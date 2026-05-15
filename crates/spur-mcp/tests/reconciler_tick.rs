@@ -2478,6 +2478,16 @@ async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
         .expect("expected Some(PmService)");
     let pm = Arc::new(pm);
     let adv = pm.advanced().expect("advanced");
+    adv.add_comment(
+        &task_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: "del-A".to_string(),
+            worker: "codex".to_string(),
+            attempt: 1,
+        }),
+    )
+    .await
+    .expect("add dispatch audit");
 
     let cleared = spur_mcp::server::resolve_dispatch_orphan(
         Arc::clone(&pm),
@@ -2537,6 +2547,18 @@ async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
         .expect("PmService::try_new failed")
         .expect("expected Some(PmService)");
     let pm = Arc::new(pm);
+    pm.advanced()
+        .expect("advanced")
+        .add_comment(
+            &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "del-legacy".to_string(),
+                worker: "codex".to_string(),
+                attempt: 1,
+            }),
+        )
+        .await
+        .expect("add dispatch audit");
 
     let cleared = spur_mcp::server::resolve_dispatch_orphan(
         Arc::clone(&pm),
@@ -2546,18 +2568,242 @@ async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
     .await
     .expect("resolve dispatch orphan");
     assert!(
-        !cleared,
-        "legacy ready-for-review marker should block dispatch orphan cleanup"
+        cleared,
+        "label-only ready-for-review should not block orphan cleanup without audit"
     );
 
     let issue = pm.get_issue(&task_id).await.expect("get issue");
     assert!(
-        issue
+        !issue
             .labels
             .iter()
             .any(|label| label == &labels::delegation_id("del-legacy")),
-        "delegation label must be preserved while task is awaiting review"
+        "delegation label should be cleared when audit does not attest awaiting review"
     );
+}
+
+#[tokio::test]
+async fn lease_sweep_prefers_audit_delegation_over_mismatched_label() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced");
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Lease Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(
+        dir.path(),
+        &epic_id,
+        &labels::plan_id("plan-lease-mismatch"),
+    );
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Lease Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(
+        dir.path(),
+        &task_id,
+        &labels::plan_id("plan-lease-mismatch"),
+    );
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t-lease"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    label_issue(dir.path(), &task_id, &labels::delegation_id("del-label"));
+    label_issue(dir.path(), &task_id, &labels::lease_expires_at(1));
+    adv.add_comment(
+        &task_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: "del-audit".to_string(),
+            worker: "codex".to_string(),
+            attempt: 1,
+        }),
+    )
+    .await
+    .expect("add dispatch audit");
+
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+        }),
+        Some("plan-lease-mismatch".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+    assert!(reconciler.tick_once().await.expect("tick once"));
+
+    let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &task_id]));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion { delegation_id, .. } if delegation_id == "del-audit"
+    )));
+}
+
+#[tokio::test]
+async fn lease_sweep_skips_when_label_has_no_audit() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Lease Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(
+        dir.path(),
+        &epic_id,
+        &labels::plan_id("plan-lease-no-audit"),
+    );
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Lease Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(
+        dir.path(),
+        &task_id,
+        &labels::plan_id("plan-lease-no-audit"),
+    );
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t-lease"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    label_issue(
+        dir.path(),
+        &task_id,
+        &labels::delegation_id("del-label-only"),
+    );
+    label_issue(dir.path(), &task_id, &labels::lease_expires_at(1));
+
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+        }),
+        Some("plan-lease-no-audit".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+    assert!(!reconciler.tick_once().await.expect("tick once"));
+}
+
+#[tokio::test]
+async fn resolve_dispatch_orphan_prefers_audit_delegation_over_mismatched_label() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Audit Delegation Wins",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::delegation_id("del-label"));
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced");
+    adv.add_comment(
+        &task_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: "del-audit".to_string(),
+            worker: "codex".to_string(),
+            attempt: 1,
+        }),
+    )
+    .await
+    .expect("add dispatch audit");
+
+    let cleared = spur_mcp::server::resolve_dispatch_orphan(
+        Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
+        &task_id,
+    )
+    .await
+    .expect("resolve dispatch orphan");
+    assert!(cleared, "dispatch orphan should be cleared");
+
+    let audits = adv
+        .list_comments(&task_id)
+        .await
+        .expect("list comments")
+        .iter()
+        .filter_map(|comment| audit_sentinel::parse_comment(&comment.body))
+        .filter_map(|result| result.ok())
+        .collect::<Vec<_>>();
+    assert!(audits.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::DispatchOrphanCleared { delegation_id, .. } if delegation_id == "del-audit"
+    )));
 }
 
 #[tokio::test]

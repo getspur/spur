@@ -46,14 +46,6 @@ impl Reconciler {
         let mut plan_activation_cache = HashMap::new();
 
         for summary in summaries_by_id.into_values() {
-            let Some(delegation_id) = summary
-                .labels
-                .iter()
-                .find_map(|label| crate::plan::labels::parse_delegation_id(label))
-                .map(str::to_string)
-            else {
-                continue;
-            };
             let Some(expires_at) = summary
                 .labels
                 .iter()
@@ -81,7 +73,6 @@ impl Reconciler {
             else {
                 tracing::warn!(
                     issue_id = %summary.id,
-                    %delegation_id,
                     "expired dispatch lease has no plan id label; skipping"
                 );
                 continue;
@@ -104,6 +95,43 @@ impl Reconciler {
                 &summary.id,
                 adv.list_comments(&summary.id).await?,
             )?;
+            let delegation_label = summary
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_delegation_id(label));
+            let Some(delegation_id) = (match (
+                crate::plan::projector::current_delegation_from_audits(&audits),
+                delegation_label,
+            ) {
+                (Some(audit_id), Some(label_id)) if audit_id == label_id => Some(audit_id),
+                (Some(audit_id), Some(_)) => {
+                    crate::plan::projector::emit_label_audit_drift(
+                        "delegation-id",
+                        "mismatch",
+                        &summary.id,
+                    );
+                    Some(audit_id)
+                }
+                (Some(audit_id), None) => {
+                    crate::plan::projector::emit_label_audit_drift(
+                        "delegation-id",
+                        "audit_only",
+                        &summary.id,
+                    );
+                    Some(audit_id)
+                }
+                (None, Some(_label_id)) => {
+                    crate::plan::projector::emit_label_audit_drift(
+                        "delegation-id",
+                        "label_only",
+                        &summary.id,
+                    );
+                    None
+                }
+                (None, None) => None,
+            }) else {
+                continue;
+            };
             let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
             let orphan_reason = format!("dispatch lease expired at {expires_at} (age {age_secs}s)");
             // Match on `delegation_id` only, ignoring `reason`. Safe because

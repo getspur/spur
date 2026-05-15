@@ -102,11 +102,11 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
             {
                 continue;
             }
-            if !issue
+            let has_ready_label = issue
                 .labels
                 .iter()
-                .any(|label| label == crate::plan::labels::READY_FOR_REVIEW)
-            {
+                .any(|label| label == crate::plan::labels::READY_FOR_REVIEW);
+            if !has_ready_label {
                 continue;
             }
             if issue
@@ -122,6 +122,18 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     .cmp(&right.created_at)
                     .then_with(|| left.id.cmp(&right.id))
             });
+            let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                &issue.id,
+                comments.clone(),
+            )?;
+            if !crate::plan::projector::awaiting_review_from_audits(&audits) {
+                crate::plan::projector::emit_label_audit_drift(
+                    "ready-for-review",
+                    "label_only",
+                    &issue.id,
+                );
+                continue;
+            }
 
             for comment in comments {
                 if !comment.body.trim_start().starts_with(SENTINEL_PREFIX) {

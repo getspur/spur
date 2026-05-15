@@ -634,7 +634,11 @@ fn superseded_status(issue: &spur_pm::Issue) -> Option<PlanTaskStatus> {
     }
 }
 
-fn emit_label_audit_drift(label_kind: &'static str, direction: &'static str, issue_id: &str) {
+pub(crate) fn emit_label_audit_drift(
+    label_kind: &'static str,
+    direction: &'static str,
+    issue_id: &str,
+) {
     tracing::warn!(
         target: "spur.plan.projector",
         metric = "label_audit_drift",

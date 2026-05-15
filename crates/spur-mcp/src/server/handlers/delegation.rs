@@ -200,30 +200,14 @@ impl McpCallbackServer {
             ));
         }
 
-        let delegation_id = issue
+        let delegation_label = issue
             .labels
             .iter()
             .find_map(|label| {
                 crate::plan::labels::parse_delegation_id(label)
                     .or_else(|| label.strip_prefix("delegation-id:"))
             })
-            .map(str::to_string)
-            .ok_or_else(|| {
-                format!(
-                    "recover_orphaned_dispatch: issue {issue_id} is missing spur:delegation-id:<id> label"
-                )
-            })?;
-
-        if crate::plan::projector::has_ready_for_review_label_compat(&issue.labels) {
-            return Err(format!(
-                "recover_orphaned_dispatch: issue {issue_id} is already awaiting review (ready-for-review label present)"
-            ));
-        }
-        let dispatched_base_oid = issue
-            .labels
-            .iter()
-            .find_map(|label| crate::plan::labels::parse_dispatched_base_oid(label))
-            .unwrap_or(dispatched_base_oid);
+            .map(str::to_string);
 
         require_feature(
             FeatureKey::PM_PRO_BEADS_ADVANCED,
@@ -242,6 +226,68 @@ impl McpCallbackServer {
         .map_err(|error| {
             format!("recover_orphaned_dispatch: parse comments({issue_id}) failed: {error}")
         })?;
+        let delegation_audit = crate::plan::projector::current_delegation_from_audits(&audits);
+        let delegation_id = match (delegation_audit, delegation_label) {
+            (Some(audit_id), Some(label_id)) if audit_id == label_id => audit_id,
+            (Some(audit_id), Some(_)) => {
+                crate::plan::projector::emit_label_audit_drift(
+                    "delegation-id",
+                    "mismatch",
+                    issue_id,
+                );
+                audit_id
+            }
+            (Some(audit_id), None) => {
+                crate::plan::projector::emit_label_audit_drift(
+                    "delegation-id",
+                    "audit_only",
+                    issue_id,
+                );
+                audit_id
+            }
+            (None, Some(_label_id)) => {
+                crate::plan::projector::emit_label_audit_drift(
+                    "delegation-id",
+                    "label_only",
+                    issue_id,
+                );
+                return Err(format!(
+                    "recover_orphaned_dispatch: issue {issue_id} has delegation-id label but no audit attestation"
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "recover_orphaned_dispatch: issue {issue_id} is missing spur:delegation-id:<id> label"
+                ));
+            }
+        };
+        let has_ready_label =
+            crate::plan::projector::has_ready_for_review_label_compat(&issue.labels);
+        let awaiting_review_audit = crate::plan::projector::awaiting_review_from_audits(&audits);
+        if has_ready_label && !awaiting_review_audit {
+            crate::plan::projector::emit_label_audit_drift(
+                "ready-for-review",
+                "label_only",
+                issue_id,
+            );
+        }
+        if awaiting_review_audit {
+            if !has_ready_label {
+                crate::plan::projector::emit_label_audit_drift(
+                    "ready-for-review",
+                    "audit_only",
+                    issue_id,
+                );
+            }
+            return Err(format!(
+                "recover_orphaned_dispatch: issue {issue_id} is already awaiting review per audit"
+            ));
+        }
+        let dispatched_base_oid = issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_dispatched_base_oid(label))
+            .unwrap_or(dispatched_base_oid);
         if audits.iter().any(|audit| {
             matches!(
                 audit,
