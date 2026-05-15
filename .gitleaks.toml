@@ -1,0 +1,15 @@
+[extend]
+useDefault = true
+
+[allowlist]
+regexTarget = "match"
+regexes = [
+  # justification: Documentation example audit_token UUID in a JSON response shape, not a real credential.
+  '''audit_token":\s*"5b1b9f8e-3a12-4d6c-b8e4-7f0c1d2a3b4c"''',
+  # justification: Documentation example sentinel token UUID in an inline JSON audit payload, not a real credential.
+  '''token":"5b1b9f8e-3a12-4d6c-b8e4-7f0c1d2a3b4c"''',
+  # justification: RCA prose listing keyboard shortcuts (Ctrl+P/Ctrl+N), not an API key.
+  '''keys:\s*`Up/Down/Esc/Tab/Enter/Ctrl\+C/Ctrl\+P/Ctrl\+N`''',
+]
+paths = []
+commits = []
