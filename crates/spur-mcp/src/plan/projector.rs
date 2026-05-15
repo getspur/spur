@@ -162,6 +162,7 @@ pub enum TerminalAuditKind {
     Rejection,
     CompletionFailed,
     CompletionCancelled,
+    Superseded,
 }
 
 pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<CompletionFacts> {
@@ -228,130 +229,122 @@ pub fn current_delegation_from_audits(audits: &[AuditSentinelKind]) -> Option<St
 
 /// Tier-1 index-maintenance reconciler consumer: derive whether the current
 /// attempt is awaiting review from durable audit comments only.
-pub fn awaiting_review_from_audits(audits: &[AuditSentinelKind]) -> bool {
-    let Some(current_delegation_id) = audits.iter().rev().find_map(|audit| match audit {
-        AuditSentinelKind::Dispatch { delegation_id, .. } => Some(delegation_id.as_str()),
-        _ => None,
-    }) else {
-        return false;
-    };
+pub(crate) fn project_status_from_audits(audits: &[AuditSentinelKind]) -> PlanTaskStatus {
+    let mut status = PlanTaskStatus::Pending;
+    let mut summary = None;
 
-    for audit in audits.iter().rev() {
+    for audit in audits {
         match audit {
-            AuditSentinelKind::Approval { delegation_id }
-            | AuditSentinelKind::Rejection { delegation_id, .. }
-            | AuditSentinelKind::ReviewFeedback { delegation_id, .. }
-            | AuditSentinelKind::RetryRequested { delegation_id, .. }
-            | AuditSentinelKind::DispatchOrphanCleared { delegation_id, .. }
-            | AuditSentinelKind::EscalationRequested {
-                delegation_id: Some(delegation_id),
-                ..
-            } if delegation_id == current_delegation_id => {
-                return false;
+            AuditSentinelKind::Dispatch { delegation_id, .. } => {
+                status = PlanTaskStatus::Dispatched {
+                    delegation_id: delegation_id.clone(),
+                };
             }
             AuditSentinelKind::Completion {
-                delegation_id,
-                completion_state: CompletionState::AwaitingReview,
+                completion_state,
+                result_summary,
                 ..
-            } if delegation_id == current_delegation_id => return true,
-            AuditSentinelKind::Completion { delegation_id, .. }
-                if delegation_id == current_delegation_id =>
-            {
-                return false;
+            } => {
+                if let Some(s) = result_summary.clone() {
+                    summary = Some(s);
+                }
+
+                status = match completion_state {
+                    CompletionState::AwaitingReview => PlanTaskStatus::AwaitingReview {
+                        summary: summary.clone(),
+                    },
+                    CompletionState::Failed => PlanTaskStatus::Failed {
+                        error: summary
+                            .clone()
+                            .unwrap_or_else(|| "worker failed".to_string()),
+                    },
+                    CompletionState::Cancelled => PlanTaskStatus::Cancelled {
+                        reason: summary
+                            .clone()
+                            .unwrap_or_else(|| "worker cancelled".to_string()),
+                    },
+                    CompletionState::Superseded => PlanTaskStatus::Superseded {
+                        mutation_id: "unknown".to_string(),
+                        by: Vec::new(),
+                    },
+                };
             }
-            AuditSentinelKind::Dispatch { delegation_id, .. }
-                if delegation_id == current_delegation_id =>
+            AuditSentinelKind::Approval { .. } => {
+                status = PlanTaskStatus::Approved {
+                    summary: summary.clone(),
+                };
+            }
+            AuditSentinelKind::Rejection { feedback, .. } => {
+                status = PlanTaskStatus::Rejected {
+                    feedback: Some(feedback.clone()),
+                };
+            }
+            AuditSentinelKind::ReviewFeedback { .. } | AuditSentinelKind::RetryRequested { .. } => {
+                status = PlanTaskStatus::Pending;
+            }
+            AuditSentinelKind::EscalationRequested { last_error, .. } => {
+                status = PlanTaskStatus::EscalatedToBrain {
+                    last_error: last_error.clone(),
+                };
+            }
+            AuditSentinelKind::Signal { kind, reason, .. }
+                if kind == "integration-conflict" || kind == "integration_conflict" =>
             {
-                return false;
+                #[derive(serde::Deserialize)]
+                struct IntegrationConflictReason {
+                    dep_task_id: String,
+                    #[serde(default)]
+                    files: Vec<String>,
+                }
+                let (dep_task_id, files) =
+                    serde_json::from_str::<IntegrationConflictReason>(reason)
+                        .map(|parsed| (parsed.dep_task_id, parsed.files))
+                        .unwrap_or_else(|_| ("unknown".to_string(), Vec::new()));
+                status = PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files };
             }
             _ => {}
         }
     }
 
-    false
+    status
+}
+
+pub fn awaiting_review_from_audits(audits: &[AuditSentinelKind]) -> bool {
+    matches!(
+        project_status_from_audits(audits),
+        PlanTaskStatus::AwaitingReview { .. }
+    )
 }
 
 /// Tier-1 shadow comparator consumer: derive the latest terminal audit kind
 /// from durable audit comments only.
 pub fn terminal_status_from_audits(audits: &[AuditSentinelKind]) -> Option<TerminalAuditKind> {
-    for audit in audits.iter().rev() {
-        match audit {
-            AuditSentinelKind::Approval { .. } => return Some(TerminalAuditKind::Approval),
-            AuditSentinelKind::Rejection { .. } => return Some(TerminalAuditKind::Rejection),
-            AuditSentinelKind::Completion {
-                completion_state: CompletionState::Failed,
-                ..
-            } => return Some(TerminalAuditKind::CompletionFailed),
-            AuditSentinelKind::Completion {
-                completion_state: CompletionState::Cancelled,
-                ..
-            } => return Some(TerminalAuditKind::CompletionCancelled),
-            AuditSentinelKind::Dispatch { .. }
-            | AuditSentinelKind::Completion {
-                completion_state: CompletionState::AwaitingReview | CompletionState::Superseded,
-                ..
-            }
-            | AuditSentinelKind::RetryRequested { .. }
-            | AuditSentinelKind::ReviewFeedback { .. }
-            | AuditSentinelKind::DispatchOrphanCleared { .. } => return None,
-            AuditSentinelKind::Signal { kind, .. }
-                if kind == "integration-conflict" || kind == "integration_conflict" =>
-            {
-                return None;
-            }
-            _ => {}
-        }
+    match project_status_from_audits(audits) {
+        PlanTaskStatus::Approved { .. } => Some(TerminalAuditKind::Approval),
+        PlanTaskStatus::Rejected { .. } => Some(TerminalAuditKind::Rejection),
+        PlanTaskStatus::Failed { .. } => Some(TerminalAuditKind::CompletionFailed),
+        PlanTaskStatus::Cancelled { .. } => Some(TerminalAuditKind::CompletionCancelled),
+        PlanTaskStatus::Superseded { .. } => Some(TerminalAuditKind::Superseded),
+        _ => None,
     }
-    None
 }
 
 /// Tier-1 projector inversion consumer: derive supersession fact from durable
 /// audit comments only (`mutation_id` and `by` remain label-only metadata).
 pub fn superseded_from_audits(audits: &[AuditSentinelKind]) -> bool {
-    for audit in audits.iter().rev() {
-        match audit {
-            AuditSentinelKind::Approval { .. }
-            | AuditSentinelKind::Rejection { .. }
-            | AuditSentinelKind::Completion {
-                completion_state: CompletionState::Failed | CompletionState::Cancelled,
-                ..
-            }
-            | AuditSentinelKind::Dispatch { .. }
-            | AuditSentinelKind::RetryRequested { .. }
-            | AuditSentinelKind::ReviewFeedback { .. }
-            | AuditSentinelKind::EscalationRequested { .. }
-            | AuditSentinelKind::Completion {
-                completion_state: CompletionState::AwaitingReview,
-                ..
-            } => return false,
-            AuditSentinelKind::Completion {
-                completion_state: CompletionState::Superseded,
-                ..
-            } => return true,
-            _ => {}
-        }
-    }
-
-    false
+    matches!(
+        project_status_from_audits(audits),
+        PlanTaskStatus::Superseded { .. }
+    )
 }
 
 /// Tier-1 index-maintenance reconciler consumer: derive escalation fact from
 /// durable audit comments only.
 pub fn escalated_from_audits(audits: &[AuditSentinelKind]) -> bool {
-    for audit in audits.iter().rev() {
-        match audit {
-            AuditSentinelKind::Approval { .. }
-            | AuditSentinelKind::Rejection { .. }
-            | AuditSentinelKind::Completion { .. }
-            | AuditSentinelKind::Dispatch { .. }
-            | AuditSentinelKind::RetryRequested { .. }
-            | AuditSentinelKind::ReviewFeedback { .. } => return false,
-            AuditSentinelKind::EscalationRequested { .. } => return true,
-            _ => {}
-        }
-    }
-
-    false
+    matches!(
+        project_status_from_audits(audits),
+        PlanTaskStatus::EscalatedToBrain { .. }
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -773,6 +766,9 @@ pub fn project_status_for_issue(
                     PlanTaskStatus::Cancelled { reason }
                 }
             }
+            TerminalAuditKind::Superseded => {
+                superseded_status(issue).unwrap_or(PlanTaskStatus::Pending)
+            }
         }
     } else if let Some(delegation_id) = current_delegation_from_audits(audits) {
         if integration_conflict_labeled {
@@ -854,24 +850,13 @@ pub fn project_status_for_issue(
     // `submit_plan_mutation` on success, so a present label is authoritative
     // for the projection.
     if issue.status == closed_status {
-        let latest_terminal_audit = audits.iter().rev().find_map(|audit| match audit {
-            AuditSentinelKind::Approval { .. } => Some("approval"),
-            AuditSentinelKind::Rejection { .. } => Some("rejection"),
-            AuditSentinelKind::Completion {
-                completion_state: CompletionState::Failed { .. },
-                ..
-            } => Some("completion_failed"),
-            AuditSentinelKind::Completion {
-                completion_state: CompletionState::Cancelled { .. },
-                ..
-            } => Some("completion_cancelled"),
-            _ => None,
-        });
+        let latest_terminal_audit = latest_terminal_audit_kind(audits);
         let consistent = match latest_terminal_audit {
             Some("approval") => matches!(status, PlanTaskStatus::Approved { .. }),
             Some("rejection") => matches!(status, PlanTaskStatus::Rejected { .. }),
             Some("completion_failed") => matches!(status, PlanTaskStatus::Failed { .. }),
             Some("completion_cancelled") => matches!(status, PlanTaskStatus::Cancelled { .. }),
+            Some("superseded") => matches!(status, PlanTaskStatus::Superseded { .. }),
             _ => true,
         };
         assert!(
@@ -993,6 +978,7 @@ fn latest_terminal_audit_kind(audits: &[AuditSentinelKind]) -> Option<&'static s
         TerminalAuditKind::Rejection => "rejection",
         TerminalAuditKind::CompletionFailed => "completion_failed",
         TerminalAuditKind::CompletionCancelled => "completion_cancelled",
+        TerminalAuditKind::Superseded => "superseded",
     })
 }
 
@@ -3168,6 +3154,17 @@ mod tests {
         ]
     }
 
+    fn terminal_kind_from_status(status: &PlanTaskStatus) -> Option<TerminalAuditKind> {
+        match status {
+            PlanTaskStatus::Approved { .. } => Some(TerminalAuditKind::Approval),
+            PlanTaskStatus::Rejected { .. } => Some(TerminalAuditKind::Rejection),
+            PlanTaskStatus::Failed { .. } => Some(TerminalAuditKind::CompletionFailed),
+            PlanTaskStatus::Cancelled { .. } => Some(TerminalAuditKind::CompletionCancelled),
+            PlanTaskStatus::Superseded { .. } => Some(TerminalAuditKind::Superseded),
+            _ => None,
+        }
+    }
+
     #[test]
     fn current_delegation_from_audits_prefers_latest_dispatch_lifecycle() {
         let audits = vec![
@@ -3392,6 +3389,30 @@ mod tests {
             let one = super::escalated_from_audits(&audits);
             let two = super::escalated_from_audits(&audits);
             prop_assert_eq!(one, two);
+        }
+
+        #[test]
+        fn helper_wrappers_match_shared_projection(
+            audits in proptest::collection::vec(arb_audit_kind(), 50..128)
+        ) {
+            let projected = super::project_status_from_audits(&audits);
+
+            prop_assert_eq!(
+                super::awaiting_review_from_audits(&audits),
+                matches!(&projected, PlanTaskStatus::AwaitingReview { .. })
+            );
+            prop_assert_eq!(
+                super::terminal_status_from_audits(&audits),
+                terminal_kind_from_status(&projected)
+            );
+            prop_assert_eq!(
+                super::superseded_from_audits(&audits),
+                matches!(&projected, PlanTaskStatus::Superseded { .. })
+            );
+            prop_assert_eq!(
+                super::escalated_from_audits(&audits),
+                matches!(&projected, PlanTaskStatus::EscalatedToBrain { .. })
+            );
         }
     }
 }

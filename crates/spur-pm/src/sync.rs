@@ -129,6 +129,7 @@ pub struct SyncWatermark {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum FetchOneOutcome {
     Unchanged, // 304 / etag match
     Updated(RemoteNode),
