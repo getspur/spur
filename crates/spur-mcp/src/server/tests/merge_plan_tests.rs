@@ -718,7 +718,6 @@ async fn setup_cached_overlay_diff_plan(
     )
     .await
     .expect("project persisted plan");
-    let projected = projected;
     server.install_projected_plan(projected, false).await;
     if !use_dispatched_base_oid {
         server.set_versioned_cache_serve(true);

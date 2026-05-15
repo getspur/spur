@@ -1030,16 +1030,14 @@ impl McpCallbackServer {
         let mut issue_ids: Vec<String> = summary_by_id.into_keys().collect();
         issue_ids.sort();
 
-        let comments_by_issue = futures::future::try_join_all(issue_ids.iter().map(|issue_id| {
-            let adv = adv;
-            async move {
+        let comments_by_issue =
+            futures::future::try_join_all(issue_ids.iter().map(|issue_id| async move {
                 adv.list_comments(issue_id)
                     .await
                     .map(|comments| (issue_id.clone(), comments))
-            }
-        }))
-        .await
-        .map_err(|error| format!("list_comments(plan={plan_id}) failed: {error}"))?;
+            }))
+            .await
+            .map_err(|error| format!("list_comments(plan={plan_id}) failed: {error}"))?;
 
         let mut audit_keys = Vec::new();
         for (issue_id, comments) in comments_by_issue {

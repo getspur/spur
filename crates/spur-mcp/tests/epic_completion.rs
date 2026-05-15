@@ -483,36 +483,37 @@ async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready
         epic.labels
     );
 
-    let events = sink.events.lock().unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                &event.body,
-                SpurEventBody::PlanCompleted {
-                    plan_id: found,
-                    approved: 1,
-                    rejected: 0,
-                    failed: 0,
-                    cancelled: 1,
-                } if found == plan_id
-            ))
-            .count(),
-        1,
-        "expected PlanCompleted with cancelled count"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                &event.body,
-                SpurEventBody::PlanReadyToMerge { plan_id: found } if found == plan_id
-            ))
-            .count(),
-        0,
-        "cancelled count must suppress PlanReadyToMerge"
-    );
-    drop(events);
+    {
+        let events = sink.events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    &event.body,
+                    SpurEventBody::PlanCompleted {
+                        plan_id: found,
+                        approved: 1,
+                        rejected: 0,
+                        failed: 0,
+                        cancelled: 1,
+                    } if found == plan_id
+                ))
+                .count(),
+            1,
+            "expected PlanCompleted with cancelled count"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    &event.body,
+                    SpurEventBody::PlanReadyToMerge { plan_id: found } if found == plan_id
+                ))
+                .count(),
+            0,
+            "cancelled count must suppress PlanReadyToMerge"
+        );
+    }
 
     let continuation = tokio::time::timeout(Duration::from_secs(2), continuation_rx.recv())
         .await
