@@ -195,11 +195,15 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             },
             status: spur_mcp::plan::PlanTaskStatus::AwaitingReview { summary: None },
             result: None,
-            worker_branch: None,
+            // bd-334 Tier 0: AwaitingReview/Approved tasks must carry
+            // dispatched_base_oid per projector.rs / mod.rs invariants. Test
+            // exercises lock-release semantics, not state correctness, but the
+            // fixture must satisfy the invariant.
+            worker_branch: Some("worker/p1-t1-attempt-1".into()),
             attempt: 1,
             history: vec![],
             last_delegation_id: None,
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
         base_snapshot_branch: None,
