@@ -684,3 +684,462 @@ Two cheap reads to do before filing the epic:
 - `crates/spur-mcp/src/plan/snapshot.rs:29` — owner-state seam (always None)
 - `crates/spur-core/src/plan_projection/mod.rs:1` — ACP snapshot cache
 - Commit `33f5f479` — bd-334 fix
+
+---
+
+## 11. Tier-1 §10.3.2 second-pass reframe (2026-05-16)
+
+**Status:** Synthesis approved. Bead graph re-issued. Implementation pending dispatch of bd-3us.
+
+### 11.1 Trigger and method
+
+After bd-1r8 merged (commit `5773c5bf` — collapsed parallel projection algorithms into a single chronological forward-fold, see §10.3.3), a proposal was drafted to extend Tier-1 §10.3.2 with a `PlanTaskProjection` foundation refactor + per-call-site inversion sweep across `delegation.rs:229`, `sync.rs:539`, `signal_watcher.rs:129`, plus a Tier-2 collapse via richer projection struct.
+
+Two rounds of dual review were performed:
+
+| Round | Reviewers | Method | Outcome |
+|---|---|---|---|
+| 1 | gemini + codex | Evidence-first review of the proposal | Corrections: removed `plan_builder.rs:230` (already audit-first); enforced Type A/B boundary; merged bd-3sk with projector-core inversion per §10.7 pre-flight gate |
+| 2 | gemini + kimi | First-principles + double-loop with **multi-sub-agent grounding** (3 sub-agents each) | Major reframe: corrected proposal is solving a non-problem; the targeted call sites are already audit-first; bd-3sk's `PlanTaskProjection` would trip its own §10.7 escape-hatch |
+
+Round-2 sub-agent delegations: gemini `5a7be2a8-ed04-499f-ab8f-91eac08745b4`, kimi `067d87cb-69be-471f-8432-fa27616884ae`.
+
+### 11.2 What the second-pass review surfaced (grounded findings)
+
+| Finding | Source | Citation |
+|---|---|---|
+| The 3 consumer call sites are **already audit-first with label-as-hint** at HEAD — labels are read only for drift telemetry / pre-filter optimization | gemini sub-agent C, kimi direct read | `server/handlers/delegation.rs:229` derives `delegation_id` via `current_delegation_from_audits`; `server/sync.rs:539` mirrors the pattern; `plan/signal_watcher.rs:129` gates on `awaiting_review_from_audits` |
+| `index_hygiene_sweep` exists but covers only **3 of 8+ Type A label families** | gemini sub-agent A, kimi sub-agent B | `crates/spur-mcp/src/plan/reconciler/mod.rs:1190-1235`; tests at `reconciler_tick.rs:2229,2301`. Missing families: `plan-id`, `plan-task-id`, `agent`, `plan-pending`, `plan-complete`, `superseded-by`, `mutation-id` |
+| `PlanTaskProjection` as a richer audit-only struct **fundamentally leaks** per §10.7 — cannot supply Type B `signal:*` labels | gemini sub-agent B | `projector.rs:657` (`signal:integration-conflict`), `projector.rs:812` (`signal:escalated`); callers would still parse raw `Issue` |
+| A `ProjectedIssue` newtype type-system seal is **infeasible at reasonable cost** — `PmService::list_issues` returns `IssueSummary` consumed by ~75+ call sites | kimi sub-agent C | Workspace census; structural mismatch between `IssueSummary` and `Issue` consumers |
+| Of the 8 direct label reads in `project_status_for_issue`, **6 are already replaceable by audit helpers**; 2 are genuinely label-only (`superseded-by:*`, `mutation-id:*`) | kimi sub-agent A | `projector.rs:651-654, 655, 657, 787, 809-812, 966` (audit-derivable); `projector.rs:607-618` (irreducible) |
+| bd-1va's body is the **retracted race-repair framing** of §10.3.1 ¶1 | doc cross-check | bd-1va body describes "audit-comment + label-update atomicity"; §10.3.1 ¶1 explicitly retracts that framing on 2026-05-15 |
+
+### 11.3 Before/after bead graph
+
+**Before (round-1 corrected proposal):**
+
+```mermaid
+flowchart TB
+    bd1r8[bd-1r8: substrate-alignment collapse<br/><b>DONE</b>]
+    bd42v[bd-42v: proptest generator<br/>strengthening]
+    bd3sk_old[bd-3sk OLD: foundation<br/>PlanTaskProjection +<br/>projector-core inversion]
+    cs1[§10.3.2 callsite:<br/>delegation handler]
+    cs2[§10.3.2 callsite:<br/>sync orphan]
+    cs3[§10.3.2 callsite:<br/>signal-watcher Type-A]
+    bd1va_old[bd-1va: audit-label<br/>atomicity race repair]
+    cleanup_old[§10.5 cleanup PR]
+
+    bd1r8 --> bd42v
+    bd1r8 --> bd3sk_old
+    bd3sk_old --> cs1
+    bd3sk_old --> cs2
+    bd3sk_old --> cs3
+    bd1r8 --> bd1va_old
+    cs1 --> cleanup_old
+    cs2 --> cleanup_old
+    cs3 --> cleanup_old
+    bd1va_old --> cleanup_old
+
+    bd3sk_old:::wrong
+    cs1:::wrong
+    cs2:::wrong
+    cs3:::wrong
+    bd1va_old:::stale
+    cleanup_old:::wrong
+
+    classDef wrong fill:#fee,stroke:#c33,stroke-width:2px
+    classDef stale fill:#fed,stroke:#960,stroke-width:2px
+```
+
+Red = solving a non-problem (sites already inverted, abstraction leaks). Orange = retracted framing.
+
+**After (round-2 synthesized graph):**
+
+```mermaid
+flowchart TB
+    bd1r8[bd-1r8: substrate-alignment collapse<br/><b>DONE</b>]
+    bd42v[bd-42v: proptest generator<br/>strengthening<br/><i>strengthens bd-1r8 lock</i>]
+    bd3us[bd-3us: §10.3.1 reframed<br/>complete index-hygiene sweep<br/>for all Type A families]
+    bd3sk_new[bd-3sk SHRUNK: projector core<br/>transitional cleanup ONLY<br/><i>§10.5 merged in</i>]
+    bd1va_super[bd-1va SUPERSEDED<br/>retracted framing<br/><i>doc-only retraction or close</i>]
+
+    bd1r8 --> bd42v
+    bd1r8 --> bd3us
+    bd1r8 -.replaces.-> bd1va_super
+    bd3us --> bd3sk_new
+    bd42v --> bd3sk_new
+
+    bd1r8:::done
+    bd42v:::active
+    bd3us:::next
+    bd3sk_new:::active
+    bd1va_super:::superseded
+
+    classDef done fill:#efe,stroke:#393,stroke-width:2px
+    classDef active fill:#ffd,stroke:#990,stroke-width:2px
+    classDef next fill:#dfd,stroke:#393,stroke-width:3px
+    classDef superseded fill:#eee,stroke:#999,stroke-width:1px,color:#666
+```
+
+Green = done. Yellow = active. Bold green = next dispatch. Grey = superseded.
+
+### 11.4 Scope of work — active beads
+
+#### bd-3us (next dispatch) — §10.3.1 reframed: index-hygiene sweep expansion
+
+**Scope:** Extend `index_hygiene_sweep` at `reconciler/mod.rs:1190-1235` to derive expected Type A label sets for 5+ missing families from `(issue, audits)` via the bd-1r8 helpers, then patch drift via idempotent `update_issue` calls.
+
+| In scope | Out of scope |
+|---|---|
+| `spur:plan-id:*` reconciliation | Type B `signal:*` (no audit counterpart by design) |
+| `spur:plan-task-id:*` reconciliation | Type B `spur:lease-expires-at:*` (heartbeat economics) |
+| `spur:agent:*` reconciliation | Modifying `projector.rs:443-466` invariants (bd-3sk owns the tighten-back) |
+| `spur:plan-pending` / `spur:plan-complete` | Removing existing Tier-0 defensive panics (bd-3sk owns retirement) |
+| Decision: reconcile or exempt `spur:superseded-by:*`, `spur:mutation-id:*` (kimi-sub-agent-A irreducibles) | New event taxonomy or audit-sentinel additions |
+| `label_index_drift{label_family, direction}` counter per family | Type-system newtype refactor (`ProjectedIssue` — kimi-sub-agent-C rejected) |
+| Property tests: idempotent convergence; correct drift on injected mismatch | |
+
+Single commit. Title: `feat(spur-mcp): tier-1 §10.3.1 — complete index-hygiene sweep for all Type A label families`.
+
+#### bd-42v (active, filed) — proptest generator strengthening
+
+**Scope:** strengthen `arb_audit_kind` to emit gap-triggering variants — `Signal { kind: "integration-conflict" | "integration_conflict" }` and `EscalationRequested { delegation_id: None }`. Locks the bd-1r8 identity proptest against the original substrate-drift bug paths. Independent of bd-3us; can land in parallel.
+
+#### bd-3sk (depends on bd-3us + bd-42v) — projector core transitional cleanup
+
+**Scope after re-scope** (was: PlanTaskProjection foundation + sweep):
+
+| Action | Citation |
+|---|---|
+| Remove transitional Dispatched branch | `projector.rs:799-803` (explicitly marked "Transitional workaround until t1-cleanup tightens invariants") |
+| Remove redundant drift warnings in `project_status_for_issue` now covered by bd-3us telemetry | `projector.rs:873-900` (drift-tolerant mismatch warnings) |
+| Tighten mutual-exclusivity invariants to strict form | `projector.rs:443-466` (Tier-0 relaxations retired) |
+| Retire bd-3lo Tier-0 status-field skip — subsumed by bd-1r8 partial-cmp comparator | `emit_shadow_projector_mismatch_warnings` |
+| Merge §10.5 cleanup into this bead | Surface too small to justify standalone bead after bd-3us lands |
+
+**Hard constraints:**
+- Type-B prohibition: NO modification of `signal:*` or `spur:lease-expires-at:*` writes/reads.
+- No new label-derived state; all state derivation goes through `project_status_from_audits` (bd-1r8).
+
+### 11.5 Sequencing diagram
+
+```mermaid
+gantt
+    title Synthesized Tier-1 sequencing
+    dateFormat YYYY-MM-DD
+    axisFormat %m-%d
+
+    section Done
+    bd-1r8 substrate collapse  :done, b1, 2026-05-15, 1d
+
+    section Parallel-able
+    bd-42v proptest strength   :active, b2, 2026-05-16, 2d
+    bd-3us index-hygiene sweep :active, b3, 2026-05-16, 5d
+
+    section Sequenced
+    bd-3sk projector cleanup   :b4, after b3, 3d
+    soak + verification        :b5, after b4, 3d
+```
+
+bd-42v and bd-3us are fully parallelizable. bd-3sk strictly depends on bd-3us landing (cannot retire drift-tolerance without confirmed convergent index) and on bd-42v landing (strengthens the proptest gate that protects the cleanup).
+
+### 11.6 What's NOT in the new graph (and why)
+
+| Rejected / deleted | Reason |
+|---|---|
+| Per-call-site inversion beads (`delegation-handler`, `sync-orphan`, `signal-watcher-typeA`) | Sites are **already audit-first** at HEAD; filing them creates fake progress (gemini sub-agent C, kimi direct read) |
+| `bd-new-type-level-seal` / `ProjectedIssue` newtype | `PmService::list_issues` returns `IssueSummary` consumed by ~75+ call sites; type-system trick is local clarifier, not global enforcer (kimi sub-agent C) |
+| Standalone §10.5 cleanup bead | Surface too small after bd-3us lands; merged into bd-3sk |
+| Standalone §10.3.2 epic | Children deleted; no umbrella needed |
+| Extending bd-1va as the index-hygiene-sweep bead | Body describes retracted race-repair framing (§10.3.1 ¶1); cleaner to file fresh bead (bd-3us) and supersede |
+
+### 11.7 Decisions still owed
+
+1. **bd-1va disposition** — close as superseded, or convert to doc-only retraction note? (Brain decision; bd-3us inherits its substantive role.)
+2. **bd-3us scope on irreducibles** — `spur:superseded-by:*` and `spur:mutation-id:*` are genuinely label-only per kimi sub-agent A. Reconcile-with-exception or exempt-and-document? Recommendation: exempt-and-document, citing `partial_compare_status` (`projector.rs:412-439`).
+3. **Doc §10.3.1 ¶1 follow-up** — update to reflect that the reframed work is now tracked under bd-3us, and the existing partial sweep (3 of 8+ families) is the starting point, not the end state.
+4. **Effect Executor pacing** — §11 closes Tier-1. Tier-3 (purify command handlers, introduce Effect Executor per §3 L1 / §6) remains a separate decision cycle.
+
+---
+
+## 12. Cumulative state per tier — before/after with pros/cons
+
+A trajectory view: what the system *is* at the end of each tier, presented as before/after data-flow diagrams plus honest cost ledgers. Use this section as the standing reference for "where are we today?" and "what does the next tier actually buy us?"
+
+### 12.1 Terminology reconciliation
+
+The §6 strangler-fig had 5 tiers; the §10 update (2026-05-15) merged the original Tier-2 "Sever labels" into Tier-1 §10.3. The current naming used in this section:
+
+| Label here | Doc section mapping | State as of 2026-05-16 |
+|---|---|---|
+| **Tier-0** | §6.0 — Lock the door | Shipped (3 commits, §10.1) |
+| **Tier-1** | §6.1 (Fix the fold) + §10.3 (Sever labels, formerly §6.2) | bd-1r8 done; bd-3us + bd-42v + bd-3sk pending (§11) |
+| **Tier-2** | §6.3 — Purify command handlers → Effect Executor | Not started |
+
+§6.4 (spur-sim verification tooling) is intentionally omitted here — it is testing infrastructure layered on top of Tier-2, not an architectural state of the system.
+
+### 12.2 Tier-0 — Lock the door
+
+```mermaid
+flowchart LR
+    subgraph Before_T0[Before Tier-0]
+        direction TB
+        Cmd_B[handlers] --> Cache_B[active_plans<br/>weak invalidation]
+        Cache_B --> Read_B[reader]
+        Drift_B[silent drift<br/>no panic, no signal]:::bad
+    end
+    subgraph After_T0[After Tier-0]
+        direction TB
+        Cmd_A[handlers] --> Cache_A[active_plans<br/>task-level token]
+        Cache_A --> Read_A[reader]
+        Assert_A[invariant panics<br/>at mutation sites]:::ok
+        Shadow_A[shadow projector<br/>observe-only]:::ok --> Warn[label_audit_drift<br/>warnings]
+        Cmd_A -.-> Assert_A
+        Cmd_A -.parallel.-> Shadow_A
+    end
+    classDef ok fill:#efe,stroke:#393
+    classDef bad fill:#fee,stroke:#c33
+```
+
+| Pros | Cons |
+|---|---|
+| Near-zero risk — reversible asserts, observe-only shadow | Doesn't fix anything; just exposes it |
+| Buys empirical data on actual drift rate | Adds a 2nd projection algorithm → eventual drift between them (manifested as bd-1r8 substrate-alignment gaps) |
+| Closes the bd-334 panic class | Defensive asserts only fail loud; silent drift still possible in unguarded paths |
+
+### 12.3 Tier-1 — Fix the fold + sever labels
+
+State at the end of Tier-1 = the world after bd-3us, bd-42v, and bd-3sk all land (per the §11 reframe). bd-1r8 already delivered the single forward-fold.
+
+```mermaid
+flowchart TB
+    subgraph Before_T1[Before Tier-1]
+        direction TB
+        Audits_B[(Audit Log)]
+        Labels_B[(Labels)]
+        Fold_B[shadow forward-fold]
+        Scan_B[helpers backwards-scan<br/><b>drifts on Signal/Escalation/Superseded</b>]:::bad
+        Cascade_B[project_status_for_issue<br/><b>label-first cascade</b>]:::bad
+        State_B[PlanState<br/><b>derived from labels</b>]:::bad
+        Reco_B[reconciler<br/>no index hygiene]:::bad
+
+        Audits_B --> Fold_B
+        Audits_B --> Scan_B
+        Labels_B --> Cascade_B
+        Audits_B -.decoration.-> Cascade_B
+        Cascade_B --> State_B
+    end
+
+    subgraph After_T1[After Tier-1]
+        direction TB
+        Audits_A[(Audit Log<br/><b>sole authority for Type A state</b>)]:::ok
+        Labels_A[(Labels<br/>Type A: indexed cache<br/>Type B: authoritative ephemera)]
+        Fold_A[project_status_from_audits<br/><b>single forward-fold</b>]:::ok
+        Wrappers_A[helpers as wrappers<br/><i>annihilates drift class</i>]:::ok
+        Inverted_A[project_status_for_issue<br/><b>audit-first; labels = hint</b>]:::ok
+        Sweep_A[index_hygiene_sweep<br/>all Type A families]:::ok
+        State_A[PlanState<br/><b>derived from audits</b>]:::ok
+        Drift_A[label_index_drift counter<br/>telemetry, no panic]:::ok
+
+        Audits_A --> Fold_A
+        Fold_A --> Wrappers_A
+        Wrappers_A --> Inverted_A
+        Audits_A --> Inverted_A
+        Inverted_A --> State_A
+        Labels_A -.drift hint.-> Inverted_A
+        Audits_A --> Sweep_A
+        Sweep_A --> Labels_A
+        Sweep_A --> Drift_A
+    end
+    classDef ok fill:#efe,stroke:#393
+    classDef bad fill:#fee,stroke:#c33
+```
+
+| Pros | Cons |
+|---|---|
+| Drift class bd-334 / `Signal(integration-conflict)` / bare-None Escalation **mathematically impossible** — one fold, helpers wrap it | `superseded-by` / `mutation-id` remain irreducibly label-only (audit stream silent on lineage) |
+| `list_issues({labels: […]})` queryability preserved — labels remain a cache, just not a source of truth | Type A/B bifurcation is real complexity; future writers must respect it (footgun documented in §10.2.1) |
+| Reconciler sweep makes drift self-healing with `label_index_drift` counter observability | Replay cost on cold-start projection — fold over 50+ comments per task |
+| Tier-0 defensive panics can be retired (bd-3sk) — telemetry replaces panics | Schema evolution of `AuditSentinelKind` requires explicit versioning (Open Question §9.4) |
+| Per-call-site inversion not actually needed (3 listed sites were already audit-first) — work shrinks to bd-3us + bd-3sk + bd-42v | Effect-after-append discipline must be maintained at every IO site (cultural cost) |
+
+### 12.4 Tier-2 — Purify command handlers + Effect Executor
+
+State going into Tier-2 = state at the end of Tier-1 above. Command handlers still do non-atomic dual-write (emit event AND imperative beads mutation in the same call). The Tier-1 work made the *read* path pure; the *write* path is still impure.
+
+```mermaid
+flowchart TB
+    subgraph Before_T2[Before Tier-2 — post-Tier-1]
+        direction TB
+        Brain_B[Brain]
+        Handler_B[command handler<br/><b>impure: dual-write</b>]:::bad
+        Audit_B[(Audit Log)]
+        Beads_B[(Beads labels/status)]
+        Cache_B[active_plans cache]
+
+        Brain_B --> Handler_B
+        Handler_B -.emits event.-> Audit_B
+        Handler_B -.imperative mutation.-> Beads_B
+        Handler_B -.invalidates.-> Cache_B
+        Note_B[<b>race window:</b><br/>event durable BEFORE labels<br/>OR labels written BEFORE event]:::bad
+    end
+
+    subgraph After_T2[After Tier-2 — pure handlers + Effect Executor]
+        direction TB
+        Brain_A[Brain]
+        Handler_A["decide(&State, &Cmd)<br/><b>pure synchronous core</b>"]:::ok
+        Audit_A[(Audit Log<br/><b>sole input</b>)]:::ok
+        Exec_A[Effect Executor<br/>idempotent, replayable<br/>observes event log]:::ok
+        Beads_A[(Beads UI<br/>derived read-model)]
+        Git_A[(Git worktrees)]
+        Worker_A[(Worker dispatch)]
+
+        Brain_A --> Handler_A
+        Audit_A --> Handler_A
+        Handler_A -->|new event| Audit_A
+        Handler_A -->|effects list| Exec_A
+        Audit_A --> Exec_A
+        Exec_A -->|idempotent labels| Beads_A
+        Exec_A -->|idempotent ops| Git_A
+        Exec_A -->|dispatch| Worker_A
+        Worker_A -->|completion audit| Audit_A
+        Note_A[<b>invariant:</b><br/>events durable before any effect<br/>replay is trivial]:::ok
+    end
+    classDef ok fill:#efe,stroke:#393
+    classDef bad fill:#fee,stroke:#c33
+```
+
+| Pros | Cons |
+|---|---|
+| `fn decide()` and `fn project()` both pure → trivially proptestable. Subsumes most of bd-d1r's 30 scenarios | Calendar: ~6 weeks distributed (§6 estimate), one handler path at a time |
+| Replay is trivial: re-run `project` then `decide` on the same audit log | Every effect must be made truly idempotent (worktree create, label update, dispatch ack) — real engineering cost |
+| Schema evolution policy becomes urgent (Open Question §9.4): every event variant lives forever in old audit logs | Open Question §9.5: Effect Executor placement — new module in `spur-mcp`, or new `spur-effects` crate? |
+| Effect Executor can implement backpressure, retries, and audit-driven recovery uniformly | Debugging shape changes: "read a DB row" → "fold the event stream" (mitigated by mermaid dump on assertion failure — already in simulator design) |
+| Closes the Dual-Write anti-pattern (named in §2 L3) for the entire system | The Tier-1 `index_hygiene_sweep` (bd-3us) becomes one specific Effect, not a separate component — possible re-architecture |
+
+### 12.5 Cumulative invariant ledger
+
+| Invariant | Tier-0 | Tier-1 | Tier-2 |
+|---|---|---|---|
+| Cache invalidates on task-level audits | ✅ | ✅ | ✅ |
+| Single projection algorithm (no drift between forward-fold and backwards-scan) | ❌ | ✅ (bd-1r8) | ✅ |
+| State derives from audit log alone (Type A) | ❌ | ✅ (post bd-3sk) | ✅ |
+| Labels are queryable index, not authority | ❌ | ✅ (post bd-3us) | ✅ |
+| Drift is telemetry, not panic | ⚠️ defensive panics | ✅ (post bd-3sk) | ✅ |
+| Command handlers are pure | ❌ | ❌ | ✅ |
+| Effects happen after durable event append | ❌ | ⚠️ partial (comment-first only) | ✅ |
+| `decide(&State, &Command)` testable in isolation | ❌ | ❌ | ✅ |
+| Replay is trivial | ❌ | ⚠️ project is, decide isn't | ✅ |
+
+### 12.6 What Tier-2 specifically buys (beyond Tier-1)
+
+Tier-1 makes the *read* substrate honest. Tier-2 makes the *write* substrate honest. The concrete deltas Tier-2 unlocks:
+
+1. **No more dual-write race classes.** bd-1va's original race-repair framing (since retracted under §10.3.1's reframe) becomes structurally impossible: handlers don't write labels, the executor does, and only after the event is durable.
+2. **Property tests over command sequences.** `decide` is pure; you can proptest arbitrary `Vec<Command>` sequences against any starting `PlanState` and assert invariants over the resulting effect lists. The bd-d1r simulator's 30 hand-curated scenarios collapse to ~3 property tests.
+3. **Schema evolution becomes a first-class concern, not a footgun.** Once events are the only input to both decide and project, additive-only evolution + an explicit `AuditSentinelKind` version field forces every event-touching change through a single schema gate.
+4. **Cold-start replay is bounded.** Today, replay requires re-folding the audit log AND re-running handler side-effects from observed labels. After Tier-2, replay is `for event in log { exec(decide(project(prior), event)) }` — deterministic, idempotent, and parallelizable per task.
+
+### 12.7 What Tier-2 does NOT buy
+
+Naming these to avoid scope creep when the Tier-2 decision cycle opens:
+
+- **Does not retire the Beads backend dependency.** Beads remains the audit log substrate (comments) and the queryable index (labels). The Effect Executor still uses `PmService` for both.
+- **Does not eliminate the Type A/B bifurcation.** Type B labels (`signal:*`, `spur:lease-expires-at:*`) remain authoritative for their concerns; the Effect Executor handles them through dedicated effect variants, not through the audit log.
+- **Does not solve cross-plan transactions.** A command that touches multiple plans still serializes through the executor; atomicity is per-event, not per-command.
+- **Does not eliminate worker non-determinism.** Workers still produce diverse completion audits; the executor is downstream of that variability and must handle it through retry / signal pathways already designed in Tier-1.
+
+---
+
+## 13. Operator / executive view — what each tier means for `submit_plan` and plan execution
+
+The architectural tiers in §6 / §10 / §12 are stated in engineering terms (folds, projections, executors). This section restates them in *operator-facing* terms: what changes about the two core flows the system exists to serve — `submit_plan` (brain decomposes work) and plan execution (workers carry it out).
+
+### 13.1 Per-tier flow impact
+
+#### Tier-0 — observability + defensive panics
+
+| `submit_plan` | Plan execution |
+|---|---|
+| Cache invalidation advances on each task-level audit, so a freshly submitted plan is **immediately visible** to `get_plan_status` / reconciler reads (was: stale-cache window). | Invariant violations now **fail loud at the mutation site** instead of silently corrupting `active_plans`. Shadow projector logs every label-vs-audit drift, so operators learn *how often* the substrate is wrong in production. |
+
+**Operator-visible benefit:** same flows as before; corruption shows up as a panic with context, plus a metric for how broken the old substrate was. No new capabilities — pure signal.
+
+#### Tier-1 — state derives from audits, not labels
+
+| `submit_plan` | Plan execution |
+|---|---|
+| Brain submits → audit comments are written → **state is correct the instant the comment lands**. Label writes follow as an index cache; if a label write fails, the plan is still in the correct state — only `list_issues({labels:[…]})` queries are briefly stale, and the next reconciler tick patches them via `bd-3us`. | Worker writes Completion audit → status **projects as `AwaitingReview` immediately**. Brain can call `review_task` straight away. The bd-334 class of races (duplicate dispatch after label-lag, spurious `request_changes`, stale `delegation-id` re-fired) becomes **structurally impossible** — labels can't lie because no consumer derives state from them anymore. Drift is a counter (`label_index_drift`), not a panic. |
+
+**Operator-visible benefits:**
+- `submit_plan` becomes **idempotent on retry**: if the brain re-issues a submit because of a transport hiccup, the audit-derived state is the same regardless of which label-write half-landed.
+- Plan execution becomes **immune to label desync**: workers that crash mid-completion, brains that interleave `review_task` with worker writes, reconcilers that tick during a label update — all converge to the same answer (audit truth) with at most a query-visibility lag.
+- New worker outcomes (escalation, integration-conflict signal, supersession via mutation) all propagate to correct status without manual cleanup.
+- `bd-3us` adds self-healing: a label that gets manually deleted or hand-edited via the Beads UI is automatically restored on the next reconciler tick.
+
+#### Tier-2 — pure handlers + Effect Executor
+
+| `submit_plan` | Plan execution |
+|---|---|
+| Handler becomes `decide(&PlanState, SubmitPlan) -> Vec<Effect>` — **pure, synchronous**. Brain gets a response the instant the event is durable; the Effect Executor handles issue creation, label writes, and initial worker dispatches downstream and idempotently. If the orchestrator crashes mid-submit, restart **replays the event log** and the executor finishes the half-done work. Brain can also "dry-run" a submit by calling `decide` on a snapshot — no IO. | Worker completion → single Completion event → executor handles all downstream effects (label updates, lease release, next-dispatch trigger, escalation handoff) uniformly. `review_task`, `request_changes`, `report_signal`, `escalate` are all pure decision functions; the executor is the only IO surface. **Crash recovery is automatic** — on restart, the executor resumes any in-flight effects from the event log. Property tests over arbitrary command sequences replace most of the bd-d1r scenario suite. |
+
+**Operator-visible benefits:**
+- `submit_plan` becomes **transactional and replayable**: an OK response means the plan is durable, and any remaining IO will complete (or be safely retried) without intervention.
+- Plan execution becomes **crash-resilient**: orchestrator restarts during dispatch / completion / review handoff don't leave half-state. The executor's idempotent ops mean "did this dispatch actually happen?" is always answerable from the log.
+- New effect types (a new worker pool, a Slack notification, an audit summarization step) plug in by adding an Effect variant — **handler logic doesn't change**.
+- The simulator (`spur-sim` / bd-d1r Tier-4) becomes trivially correct because both `decide` and `project` are pure — most of the 30 scenarios collapse into ~3 property tests.
+
+### 13.2 Cumulative end-to-end flow after Tier-2
+
+```mermaid
+sequenceDiagram
+    participant Brain
+    participant Handler as decide()<br/>(pure)
+    participant Log as Audit Log<br/>(sole truth)
+    participant Exec as Effect Executor<br/>(idempotent IO)
+    participant Beads as Beads UI<br/>(read-model)
+    participant Worker
+
+    Note over Brain,Worker: submit_plan
+    Brain->>Handler: submit_plan(plan_spec)
+    Handler->>Log: append TaskSpec events
+    Log-->>Handler: durable
+    Handler-->>Brain: OK (plan_id)
+    Note over Exec: async, observes log
+    Log->>Exec: TaskSpec batch
+    Exec->>Beads: create_issues + labels (idempotent)
+    Exec->>Worker: dispatch ready tasks (idempotent)
+
+    Note over Brain,Worker: execution
+    Worker->>Log: Completion event
+    Log-->>Worker: durable
+    Note right of Log: status IS AwaitingReview now
+    Brain->>Handler: review_task(approve)
+    Handler->>Log: append Approval event
+    Log-->>Handler: durable
+    Handler-->>Brain: OK
+    Log->>Exec: Approval event
+    Exec->>Beads: relabel + close (idempotent)
+    Exec->>Worker: detach worktree (idempotent)
+```
+
+Every arrow is either pure (no IO) or idempotent (safe to retry). The brain's view of the world is always derivable by folding the log; an operator can answer "what state is this plan in?" with a single read from the log, no matter what the labels say.
+
+### 13.3 Bottom line — operator question each tier answers
+
+| Tier | Operator question it answers |
+|---|---|
+| **Tier-0** | "How broken is the substrate right now?" — gives you a metric (`label_audit_drift`) and a panic at corruption sites |
+| **Tier-1** | "Can I trust that `submit_plan` and `report_progress` produce the same state I'll observe later?" — yes, because labels stop being the truth |
+| **Tier-2** | "If the orchestrator crashes during a submit/dispatch/review, do I lose work?" — no, because the event log is the truth and the executor is replay-driven |
+
+### 13.4 What this does NOT change
+
+To avoid setting wrong expectations when reviewing this document with stakeholders:
+
+- **Worker quality / output variance.** Tiers fix the *substrate*; worker prompt quality, model selection, and review rigor remain the operator's responsibility.
+- **Plan decomposition quality.** `submit_plan` becomes more reliable, but the brain's ability to decompose a goal into a tractable DAG is a separate concern (Plan Mutation tooling, bd-3lo lineage, future planning skills).
+- **Beads backend latency.** Comment writes and label writes still hit the Beads PM substrate; Tiers make those operations safer, not faster.
+- **Cross-plan coordination.** Plans remain independent; multi-plan transactions are not a Tier goal.
+- **Cost / token usage.** Architectural changes are about correctness and recoverability, not LLM economics.
