@@ -205,21 +205,25 @@ pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<Completio
 /// Tier-1 projector inversion consumer: derive the currently active delegation
 /// from durable audit comments only.
 pub fn current_delegation_from_audits(audits: &[AuditSentinelKind]) -> Option<String> {
-    let mut pending: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
     for audit in audits {
         match audit {
             AuditSentinelKind::Dispatch { delegation_id, .. } => {
-                pending.push(delegation_id.clone());
+                current = Some(delegation_id.clone());
             }
-            AuditSentinelKind::Completion { delegation_id, .. } => {
-                if let Some(index) = pending.iter().position(|id| id == delegation_id) {
-                    pending.remove(index);
-                }
+            AuditSentinelKind::Completion { delegation_id, .. }
+            | AuditSentinelKind::Approval { delegation_id }
+            | AuditSentinelKind::Rejection { delegation_id, .. }
+            | AuditSentinelKind::ReviewFeedback { delegation_id, .. }
+            | AuditSentinelKind::DispatchOrphanCleared { delegation_id, .. }
+                if current.as_deref() == Some(delegation_id) =>
+            {
+                current = None;
             }
             _ => {}
         }
     }
-    pending.last().cloned()
+    current
 }
 
 /// Tier-1 index-maintenance reconciler consumer: derive whether the current
@@ -237,6 +241,7 @@ pub fn awaiting_review_from_audits(audits: &[AuditSentinelKind]) -> bool {
             AuditSentinelKind::Approval { delegation_id }
             | AuditSentinelKind::Rejection { delegation_id, .. }
             | AuditSentinelKind::ReviewFeedback { delegation_id, .. }
+            | AuditSentinelKind::DispatchOrphanCleared { delegation_id, .. }
                 if delegation_id == current_delegation_id =>
             {
                 return false;
@@ -266,19 +271,30 @@ pub fn awaiting_review_from_audits(audits: &[AuditSentinelKind]) -> bool {
 /// Tier-1 shadow comparator consumer: derive the latest terminal audit kind
 /// from durable audit comments only.
 pub fn terminal_status_from_audits(audits: &[AuditSentinelKind]) -> Option<TerminalAuditKind> {
-    audits.iter().rev().find_map(|audit| match audit {
-        AuditSentinelKind::Approval { .. } => Some(TerminalAuditKind::Approval),
-        AuditSentinelKind::Rejection { .. } => Some(TerminalAuditKind::Rejection),
-        AuditSentinelKind::Completion {
-            completion_state: CompletionState::Failed,
-            ..
-        } => Some(TerminalAuditKind::CompletionFailed),
-        AuditSentinelKind::Completion {
-            completion_state: CompletionState::Cancelled,
-            ..
-        } => Some(TerminalAuditKind::CompletionCancelled),
-        _ => None,
-    })
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::Approval { .. } => return Some(TerminalAuditKind::Approval),
+            AuditSentinelKind::Rejection { .. } => return Some(TerminalAuditKind::Rejection),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed,
+                ..
+            } => return Some(TerminalAuditKind::CompletionFailed),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Cancelled,
+                ..
+            } => return Some(TerminalAuditKind::CompletionCancelled),
+            AuditSentinelKind::Dispatch { .. }
+            | AuditSentinelKind::Completion {
+                completion_state: CompletionState::AwaitingReview | CompletionState::Superseded,
+                ..
+            }
+            | AuditSentinelKind::RetryRequested { .. }
+            | AuditSentinelKind::ReviewFeedback { .. }
+            | AuditSentinelKind::DispatchOrphanCleared { .. } => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Tier-1 projector inversion consumer: derive supersession fact from durable
@@ -2131,6 +2147,48 @@ mod tests {
             escalation,
             noise
         ]
+    }
+
+    #[test]
+    fn current_delegation_from_audits_prefers_latest_dispatch_lifecycle() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "A".to_string(),
+                worker: "codex".to_string(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "B".to_string(),
+                worker: "codex".to_string(),
+                attempt: 2,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "B".to_string(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-B".to_string()),
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+        ];
+        assert_eq!(super::current_delegation_from_audits(&audits), None);
+    }
+
+    #[test]
+    fn current_delegation_from_audits_clears_on_dispatch_orphan_cleared() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "A".to_string(),
+                worker: "codex".to_string(),
+                attempt: 1,
+            },
+            AuditSentinelKind::DispatchOrphanCleared {
+                delegation_id: "A".to_string(),
+                reason: "dispatch send failed".to_string(),
+            },
+        ];
+        assert_eq!(super::current_delegation_from_audits(&audits), None);
     }
 
     proptest! {
