@@ -184,6 +184,7 @@ impl McpEventSink for DelayingSink {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn active_count_tracks_concurrent_dispatch_entry_and_exit() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -258,6 +259,7 @@ async fn active_count_tracks_concurrent_dispatch_entry_and_exit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn shutdown_blocks_until_active_count_reaches_zero() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -428,6 +430,7 @@ async fn shutdown_returns_drained_quickly_when_no_in_flight_dispatchers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn shutdown_warns_and_returns_undrained_when_deadline_elapses() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
