@@ -408,6 +408,41 @@ fn rust_extractor_stable_keys_are_deterministic_across_runs() {
 }
 
 #[test]
+fn stable_key_is_stable_under_leading_whitespace_insertion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+    let base_source = r#"
+trait Foo { fn f(&self); }
+struct Bar;
+impl Foo for Bar { fn f(&self) {} }
+impl Bar { fn a(&self) {} }
+impl Bar { fn b(&self) {} }
+"#;
+    fs::write(root.join("src/lib.rs"), base_source).expect("write base source");
+    let base_facts = build_facts(root).expect("extract base").0;
+    let base_keys: Vec<_> = base_facts
+        .nodes
+        .iter()
+        .map(|node| (node.kind, node.label.clone(), node.stable_key.clone()))
+        .collect();
+
+    fs::write(root.join("src/lib.rs"), format!("\n{base_source}")).expect("write shifted source");
+    let shifted_facts = build_facts(root).expect("extract shifted").0;
+    let shifted_keys: Vec<_> = shifted_facts
+        .nodes
+        .iter()
+        .map(|node| (node.kind, node.label.clone(), node.stable_key.clone()))
+        .collect();
+
+    assert_eq!(
+        base_keys, shifted_keys,
+        "leading whitespace insertion should not perturb stable keys"
+    );
+}
+
+#[test]
 fn rust_extractor_distinguishes_trait_impls_of_same_self_type() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();

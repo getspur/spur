@@ -5,7 +5,7 @@
   "manifest_version": "<normalized>",
   "file_manifests": [
     {
-      "stable_file_id": "a759aff8ae5419e0",
+      "stable_file_id": "32b0da5754b27dce",
       "path": "api.md",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -16,7 +16,7 @@
       ]
     },
     {
-      "stable_file_id": "91079949255a448a",
+      "stable_file_id": "262034679d995356",
       "path": "guide.md",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -28,7 +28,7 @@
       ]
     },
     {
-      "stable_file_id": "57b2b40fcba2e8ed",
+      "stable_file_id": "72fa53ed526f155d",
       "path": "index.md",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -42,21 +42,21 @@
   ],
   "files": [
     {
-      "stable_file_id": "a759aff8ae5419e0",
+      "stable_file_id": "32b0da5754b27dce",
       "file_path": "api.md"
     },
     {
-      "stable_file_id": "91079949255a448a",
+      "stable_file_id": "262034679d995356",
       "file_path": "guide.md"
     },
     {
-      "stable_file_id": "57b2b40fcba2e8ed",
+      "stable_file_id": "72fa53ed526f155d",
       "file_path": "index.md"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "e35b915f52f45e83",
+      "stable_symbol_id": "f16fb5387cb06425",
       "file_path": "api.md",
       "byte_range": [
         0,
@@ -72,7 +72,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "804fa19ecdd05a81",
+      "stable_symbol_id": "59b6c9abc2196bb0",
       "file_path": "api.md",
       "byte_range": [
         7,
@@ -88,7 +88,7 @@
       "enclosing_scope": "API"
     },
     {
-      "stable_symbol_id": "18070d361bbf917e",
+      "stable_symbol_id": "344f8f99596f3ba4",
       "file_path": "guide.md",
       "byte_range": [
         0,
@@ -104,7 +104,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "617a3753df7f96af",
+      "stable_symbol_id": "28d38687b53ecfa5",
       "file_path": "guide.md",
       "byte_range": [
         98,
@@ -120,7 +120,7 @@
       "enclosing_scope": "Guide"
     },
     {
-      "stable_symbol_id": "a4f4756c445cfa9c",
+      "stable_symbol_id": "77f46f292a3742f0",
       "file_path": "guide.md",
       "byte_range": [
         159,
@@ -136,7 +136,7 @@
       "enclosing_scope": "Guide"
     },
     {
-      "stable_symbol_id": "324648dd1b8e00d2",
+      "stable_symbol_id": "a093244d909ebeef",
       "file_path": "index.md",
       "byte_range": [
         0,
@@ -152,7 +152,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "30cc2b6854ab6306",
+      "stable_symbol_id": "97fd3664754d4ed6",
       "file_path": "index.md",
       "byte_range": [
         172,
@@ -168,7 +168,7 @@
       "enclosing_scope": "Overview"
     },
     {
-      "stable_symbol_id": "20bb6eac9c665eaa",
+      "stable_symbol_id": "8ebc36ba1d03377d",
       "file_path": "index.md",
       "byte_range": [
         218,

@@ -5,7 +5,7 @@
   "manifest_version": "<normalized>",
   "file_manifests": [
     {
-      "stable_file_id": "1e095ba8c60223fe",
+      "stable_file_id": "fa1b8fd6988afb15",
       "path": "src/helpers.py",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -15,7 +15,7 @@
       ]
     },
     {
-      "stable_file_id": "7633513f745a26ce",
+      "stable_file_id": "7637220ca411355c",
       "path": "src/main.py",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -26,7 +26,7 @@
       ]
     },
     {
-      "stable_file_id": "528488002bf97df3",
+      "stable_file_id": "88080f65b93577ff",
       "path": "src/models.py",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -39,7 +39,7 @@
       ]
     },
     {
-      "stable_file_id": "233e90d5343e886c",
+      "stable_file_id": "438512d0ff1861c0",
       "path": "src/pkg.py",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -52,25 +52,25 @@
   ],
   "files": [
     {
-      "stable_file_id": "1e095ba8c60223fe",
+      "stable_file_id": "fa1b8fd6988afb15",
       "file_path": "src/helpers.py"
     },
     {
-      "stable_file_id": "7633513f745a26ce",
+      "stable_file_id": "7637220ca411355c",
       "file_path": "src/main.py"
     },
     {
-      "stable_file_id": "528488002bf97df3",
+      "stable_file_id": "88080f65b93577ff",
       "file_path": "src/models.py"
     },
     {
-      "stable_file_id": "233e90d5343e886c",
+      "stable_file_id": "438512d0ff1861c0",
       "file_path": "src/pkg.py"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "ed9abdbb09704c78",
+      "stable_symbol_id": "b3e8dd9e203796dc",
       "file_path": "src/helpers.py",
       "byte_range": [
         0,
@@ -86,7 +86,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "74ec69dd6e04be1b",
+      "stable_symbol_id": "0008680ec500f0cc",
       "file_path": "src/main.py",
       "byte_range": [
         117,
@@ -102,7 +102,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "22875f8c16d9b97b",
+      "stable_symbol_id": "d1aad177c35dee30",
       "file_path": "src/main.py",
       "byte_range": [
         283,
@@ -118,7 +118,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "23f3dd6a1c0267b5",
+      "stable_symbol_id": "98acc27597535ad6",
       "file_path": "src/models.py",
       "byte_range": [
         0,
@@ -134,7 +134,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "3df01b68f42059d5",
+      "stable_symbol_id": "a4d8c8baaefff024",
       "file_path": "src/models.py",
       "byte_range": [
         16,
@@ -150,7 +150,7 @@
       "enclosing_scope": "User"
     },
     {
-      "stable_symbol_id": "81fdbe50fb39044f",
+      "stable_symbol_id": "bc1353884526a3fb",
       "file_path": "src/models.py",
       "byte_range": [
         72,
@@ -166,7 +166,7 @@
       "enclosing_scope": "User"
     },
     {
-      "stable_symbol_id": "65b7728fe805305b",
+      "stable_symbol_id": "a73c0d6fc25dad8b",
       "file_path": "src/models.py",
       "byte_range": [
         150,
@@ -182,7 +182,7 @@
       "enclosing_scope": "User"
     },
     {
-      "stable_symbol_id": "711fe77e5e26d211",
+      "stable_symbol_id": "7f8a5ff1eb1843de",
       "file_path": "src/pkg.py",
       "byte_range": [
         0,
@@ -198,7 +198,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "8725ca36d1c96bdc",
+      "stable_symbol_id": "b137eda51a24b90d",
       "file_path": "src/pkg.py",
       "byte_range": [
         18,
