@@ -5,14 +5,22 @@ use std::time::SystemTime;
 
 use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
 use spur_graph::{
-    load_artifact, CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints,
-    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphFileArtifact,
-    GraphIndexArtifact, GraphSymbolArtifact, CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
+    load_artifact, read_artifact_header, CodeMentionAuthoritative, CodeMentionDisplayMeta,
+    CodeMentionExtractionHints, CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec,
+    GraphFileArtifact, GraphIndexArtifact, GraphSymbolArtifact, CODE_FILE_URI_PREFIX,
+    CODE_SYMBOL_URI_PREFIX,
 };
+
+struct CodeGraphCacheKey {
+    path: PathBuf,
+    mtime: SystemTime,
+    len: u64,
+    content_hash: Option<String>,
+}
 
 pub struct CodeGraphMentionSource {
     artifact_path: PathBuf,
-    cache_key: Option<(PathBuf, SystemTime, u64)>,
+    cache_key: Option<CodeGraphCacheKey>,
     cached_entries: Vec<MentionEntry>,
     payloads: Vec<(String, Arc<CodeMentionPayload>)>,
     #[cfg(test)]
@@ -43,23 +51,66 @@ impl MentionSource for CodeGraphMentionSource {
             .as_ref()
             .and_then(|metadata| metadata.modified().ok());
         let len = metadata.as_ref().map(|metadata| metadata.len());
-        let cached = matches!(
+        let cached_fast = matches!(
             (&self.cache_key, modified, len),
-            (Some((path, cached_mtime, cached_len)), Some(current_mtime), Some(current_len))
+            (
+                Some(CodeGraphCacheKey {
+                    path,
+                    mtime: cached_mtime,
+                    len: cached_len,
+                    ..
+                }),
+                Some(current_mtime),
+                Some(current_len)
+            )
                 if path == &self.artifact_path
                     && *cached_mtime == current_mtime
                     && *cached_len == current_len
         );
+        if cached_fast {
+            let span = tracing::debug_span!(
+                "code_graph_build",
+                path = %self.artifact_path.display(),
+                cached = "fast"
+            );
+            let _guard = span.enter();
+            return Ok(self.cached_entries.clone());
+        }
+
+        if let (Some(cache_key), Some(current_mtime), Some(current_len)) =
+            (self.cache_key.as_mut(), modified, len)
+        {
+            if let Ok(header) = read_artifact_header(&self.artifact_path) {
+                if let (Some(cached_hash), Some(current_hash)) = (
+                    cache_key.content_hash.as_deref(),
+                    header.content_hash_blake3.as_deref(),
+                ) {
+                    if cached_hash == current_hash {
+                        cache_key.path = self.artifact_path.clone();
+                        cache_key.mtime = current_mtime;
+                        cache_key.len = current_len;
+                        let span = tracing::debug_span!(
+                            "code_graph_build",
+                            path = %self.artifact_path.display(),
+                            cached = "hash"
+                        );
+                        let _guard = span.enter();
+                        tracing::debug!(
+                            path = %self.artifact_path.display(),
+                            "code graph mention source cached by content hash"
+                        );
+                        return Ok(self.cached_entries.clone());
+                    }
+                }
+            }
+        }
+
         let span = tracing::debug_span!(
             "code_graph_build",
             path = %self.artifact_path.display(),
-            cached = cached
+            cached = "miss"
         );
         let _guard = span.enter();
-
-        if cached {
-            return Ok(self.cached_entries.clone());
-        }
 
         if !self.artifact_path.is_file() {
             self.cache_key = None;
@@ -89,6 +140,7 @@ impl MentionSource for CodeGraphMentionSource {
                 return Ok(Vec::new());
             }
         };
+        let content_hash = artifact.header.content_hash_blake3.clone();
         for diagnostic in &artifact.diagnostics {
             tracing::warn!(
                 diagnostic = diagnostic.as_str(),
@@ -104,11 +156,16 @@ impl MentionSource for CodeGraphMentionSource {
         self.cached_entries = entries.clone();
         tracing::info!(
             path = %self.artifact_path.display(),
+            entries = entries.len(),
+            payloads = self.payloads.len(),
             "code graph mention source reloaded"
         );
-        self.cache_key = modified
-            .zip(len)
-            .map(|(mtime, len)| (self.artifact_path.clone(), mtime, len));
+        self.cache_key = modified.zip(len).map(|(mtime, len)| CodeGraphCacheKey {
+            path: self.artifact_path.clone(),
+            mtime,
+            len,
+            content_hash,
+        });
         Ok(entries)
     }
 
@@ -263,12 +320,23 @@ fn symbol_search_text(symbol: &GraphSymbolArtifact) -> String {
 mod tests {
     use super::*;
     use filetime::{set_file_mtime, FileTime};
+    use std::fs;
     use std::time::Duration;
 
     fn write_fixture(path: &Path, file_path: &str) {
+        write_fixture_with_hash(path, file_path, None);
+    }
+
+    fn write_fixture_with_hash(path: &Path, file_path: &str, content_hash_blake3: Option<&str>) {
+        let header = match content_hash_blake3 {
+            Some(hash) => format!(
+                r#""header": {{ "graph_index_version": "v1", "content_hash_blake3": "{hash}" }}"#
+            ),
+            None => r#""header": { "graph_index_version": "v1" }"#.to_string(),
+        };
         let artifact = format!(
             r#"{{
-  "header": {{ "graph_index_version": "v1" }},
+  {header},
   "manifest_version": "v1",
   "file_manifests": [],
   "files": [
@@ -277,14 +345,22 @@ mod tests {
   "symbols": []
 }}"#
         );
-        std::fs::write(path, artifact).expect("write fixture");
+        fs::write(path, artifact).expect("write fixture");
     }
 
     fn rewrite_until_mtime_changes(path: &Path, file_path: &str, previous: SystemTime) {
+        rewrite_until_mtime_changes_with(path, previous, || write_fixture(path, file_path));
+    }
+
+    fn rewrite_until_mtime_changes_with(
+        path: &Path,
+        previous: SystemTime,
+        mut rewrite: impl FnMut(),
+    ) {
         for _ in 0..20 {
             std::thread::sleep(Duration::from_millis(10));
-            write_fixture(path, file_path);
-            let current = std::fs::metadata(path)
+            rewrite();
+            let current = fs::metadata(path)
                 .expect("metadata")
                 .modified()
                 .expect("modified");
@@ -310,7 +386,7 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(source.reload_count, 1);
 
-        let previous_mtime = std::fs::metadata(&artifact_path)
+        let previous_mtime = fs::metadata(&artifact_path)
             .expect("metadata")
             .modified()
             .expect("modified");
@@ -321,13 +397,13 @@ mod tests {
         assert_eq!(third[0].display, "src/lib.rs");
         assert_eq!(source.reload_count, 2);
 
-        let stable_metadata = std::fs::metadata(&artifact_path).expect("metadata");
+        let stable_metadata = fs::metadata(&artifact_path).expect("metadata");
         let stable_mtime = stable_metadata.modified().expect("modified");
         let previous_len = stable_metadata.len();
         write_fixture(&artifact_path, "src/lib_rewritten_with_longer_name.rs");
         let stable_filetime = FileTime::from_system_time(stable_mtime);
         set_file_mtime(&artifact_path, stable_filetime).expect("restore mtime");
-        let current_len = std::fs::metadata(&artifact_path).expect("metadata").len();
+        let current_len = fs::metadata(&artifact_path).expect("metadata").len();
         assert_ne!(current_len, previous_len);
 
         let fourth = source.build(Path::new(".")).expect("fourth build");
@@ -358,5 +434,55 @@ mod tests {
             .expect("second payload");
 
         assert!(Arc::ptr_eq(&first_payload, second_payload));
+    }
+
+    #[test]
+    fn build_uses_content_hash_when_metadata_changes_but_content_does_not() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("graph-index.json");
+        write_fixture_with_hash(&artifact_path, "src/main.rs", Some("hash-same"));
+        let mut source = CodeGraphMentionSource::new(&artifact_path);
+
+        let first = source.build(Path::new(".")).expect("first build");
+        assert_eq!(first.len(), 1);
+        assert_eq!(source.reload_count, 1);
+
+        let fixture_bytes = fs::read(&artifact_path).expect("read fixture bytes");
+        let previous_mtime = fs::metadata(&artifact_path)
+            .expect("metadata")
+            .modified()
+            .expect("modified");
+        rewrite_until_mtime_changes_with(&artifact_path, previous_mtime, || {
+            fs::write(&artifact_path, &fixture_bytes).expect("rewrite identical bytes");
+        });
+
+        let second = source.build(Path::new(".")).expect("second build");
+        assert_eq!(second.len(), 1);
+        assert_eq!(source.reload_count, 1);
+    }
+
+    #[test]
+    fn build_reloads_when_hash_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("graph-index.json");
+        write_fixture_with_hash(&artifact_path, "src/main.rs", Some("hash-before"));
+        let mut source = CodeGraphMentionSource::new(&artifact_path);
+
+        let first = source.build(Path::new(".")).expect("first build");
+        assert_eq!(first.len(), 1);
+        assert_eq!(source.reload_count, 1);
+
+        let previous_mtime = fs::metadata(&artifact_path)
+            .expect("metadata")
+            .modified()
+            .expect("modified");
+        rewrite_until_mtime_changes_with(&artifact_path, previous_mtime, || {
+            write_fixture_with_hash(&artifact_path, "src/lib.rs", Some("hash-after"));
+        });
+
+        let second = source.build(Path::new(".")).expect("second build");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].display, "src/lib.rs");
+        assert_eq!(source.reload_count, 2);
     }
 }
