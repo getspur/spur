@@ -52,6 +52,16 @@ impl McpHandlerError {
     }
 }
 
+impl From<McpHandlerError> for rmcp::ErrorData {
+    fn from(value: McpHandlerError) -> Self {
+        rmcp::ErrorData::new(
+            rmcp::model::ErrorCode(value.json_rpc_code()),
+            value.to_string(),
+            None,
+        )
+    }
+}
+
 pub async fn get_issue(
     pm: &PmService,
     _ctx: &WorkerCallContext,

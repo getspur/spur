@@ -11,6 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rmcp::{
+    model::CallToolRequestParams, service::ServiceError, transport::StreamableHttpClientTransport,
+    ServiceExt,
+};
 use serde_json::Value;
 use spur_acp::SpurEventBody;
 use spur_license::policy::PolicyResolver;
@@ -180,22 +184,68 @@ async fn call_jsonrpc(
     params: Value,
 ) -> Value {
     let url = format!("{}?token={}", server.url(), token);
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await
-        .expect("request");
-    resp.json().await.expect("response is JSON")
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(url))
+            .await
+            .expect("rmcp client initialize");
+
+    let response = match method {
+        "tools/list" => match client.list_all_tools().await {
+            Ok(tools) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "tools": tools }
+            }),
+            Err(error) => service_error_response(error),
+        },
+        "tools/call" => {
+            let tool_name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .expect("params.name is required")
+                .to_string();
+            let mut request = CallToolRequestParams::new(tool_name);
+            request.arguments = params.get("arguments").and_then(|v| v.as_object()).cloned();
+            match client.call_tool(request).await {
+                Ok(result) => {
+                    let payload = result
+                        .structured_content
+                        .clone()
+                        .unwrap_or_else(|| serde_json::to_value(result).expect("serialize result"));
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": payload
+                    })
+                }
+                Err(error) => service_error_response(error),
+            }
+        }
+        other => panic!("unsupported JSON-RPC method in test helper: {other}"),
+    };
+
+    drop(client);
+    response
+}
+
+fn service_error_response(error: ServiceError) -> Value {
+    let (code, message) = match &error {
+        ServiceError::McpError(mcp_error) => {
+            (i64::from(mcp_error.code.0), mcp_error.message.to_string())
+        }
+        _ => (-32603, error.to_string()),
+    };
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn tools_list_returns_8_curated_tools() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -230,7 +280,6 @@ async fn tools_list_returns_8_curated_tools() {
 // ─── T23: per-delegation summary event emission ───────────────────────────
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -340,7 +389,6 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn report_progress_disabled_returns_success_without_calling_handler() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -374,7 +422,6 @@ async fn report_progress_disabled_returns_success_without_calling_handler() {
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn report_progress_full_bus_silently_drops_and_returns_success() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -408,7 +455,6 @@ async fn report_progress_full_bus_silently_drops_and_returns_success() {
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn report_progress_enabled_with_capacity_emits_event() {
     let sink = Arc::new(CountingSink {
         count: AtomicUsize::new(0),
@@ -446,7 +492,6 @@ async fn report_progress_enabled_with_capacity_emits_event() {
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn tools_call_get_issue_routes_to_handler() {
     let (_dir, server, issue_id) = test_server_with_issue().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -467,7 +512,6 @@ async fn tools_call_get_issue_routes_to_handler() {
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn tools_call_unknown_tool_returns_method_not_found() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -480,8 +524,8 @@ async fn tools_call_unknown_tool_returns_method_not_found() {
     .await;
     assert_eq!(
         body["error"]["code"].as_i64(),
-        Some(-32601),
-        "unknown brain-only tool must be -32601, got: {body}"
+        Some(-32602),
+        "unknown worker tool should be invalid params/tool-not-found under native RMCP routing, got: {body}"
     );
     server.shutdown(Duration::from_secs(5)).await;
 }
@@ -494,6 +538,10 @@ async fn json_rpc_batched_request_rejected() {
     let url = format!("{}?token={}", server.url(), token);
     let resp = reqwest::Client::new()
         .post(&url)
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
         .json(&serde_json::json!([
             {"jsonrpc":"2.0","method":"tools/list","id":1},
             {"jsonrpc":"2.0","method":"tools/list","id":2}
