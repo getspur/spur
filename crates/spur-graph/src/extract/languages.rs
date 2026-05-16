@@ -238,7 +238,7 @@ pub(crate) fn emit_definitions<'tree>(
         let parent = nearest_parent(file_node_id, &bindings, node);
         let fqn = scoped_name(parent.fqn.unwrap_or(""), &label);
         let node_id = builder.add_node(relative_path, label, fqn.clone(), kind, file_id, node);
-        builder.add_edge(parent.node_id, node_id, RelationKind::Contains, None);
+        builder.add_edge(parent.node_id, Some(node_id), RelationKind::Contains, None);
         bindings.push(DefinitionBinding { node, node_id, fqn });
     }
     bindings

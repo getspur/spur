@@ -100,7 +100,7 @@ fn emit_sections<'tree>(
             file_id,
             node,
         );
-        builder.add_edge(parent_id, node_id, RelationKind::Contains, None);
+        builder.add_edge(parent_id, Some(node_id), RelationKind::Contains, None);
         stack.push((level, node_id, fqn.clone()));
         sections.push(SectionBinding { node, node_id });
     }

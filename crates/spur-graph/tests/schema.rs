@@ -17,7 +17,7 @@ fn graph_facts_round_trip_through_json() {
     let edge = GraphEdge {
         edge_id: EdgeId(5),
         source_node_id: NodeId(7),
-        target_node_id: NodeId(8),
+        target_node_id: Some(NodeId(8)),
         relation: RelationKind::Calls,
         target_label: Some("callee".to_string()),
         confidence: Confidence::SyntaxExact,
