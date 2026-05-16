@@ -46,7 +46,7 @@ impl MentionSource for CodeGraphMentionSource {
             (Some((path, cached_mtime)), Some(current_mtime))
                 if path == &self.artifact_path && *cached_mtime == current_mtime
         );
-        let span = tracing::info_span!(
+        let span = tracing::debug_span!(
             "code_graph_build",
             path = %self.artifact_path.display(),
             cached = cached
@@ -98,6 +98,10 @@ impl MentionSource for CodeGraphMentionSource {
             .in_scope(|| entries_and_payloads(artifact, &mut payloads));
         self.payloads = payloads;
         self.cached_entries = entries.clone();
+        tracing::info!(
+            path = %self.artifact_path.display(),
+            "code graph mention source reloaded"
+        );
         self.cache_key = modified.map(|mtime| (self.artifact_path.clone(), mtime));
         Ok(entries)
     }
