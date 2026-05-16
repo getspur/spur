@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{McpServer, McpServerHttp};
+use reqwest::header::ACCEPT;
 use rmcp::{
     model::CallToolRequestParams, service::ServiceError, transport::StreamableHttpClientTransport,
     ServiceExt,
@@ -190,6 +191,61 @@ async fn call_jsonrpc(url_with_token: &str, params: Value) -> Value {
     };
     drop(client);
     response
+}
+
+fn initialize_request() -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "worker-mcp-security-test",
+                "version": "1.0.0"
+            }
+        }
+    })
+}
+
+async fn open_session_with_token(url: &str, token: &str) -> String {
+    let response = reqwest::Client::new()
+        .post(format!("{url}?token={token}"))
+        .header(ACCEPT, "application/json, text/event-stream")
+        .json(&initialize_request())
+        .send()
+        .await
+        .expect("initialize request must succeed");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "initialize must return 200 with an RMCP session id"
+    );
+    response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .expect("initialize response must include Mcp-Session-Id")
+}
+
+async fn post_with_session_id(
+    url: &str,
+    session_id: &str,
+    bearer_token: Option<&str>,
+    body: Value,
+) -> reqwest::Response {
+    let client = reqwest::Client::new();
+    let mut request = client
+        .post(url)
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id)
+        .json(&body);
+    if let Some(token) = bearer_token {
+        request = request.bearer_auth(token);
+    }
+    request.send().await.expect("session request must complete")
 }
 
 async fn wait_for_read_aggregate(
@@ -581,4 +637,116 @@ async fn t33_token_not_in_argv_or_env() {
     }
 
     worker.shutdown(Duration::from_secs(5)).await;
+}
+
+// ───── T34: forged session id with valid HMAC must not bypass auth ─────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forged_session_id_is_rejected() {
+    let dir = TempDir::new().expect("tempdir");
+    let brain = BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440034".into()));
+    let (worker, _pm, _store, _orch) = boot_test_server(dir.path(), &brain).await;
+    worker.register_delegation(DELEGATION_A.into(), DelegationContext::default());
+
+    let token = worker.issue_token(DELEGATION_A, Duration::from_secs(60));
+    let issued_session_id = open_session_with_token(&worker.url(), &token).await;
+    assert!(
+        !issued_session_id.is_empty(),
+        "control initialize should mint a real session id"
+    );
+
+    let forged_session_id = "550e8400-e29b-41d4-a716-4466554400ff";
+    assert_ne!(
+        forged_session_id, issued_session_id,
+        "forged id must differ from server-issued id"
+    );
+
+    let response = post_with_session_id(
+        &worker.url(),
+        forged_session_id,
+        Some(&token),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    )
+    .await;
+    assert!(
+        response.status() == reqwest::StatusCode::UNAUTHORIZED
+            || response.status() == reqwest::StatusCode::NOT_FOUND,
+        "forged session-id must be rejected (401/404), got {}",
+        response.status()
+    );
+
+    worker.shutdown(Duration::from_secs(5)).await;
+}
+
+// ───── T35: post-initialize requests succeed without token when session is valid ─────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn post_initialize_request_without_token_succeeds_with_valid_session_id() {
+    let dir = TempDir::new().expect("tempdir");
+    let brain = BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440035".into()));
+    let (worker, _pm, _store, _orch) = boot_test_server(dir.path(), &brain).await;
+    worker.register_delegation(DELEGATION_A.into(), DelegationContext::default());
+
+    let token = worker.issue_token(DELEGATION_A, Duration::from_secs(60));
+    let session_id = open_session_with_token(&worker.url(), &token).await;
+
+    let response = post_with_session_id(
+        &worker.url(),
+        &session_id,
+        None,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "valid server-issued session id should authorize post-initialize requests without token"
+    );
+    let body = response.text().await.expect("tools/list body");
+    assert!(
+        body.contains("\"result\""),
+        "expected successful JSON-RPC result payload, got: {body}"
+    );
+    assert!(
+        !body.contains("\"error\""),
+        "valid session-id request must not return unauthorized error: {body}"
+    );
+
+    worker.shutdown(Duration::from_secs(5)).await;
+}
+
+// ───── T36: cross-brain session ids are rejected even with valid local HMAC ─────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_brain_session_id_is_rejected() {
+    let dir_a = TempDir::new().expect("tempdir a");
+    let dir_b = TempDir::new().expect("tempdir b");
+    let brain_a = BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440036".into()));
+    let brain_b = BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440037".into()));
+
+    let (worker_a, _pm_a, _store_a, _orch_a) = boot_test_server(dir_a.path(), &brain_a).await;
+    let (worker_b, _pm_b, _store_b, _orch_b) = boot_test_server(dir_b.path(), &brain_b).await;
+    worker_a.register_delegation(DELEGATION_A.into(), DelegationContext::default());
+    worker_b.register_delegation(DELEGATION_A.into(), DelegationContext::default());
+
+    let token_a = worker_a.issue_token(DELEGATION_A, Duration::from_secs(60));
+    let token_b = worker_b.issue_token(DELEGATION_A, Duration::from_secs(60));
+    let session_id_a = open_session_with_token(&worker_a.url(), &token_a).await;
+
+    let response = post_with_session_id(
+        &worker_b.url(),
+        &session_id_a,
+        Some(&token_b),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}),
+    )
+    .await;
+    assert!(
+        response.status() == reqwest::StatusCode::UNAUTHORIZED
+            || response.status() == reqwest::StatusCode::NOT_FOUND,
+        "server B must reject session-id minted by server A (status={})",
+        response.status()
+    );
+
+    worker_a.shutdown(Duration::from_secs(5)).await;
+    worker_b.shutdown(Duration::from_secs(5)).await;
 }
