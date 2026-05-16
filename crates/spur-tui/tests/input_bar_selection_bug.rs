@@ -1,5 +1,4 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use spur_tui::components::completion_trigger::IntentEvent;
 use spur_tui::components::input_bar::{HandleOutcome, InputBar};
 
 fn press(bar: &mut InputBar, code: KeyCode, modifiers: KeyModifiers) -> HandleOutcome {
@@ -13,13 +12,13 @@ fn insert_char_with_selection_deletes_atoms_correctly() {
     bar.set_text_cursor_for_test(0);
 
     // Select the atom
-    press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
-    press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
-    press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
-    press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
+    let _ = press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
+    let _ = press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
+    let _ = press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
+    let _ = press(&mut bar, KeyCode::Right, KeyModifiers::SHIFT);
 
     // Insert a char, which should replace the selection.
-    press(&mut bar, KeyCode::Char('a'), KeyModifiers::NONE);
+    let _ = press(&mut bar, KeyCode::Char('a'), KeyModifiers::NONE);
 
     // The atom should be deleted.
     assert!(bar.protected_ranges().is_empty(), "Atom should be deleted");
