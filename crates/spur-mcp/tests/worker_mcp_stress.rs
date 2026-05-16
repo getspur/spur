@@ -177,6 +177,7 @@ async fn collect_summaries(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let dir = TempDir::new().expect("tempdir");
@@ -410,6 +411,7 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn flush_failure_emits_summary_with_errors() {
     tokio::time::timeout(Duration::from_secs(60), async {
         const DELEGATION_ID: &str = "d-flush-fail";

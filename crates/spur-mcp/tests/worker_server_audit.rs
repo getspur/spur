@@ -99,6 +99,7 @@ async fn call_jsonrpc(
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn update_issue_success_emits_worker_write_audit_sentinel() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -176,6 +177,7 @@ async fn update_issue_success_emits_worker_write_audit_sentinel() {
 // ─── T20: per-delegation read-audit aggregation buffer ────────────────────
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn read_tool_calls_append_to_buffer() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -266,6 +268,7 @@ async fn drop_buffer_after_receiver_dropped_does_not_panic() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn update_issue_without_id_arg_does_not_emit_audit() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

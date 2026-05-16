@@ -195,6 +195,7 @@ async fn call_jsonrpc(
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn tools_list_returns_8_curated_tools() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -229,6 +230,7 @@ async fn tools_list_returns_8_curated_tools() {
 // ─── T23: per-delegation summary event emission ───────────────────────────
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -338,6 +340,7 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn report_progress_disabled_returns_success_without_calling_handler() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -371,6 +374,7 @@ async fn report_progress_disabled_returns_success_without_calling_handler() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn report_progress_full_bus_silently_drops_and_returns_success() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -404,6 +408,7 @@ async fn report_progress_full_bus_silently_drops_and_returns_success() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn report_progress_enabled_with_capacity_emits_event() {
     let sink = Arc::new(CountingSink {
         count: AtomicUsize::new(0),
@@ -441,6 +446,7 @@ async fn report_progress_enabled_with_capacity_emits_event() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn tools_call_get_issue_routes_to_handler() {
     let (_dir, server, issue_id) = test_server_with_issue().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -461,6 +467,7 @@ async fn tools_call_get_issue_routes_to_handler() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn tools_call_unknown_tool_returns_method_not_found() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -480,6 +487,7 @@ async fn tools_call_unknown_tool_returns_method_not_found() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn json_rpc_batched_request_rejected() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));

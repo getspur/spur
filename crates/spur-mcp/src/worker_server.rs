@@ -1,13 +1,10 @@
 //! Per-`BrainSession` HTTP/JSON-RPC server exposing the curated worker MCP
 //! tool subset to delegated workers.
 //!
-//! T15 implements the lifecycle skeleton: bind a TCP listener on
-//! `127.0.0.1:0`, run a cancellable accept loop, and expose `start()` /
-//! `url()` / `shutdown()`. T16 adds HMAC token validation middleware.
-//! T17 wires the JSON-RPC dispatcher: `tools/list` returns the curated
-//! 8-tool subset and `tools/call` routes to the freestanding handlers in
-//! [`crate::handlers`]. Audit emission (T19+) and per-delegation gating
-//! (T18) layer on top of this dispatcher.
+//! The transport layer is RMCP Streamable HTTP (`axum` + `StreamableHttpService`)
+//! while tool routing remains a compatibility shim that delegates to the
+//! existing freestanding handlers in [`crate::handlers`]. Audit emission and
+//! per-delegation lifecycle guards remain in this module.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -36,17 +33,35 @@ impl Default for WorkerMcpServerConfig {
 
 use parking_lot::Mutex;
 use rand::RngCore;
+use rmcp::{
+    model::{
+        object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    },
+    service::RequestContext,
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    },
+    ErrorData as McpError, RoleServer, ServerHandler,
+};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, Request, Response, StatusCode},
+    middleware::{self, Next},
+    Router,
+};
+
 use crate::events::McpEventSink;
 use crate::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
 use crate::outcome_materializer::OutcomeMaterializer;
-use crate::token::{validate_token, TokenError};
+use crate::token::validate_token;
 
 /// Per-delegation context cached by the dispatcher so gating checks never
 /// hit the PM on the hot path.
@@ -149,27 +164,6 @@ impl Drop for ReadAuditBuffer {
         });
     }
 }
-
-/// Maximum allowed HTTP body size (1 MiB). JSON-RPC payloads are tiny;
-/// anything larger is treated as an attack.
-const MAX_BODY_BYTES: usize = 1024 * 1024;
-
-/// Timeout for reading the request line.
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Timeout for reading the request body.
-const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Timeout for the entire headers-parsing phase. Prevents slowloris-style
-/// attacks that trickle one short header at a time to stay under the
-/// per-iteration `READ_TIMEOUT`.
-const HEADERS_PHASE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Maximum length of a single header line.
-const MAX_HEADER_LINE: usize = 8 * 1024;
-
-/// Maximum number of headers accepted per request.
-const MAX_HEADERS: usize = 64;
 
 /// Shared dependencies the dispatcher hands to handlers. Bundled into a
 /// struct so [`WorkerMcpServer::start`] stays one positional arg per
@@ -400,6 +394,124 @@ struct DispatcherDeps {
         Arc<parking_lot::Mutex<std::collections::HashMap<String, DelegationDispatchGuard>>>,
 }
 
+/// Token-derived request context cached in middleware and injected into each
+/// request as an axum extension so the RMCP handler can build
+/// [`WorkerCallContext`] without reading transport-specific headers.
+#[derive(Debug, Clone)]
+struct AuthenticatedWorkerContext {
+    delegation_id: String,
+    brain_session_id: String,
+}
+
+/// Shared auth state for the axum middleware that gates session creation.
+#[derive(Clone)]
+struct WorkerAuthMiddlewareState {
+    hmac_key: [u8; 32],
+    brain_session_id: String,
+    session_contexts:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
+}
+
+/// RMCP `ServerHandler` compat shim for the worker tool subset.
+struct WorkerToolHandler {
+    deps: Arc<DispatcherDeps>,
+    brain_session_id: String,
+}
+
+impl WorkerToolHandler {
+    fn rmcp_tools(&self) -> Vec<Tool> {
+        crate::tools::worker_tools_list()
+            .into_iter()
+            .map(|def| Tool::new(def.name, def.description, rmcp_object(def.input_schema)))
+            .collect()
+    }
+
+    fn rmcp_tool(&self, name: &str) -> Option<Tool> {
+        self.rmcp_tools().into_iter().find(|tool| tool.name == name)
+    }
+
+    fn context_from_request(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<WorkerCallContext, McpError> {
+        let parts = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "missing HTTP request parts extension for worker auth context",
+                    None,
+                )
+            })?;
+        let auth_ctx = parts
+            .extensions
+            .get::<AuthenticatedWorkerContext>()
+            .ok_or_else(|| {
+                McpError::new(
+                    rmcp::model::ErrorCode(-32001),
+                    "unauthorized: missing worker delegation auth context",
+                    None,
+                )
+            })?;
+        Ok(WorkerCallContext {
+            delegation_id: auth_ctx.delegation_id.clone(),
+            brain_session_id: auth_ctx.brain_session_id.clone(),
+        })
+    }
+}
+
+impl ServerHandler for WorkerToolHandler {
+    fn get_info(&self) -> ServerInfo {
+        let mut info = ServerInfo::default();
+        info.instructions = Some(
+            "Use these tools to inspect/update assigned issues and report worker progress/signals."
+                .into(),
+        );
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+
+        let mut implementation = Implementation::default();
+        implementation.name = "spur-worker-mcp".into();
+        implementation.version = env!("CARGO_PKG_VERSION").into();
+        info.server_info = implementation;
+        info
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.rmcp_tool(name)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.rmcp_tools()))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let worker_ctx = self.context_from_request(&context)?;
+        if worker_ctx.brain_session_id != self.brain_session_id {
+            return Err(McpError::new(
+                rmcp::model::ErrorCode(-32001),
+                "unauthorized: token brain_session_id mismatch",
+                None,
+            ));
+        }
+        let args = request
+            .arguments
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
+        let tool_name = request.name.to_string();
+        let result =
+            dispatch_tool_call_compat(worker_ctx, &tool_name, args, Arc::clone(&self.deps)).await?;
+        Ok(CallToolResult::structured(result))
+    }
+}
+
 /// Errors returned by [`WorkerMcpServer::start`].
 #[derive(Debug, thiserror::Error)]
 pub enum BindError {
@@ -429,6 +541,120 @@ pub enum FlushDelegationError {
 pub struct ShutdownOutcome {
     pub drained: bool,
     pub active_at_deadline: u32,
+}
+
+fn unauthorized_response() -> Response<Body> {
+    const BODY: &str =
+        r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}"#;
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(BODY))
+        .expect("valid unauthorized response")
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let trimmed = value.trim_start();
+            if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("Bearer") {
+                let rest = trimmed[6..].trim_start();
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.to_string())
+                }
+            } else {
+                None
+            }
+        })
+}
+
+fn extract_query_token(uri: &axum::http::Uri) -> Option<String> {
+    uri.query().and_then(|query| {
+        query.split('&').find_map(|part| {
+            let (k, v) = part.split_once('=')?;
+            if k == "token" {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+async fn worker_auth_middleware(
+    State(state): State<WorkerAuthMiddlewareState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let session_id = request
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    // T1 rule: only enforce HMAC on requests that do not carry
+    // `Mcp-Session-Id`. After session creation, we trust the unguessable
+    // RMCP session id and skip per-request token validation.
+    if let Some(session_id) = session_id {
+        if let Some(auth_ctx) = state.session_contexts.lock().get(&session_id).cloned() {
+            request.extensions_mut().insert(auth_ctx);
+        }
+        return next.run(request).await;
+    }
+
+    let token =
+        extract_bearer_token(request.headers()).or_else(|| extract_query_token(request.uri()));
+    let token = match token {
+        Some(token) => token,
+        None => {
+            tracing::warn!("WorkerMcp AuthDenied: missing token on session-opening request");
+            return unauthorized_response();
+        }
+    };
+
+    let payload = match validate_token(&state.hmac_key, &token, /*skew_tolerance_secs=*/ 30) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(?error, "WorkerMcp AuthDenied: invalid token");
+            return unauthorized_response();
+        }
+    };
+
+    if payload.b != state.brain_session_id {
+        tracing::warn!(
+            token_brain_session_id = %payload.b,
+            expected_brain_session_id = %state.brain_session_id,
+            "WorkerMcp AuthDenied: token brain_session_id mismatch"
+        );
+        return unauthorized_response();
+    }
+
+    let auth_ctx = AuthenticatedWorkerContext {
+        delegation_id: payload.d,
+        brain_session_id: payload.b,
+    };
+    request.extensions_mut().insert(auth_ctx.clone());
+
+    let response = next.run(request).await;
+    if let Some(session_id) = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        state
+            .session_contexts
+            .lock()
+            .insert(session_id.to_string(), auth_ctx);
+    }
+    response
 }
 
 impl WorkerMcpServer {
@@ -493,13 +719,42 @@ impl WorkerMcpServer {
             active_delegations,
         });
 
-        let accept_handle = tokio::spawn(accept_loop(
-            listener,
-            shutdown.clone(),
+        let handler = Arc::new(WorkerToolHandler {
+            deps: Arc::clone(&dispatcher_deps),
+            brain_session_id: brain_session_id.clone(),
+        });
+        let service = {
+            let handler = Arc::clone(&handler);
+            let mut streamable_config = StreamableHttpServerConfig::default();
+            streamable_config.stateful_mode = true;
+            StreamableHttpService::new(
+                move || Ok(Arc::clone(&handler)),
+                Arc::new(LocalSessionManager::default()),
+                streamable_config,
+            )
+        };
+        let auth_state = WorkerAuthMiddlewareState {
             hmac_key,
-            brain_session_id.clone(),
-            Arc::clone(&dispatcher_deps),
-        ));
+            brain_session_id: brain_session_id.clone(),
+            session_contexts: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        };
+        let router =
+            Router::new()
+                .nest_service("/mcp", service)
+                .layer(middleware::from_fn_with_state(
+                    auth_state,
+                    worker_auth_middleware,
+                ));
+
+        let serve_shutdown = shutdown.clone();
+        let accept_handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, router)
+                .with_graceful_shutdown(serve_shutdown.cancelled_owned())
+                .await
+            {
+                tracing::debug!(%error, "worker MCP streamable HTTP server exited");
+            }
+        });
         *server.accept_loop_handle.lock() = Some(accept_handle);
 
         let flush_rx = server
@@ -780,282 +1035,18 @@ impl WorkerMcpServer {
 /// a fast-completing dispatcher doesn't materially extend shutdown latency.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Free fn so the spawned task does not capture an `Arc<Self>` — that would
-/// create a strong reference cycle with `accept_loop_handle` and prevent the
-/// server from ever dropping if a caller forgets to call `shutdown()`.
-async fn accept_loop(
-    listener: TcpListener,
-    shutdown: CancellationToken,
-    hmac_key: [u8; 32],
-    brain_session_id: String,
-    deps: Arc<DispatcherDeps>,
-) {
-    // TODO(T24): track per-connection tasks via tokio_util::task::TaskTracker
-    // so shutdown drains in-flight requests instead of detaching them.
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return,
-            accept = listener.accept() => match accept {
-                Ok((stream, peer)) => {
-                    tokio::spawn(handle_connection(
-                        stream,
-                        peer,
-                        hmac_key,
-                        brain_session_id.clone(),
-                        Arc::clone(&deps),
-                    ));
-                }
-                Err(_) => {
-                    // Avoid pegging a core at 100% on persistent OS errors
-                    // such as EMFILE — a short backoff lets the runtime
-                    // recover and keeps cancellation responsive.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-    }
-}
-
-/// Parse an HTTP request, validate the bearer token, and either reject with
-/// 401 or dispatch to the JSON-RPC handler.
-async fn handle_connection(
-    mut stream: TcpStream,
-    peer: SocketAddr,
-    hmac_key: [u8; 32],
-    brain_session_id: String,
-    deps: Arc<DispatcherDeps>,
-) {
-    let response = match handle_request(&mut stream, &hmac_key, &brain_session_id, deps).await {
-        Ok(body) => format_http_response(200, "OK", &body),
-        Err(err) => {
-            tracing::warn!(?peer, error = ?err, "WorkerMcp AuthDenied");
-            let body = r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}"#;
-            format_http_response(401, "Unauthorized", body)
-        }
-    };
-
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
-}
-
-/// Format a minimal HTTP/1.1 response with a JSON body.
-fn format_http_response(status: u16, reason: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
-
-/// Extract the bearer token from the `Authorization` header (case-insensitive
-/// scheme) or the `?token=` query string.
-fn extract_token(request_line: &str, headers: &[(String, String)]) -> Option<String> {
-    // 1. Prefer Authorization: Bearer <token> header.
-    let from_header = headers
-        .iter()
-        .find(|(k, _)| k == "authorization")
-        .and_then(|(_, v)| {
-            let trimmed = v.trim_start();
-            if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("Bearer") {
-                let rest = trimmed[6..].trim_start();
-                Some(rest.to_string())
-            } else {
-                None
-            }
-        });
-
-    if from_header.is_some() {
-        return from_header;
-    }
-
-    // 2. Fall back to ?token=<token> query parameter.
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let path_and_query = parts[1];
-    path_and_query.split_once('?').and_then(|(_, query)| {
-        query.split('&').find_map(|param| {
-            let (k, v) = param.split_once('=')?;
-            if k == "token" {
-                Some(v.to_string())
-            } else {
-                None
-            }
-        })
-    })
-}
-
-/// Read and parse an HTTP request from `stream`, validate the bearer token,
-/// and on success return the JSON-RPC body string. On any failure returns a
-/// `TokenError` which is logged (without token bytes) and mapped to HTTP 401.
-async fn handle_request(
-    stream: &mut TcpStream,
-    hmac_key: &[u8; 32],
-    brain_session_id: &str,
-    deps: Arc<DispatcherDeps>,
-) -> Result<String, TokenError> {
-    let mut buf_reader = tokio::io::BufReader::new(stream);
-    let mut request_line = String::new();
-
-    let mut limited = (&mut buf_reader).take(MAX_HEADER_LINE as u64);
-    tokio::time::timeout(READ_TIMEOUT, limited.read_line(&mut request_line))
-        .await
-        .map_err(|_| TokenError::Malformed)?
-        .map_err(|_| TokenError::Malformed)?;
-
-    if !request_line.ends_with('\n') {
-        return Err(TokenError::Malformed);
-    }
-
-    let headers = tokio::time::timeout(HEADERS_PHASE_TIMEOUT, async {
-        let mut headers = Vec::new();
-        loop {
-            if headers.len() >= MAX_HEADERS {
-                return Err(TokenError::Malformed);
-            }
-            let mut line = String::new();
-            let mut limited = (&mut buf_reader).take(MAX_HEADER_LINE as u64);
-            tokio::time::timeout(READ_TIMEOUT, limited.read_line(&mut line))
-                .await
-                .map_err(|_| TokenError::Malformed)?
-                .map_err(|_| TokenError::Malformed)?;
-            if !line.ends_with('\n') {
-                return Err(TokenError::Malformed);
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-            if let Some((k, v)) = line.trim_end().split_once(':') {
-                headers.push((k.to_lowercase(), v.trim().to_string()));
-            }
-        }
-        Ok::<_, TokenError>(headers)
-    })
-    .await
-    .map_err(|_| TokenError::Malformed)??;
-
-    let content_length = headers
-        .iter()
-        .find(|(k, _)| k == "content-length")
-        .and_then(|(_, v)| v.parse::<usize>().ok())
-        .unwrap_or(0);
-
-    if content_length > MAX_BODY_BYTES {
-        return Err(TokenError::Malformed);
-    }
-
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 {
-        tokio::time::timeout(BODY_READ_TIMEOUT, buf_reader.read_exact(&mut body))
-            .await
-            .map_err(|_| TokenError::Malformed)?
-            .map_err(|_| TokenError::Malformed)?;
-    }
-
-    // Drop buf_reader so the caller can write to the underlying stream.
-    drop(buf_reader);
-
-    let token = extract_token(&request_line, &headers).ok_or(TokenError::Malformed)?;
-    let payload = validate_token(hmac_key, &token, /*skew_tolerance_secs=*/ 30)?;
-
-    if payload.b != brain_session_id {
-        return Err(TokenError::BadSignature);
-    }
-
-    let ctx = WorkerCallContext {
-        delegation_id: payload.d,
-        brain_session_id: payload.b,
-    };
-
-    Ok(dispatch(ctx, body, deps).await)
-}
-
-/// JSON-RPC dispatcher. Returns the serialized response body — even error
-/// responses are HTTP 200 once the token has been validated, per JSON-RPC 2.0
-/// (errors live inside the body, not in the transport status).
-///
-/// Reads the request body, rejects batches (`-32600`), then routes:
-/// - `tools/list` → curated 8-tool subset from [`crate::tools::worker_tools_list`]
-/// - `tools/call` → freestanding handler in [`crate::handlers`] keyed by name
-///
-/// Unknown method or unknown tool name → `-32601 Method not found`.
-async fn dispatch(ctx: WorkerCallContext, body: Vec<u8>, deps: Arc<DispatcherDeps>) -> String {
-    // RAII counter — held for the entire dispatcher lifetime including
-    // panics and early returns. Drop fires `fetch_sub` so `active_count`
-    // returns to 0 once every in-flight request finishes. `shutdown()`
-    // polls this counter to know when it is safe to tear down.
-    let _active_guard = ActiveCallGuard::new(Arc::clone(&deps.active_delegations));
-
-    let parsed: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return error_response(Value::Null, -32700, "Parse error"),
-    };
-
-    // Batched JSON-RPC requests would force per-element token re-validation
-    // and audit attribution we deliberately don't support — reject up front.
-    if parsed.is_array() {
-        return error_response(Value::Null, -32600, "Batched requests are not supported");
-    }
-
-    let id = parsed.get("id").cloned().unwrap_or(Value::Null);
-    let method = parsed
-        .get("method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let params = parsed.get("params").cloned().unwrap_or_else(|| json!({}));
-
-    match method.as_str() {
-        "initialize" => {
-            // Provide a bare-minimum MCP initialization response.
-            // This is required for real worker clients to establish the connection
-            // before they invoke tools/list.
-            success_response(
-                id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": { "listChanged": false }
-                    },
-                    "serverInfo": {
-                        "name": "spur-worker-mcp",
-                        "version": "1.0.0"
-                    }
-                }),
-            )
-        }
-        "notifications/initialized" => {
-            // Client acknowledges initialization. No response needed for notifications.
-            String::new()
-        }
-        "tools/list" => {
-            let tools = crate::tools::worker_tools_list();
-            success_response(id, json!({ "tools": tools }))
-        }
-        "tools/call" => dispatch_tool_call(ctx, id, params, deps).await,
-        other => error_response(id, -32601, format!("Method not found: {other}")),
-    }
-}
-
-async fn dispatch_tool_call(
+async fn dispatch_tool_call_compat(
     ctx: WorkerCallContext,
-    id: Value,
-    params: Value,
+    name: &str,
+    args: Value,
     deps: Arc<DispatcherDeps>,
-) -> String {
-    let name = match params.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
-        None => return error_response(id, -32602, "missing required field 'name'"),
-    };
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-
+) -> Result<Value, McpError> {
+    // RAII counter — held for the entire tool dispatch lifetime including
+    // panics and early returns. `shutdown()` drains by polling this counter.
+    let _active_guard = ActiveCallGuard::new(Arc::clone(&deps.active_delegations));
     let call_start = Instant::now();
 
-    let result: Result<Value, McpHandlerError> = match name.as_str() {
+    let result: Result<Value, McpHandlerError> = match name {
         "get_issue" => {
             append_read_audit_entry(
                 deps.as_ref(),
@@ -1167,23 +1158,26 @@ async fn dispatch_tool_call(
             // Unknown tool name: record as an errored call so the summary
             // event reflects the dispatch attempt.
             let latency_ms = call_start.elapsed().as_millis() as u64;
-            record_call(&deps, &ctx.delegation_id, &name, latency_ms, true);
-            return error_response(id, -32601, format!("Method not found: {other}"));
+            record_call(&deps, &ctx.delegation_id, name, latency_ms, true);
+            return Err(McpError::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                format!("Method not found: {other}"),
+                None,
+            ));
         }
     };
 
     let latency_ms = call_start.elapsed().as_millis() as u64;
     let is_error = result.is_err();
-    record_call(&deps, &ctx.delegation_id, &name, latency_ms, is_error);
+    record_call(&deps, &ctx.delegation_id, name, latency_ms, is_error);
 
     match result {
-        Ok(value) => success_response(id, value),
-        Err(err) => {
-            let resp = err.to_jsonrpc_response(id);
-            serde_json::to_string(&resp).unwrap_or_else(|_| {
-                r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
-            })
-        }
+        Ok(value) => Ok(value),
+        Err(error) => Err(McpError::new(
+            rmcp::model::ErrorCode(error.json_rpc_code()),
+            error.to_string(),
+            None,
+        )),
     }
 }
 
@@ -1460,31 +1454,6 @@ async fn emit_worker_write_audit_inner(
             );
         }
     }
-}
-
-fn success_response(id: Value, result: Value) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    }))
-    .unwrap_or_else(|_| {
-        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
-    })
-}
-
-fn error_response(id: Value, code: i32, message: impl Into<String>) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message.into(),
-        },
-    }))
-    .unwrap_or_else(|_| {
-        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
-    })
 }
 
 #[cfg(test)]
