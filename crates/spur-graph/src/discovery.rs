@@ -11,7 +11,7 @@ pub fn discover_files(root: &Path, allowed_extensions: &[&str]) -> anyhow::Resul
 
     for entry in WalkBuilder::new(&root)
         .standard_filters(true)
-        .filter_entry(|entry| should_descend(entry))
+        .filter_entry(should_descend)
         .build()
     {
         let entry = match entry {

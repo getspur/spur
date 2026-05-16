@@ -100,7 +100,7 @@ fn emit_sections<'tree>(
             file_id,
             node,
         );
-        builder.add_edge(parent_id, node_id, RelationKind::Contains);
+        builder.add_edge(parent_id, node_id, RelationKind::Contains, None);
         stack.push((level, node_id, fqn.clone()));
         sections.push(SectionBinding { node, node_id });
     }
@@ -108,6 +108,7 @@ fn emit_sections<'tree>(
     sections
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_markdown_links(
     builder: &mut FactBuilder<'_>,
     config: &LanguageConfig,
@@ -176,6 +177,7 @@ fn emit_markdown_links(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_markdown_block_links(
     builder: &mut FactBuilder<'_>,
     config: &LanguageConfig,

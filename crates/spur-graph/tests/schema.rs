@@ -19,6 +19,7 @@ fn graph_facts_round_trip_through_json() {
         source_node_id: NodeId(7),
         target_node_id: NodeId(8),
         relation: RelationKind::Calls,
+        target_label: Some("callee".to_string()),
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
         evidence_id: EvidenceId(13),
