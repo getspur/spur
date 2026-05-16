@@ -7259,6 +7259,7 @@ dependencies = [
  "crossterm 0.28.1",
  "directories",
  "divan",
+ "filetime",
  "futures",
  "ignore",
  "image 0.25.10",
