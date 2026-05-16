@@ -57,8 +57,8 @@ pub trait MentionSource: Send {
     fn build(&mut self, cwd: &Path) -> anyhow::Result<Vec<MentionEntry>>;
     fn name(&self) -> &'static str;
 
-    fn code_payloads(&self) -> Vec<(String, CodeMentionPayload)> {
-        Vec::new()
+    fn code_payloads(&self) -> &[(String, Arc<CodeMentionPayload>)] {
+        &[]
     }
 }
 
