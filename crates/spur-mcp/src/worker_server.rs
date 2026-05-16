@@ -1,13 +1,10 @@
 //! Per-`BrainSession` HTTP/JSON-RPC server exposing the curated worker MCP
 //! tool subset to delegated workers.
 //!
-//! T15 implements the lifecycle skeleton: bind a TCP listener on
-//! `127.0.0.1:0`, run a cancellable accept loop, and expose `start()` /
-//! `url()` / `shutdown()`. T16 adds HMAC token validation middleware.
-//! T17 wires the JSON-RPC dispatcher: `tools/list` returns the curated
-//! 8-tool subset and `tools/call` routes to the freestanding handlers in
-//! [`crate::handlers`]. Audit emission (T19+) and per-delegation gating
-//! (T18) layer on top of this dispatcher.
+//! The transport layer is RMCP Streamable HTTP (`axum` + `StreamableHttpService`)
+//! and tools are exposed as first-class RMCP tool methods that delegate to the
+//! existing freestanding handlers in [`crate::handlers`]. Audit emission and
+//! per-delegation lifecycle guards remain in this module.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -36,17 +33,37 @@ impl Default for WorkerMcpServerConfig {
 
 use parking_lot::Mutex;
 use rand::RngCore;
+use rmcp::{
+    handler::server::router::tool::ToolRouter,
+    model::{CallToolResult, Implementation, JsonObject, ServerCapabilities, ServerInfo},
+    service::RequestContext,
+    tool, tool_handler, tool_router,
+    transport::streamable_http_server::{
+        session::{local::LocalSessionManager, SessionId, SessionManager},
+        StreamableHttpServerConfig, StreamableHttpService,
+    },
+    ErrorData as McpError, RoleServer, ServerHandler,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, Request, Response, StatusCode},
+    middleware::{self, Next},
+    Router,
+};
+
 use crate::events::McpEventSink;
 use crate::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
 use crate::outcome_materializer::OutcomeMaterializer;
-use crate::token::{validate_token, TokenError};
+use crate::token::validate_token;
 
 /// Per-delegation context cached by the dispatcher so gating checks never
 /// hit the PM on the hot path.
@@ -150,27 +167,6 @@ impl Drop for ReadAuditBuffer {
     }
 }
 
-/// Maximum allowed HTTP body size (1 MiB). JSON-RPC payloads are tiny;
-/// anything larger is treated as an attack.
-const MAX_BODY_BYTES: usize = 1024 * 1024;
-
-/// Timeout for reading the request line.
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Timeout for reading the request body.
-const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Timeout for the entire headers-parsing phase. Prevents slowloris-style
-/// attacks that trickle one short header at a time to stay under the
-/// per-iteration `READ_TIMEOUT`.
-const HEADERS_PHASE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Maximum length of a single header line.
-const MAX_HEADER_LINE: usize = 8 * 1024;
-
-/// Maximum number of headers accepted per request.
-const MAX_HEADERS: usize = 64;
-
 /// Shared dependencies the dispatcher hands to handlers. Bundled into a
 /// struct so [`WorkerMcpServer::start`] stays one positional arg per
 /// orthogonal concept and so future tasks (T18 dual-gating, T19 audit) can
@@ -202,6 +198,9 @@ pub struct WorkerMcpServer {
     /// dispatcher hot path doesn't pay for the construction per request.
     deps: Arc<DispatcherDeps>,
     shutdown: CancellationToken,
+    session_manager: Arc<LocalSessionManager>,
+    session_contexts:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
     accept_loop_handle: Mutex<Option<JoinHandle<()>>>,
     flusher_handle: Mutex<Option<JoinHandle<()>>>,
     /// Receiver half of the read-audit flush channel. Created in `start()`
@@ -400,6 +399,495 @@ struct DispatcherDeps {
         Arc<parking_lot::Mutex<std::collections::HashMap<String, DelegationDispatchGuard>>>,
 }
 
+/// Token-derived request context cached in middleware and injected into each
+/// request as an axum extension so the RMCP handler can build
+/// [`WorkerCallContext`] without reading transport-specific headers.
+#[derive(Debug, Clone)]
+struct AuthenticatedWorkerContext {
+    delegation_id: String,
+    brain_session_id: String,
+}
+
+/// Shared auth state for the axum middleware that gates session creation.
+#[derive(Clone)]
+struct WorkerAuthMiddlewareState {
+    hmac_key: [u8; 32],
+    brain_session_id: String,
+    session_manager: Arc<LocalSessionManager>,
+    session_contexts:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct GetIssueParams {
+    id: String,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema, Serialize)]
+struct ListIssuesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    labels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_min: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_max: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issue_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_search: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct UpdateIssueParams {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    add_labels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remove_labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct GetPlanStatusParams {
+    plan_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct GetTaskDiffParams {
+    plan_id: String,
+    task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OutcomeArtifactSection {
+    StatusOnly,
+    Summary,
+    DiffOnly,
+    Full,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct FetchOutcomeArtifactParams {
+    delegation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    section: Option<OutcomeArtifactSection>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct ReportSignalParams {
+    task_id: String,
+    #[schemars(with = "ReportSignalSchema")]
+    signal: Value,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ReportSignalKindSchema {
+    ScopeDrift,
+    RetryExhausted,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, JsonSchema)]
+struct ReportSignalSchema {
+    kind: ReportSignalKindSchema,
+    signal_id: String,
+    #[schemars(range(min = 0.0, max = 1.0))]
+    severity: Option<f64>,
+    reason: Option<String>,
+    #[schemars(range(min = 1))]
+    estimated_subtasks: Option<u64>,
+    task_id: Option<String>,
+    attempt: Option<u32>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct ReportProgressParams {
+    message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    percent: Option<f64>,
+}
+
+/// RMCP `ServerHandler` for the curated worker tool subset.
+struct WorkerToolHandler {
+    deps: Arc<DispatcherDeps>,
+    brain_session_id: String,
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router(router = tool_router)]
+impl WorkerToolHandler {
+    fn new(deps: Arc<DispatcherDeps>, brain_session_id: String) -> Self {
+        Self {
+            deps,
+            brain_session_id,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    fn context_from_request(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<WorkerCallContext, McpError> {
+        let parts = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "missing HTTP request parts extension for worker auth context",
+                    None,
+                )
+            })?;
+        let auth_ctx = parts
+            .extensions
+            .get::<AuthenticatedWorkerContext>()
+            .ok_or_else(|| {
+                McpError::new(
+                    rmcp::model::ErrorCode(-32001),
+                    "unauthorized: missing worker delegation auth context",
+                    None,
+                )
+            })?;
+        Ok(WorkerCallContext {
+            delegation_id: auth_ctx.delegation_id.clone(),
+            brain_session_id: auth_ctx.brain_session_id.clone(),
+        })
+    }
+
+    async fn invoke_with_lifecycle<F, Fut>(
+        &self,
+        tool_name: &'static str,
+        context: RequestContext<RoleServer>,
+        read_audit_target: Option<Option<String>>,
+        invoke: F,
+    ) -> Result<CallToolResult, McpError>
+    where
+        F: FnOnce(WorkerCallContext) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, McpHandlerError>>,
+    {
+        let worker_ctx = self.context_from_request(&context)?;
+        if worker_ctx.brain_session_id != self.brain_session_id {
+            return Err(McpError::new(
+                rmcp::model::ErrorCode(-32001),
+                "unauthorized: token brain_session_id mismatch",
+                None,
+            ));
+        }
+
+        let delegation_id = worker_ctx.delegation_id.clone();
+        let _active_guard = ActiveCallGuard::new(Arc::clone(&self.deps.active_delegations));
+        let call_start = Instant::now();
+
+        if let Some(target_issue_id) = read_audit_target {
+            append_read_audit_entry(&self.deps, &delegation_id, tool_name, target_issue_id);
+        }
+
+        let result = invoke(worker_ctx).await;
+        let latency_ms = call_start.elapsed().as_millis() as u64;
+        let is_error = result.is_err();
+        record_call(&self.deps, &delegation_id, tool_name, latency_ms, is_error);
+
+        result
+            .map(CallToolResult::structured)
+            .map_err(McpError::from)
+    }
+
+    #[tool(
+        name = "get_issue",
+        description = "Retrieve an issue from the configured project management backend (beads, GitHub, etc.).",
+        input_schema = crate::tool_schemas::schema_object::<GetIssueParams>()
+    )]
+    async fn get_issue_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "get_issue",
+            context,
+            Some(issue_id),
+            move |worker_ctx| async move {
+                crate::handlers::get_issue(deps.pm_service.as_ref(), &worker_ctx, args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "list_issues",
+        description = "List issues from the configured project management backend with optional filters.",
+        input_schema = crate::tool_schemas::schema_object::<ListIssuesParams>()
+    )]
+    async fn list_issues_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "list_issues",
+            context,
+            Some(None),
+            move |worker_ctx| async move {
+                crate::handlers::list_issues(deps.pm_service.as_ref(), &worker_ctx, args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "get_task_diff",
+        description = "Get the full unified diff for a plan task. Use after get_plan_status shows tasks in awaiting_review, approved, rejected, or failed state. Returns the complete diff, worker branch name, task description, and summary for brain code review. Pass `attempt` to inspect prior iteration attempts (see entry.history).",
+        input_schema = crate::tool_schemas::schema_object::<GetTaskDiffParams>()
+    )]
+    async fn get_task_diff_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let task_id = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "get_task_diff",
+            context,
+            Some(task_id),
+            move |worker_ctx| async move {
+                crate::handlers::get_task_diff(
+                    Some(deps.pm_service.as_ref()),
+                    deps.feature_gate.as_ref(),
+                    deps.repo_root.as_deref(),
+                    deps.plan_resolver.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "get_plan_status",
+        description = "Get the current status of a submitted execution plan. Returns per-task status: pending (waiting for deps), ready, dispatched (running), completed, or failed. Non-blocking — returns immediately.",
+        input_schema = crate::tool_schemas::schema_object::<GetPlanStatusParams>()
+    )]
+    async fn get_plan_status_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let plan_id = args
+            .get("plan_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "get_plan_status",
+            context,
+            Some(plan_id),
+            move |worker_ctx| async move {
+                crate::handlers::get_plan_status(
+                    deps.plan_resolver.as_ref(),
+                    &deps.reconciler_outcomes,
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "fetch_outcome_artifact",
+        description = "Fetch the side-channel artifact (full or sectioned) for a completed delegation. Use when continuation.payload.artifact_id is Some(_) and you need fuller context. Sections let you pick what to fetch: pass 'status_only' for just status fields (~100B), 'summary' for the inline summary, 'diff_only' for full diff text, or 'full' for the entire DelegationResult JSON.",
+        input_schema = crate::tool_schemas::schema_object::<FetchOutcomeArtifactParams>()
+    )]
+    async fn fetch_outcome_artifact_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let delegation_id = args
+            .get("delegation_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "fetch_outcome_artifact",
+            context,
+            Some(delegation_id),
+            move |worker_ctx| async move {
+                if let Some(requested) = args.get("delegation_id").and_then(|v| v.as_str()) {
+                    if requested != worker_ctx.delegation_id {
+                        return Err(McpHandlerError::Unauthorized(format!(
+                            "delegation_id mismatch for bound session context (expected {}, got {requested})",
+                            worker_ctx.delegation_id
+                        )));
+                    }
+                }
+                crate::handlers::fetch_outcome_artifact(
+                    &deps.materializer,
+                    deps.outcome_store.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "update_issue",
+        description = "Update an issue in the configured project management backend.",
+        input_schema = crate::tool_schemas::schema_object::<UpdateIssueParams>()
+    )]
+    async fn update_issue_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "update_issue",
+            context,
+            None,
+            move |worker_ctx| async move {
+                let result =
+                    crate::handlers::update_issue(deps.pm_service.as_ref(), &worker_ctx, args)
+                        .await;
+                if result.is_ok() {
+                    if let Some(issue_id) = issue_id.as_deref() {
+                        emit_worker_write_audit(
+                            deps.pm_service.as_ref(),
+                            deps.feature_gate.as_ref(),
+                            &worker_ctx.delegation_id,
+                            "update_issue",
+                            issue_id,
+                        )
+                        .await;
+                    }
+                }
+                result
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "report_signal",
+        description = "Worker-facing. Record a typed WorkerSignal on a task. Brain-side watcher will inspect and may mutate the plan.",
+        input_schema = crate::tool_schemas::schema_object::<ReportSignalParams>()
+    )]
+    async fn report_signal_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "report_signal",
+            context,
+            None,
+            move |worker_ctx| async move {
+                crate::handlers::report_signal(
+                    deps.pm_service.as_ref(),
+                    deps.feature_gate.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "report_progress",
+        description = "Worker-facing fire-and-forget progress emission. Sends a free-form `message` (and optional `percent`) to the brain as a `WorkerReportProgress` event. The handler returns `{ok: true}` on accept; the side effect IS the event. No PM writes, no audit sentinel — distinct from `report_signal` (which persists). Workers stream rich progress text without minting structured milestone names. Consumers (TUI / dashboards) decide how to render `percent` (no clamping).",
+        input_schema = crate::tool_schemas::schema_object::<ReportProgressParams>()
+    )]
+    async fn report_progress_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "report_progress",
+            context,
+            None,
+            move |worker_ctx| async move {
+                let delegation_ctx = deps
+                    .delegations
+                    .lock()
+                    .get(&worker_ctx.delegation_id)
+                    .copied()
+                    .unwrap_or_default();
+                if !delegation_ctx.enable_worker_progress {
+                    Ok(json!({ "ok": true }))
+                } else {
+                    crate::handlers::report_progress(deps.funnel.as_ref(), &worker_ctx, args).await
+                }
+            },
+        )
+        .await
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for WorkerToolHandler {
+    fn get_info(&self) -> ServerInfo {
+        let mut info = ServerInfo::default();
+        info.instructions = Some(
+            "Use these tools to inspect/update assigned issues and report worker progress/signals."
+                .into(),
+        );
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+
+        let mut implementation = Implementation::default();
+        implementation.name = "spur-worker-mcp".into();
+        implementation.version = env!("CARGO_PKG_VERSION").into();
+        info.server_info = implementation;
+        info
+    }
+}
+
 /// Errors returned by [`WorkerMcpServer::start`].
 #[derive(Debug, thiserror::Error)]
 pub enum BindError {
@@ -429,6 +917,159 @@ pub enum FlushDelegationError {
 pub struct ShutdownOutcome {
     pub drained: bool,
     pub active_at_deadline: u32,
+}
+
+fn unauthorized_response() -> Response<Body> {
+    const BODY: &str =
+        r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}"#;
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(BODY))
+        .expect("valid unauthorized response")
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let trimmed = value.trim_start();
+            if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("Bearer") {
+                let rest = trimmed[6..].trim_start();
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.to_string())
+                }
+            } else {
+                None
+            }
+        })
+}
+
+fn extract_query_token(uri: &axum::http::Uri) -> Option<String> {
+    uri.query().and_then(|query| {
+        query.split('&').find_map(|part| {
+            let (k, v) = part.split_once('=')?;
+            if k == "token" {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+async fn worker_auth_middleware(
+    State(state): State<WorkerAuthMiddlewareState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let session_id = request
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    // Requests carrying `Mcp-Session-Id` are trusted ONLY when the id exists
+    // in this server's LocalSessionManager and maps to a token-derived
+    // delegation context captured at session-open time.
+    if let Some(session_id) = session_id {
+        let has_session = state
+            .session_manager
+            .has_session(&SessionId::from(session_id.clone()))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    ?error,
+                    session_id = %session_id,
+                    "WorkerMcp AuthDenied: failed to verify session id"
+                );
+                false
+            });
+        if has_session {
+            let auth_ctx = { state.session_contexts.lock().get(&session_id).cloned() };
+            if let Some(auth_ctx) = auth_ctx {
+                request.extensions_mut().insert(auth_ctx);
+                return next.run(request).await;
+            }
+            tracing::warn!(
+                session_id = %session_id,
+                "WorkerMcp AuthDenied: session id exists but has no delegation binding"
+            );
+            return unauthorized_response();
+        }
+    }
+
+    let token =
+        extract_bearer_token(request.headers()).or_else(|| extract_query_token(request.uri()));
+    let token = match token {
+        Some(token) => token,
+        None => {
+            tracing::warn!("WorkerMcp AuthDenied: missing token on session-opening request");
+            return unauthorized_response();
+        }
+    };
+
+    let payload = match validate_token(&state.hmac_key, &token, /*skew_tolerance_secs=*/ 30) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(?error, "WorkerMcp AuthDenied: invalid token");
+            return unauthorized_response();
+        }
+    };
+
+    if payload.b != state.brain_session_id {
+        tracing::warn!(
+            token_brain_session_id = %payload.b,
+            expected_brain_session_id = %state.brain_session_id,
+            "WorkerMcp AuthDenied: token brain_session_id mismatch"
+        );
+        return unauthorized_response();
+    }
+
+    let auth_ctx = AuthenticatedWorkerContext {
+        delegation_id: payload.d,
+        brain_session_id: payload.b,
+    };
+    request.extensions_mut().insert(auth_ctx.clone());
+
+    let response = next.run(request).await;
+    if let Some(session_id) = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let has_session = state
+            .session_manager
+            .has_session(&SessionId::from(session_id.to_string()))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    ?error,
+                    session_id = %session_id,
+                    "WorkerMcp AuthDenied: failed to verify minted session id"
+                );
+                false
+            });
+        if has_session {
+            state
+                .session_contexts
+                .lock()
+                .insert(session_id.to_string(), auth_ctx);
+        } else {
+            tracing::warn!(
+                session_id = %session_id,
+                "WorkerMcp AuthDenied: response carried unknown session id"
+            );
+        }
+    }
+    response
 }
 
 impl WorkerMcpServer {
@@ -481,25 +1122,60 @@ impl WorkerMcpServer {
         });
 
         let shutdown = CancellationToken::new();
+        let session_manager = Arc::new(LocalSessionManager::default());
+        let session_contexts = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let server = Arc::new(Self {
             addr,
             hmac_key,
             brain_session_id: brain_session_id.clone(),
             deps: Arc::clone(&dispatcher_deps),
             shutdown: shutdown.clone(),
+            session_manager: Arc::clone(&session_manager),
+            session_contexts: Arc::clone(&session_contexts),
             accept_loop_handle: Mutex::new(None),
             flusher_handle: Mutex::new(None),
             flush_rx: Mutex::new(Some(flush_rx)),
             active_delegations,
         });
 
-        let accept_handle = tokio::spawn(accept_loop(
-            listener,
-            shutdown.clone(),
-            hmac_key,
-            brain_session_id.clone(),
+        let handler = Arc::new(WorkerToolHandler::new(
             Arc::clone(&dispatcher_deps),
+            brain_session_id.clone(),
         ));
+        let service = {
+            let handler = Arc::clone(&handler);
+            let mut streamable_config = StreamableHttpServerConfig::default();
+            streamable_config.stateful_mode = true;
+            streamable_config.cancellation_token = shutdown.clone();
+            StreamableHttpService::new(
+                move || Ok(Arc::clone(&handler)),
+                Arc::clone(&session_manager),
+                streamable_config,
+            )
+        };
+        let auth_state = WorkerAuthMiddlewareState {
+            hmac_key,
+            brain_session_id: brain_session_id.clone(),
+            session_manager,
+            session_contexts,
+        };
+        let router =
+            Router::new()
+                .nest_service("/mcp", service)
+                .layer(middleware::from_fn_with_state(
+                    auth_state,
+                    worker_auth_middleware,
+                ));
+
+        let serve_shutdown = shutdown.clone();
+        let accept_handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, router)
+                .with_graceful_shutdown(serve_shutdown.cancelled_owned())
+                .await
+            {
+                tracing::debug!(%error, "worker MCP streamable HTTP server exited");
+            }
+        });
         *server.accept_loop_handle.lock() = Some(accept_handle);
 
         let flush_rx = server
@@ -709,6 +1385,48 @@ impl WorkerMcpServer {
         !self.shutdown.is_cancelled()
     }
 
+    async fn close_all_sessions(&self, close_window: Duration) {
+        if close_window.is_zero() {
+            return;
+        }
+
+        let session_ids: Vec<SessionId> = {
+            let sessions = self.session_manager.sessions.read().await;
+            sessions.keys().cloned().collect()
+        };
+        if session_ids.is_empty() {
+            return;
+        }
+
+        let manager = Arc::clone(&self.session_manager);
+        let session_contexts = Arc::clone(&self.session_contexts);
+        let brain_session_id = self.brain_session_id.clone();
+        let close_sessions = async move {
+            for session_id in session_ids {
+                if let Err(error) = manager.close_session(&session_id).await {
+                    tracing::warn!(
+                        %error,
+                        session_id = %session_id,
+                        brain_session_id = %brain_session_id,
+                        "WorkerMcpServer close_session failed during shutdown drain"
+                    );
+                }
+                session_contexts.lock().remove(session_id.as_ref());
+            }
+        };
+
+        if tokio::time::timeout(close_window, close_sessions)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                brain_session_id = %self.brain_session_id,
+                timeout_ms = close_window.as_millis() as u64,
+                "WorkerMcpServer timed out while closing active sessions"
+            );
+        }
+    }
+
     /// Cancel the accept loop, drain in-flight dispatchers up to `deadline`,
     /// then join the background audit flusher task. Returns a
     /// [`ShutdownOutcome`] describing whether the drain completed (`drained =
@@ -718,12 +1436,14 @@ impl WorkerMcpServer {
     /// Drain semantics:
     /// 1. The accept loop is cancelled first, so the listener stops accepting
     ///    new connections immediately.
-    /// 2. Existing dispatchers continue and decrement `active_delegations`
+    /// 2. Active RMCP sessions are closed so long-lived SSE streams are
+    ///    proactively terminated.
+    /// 3. Existing dispatchers continue and decrement `active_delegations`
     ///    via [`ActiveCallGuard::drop`] as they return.
-    /// 3. The drain loop polls [`active_count`](Self::active_count) every
+    /// 4. The drain loop polls [`active_count`](Self::active_count) every
     ///    `DRAIN_POLL_INTERVAL` (bounded — never busy-loops) until either the
     ///    counter reaches `0` or `deadline` elapses.
-    /// 4. On deadline elapse a `WARN`-level log is emitted with the in-flight
+    /// 5. On deadline elapse a `WARN`-level log is emitted with the in-flight
     ///    count. The flusher task is still joined so its TaskTracker drains
     ///    and the deps `Arc` is released.
     ///
@@ -732,15 +1452,13 @@ impl WorkerMcpServer {
     /// Idempotent: a second call after shutdown finds the accept and flusher
     /// handles already taken and returns immediately with `drained = true`.
     pub async fn shutdown(self: Arc<Self>, deadline: Duration) -> ShutdownOutcome {
-        self.shutdown.cancel();
-        let accept_handle = self.accept_loop_handle.lock().take();
-        if let Some(handle) = accept_handle {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        }
-
-        // Listener is closed (accept_loop has returned), so no new requests
-        // can arrive. Drain existing dispatchers, bounded by `deadline`.
         let drain_deadline = Instant::now() + deadline;
+        self.shutdown.cancel();
+        self.close_all_sessions(deadline).await;
+
+        // Listener cancellation + session close-all prevents new work and
+        // terminates active SSE streams. Drain in-flight dispatchers, bounded
+        // by `deadline`.
         let outcome = loop {
             let active = self.active_count();
             if active == 0 {
@@ -764,9 +1482,27 @@ impl WorkerMcpServer {
             tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
         };
 
+        let accept_handle = self.accept_loop_handle.lock().take();
+        if let Some(handle) = accept_handle {
+            let wait = drain_deadline.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                handle.abort();
+            } else {
+                let _ = tokio::time::timeout(wait, handle).await;
+            }
+        }
+
         let flusher_handle = self.flusher_handle.lock().take();
         if let Some(handle) = flusher_handle {
-            let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+            let wait = std::cmp::min(
+                Duration::from_secs(1),
+                drain_deadline.saturating_duration_since(Instant::now()),
+            );
+            if wait.is_zero() {
+                handle.abort();
+            } else {
+                let _ = tokio::time::timeout(wait, handle).await;
+            }
         }
         // Reference held only to keep the deps Arc alive until shutdown
         // completes; explicit drop documents intent.
@@ -779,413 +1515,6 @@ impl WorkerMcpServer {
 /// draining. Bounded so the polling loop never busy-spins, small enough that
 /// a fast-completing dispatcher doesn't materially extend shutdown latency.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-/// Free fn so the spawned task does not capture an `Arc<Self>` — that would
-/// create a strong reference cycle with `accept_loop_handle` and prevent the
-/// server from ever dropping if a caller forgets to call `shutdown()`.
-async fn accept_loop(
-    listener: TcpListener,
-    shutdown: CancellationToken,
-    hmac_key: [u8; 32],
-    brain_session_id: String,
-    deps: Arc<DispatcherDeps>,
-) {
-    // TODO(T24): track per-connection tasks via tokio_util::task::TaskTracker
-    // so shutdown drains in-flight requests instead of detaching them.
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return,
-            accept = listener.accept() => match accept {
-                Ok((stream, peer)) => {
-                    tokio::spawn(handle_connection(
-                        stream,
-                        peer,
-                        hmac_key,
-                        brain_session_id.clone(),
-                        Arc::clone(&deps),
-                    ));
-                }
-                Err(_) => {
-                    // Avoid pegging a core at 100% on persistent OS errors
-                    // such as EMFILE — a short backoff lets the runtime
-                    // recover and keeps cancellation responsive.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-    }
-}
-
-/// Parse an HTTP request, validate the bearer token, and either reject with
-/// 401 or dispatch to the JSON-RPC handler.
-async fn handle_connection(
-    mut stream: TcpStream,
-    peer: SocketAddr,
-    hmac_key: [u8; 32],
-    brain_session_id: String,
-    deps: Arc<DispatcherDeps>,
-) {
-    let response = match handle_request(&mut stream, &hmac_key, &brain_session_id, deps).await {
-        Ok(body) => format_http_response(200, "OK", &body),
-        Err(err) => {
-            tracing::warn!(?peer, error = ?err, "WorkerMcp AuthDenied");
-            let body = r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}"#;
-            format_http_response(401, "Unauthorized", body)
-        }
-    };
-
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
-}
-
-/// Format a minimal HTTP/1.1 response with a JSON body.
-fn format_http_response(status: u16, reason: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
-
-/// Extract the bearer token from the `Authorization` header (case-insensitive
-/// scheme) or the `?token=` query string.
-fn extract_token(request_line: &str, headers: &[(String, String)]) -> Option<String> {
-    // 1. Prefer Authorization: Bearer <token> header.
-    let from_header = headers
-        .iter()
-        .find(|(k, _)| k == "authorization")
-        .and_then(|(_, v)| {
-            let trimmed = v.trim_start();
-            if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("Bearer") {
-                let rest = trimmed[6..].trim_start();
-                Some(rest.to_string())
-            } else {
-                None
-            }
-        });
-
-    if from_header.is_some() {
-        return from_header;
-    }
-
-    // 2. Fall back to ?token=<token> query parameter.
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let path_and_query = parts[1];
-    path_and_query.split_once('?').and_then(|(_, query)| {
-        query.split('&').find_map(|param| {
-            let (k, v) = param.split_once('=')?;
-            if k == "token" {
-                Some(v.to_string())
-            } else {
-                None
-            }
-        })
-    })
-}
-
-/// Read and parse an HTTP request from `stream`, validate the bearer token,
-/// and on success return the JSON-RPC body string. On any failure returns a
-/// `TokenError` which is logged (without token bytes) and mapped to HTTP 401.
-async fn handle_request(
-    stream: &mut TcpStream,
-    hmac_key: &[u8; 32],
-    brain_session_id: &str,
-    deps: Arc<DispatcherDeps>,
-) -> Result<String, TokenError> {
-    let mut buf_reader = tokio::io::BufReader::new(stream);
-    let mut request_line = String::new();
-
-    let mut limited = (&mut buf_reader).take(MAX_HEADER_LINE as u64);
-    tokio::time::timeout(READ_TIMEOUT, limited.read_line(&mut request_line))
-        .await
-        .map_err(|_| TokenError::Malformed)?
-        .map_err(|_| TokenError::Malformed)?;
-
-    if !request_line.ends_with('\n') {
-        return Err(TokenError::Malformed);
-    }
-
-    let headers = tokio::time::timeout(HEADERS_PHASE_TIMEOUT, async {
-        let mut headers = Vec::new();
-        loop {
-            if headers.len() >= MAX_HEADERS {
-                return Err(TokenError::Malformed);
-            }
-            let mut line = String::new();
-            let mut limited = (&mut buf_reader).take(MAX_HEADER_LINE as u64);
-            tokio::time::timeout(READ_TIMEOUT, limited.read_line(&mut line))
-                .await
-                .map_err(|_| TokenError::Malformed)?
-                .map_err(|_| TokenError::Malformed)?;
-            if !line.ends_with('\n') {
-                return Err(TokenError::Malformed);
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-            if let Some((k, v)) = line.trim_end().split_once(':') {
-                headers.push((k.to_lowercase(), v.trim().to_string()));
-            }
-        }
-        Ok::<_, TokenError>(headers)
-    })
-    .await
-    .map_err(|_| TokenError::Malformed)??;
-
-    let content_length = headers
-        .iter()
-        .find(|(k, _)| k == "content-length")
-        .and_then(|(_, v)| v.parse::<usize>().ok())
-        .unwrap_or(0);
-
-    if content_length > MAX_BODY_BYTES {
-        return Err(TokenError::Malformed);
-    }
-
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 {
-        tokio::time::timeout(BODY_READ_TIMEOUT, buf_reader.read_exact(&mut body))
-            .await
-            .map_err(|_| TokenError::Malformed)?
-            .map_err(|_| TokenError::Malformed)?;
-    }
-
-    // Drop buf_reader so the caller can write to the underlying stream.
-    drop(buf_reader);
-
-    let token = extract_token(&request_line, &headers).ok_or(TokenError::Malformed)?;
-    let payload = validate_token(hmac_key, &token, /*skew_tolerance_secs=*/ 30)?;
-
-    if payload.b != brain_session_id {
-        return Err(TokenError::BadSignature);
-    }
-
-    let ctx = WorkerCallContext {
-        delegation_id: payload.d,
-        brain_session_id: payload.b,
-    };
-
-    Ok(dispatch(ctx, body, deps).await)
-}
-
-/// JSON-RPC dispatcher. Returns the serialized response body — even error
-/// responses are HTTP 200 once the token has been validated, per JSON-RPC 2.0
-/// (errors live inside the body, not in the transport status).
-///
-/// Reads the request body, rejects batches (`-32600`), then routes:
-/// - `tools/list` → curated 8-tool subset from [`crate::tools::worker_tools_list`]
-/// - `tools/call` → freestanding handler in [`crate::handlers`] keyed by name
-///
-/// Unknown method or unknown tool name → `-32601 Method not found`.
-async fn dispatch(ctx: WorkerCallContext, body: Vec<u8>, deps: Arc<DispatcherDeps>) -> String {
-    // RAII counter — held for the entire dispatcher lifetime including
-    // panics and early returns. Drop fires `fetch_sub` so `active_count`
-    // returns to 0 once every in-flight request finishes. `shutdown()`
-    // polls this counter to know when it is safe to tear down.
-    let _active_guard = ActiveCallGuard::new(Arc::clone(&deps.active_delegations));
-
-    let parsed: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return error_response(Value::Null, -32700, "Parse error"),
-    };
-
-    // Batched JSON-RPC requests would force per-element token re-validation
-    // and audit attribution we deliberately don't support — reject up front.
-    if parsed.is_array() {
-        return error_response(Value::Null, -32600, "Batched requests are not supported");
-    }
-
-    let id = parsed.get("id").cloned().unwrap_or(Value::Null);
-    let method = parsed
-        .get("method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let params = parsed.get("params").cloned().unwrap_or_else(|| json!({}));
-
-    match method.as_str() {
-        "initialize" => {
-            // Provide a bare-minimum MCP initialization response.
-            // This is required for real worker clients to establish the connection
-            // before they invoke tools/list.
-            success_response(
-                id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": { "listChanged": false }
-                    },
-                    "serverInfo": {
-                        "name": "spur-worker-mcp",
-                        "version": "1.0.0"
-                    }
-                }),
-            )
-        }
-        "notifications/initialized" => {
-            // Client acknowledges initialization. No response needed for notifications.
-            String::new()
-        }
-        "tools/list" => {
-            let tools = crate::tools::worker_tools_list();
-            success_response(id, json!({ "tools": tools }))
-        }
-        "tools/call" => dispatch_tool_call(ctx, id, params, deps).await,
-        other => error_response(id, -32601, format!("Method not found: {other}")),
-    }
-}
-
-async fn dispatch_tool_call(
-    ctx: WorkerCallContext,
-    id: Value,
-    params: Value,
-    deps: Arc<DispatcherDeps>,
-) -> String {
-    let name = match params.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
-        None => return error_response(id, -32602, "missing required field 'name'"),
-    };
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-
-    let call_start = Instant::now();
-
-    let result: Result<Value, McpHandlerError> = match name.as_str() {
-        "get_issue" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "get_issue",
-                args.get("id").and_then(|v| v.as_str()).map(String::from),
-            );
-            crate::handlers::get_issue(deps.pm_service.as_ref(), &ctx, args).await
-        }
-        "list_issues" => {
-            append_read_audit_entry(deps.as_ref(), &ctx.delegation_id, "list_issues", None);
-            crate::handlers::list_issues(deps.pm_service.as_ref(), &ctx, args).await
-        }
-        "update_issue" => {
-            let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
-            let result = crate::handlers::update_issue(deps.pm_service.as_ref(), &ctx, args).await;
-            if result.is_ok() {
-                if let Some(ref issue_id) = issue_id {
-                    emit_worker_write_audit(
-                        deps.pm_service.as_ref(),
-                        deps.feature_gate.as_ref(),
-                        &ctx.delegation_id,
-                        "update_issue",
-                        issue_id,
-                    )
-                    .await;
-                }
-            }
-            result
-        }
-        "report_signal" => {
-            crate::handlers::report_signal(
-                deps.pm_service.as_ref(),
-                deps.feature_gate.as_ref(),
-                &ctx,
-                args,
-            )
-            .await
-        }
-        "report_progress" => {
-            // Dual-gate gate 1: check cached delegation context. If progress
-            // is disabled, silently drop and return success (fire-and-forget).
-            let delegation_ctx = deps
-                .delegations
-                .lock()
-                .get(&ctx.delegation_id)
-                .copied()
-                .unwrap_or_default();
-            if !delegation_ctx.enable_worker_progress {
-                Ok(json!({ "ok": true }))
-            } else {
-                crate::handlers::report_progress(deps.funnel.as_ref(), &ctx, args).await
-            }
-        }
-        "get_plan_status" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "get_plan_status",
-                args.get("plan_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            );
-            crate::handlers::get_plan_status(
-                deps.plan_resolver.as_ref(),
-                &deps.reconciler_outcomes,
-                &ctx,
-                args,
-            )
-            .await
-        }
-        "fetch_outcome_artifact" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "fetch_outcome_artifact",
-                args.get("delegation_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            );
-            crate::handlers::fetch_outcome_artifact(
-                &deps.materializer,
-                deps.outcome_store.as_ref(),
-                &ctx,
-                args,
-            )
-            .await
-        }
-        "get_task_diff" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "get_task_diff",
-                args.get("task_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            );
-            crate::handlers::get_task_diff(
-                Some(deps.pm_service.as_ref()),
-                deps.feature_gate.as_ref(),
-                deps.repo_root.as_deref(),
-                deps.plan_resolver.as_ref(),
-                &ctx,
-                args,
-            )
-            .await
-        }
-        other => {
-            // Unknown tool name: record as an errored call so the summary
-            // event reflects the dispatch attempt.
-            let latency_ms = call_start.elapsed().as_millis() as u64;
-            record_call(&deps, &ctx.delegation_id, &name, latency_ms, true);
-            return error_response(id, -32601, format!("Method not found: {other}"));
-        }
-    };
-
-    let latency_ms = call_start.elapsed().as_millis() as u64;
-    let is_error = result.is_err();
-    record_call(&deps, &ctx.delegation_id, &name, latency_ms, is_error);
-
-    match result {
-        Ok(value) => success_response(id, value),
-        Err(err) => {
-            let resp = err.to_jsonrpc_response(id);
-            serde_json::to_string(&resp).unwrap_or_else(|_| {
-                r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
-            })
-        }
-    }
-}
 
 /// Append a read-tool call to the per-delegation aggregation buffer. Lazily
 /// creates the buffer on first call. Lock scope is intentionally tight — the
@@ -1460,31 +1789,6 @@ async fn emit_worker_write_audit_inner(
             );
         }
     }
-}
-
-fn success_response(id: Value, result: Value) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    }))
-    .unwrap_or_else(|_| {
-        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
-    })
-}
-
-fn error_response(id: Value, code: i32, message: impl Into<String>) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message.into(),
-        },
-    }))
-    .unwrap_or_else(|_| {
-        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
-    })
 }
 
 #[cfg(test)]
