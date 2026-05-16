@@ -952,6 +952,69 @@ proptest! {
         );
         prop_assert!(add2.is_empty() && remove2.is_empty() && drift2.is_empty());
     }
+
+    #[test]
+    fn delegation_id_reconcile_converges_idempotently(
+        expected in prop_oneof![
+            Just(None),
+            Just(Some(crate::plan::labels::delegation_id("d-current"))),
+        ],
+        has_expected in any::<bool>(),
+        has_stale in any::<bool>(),
+        has_legacy_stale in any::<bool>(),
+        junk in prop::collection::vec("[a-z0-9_-]{1,12}", 0..4),
+    ) {
+        let canonical = crate::plan::labels::delegation_id("d-current");
+        let stale = crate::plan::labels::delegation_id("d-prev");
+        // Legacy non-prefixed form (no `spur:` prefix) — the form
+        // `parse_plan_id` / `delegation_label_value` historically accepts.
+        let legacy_stale = "delegation-id:d-legacy".to_string();
+        let mut existing = junk;
+        if has_expected && expected.as_deref() == Some(canonical.as_str()) {
+            existing.push(canonical.clone());
+        }
+        if has_stale {
+            existing.push(stale.clone());
+        }
+        if has_legacy_stale {
+            existing.push(legacy_stale.clone());
+        }
+
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        let mut drift = Vec::new();
+        super::reconcile_singleton_label(
+            "delegation_id",
+            expected.clone(),
+            existing.clone(),
+            &mut add,
+            &mut remove,
+            &mut drift,
+        );
+        if expected.is_none() && has_stale {
+            prop_assert!(remove.contains(&stale));
+            prop_assert!(drift.iter().any(|event| event.direction == "stale"));
+        }
+        if expected.is_none() && has_legacy_stale {
+            // The raw legacy label string must appear in remove_labels so the
+            // backend can actually match and strip it (no silent canonicalization).
+            prop_assert!(remove.contains(&legacy_stale));
+        }
+
+        let converged = apply_label_delta(&existing, &add, &remove);
+        let mut add2 = Vec::new();
+        let mut remove2 = Vec::new();
+        let mut drift2 = Vec::new();
+        super::reconcile_singleton_label(
+            "delegation_id",
+            expected,
+            converged,
+            &mut add2,
+            &mut remove2,
+            &mut drift2,
+        );
+        prop_assert!(add2.is_empty() && remove2.is_empty() && drift2.is_empty());
+    }
 }
 
 #[test]
