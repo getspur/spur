@@ -58,6 +58,8 @@ pub(crate) struct LanguageFileGroup {
     pub(crate) files: Vec<PathBuf>,
 }
 
+type GroupAccumulator = BTreeMap<&'static str, (fn() -> LanguageConfig, Vec<PathBuf>)>;
+
 impl<'a> FactBuilder<'a> {
     fn new(root: &'a Path) -> Self {
         Self {
@@ -146,7 +148,13 @@ impl<'a> FactBuilder<'a> {
         node_id
     }
 
-    pub(crate) fn add_edge(&mut self, source: NodeId, target: NodeId, relation: RelationKind) {
+    pub(crate) fn add_edge(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        relation: RelationKind,
+        target_label: Option<String>,
+    ) {
         if !self.edge_index.insert((source, target, relation)) {
             return;
         }
@@ -157,6 +165,7 @@ impl<'a> FactBuilder<'a> {
             source_node_id: source,
             target_node_id: target,
             relation,
+            target_label,
             confidence: match relation {
                 RelationKind::Contains => Confidence::SyntaxExact,
                 RelationKind::Calls | RelationKind::Imports | RelationKind::Links => {
@@ -203,7 +212,7 @@ impl<'a> FactBuilder<'a> {
                     ambiguous_hits += 1;
                 }
                 if target != edge.source {
-                    self.add_edge(edge.source, target, edge.relation);
+                    self.add_edge(edge.source, target, edge.relation, Some(edge.target_name));
                 }
             }
         }
@@ -409,8 +418,7 @@ fn discover_language_groups(
 ) -> anyhow::Result<(Vec<LanguageFileGroup>, BTreeMap<&'static str, usize>)> {
     let allowed_extensions = all_supported_extensions();
     let files = discover_files(root, &allowed_extensions)?;
-    let mut groups: BTreeMap<&'static str, (fn() -> LanguageConfig, Vec<PathBuf>)> =
-        BTreeMap::new();
+    let mut groups: GroupAccumulator = BTreeMap::new();
     let descriptors: &[LanguageDescriptor] = language_registry();
     for path in files {
         let Some(descriptor) = descriptors.iter().find(|d| (d.matcher)(&path)) else {
@@ -444,8 +452,7 @@ fn language_groups_for_paths(
     root: &Path,
     files: &[PathBuf],
 ) -> anyhow::Result<Vec<LanguageFileGroup>> {
-    let mut groups: BTreeMap<&'static str, (fn() -> LanguageConfig, Vec<PathBuf>)> =
-        BTreeMap::new();
+    let mut groups: GroupAccumulator = BTreeMap::new();
     let descriptors: &[LanguageDescriptor] = language_registry();
     for path in files {
         let full_path = if path.is_absolute() {

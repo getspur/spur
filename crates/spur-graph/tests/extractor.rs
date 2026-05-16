@@ -648,11 +648,63 @@ fn artifact_writer_round_trips_through_existing_reader() {
 
     assert_eq!(loaded.files, artifact.files);
     assert_eq!(loaded.symbols, artifact.symbols);
+    assert_eq!(loaded.edges, artifact.edges);
     assert!(loaded.symbols.iter().any(|symbol| {
         symbol.entity_name == "run"
             && symbol.symbol_kind == "method"
             && symbol.enclosing_scope.as_deref() == Some("impl App")
     }));
+}
+
+#[test]
+fn artifact_persists_in_file_contains_edges() {
+    let root = fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+
+    let file = artifact
+        .files
+        .iter()
+        .find(|file| file.file_path == "src/lib.rs")
+        .expect("lib file artifact");
+    let function = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.file_path == "src/lib.rs" && symbol.entity_name == "build_app")
+        .expect("build_app symbol");
+
+    assert!(artifact.edges.iter().any(|edge| {
+        edge.relation == RelationKind::Contains
+            && edge.source_stable_symbol_id == file.stable_file_id
+            && edge.target_stable_symbol_id.as_deref() == Some(function.stable_symbol_id.as_str())
+            && edge.target_label.is_none()
+    }));
+}
+
+#[test]
+fn artifact_persists_cross_file_calls_edge_with_label() {
+    let root = fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+
+    let helper_symbol = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.file_path == "src/utils.rs" && symbol.entity_name == "helper")
+        .expect("helper symbol");
+
+    let calls_edge = artifact
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.target_stable_symbol_id.as_deref()
+                    == Some(helper_symbol.stable_symbol_id.as_str())
+                && edge.target_label.as_deref() == Some("helper")
+        })
+        .expect("calls edge with retained label");
+
+    assert_eq!(calls_edge.target_label.as_deref(), Some("helper"));
 }
 
 #[test]
@@ -709,6 +761,15 @@ fn incremental_round_trip_noop_matches_full_artifact() {
     let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     assert_eq!(next, full);
+}
+
+#[test]
+fn incremental_round_trip_preserves_edges() {
+    let root = fixture_root();
+    let full = artifact_from_facts(&build_facts(&root).expect("extract").0, &root).expect("full");
+    let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+    assert_eq!(next.edges, full.edges);
 }
 
 #[test]

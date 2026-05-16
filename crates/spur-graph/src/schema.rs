@@ -68,7 +68,7 @@ pub struct CodeMentionDisplayMeta {
     pub graph_index_version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphIndexArtifact {
     pub header: GraphIndexHeader,
@@ -78,6 +78,8 @@ pub struct GraphIndexArtifact {
     pub file_manifests: Vec<GraphFileManifestEntry>,
     pub files: Vec<GraphFileArtifact>,
     pub symbols: Vec<GraphSymbolArtifact>,
+    #[serde(default)]
+    pub edges: Vec<GraphEdgeArtifact>,
     #[serde(default, skip)]
     pub diagnostics: Vec<String>,
 }
@@ -118,6 +120,19 @@ pub struct GraphSymbolArtifact {
     pub enclosing_scope: Option<String>,
 }
 
+// Symbol artifacts already persist byte/line ranges, so edge artifacts only carry
+// stable symbol identifiers and relation metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEdgeArtifact {
+    pub source_stable_symbol_id: String,
+    pub target_stable_symbol_id: Option<String>,
+    pub target_label: Option<String>,
+    pub relation: RelationKind,
+    pub confidence: Confidence,
+    pub confidence_score: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
@@ -137,6 +152,7 @@ pub struct GraphEdge {
     pub source_node_id: NodeId,
     pub target_node_id: NodeId,
     pub relation: RelationKind,
+    pub target_label: Option<String>,
     pub confidence: Confidence,
     pub confidence_score: f32,
     pub evidence_id: EvidenceId,
