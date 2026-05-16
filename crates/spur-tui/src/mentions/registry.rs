@@ -547,7 +547,7 @@ fn typed_query_cmp(
     bucket_b
         .cmp(&bucket_a)
         .then(tier_rank(&a.entry.kind).cmp(&tier_rank(&b.entry.kind)))
-        .then(stable_tie_key(&a.entry).cmp(stable_tie_key(&b.entry)))
+        .then(stable_tie_key(a.entry).cmp(stable_tie_key(b.entry)))
 }
 
 fn source_cache_ttl(name: &'static str) -> Duration {
@@ -986,7 +986,7 @@ mod tests {
 
     #[test]
     fn comparator_is_strict_weak_ordering() {
-        let entries = vec![
+        let entries = [
             mention(MentionKind::Worker, 1, "worker-a".into()),
             mention(MentionKind::CodeSymbol, 2, "code-b".into()),
             mention(MentionKind::File, 3, "file-c".into()),

@@ -8,7 +8,7 @@ fn vim_w_skips_atom() {
     bar.set_text_cursor_for_test(0);
     bar.set_mode_for_test(EditMode::Vim(VimMode::Normal));
 
-    bar.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    let _ = bar.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
 
     let cursor = bar.cursor();
     assert!(

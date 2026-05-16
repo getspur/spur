@@ -201,21 +201,6 @@ pub(crate) fn observe_compact(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rendered_external_text_does_not_emit_terminal_controls() {
-        assert_eq!(
-            terminal_safe_text("2728\tself.process_action();"),
-            "2728    self.process_action();"
-        );
-        assert_eq!(terminal_safe_text("red\x1b[31m"), "red^[[31m");
-        assert_eq!(terminal_safe_text("left\rright"), "left^Mright");
-    }
-}
-
 // ─── Line builders ──────────────────────────────────────────────────
 
 /// Build display lines for a `ToolInputDisplay` value (3-space indented).
@@ -530,4 +515,19 @@ pub(crate) fn derive_delegate_status(
         LifecycleState::Failed => "failed",
         LifecycleState::Cancelled => "cancelled",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rendered_external_text_does_not_emit_terminal_controls() {
+        assert_eq!(
+            terminal_safe_text("2728\tself.process_action();"),
+            "2728    self.process_action();"
+        );
+        assert_eq!(terminal_safe_text("red\x1b[31m"), "red^[[31m");
+        assert_eq!(terminal_safe_text("left\rright"), "left^Mright");
+    }
 }

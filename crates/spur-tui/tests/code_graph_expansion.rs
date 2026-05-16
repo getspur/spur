@@ -262,6 +262,7 @@ fn file_payload(display: &str, uri: &str, file_path: &str) -> CodeMentionPayload
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn symbol_payload_from_source(
     display: &str,
     uri: &str,
@@ -292,6 +293,7 @@ fn symbol_payload_from_source(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn symbol_payload(
     display: &str,
     uri: &str,
