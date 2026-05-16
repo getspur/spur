@@ -24,13 +24,13 @@ use unicode_width::UnicodeWidthStr;
 
 const W: u16 = 100;
 const H: u16 = 30;
+type TraceMutation = (&'static str, Box<dyn Fn(&mut ReactTrace)>);
 
 /// Simulated terminal that applies ratatui's diff with REAL cursor advance
 /// behavior (auto-advance by UnicodeWidthStr per print).
 struct SimTerm {
     grid: Vec<Vec<String>>,
     width: u16,
-    height: u16,
 }
 
 impl SimTerm {
@@ -38,13 +38,12 @@ impl SimTerm {
         Self {
             grid: vec![vec![" ".to_string(); width as usize]; height as usize],
             width,
-            height,
         }
     }
 
     /// Apply diff(prev, next), mirroring ratatui's MoveTo-skip optimization
     /// + REAL terminal cursor auto-advance. Track every print + its actual
-    /// landing column.
+    ///   landing column.
     fn apply_diff(&mut self, prev: &ratatui::buffer::Buffer, next: &ratatui::buffer::Buffer) {
         let updates = prev.diff(next);
         let mut last_emit: Option<(u16, u16)> = None;
@@ -121,7 +120,7 @@ where
     let mut prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, w, h));
 
     let mut total_desync = 0;
-    let mut steps: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
+    let mut steps: Vec<TraceMutation> = vec![
         (
             "init render (collapsed)",
             Box::new(|_t: &mut ReactTrace| {}),
@@ -264,7 +263,7 @@ fn scenario_cjk_wide_chars_in_tool_output() -> ReactTrace {
             tool_call_id: None,
             status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
                 exit_code: Some(0),
-                stdout: vec![
+                stdout: [
                     "2026年04月30日 エラー発生",
                     "ログ出力: ファイルが見つかりません",
                     "INFO: 処理を続行します",
@@ -299,7 +298,7 @@ fn scenario_control_chars_in_tool_output() -> ReactTrace {
             tool_call_id: None,
             status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
                 exit_code: Some(0),
-                stdout: vec![
+                stdout: [
                     "\x1B[32m   Compiling foo v0.1.0\x1B[0m",
                     "\x1B[31merror[E0001]: something\x1B[0m",
                     "Progress: [###       ]\rProgress: [######    ]\rProgress: [##########]",
@@ -333,7 +332,7 @@ fn scenario_combining_diacritics_and_zwj_emoji() -> ReactTrace {
             tool_call_id: None,
             status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
                 exit_code: Some(0),
-                stdout: vec![
+                stdout: [
                     // Combining diacritics
                     "café crème brûlée — naïve façade",
                     "résumé piñata jalapeño",
@@ -345,7 +344,8 @@ fn scenario_combining_diacritics_and_zwj_emoji() -> ReactTrace {
                     "mixed: ⌘+⇧+P  ⌥+⇥",
                     // Long line with mix
                     "line that is fairly long and contains éèàê combining marks and emoji 🎯 and arrows ➜ and stuff",
-                ].join("\n"),
+                ]
+                .join("\n"),
                 stderr: String::new(),
             })),
         },
@@ -370,7 +370,7 @@ fn scenario_super_long_lines_no_wrap_chars() -> ReactTrace {
             tool_call_id: None,
             status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
                 exit_code: Some(0),
-                stdout: vec![
+                stdout: [
                     // 500-char line with no spaces
                     format!("a{}", "b".repeat(499)),
                     // 200-char line with spaces every 5 chars (wraps cleanly)
@@ -487,12 +487,11 @@ fn dynamic_harvest() {
         trace.toggle_observe_collapsed();
         let buf2 = render(&mut trace, &mut term, &mut cache, w1, h);
         sim.apply_diff(&prev_buf, &buf2);
-        prev_buf = buf2;
 
         // Resize: drop term + sim and rebuild at narrower width
         let mut term = Terminal::new(TestBackend::new(w2, h)).unwrap();
         let mut sim = SimTerm::new(w2, h);
-        let mut prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, w2, h));
+        let prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, w2, h));
         let buf3 = render(&mut trace, &mut term, &mut cache, w2, h);
         sim.apply_diff(&prev_buf, &buf3);
 

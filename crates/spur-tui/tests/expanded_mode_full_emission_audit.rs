@@ -263,11 +263,6 @@ fn full_user_repro_with_real_terminal_simulation() {
         }
         let intended = snap(&term);
         let buf = term.backend().buffer().clone();
-        let terminal = simulate_terminal_after_emission(
-            &buf,
-            &term.backend().buffer().clone(),
-            &prev_terminal,
-        );
         // Wait — that's wrong. simulate from prev_buf to current buf, applied to prev_terminal.
         let terminal = simulate_terminal_after_emission(&prev_buf, &buf, &prev_terminal);
         eprintln!("=== Scroll iter {} ===", i);
