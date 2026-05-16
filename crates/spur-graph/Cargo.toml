@@ -22,4 +22,5 @@ tree-sitter-typescript = "0.23"
 tracing = { workspace = true }
 
 [dev-dependencies]
+pretty_assertions = "1"
 tempfile = "3"
