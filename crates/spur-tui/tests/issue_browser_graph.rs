@@ -65,6 +65,7 @@ fn sample_detail(id: &str, title: &str) -> IssueDetailEvent {
         issue_type: Some("task".into()),
         blocked_by: vec![],
         due_at: None,
+        comments: Vec::new(),
         created_at: now,
         updated_at: now,
     }

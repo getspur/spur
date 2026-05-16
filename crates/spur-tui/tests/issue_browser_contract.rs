@@ -81,6 +81,7 @@ fn sample_detail_event(id: &str) -> IssueDetailEvent {
         issue_type: Some("bug".into()),
         blocked_by: vec![],
         due_at: None,
+        comments: Vec::new(),
         created_at: now,
         updated_at: now,
     }

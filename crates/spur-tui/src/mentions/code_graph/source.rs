@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
@@ -13,7 +14,7 @@ pub struct CodeGraphMentionSource {
     artifact_path: PathBuf,
     cache_key: Option<(PathBuf, SystemTime)>,
     cached_entries: Vec<MentionEntry>,
-    payloads: Vec<(String, CodeMentionPayload)>,
+    payloads: Vec<(String, Arc<CodeMentionPayload>)>,
     #[cfg(test)]
     reload_count: usize,
 }
@@ -101,14 +102,14 @@ impl MentionSource for CodeGraphMentionSource {
         Ok(entries)
     }
 
-    fn code_payloads(&self) -> Vec<(String, CodeMentionPayload)> {
-        self.payloads.clone()
+    fn code_payloads(&self) -> &[(String, Arc<CodeMentionPayload>)] {
+        &self.payloads
     }
 }
 
 fn entries_and_payloads(
     artifact: GraphIndexArtifact,
-    payloads: &mut Vec<(String, CodeMentionPayload)>,
+    payloads: &mut Vec<(String, Arc<CodeMentionPayload>)>,
 ) -> Vec<MentionEntry> {
     let graph_index_version = artifact.header.graph_index_version;
     let mut entries = Vec::with_capacity(artifact.files.len() + artifact.symbols.len());
@@ -118,7 +119,7 @@ fn entries_and_payloads(
         let display = file.file_path.clone();
         payloads.push((
             uri.clone(),
-            file_payload(&file, &uri, &display, &graph_index_version),
+            Arc::new(file_payload(&file, &uri, &display, &graph_index_version)),
         ));
         entries.push(MentionEntry {
             section_header: None,
@@ -139,7 +140,12 @@ fn entries_and_payloads(
         let secondary = symbol_secondary(&symbol);
         payloads.push((
             uri.clone(),
-            symbol_payload(&symbol, &uri, &display, &graph_index_version),
+            Arc::new(symbol_payload(
+                &symbol,
+                &uri,
+                &display,
+                &graph_index_version,
+            )),
         ));
         entries.push(MentionEntry {
             section_header: None,
@@ -303,5 +309,29 @@ mod tests {
         assert_eq!(third.len(), 1);
         assert_eq!(third[0].display, "src/lib.rs");
         assert_eq!(source.reload_count, 2);
+    }
+
+    #[test]
+    fn code_payloads_cache_hit_reuses_arc_instances() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("graph-index.json");
+        write_fixture(&artifact_path, "src/main.rs");
+        let mut source = CodeGraphMentionSource::new(&artifact_path);
+
+        let _ = source.build(Path::new(".")).expect("first build");
+        let first = source.code_payloads();
+        let (uri, first_payload) = first.first().expect("first payload");
+        let uri = uri.clone();
+        let first_payload = Arc::clone(first_payload);
+
+        let _ = source.build(Path::new(".")).expect("second build");
+        let second = source.code_payloads();
+        let second_payload = second
+            .iter()
+            .find(|(candidate_uri, _)| candidate_uri == &uri)
+            .map(|(_, payload)| payload)
+            .expect("second payload");
+
+        assert!(Arc::ptr_eq(&first_payload, second_payload));
     }
 }
