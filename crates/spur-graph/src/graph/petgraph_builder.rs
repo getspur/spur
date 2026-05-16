@@ -19,7 +19,10 @@ pub fn build_petgraph(facts: &GraphFacts) -> anyhow::Result<OperationalGraph> {
 
     for edge in &facts.edges {
         let source = lookup(&indices, edge.source_node_id)?;
-        let target = lookup(&indices, edge.target_node_id)?;
+        let Some(target_node_id) = edge.target_node_id else {
+            continue;
+        };
+        let target = lookup(&indices, target_node_id)?;
         graph.add_edge(source, target, edge.clone());
     }
 

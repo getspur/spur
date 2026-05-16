@@ -347,6 +347,14 @@
     },
     {
       "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": null,
+      "target_label": "./helpers",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
       "target_stable_symbol_id": "3654d8e7804b6596",
       "target_label": null,
       "relation": "contains",

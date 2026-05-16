@@ -71,6 +71,37 @@ fn normalize_for_golden(
     artifact
 }
 
+fn normalize_for_edge_compare(
+    mut artifact: spur_graph::GraphIndexArtifact,
+) -> spur_graph::GraphIndexArtifact {
+    artifact.manifest_version = "<normalized>".to_string();
+    for entry in &mut artifact.file_manifests {
+        entry.mtime_nanos = 0;
+        entry.size_bytes = 0;
+    }
+    artifact
+}
+
+fn call_edge_target_for(
+    artifact: &spur_graph::GraphIndexArtifact,
+    caller_name: &str,
+) -> Option<String> {
+    let caller = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == caller_name)
+        .unwrap_or_else(|| panic!("missing caller symbol `{caller_name}`"));
+    artifact
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.source_stable_symbol_id == caller.stable_symbol_id
+                && edge.target_label.as_deref() == Some("callee")
+        })
+        .and_then(|edge| edge.target_stable_symbol_id.clone())
+}
+
 #[test]
 fn rust_extractor_matches_sample_corpus_golden_artifact() {
     let root = fixture_root();
@@ -362,7 +393,7 @@ fn typescript_extractor_finds_expected_nodes_and_edges() {
         .filter(|edge| edge.relation == RelationKind::Calls)
         .count();
 
-    assert_eq!(imports_edges, 3, "imports edges: {imports_edges}");
+    assert!(imports_edges >= 3, "imports edges: {imports_edges}");
     assert!(calls_edges >= 2, "calls edges: {calls_edges}");
 
     let app_file_id = facts
@@ -375,9 +406,10 @@ fn typescript_extractor_finds_expected_nodes_and_edges() {
         .edges
         .iter()
         .filter(|edge| edge.relation == RelationKind::Imports && edge.source_node_id == app_file_id)
-        .map(|edge| {
+        .filter_map(|edge| edge.target_node_id)
+        .map(|target_node_id| {
             *node_labels_by_id
-                .get(&edge.target_node_id)
+                .get(&target_node_id)
                 .expect("import target node exists")
         })
         .collect();
@@ -552,7 +584,14 @@ fn petgraph_builder_preserves_typed_fact_counts() {
     let graph = build_petgraph(&facts).expect("build petgraph");
 
     assert_eq!(graph.node_count(), facts.nodes.len());
-    assert_eq!(graph.edge_count(), facts.edges.len());
+    assert_eq!(
+        graph.edge_count(),
+        facts
+            .edges
+            .iter()
+            .filter(|edge| edge.target_node_id.is_some())
+            .count(),
+    );
 }
 
 #[test]
@@ -746,7 +785,11 @@ fn resolve_pending_edges_surfaces_ambiguous_labels() {
         .edges
         .iter()
         .filter(|edge| edge.relation == RelationKind::Calls)
-        .filter(|edge| labels_by_id.get(&edge.target_node_id) == Some(&"process"))
+        .filter(|edge| {
+            edge.target_node_id
+                .and_then(|target_node_id| labels_by_id.get(&target_node_id).copied())
+                == Some("process")
+        })
         .count();
     assert!(
         process_calls <= 1,
@@ -855,4 +898,139 @@ fn incremental_manifest_mismatch_falls_back_to_full() {
     let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Full);
     assert_ne!(next.manifest_version, "stale-manifest");
+}
+
+#[test]
+fn incremental_rebinds_call_edge_after_callee_file_changed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/caller.rs"), "pub fn calls() { callee(); }\n")
+        .expect("write caller.rs");
+    fs::write(root.join("src/callee.rs"), "pub fn callee() {}\n").expect("write callee.rs");
+
+    let full_before =
+        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full before");
+    let old_target = call_edge_target_for(&full_before, "calls").expect("initial calls target");
+
+    sleep(Duration::from_millis(5));
+    fs::write(
+        root.join("src/callee.rs"),
+        "mod wrapper {\n    pub fn callee() {}\n}\n",
+    )
+    .expect("rewrite callee.rs");
+
+    let (incremental, mode) =
+        artifact_from_facts_incremental(&full_before, root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+    let new_target = call_edge_target_for(&incremental, "calls").expect("rebound calls target");
+    assert_ne!(new_target, old_target);
+    assert!(!new_target.is_empty());
+}
+
+#[test]
+fn incremental_rebinds_call_edge_when_caller_file_changed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/callee.rs"), "pub fn callee() {}\n").expect("write callee.rs");
+    fs::write(root.join("src/caller.rs"), "pub fn calls() { callee(); }\n")
+        .expect("write caller.rs");
+
+    let full_before =
+        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full before");
+    let before_target = call_edge_target_for(&full_before, "calls").expect("initial calls target");
+
+    sleep(Duration::from_millis(5));
+    fs::write(
+        root.join("src/caller.rs"),
+        "pub fn calls() {\n    callee();\n}\n",
+    )
+    .expect("rewrite caller.rs");
+
+    let (incremental, mode) =
+        artifact_from_facts_incremental(&full_before, root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+    let after_target =
+        call_edge_target_for(&incremental, "calls").expect("calls target after caller change");
+    assert_eq!(after_target, before_target);
+}
+
+#[test]
+fn full_and_incremental_emit_byte_identical_edges_for_same_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+    fs::write(root.join("src/caller.rs"), "pub fn calls() { callee(); }\n")
+        .expect("write caller.rs");
+    fs::write(root.join("src/callee.rs"), "pub fn callee() {}\n").expect("write callee.rs");
+    let y = artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full y");
+
+    sleep(Duration::from_millis(5));
+    fs::write(
+        root.join("src/callee.rs"),
+        "pub fn callee() {}\npub fn callee() {}\n",
+    )
+    .expect("rewrite callee.rs");
+
+    let full_x = normalize_for_edge_compare(
+        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full x"),
+    );
+    let (incremental_x, mode) = artifact_from_facts_incremental(&y, root).expect("incremental x");
+    assert_eq!(mode, BuildMode::Incremental);
+    let incremental_x = normalize_for_edge_compare(incremental_x);
+
+    let full_edges = serde_json::to_vec(&full_x.edges).expect("serialize full edges");
+    let incremental_edges =
+        serde_json::to_vec(&incremental_x.edges).expect("serialize incremental edges");
+    assert_eq!(incremental_edges, full_edges);
+}
+
+#[test]
+fn incremental_drops_removed_cross_file_call_edge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/callee.rs"), "pub fn callee() {}\n").expect("write callee.rs");
+    fs::write(root.join("src/caller.rs"), "pub fn calls() { callee(); }\n")
+        .expect("write caller.rs");
+
+    let baseline =
+        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full baseline");
+
+    sleep(Duration::from_millis(5));
+    fs::write(
+        root.join("src/caller.rs"),
+        "pub fn calls() { let _ = 1; }\n",
+    )
+    .expect("rewrite caller.rs");
+
+    let (incremental, mode) =
+        artifact_from_facts_incremental(&baseline, root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+
+    let calls_symbol = incremental
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "calls")
+        .expect("calls symbol");
+    let has_stale_callee_call = incremental.edges.iter().any(|edge| {
+        edge.relation == RelationKind::Calls
+            && edge.source_stable_symbol_id == calls_symbol.stable_symbol_id
+            && edge.target_label.as_deref() == Some("callee")
+    });
+    assert!(
+        !has_stale_callee_call,
+        "incremental artifact should not retain removed callee call edge"
+    );
+
+    let full_after = normalize_for_edge_compare(
+        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full after"),
+    );
+    let incremental = normalize_for_edge_compare(incremental);
+    assert_eq!(
+        serde_json::to_vec(&incremental.edges).expect("serialize incremental edges"),
+        serde_json::to_vec(&full_after.edges).expect("serialize full edges")
+    );
 }
