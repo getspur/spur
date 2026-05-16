@@ -36,6 +36,7 @@ pub(crate) struct FactBuilder<'a> {
     pub(crate) pending_edges: Vec<PendingEdge>,
     symbol_index: BTreeMap<String, Vec<NodeId>>,
     edge_index: HashSet<(NodeId, NodeId, RelationKind)>,
+    stable_key_ordinals: HashMap<(String, String, &'static str), u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,7 @@ impl<'a> FactBuilder<'a> {
             pending_edges: Vec::new(),
             symbol_index: BTreeMap::new(),
             edge_index: HashSet::new(),
+            stable_key_ordinals: HashMap::new(),
         }
     }
 
@@ -112,7 +114,14 @@ impl<'a> FactBuilder<'a> {
         let span_id = SpanId(self.next_span);
         self.next_span += 1;
         let range = node.range();
-        let stable_key = stable_key(relative_path, &fqn, kind, range.start_byte);
+        let kind_discriminator = kind.discriminator();
+        let ordinal = {
+            let key = (relative_path.to_string(), label.clone(), kind_discriminator);
+            let count = self.stable_key_ordinals.entry(key).or_insert(0);
+            *count += 1;
+            *count
+        };
+        let stable_key = stable_key(relative_path, &fqn, kind, ordinal);
 
         self.facts.spans.push(SourceSpan {
             span_id,
@@ -486,7 +495,7 @@ pub(crate) fn run_query<'tree>(
     hits
 }
 
-fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, start_byte: usize) -> String {
+fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, ordinal: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(relative_path.as_bytes());
     hasher.update([0]);
@@ -494,7 +503,7 @@ fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, start_byte: usize)
     hasher.update([0]);
     hasher.update(kind.discriminator().as_bytes());
     hasher.update([0]);
-    hasher.update(start_byte.to_le_bytes());
+    hasher.update(ordinal.to_le_bytes());
     let digest = hasher.finalize();
     format!(
         "{:016x}",
