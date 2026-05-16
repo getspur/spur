@@ -12,7 +12,7 @@ use spur_graph::{
 
 pub struct CodeGraphMentionSource {
     artifact_path: PathBuf,
-    cache_key: Option<(PathBuf, SystemTime)>,
+    cache_key: Option<(PathBuf, SystemTime, u64)>,
     cached_entries: Vec<MentionEntry>,
     payloads: Vec<(String, Arc<CodeMentionPayload>)>,
     #[cfg(test)]
@@ -38,13 +38,17 @@ impl MentionSource for CodeGraphMentionSource {
     }
 
     fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
-        let modified = fs::metadata(&self.artifact_path)
-            .and_then(|metadata| metadata.modified())
-            .ok();
+        let metadata = fs::metadata(&self.artifact_path).ok();
+        let modified = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok());
+        let len = metadata.as_ref().map(|metadata| metadata.len());
         let cached = matches!(
-            (&self.cache_key, modified),
-            (Some((path, cached_mtime)), Some(current_mtime))
-                if path == &self.artifact_path && *cached_mtime == current_mtime
+            (&self.cache_key, modified, len),
+            (Some((path, cached_mtime, cached_len)), Some(current_mtime), Some(current_len))
+                if path == &self.artifact_path
+                    && *cached_mtime == current_mtime
+                    && *cached_len == current_len
         );
         let span = tracing::debug_span!(
             "code_graph_build",
@@ -102,7 +106,9 @@ impl MentionSource for CodeGraphMentionSource {
             path = %self.artifact_path.display(),
             "code graph mention source reloaded"
         );
-        self.cache_key = modified.map(|mtime| (self.artifact_path.clone(), mtime));
+        self.cache_key = modified
+            .zip(len)
+            .map(|(mtime, len)| (self.artifact_path.clone(), mtime, len));
         Ok(entries)
     }
 
@@ -256,6 +262,7 @@ fn symbol_search_text(symbol: &GraphSymbolArtifact) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filetime::{set_file_mtime, FileTime};
     use std::time::Duration;
 
     fn write_fixture(path: &Path, file_path: &str) {
@@ -313,6 +320,20 @@ mod tests {
         assert_eq!(third.len(), 1);
         assert_eq!(third[0].display, "src/lib.rs");
         assert_eq!(source.reload_count, 2);
+
+        let stable_metadata = std::fs::metadata(&artifact_path).expect("metadata");
+        let stable_mtime = stable_metadata.modified().expect("modified");
+        let previous_len = stable_metadata.len();
+        write_fixture(&artifact_path, "src/lib_rewritten_with_longer_name.rs");
+        let stable_filetime = FileTime::from_system_time(stable_mtime);
+        set_file_mtime(&artifact_path, stable_filetime).expect("restore mtime");
+        let current_len = std::fs::metadata(&artifact_path).expect("metadata").len();
+        assert_ne!(current_len, previous_len);
+
+        let fourth = source.build(Path::new(".")).expect("fourth build");
+        assert_eq!(fourth.len(), 1);
+        assert_eq!(fourth[0].display, "src/lib_rewritten_with_longer_name.rs");
+        assert_eq!(source.reload_count, 3);
     }
 
     #[test]
