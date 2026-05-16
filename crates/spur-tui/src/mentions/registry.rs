@@ -29,7 +29,7 @@ const ISSUE_CAP: usize = 3;
 const CODE_CAP: usize = 3;
 
 struct CachedSourceIndex {
-    entries: Vec<MentionEntry>,
+    entries: Arc<Vec<MentionEntry>>,
     code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
     built_at: Instant,
 }
@@ -60,7 +60,6 @@ impl From<CompletionScope<'_>> for CompletionScopeKey {
 pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
     cache: HashMap<&'static str, CachedSourceIndex>,
-    code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
     code_graph_hint: Option<&'static str>,
     matcher: Matcher,
     #[cfg(any(test, debug_assertions))]
@@ -73,7 +72,6 @@ impl MentionRegistry {
         Self {
             sources: vec![Box::new(FileMentionSource)],
             cache: HashMap::new(),
-            code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -90,7 +88,6 @@ impl MentionRegistry {
                 Box::new(WorkerMentionSource::new(workers)),
             ],
             cache: HashMap::new(),
-            code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -155,18 +152,17 @@ impl MentionRegistry {
     /// support is added (out of scope for v1).
     pub fn clear_cache(&mut self) {
         self.cache.clear();
-        self.code_payloads.clear();
     }
 
     fn clear_cache_for(&mut self, name: &'static str) {
         self.cache.remove(name);
-        if matches!(name, "code" | "code_graph") {
-            self.code_payloads.retain(|uri, _| !is_graph_uri(uri));
-        }
     }
 
     pub fn lookup_code_payload(&self, uri: &str) -> Option<&CodeMentionPayload> {
-        self.code_payloads.get(uri).map(Arc::as_ref)
+        self.cache
+            .values()
+            .find_map(|cached| cached.code_payloads.get(uri))
+            .map(Arc::as_ref)
     }
 
     pub fn code_graph_hint(&self) -> Option<&'static str> {
@@ -175,8 +171,11 @@ impl MentionRegistry {
 
     pub fn retain_code_payloads_for_uris<'a>(&mut self, uris: impl IntoIterator<Item = &'a str>) {
         let keep: std::collections::HashSet<&str> = uris.into_iter().collect();
-        self.code_payloads
-            .retain(|uri, _| !is_graph_uri(uri) || keep.contains(uri.as_str()));
+        for cached in self.cache.values_mut() {
+            cached
+                .code_payloads
+                .retain(|uri, _| !is_graph_uri(uri) || keep.contains(uri.as_str()));
+        }
     }
 
     pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
@@ -238,7 +237,7 @@ impl MentionRegistry {
                     self.cache.insert(
                         source_name,
                         CachedSourceIndex {
-                            entries,
+                            entries: Arc::new(entries),
                             code_payloads: source_code_payloads,
                             built_at: Instant::now(),
                         },
@@ -246,24 +245,20 @@ impl MentionRegistry {
                 }
             }
         }
-        let mut all_entries = Vec::new();
-        let mut code_payloads = HashMap::new();
+        let total_len: usize = self.cache.values().map(|cached| cached.entries.len()).sum();
+        let mut all_entries: Vec<&MentionEntry> = Vec::with_capacity(total_len);
         for source in &self.sources {
             if let Some(cached) = self.cache.get(source.name()) {
-                all_entries.extend(cached.entries.iter().cloned());
-                for (uri, payload) in &cached.code_payloads {
-                    code_payloads.insert(uri.clone(), Arc::clone(payload));
-                }
+                all_entries.extend(cached.entries.iter());
             }
         }
-        self.code_payloads = code_payloads;
-        let entries = &all_entries;
+        let entries = all_entries.as_slice();
 
         if query.is_empty() {
-            let mut workers: Vec<MentionEntry> = entries
+            let mut workers: Vec<&MentionEntry> = entries
                 .iter()
                 .filter(|e| e.kind == MentionKind::Worker)
-                .cloned()
+                .copied()
                 .collect();
             workers.sort_by(|a, b| {
                 a.display
@@ -272,11 +267,12 @@ impl MentionRegistry {
                     .then(a.display.cmp(&b.display))
             });
             workers.truncate(WORKER_PIN_CAP);
+            let workers: Vec<MentionEntry> = workers.into_iter().cloned().collect();
 
-            let mut files: Vec<MentionEntry> = entries
+            let mut files: Vec<&MentionEntry> = entries
                 .iter()
                 .filter(|e| matches!(e.kind, MentionKind::File | MentionKind::Directory))
-                .cloned()
+                .copied()
                 .collect();
             files.sort_by(|a, b| {
                 path_depth(&a.display)
@@ -286,12 +282,13 @@ impl MentionRegistry {
                     .then(a.uri.cmp(&b.uri))
             });
             files.truncate(FILE_CAP);
+            let files: Vec<MentionEntry> = files.into_iter().cloned().collect();
 
-            let mut issues: Vec<(usize, MentionEntry)> = entries
+            let mut issues: Vec<(usize, &MentionEntry)> = entries
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| e.kind == MentionKind::Issue)
-                .map(|(index, e)| (index, e.clone()))
+                .map(|(index, e)| (index, *e))
                 .collect();
             issues.sort_by(|(idx_a, a), (idx_b, b)| {
                 idx_a
@@ -300,12 +297,13 @@ impl MentionRegistry {
                     .then(a.uri.cmp(&b.uri))
             });
             issues.truncate(ISSUE_CAP);
-            let issues: Vec<MentionEntry> = issues.into_iter().map(|(_, entry)| entry).collect();
+            let issues: Vec<MentionEntry> =
+                issues.into_iter().map(|(_, entry)| entry.clone()).collect();
 
-            let mut code_graph: Vec<MentionEntry> = entries
+            let mut code_graph: Vec<&MentionEntry> = entries
                 .iter()
                 .filter(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
-                .cloned()
+                .copied()
                 .collect();
             code_graph.sort_by(|a, b| {
                 empty_code_kind_rank(&a.kind)
@@ -316,6 +314,7 @@ impl MentionRegistry {
                     .then(a.uri.cmp(&b.uri))
             });
             code_graph.truncate(CODE_CAP);
+            let code_graph: Vec<MentionEntry> = code_graph.into_iter().cloned().collect();
 
             let mut rows = Vec::new();
             append_section_rows(&mut rows, "Workers", &workers);
@@ -329,7 +328,7 @@ impl MentionRegistry {
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
         let code_pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let mut buf = Vec::new();
-        let mut scored: Vec<RankedMention> = entries
+        let mut scored: Vec<RankedMentionRef<'_>> = entries
             .iter()
             .filter_map(|e| {
                 buf.clear();
@@ -342,10 +341,7 @@ impl MentionRegistry {
                         &mut self.matcher,
                     )?
                 };
-                Some(RankedMention {
-                    rank,
-                    entry: e.clone(),
-                })
+                Some(RankedMentionRef { rank, entry: e })
             })
             .collect();
         let max_rank = scored.iter().map(|mention| mention.rank).max().unwrap_or(0);
@@ -353,7 +349,7 @@ impl MentionRegistry {
         scored
             .into_iter()
             .take(limit)
-            .map(|ranked| ranked.entry)
+            .map(|ranked| ranked.entry.clone())
             .collect()
     }
 
@@ -369,9 +365,9 @@ fn is_graph_uri(uri: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
-struct RankedMention {
+struct RankedMentionRef<'a> {
     rank: u32,
-    entry: MentionEntry,
+    entry: &'a MentionEntry,
 }
 
 fn code_match_rank(
@@ -540,7 +536,11 @@ fn score_bucket(score: u32, global_max: u32) -> u32 {
     score.saturating_div(bucket_width)
 }
 
-fn typed_query_cmp(a: &RankedMention, b: &RankedMention, max_rank: u32) -> std::cmp::Ordering {
+fn typed_query_cmp(
+    a: &RankedMentionRef<'_>,
+    b: &RankedMentionRef<'_>,
+    max_rank: u32,
+) -> std::cmp::Ordering {
     // Transitive comparator: bucket rank (desc), then tier rank (asc), then stable key.
     let bucket_a = score_bucket(a.rank, max_rank);
     let bucket_b = score_bucket(b.rank, max_rank);
@@ -602,7 +602,6 @@ mod tests {
                 Some("alice"),
             )]))],
             cache: HashMap::new(),
-            code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -624,7 +623,6 @@ mod tests {
                 None,
             )]))],
             cache: HashMap::new(),
-            code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -711,7 +709,6 @@ mod tests {
                 issue("bd-2", "Deploy Prod", None),
             ]))],
             cache: HashMap::new(),
-            code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -774,7 +771,6 @@ mod tests {
         MentionRegistry {
             sources,
             cache: HashMap::new(),
-            code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -784,23 +780,25 @@ mod tests {
 
     #[test]
     fn empty_query_caps_each_kind() {
-        let workers = (0..10)
+        // Limitation: this test validates section caps on large candidate sets,
+        // but does not instrument exact clone counts.
+        let workers = (0..100)
             .map(|i| WorkerMentionDescriptor {
                 name: format!("worker-{i}"),
                 description: None,
                 tier: None,
             })
             .collect::<Vec<_>>();
-        let files = (0..12)
+        let files = (0..120)
             .map(|i| mention(MentionKind::File, i, format!("src/path-{i}.rs")))
             .collect::<Vec<_>>();
-        let issues = (0..8)
+        let issues = (0..80)
             .map(|i| issue(&format!("bd-{i}"), &format!("Issue {i}"), None))
             .collect::<Vec<_>>();
-        let code_files = (0..6)
+        let code_files = (0..60)
             .map(|i| mention(MentionKind::CodeFile, 100 + i, format!("src/code-{i}.rs")))
             .collect::<Vec<_>>();
-        let code_symbols = (0..6)
+        let code_symbols = (0..60)
             .map(|i| mention(MentionKind::CodeSymbol, 200 + i, format!("symbol_{i}")))
             .collect::<Vec<_>>();
 
@@ -824,6 +822,34 @@ mod tests {
             .collect();
 
         assert_eq!(content.len(), 16);
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| e.kind == MentionKind::Worker)
+                .count(),
+            WORKER_PIN_CAP
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| e.kind == MentionKind::File)
+                .count(),
+            FILE_CAP
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| e.kind == MentionKind::Issue)
+                .count(),
+            ISSUE_CAP
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
+                .count(),
+            CODE_CAP
+        );
         assert_eq!(
             content
                 .iter()
@@ -960,30 +986,38 @@ mod tests {
 
     #[test]
     fn comparator_is_strict_weak_ordering() {
+        let entries = vec![
+            mention(MentionKind::Worker, 1, "worker-a".into()),
+            mention(MentionKind::CodeSymbol, 2, "code-b".into()),
+            mention(MentionKind::File, 3, "file-c".into()),
+            mention(MentionKind::Issue, 4, "issue-d".into()),
+            mention(MentionKind::File, 5, "file-e".into()),
+            mention(MentionKind::Worker, 6, "worker-f".into()),
+        ];
         let base = vec![
-            RankedMention {
+            RankedMentionRef {
                 rank: 95,
-                entry: mention(MentionKind::Worker, 1, "worker-a".into()),
+                entry: &entries[0],
             },
-            RankedMention {
+            RankedMentionRef {
                 rank: 100,
-                entry: mention(MentionKind::CodeSymbol, 2, "code-b".into()),
+                entry: &entries[1],
             },
-            RankedMention {
+            RankedMentionRef {
                 rank: 86,
-                entry: mention(MentionKind::File, 3, "file-c".into()),
+                entry: &entries[2],
             },
-            RankedMention {
+            RankedMentionRef {
                 rank: 88,
-                entry: mention(MentionKind::Issue, 4, "issue-d".into()),
+                entry: &entries[3],
             },
-            RankedMention {
+            RankedMentionRef {
                 rank: 45,
-                entry: mention(MentionKind::File, 5, "file-e".into()),
+                entry: &entries[4],
             },
-            RankedMention {
+            RankedMentionRef {
                 rank: 0,
-                entry: mention(MentionKind::Worker, 6, "worker-f".into()),
+                entry: &entries[5],
             },
         ];
         let max_rank = base.iter().map(|mention| mention.rank).max().unwrap_or(0);
