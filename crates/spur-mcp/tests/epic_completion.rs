@@ -12,6 +12,7 @@ use spur_mcp::plan::outcomes::{DispatchOutcome, OutcomeStore, SkipReason};
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_mcp::plan::PmLike;
 use spur_mcp::McpEventSink;
+use spur_pm::BeadsAdvanced;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
@@ -164,6 +165,22 @@ async fn seed_mock_plan(
             depends_on,
         )
         .await;
+        // Emit a TaskSpec audit so the audit-first index-hygiene sweep
+        // (Tier-1 §10.3.1) doesn't strip the plan_task_id / agent labels
+        // we just seeded. The sweep treats audits as the source of truth;
+        // hand-stamped labels with no audit backing are considered stale.
+        pm.add_comment(
+            &issue_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+                task_id: (*task_id).to_string(),
+                context_files: Vec::new(),
+                task_text: None,
+                agent: Some("codex".into()),
+                depends_on: None,
+            }),
+        )
+        .await
+        .expect("seed TaskSpec audit");
         by_task.insert((*task_id).to_string(), issue_id);
     }
     (epic_id, by_task)
