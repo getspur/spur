@@ -107,6 +107,7 @@ async fn mock_issue(
     body: &str,
     issue_type: &str,
     labels: Vec<String>,
+    parent: Option<String>,
     depends_on: Vec<String>,
 ) -> String {
     pm.create_issue(spur_pm::IssueCreate {
@@ -115,7 +116,7 @@ async fn mock_issue(
         issue_type: Some(issue_type.to_string()),
         priority: Some(2),
         labels,
-        parent: None,
+        parent,
         depends_on,
         ..Default::default()
     })
@@ -138,9 +139,28 @@ async fn seed_mock_plan(
             labels::plan_owner("brain"),
             labels::PLAN_COMPLETE.to_string(),
         ],
+        None,
         vec![],
     )
     .await;
+    pm.add_comment(
+        &epic_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::PlanSubmit {
+            plan_id: plan_id.to_string(),
+            epic_issue_id: epic_id.clone(),
+            task_ids: tasks
+                .iter()
+                .map(|(task_id, _deps)| (*task_id).to_string())
+                .collect(),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            execution_mode: None,
+            brain_session_id: None,
+            explicit_base: None,
+        }),
+    )
+    .await
+    .expect("seed PlanSubmit audit");
     let mut by_task = std::collections::HashMap::new();
     for (task_id, deps) in tasks {
         let depends_on = deps
@@ -162,6 +182,7 @@ async fn seed_mock_plan(
                 labels::plan_task_id(task_id),
                 labels::agent("codex"),
             ],
+            Some(epic_id.clone()),
             depends_on,
         )
         .await;
@@ -733,6 +754,26 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     label_issue(dir.path(), &task_id, &plan_label);
     label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
     label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    run_br(dir.path(), &["dep", "add", &task_id, &epic_id]);
+    let plan_submit = audit_sentinel::encode_comment(&AuditSentinelKind::PlanSubmit {
+        plan_id: plan_id.to_string(),
+        epic_issue_id: epic_id.clone(),
+        task_ids: vec!["t1".to_string()],
+        base_snapshot_branch: None,
+        base_snapshot_oid: None,
+        execution_mode: None,
+        brain_session_id: None,
+        explicit_base: None,
+    });
+    run_br(dir.path(), &["comments", "add", &epic_id, &plan_submit]);
+    let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+        task_id: "t1".to_string(),
+        context_files: Vec::new(),
+        task_text: None,
+        agent: Some("codex".into()),
+        depends_on: None,
+    });
+    run_br(dir.path(), &["comments", "add", &task_id, &task_spec]);
 
     let pm = beads_pm(dir.path()).await;
     let adv = pm.advanced().expect("advanced beads backend");
@@ -1015,7 +1056,29 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
             task_id,
             &labels::dispatched_base_oid("0000000000000000000000000000000000000001"),
         );
+        run_br(dir.path(), &["dep", "add", task_id, &epic_id]);
+        let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+            task_id: format!("t{index}"),
+            context_files: Vec::new(),
+            task_text: None,
+            agent: Some("codex".into()),
+            depends_on: None,
+        });
+        run_br(dir.path(), &["comments", "add", task_id, &task_spec]);
     }
+    let plan_submit = audit_sentinel::encode_comment(&AuditSentinelKind::PlanSubmit {
+        plan_id: plan_id.to_string(),
+        epic_issue_id: epic_id.clone(),
+        task_ids: (0..task_ids.len())
+            .map(|index| format!("t{index}"))
+            .collect(),
+        base_snapshot_branch: None,
+        base_snapshot_oid: None,
+        execution_mode: None,
+        brain_session_id: None,
+        explicit_base: None,
+    });
+    run_br(dir.path(), &["comments", "add", &epic_id, &plan_submit]);
 
     let pm = beads_pm(dir.path()).await;
     let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
