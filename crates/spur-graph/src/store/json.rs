@@ -121,6 +121,7 @@ pub fn artifact_from_facts_incremental(
     cached_buckets.retain(|path, _| path_set.contains(path));
 
     if changed_paths.is_empty() {
+        rebind_cross_file_edges(&mut cached_buckets);
         return Ok((
             rebuild_from_buckets(cached_buckets, manifest_version),
             BuildMode::Incremental,
@@ -134,6 +135,7 @@ pub fn artifact_from_facts_incremental(
     for (path, bucket) in buckets_from_artifact(&changed_artifact) {
         cached_buckets.insert(path, bucket);
     }
+    rebind_cross_file_edges(&mut cached_buckets);
 
     Ok((
         rebuild_from_buckets(cached_buckets, manifest_version),
@@ -271,8 +273,9 @@ fn build_artifact_from_facts_and_stats(
             );
             continue;
         };
-        let target_stable_symbol_id = nodes_by_id
-            .get(&edge.target_node_id)
+        let target_stable_symbol_id = edge
+            .target_node_id
+            .and_then(|target_node_id| nodes_by_id.get(&target_node_id))
             .map(|node| node.stable_key.clone());
         let entry = buckets.entry(source_file_path.clone()).or_insert_with(|| {
             let stable_file_id = stable_file_id_from_path(&source_file_path);
@@ -320,7 +323,49 @@ fn build_artifact_from_facts_and_stats(
             .sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
     }
 
+    rebind_cross_file_edges(&mut buckets);
     Ok(rebuild_from_buckets(buckets, current_manifest_version()))
+}
+
+fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
+    let mut symbols_by_entity_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for bucket in buckets.values() {
+        for symbol in &bucket.symbols {
+            symbols_by_entity_name
+                .entry(symbol.entity_name.clone())
+                .or_default()
+                .push(symbol.stable_symbol_id.clone());
+        }
+    }
+
+    for bucket in buckets.values_mut() {
+        for edge in &mut bucket.edges {
+            let Some(target_label) = edge.target_label.as_deref() else {
+                continue;
+            };
+            if edge.relation == RelationKind::Links {
+                continue;
+            }
+            let Some(matches) = symbols_by_entity_name.get(target_label) else {
+                edge.target_stable_symbol_id = None;
+                continue;
+            };
+            let resolved = matches
+                .iter()
+                .map(String::as_str)
+                .min()
+                .expect("matches is non-empty");
+            if matches.len() > 1 {
+                tracing::warn!(
+                    target_label = target_label,
+                    candidates = matches.len(),
+                    resolved_stable_symbol_id = resolved,
+                    "spur-graph: ambiguous cross-file target_label; resolved to lexicographically smallest stable_symbol_id"
+                );
+            }
+            edge.target_stable_symbol_id = Some(resolved.to_string());
+        }
+    }
 }
 
 fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, FileBucket> {
@@ -620,7 +665,9 @@ fn enclosing_scope(
     facts
         .edges
         .iter()
-        .find(|edge| edge.relation == RelationKind::Contains && edge.target_node_id == node.node_id)
+        .find(|edge| {
+            edge.relation == RelationKind::Contains && edge.target_node_id == Some(node.node_id)
+        })
         .and_then(|edge| nodes_by_id.get(&edge.source_node_id).copied())
         .and_then(|parent| match parent.kind {
             NodeKind::File => None,

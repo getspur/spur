@@ -150,7 +150,7 @@ pub struct GraphNode {
 pub struct GraphEdge {
     pub edge_id: EdgeId,
     pub source_node_id: NodeId,
-    pub target_node_id: NodeId,
+    pub target_node_id: Option<NodeId>,
     pub relation: RelationKind,
     pub target_label: Option<String>,
     pub confidence: Confidence,

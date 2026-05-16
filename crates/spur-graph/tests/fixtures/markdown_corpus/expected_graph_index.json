@@ -283,6 +283,22 @@
     },
     {
       "source_stable_symbol_id": "a093244d909ebeef",
+      "target_stable_symbol_id": null,
+      "target_label": "[guide-ref]",
+      "relation": "links",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "a093244d909ebeef",
+      "target_stable_symbol_id": null,
+      "target_label": "guide-ref",
+      "relation": "links",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "a093244d909ebeef",
       "target_stable_symbol_id": "262034679d995356",
       "target_label": "guide.md",
       "relation": "links",
