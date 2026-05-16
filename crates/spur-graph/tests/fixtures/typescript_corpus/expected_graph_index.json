@@ -5,7 +5,7 @@
   "manifest_version": "<normalized>",
   "file_manifests": [
     {
-      "stable_file_id": "f6656417814146db",
+      "stable_file_id": "cfb90035f8daa878",
       "path": "src/app.tsx",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -21,7 +21,7 @@
       ]
     },
     {
-      "stable_file_id": "3c6471780d9e8578",
+      "stable_file_id": "c0a4422c47da8073",
       "path": "src/helpers.ts",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -38,17 +38,17 @@
   ],
   "files": [
     {
-      "stable_file_id": "f6656417814146db",
+      "stable_file_id": "cfb90035f8daa878",
       "file_path": "src/app.tsx"
     },
     {
-      "stable_file_id": "3c6471780d9e8578",
+      "stable_file_id": "c0a4422c47da8073",
       "file_path": "src/helpers.ts"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "9f1ef0ea170a1dc1",
+      "stable_symbol_id": "3654d8e7804b6596",
       "file_path": "src/app.tsx",
       "byte_range": [
         56,
@@ -64,7 +64,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "dc63618227586534",
+      "stable_symbol_id": "6357d5fb97a04d49",
       "file_path": "src/app.tsx",
       "byte_range": [
         91,
@@ -80,7 +80,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "b157cefaf7fe3c8c",
+      "stable_symbol_id": "c96bb5dfecee25f8",
       "file_path": "src/app.tsx",
       "byte_range": [
         116,
@@ -96,7 +96,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "88c2887e42a7e154",
+      "stable_symbol_id": "552287194f6a520d",
       "file_path": "src/app.tsx",
       "byte_range": [
         145,
@@ -112,7 +112,7 @@
       "enclosing_scope": "App"
     },
     {
-      "stable_symbol_id": "925e9bcc2a4a5ecd",
+      "stable_symbol_id": "71d7a253d5189bed",
       "file_path": "src/app.tsx",
       "byte_range": [
         196,
@@ -128,7 +128,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "06b57d27bc6da2d7",
+      "stable_symbol_id": "96f2eee4fe283bbe",
       "file_path": "src/app.tsx",
       "byte_range": [
         307,
@@ -144,7 +144,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "b7935e272e1df724",
+      "stable_symbol_id": "93302246b4aa109e",
       "file_path": "src/app.tsx",
       "byte_range": [
         340,
@@ -160,7 +160,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "a643b3bc176ed041",
+      "stable_symbol_id": "aa5590284609af88",
       "file_path": "src/helpers.ts",
       "byte_range": [
         7,
@@ -176,7 +176,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "45524754defdd6f8",
+      "stable_symbol_id": "4d1dc1688628bd43",
       "file_path": "src/helpers.ts",
       "byte_range": [
         51,
@@ -192,7 +192,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "ba77b7195f718134",
+      "stable_symbol_id": "9a785a22c9c059d2",
       "file_path": "src/helpers.ts",
       "byte_range": [
         88,
@@ -208,7 +208,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "02775bcca5346806",
+      "stable_symbol_id": "4edfa70794ae6da4",
       "file_path": "src/helpers.ts",
       "byte_range": [
         126,
@@ -224,7 +224,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "9156eac9b8c3b2ba",
+      "stable_symbol_id": "7722817d2c623ab4",
       "file_path": "src/helpers.ts",
       "byte_range": [
         184,
@@ -240,7 +240,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "8070bc0cbf8984f8",
+      "stable_symbol_id": "90e88e128d21c9dd",
       "file_path": "src/helpers.ts",
       "byte_range": [
         219,

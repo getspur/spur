@@ -15,7 +15,7 @@ use crate::{
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v3";
-pub const EXTRACTOR_VERSION: &str = "2026-05-13-incremental-v1";
+pub const EXTRACTOR_VERSION: &str = "2026-05-16-stable-key-v2";
 
 const TAG_QUERY_BYTES: &[&[u8]] = &[
     include_bytes!("../../queries/markdown/tags.scm"),
