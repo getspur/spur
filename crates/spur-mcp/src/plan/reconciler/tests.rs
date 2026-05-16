@@ -1,4 +1,5 @@
 use super::*;
+use proptest::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -520,13 +521,19 @@ async fn seed_ready_overlay_plan(
     )
     .await
     .expect("plan submit audit");
-    crate::plan::emit_task_spec_audit(adv, &dep_issue_id, "X", &["x.rs".to_string()])
+    crate::plan::emit_task_spec_audit(adv, &dep_issue_id, "X", "codex", &["x.rs".to_string()])
         .await
         .expect("dep task spec audit");
-    crate::plan::emit_task_spec_audit(adv, &second_dep_issue_id, "Z", &["z.rs".to_string()])
-        .await
-        .expect("second dep task spec audit");
-    crate::plan::emit_task_spec_audit(adv, &ready_issue_id, "Y", &["y.rs".to_string()])
+    crate::plan::emit_task_spec_audit(
+        adv,
+        &second_dep_issue_id,
+        "Z",
+        "codex",
+        &["z.rs".to_string()],
+    )
+    .await
+    .expect("second dep task spec audit");
+    crate::plan::emit_task_spec_audit(adv, &ready_issue_id, "Y", "codex", &["y.rs".to_string()])
         .await
         .expect("ready task spec audit");
 
@@ -603,10 +610,9 @@ async fn tick_once_predicts_overlay_conflict_and_blocks_without_dispatch() {
 
     let did_work = reconciler.tick_once().await.expect("tick once");
 
-    assert!(
-        !did_work,
-        "blocked task should not count as dispatched work"
-    );
+    // `did_work` may be true because index-hygiene reconciliation can write.
+    // The real no-dispatch invariant here is the channel check below.
+    let _ = did_work;
     assert!(
         delegation_rx.try_recv().is_err(),
         "predicted conflict must not dispatch a worker"
@@ -773,5 +779,577 @@ async fn hybrid_journal_probe_disables_itself_when_missing() {
     assert!(
         result.is_ok(),
         "journal monitor must exit when path is missing, not hang"
+    );
+}
+
+fn apply_label_delta(
+    existing: &[String],
+    add_labels: &[String],
+    remove_labels: &[String],
+) -> Vec<String> {
+    let mut next = existing.to_vec();
+    next.retain(|label| !remove_labels.contains(label));
+    for label in add_labels {
+        if !next.contains(label) {
+            next.push(label.clone());
+        }
+    }
+    next.sort();
+    next.dedup();
+    next
+}
+
+proptest! {
+    #[test]
+    fn plan_id_reconcile_converges_idempotently(
+        expected in prop_oneof![
+            Just(None),
+            Just(Some(crate::plan::labels::plan_id("P1"))),
+        ],
+        has_expected in any::<bool>(),
+        has_stale in any::<bool>(),
+        junk in prop::collection::vec("[a-z0-9_-]{1,12}", 0..4),
+    ) {
+        let canonical = crate::plan::labels::plan_id("P1");
+        let stale = crate::plan::labels::plan_id("P2");
+        let mut existing = junk;
+        if has_expected && expected.as_deref() == Some(canonical.as_str()) {
+            existing.push(canonical.clone());
+        }
+        if has_stale {
+            existing.push(stale.clone());
+        }
+
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        let mut drift = Vec::new();
+        super::reconcile_singleton_label(
+            "plan_id",
+            expected.clone(),
+            existing.clone(),
+            &mut add,
+            &mut remove,
+            &mut drift,
+        );
+        if expected.is_none() && has_stale {
+            prop_assert!(remove.contains(&stale));
+            prop_assert!(drift.iter().any(|event| event.direction == "stale"));
+        }
+
+        let converged = apply_label_delta(&existing, &add, &remove);
+        let mut add2 = Vec::new();
+        let mut remove2 = Vec::new();
+        let mut drift2 = Vec::new();
+        super::reconcile_singleton_label(
+            "plan_id",
+            expected,
+            converged,
+            &mut add2,
+            &mut remove2,
+            &mut drift2,
+        );
+        prop_assert!(add2.is_empty() && remove2.is_empty() && drift2.is_empty());
+    }
+
+    #[test]
+    fn plan_task_id_reconcile_converges_idempotently(
+        expected in prop_oneof![
+            Just(None),
+            Just(Some(crate::plan::labels::plan_task_id("T1"))),
+        ],
+        has_expected in any::<bool>(),
+        has_stale in any::<bool>(),
+        junk in prop::collection::vec("[a-z0-9_-]{1,12}", 0..4),
+    ) {
+        let canonical = crate::plan::labels::plan_task_id("T1");
+        let stale = crate::plan::labels::plan_task_id("T2");
+        let mut existing = junk;
+        if has_expected && expected.as_deref() == Some(canonical.as_str()) {
+            existing.push(canonical.clone());
+        }
+        if has_stale {
+            existing.push(stale.clone());
+        }
+
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        let mut drift = Vec::new();
+        super::reconcile_singleton_label(
+            "plan_task_id",
+            expected.clone(),
+            existing.clone(),
+            &mut add,
+            &mut remove,
+            &mut drift,
+        );
+        if expected.is_none() && has_stale {
+            prop_assert!(remove.contains(&stale));
+            prop_assert!(drift.iter().any(|event| event.direction == "stale"));
+        }
+
+        let converged = apply_label_delta(&existing, &add, &remove);
+        let mut add2 = Vec::new();
+        let mut remove2 = Vec::new();
+        let mut drift2 = Vec::new();
+        super::reconcile_singleton_label(
+            "plan_task_id",
+            expected,
+            converged,
+            &mut add2,
+            &mut remove2,
+            &mut drift2,
+        );
+        prop_assert!(add2.is_empty() && remove2.is_empty() && drift2.is_empty());
+    }
+
+    #[test]
+    fn agent_reconcile_converges_idempotently(
+        expected in prop_oneof![
+            Just(None),
+            Just(Some(crate::plan::labels::agent("codex"))),
+        ],
+        has_expected in any::<bool>(),
+        has_stale in any::<bool>(),
+        junk in prop::collection::vec("[a-z0-9_-]{1,12}", 0..4),
+    ) {
+        let canonical = crate::plan::labels::agent("codex");
+        let stale = crate::plan::labels::agent("gemini");
+        let mut existing = junk;
+        if has_expected && expected.as_deref() == Some(canonical.as_str()) {
+            existing.push(canonical.clone());
+        }
+        if has_stale {
+            existing.push(stale.clone());
+        }
+
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        let mut drift = Vec::new();
+        super::reconcile_singleton_label(
+            "agent",
+            expected.clone(),
+            existing.clone(),
+            &mut add,
+            &mut remove,
+            &mut drift,
+        );
+        if expected.is_none() && has_stale {
+            prop_assert!(remove.contains(&stale));
+            prop_assert!(drift.iter().any(|event| event.direction == "stale"));
+        }
+
+        let converged = apply_label_delta(&existing, &add, &remove);
+        let mut add2 = Vec::new();
+        let mut remove2 = Vec::new();
+        let mut drift2 = Vec::new();
+        super::reconcile_singleton_label(
+            "agent",
+            expected,
+            converged,
+            &mut add2,
+            &mut remove2,
+            &mut drift2,
+        );
+        prop_assert!(add2.is_empty() && remove2.is_empty() && drift2.is_empty());
+    }
+}
+
+#[test]
+fn plan_complete_reconcile_missing_emits_drift_then_noops() {
+    let existing = vec!["x".to_string()];
+    let mut add = Vec::new();
+    let mut remove = Vec::new();
+    let mut drift = Vec::new();
+    let mut buffers = super::LabelReconcileBuffers {
+        add_labels: &mut add,
+        remove_labels: &mut remove,
+        drift_events: &mut drift,
+    };
+    super::reconcile_presence_label(
+        "plan_complete",
+        crate::plan::labels::PLAN_COMPLETE,
+        |label| label == crate::plan::labels::PLAN_COMPLETE,
+        true,
+        &existing,
+        &mut buffers,
+    );
+    assert!(add.contains(&crate::plan::labels::PLAN_COMPLETE.to_string()));
+    assert!(drift.iter().any(|event| event.direction == "missing"));
+
+    let converged = apply_label_delta(&existing, &add, &remove);
+    let mut add2 = Vec::new();
+    let mut remove2 = Vec::new();
+    let mut drift2 = Vec::new();
+    let mut buffers2 = super::LabelReconcileBuffers {
+        add_labels: &mut add2,
+        remove_labels: &mut remove2,
+        drift_events: &mut drift2,
+    };
+    super::reconcile_presence_label(
+        "plan_complete",
+        crate::plan::labels::PLAN_COMPLETE,
+        |label| label == crate::plan::labels::PLAN_COMPLETE,
+        true,
+        &converged,
+        &mut buffers2,
+    );
+    assert!(add2.is_empty() && remove2.is_empty() && drift2.is_empty());
+}
+
+#[test]
+fn plan_pending_reconcile_stale_emits_drift_then_noops() {
+    let existing = vec![
+        crate::plan::labels::PLAN_PENDING.to_string(),
+        "x".to_string(),
+    ];
+    let mut add = Vec::new();
+    let mut remove = Vec::new();
+    let mut drift = Vec::new();
+    let mut buffers = super::LabelReconcileBuffers {
+        add_labels: &mut add,
+        remove_labels: &mut remove,
+        drift_events: &mut drift,
+    };
+    super::reconcile_presence_label(
+        "plan_pending",
+        crate::plan::labels::PLAN_PENDING,
+        |label| label == crate::plan::labels::PLAN_PENDING,
+        false,
+        &existing,
+        &mut buffers,
+    );
+    assert!(remove.contains(&crate::plan::labels::PLAN_PENDING.to_string()));
+    assert!(drift.iter().any(|event| event.direction == "stale"));
+
+    let converged = apply_label_delta(&existing, &add, &remove);
+    let mut add2 = Vec::new();
+    let mut remove2 = Vec::new();
+    let mut drift2 = Vec::new();
+    let mut buffers2 = super::LabelReconcileBuffers {
+        add_labels: &mut add2,
+        remove_labels: &mut remove2,
+        drift_events: &mut drift2,
+    };
+    super::reconcile_presence_label(
+        "plan_pending",
+        crate::plan::labels::PLAN_PENDING,
+        |label| label == crate::plan::labels::PLAN_PENDING,
+        false,
+        &converged,
+        &mut buffers2,
+    );
+    assert!(add2.is_empty() && remove2.is_empty() && drift2.is_empty());
+}
+
+#[derive(Clone)]
+struct ParentFallbackAdvanced {
+    comments_by_issue: std::collections::HashMap<String, Vec<spur_pm::Comment>>,
+}
+
+#[async_trait::async_trait]
+impl spur_pm::BeadsAdvanced for ParentFallbackAdvanced {
+    async fn list_ready(
+        &self,
+        _filter: spur_pm::ReadyFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+        Ok(self
+            .comments_by_issue
+            .get(issue_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<String> {
+        Ok("c1".to_string())
+    }
+
+    async fn remove_dependency(&self, _issue_id: &str, _depends_on_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+        Ok(Vec::new())
+    }
+}
+
+struct ParentFallbackPm {
+    issue: spur_pm::Issue,
+    advanced: ParentFallbackAdvanced,
+}
+
+#[async_trait::async_trait]
+impl crate::plan::PmLike for ParentFallbackPm {
+    async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+        if id == self.issue.id {
+            return Ok(self.issue.clone());
+        }
+        anyhow::bail!("unknown issue id: {id}");
+    }
+
+    async fn update_issue(&self, _id: &str, _update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn closed_status(&self) -> &str {
+        "closed"
+    }
+
+    fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+        Some(&self.advanced)
+    }
+}
+
+fn parent_fallback_issue(blocked_by: Vec<String>) -> spur_pm::Issue {
+    spur_pm::Issue {
+        id: "bd-child".to_string(),
+        source: spur_pm::PmSource::Beads,
+        title: "Child".to_string(),
+        body: String::new(),
+        status: "open".to_string(),
+        labels: vec![],
+        assignee: None,
+        url: "https://example.invalid/bd-child".to_string(),
+        priority: None,
+        issue_type: Some("task".to_string()),
+        blocked_by,
+        due_at: None,
+        source_system: None,
+        source_repo: None,
+        external_ref: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn plan_submit_comment(plan_id: &str, epic_id: &str) -> spur_pm::Comment {
+    spur_pm::Comment {
+        id: format!("c-{epic_id}"),
+        body: crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                plan_id: plan_id.to_string(),
+                epic_issue_id: epic_id.to_string(),
+                task_ids: Vec::new(),
+                base_snapshot_branch: None,
+                base_snapshot_oid: None,
+                execution_mode: None,
+                brain_session_id: None,
+                explicit_base: None,
+            },
+        ),
+        actor: "tester".to_string(),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn expected_plan_id_from_parent_epic_is_deterministic_when_blocked_by_reversed() {
+    let issue_summary = spur_pm::IssueSummary {
+        id: "bd-child".to_string(),
+        source: spur_pm::PmSource::Beads,
+        title: "Child".to_string(),
+        status: "open".to_string(),
+        labels: vec![],
+        url: "https://example.invalid/bd-child".to_string(),
+        priority: None,
+        issue_type: Some("task".to_string()),
+        assignee: None,
+        description: None,
+    };
+    let mut comments_by_issue = std::collections::HashMap::new();
+    comments_by_issue.insert(
+        "bd-parent-a".to_string(),
+        vec![plan_submit_comment("PLAN-A", "bd-parent-a")],
+    );
+    comments_by_issue.insert(
+        "bd-parent-b".to_string(),
+        vec![plan_submit_comment("PLAN-B", "bd-parent-b")],
+    );
+    let feature_gate = pro_feature_gate();
+
+    let pm_forward = Arc::new(ParentFallbackPm {
+        issue: parent_fallback_issue(vec!["bd-parent-b".to_string(), "bd-parent-a".to_string()]),
+        advanced: ParentFallbackAdvanced {
+            comments_by_issue: comments_by_issue.clone(),
+        },
+    });
+    let reconciler_forward = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm_forward.clone() as Arc<dyn crate::plan::PmLike>,
+        Arc::new(Notify::new()),
+        None,
+        None,
+        Arc::clone(&feature_gate),
+    );
+    let forward = reconciler_forward
+        .expected_plan_id_from_parent_epic(
+            crate::plan::PmLike::advanced(pm_forward.as_ref()).expect("advanced"),
+            &issue_summary,
+        )
+        .await
+        .expect("forward parent fallback");
+
+    let pm_reverse = Arc::new(ParentFallbackPm {
+        issue: parent_fallback_issue(vec!["bd-parent-a".to_string(), "bd-parent-b".to_string()]),
+        advanced: ParentFallbackAdvanced { comments_by_issue },
+    });
+    let reconciler_reverse = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm_reverse.clone() as Arc<dyn crate::plan::PmLike>,
+        Arc::new(Notify::new()),
+        None,
+        None,
+        feature_gate,
+    );
+    let reverse = reconciler_reverse
+        .expected_plan_id_from_parent_epic(
+            crate::plan::PmLike::advanced(pm_reverse.as_ref()).expect("advanced"),
+            &issue_summary,
+        )
+        .await
+        .expect("reversed parent fallback");
+
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.as_deref(), Some("PLAN-A"));
+}
+
+#[tokio::test]
+async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let empty = spur_pm::test_workspace::TestBeadsWorkspace::init();
+    let beads_dir = repo.join(".beads");
+    std::fs::create_dir(&beads_dir).expect("create test .beads directory");
+    empty.copy_db_to(&beads_dir);
+    let pm = pm_for_beads_repo(repo).await;
+    let feature_gate = pro_feature_gate();
+
+    let plan_id = "P-EMPTY-CONTEXT";
+    let sg = crate::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Empty Context Plan",
+        Some("empty-context regression"),
+        &[crate::plan::PlanTask {
+            task_id: "T1".to_string(),
+            agent: "codex".to_string(),
+            task: "do work".to_string(),
+            depends_on: vec![],
+            issue_id: None,
+            issue_title: None,
+            context_files: Vec::new(),
+        }],
+    )
+    .await
+    .expect("persist plan");
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate.as_ref(),
+    )
+    .expect("test feature gate should allow beads advanced");
+    let adv = pm.advanced().expect("advanced");
+    crate::emit_plan_submit_audit(adv, plan_id, &sg, crate::PlanSubmitAuditContext::default())
+        .await;
+    let child_id = sg.task_map.get("T1").cloned().expect("task map for T1");
+    adv.add_comment(
+        &child_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                delegation_id: "del-T1".to_string(),
+                worker: "codex".to_string(),
+                attempt: 1,
+            },
+        ),
+    )
+    .await
+    .expect("dispatch audit");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some(plan_id.to_string()),
+        feature_gate,
+    );
+    let _ = reconciler.tick_once().await.expect("tick once");
+
+    let child = pm.get_issue(&child_id).await.expect("child issue");
+    assert!(
+        child
+            .labels
+            .iter()
+            .any(|label| label == &crate::plan::labels::agent("codex")),
+        "child must retain spur:agent:* after tick"
+    );
+    assert!(
+        child
+            .labels
+            .iter()
+            .any(|label| label == &crate::plan::labels::plan_task_id("T1")),
+        "child must retain spur:plan-task-id:* after tick"
+    );
+}
+
+#[tokio::test]
+async fn tick_once_strips_plan_complete_when_plan_submit_audit_is_absent() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let empty = spur_pm::test_workspace::TestBeadsWorkspace::init();
+    let beads_dir = repo.join(".beads");
+    std::fs::create_dir(&beads_dir).expect("create test .beads directory");
+    empty.copy_db_to(&beads_dir);
+    let pm = pm_for_beads_repo(repo).await;
+    let feature_gate = pro_feature_gate();
+
+    let issue_id = pm
+        .create_issue(spur_pm::IssueCreate {
+            title: "orphan plan-complete".to_string(),
+            issue_type: Some("epic".to_string()),
+            labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect("create issue");
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate.as_ref(),
+    )
+    .expect("test feature gate should allow beads advanced");
+    let adv = pm.advanced().expect("advanced");
+    adv.add_comment(
+        &issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                delegation_id: "del-orphan".to_string(),
+                worker: "codex".to_string(),
+                attempt: 1,
+            },
+        ),
+    )
+    .await
+    .expect("dispatch audit");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        None,
+        feature_gate,
+    );
+    let _ = reconciler.tick_once().await.expect("tick once");
+
+    let issue = pm.get_issue(&issue_id).await.expect("issue");
+    assert!(
+        !issue
+            .labels
+            .iter()
+            .any(|label| label == crate::plan::labels::PLAN_COMPLETE),
+        "spur:plan-complete must be stripped without a PlanSubmit audit"
     );
 }
