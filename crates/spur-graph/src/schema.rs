@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::BufReader;
 use std::path::Path;
 
 use anyhow::{anyhow, Context};
@@ -88,6 +89,8 @@ pub struct GraphIndexArtifact {
 #[serde(deny_unknown_fields)]
 pub struct GraphIndexHeader {
     pub graph_index_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash_blake3: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +247,26 @@ pub fn load_artifact(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
     validate_ranges(&artifact)?;
 
     Ok(artifact)
+}
+
+/// Reads only the top-level graph index header from an artifact file.
+///
+/// This intentionally avoids allocating large artifact arrays such as `files`
+/// and `symbols` in memory, but still parses the full JSON stream (O(file_size)
+/// I/O/CPU) to reach the header field.
+pub fn read_artifact_header(path: &Path) -> anyhow::Result<GraphIndexHeader> {
+    #[derive(Deserialize)]
+    struct ArtifactHeaderEnvelope {
+        header: GraphIndexHeader,
+    }
+
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to read graph index artifact `{}`", path.display()))?;
+    let reader = BufReader::new(file);
+    let envelope: ArtifactHeaderEnvelope = serde_json::from_reader(reader)
+        .map_err(|err| anyhow!("invalid graph index JSON in `{}`: {err}", path.display()))?;
+
+    Ok(envelope.header)
 }
 
 pub fn file_id_from_uri(uri: &str) -> String {
