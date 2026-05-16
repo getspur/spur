@@ -4,7 +4,13 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rmcp::{model::CallToolRequestParams, transport::StreamableHttpClientTransport, ServiceExt};
+use rmcp::{
+    model::CallToolRequestParams,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use spur_acp::SpurEventBody;
 use spur_license::policy::PolicyResolver;
 use spur_license::FeatureGate;
@@ -70,9 +76,28 @@ fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
     }
 }
 
-async fn call_report_progress(url_with_token: String) -> Result<(), String> {
+async fn call_list_tools(url: &str, token: &str) -> Result<Vec<String>, String> {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string()).auth_header(token);
     let client =
-        ().serve(StreamableHttpClientTransport::from_uri(url_with_token))
+        ().serve(StreamableHttpClientTransport::from_config(config))
+            .await
+            .map_err(|error| error.to_string())?;
+    let tools = client
+        .list_all_tools()
+        .await
+        .map_err(|error| error.to_string())?;
+    let names = tools
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    drop(client);
+    Ok(names)
+}
+
+async fn call_report_progress(url: &str, token: &str) -> Result<(), String> {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string()).auth_header(token);
+    let client =
+        ().serve(StreamableHttpClientTransport::from_config(config))
             .await
             .map_err(|error| error.to_string())?;
     let mut request = CallToolRequestParams::new("report_progress");
@@ -96,29 +121,16 @@ async fn start_binds_listener_and_returns_url() {
     assert!(url.starts_with("http://127.0.0.1:"), "url: {url}");
     assert!(url.contains("/mcp"), "url: {url}");
 
-    // Short timeout so post-shutdown probe fails fast even if the port were
-    // somehow still alive.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("client");
-
-    let resp = client
-        .get(&url)
-        .send()
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let tools = call_list_tools(&url, &token)
         .await
-        .expect("GET reaches the listener");
-    assert!(
-        resp.status().is_client_error() || resp.status() == 200,
-        "unexpected status: {}",
-        resp.status()
-    );
+        .expect("worker MCP rmcp session should open while listener is live");
+    assert!(!tools.is_empty(), "tools/list should expose worker surface");
 
     server.shutdown(Duration::from_secs(5)).await;
 
-    // Cancellation must actually close the listener — a follow-up probe
-    // should return Err (connection refused / timeout), not a 4xx response.
-    let after_shutdown = client.get(&url).send().await;
+    // Cancellation must actually close the listener.
+    let after_shutdown = call_list_tools(&url, &token).await;
     assert!(
         after_shutdown.is_err(),
         "listener still reachable after shutdown: {after_shutdown:?}"
@@ -232,14 +244,13 @@ async fn active_count_tracks_concurrent_dispatch_entry_and_exit() {
     let n: u32 = 4;
     let url = server.url();
     let token = server.issue_token("d-1", Duration::from_secs(60));
-    let request_url = format!("{url}?token={token}");
-
     let mut handles = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let request_url = request_url.clone();
+        let url = url.clone();
+        let token = token.clone();
         handles.push(tokio::spawn(async move {
             let _ = i;
-            call_report_progress(request_url).await
+            call_report_progress(&url, &token).await
         }));
     }
 
@@ -293,10 +304,10 @@ async fn shutdown_blocks_until_active_count_reaches_zero() {
     );
 
     let token = server.issue_token("d-1", Duration::from_secs(60));
-    let request_url = format!("{}?token={}", server.url(), token);
+    let request_url = server.url();
 
     let _req_handle = tokio::spawn(async move {
-        let _ = call_report_progress(request_url).await;
+        let _ = call_report_progress(&request_url, &token).await;
     });
 
     // Wait until the dispatcher's guard has incremented the counter. Polling
@@ -424,7 +435,6 @@ async fn shutdown_returns_drained_quickly_when_no_in_flight_dispatchers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn shutdown_warns_and_returns_undrained_when_deadline_elapses() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -454,10 +464,10 @@ async fn shutdown_warns_and_returns_undrained_when_deadline_elapses() {
     );
 
     let token = server.issue_token("d-1", Duration::from_secs(60));
-    let request_url = format!("{}?token={}", server.url(), token);
+    let request_url = server.url();
 
     let _req_handle = tokio::spawn(async move {
-        let _ = call_report_progress(request_url).await;
+        let _ = call_report_progress(&request_url, &token).await;
     });
 
     // Wait until the dispatcher's guard has incremented the counter so we

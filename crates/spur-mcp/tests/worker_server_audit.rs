@@ -5,12 +5,16 @@
 //! target issue before returning success to the worker.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rmcp::{
-    model::CallToolRequestParams, service::ServiceError, transport::StreamableHttpClientTransport,
+    model::CallToolRequestParams,
+    service::ServiceError,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
     ServiceExt,
 };
 use serde_json::Value;
@@ -22,6 +26,7 @@ use spur_mcp::handlers::PlanResolver;
 use spur_mcp::plan::PlanState;
 use spur_mcp::worker_server::{
     DelegationContext, ReadAuditBuffer, ReadAuditEntry, WorkerMcpDeps, WorkerMcpServer,
+    WorkerMcpServerConfig,
 };
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
@@ -58,6 +63,40 @@ impl McpEventSink for NullSink {
     fn emit(&self, _event: SpurEventBody) {}
 }
 
+#[derive(Default)]
+struct RecordingSink {
+    events: StdMutex<Vec<SpurEventBody>>,
+}
+
+impl RecordingSink {
+    fn summary_count_for(&self, delegation_id: &str) -> usize {
+        self.events
+            .lock()
+            .expect("recording sink lock")
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    SpurEventBody::WorkerMcpDelegationSummary {
+                        delegation_id: id,
+                        ..
+                    } if id == delegation_id
+                )
+            })
+            .count()
+    }
+}
+
+impl McpEventSink for RecordingSink {
+    fn emit(&self, event: SpurEventBody) {
+        self.events.lock().expect("recording sink lock").push(event);
+    }
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        self.emit(event);
+        Ok(())
+    }
+}
+
 struct NullPlanResolver;
 
 #[async_trait]
@@ -68,10 +107,14 @@ impl PlanResolver for NullPlanResolver {
 }
 
 fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
+    test_deps_with_funnel(pm, Arc::new(NullSink))
+}
+
+fn test_deps_with_funnel(pm: Arc<PmService>, funnel: Arc<dyn McpEventSink>) -> WorkerMcpDeps {
     WorkerMcpDeps {
         pm_service: pm,
         feature_gate: test_feature_gate(),
-        funnel: Arc::new(NullSink),
+        funnel,
         plan_resolver: Arc::new(NullPlanResolver),
         reconciler_outcomes: Arc::new(
             Mutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),
@@ -87,9 +130,10 @@ async fn call_jsonrpc(
     method: &str,
     params: Value,
 ) -> Value {
-    let url = format!("{}?token={}", server.url(), token);
+    let config =
+        StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(token.to_string());
     let client =
-        ().serve(StreamableHttpClientTransport::from_uri(url))
+        ().serve(StreamableHttpClientTransport::from_config(config))
             .await
             .expect("rmcp client initialize");
 
@@ -139,6 +183,32 @@ fn service_error_response(error: ServiceError) -> Value {
             "message": message,
         }
     })
+}
+
+async fn wait_for_read_aggregate_comment(
+    pm: &PmService,
+    issue_id: &str,
+    timeout: Duration,
+) -> Option<spur_mcp::plan::audit_sentinel::AuditSentinelKind> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let adv = pm.advanced()?;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(comments) = adv.list_comments(issue_id).await {
+            for comment in comments {
+                if let Some(Ok(kind)) = spur_mcp::plan::audit_sentinel::parse_comment(&comment.body)
+                {
+                    if matches!(
+                        kind,
+                        spur_mcp::plan::audit_sentinel::AuditSentinelKind::ReadAggregate { .. }
+                    ) {
+                        return Some(kind);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
 }
 
 #[tokio::test]
@@ -263,6 +333,242 @@ async fn read_tool_calls_append_to_buffer() {
         .peek_read_buffer("d-1")
         .expect("buffer should exist after read calls");
     assert_eq!(buf.entry_count(), 3);
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn flush_delegation_drains_buffer_and_emits_summary_once() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let issue_id = pm
+        .create_issue(IssueCreate {
+            title: "flush-delegation test".into(),
+            description: Some("buffer drain target".into()),
+            issue_type: Some("task".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("create issue");
+
+    let sink = Arc::new(RecordingSink::default());
+    let server = WorkerMcpServer::start(
+        "session-flush-sync".into(),
+        test_deps_with_funnel(Arc::clone(&pm), Arc::clone(&sink) as Arc<dyn McpEventSink>),
+    )
+    .await
+    .expect("start must succeed");
+    server.register_delegation(
+        "d-sync".into(),
+        DelegationContext {
+            enable_worker_progress: false,
+        },
+    );
+    let token = server.issue_token("d-sync", Duration::from_secs(60));
+
+    for _ in 0..3 {
+        let body = call_jsonrpc(
+            &server,
+            &token,
+            "tools/call",
+            serde_json::json!({
+                "name": "get_issue",
+                "arguments": { "id": &issue_id }
+            }),
+        )
+        .await;
+        assert!(
+            body.get("error").is_none() || body["error"].is_null(),
+            "get_issue should succeed, got: {body}"
+        );
+    }
+    assert_eq!(
+        server
+            .peek_read_buffer("d-sync")
+            .expect("buffer should exist")
+            .entry_count(),
+        3
+    );
+
+    server
+        .flush_delegation("d-sync", "success")
+        .await
+        .expect("flush_delegation must succeed");
+    assert!(
+        server.peek_read_buffer("d-sync").is_none(),
+        "flush_delegation should synchronously remove read buffer"
+    );
+
+    for _ in 0..100 {
+        if sink.summary_count_for("d-sync") == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        sink.summary_count_for("d-sync"),
+        1,
+        "flush_delegation should emit exactly one summary event"
+    );
+
+    let events = sink.events.lock().expect("recording sink lock");
+    let summary = events.iter().find_map(|event| {
+        if let SpurEventBody::WorkerMcpDelegationSummary {
+            delegation_id,
+            calls_total,
+            calls_by_tool,
+            errors,
+            ..
+        } = event
+        {
+            if delegation_id == "d-sync" {
+                return Some((*calls_total, calls_by_tool.clone(), *errors));
+            }
+        }
+        None
+    });
+    let (calls_total, calls_by_tool, errors) = summary.expect("summary event should exist");
+    assert_eq!(
+        calls_total, 3,
+        "summary should include all three read calls"
+    );
+    assert_eq!(
+        calls_by_tool.get("get_issue").copied().unwrap_or(0),
+        3,
+        "summary must attribute all calls to get_issue"
+    );
+    assert_eq!(errors, 0, "successful reads should not increment errors");
+    drop(events);
+
+    let sentinel = wait_for_read_aggregate_comment(&pm, &issue_id, Duration::from_secs(5))
+        .await
+        .expect("read aggregate sentinel should be persisted");
+    if let spur_mcp::plan::audit_sentinel::AuditSentinelKind::ReadAggregate {
+        delegation_id,
+        entries,
+    } = sentinel
+    {
+        assert_eq!(delegation_id, "d-sync");
+        assert_eq!(entries.len(), 3, "all three reads should be aggregated");
+    } else {
+        panic!("expected read aggregate sentinel");
+    }
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn idle_flusher_drains_buffer_and_complete_emits_single_summary() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let issue_id = pm
+        .create_issue(IssueCreate {
+            title: "idle-flusher test".into(),
+            description: Some("idle flush target".into()),
+            issue_type: Some("task".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("create issue");
+
+    let sink = Arc::new(RecordingSink::default());
+    let config = WorkerMcpServerConfig {
+        idle_threshold: Duration::from_millis(100),
+        scan_interval: Duration::from_millis(50),
+    };
+    let server = WorkerMcpServer::start_with_config(
+        "session-flush-async".into(),
+        test_deps_with_funnel(Arc::clone(&pm), Arc::clone(&sink) as Arc<dyn McpEventSink>),
+        config,
+    )
+    .await
+    .expect("start must succeed");
+    server.register_delegation(
+        "d-async".into(),
+        DelegationContext {
+            enable_worker_progress: false,
+        },
+    );
+    let token = server.issue_token("d-async", Duration::from_secs(60));
+
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({
+            "name": "get_issue",
+            "arguments": { "id": &issue_id }
+        }),
+    )
+    .await;
+    assert!(
+        body.get("error").is_none() || body["error"].is_null(),
+        "get_issue should succeed, got: {body}"
+    );
+
+    for _ in 0..100 {
+        if server.peek_read_buffer("d-async").is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        server.peek_read_buffer("d-async").is_none(),
+        "idle flusher should drain stale read buffer asynchronously"
+    );
+
+    server.complete_delegation("d-async", "success");
+
+    for _ in 0..100 {
+        if sink.summary_count_for("d-async") == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        sink.summary_count_for("d-async"),
+        1,
+        "complete_delegation should emit exactly one summary after idle flush"
+    );
+
+    let events = sink.events.lock().expect("recording sink lock");
+    let summary = events.iter().find_map(|event| {
+        if let SpurEventBody::WorkerMcpDelegationSummary {
+            delegation_id,
+            calls_total,
+            calls_by_tool,
+            errors,
+            ..
+        } = event
+        {
+            if delegation_id == "d-async" {
+                return Some((*calls_total, calls_by_tool.clone(), *errors));
+            }
+        }
+        None
+    });
+    let (calls_total, calls_by_tool, errors) = summary.expect("summary event should exist");
+    assert_eq!(calls_total, 1);
+    assert_eq!(calls_by_tool.get("get_issue").copied().unwrap_or(0), 1);
+    assert_eq!(errors, 0);
+    drop(events);
+
+    let sentinel = wait_for_read_aggregate_comment(&pm, &issue_id, Duration::from_secs(5))
+        .await
+        .expect("idle flush should persist read aggregate sentinel");
+    if let spur_mcp::plan::audit_sentinel::AuditSentinelKind::ReadAggregate {
+        delegation_id,
+        entries,
+    } = sentinel
+    {
+        assert_eq!(delegation_id, "d-async");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tool_name, "get_issue");
+    } else {
+        panic!("expected read aggregate sentinel");
+    }
 
     server.shutdown(Duration::from_secs(5)).await;
 }
