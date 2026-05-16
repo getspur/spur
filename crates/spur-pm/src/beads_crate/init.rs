@@ -281,13 +281,90 @@ mod sweep_tests {
     }
 }
 
+/// Cheap filesystem-only probe used to decide whether the boot-time
+/// `init_writer_with_flush` sequence has anything to do. The full sequence
+/// holds `.write.lock` across SQLite open + `sweep_stale_jsonl_temps` +
+/// `sync::auto_flush` + WAL checkpoint, which can take several seconds on a
+/// busy beads dir and starves any concurrent process trying to acquire the
+/// lock during PM startup. When the filesystem signals no pending work we
+/// can skip the lock entirely; the next mutation will trigger a regular
+/// `auto_flush` and correct any state we left untouched.
+///
+/// Returns true (= safe to skip) iff ALL of:
+///   * `beads.db` exists (otherwise init must run to create it),
+///   * `issues.jsonl` exists (otherwise we owe an initial export),
+///   * no `issues.jsonl.<pid>.tmp` files are present (no sweep work pending),
+///   * `issues.jsonl` mtime is at least as recent as `beads.db` and any
+///     `beads.db-wal` sidecar (no SQLite→JSONL flush is pending).
+///
+/// Conservative by design: any mtime/stat error or unknown state returns
+/// false so the caller takes the slow lock-held path. False-positives only
+/// re-introduce the (correct) original behaviour; false-negatives are the
+/// only thing that would skip a legitimate flush, and we have no such path.
+fn can_skip_init_flush(beads_dir: &Path) -> bool {
+    let db_path = beads_dir.join("beads.db");
+    if !db_path.exists() {
+        return false;
+    }
+
+    let jsonl_path = beads_dir.join("issues.jsonl");
+    let Ok(jsonl_meta) = std::fs::metadata(&jsonl_path) else {
+        return false;
+    };
+    let Ok(jsonl_mtime) = jsonl_meta.modified() else {
+        return false;
+    };
+
+    let entries = match std::fs::read_dir(beads_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if let Some(name_str) = name.to_str() {
+            if is_jsonl_temp_file(name_str) {
+                return false;
+            }
+        }
+    }
+
+    let Ok(db_meta) = std::fs::metadata(&db_path) else {
+        return false;
+    };
+    if db_meta.modified().ok().is_some_and(|m| m > jsonl_mtime) {
+        return false;
+    }
+
+    let wal_path = beads_dir.join("beads.db-wal");
+    if let Ok(wal_meta) = std::fs::metadata(&wal_path) {
+        if wal_meta.modified().ok().is_some_and(|m| m > jsonl_mtime) {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Initialize the writer-side storage state and flush stale SQLite changes to
 /// JSONL while holding `.write.lock` for the full boot-time sequence.
+///
+/// Fast path: `can_skip_init_flush` (lock-free, filesystem-only) returns true
+/// for a quiet, freshly-exported beads dir. In that common case we never
+/// acquire the write lock — startup is O(milliseconds) instead of waiting up
+/// to `lock_timeout_ms` for whatever process is doing the actual flush work.
 pub(crate) fn init_writer_with_flush(
     beads_dir: &Path,
     lock_timeout_ms: u64,
     stale_tmp_min_age: Duration,
 ) -> anyhow::Result<()> {
+    if can_skip_init_flush(beads_dir) {
+        tracing::debug!(
+            beads_dir = %beads_dir.display(),
+            "init_writer_with_flush: fast path — no pending flush, skipping write lock"
+        );
+        return Ok(());
+    }
+
     let _guard = write_lock::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
     let db_path = beads_dir.join("beads.db");
     pre_open_quick_check(&db_path)?;
@@ -310,5 +387,110 @@ mod migration_tests {
         let dir = TempDir::new().unwrap();
         init_writer_with_flush(dir.path(), 5_000, Duration::ZERO)
             .expect("fresh dir init should succeed");
+    }
+}
+
+#[cfg(test)]
+mod can_skip_init_flush_tests {
+    use super::*;
+    use filetime::{set_file_mtime, FileTime};
+    use std::fs;
+    use std::time::SystemTime;
+    use tempfile::TempDir;
+
+    fn touch(path: &Path) {
+        fs::write(path, b"").unwrap();
+    }
+
+    fn set_mtime(path: &Path, t: SystemTime) {
+        set_file_mtime(path, FileTime::from_system_time(t)).unwrap();
+    }
+
+    #[test]
+    fn returns_false_when_db_missing() {
+        let dir = TempDir::new().unwrap();
+        // jsonl exists but db does not — must take slow path so init can create db
+        touch(&dir.path().join("issues.jsonl"));
+        assert!(!can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_false_when_jsonl_missing() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir.path().join("beads.db"));
+        assert!(!can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_false_when_stale_tmp_present() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("beads.db");
+        let jsonl = dir.path().join("issues.jsonl");
+        touch(&db);
+        touch(&jsonl);
+        let now = SystemTime::now();
+        set_mtime(&db, now);
+        set_mtime(&jsonl, now);
+        // A pending sweep target should force the slow path so it gets removed
+        touch(&dir.path().join("issues.jsonl.12345.tmp"));
+        assert!(!can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_false_when_db_newer_than_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("beads.db");
+        let jsonl = dir.path().join("issues.jsonl");
+        touch(&jsonl);
+        touch(&db);
+        let old = SystemTime::now() - Duration::from_secs(60);
+        let new = SystemTime::now();
+        set_mtime(&jsonl, old);
+        set_mtime(&db, new);
+        assert!(!can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_false_when_wal_newer_than_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("beads.db");
+        let wal = dir.path().join("beads.db-wal");
+        let jsonl = dir.path().join("issues.jsonl");
+        touch(&db);
+        touch(&jsonl);
+        touch(&wal);
+        let old = SystemTime::now() - Duration::from_secs(60);
+        let new = SystemTime::now();
+        set_mtime(&db, old);
+        set_mtime(&jsonl, old);
+        set_mtime(&wal, new);
+        assert!(!can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_true_when_quiet_and_jsonl_at_least_as_fresh_as_db() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("beads.db");
+        let jsonl = dir.path().join("issues.jsonl");
+        touch(&db);
+        touch(&jsonl);
+        let old = SystemTime::now() - Duration::from_secs(60);
+        let new = SystemTime::now();
+        set_mtime(&db, old);
+        set_mtime(&jsonl, new);
+        assert!(can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_true_when_no_wal_and_jsonl_at_least_as_fresh_as_db() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("beads.db");
+        let jsonl = dir.path().join("issues.jsonl");
+        touch(&db);
+        touch(&jsonl);
+        let t = SystemTime::now() - Duration::from_secs(60);
+        set_mtime(&db, t);
+        set_mtime(&jsonl, t);
+        assert!(can_skip_init_flush(dir.path()));
     }
 }

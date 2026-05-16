@@ -34,5 +34,6 @@ http = "1"
 secrecy = "=0.10.3"
 
 [dev-dependencies]
+filetime = "0.2"
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
