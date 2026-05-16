@@ -1325,15 +1325,19 @@ pub async fn project_plan_from_beads(
             latest_completion,
             entry.worker_branch,
         );
-        assert!(
-            !matches!(entry.status, PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. })
-                || entry.dispatched_base_oid.is_some(),
-            "invariant:project_plan_from_beads dispatched_base_oid missing for completion-derived status violated (plan_id={}, task_id={}) expected dispatched_base_oid=Some(_) for AwaitingReview/Approved, got status={:?}, dispatched_base_oid={:?}",
-            plan_id,
-            entry.spec.task_id,
+        // Tier-0 tactical relaxation; bd-3sk retires this branch (see RCA §10.1/§11/§12.2).
+        if matches!(
             entry.status,
-            entry.dispatched_base_oid,
-        );
+            PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. }
+        ) && entry.dispatched_base_oid.is_none()
+        {
+            tracing::error!(
+                plan_id = %plan_id,
+                task_id = %entry.spec.task_id,
+                status = ?entry.status,
+                "label_index_drift: projector observed completion-derived status without dispatched_base_oid; likely operator-closed shadow task that was never dispatched. Keeping degraded entry. Tier-0 tactical relaxation; bd-3sk retires this branch."
+            );
+        }
         if issue_is_closed {
             if let Some(terminal_audit) = terminal_audit {
                 let consistent = match terminal_audit {
@@ -1403,6 +1407,7 @@ pub async fn project_plan_from_beads(
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use proptest::prelude::*;
     use spur_pm::Comment;
@@ -1970,6 +1975,142 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct TestPm {
+        issues_by_id: HashMap<String, spur_pm::Issue>,
+        comments_by_issue_id: HashMap<String, Vec<spur_pm::Comment>>,
+        closed_status: String,
+    }
+
+    impl TestPm {
+        fn new(
+            issues: Vec<spur_pm::Issue>,
+            comments_by_issue_id: HashMap<String, Vec<spur_pm::Comment>>,
+            closed_status: &str,
+        ) -> Self {
+            let issues_by_id = issues
+                .into_iter()
+                .map(|issue| (issue.id.clone(), issue))
+                .collect();
+            Self {
+                issues_by_id,
+                comments_by_issue_id,
+                closed_status: closed_status.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::plan::PmLike for TestPm {
+        async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+            self.issues_by_id
+                .get(id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("issue {id} not found"))
+        }
+
+        async fn list_issues(
+            &self,
+            filter: spur_pm::IssueFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            let mut out = Vec::new();
+            for issue in self.issues_by_id.values() {
+                if let Some(status) = &filter.status {
+                    if &issue.status != status {
+                        continue;
+                    }
+                }
+                if !filter
+                    .labels
+                    .iter()
+                    .all(|label| issue.labels.iter().any(|issue_label| issue_label == label))
+                {
+                    continue;
+                }
+                out.push(spur_pm::IssueSummary {
+                    id: issue.id.clone(),
+                    source: issue.source.clone(),
+                    title: issue.title.clone(),
+                    status: issue.status.clone(),
+                    labels: issue.labels.clone(),
+                    url: issue.url.clone(),
+                    priority: issue.priority,
+                    issue_type: issue.issue_type.clone(),
+                    assignee: issue.assignee.clone(),
+                    description: None,
+                });
+            }
+            Ok(out)
+        }
+
+        async fn update_issue(
+            &self,
+            _id: &str,
+            _update: spur_pm::IssueUpdate,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn closed_status(&self) -> &str {
+            &self.closed_status
+        }
+
+        fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl spur_pm::BeadsAdvanced for TestPm {
+        async fn list_ready(
+            &self,
+            _filter: spur_pm::ReadyFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+            Ok(self
+                .comments_by_issue_id
+                .get(issue_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn add_comment(
+            &self,
+            _issue_id: &str,
+            _body: &str,
+        ) -> anyhow::Result<spur_pm::CommentId> {
+            Ok("c-1".to_string())
+        }
+
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn pro_feature_gate() -> spur_license::FeatureGate {
+        let gate = spur_license::FeatureGate::new(spur_license::policy::PolicyResolver::embedded());
+        let features =
+            std::collections::BTreeSet::from([spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED
+                .as_str()
+                .to_string()]);
+        gate.update_state(&spur_license::LicenseState::active_validated(
+            spur_license::Plan::Pro,
+            features,
+        ));
+        gate
+    }
+
     #[test]
     fn latest_completion_carries_state_branch_and_summary() {
         let audits = vec![AuditSentinelKind::Completion {
@@ -1988,6 +2129,60 @@ mod tests {
         assert_eq!(facts.2.as_deref(), Some("3 files changed"));
         assert!(!facts.3);
         assert_eq!(facts.4.as_deref(), Some("base-oid"));
+    }
+
+    #[test]
+    fn zero_audit_closed_task_derives_approved_without_dispatched_base_oid() {
+        let issue = issue("bd-42v", "closed", Vec::new(), Vec::new());
+        let audits: Vec<AuditSentinelKind> = vec![];
+
+        let status = super::project_status_for_issue(&issue, &audits, false, "closed");
+        assert!(matches!(status, PlanTaskStatus::Approved { summary: None }));
+
+        let dispatched_base_oid =
+            super::latest_completion_facts(&audits).and_then(|(_, _, _, _, oid)| oid);
+        assert!(dispatched_base_oid.is_none());
+    }
+
+    #[tokio::test]
+    async fn project_plan_from_beads_does_not_panic_on_zero_audit_closed_task() {
+        let plan_id = "test-plan";
+        let epic = issue(
+            "bd-epic-1",
+            "open",
+            vec![crate::plan::labels::plan_id(plan_id)],
+            Vec::new(),
+        );
+        let mut closed_task_labels = vec![
+            crate::plan::labels::plan_id(plan_id),
+            crate::plan::labels::plan_task_id("bd-42v"),
+            crate::plan::labels::agent("codex"),
+        ];
+        closed_task_labels.sort();
+        let task = issue(
+            "bd-task-1",
+            "closed",
+            closed_task_labels,
+            vec![epic.id.clone()],
+        );
+
+        let pm = TestPm::new(
+            vec![
+                spur_pm::Issue {
+                    issue_type: Some("epic".to_string()),
+                    ..epic
+                },
+                spur_pm::Issue {
+                    issue_type: Some("task".to_string()),
+                    ..task
+                },
+            ],
+            HashMap::new(),
+            "closed",
+        );
+
+        let gate = pro_feature_gate();
+        let _ = super::project_plan_from_beads(&pm, plan_id, &gate).await;
     }
 
     #[test]
