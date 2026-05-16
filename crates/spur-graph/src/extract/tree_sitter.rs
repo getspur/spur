@@ -35,7 +35,7 @@ pub(crate) struct FactBuilder<'a> {
     next_span: u64,
     pub(crate) pending_edges: Vec<PendingEdge>,
     symbol_index: BTreeMap<String, Vec<NodeId>>,
-    edge_index: HashSet<(NodeId, NodeId, RelationKind)>,
+    edge_index: HashSet<(NodeId, Option<NodeId>, RelationKind, Option<String>)>,
     stable_key_ordinals: HashMap<(String, String, &'static str), u32>,
 }
 
@@ -151,11 +151,14 @@ impl<'a> FactBuilder<'a> {
     pub(crate) fn add_edge(
         &mut self,
         source: NodeId,
-        target: NodeId,
+        target: Option<NodeId>,
         relation: RelationKind,
         target_label: Option<String>,
     ) {
-        if !self.edge_index.insert((source, target, relation)) {
+        if !self
+            .edge_index
+            .insert((source, target, relation, target_label.clone()))
+        {
             return;
         }
         let edge_id = EdgeId(self.next_edge);
@@ -212,8 +215,15 @@ impl<'a> FactBuilder<'a> {
                     ambiguous_hits += 1;
                 }
                 if target != edge.source {
-                    self.add_edge(edge.source, target, edge.relation, Some(edge.target_name));
+                    self.add_edge(
+                        edge.source,
+                        Some(target),
+                        edge.relation,
+                        Some(edge.target_name),
+                    );
                 }
+            } else {
+                self.add_edge(edge.source, None, edge.relation, Some(edge.target_name));
             }
         }
         if ambiguous_hits > 0 {
