@@ -2182,7 +2182,17 @@ mod tests {
         );
 
         let gate = pro_feature_gate();
-        let _ = super::project_plan_from_beads(&pm, plan_id, &gate).await;
+        let plan_state = super::project_plan_from_beads(&pm, plan_id, &gate)
+            .await
+            .expect("projection should succeed with degraded entry preserved");
+        assert!(
+            plan_state.tasks.iter().any(|t| {
+                t.spec.task_id == "bd-42v"
+                    && matches!(t.status, PlanTaskStatus::Approved { summary: None })
+                    && t.dispatched_base_oid.is_none()
+            }),
+            "degraded task must be preserved in PlanState with Approved{{summary:None}} status and dispatched_base_oid=None"
+        );
     }
 
     #[test]

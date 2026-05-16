@@ -5142,6 +5142,48 @@ mod tests {
     }
 
     #[test]
+    fn assert_dispatched_base_oid_for_active_status_logs_instead_of_panics_when_oid_missing() {
+        let plan_id = "plan-1";
+        let task_id = "T1";
+        let base_spec = super::PlanTask {
+            task_id: task_id.into(),
+            agent: "x".into(),
+            task: "do".into(),
+            depends_on: vec![],
+            issue_id: None,
+            issue_title: None,
+            context_files: vec![],
+        };
+        let missing_oid_entry = super::PlanTaskEntry {
+            spec: base_spec.clone(),
+            status: super::PlanTaskStatus::AwaitingReview { summary: None },
+            result: None,
+            worker_branch: Some("spur/worker-x-1".into()),
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: Some("del-A".into()),
+            dispatched_base_oid: None,
+        };
+        super::assert_dispatched_base_oid_for_active_status(
+            plan_id,
+            task_id,
+            &missing_oid_entry,
+            "test-site",
+        );
+
+        let present_oid_entry = super::PlanTaskEntry {
+            dispatched_base_oid: Some("abc123".into()),
+            ..missing_oid_entry
+        };
+        super::assert_dispatched_base_oid_for_active_status(
+            plan_id,
+            task_id,
+            &present_oid_entry,
+            "test-site",
+        );
+    }
+
+    #[test]
     fn valid_linear_plan() {
         let tasks = vec![task("A", &[]), task("B", &["A"]), task("C", &["B"])];
         assert!(validate_plan(&tasks).is_ok());
