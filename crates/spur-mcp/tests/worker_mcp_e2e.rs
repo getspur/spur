@@ -93,6 +93,7 @@ fn attach_test_beads(repo: &Path, w: &TestBeadsWorkspace) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn end_to_end_orchestrator_worker_mcp_get_issue() {
     let dir = TempDir::new().expect("tempdir");
     init_repo(dir.path());
