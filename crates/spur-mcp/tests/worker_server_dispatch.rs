@@ -12,7 +12,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rmcp::{
-    model::CallToolRequestParams, service::ServiceError, transport::StreamableHttpClientTransport,
+    model::CallToolRequestParams,
+    service::ServiceError,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
     ServiceExt,
 };
 use serde_json::Value;
@@ -183,9 +187,10 @@ async fn call_jsonrpc(
     method: &str,
     params: Value,
 ) -> Value {
-    let url = format!("{}?token={}", server.url(), token);
+    let config =
+        StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(token.to_string());
     let client =
-        ().serve(StreamableHttpClientTransport::from_uri(url))
+        ().serve(StreamableHttpClientTransport::from_config(config))
             .await
             .expect("rmcp client initialize");
 
@@ -531,17 +536,18 @@ async fn tools_call_unknown_tool_returns_method_not_found() {
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn json_rpc_batched_request_rejected() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
-    let url = format!("{}?token={}", server.url(), token);
-    let resp = reqwest::Client::new()
-        .post(&url)
+    // rmcp's typed client API cannot encode batched JSON-RPC payload arrays,
+    // so this negative wire-contract assertion must send raw JSON over HTTP.
+    let response = reqwest::Client::new()
+        .post(server.url())
         .header(
             reqwest::header::ACCEPT,
             "application/json, text/event-stream",
         )
+        .bearer_auth(token)
         .json(&serde_json::json!([
             {"jsonrpc":"2.0","method":"tools/list","id":1},
             {"jsonrpc":"2.0","method":"tools/list","id":2}
@@ -549,11 +555,142 @@ async fn json_rpc_batched_request_rejected() {
         .send()
         .await
         .expect("request");
-    let body: Value = resp.json().await.expect("json");
+    let body: Value = response.json().await.expect("json");
     assert_eq!(
         body["error"]["code"].as_i64(),
         Some(-32600),
         "batches must be -32600 Invalid Request, got: {body}"
     );
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn curated_tool_calls_route_and_deserialize_params() {
+    let (_dir, server, issue_id) = test_server_with_issue().await;
+    server.register_delegation(
+        "d-1".into(),
+        spur_mcp::worker_server::DelegationContext {
+            enable_worker_progress: true,
+        },
+    );
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+
+    let list_issues = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "list_issues", "arguments": {"limit": 10}}),
+    )
+    .await;
+    assert!(
+        list_issues.get("error").is_none() || list_issues["error"].is_null(),
+        "list_issues should deserialize + route, got: {list_issues}"
+    );
+    assert!(
+        list_issues["result"].as_array().is_some_and(|issues| issues
+            .iter()
+            .any(|issue| issue["id"].as_str() == Some(&issue_id))),
+        "list_issues should include seeded issue {issue_id}, got: {list_issues}"
+    );
+
+    let get_plan_status = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "get_plan_status", "arguments": {"plan_id": "missing-plan"}}),
+    )
+    .await;
+    assert_eq!(
+        get_plan_status["error"]["code"].as_i64(),
+        Some(-32602),
+        "unknown plan_id should hit get_plan_status handler and return invalid params"
+    );
+
+    let get_task_diff = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({
+            "name": "get_task_diff",
+            "arguments": {"plan_id": "missing-plan", "task_id": &issue_id}
+        }),
+    )
+    .await;
+    assert_eq!(
+        get_task_diff["error"]["code"].as_i64(),
+        Some(-32602),
+        "unknown plan_id should hit get_task_diff handler and return invalid params"
+    );
+
+    let fetch_outcome = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "fetch_outcome_artifact", "arguments": {"delegation_id": "d-1"}}),
+    )
+    .await;
+    assert!(
+        matches!(
+            fetch_outcome["error"]["code"].as_i64(),
+            Some(-32004) | Some(-32001)
+        ),
+        "fetch_outcome_artifact should route and return domain error, got: {fetch_outcome}"
+    );
+
+    let update_issue = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({
+            "name": "update_issue",
+            "arguments": {"id": &issue_id, "comment": "dispatch routing check"}
+        }),
+    )
+    .await;
+    assert_eq!(
+        update_issue["result"]["ok"].as_bool(),
+        Some(true),
+        "update_issue should deserialize + route, got: {update_issue}"
+    );
+
+    let report_signal = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({
+            "name": "report_signal",
+            "arguments": {
+                "task_id": &issue_id,
+                "signal": {
+                    "kind": "scope_drift",
+                    "signal_id": "550e8400-e29b-41d4-a716-446655440999",
+                    "severity": 0.5,
+                    "reason": "dispatch-routing-test",
+                    "estimated_subtasks": 2
+                }
+            }
+        }),
+    )
+    .await;
+    let signal_error = report_signal["error"]["code"].as_i64();
+    let signal_recorded = report_signal["result"]["recorded"].as_bool();
+    assert!(
+        signal_error == Some(-32001) || signal_recorded == Some(true),
+        "report_signal should route + deserialize (either gated or recorded), got: {report_signal}"
+    );
+
+    let report_progress = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "report_progress", "arguments": {"message": "working"}}),
+    )
+    .await;
+    assert_eq!(
+        report_progress["result"]["ok"].as_bool(),
+        Some(true),
+        "report_progress should deserialize + route, got: {report_progress}"
+    );
+
     server.shutdown(Duration::from_secs(5)).await;
 }
