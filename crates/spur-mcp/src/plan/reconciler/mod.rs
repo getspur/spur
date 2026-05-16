@@ -1399,11 +1399,18 @@ impl Reconciler {
         let mut remove_labels = Vec::new();
         let mut drift_events = Vec::new();
 
+        // Keep the raw existing label string (matching plan_id/plan_task_id/agent
+        // collection below). If we canonicalized to `spur:delegation-id:X` here,
+        // the backend would be asked to remove the canonical form while the issue
+        // actually carries the legacy `delegation-id:X` form — leaking it forever.
+        // `reconcile_singleton_label` does the legacy→canonical conversion via
+        // its mismatch path: stale legacy is pushed to remove_labels with its
+        // raw value, and the canonical expected is pushed to add_labels.
         let existing_delegations = issue
             .labels
             .iter()
-            .filter_map(|label| delegation_label_value(label))
-            .map(crate::plan::labels::delegation_id)
+            .filter(|label| delegation_label_value(label).is_some())
+            .cloned()
             .collect::<Vec<_>>();
         let expected_delegation_label = expected_delegation
             .as_deref()
