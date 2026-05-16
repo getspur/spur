@@ -306,6 +306,9 @@ fn can_skip_init_flush(beads_dir: &Path) -> bool {
     if !db_path.exists() {
         return false;
     }
+    if pre_open_quick_check(&db_path).is_err() {
+        return false;
+    }
 
     let jsonl_path = beads_dir.join("issues.jsonl");
     let Ok(jsonl_meta) = std::fs::metadata(&jsonl_path) else {
@@ -319,7 +322,11 @@ fn can_skip_init_flush(beads_dir: &Path) -> bool {
         Ok(e) => e,
         Err(_) => return false,
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return false,
+        };
         let name = entry.file_name();
         if let Some(name_str) = name.to_str() {
             if is_jsonl_temp_file(name_str) {
@@ -328,9 +335,30 @@ fn can_skip_init_flush(beads_dir: &Path) -> bool {
         }
     }
 
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(_) => return false,
+    };
+    let needs_flush = match conn.query_row(
+        "SELECT value FROM metadata WHERE key = 'needs_flush'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(value) => value == "true",
+        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+        Err(_) => return false,
+    };
+    if needs_flush {
+        return false;
+    }
+
     let Ok(db_meta) = std::fs::metadata(&db_path) else {
         return false;
     };
+    // Intentionally keep strict `>` checks here (not `>=`) until mtime semantics are revisited.
     if db_meta.modified().ok().is_some_and(|m| m > jsonl_mtime) {
         return false;
     }
@@ -406,6 +434,15 @@ mod can_skip_init_flush_tests {
         set_file_mtime(path, FileTime::from_system_time(t)).unwrap();
     }
 
+    fn create_valid_db(path: &Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn returns_false_when_db_missing() {
         let dir = TempDir::new().unwrap();
@@ -417,7 +454,7 @@ mod can_skip_init_flush_tests {
     #[test]
     fn returns_false_when_jsonl_missing() {
         let dir = TempDir::new().unwrap();
-        touch(&dir.path().join("beads.db"));
+        create_valid_db(&dir.path().join("beads.db"));
         assert!(!can_skip_init_flush(dir.path()));
     }
 
@@ -426,7 +463,7 @@ mod can_skip_init_flush_tests {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("beads.db");
         let jsonl = dir.path().join("issues.jsonl");
-        touch(&db);
+        create_valid_db(&db);
         touch(&jsonl);
         let now = SystemTime::now();
         set_mtime(&db, now);
@@ -442,7 +479,7 @@ mod can_skip_init_flush_tests {
         let db = dir.path().join("beads.db");
         let jsonl = dir.path().join("issues.jsonl");
         touch(&jsonl);
-        touch(&db);
+        create_valid_db(&db);
         let old = SystemTime::now() - Duration::from_secs(60);
         let new = SystemTime::now();
         set_mtime(&jsonl, old);
@@ -456,7 +493,7 @@ mod can_skip_init_flush_tests {
         let db = dir.path().join("beads.db");
         let wal = dir.path().join("beads.db-wal");
         let jsonl = dir.path().join("issues.jsonl");
-        touch(&db);
+        create_valid_db(&db);
         touch(&jsonl);
         touch(&wal);
         let old = SystemTime::now() - Duration::from_secs(60);
@@ -472,7 +509,7 @@ mod can_skip_init_flush_tests {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("beads.db");
         let jsonl = dir.path().join("issues.jsonl");
-        touch(&db);
+        create_valid_db(&db);
         touch(&jsonl);
         let old = SystemTime::now() - Duration::from_secs(60);
         let new = SystemTime::now();
@@ -486,11 +523,50 @@ mod can_skip_init_flush_tests {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("beads.db");
         let jsonl = dir.path().join("issues.jsonl");
-        touch(&db);
+        create_valid_db(&db);
         touch(&jsonl);
         let t = SystemTime::now() - Duration::from_secs(60);
         set_mtime(&db, t);
         set_mtime(&jsonl, t);
         assert!(can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_false_when_needs_flush_metadata_is_true() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("beads.db");
+        let jsonl = dir.path().join("issues.jsonl");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES ('needs_flush', 'true')",
+                [],
+            )
+            .unwrap();
+        }
+        touch(&jsonl);
+        let old = SystemTime::now() - Duration::from_secs(60);
+        let new = SystemTime::now();
+        set_mtime(&db, old);
+        set_mtime(&jsonl, new);
+        assert!(!can_skip_init_flush(dir.path()));
+    }
+
+    #[test]
+    fn returns_false_when_db_is_zero_byte() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("beads.db");
+        let jsonl = dir.path().join("issues.jsonl");
+        touch(&db);
+        touch(&jsonl);
+        let t = SystemTime::now() - Duration::from_secs(60);
+        set_mtime(&db, t);
+        set_mtime(&jsonl, t);
+        assert!(!can_skip_init_flush(dir.path()));
     }
 }
