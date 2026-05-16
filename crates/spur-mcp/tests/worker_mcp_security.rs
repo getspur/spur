@@ -30,6 +30,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{McpServer, McpServerHttp};
+use rmcp::{
+    model::CallToolRequestParams, service::ServiceError, transport::StreamableHttpClientTransport,
+    ServiceExt,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use spur_acp::config::{AgentConfig, SpurConfig};
@@ -147,18 +151,45 @@ async fn boot_test_server(
 }
 
 async fn call_jsonrpc(url_with_token: &str, params: Value) -> Value {
-    let resp = reqwest::Client::new()
-        .post(url_with_token)
-        .json(&serde_json::json!({
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(
+            url_with_token.to_string(),
+        ))
+        .await
+        .expect("rmcp client initialize");
+    let tool_name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .expect("params.name is required")
+        .to_string();
+    let mut request = CallToolRequestParams::new(tool_name);
+    request.arguments = params.get("arguments").and_then(|v| v.as_object()).cloned();
+
+    let response = match client.call_tool(request).await {
+        Ok(result) => serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "tools/call",
-            "params": params,
-        }))
-        .send()
-        .await
-        .expect("send JSON-RPC request");
-    resp.json().await.expect("response body must be JSON")
+            "result": serde_json::to_value(result).expect("serialize CallToolResult"),
+        }),
+        Err(error) => {
+            let (code, message) = match &error {
+                ServiceError::McpError(mcp_error) => {
+                    (i64::from(mcp_error.code.0), mcp_error.message.to_string())
+                }
+                _ => (-32603, error.to_string()),
+            };
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": code,
+                    "message": message,
+                }
+            })
+        }
+    };
+    drop(client);
+    response
 }
 
 async fn wait_for_read_aggregate(

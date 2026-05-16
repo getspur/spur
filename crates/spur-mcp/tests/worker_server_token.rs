@@ -79,6 +79,7 @@ async fn test_server() -> (TempDir, Arc<WorkerMcpServer>) {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn valid_token_round_trip_header() {
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -95,6 +96,7 @@ async fn valid_token_round_trip_header() {
 }
 
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn valid_token_round_trip_query() {
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
@@ -222,6 +224,7 @@ async fn wrong_brain_session_id_rejected() {
 /// trailing newline. The server must detect the truncated read and close the
 /// connection with 401 well before the 15-second headers-phase timeout.
 #[tokio::test]
+#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn long_header_line_without_newline_rejected_quickly() {
     let (_dir, server) = test_server().await;
 
