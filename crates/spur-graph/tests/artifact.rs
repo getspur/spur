@@ -4,8 +4,8 @@ use spur_graph::validation::{
     compute_anchor_hash, validate_file, validate_symbol, FailureReason, ValidationOutcome,
 };
 use spur_graph::{
-    load_artifact, GraphFileArtifact, GraphSymbolArtifact, CODE_FILE_URI_PREFIX,
-    CODE_SYMBOL_URI_PREFIX,
+    load_artifact, read_artifact_header, GraphFileArtifact, GraphSymbolArtifact,
+    CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
 };
 
 #[test]
@@ -18,6 +18,7 @@ fn load_artifact_accepts_fixture_schema() {
     let artifact = load_artifact(&fixture_path).expect("fixture should load");
 
     assert_eq!(artifact.header.graph_index_version, "fixture-2026-05-11");
+    assert_eq!(artifact.header.content_hash_blake3, None);
     assert_eq!(artifact.files.len(), 2);
     assert_eq!(artifact.symbols.len(), 4);
     assert!(artifact.diagnostics.is_empty());
@@ -38,6 +39,49 @@ fn load_artifact_accepts_fixture_schema() {
     }));
     assert_eq!(CODE_FILE_URI_PREFIX, "graph://file/");
     assert_eq!(CODE_SYMBOL_URI_PREFIX, "graph://symbol/");
+}
+
+#[test]
+fn load_artifact_defaults_missing_content_hash_to_none() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy_no_hash.json");
+    fs::write(
+        &path,
+        r#"{
+          "header": {"graph_index_version": "v1"},
+          "files": [],
+          "symbols": []
+        }"#,
+    )
+    .expect("write fixture");
+
+    let artifact = load_artifact(&path).expect("legacy artifact should load");
+    assert_eq!(artifact.header.graph_index_version, "v1");
+    assert_eq!(artifact.header.content_hash_blake3, None);
+}
+
+#[test]
+fn read_artifact_header_extracts_content_hash_when_present() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("with_hash.json");
+    fs::write(
+        &path,
+        r#"{
+          "header": {
+            "graph_index_version": "v1",
+            "content_hash_blake3": "abc123"
+          },
+          "manifest_version": "m1",
+          "file_manifests": [],
+          "files": [],
+          "symbols": []
+        }"#,
+    )
+    .expect("write fixture");
+
+    let header = read_artifact_header(&path).expect("header should load");
+    assert_eq!(header.graph_index_version, "v1");
+    assert_eq!(header.content_hash_blake3.as_deref(), Some("abc123"));
 }
 
 #[test]

@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+blake3 = "1"
 ignore = "0.4.25"
 petgraph = { workspace = true }
 serde = { workspace = true }
