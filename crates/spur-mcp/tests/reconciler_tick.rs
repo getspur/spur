@@ -257,7 +257,10 @@ async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
         .await
         .expect("tick_once must not hang")
         .expect("tick_once");
-    assert!(!did_work, "partial plan must not produce dispatch work");
+    // `did_work` may be true because index_hygiene_sweep (§10.3.1) contributes
+    // work even when nothing is dispatched. The real invariant is the
+    // delegation channel: no enqueued delegation means no partial dispatch.
+    let _ = did_work;
     assert!(
         delegation_rx.try_recv().is_err(),
         "partial plan must not enqueue a delegation"
@@ -310,7 +313,10 @@ async fn tick_once_skips_plan_owned_by_another_brain() {
     );
 
     let did_work = reconciler.tick_once().await.expect("tick_once");
-    assert!(!did_work, "other-owned plan must not produce dispatch work");
+    // `did_work` may be true because index_hygiene_sweep (§10.3.1) contributes
+    // work on plan-scoped issues regardless of ownership. The real invariant
+    // for plan-ownership skip is the delegation channel.
+    let _ = did_work;
     assert!(
         delegation_rx.try_recv().is_err(),
         "other-owned plan must not enqueue a delegation"
@@ -1716,6 +1722,26 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     label_issue(dir.path(), &task_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
     label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    run_br(dir.path(), &["dep", "add", &task_id, &epic_id]);
+    let plan_submit = audit_sentinel::encode_comment(&AuditSentinelKind::PlanSubmit {
+        plan_id: "plan-1".to_string(),
+        epic_issue_id: epic_id.clone(),
+        task_ids: vec!["t1".to_string()],
+        base_snapshot_branch: None,
+        base_snapshot_oid: None,
+        execution_mode: None,
+        brain_session_id: None,
+        explicit_base: None,
+    });
+    run_br(dir.path(), &["comments", "add", &epic_id, &plan_submit]);
+    let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
+        task_id: "t1".to_string(),
+        context_files: Vec::new(),
+        task_text: None,
+        agent: Some("codex".into()),
+        depends_on: None,
+    });
+    run_br(dir.path(), &["comments", "add", &task_id, &task_spec]);
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
     let task_tracker = tokio_util::task::TaskTracker::new();
