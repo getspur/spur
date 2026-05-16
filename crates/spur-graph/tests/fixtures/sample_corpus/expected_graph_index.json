@@ -5,7 +5,7 @@
   "manifest_version": "<normalized>",
   "file_manifests": [
     {
-      "stable_file_id": "b4bf8362c80d42ea",
+      "stable_file_id": "c5ed2ae8f633f186",
       "path": "src/lib.rs",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -21,7 +21,7 @@
       ]
     },
     {
-      "stable_file_id": "b481045ec43d18b4",
+      "stable_file_id": "9776f1a0b79c3f6f",
       "path": "src/utils.rs",
       "mtime_nanos": 0,
       "size_bytes": 0,
@@ -36,17 +36,17 @@
   ],
   "files": [
     {
-      "stable_file_id": "b4bf8362c80d42ea",
+      "stable_file_id": "c5ed2ae8f633f186",
       "file_path": "src/lib.rs"
     },
     {
-      "stable_file_id": "b481045ec43d18b4",
+      "stable_file_id": "9776f1a0b79c3f6f",
       "file_path": "src/utils.rs"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "c7e33b75e565d730",
+      "stable_symbol_id": "2a74ff1fb30c8d9d",
       "file_path": "src/lib.rs",
       "byte_range": [
         37,
@@ -62,7 +62,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "51e4143c6a874467",
+      "stable_symbol_id": "a7f9209de931a581",
       "file_path": "src/lib.rs",
       "byte_range": [
         54,
@@ -78,7 +78,7 @@
       "enclosing_scope": "inline"
     },
     {
-      "stable_symbol_id": "9ce57cf00efb9967",
+      "stable_symbol_id": "82db52e35325d8ab",
       "file_path": "src/lib.rs",
       "byte_range": [
         93,
@@ -94,7 +94,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "be1aa2b3e0311fc2",
+      "stable_symbol_id": "ebd7aaa1f390e384",
       "file_path": "src/lib.rs",
       "byte_range": [
         133,
@@ -110,7 +110,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "2583eb4312998eb1",
+      "stable_symbol_id": "c743005b36750f94",
       "file_path": "src/lib.rs",
       "byte_range": [
         148,
@@ -126,7 +126,7 @@
       "enclosing_scope": "impl App"
     },
     {
-      "stable_symbol_id": "becef4d216986a2a",
+      "stable_symbol_id": "98e9d54ac8d82589",
       "file_path": "src/lib.rs",
       "byte_range": [
         195,
@@ -142,7 +142,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "3842b4dc4be739d2",
+      "stable_symbol_id": "1e4b6ed218256711",
       "file_path": "src/lib.rs",
       "byte_range": [
         236,
@@ -158,7 +158,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "8adf4fe25a85c876",
+      "stable_symbol_id": "453c28f31af2fd8a",
       "file_path": "src/utils.rs",
       "byte_range": [
         0,
@@ -174,7 +174,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "6a2e722ded1d0d94",
+      "stable_symbol_id": "bfc447c09b3027cf",
       "file_path": "src/utils.rs",
       "byte_range": [
         20,
@@ -190,7 +190,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "3c12493bdaca1457",
+      "stable_symbol_id": "26f2a95cbbcbdcb6",
       "file_path": "src/utils.rs",
       "byte_range": [
         40,
@@ -206,7 +206,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "1dd835e82e96296c",
+      "stable_symbol_id": "4d5b556fad048aa4",
       "file_path": "src/utils.rs",
       "byte_range": [
         58,
