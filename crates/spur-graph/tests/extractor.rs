@@ -7,10 +7,10 @@ use std::time::Duration;
 use pretty_assertions::assert_eq;
 use spur_graph::build_facts;
 use spur_graph::graph::petgraph_builder::build_petgraph;
-use spur_graph::load_artifact;
 use spur_graph::store::json::{
     artifact_from_facts, artifact_from_facts_incremental, write_artifact, BuildMode,
 };
+use spur_graph::{load_artifact, read_artifact_header};
 use spur_graph::{Confidence, NodeKind, RelationKind};
 
 fn fixture_root() -> PathBuf {
@@ -100,6 +100,17 @@ fn call_edge_target_for(
                 && edge.target_label.as_deref() == Some("callee")
         })
         .and_then(|edge| edge.target_stable_symbol_id.clone())
+}
+
+fn write_and_read_content_hash(
+    artifact: &spur_graph::GraphIndexArtifact,
+    path: &std::path::Path,
+) -> String {
+    write_artifact(artifact, path).expect("write artifact");
+    read_artifact_header(path)
+        .expect("read artifact header")
+        .content_hash_blake3
+        .expect("writer should stamp BLAKE3 content hash")
 }
 
 enum EditStep {
@@ -694,11 +705,90 @@ fn artifact_writer_round_trips_through_existing_reader() {
     assert_eq!(loaded.files, artifact.files);
     assert_eq!(loaded.symbols, artifact.symbols);
     assert_eq!(loaded.edges, artifact.edges);
+    let hash = loaded
+        .header
+        .content_hash_blake3
+        .as_deref()
+        .expect("writer should stamp BLAKE3 content hash");
+    assert_eq!(hash.len(), 64, "blake3 hex hash should be 64 chars");
+    assert!(
+        hash.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "expected lowercase hex hash: {hash}"
+    );
     assert!(loaded.symbols.iter().any(|symbol| {
         symbol.entity_name == "run"
             && symbol.symbol_kind == "method"
             && symbol.enclosing_scope.as_deref() == Some("impl App")
     }));
+}
+
+#[test]
+fn artifact_writer_hash_is_deterministic_for_identical_content() {
+    let root = fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first_path = dir.path().join("graph_index.first.json");
+    let second_path = dir.path().join("graph_index.second.json");
+
+    write_artifact(&artifact, &first_path).expect("write first artifact");
+    write_artifact(&artifact, &second_path).expect("write second artifact");
+
+    let first = read_artifact_header(&first_path).expect("read first header");
+    let second = read_artifact_header(&second_path).expect("read second header");
+    assert_eq!(
+        first.content_hash_blake3, second.content_hash_blake3,
+        "identical artifact content should produce identical BLAKE3 hashes"
+    );
+    assert!(first.content_hash_blake3.is_some());
+}
+
+#[test]
+fn artifact_writer_hash_changes_when_symbol_content_changes() {
+    let root = fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let mut mutated = artifact.clone();
+    let symbol = mutated
+        .symbols
+        .first_mut()
+        .expect("fixture should contain at least one symbol");
+    symbol.entity_name.push_str("_mutated");
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let original_hash = write_and_read_content_hash(&artifact, &dir.path().join("original.json"));
+    let mutated_hash = write_and_read_content_hash(&mutated, &dir.path().join("mutated.json"));
+
+    assert_ne!(
+        original_hash, mutated_hash,
+        "changing symbol payload should change BLAKE3 content hash"
+    );
+}
+
+#[test]
+fn artifact_writer_hash_changes_when_edge_content_changes() {
+    let root = fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let mut mutated = artifact.clone();
+    let edge = mutated
+        .edges
+        .first_mut()
+        .expect("fixture should contain at least one edge");
+    edge.target_label = Some(match edge.target_label.take() {
+        Some(label) => format!("{label}_mutated"),
+        None => "mutated_target".to_string(),
+    });
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let original_hash = write_and_read_content_hash(&artifact, &dir.path().join("original.json"));
+    let mutated_hash = write_and_read_content_hash(&mutated, &dir.path().join("mutated.json"));
+
+    assert_ne!(
+        original_hash, mutated_hash,
+        "changing edge payload should change BLAKE3 content hash"
+    );
 }
 
 #[test]

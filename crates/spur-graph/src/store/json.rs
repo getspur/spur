@@ -38,6 +38,15 @@ struct FileBucket {
     edges: Vec<GraphEdgeArtifact>,
 }
 
+#[derive(serde::Serialize)]
+struct GraphArtifactBodyForHash<'a> {
+    files: &'a [GraphFileArtifact],
+    symbols: &'a [GraphSymbolArtifact],
+    edges: &'a [GraphEdgeArtifact],
+    file_manifests: &'a [GraphFileManifestEntry],
+    manifest_version: &'a str,
+}
+
 pub fn current_manifest_version() -> String {
     let mut hasher = Sha256::new();
     hasher.update(SCHEMA_VERSION.as_bytes());
@@ -148,8 +157,27 @@ pub fn write_artifact(artifact: &GraphIndexArtifact, path: &Path) -> anyhow::Res
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create `{}`", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(artifact).context("failed to encode graph artifact")?;
+    let mut artifact_with_hash = artifact.clone();
+    artifact_with_hash.header.content_hash_blake3 = Some(
+        artifact_content_hash_blake3_hex(artifact)
+            .context("failed to compute graph artifact content hash")?,
+    );
+    let json = serde_json::to_string_pretty(&artifact_with_hash)
+        .context("failed to encode graph artifact")?;
     fs::write(path, json).with_context(|| format!("failed to write `{}`", path.display()))
+}
+
+fn artifact_content_hash_blake3_hex(artifact: &GraphIndexArtifact) -> anyhow::Result<String> {
+    let body = GraphArtifactBodyForHash {
+        files: &artifact.files,
+        symbols: &artifact.symbols,
+        edges: &artifact.edges,
+        file_manifests: &artifact.file_manifests,
+        manifest_version: &artifact.manifest_version,
+    };
+    let canonical_json = serde_json::to_vec(&body)
+        .context("failed to encode graph artifact body for content hash")?;
+    Ok(blake3::hash(&canonical_json).to_hex().to_string())
 }
 
 fn build_artifact_from_facts_and_stats(
@@ -527,6 +555,8 @@ fn rebuild_from_buckets(
     GraphIndexArtifact {
         header: GraphIndexHeader {
             graph_index_version: PHASE1_GRAPH_INDEX_VERSION.to_string(),
+            // Content hash is stamped at write time, after body serialization input is finalized.
+            content_hash_blake3: None,
         },
         manifest_version,
         file_manifests: manifests,
