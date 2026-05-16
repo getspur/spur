@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nucleo_matcher::{
@@ -29,7 +30,7 @@ const CODE_CAP: usize = 3;
 
 struct CachedSourceIndex {
     entries: Vec<MentionEntry>,
-    code_payloads: HashMap<String, CodeMentionPayload>,
+    code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
     built_at: Instant,
 }
 
@@ -59,7 +60,7 @@ impl From<CompletionScope<'_>> for CompletionScopeKey {
 pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
     cache: HashMap<&'static str, CachedSourceIndex>,
-    code_payloads: HashMap<String, CodeMentionPayload>,
+    code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
     code_graph_hint: Option<&'static str>,
     matcher: Matcher,
     #[cfg(any(test, debug_assertions))]
@@ -165,7 +166,7 @@ impl MentionRegistry {
     }
 
     pub fn lookup_code_payload(&self, uri: &str) -> Option<&CodeMentionPayload> {
-        self.code_payloads.get(uri)
+        self.code_payloads.get(uri).map(Arc::as_ref)
     }
 
     pub fn code_graph_hint(&self) -> Option<&'static str> {
@@ -230,11 +231,15 @@ impl MentionRegistry {
             if needs_rebuild {
                 tracing::debug!(source = source_name, "rebuilding mention source cache");
                 if let Ok(entries) = source.build(cwd) {
+                    let mut source_code_payloads = HashMap::new();
+                    for (uri, payload) in source.code_payloads() {
+                        source_code_payloads.insert(uri.clone(), Arc::clone(payload));
+                    }
                     self.cache.insert(
                         source_name,
                         CachedSourceIndex {
                             entries,
-                            code_payloads: source.code_payloads().into_iter().collect(),
+                            code_payloads: source_code_payloads,
                             built_at: Instant::now(),
                         },
                     );
@@ -246,7 +251,9 @@ impl MentionRegistry {
         for source in &self.sources {
             if let Some(cached) = self.cache.get(source.name()) {
                 all_entries.extend(cached.entries.iter().cloned());
-                code_payloads.extend(cached.code_payloads.clone());
+                for (uri, payload) in &cached.code_payloads {
+                    code_payloads.insert(uri.clone(), Arc::clone(payload));
+                }
             }
         }
         self.code_payloads = code_payloads;
