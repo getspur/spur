@@ -10,6 +10,13 @@ pub fn schema_value<T: JsonSchema>() -> Value {
     value
 }
 
+pub fn schema_object<T: JsonSchema>() -> serde_json::Map<String, Value> {
+    match schema_value::<T>() {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
 fn normalize_defs_refs(value: &mut Value) {
     if let Value::Object(map) = value {
         if let Some(definitions) = map.remove("definitions") {
