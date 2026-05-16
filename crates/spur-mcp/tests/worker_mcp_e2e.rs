@@ -39,6 +39,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use agent_client_protocol::schema::{McpServer, McpServerHttp};
+use rmcp::{
+    model::CallToolRequestParams,
+    service::ServiceError,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use serde_json::Value;
 use spur_acp::config::SpurConfig;
 use spur_acp::types::SessionId;
@@ -56,7 +64,7 @@ use std::collections::BTreeSet;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-const DELEGATION_ID: &str = "d-e2e-worker-mcp";
+const DELEGATION_ID: &str = "550e8400-e29b-41d4-a716-446655440123";
 
 fn pro_feature_gate() -> Arc<FeatureGate> {
     let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
@@ -93,7 +101,6 @@ fn attach_test_beads(repo: &Path, w: &TestBeadsWorkspace) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn end_to_end_orchestrator_worker_mcp_get_issue() {
     let dir = TempDir::new().expect("tempdir");
     init_repo(dir.path());
@@ -163,7 +170,7 @@ async fn end_to_end_orchestrator_worker_mcp_get_issue() {
     worker_server.register_delegation(
         DELEGATION_ID.into(),
         DelegationContext {
-            enable_worker_progress: false,
+            enable_worker_progress: true,
         },
     );
 
@@ -222,13 +229,31 @@ async fn end_to_end_orchestrator_worker_mcp_get_issue() {
         .await
         .expect("create issue");
 
-    let response = call_jsonrpc(
-        &url_with_token,
-        "tools/call",
-        serde_json::json!({
-            "name": "get_issue",
-            "arguments": { "id": &issue_id }
-        }),
+    let mut tools = list_tools_with_bearer(&server_url, &token)
+        .await
+        .expect("list_tools must succeed over streamable HTTP");
+    tools.sort();
+    for expected in [
+        "fetch_outcome_artifact",
+        "get_issue",
+        "get_plan_status",
+        "get_task_diff",
+        "list_issues",
+        "report_progress",
+        "report_signal",
+        "update_issue",
+    ] {
+        assert!(
+            tools.iter().any(|name| name == expected),
+            "curated worker tool set missing {expected}: {tools:?}"
+        );
+    }
+
+    let response = call_tool_with_bearer(
+        &server_url,
+        &token,
+        "get_issue",
+        serde_json::json!({ "id": &issue_id }),
     )
     .await;
     assert!(
@@ -244,6 +269,82 @@ async fn end_to_end_orchestrator_worker_mcp_get_issue() {
         response["result"]["body"].as_str(),
         Some("worker reads this body via get_issue"),
         "get_issue result must include the seeded body: {response}"
+    );
+
+    let list_issues = call_tool_with_bearer(
+        &server_url,
+        &token,
+        "list_issues",
+        serde_json::json!({ "limit": 20 }),
+    )
+    .await;
+    assert!(
+        list_issues.get("error").is_none() || list_issues["error"].is_null(),
+        "list_issues must succeed, got: {list_issues}"
+    );
+    assert!(
+        list_issues["result"].is_array(),
+        "list_issues result must be an array, got: {list_issues}"
+    );
+
+    let get_plan_status = call_tool_with_bearer(
+        &server_url,
+        &token,
+        "get_plan_status",
+        serde_json::json!({ "plan_id": "missing-plan" }),
+    )
+    .await;
+    assert_eq!(
+        get_plan_status["error"]["code"].as_i64(),
+        Some(-32602),
+        "unknown plan_id should be invalid params, got: {get_plan_status}"
+    );
+
+    let get_task_diff = call_tool_with_bearer(
+        &server_url,
+        &token,
+        "get_task_diff",
+        serde_json::json!({
+            "plan_id": "missing-plan",
+            "task_id": &issue_id
+        }),
+    )
+    .await;
+    assert_eq!(
+        get_task_diff["error"]["code"].as_i64(),
+        Some(-32602),
+        "unknown plan_id should be invalid params, got: {get_task_diff}"
+    );
+
+    let fetch_outcome_artifact = call_tool_with_bearer(
+        &server_url,
+        &token,
+        "fetch_outcome_artifact",
+        serde_json::json!({ "delegation_id": DELEGATION_ID }),
+    )
+    .await;
+    assert!(
+        matches!(
+            fetch_outcome_artifact["error"]["code"].as_i64(),
+            Some(-32004) | Some(-32001)
+        ),
+        "missing artifact must return a non-success MCP error, got: {fetch_outcome_artifact}"
+    );
+
+    let report_progress = call_tool_with_bearer(
+        &server_url,
+        &token,
+        "report_progress",
+        serde_json::json!({
+            "message": "still working",
+            "percent": 42.0
+        }),
+    )
+    .await;
+    assert_eq!(
+        report_progress["result"]["ok"].as_bool(),
+        Some(true),
+        "report_progress must return ok=true, got: {report_progress}"
     );
 
     // ── Drive flush so (c) audit sentinel + (d) summary land. ──────────
@@ -276,15 +377,28 @@ async fn end_to_end_orchestrator_worker_mcp_get_issue() {
     };
     assert_eq!(delegation_id, DELEGATION_ID);
     assert_eq!(brain_id, brain_session_id.to_string());
-    assert!(
-        calls_total >= 1,
-        "calls_total must include the get_issue call (got {calls_total})"
+    assert_eq!(
+        calls_total, 6,
+        "summary must include five read calls plus one report_progress call"
     );
-    assert!(
-        calls_by_tool.get("get_issue").copied().unwrap_or(0) >= 1,
-        "calls_by_tool must record get_issue (got {calls_by_tool:?})"
+    for expected in [
+        "fetch_outcome_artifact",
+        "get_issue",
+        "get_plan_status",
+        "get_task_diff",
+        "list_issues",
+        "report_progress",
+    ] {
+        assert_eq!(
+            calls_by_tool.get(expected).copied().unwrap_or(0),
+            1,
+            "summary must attribute exactly one call to {expected}: {calls_by_tool:?}"
+        );
+    }
+    assert_eq!(
+        errors, 3,
+        "three read tools should fail in this fixture (unknown plan/artifact)"
     );
-    assert_eq!(errors, 0, "successful read must not bump errors");
 
     // ── (e) Ordering: summary precedes DelegationCompleted. ────────────
     //
@@ -332,30 +446,87 @@ async fn end_to_end_orchestrator_worker_mcp_get_issue() {
         unreachable!("wait_for_read_aggregate_sentinel returns only ReadAggregate")
     };
     assert_eq!(aud_id, DELEGATION_ID);
+    for expected in [
+        "fetch_outcome_artifact",
+        "get_issue",
+        "get_plan_status",
+        "get_task_diff",
+        "list_issues",
+    ] {
+        assert!(
+            entries.iter().any(|e| e.tool_name == expected),
+            "audit entries must include {expected}: {entries:?}"
+        );
+    }
     assert!(
         entries
             .iter()
             .any(|e| e.tool_name == "get_issue" && e.target_issue_id.as_deref() == Some(&issue_id)),
-        "audit entries must include a get_issue call for the seeded issue: {entries:?}"
+        "get_issue entry must target the seeded issue: {entries:?}"
     );
 
     worker_server.shutdown(Duration::from_secs(5)).await;
 }
 
-/// POST a single JSON-RPC `tools/call` and return the parsed response.
-async fn call_jsonrpc(url_with_token: &str, method: &str, params: Value) -> Value {
-    let resp = reqwest::Client::new()
-        .post(url_with_token)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
+async fn list_tools_with_bearer(url: &str, token: &str) -> Result<Vec<String>, String> {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string()).auth_header(token);
+    let client =
+        ().serve(StreamableHttpClientTransport::from_config(config))
+            .await
+            .map_err(|error| error.to_string())?;
+    let tools = client
+        .list_all_tools()
         .await
-        .expect("send JSON-RPC request");
-    resp.json().await.expect("response body must be JSON")
+        .map_err(|error| error.to_string())?;
+    let names = tools
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    drop(client);
+    Ok(names)
+}
+
+async fn call_tool_with_bearer(url: &str, token: &str, name: &str, arguments: Value) -> Value {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string()).auth_header(token);
+    let client =
+        ().serve(StreamableHttpClientTransport::from_config(config))
+            .await
+            .expect("rmcp client initialize");
+    let mut request = CallToolRequestParams::new(name.to_string());
+    request.arguments = arguments.as_object().cloned();
+    let response = match client.call_tool(request).await {
+        Ok(result) => {
+            let payload = result
+                .structured_content
+                .clone()
+                .unwrap_or_else(|| serde_json::to_value(result).expect("serialize result"));
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": payload
+            })
+        }
+        Err(error) => service_error_response(error),
+    };
+    drop(client);
+    response
+}
+
+fn service_error_response(error: ServiceError) -> Value {
+    let (code, message) = match &error {
+        ServiceError::McpError(mcp_error) => {
+            (i64::from(mcp_error.code.0), mcp_error.message.to_string())
+        }
+        _ => (-32603, error.to_string()),
+    };
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
 }
 
 /// Drain `rx` until a `WorkerMcpDelegationSummary` for `delegation_id`
