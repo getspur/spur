@@ -255,5 +255,167 @@
       "anchor_hash": "15206326328853749816",
       "enclosing_scope": "Helper"
     }
+  ],
+  "edges": [
+    {
+      "source_stable_symbol_id": "552287194f6a520d",
+      "target_stable_symbol_id": "4edfa70794ae6da4",
+      "target_label": "renderThing",
+      "relation": "calls",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "552287194f6a520d",
+      "target_stable_symbol_id": "90e88e128d21c9dd",
+      "target_label": "run",
+      "relation": "calls",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "71d7a253d5189bed",
+      "target_stable_symbol_id": "552287194f6a520d",
+      "target_label": "boot",
+      "relation": "calls",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "7722817d2c623ab4",
+      "target_stable_symbol_id": "90e88e128d21c9dd",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "90e88e128d21c9dd",
+      "target_stable_symbol_id": "4edfa70794ae6da4",
+      "target_label": "renderThing",
+      "relation": "calls",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "c0a4422c47da8073",
+      "target_stable_symbol_id": "4d1dc1688628bd43",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "c0a4422c47da8073",
+      "target_stable_symbol_id": "4edfa70794ae6da4",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "c0a4422c47da8073",
+      "target_stable_symbol_id": "7722817d2c623ab4",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "c0a4422c47da8073",
+      "target_stable_symbol_id": "9a785a22c9c059d2",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "c0a4422c47da8073",
+      "target_stable_symbol_id": "aa5590284609af88",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "c96bb5dfecee25f8",
+      "target_stable_symbol_id": "552287194f6a520d",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "3654d8e7804b6596",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "4edfa70794ae6da4",
+      "target_label": "renderThing",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "6357d5fb97a04d49",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "71d7a253d5189bed",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "7722817d2c623ab4",
+      "target_label": "Helper",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "93302246b4aa109e",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "96f2eee4fe283bbe",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "9a785a22c9c059d2",
+      "target_label": "Mode",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "cfb90035f8daa878",
+      "target_stable_symbol_id": "c96bb5dfecee25f8",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0
+    }
   ]
 }
