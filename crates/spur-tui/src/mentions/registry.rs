@@ -15,7 +15,8 @@ use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
 use super::worker_source::{WorkerMentionDescriptor, WorkerMentionSource};
 use spur_graph::CodeMentionPayload;
 
-const CACHE_TTL: Duration = Duration::from_secs(60);
+const GLOBAL_SOURCE_CACHE_TTL: Duration = Duration::from_secs(600);
+const SESSION_SOURCE_CACHE_TTL: Duration = Duration::from_secs(600);
 pub const CODE_GRAPH_INDEX_ENV: &str = "SPUR_CODE_GRAPH_INDEX";
 pub const CODE_GRAPH_MISSING_HINT: &str = "Run 'spur graph build' to enable code-graph mentions";
 
@@ -26,8 +27,9 @@ const FILE_CAP: usize = 6;
 const ISSUE_CAP: usize = 3;
 const CODE_CAP: usize = 3;
 
-struct CachedIndex {
+struct CachedSourceIndex {
     entries: Vec<MentionEntry>,
+    code_payloads: HashMap<String, CodeMentionPayload>,
     built_at: Instant,
 }
 
@@ -56,7 +58,7 @@ impl From<CompletionScope<'_>> for CompletionScopeKey {
 
 pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
-    cache: HashMap<CompletionScopeKey, CachedIndex>,
+    cache: HashMap<&'static str, CachedSourceIndex>,
     code_payloads: HashMap<String, CodeMentionPayload>,
     code_graph_hint: Option<&'static str>,
     matcher: Matcher,
@@ -155,6 +157,13 @@ impl MentionRegistry {
         self.code_payloads.clear();
     }
 
+    fn clear_cache_for(&mut self, name: &'static str) {
+        self.cache.remove(name);
+        if matches!(name, "code" | "code_graph") {
+            self.code_payloads.retain(|uri, _| !is_graph_uri(uri));
+        }
+    }
+
     pub fn lookup_code_payload(&self, uri: &str) -> Option<&CodeMentionPayload> {
         self.code_payloads.get(uri)
     }
@@ -181,7 +190,7 @@ impl MentionRegistry {
         } else {
             self.sources.push(Box::new(IssueMentionSource::new(issues)));
         }
-        self.clear_cache();
+        self.clear_cache_for("issue");
     }
 
     pub fn set_worker_snapshot_in_place(&mut self, workers: Vec<WorkerMentionDescriptor>) {
@@ -195,7 +204,7 @@ impl MentionRegistry {
             self.sources
                 .push(Box::new(WorkerMentionSource::new(workers)));
         }
-        self.clear_cache();
+        self.clear_cache_for("worker");
     }
 
     pub fn query(
@@ -209,30 +218,39 @@ impl MentionRegistry {
         {
             self.query_call_count += 1;
         }
-        let key = CompletionScopeKey::from(scope);
-        let needs_rebuild = match self.cache.get(&key) {
-            Some(c) => c.built_at.elapsed() > CACHE_TTL,
-            None => true,
-        };
-        if needs_rebuild {
-            let mut all = Vec::new();
-            let mut code_payloads = HashMap::new();
-            for s in &mut self.sources {
-                if let Ok(mut entries) = s.build(cwd) {
-                    all.append(&mut entries);
-                    code_payloads.extend(s.code_payloads());
+        let _scope_key = CompletionScopeKey::from(scope);
+        let _span =
+            tracing::debug_span!("mention_registry_query", query_len = query.len()).entered();
+        for source in &mut self.sources {
+            let source_name = source.name();
+            let needs_rebuild = match self.cache.get(source_name) {
+                Some(cached) => cached.built_at.elapsed() > source_cache_ttl(source_name),
+                None => true,
+            };
+            if needs_rebuild {
+                tracing::debug!(source = source_name, "rebuilding mention source cache");
+                if let Ok(entries) = source.build(cwd) {
+                    self.cache.insert(
+                        source_name,
+                        CachedSourceIndex {
+                            entries,
+                            code_payloads: source.code_payloads().into_iter().collect(),
+                            built_at: Instant::now(),
+                        },
+                    );
                 }
             }
-            self.code_payloads = code_payloads;
-            self.cache.insert(
-                key.clone(),
-                CachedIndex {
-                    entries: all,
-                    built_at: Instant::now(),
-                },
-            );
         }
-        let entries = &self.cache[&key].entries;
+        let mut all_entries = Vec::new();
+        let mut code_payloads = HashMap::new();
+        for source in &self.sources {
+            if let Some(cached) = self.cache.get(source.name()) {
+                all_entries.extend(cached.entries.iter().cloned());
+                code_payloads.extend(cached.code_payloads.clone());
+            }
+        }
+        self.code_payloads = code_payloads;
+        let entries = &all_entries;
 
         if query.is_empty() {
             let mut workers: Vec<MentionEntry> = entries
@@ -525,6 +543,13 @@ fn typed_query_cmp(a: &RankedMention, b: &RankedMention, max_rank: u32) -> std::
         .then(stable_tie_key(&a.entry).cmp(stable_tie_key(&b.entry)))
 }
 
+fn source_cache_ttl(name: &'static str) -> Duration {
+    match name {
+        "file" | "code" | "code_graph" => GLOBAL_SOURCE_CACHE_TTL,
+        _ => SESSION_SOURCE_CACHE_TTL,
+    }
+}
+
 impl Default for MentionRegistry {
     fn default() -> Self {
         Self::new()
@@ -534,6 +559,10 @@ impl Default for MentionRegistry {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     use super::*;
     use crate::mentions::{
@@ -608,6 +637,66 @@ mod tests {
     }
 
     #[test]
+    fn set_issue_snapshot_does_not_invalidate_file_cache() {
+        let file_build_count = Arc::new(AtomicUsize::new(0));
+        let mut registry = test_registry(vec![
+            Box::new(CountingSource {
+                name: "file",
+                entries: vec![mention(MentionKind::File, 1, "src/main.rs".into())],
+                build_count: Arc::clone(&file_build_count),
+            }),
+            Box::new(IssueMentionSource::new(vec![issue(
+                "bd-1",
+                "Old title",
+                None,
+            )])),
+        ]);
+
+        let _ = registry.query(CompletionScope::PreSession, Path::new("."), "", 16);
+        assert_eq!(file_build_count.load(Ordering::Relaxed), 1);
+
+        registry.set_issue_snapshot(vec![issue("bd-2", "New title", None)]);
+        let _ = registry.query(CompletionScope::PreSession, Path::new("."), "", 16);
+
+        assert_eq!(file_build_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn presession_to_session_transition_reuses_global_caches() {
+        let file_build_count = Arc::new(AtomicUsize::new(0));
+        let code_build_count = Arc::new(AtomicUsize::new(0));
+        let session_id = SessionId("session-1".to_string());
+        let mut registry = test_registry(vec![
+            Box::new(CountingSource {
+                name: "file",
+                entries: vec![mention(MentionKind::File, 1, "src/lib.rs".into())],
+                build_count: Arc::clone(&file_build_count),
+            }),
+            Box::new(CountingSource {
+                name: "code",
+                entries: vec![mention(MentionKind::CodeFile, 2, "src/code.rs".into())],
+                build_count: Arc::clone(&code_build_count),
+            }),
+            Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
+                name: "alpha".into(),
+                description: None,
+                tier: None,
+            }])),
+        ]);
+
+        let _ = registry.query(CompletionScope::PreSession, Path::new("."), "", 16);
+        let _ = registry.query(
+            CompletionScope::Session(&session_id),
+            Path::new("."),
+            "",
+            16,
+        );
+
+        assert_eq!(file_build_count.load(Ordering::Relaxed), 1);
+        assert_eq!(code_build_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn query_uses_smart_case_matching() {
         let mut registry = MentionRegistry {
             sources: vec![Box::new(IssueMentionSource::new(vec![
@@ -635,6 +724,23 @@ mod tests {
 
     impl MentionSource for StaticSource {
         fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
+            Ok(self.entries.clone())
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    struct CountingSource {
+        name: &'static str,
+        entries: Vec<MentionEntry>,
+        build_count: Arc<AtomicUsize>,
+    }
+
+    impl MentionSource for CountingSource {
+        fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
+            self.build_count.fetch_add(1, Ordering::Relaxed);
             Ok(self.entries.clone())
         }
 
