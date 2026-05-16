@@ -162,11 +162,15 @@ pub async fn apply_mutation(
                         )
                         .await
                         .with_context(|| format!("persist plan scope on child {id}"))?;
-                    }
-                    if parent_plan_id.is_some() && !parent_context_files.is_empty() {
-                        super::emit_task_spec_audit(adv, &id, &id, &parent_context_files)
-                            .await
-                            .with_context(|| format!("persist child task spec {id}"))?;
+                        super::emit_task_spec_audit(
+                            adv,
+                            &id,
+                            &id,
+                            parent_agent,
+                            &parent_context_files,
+                        )
+                        .await
+                        .with_context(|| format!("persist child task spec {id}"))?;
                     }
                     child_ids.push(id);
                 }

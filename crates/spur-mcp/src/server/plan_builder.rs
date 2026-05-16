@@ -96,18 +96,18 @@ pub(crate) async fn build_epic_subgraph_with_activation_labels(
             .iter()
             .find(|task| task.task_id == task_id)
             .ok_or_else(|| format!("task spec for '{task_id}' disappeared during persistence"))?;
-        if !task.context_files.is_empty() {
-            let adv = advanced.ok_or_else(|| {
-                format!(
-                    "failed to persist child task spec for task '{task_id}': beads backend missing"
-                )
-            })?;
-            crate::plan::emit_task_spec_audit(adv, &child_id, &task.task_id, &task.context_files)
-                .await
-                .map_err(|e| {
-                    format!("failed to persist child task spec for task '{task_id}': {e}")
-                })?;
-        }
+        let adv = advanced.ok_or_else(|| {
+            format!("failed to persist child task spec for task '{task_id}': beads backend missing")
+        })?;
+        crate::plan::emit_task_spec_audit(
+            adv,
+            &child_id,
+            &task.task_id,
+            &task.agent,
+            &task.context_files,
+        )
+        .await
+        .map_err(|e| format!("failed to persist child task spec for task '{task_id}': {e}"))?;
         task_map.insert(task_id, child_id);
     }
 

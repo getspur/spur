@@ -24,11 +24,18 @@ fn shadow_projector_enabled() -> bool {
     })
 }
 
+fn compare_comment_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    match (left.parse::<u64>(), right.parse::<u64>()) {
+        (Ok(left_id), Ok(right_id)) => left_id.cmp(&right_id),
+        _ => left.cmp(right),
+    }
+}
+
 pub fn sort_projection_comments(mut comments: Vec<spur_pm::Comment>) -> Vec<spur_pm::Comment> {
     comments.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| compare_comment_ids(&left.id, &right.id))
     });
     comments
 }
@@ -792,19 +799,12 @@ pub fn project_status_for_issue(
             if !has_ready_label {
                 emit_label_audit_drift("ready-for-review", "audit_only", &issue.id);
             }
-            // Transitional workaround until t1-cleanup tightens invariants and
-            // removes this branch.
-            // if delegation label is still present but ready label has not landed yet,
-            // keep status Dispatched for this poll.
-            if let Some(delegation_id) = delegation_label.filter(|_| !has_ready_label) {
-                PlanTaskStatus::Dispatched {
-                    delegation_id: delegation_id.to_string(),
-                }
-            } else {
-                let summary = latest_completion_facts(audits)
-                    .and_then(|(_, _, result_summary, _, _)| result_summary);
-                PlanTaskStatus::AwaitingReview { summary }
+            if delegation_label.is_some() && !has_ready_label {
+                emit_label_audit_drift("delegation-id", "stale", &issue.id);
             }
+            let summary = latest_completion_facts(audits)
+                .and_then(|(_, _, result_summary, _, _)| result_summary);
+            PlanTaskStatus::AwaitingReview { summary }
         }
     } else if issue
         .labels
@@ -1523,6 +1523,28 @@ mod tests {
             ids,
             vec!["c-1".to_string(), "c-2".to_string(), "c-3".to_string()]
         );
+    }
+
+    #[test]
+    fn sort_projection_comments_orders_numeric_string_ids_by_numeric_value() {
+        let comments = vec![
+            Comment {
+                id: "10".into(),
+                body: "ten".into(),
+                actor: "spur".into(),
+                created_at: Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 1).unwrap(),
+            },
+            Comment {
+                id: "9".into(),
+                body: "nine".into(),
+                actor: "spur".into(),
+                created_at: Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 1).unwrap(),
+            },
+        ];
+
+        let ordered = super::sort_projection_comments(comments);
+        let ids: Vec<String> = ordered.into_iter().map(|comment| comment.id).collect();
+        assert_eq!(ids, vec!["9".to_string(), "10".to_string()]);
     }
 
     #[test]
@@ -2321,6 +2343,60 @@ mod tests {
                     .fields
                     .get("direction")
                     .is_some_and(|direction| direction.contains("audit_only"))
+        }));
+    }
+
+    #[test]
+    fn open_task_awaiting_review_with_stale_delegation_label_projects_awaiting_review() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::delegation_id("del-A")],
+            Vec::new(),
+        );
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-A".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("feat/task".into()),
+                result_summary: Some("looks good".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+        ];
+
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(
+            matches!(status, PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("looks good"))
+        );
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("ready-for-review"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("audit_only"))
+        }));
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("delegation-id"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("stale"))
         }));
     }
 

@@ -1624,13 +1624,14 @@ pub(crate) async fn emit_task_spec_audit(
     advanced: &dyn spur_pm::BeadsAdvanced,
     issue_id: &str,
     task_id: &str,
+    agent: &str,
     context_files: &[String],
 ) -> anyhow::Result<()> {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
         task_text: None,
-        agent: None,
+        agent: Some(agent.to_string()),
         depends_on: None,
     };
     advanced
@@ -6622,6 +6623,68 @@ mod tests {
                 && worker_branch == "spur/worker/v2/codex/brain/worker"
                 && worker_session_id == "worker"
                 && dispatched_base_oid == "base-oid"
+        ));
+    }
+
+    #[tokio::test]
+    async fn emit_task_spec_audit_records_agent_and_non_empty_context_files() {
+        let adv = RecordingAdvanced {
+            comments: std::sync::Mutex::new(vec![]),
+        };
+        let context_files = vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()];
+        super::emit_task_spec_audit(&adv, "bd-1", "T1", "codex", &context_files)
+            .await
+            .expect("task-spec audit");
+
+        let comments = adv.comments.lock().expect("comments lock");
+        let body = comments.first().expect("task-spec comment");
+        let parsed = crate::plan::audit_sentinel::parse_comment(body)
+            .expect("sentinel")
+            .expect("parse");
+        assert!(matches!(
+            parsed,
+            crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
+                task_id,
+                context_files,
+                task_text,
+                agent,
+                depends_on,
+            } if task_id == "T1"
+                && context_files == vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()]
+                && task_text.is_none()
+                && agent.as_deref() == Some("codex")
+                && depends_on.is_none()
+        ));
+    }
+
+    #[tokio::test]
+    async fn emit_task_spec_audit_records_agent_with_empty_context_files() {
+        let adv = RecordingAdvanced {
+            comments: std::sync::Mutex::new(vec![]),
+        };
+        let context_files: Vec<String> = Vec::new();
+        super::emit_task_spec_audit(&adv, "bd-2", "T2", "gemini", &context_files)
+            .await
+            .expect("task-spec audit");
+
+        let comments = adv.comments.lock().expect("comments lock");
+        let body = comments.first().expect("task-spec comment");
+        let parsed = crate::plan::audit_sentinel::parse_comment(body)
+            .expect("sentinel")
+            .expect("parse");
+        assert!(matches!(
+            parsed,
+            crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
+                task_id,
+                context_files,
+                task_text,
+                agent,
+                depends_on,
+            } if task_id == "T2"
+                && context_files.is_empty()
+                && task_text.is_none()
+                && agent.as_deref() == Some("gemini")
+                && depends_on.is_none()
         ));
     }
 
