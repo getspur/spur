@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthStr;
 
 const W: u16 = 100;
 const H: u16 = 20;
+type TraceMutation = (&'static str, Box<dyn Fn(&mut ReactTrace)>);
 
 struct SimTerm {
     grid: Vec<Vec<String>>,
@@ -144,7 +145,7 @@ fn dashboard_compact_user_repro_dynamic() {
     let mut prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, W, H));
 
     let mut total_desync = 0;
-    let steps: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
+    let steps: Vec<TraceMutation> = vec![
         ("init compact (collapsed)", Box::new(|_t| {})),
         (
             "Ctrl+O toggle (expand)",
@@ -264,7 +265,7 @@ fn dashboard_compact_with_cjk_and_control_chars() {
             tool_call_id: None,
             status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
                 exit_code: Some(0),
-                stdout: vec![
+                stdout: [
                     "2026年04月30日 エラー発生 で何かが起きました",
                     "中文测试 内容很长 包含很多字符",
                     "한국어 텍스트 한국어 텍스트 추가",
@@ -290,7 +291,7 @@ fn dashboard_compact_with_cjk_and_control_chars() {
     let mut prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, W, H));
     let mut total_desync = 0;
 
-    let actions: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
+    let actions: Vec<TraceMutation> = vec![
         ("init", Box::new(|_t| {})),
         (
             "expand",
@@ -421,7 +422,7 @@ fn dashboard_compact_long_acp_stream_simulation() {
     let mut prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, W, H));
     let mut total = 0;
 
-    let actions: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
+    let actions: Vec<TraceMutation> = vec![
         ("init", Box::new(|_t| {})),
         (
             "expand",
@@ -510,7 +511,7 @@ fn dashboard_compact_long_acp_stream_simulation() {
         let registry = HashMap::new();
         let mut total2 = 0;
 
-        let actions2: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
+        let actions2: Vec<TraceMutation> = vec![
             ("init full", Box::new(|_t| {})),
             (
                 "scroll up 5",

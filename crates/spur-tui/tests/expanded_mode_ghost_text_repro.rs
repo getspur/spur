@@ -169,7 +169,7 @@ fn iterm2_eaw_n_fontfallback_desync_repro() {
     let mut cache = ImageCache::new();
     let registry = HashMap::new();
     let mut sim = SimItermTerm::new(W, H);
-    let mut prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, W, H));
+    let prev_buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, W, H));
 
     // ── Frame 1: collapsed (default) ──
     {

@@ -7,7 +7,7 @@ fn word_forward_skips_atom() {
     bar.insert_atom("@my-file.txt", "file:///foo".into(), "my-file.txt".into());
     bar.set_text_cursor_for_test(0);
 
-    bar.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+    let _ = bar.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
 
     let cursor = bar.cursor();
     assert!(
