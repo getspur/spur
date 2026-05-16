@@ -39,7 +39,8 @@ use rmcp::{
     service::RequestContext,
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        session::{local::LocalSessionManager, SessionId, SessionManager},
+        StreamableHttpServerConfig, StreamableHttpService,
     },
     ErrorData as McpError, RoleServer, ServerHandler,
 };
@@ -197,6 +198,9 @@ pub struct WorkerMcpServer {
     /// dispatcher hot path doesn't pay for the construction per request.
     deps: Arc<DispatcherDeps>,
     shutdown: CancellationToken,
+    session_manager: Arc<LocalSessionManager>,
+    session_contexts:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
     accept_loop_handle: Mutex<Option<JoinHandle<()>>>,
     flusher_handle: Mutex<Option<JoinHandle<()>>>,
     /// Receiver half of the read-audit flush channel. Created in `start()`
@@ -409,6 +413,7 @@ struct AuthenticatedWorkerContext {
 struct WorkerAuthMiddlewareState {
     hmac_key: [u8; 32],
     brain_session_id: String,
+    session_manager: Arc<LocalSessionManager>,
     session_contexts:
         Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
 }
@@ -743,6 +748,14 @@ impl WorkerToolHandler {
             context,
             Some(delegation_id),
             move |worker_ctx| async move {
+                if let Some(requested) = args.get("delegation_id").and_then(|v| v.as_str()) {
+                    if requested != worker_ctx.delegation_id {
+                        return Err(McpHandlerError::Unauthorized(format!(
+                            "delegation_id mismatch for bound session context (expected {}, got {requested})",
+                            worker_ctx.delegation_id
+                        )));
+                    }
+                }
                 crate::handlers::fetch_outcome_artifact(
                     &deps.materializer,
                     deps.outcome_store.as_ref(),
@@ -961,14 +974,34 @@ async fn worker_auth_middleware(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    // T1 rule: only enforce HMAC on requests that do not carry
-    // `Mcp-Session-Id`. After session creation, we trust the unguessable
-    // RMCP session id and skip per-request token validation.
+    // Requests carrying `Mcp-Session-Id` are trusted ONLY when the id exists
+    // in this server's LocalSessionManager and maps to a token-derived
+    // delegation context captured at session-open time.
     if let Some(session_id) = session_id {
-        if let Some(auth_ctx) = state.session_contexts.lock().get(&session_id).cloned() {
-            request.extensions_mut().insert(auth_ctx);
+        let has_session = state
+            .session_manager
+            .has_session(&SessionId::from(session_id.clone()))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    ?error,
+                    session_id = %session_id,
+                    "WorkerMcp AuthDenied: failed to verify session id"
+                );
+                false
+            });
+        if has_session {
+            let auth_ctx = { state.session_contexts.lock().get(&session_id).cloned() };
+            if let Some(auth_ctx) = auth_ctx {
+                request.extensions_mut().insert(auth_ctx);
+                return next.run(request).await;
+            }
+            tracing::warn!(
+                session_id = %session_id,
+                "WorkerMcp AuthDenied: session id exists but has no delegation binding"
+            );
+            return unauthorized_response();
         }
-        return next.run(request).await;
     }
 
     let token =
@@ -1012,10 +1045,29 @@ async fn worker_auth_middleware(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        state
-            .session_contexts
-            .lock()
-            .insert(session_id.to_string(), auth_ctx);
+        let has_session = state
+            .session_manager
+            .has_session(&SessionId::from(session_id.to_string()))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    ?error,
+                    session_id = %session_id,
+                    "WorkerMcp AuthDenied: failed to verify minted session id"
+                );
+                false
+            });
+        if has_session {
+            state
+                .session_contexts
+                .lock()
+                .insert(session_id.to_string(), auth_ctx);
+        } else {
+            tracing::warn!(
+                session_id = %session_id,
+                "WorkerMcp AuthDenied: response carried unknown session id"
+            );
+        }
     }
     response
 }
@@ -1070,12 +1122,16 @@ impl WorkerMcpServer {
         });
 
         let shutdown = CancellationToken::new();
+        let session_manager = Arc::new(LocalSessionManager::default());
+        let session_contexts = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let server = Arc::new(Self {
             addr,
             hmac_key,
             brain_session_id: brain_session_id.clone(),
             deps: Arc::clone(&dispatcher_deps),
             shutdown: shutdown.clone(),
+            session_manager: Arc::clone(&session_manager),
+            session_contexts: Arc::clone(&session_contexts),
             accept_loop_handle: Mutex::new(None),
             flusher_handle: Mutex::new(None),
             flush_rx: Mutex::new(Some(flush_rx)),
@@ -1090,16 +1146,18 @@ impl WorkerMcpServer {
             let handler = Arc::clone(&handler);
             let mut streamable_config = StreamableHttpServerConfig::default();
             streamable_config.stateful_mode = true;
+            streamable_config.cancellation_token = shutdown.clone();
             StreamableHttpService::new(
                 move || Ok(Arc::clone(&handler)),
-                Arc::new(LocalSessionManager::default()),
+                Arc::clone(&session_manager),
                 streamable_config,
             )
         };
         let auth_state = WorkerAuthMiddlewareState {
             hmac_key,
             brain_session_id: brain_session_id.clone(),
-            session_contexts: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            session_manager,
+            session_contexts,
         };
         let router =
             Router::new()
@@ -1327,6 +1385,48 @@ impl WorkerMcpServer {
         !self.shutdown.is_cancelled()
     }
 
+    async fn close_all_sessions(&self, close_window: Duration) {
+        if close_window.is_zero() {
+            return;
+        }
+
+        let session_ids: Vec<SessionId> = {
+            let sessions = self.session_manager.sessions.read().await;
+            sessions.keys().cloned().collect()
+        };
+        if session_ids.is_empty() {
+            return;
+        }
+
+        let manager = Arc::clone(&self.session_manager);
+        let session_contexts = Arc::clone(&self.session_contexts);
+        let brain_session_id = self.brain_session_id.clone();
+        let close_sessions = async move {
+            for session_id in session_ids {
+                if let Err(error) = manager.close_session(&session_id).await {
+                    tracing::warn!(
+                        %error,
+                        session_id = %session_id,
+                        brain_session_id = %brain_session_id,
+                        "WorkerMcpServer close_session failed during shutdown drain"
+                    );
+                }
+                session_contexts.lock().remove(session_id.as_ref());
+            }
+        };
+
+        if tokio::time::timeout(close_window, close_sessions)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                brain_session_id = %self.brain_session_id,
+                timeout_ms = close_window.as_millis() as u64,
+                "WorkerMcpServer timed out while closing active sessions"
+            );
+        }
+    }
+
     /// Cancel the accept loop, drain in-flight dispatchers up to `deadline`,
     /// then join the background audit flusher task. Returns a
     /// [`ShutdownOutcome`] describing whether the drain completed (`drained =
@@ -1336,12 +1436,14 @@ impl WorkerMcpServer {
     /// Drain semantics:
     /// 1. The accept loop is cancelled first, so the listener stops accepting
     ///    new connections immediately.
-    /// 2. Existing dispatchers continue and decrement `active_delegations`
+    /// 2. Active RMCP sessions are closed so long-lived SSE streams are
+    ///    proactively terminated.
+    /// 3. Existing dispatchers continue and decrement `active_delegations`
     ///    via [`ActiveCallGuard::drop`] as they return.
-    /// 3. The drain loop polls [`active_count`](Self::active_count) every
+    /// 4. The drain loop polls [`active_count`](Self::active_count) every
     ///    `DRAIN_POLL_INTERVAL` (bounded — never busy-loops) until either the
     ///    counter reaches `0` or `deadline` elapses.
-    /// 4. On deadline elapse a `WARN`-level log is emitted with the in-flight
+    /// 5. On deadline elapse a `WARN`-level log is emitted with the in-flight
     ///    count. The flusher task is still joined so its TaskTracker drains
     ///    and the deps `Arc` is released.
     ///
@@ -1350,15 +1452,13 @@ impl WorkerMcpServer {
     /// Idempotent: a second call after shutdown finds the accept and flusher
     /// handles already taken and returns immediately with `drained = true`.
     pub async fn shutdown(self: Arc<Self>, deadline: Duration) -> ShutdownOutcome {
-        self.shutdown.cancel();
-        let accept_handle = self.accept_loop_handle.lock().take();
-        if let Some(handle) = accept_handle {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        }
-
-        // Listener is closed (accept_loop has returned), so no new requests
-        // can arrive. Drain existing dispatchers, bounded by `deadline`.
         let drain_deadline = Instant::now() + deadline;
+        self.shutdown.cancel();
+        self.close_all_sessions(deadline).await;
+
+        // Listener cancellation + session close-all prevents new work and
+        // terminates active SSE streams. Drain in-flight dispatchers, bounded
+        // by `deadline`.
         let outcome = loop {
             let active = self.active_count();
             if active == 0 {
@@ -1382,9 +1482,27 @@ impl WorkerMcpServer {
             tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
         };
 
+        let accept_handle = self.accept_loop_handle.lock().take();
+        if let Some(handle) = accept_handle {
+            let wait = drain_deadline.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                handle.abort();
+            } else {
+                let _ = tokio::time::timeout(wait, handle).await;
+            }
+        }
+
         let flusher_handle = self.flusher_handle.lock().take();
         if let Some(handle) = flusher_handle {
-            let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+            let wait = std::cmp::min(
+                Duration::from_secs(1),
+                drain_deadline.saturating_duration_since(Instant::now()),
+            );
+            if wait.is_zero() {
+                handle.abort();
+            } else {
+                let _ = tokio::time::timeout(wait, handle).await;
+            }
         }
         // Reference held only to keep the deps Arc alive until shutdown
         // completes; explicit drop documents intent.
