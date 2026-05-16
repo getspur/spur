@@ -2,7 +2,7 @@
 //! tool subset to delegated workers.
 //!
 //! The transport layer is RMCP Streamable HTTP (`axum` + `StreamableHttpService`)
-//! while tool routing remains a compatibility shim that delegates to the
+//! and tools are exposed as first-class RMCP tool methods that delegate to the
 //! existing freestanding handlers in [`crate::handlers`]. Audit emission and
 //! per-delegation lifecycle guards remain in this module.
 
@@ -34,16 +34,17 @@ impl Default for WorkerMcpServerConfig {
 use parking_lot::Mutex;
 use rand::RngCore;
 use rmcp::{
-    model::{
-        object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation,
-        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-    },
+    handler::server::router::tool::ToolRouter,
+    model::{CallToolResult, Implementation, JsonObject, ServerCapabilities, ServerInfo},
     service::RequestContext,
+    tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
     ErrorData as McpError, RoleServer, ServerHandler,
 };
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -412,22 +413,131 @@ struct WorkerAuthMiddlewareState {
         Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
 }
 
-/// RMCP `ServerHandler` compat shim for the worker tool subset.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct GetIssueParams {
+    id: String,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema, Serialize)]
+struct ListIssuesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    labels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_min: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_max: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issue_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_search: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct UpdateIssueParams {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    add_labels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remove_labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct GetPlanStatusParams {
+    plan_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct GetTaskDiffParams {
+    plan_id: String,
+    task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OutcomeArtifactSection {
+    StatusOnly,
+    Summary,
+    DiffOnly,
+    Full,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct FetchOutcomeArtifactParams {
+    delegation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    section: Option<OutcomeArtifactSection>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct ReportSignalParams {
+    task_id: String,
+    #[schemars(with = "ReportSignalSchema")]
+    signal: Value,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ReportSignalKindSchema {
+    ScopeDrift,
+    RetryExhausted,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, JsonSchema)]
+struct ReportSignalSchema {
+    kind: ReportSignalKindSchema,
+    signal_id: String,
+    #[schemars(range(min = 0.0, max = 1.0))]
+    severity: Option<f64>,
+    reason: Option<String>,
+    #[schemars(range(min = 1))]
+    estimated_subtasks: Option<u64>,
+    task_id: Option<String>,
+    attempt: Option<u32>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct ReportProgressParams {
+    message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    percent: Option<f64>,
+}
+
+/// RMCP `ServerHandler` for the curated worker tool subset.
 struct WorkerToolHandler {
     deps: Arc<DispatcherDeps>,
     brain_session_id: String,
+    tool_router: ToolRouter<Self>,
 }
 
+#[tool_router(router = tool_router)]
 impl WorkerToolHandler {
-    fn rmcp_tools(&self) -> Vec<Tool> {
-        crate::tools::worker_tools_list()
-            .into_iter()
-            .map(|def| Tool::new(def.name, def.description, rmcp_object(def.input_schema)))
-            .collect()
-    }
-
-    fn rmcp_tool(&self, name: &str) -> Option<Tool> {
-        self.rmcp_tools().into_iter().find(|tool| tool.name == name)
+    fn new(deps: Arc<DispatcherDeps>, brain_session_id: String) -> Self {
+        Self {
+            deps,
+            brain_session_id,
+            tool_router: Self::tool_router(),
+        }
     }
 
     fn context_from_request(
@@ -458,8 +568,296 @@ impl WorkerToolHandler {
             brain_session_id: auth_ctx.brain_session_id.clone(),
         })
     }
+
+    async fn invoke_with_lifecycle<F, Fut>(
+        &self,
+        tool_name: &'static str,
+        context: RequestContext<RoleServer>,
+        read_audit_target: Option<Option<String>>,
+        invoke: F,
+    ) -> Result<CallToolResult, McpError>
+    where
+        F: FnOnce(WorkerCallContext) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, McpHandlerError>>,
+    {
+        let worker_ctx = self.context_from_request(&context)?;
+        if worker_ctx.brain_session_id != self.brain_session_id {
+            return Err(McpError::new(
+                rmcp::model::ErrorCode(-32001),
+                "unauthorized: token brain_session_id mismatch",
+                None,
+            ));
+        }
+
+        let delegation_id = worker_ctx.delegation_id.clone();
+        let _active_guard = ActiveCallGuard::new(Arc::clone(&self.deps.active_delegations));
+        let call_start = Instant::now();
+
+        if let Some(target_issue_id) = read_audit_target {
+            append_read_audit_entry(&self.deps, &delegation_id, tool_name, target_issue_id);
+        }
+
+        let result = invoke(worker_ctx).await;
+        let latency_ms = call_start.elapsed().as_millis() as u64;
+        let is_error = result.is_err();
+        record_call(&self.deps, &delegation_id, tool_name, latency_ms, is_error);
+
+        result
+            .map(CallToolResult::structured)
+            .map_err(McpError::from)
+    }
+
+    #[tool(
+        name = "get_issue",
+        description = "Retrieve an issue from the configured project management backend (beads, GitHub, etc.).",
+        input_schema = crate::tool_schemas::schema_object::<GetIssueParams>()
+    )]
+    async fn get_issue_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "get_issue",
+            context,
+            Some(issue_id),
+            move |worker_ctx| async move {
+                crate::handlers::get_issue(deps.pm_service.as_ref(), &worker_ctx, args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "list_issues",
+        description = "List issues from the configured project management backend with optional filters.",
+        input_schema = crate::tool_schemas::schema_object::<ListIssuesParams>()
+    )]
+    async fn list_issues_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "list_issues",
+            context,
+            Some(None),
+            move |worker_ctx| async move {
+                crate::handlers::list_issues(deps.pm_service.as_ref(), &worker_ctx, args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "get_task_diff",
+        description = "Get the full unified diff for a plan task. Use after get_plan_status shows tasks in awaiting_review, approved, rejected, or failed state. Returns the complete diff, worker branch name, task description, and summary for brain code review. Pass `attempt` to inspect prior iteration attempts (see entry.history).",
+        input_schema = crate::tool_schemas::schema_object::<GetTaskDiffParams>()
+    )]
+    async fn get_task_diff_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let task_id = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "get_task_diff",
+            context,
+            Some(task_id),
+            move |worker_ctx| async move {
+                crate::handlers::get_task_diff(
+                    Some(deps.pm_service.as_ref()),
+                    deps.feature_gate.as_ref(),
+                    deps.repo_root.as_deref(),
+                    deps.plan_resolver.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "get_plan_status",
+        description = "Get the current status of a submitted execution plan. Returns per-task status: pending (waiting for deps), ready, dispatched (running), completed, or failed. Non-blocking — returns immediately.",
+        input_schema = crate::tool_schemas::schema_object::<GetPlanStatusParams>()
+    )]
+    async fn get_plan_status_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let plan_id = args
+            .get("plan_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "get_plan_status",
+            context,
+            Some(plan_id),
+            move |worker_ctx| async move {
+                crate::handlers::get_plan_status(
+                    deps.plan_resolver.as_ref(),
+                    &deps.reconciler_outcomes,
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "fetch_outcome_artifact",
+        description = "Fetch the side-channel artifact (full or sectioned) for a completed delegation. Use when continuation.payload.artifact_id is Some(_) and you need fuller context. Sections let you pick what to fetch: pass 'status_only' for just status fields (~100B), 'summary' for the inline summary, 'diff_only' for full diff text, or 'full' for the entire DelegationResult JSON.",
+        input_schema = crate::tool_schemas::schema_object::<FetchOutcomeArtifactParams>()
+    )]
+    async fn fetch_outcome_artifact_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let delegation_id = args
+            .get("delegation_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "fetch_outcome_artifact",
+            context,
+            Some(delegation_id),
+            move |worker_ctx| async move {
+                crate::handlers::fetch_outcome_artifact(
+                    &deps.materializer,
+                    deps.outcome_store.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "update_issue",
+        description = "Update an issue in the configured project management backend.",
+        input_schema = crate::tool_schemas::schema_object::<UpdateIssueParams>()
+    )]
+    async fn update_issue_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "update_issue",
+            context,
+            None,
+            move |worker_ctx| async move {
+                let result =
+                    crate::handlers::update_issue(deps.pm_service.as_ref(), &worker_ctx, args)
+                        .await;
+                if result.is_ok() {
+                    if let Some(issue_id) = issue_id.as_deref() {
+                        emit_worker_write_audit(
+                            deps.pm_service.as_ref(),
+                            deps.feature_gate.as_ref(),
+                            &worker_ctx.delegation_id,
+                            "update_issue",
+                            issue_id,
+                        )
+                        .await;
+                    }
+                }
+                result
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "report_signal",
+        description = "Worker-facing. Record a typed WorkerSignal on a task. Brain-side watcher will inspect and may mutate the plan.",
+        input_schema = crate::tool_schemas::schema_object::<ReportSignalParams>()
+    )]
+    async fn report_signal_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "report_signal",
+            context,
+            None,
+            move |worker_ctx| async move {
+                crate::handlers::report_signal(
+                    deps.pm_service.as_ref(),
+                    deps.feature_gate.as_ref(),
+                    &worker_ctx,
+                    args,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "report_progress",
+        description = "Worker-facing fire-and-forget progress emission. Sends a free-form `message` (and optional `percent`) to the brain as a `WorkerReportProgress` event. The handler returns `{ok: true}` on accept; the side effect IS the event. No PM writes, no audit sentinel — distinct from `report_signal` (which persists). Workers stream rich progress text without minting structured milestone names. Consumers (TUI / dashboards) decide how to render `percent` (no clamping).",
+        input_schema = crate::tool_schemas::schema_object::<ReportProgressParams>()
+    )]
+    async fn report_progress_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "report_progress",
+            context,
+            None,
+            move |worker_ctx| async move {
+                let delegation_ctx = deps
+                    .delegations
+                    .lock()
+                    .get(&worker_ctx.delegation_id)
+                    .copied()
+                    .unwrap_or_default();
+                if !delegation_ctx.enable_worker_progress {
+                    Ok(json!({ "ok": true }))
+                } else {
+                    crate::handlers::report_progress(deps.funnel.as_ref(), &worker_ctx, args).await
+                }
+            },
+        )
+        .await
+    }
 }
 
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for WorkerToolHandler {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
@@ -474,41 +872,6 @@ impl ServerHandler for WorkerToolHandler {
         implementation.version = env!("CARGO_PKG_VERSION").into();
         info.server_info = implementation;
         info
-    }
-
-    fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.rmcp_tool(name)
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.rmcp_tools()))
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        let worker_ctx = self.context_from_request(&context)?;
-        if worker_ctx.brain_session_id != self.brain_session_id {
-            return Err(McpError::new(
-                rmcp::model::ErrorCode(-32001),
-                "unauthorized: token brain_session_id mismatch",
-                None,
-            ));
-        }
-        let args = request
-            .arguments
-            .map(Value::Object)
-            .unwrap_or_else(|| json!({}));
-        let tool_name = request.name.to_string();
-        let result =
-            dispatch_tool_call_compat(worker_ctx, &tool_name, args, Arc::clone(&self.deps)).await?;
-        Ok(CallToolResult::structured(result))
     }
 }
 
@@ -719,10 +1082,10 @@ impl WorkerMcpServer {
             active_delegations,
         });
 
-        let handler = Arc::new(WorkerToolHandler {
-            deps: Arc::clone(&dispatcher_deps),
-            brain_session_id: brain_session_id.clone(),
-        });
+        let handler = Arc::new(WorkerToolHandler::new(
+            Arc::clone(&dispatcher_deps),
+            brain_session_id.clone(),
+        ));
         let service = {
             let handler = Arc::clone(&handler);
             let mut streamable_config = StreamableHttpServerConfig::default();
@@ -1034,152 +1397,6 @@ impl WorkerMcpServer {
 /// draining. Bounded so the polling loop never busy-spins, small enough that
 /// a fast-completing dispatcher doesn't materially extend shutdown latency.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-async fn dispatch_tool_call_compat(
-    ctx: WorkerCallContext,
-    name: &str,
-    args: Value,
-    deps: Arc<DispatcherDeps>,
-) -> Result<Value, McpError> {
-    // RAII counter — held for the entire tool dispatch lifetime including
-    // panics and early returns. `shutdown()` drains by polling this counter.
-    let _active_guard = ActiveCallGuard::new(Arc::clone(&deps.active_delegations));
-    let call_start = Instant::now();
-
-    let result: Result<Value, McpHandlerError> = match name {
-        "get_issue" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "get_issue",
-                args.get("id").and_then(|v| v.as_str()).map(String::from),
-            );
-            crate::handlers::get_issue(deps.pm_service.as_ref(), &ctx, args).await
-        }
-        "list_issues" => {
-            append_read_audit_entry(deps.as_ref(), &ctx.delegation_id, "list_issues", None);
-            crate::handlers::list_issues(deps.pm_service.as_ref(), &ctx, args).await
-        }
-        "update_issue" => {
-            let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
-            let result = crate::handlers::update_issue(deps.pm_service.as_ref(), &ctx, args).await;
-            if result.is_ok() {
-                if let Some(ref issue_id) = issue_id {
-                    emit_worker_write_audit(
-                        deps.pm_service.as_ref(),
-                        deps.feature_gate.as_ref(),
-                        &ctx.delegation_id,
-                        "update_issue",
-                        issue_id,
-                    )
-                    .await;
-                }
-            }
-            result
-        }
-        "report_signal" => {
-            crate::handlers::report_signal(
-                deps.pm_service.as_ref(),
-                deps.feature_gate.as_ref(),
-                &ctx,
-                args,
-            )
-            .await
-        }
-        "report_progress" => {
-            // Dual-gate gate 1: check cached delegation context. If progress
-            // is disabled, silently drop and return success (fire-and-forget).
-            let delegation_ctx = deps
-                .delegations
-                .lock()
-                .get(&ctx.delegation_id)
-                .copied()
-                .unwrap_or_default();
-            if !delegation_ctx.enable_worker_progress {
-                Ok(json!({ "ok": true }))
-            } else {
-                crate::handlers::report_progress(deps.funnel.as_ref(), &ctx, args).await
-            }
-        }
-        "get_plan_status" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "get_plan_status",
-                args.get("plan_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            );
-            crate::handlers::get_plan_status(
-                deps.plan_resolver.as_ref(),
-                &deps.reconciler_outcomes,
-                &ctx,
-                args,
-            )
-            .await
-        }
-        "fetch_outcome_artifact" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "fetch_outcome_artifact",
-                args.get("delegation_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            );
-            crate::handlers::fetch_outcome_artifact(
-                &deps.materializer,
-                deps.outcome_store.as_ref(),
-                &ctx,
-                args,
-            )
-            .await
-        }
-        "get_task_diff" => {
-            append_read_audit_entry(
-                deps.as_ref(),
-                &ctx.delegation_id,
-                "get_task_diff",
-                args.get("task_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            );
-            crate::handlers::get_task_diff(
-                Some(deps.pm_service.as_ref()),
-                deps.feature_gate.as_ref(),
-                deps.repo_root.as_deref(),
-                deps.plan_resolver.as_ref(),
-                &ctx,
-                args,
-            )
-            .await
-        }
-        other => {
-            // Unknown tool name: record as an errored call so the summary
-            // event reflects the dispatch attempt.
-            let latency_ms = call_start.elapsed().as_millis() as u64;
-            record_call(&deps, &ctx.delegation_id, name, latency_ms, true);
-            return Err(McpError::new(
-                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
-                format!("Method not found: {other}"),
-                None,
-            ));
-        }
-    };
-
-    let latency_ms = call_start.elapsed().as_millis() as u64;
-    let is_error = result.is_err();
-    record_call(&deps, &ctx.delegation_id, name, latency_ms, is_error);
-
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => Err(McpError::new(
-            rmcp::model::ErrorCode(error.json_rpc_code()),
-            error.to_string(),
-            None,
-        )),
-    }
-}
 
 /// Append a read-tool call to the per-delegation aggregation buffer. Lazily
 /// creates the buffer on first call. Lock scope is intentionally tight — the

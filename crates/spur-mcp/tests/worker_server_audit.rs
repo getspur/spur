@@ -9,6 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rmcp::{
+    model::CallToolRequestParams, service::ServiceError, transport::StreamableHttpClientTransport,
+    ServiceExt,
+};
 use serde_json::Value;
 use spur_acp::SpurEventBody;
 use spur_license::policy::PolicyResolver;
@@ -84,22 +88,60 @@ async fn call_jsonrpc(
     params: Value,
 ) -> Value {
     let url = format!("{}?token={}", server.url(), token);
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await
-        .expect("request");
-    resp.json().await.expect("response is JSON")
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(url))
+            .await
+            .expect("rmcp client initialize");
+
+    let response = match method {
+        "tools/call" => {
+            let tool_name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .expect("params.name is required")
+                .to_string();
+            let mut request = CallToolRequestParams::new(tool_name);
+            request.arguments = params.get("arguments").and_then(|v| v.as_object()).cloned();
+            match client.call_tool(request).await {
+                Ok(result) => {
+                    let payload = result
+                        .structured_content
+                        .clone()
+                        .unwrap_or_else(|| serde_json::to_value(result).expect("serialize result"));
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": payload
+                    })
+                }
+                Err(error) => service_error_response(error),
+            }
+        }
+        other => panic!("unsupported JSON-RPC method in test helper: {other}"),
+    };
+
+    drop(client);
+    response
+}
+
+fn service_error_response(error: ServiceError) -> Value {
+    let (code, message) = match &error {
+        ServiceError::McpError(mcp_error) => {
+            (i64::from(mcp_error.code.0), mcp_error.message.to_string())
+        }
+        _ => (-32603, error.to_string()),
+    };
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn update_issue_success_emits_worker_write_audit_sentinel() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -177,7 +219,6 @@ async fn update_issue_success_emits_worker_write_audit_sentinel() {
 // ─── T20: per-delegation read-audit aggregation buffer ────────────────────
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn read_tool_calls_append_to_buffer() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -268,7 +309,6 @@ async fn drop_buffer_after_receiver_dropped_does_not_panic() {
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn update_issue_without_id_arg_does_not_emit_audit() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
