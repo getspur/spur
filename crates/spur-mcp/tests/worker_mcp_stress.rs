@@ -35,9 +35,18 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rmcp::{
+    model::CallToolRequestParams,
+    service::ServiceError,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use serde_json::Value;
 use spur_acp::config::SpurConfig;
 use spur_acp::types::SessionId;
@@ -91,19 +100,47 @@ fn attach_test_beads(repo: &Path, w: &TestBeadsWorkspace) {
     w.copy_db_to(&beads_dir);
 }
 
-async fn call_jsonrpc(url_with_token: &str, method: &str, params: Value) -> Value {
-    let resp = reqwest::Client::new()
-        .post(url_with_token)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await
-        .expect("send JSON-RPC request");
-    resp.json().await.expect("response body must be JSON")
+async fn call_tool_with_bearer(url: &str, token: &str, name: &str, arguments: Value) -> Value {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string()).auth_header(token);
+    let client =
+        ().serve(StreamableHttpClientTransport::from_config(config))
+            .await
+            .expect("rmcp client initialize");
+    let mut request = CallToolRequestParams::new(name.to_string());
+    request.arguments = arguments.as_object().cloned();
+    let response = match client.call_tool(request).await {
+        Ok(result) => {
+            let payload = result
+                .structured_content
+                .clone()
+                .unwrap_or_else(|| serde_json::to_value(result).expect("serialize result"));
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": payload
+            })
+        }
+        Err(error) => service_error_response(error),
+    };
+    drop(client);
+    response
+}
+
+fn service_error_response(error: ServiceError) -> Value {
+    let (code, message) = match &error {
+        ServiceError::McpError(mcp_error) => {
+            (i64::from(mcp_error.code.0), mcp_error.message.to_string())
+        }
+        _ => (-32603, error.to_string()),
+    };
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
 }
 
 /// Build an `Orchestrator` + `McpCallbackServer` rooted at `repo` with the
@@ -177,7 +214,6 @@ async fn collect_summaries(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let dir = TempDir::new().expect("tempdir");
@@ -247,7 +283,6 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
                 },
             );
             let token = server.issue_token(&did, Duration::from_secs(60));
-            let url_with_token = format!("{}?token={}", server_url, token);
 
             let issue_id = pm
                 .create_issue(IssueCreate {
@@ -258,24 +293,47 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
                 })
                 .await
                 .expect("create issue");
-            delegations.push((did, issue_id, url_with_token));
+            delegations.push((did, issue_id, token));
         }
 
         // ── (b) 8 workers × 10 calls in parallel. ───────────────────────
+        let peak_active = Arc::new(AtomicU32::new(0));
+        let stop_sampling = Arc::new(AtomicBool::new(false));
+        let observer_server = Arc::clone(&server);
+        let observer_peak = Arc::clone(&peak_active);
+        let observer_stop = Arc::clone(&stop_sampling);
+        let observer = tokio::spawn(async move {
+            while !observer_stop.load(Ordering::Relaxed) {
+                let observed = observer_server.active_count();
+                let mut current = observer_peak.load(Ordering::Relaxed);
+                while observed > current {
+                    match observer_peak.compare_exchange(
+                        current,
+                        observed,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => current = actual,
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
         let mut call_handles = Vec::with_capacity(N_WORKERS);
-        for (_, issue_id, url) in &delegations {
+        for (_, issue_id, token) in &delegations {
             let issue_id = issue_id.clone();
-            let url = url.clone();
+            let token = token.clone();
+            let server_url = server_url.clone();
             call_handles.push(tokio::spawn(async move {
                 let mut results = Vec::with_capacity(CALLS_PER_WORKER);
                 for _ in 0..CALLS_PER_WORKER {
-                    let resp = call_jsonrpc(
-                        &url,
-                        "tools/call",
-                        serde_json::json!({
-                            "name": "get_issue",
-                            "arguments": { "id": &issue_id }
-                        }),
+                    let resp = call_tool_with_bearer(
+                        &server_url,
+                        &token,
+                        "get_issue",
+                        serde_json::json!({ "id": &issue_id }),
                     )
                     .await;
                     results.push(resp);
@@ -300,6 +358,19 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
             total_successful,
             N_WORKERS * CALLS_PER_WORKER,
             "all 80 calls must succeed"
+        );
+        stop_sampling.store(true, Ordering::Relaxed);
+        observer.await.expect("active-count observer should join");
+
+        let peak = peak_active.load(Ordering::SeqCst);
+        assert!(
+            peak >= 2,
+            "active_count should peak above one under concurrent sessions (observed peak={peak})"
+        );
+        assert_eq!(
+            server.active_count(),
+            0,
+            "active_count must return to zero after all calls complete"
         );
 
         // Flush every delegation so per-delegation summaries land and the
@@ -411,7 +482,6 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn flush_failure_emits_summary_with_errors() {
     tokio::time::timeout(Duration::from_secs(60), async {
         const DELEGATION_ID: &str = "d-flush-fail";
@@ -439,7 +509,7 @@ async fn flush_failure_emits_summary_with_errors() {
         );
 
         let token = server.issue_token(DELEGATION_ID, Duration::from_secs(60));
-        let url_with_token = format!("{}?token={}", server.url(), token);
+        let server_url = server.url();
 
         // Seed a target issue + run one successful read so the audit buffer
         // has work the flusher would emit. Without an entry, `flush_delegation`
@@ -455,13 +525,11 @@ async fn flush_failure_emits_summary_with_errors() {
             .await
             .expect("create issue");
 
-        let response = call_jsonrpc(
-            &url_with_token,
-            "tools/call",
-            serde_json::json!({
-                "name": "get_issue",
-                "arguments": { "id": &issue_id }
-            }),
+        let response = call_tool_with_bearer(
+            &server_url,
+            &token,
+            "get_issue",
+            serde_json::json!({ "id": &issue_id }),
         )
         .await;
         assert!(

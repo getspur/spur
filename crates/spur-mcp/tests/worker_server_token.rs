@@ -3,6 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rmcp::{
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use spur_acp::SpurEventBody;
 use spur_license::policy::PolicyResolver;
 use spur_license::FeatureGate;
@@ -12,7 +18,6 @@ use spur_mcp::plan::PlanState;
 use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use spur_pm::PmService;
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 mod common;
@@ -78,40 +83,110 @@ async fn test_server() -> (TempDir, Arc<WorkerMcpServer>) {
     (dir, server)
 }
 
+async fn list_tool_names_query(url: &str, token: &str) -> Result<Vec<String>, String> {
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "{url}?token={token}"
+        )))
+        .await
+        .map_err(|error| error.to_string())?;
+    let tools = client
+        .list_all_tools()
+        .await
+        .map_err(|error| error.to_string())?;
+    let names = tools
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    drop(client);
+    Ok(names)
+}
+
+async fn list_tool_names_no_auth(url: &str) -> Result<Vec<String>, String> {
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(url.to_string()))
+            .await
+            .map_err(|error| error.to_string())?;
+    let tools = client
+        .list_all_tools()
+        .await
+        .map_err(|error| error.to_string())?;
+    let names = tools
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    drop(client);
+    Ok(names)
+}
+
+async fn list_tool_names_header(url: &str, token: &str) -> Result<Vec<String>, String> {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string()).auth_header(token);
+    let client =
+        ().serve(StreamableHttpClientTransport::from_config(config))
+            .await
+            .map_err(|error| error.to_string())?;
+    let tools = client
+        .list_all_tools()
+        .await
+        .map_err(|error| error.to_string())?;
+    let names = tools
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    drop(client);
+    Ok(names)
+}
+
+fn assert_auth_denied(result: Result<Vec<String>, String>) {
+    let error = result.expect_err("expected auth to be denied");
+    let lower = error.to_ascii_lowercase();
+    assert!(
+        lower.contains("-32001") || lower.contains("401"),
+        "expected HTTP 401 or MCP -32001 auth denial, got: {error}"
+    );
+}
+
+fn assert_header_phase_rejected(result: Result<Vec<String>, String>) {
+    let error = result.expect_err("expected oversized header to be rejected");
+    let lower = error.to_ascii_lowercase();
+    assert!(
+        lower.contains("400")
+            || lower.contains("401")
+            || lower.contains("431")
+            || lower.contains("header"),
+        "expected auth-denied error, got: {error}"
+    );
+}
+
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn valid_token_round_trip_header() {
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(server.url())
-        .bearer_auth(&token)
-        .json(&serde_json::json!({"jsonrpc":"2.0","method":"tools/list","id":1}))
-        .send()
+    let tools = list_tool_names_header(&server.url(), &token)
         .await
-        .expect("request");
-    assert_eq!(resp.status(), 200, "valid token should pass middleware");
+        .expect("valid bearer token should open rmcp session");
+    assert!(
+        !tools.is_empty(),
+        "expected tools/list to succeed via bearer header"
+    );
     server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
 async fn valid_token_round_trip_query() {
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
-    let client = reqwest::Client::new();
-    let url = format!("{}?token={}", server.url(), token);
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({"jsonrpc":"2.0","method":"tools/list","id":1}))
-        .send()
+    let mut via_query = list_tool_names_query(&server.url(), &token)
         .await
-        .expect("request");
+        .expect("valid query token should open rmcp session");
+    let mut via_header = list_tool_names_header(&server.url(), &token)
+        .await
+        .expect("valid bearer token should open rmcp session");
+    via_query.sort();
+    via_header.sort();
     assert_eq!(
-        resp.status(),
-        200,
-        "valid token in query should pass middleware"
+        via_query, via_header,
+        "token in query and Authorization header must expose identical tool surface"
     );
     server.shutdown(Duration::from_secs(5)).await;
 }
@@ -119,29 +194,14 @@ async fn valid_token_round_trip_query() {
 #[tokio::test]
 async fn missing_token_returns_401() {
     let (_dir, server) = test_server().await;
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(server.url())
-        .json(&serde_json::json!({"jsonrpc":"2.0","method":"tools/list","id":1}))
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(resp.status(), 401);
+    assert_auth_denied(list_tool_names_no_auth(&server.url()).await);
     server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
 async fn malformed_token_returns_401() {
     let (_dir, server) = test_server().await;
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(server.url())
-        .bearer_auth("totally.not.a.token")
-        .json(&serde_json::json!({"jsonrpc":"2.0","method":"tools/list","id":1}))
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(resp.status(), 401);
+    assert_auth_denied(list_tool_names_header(&server.url(), "totally.not.a.token").await);
     server.shutdown(Duration::from_secs(5)).await;
 }
 
@@ -155,15 +215,7 @@ async fn tampered_hmac_rejected() {
     let corrupted = if last == 'a' { 'b' } else { 'a' };
     tampered.push(corrupted);
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(server.url())
-        .bearer_auth(&tampered)
-        .json(&serde_json::json!({"jsonrpc":"2.0","method":"tools/list","id":1}))
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(resp.status(), 401);
+    assert_auth_denied(list_tool_names_header(&server.url(), &tampered).await);
     server.shutdown(Duration::from_secs(5)).await;
 }
 
@@ -175,15 +227,7 @@ async fn expired_token_rejected() {
         .unwrap()
         .as_secs();
     let token = server.issue_token_with_expiry("d-1", now - 100);
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(server.url())
-        .bearer_auth(&token)
-        .json(&serde_json::json!({"jsonrpc":"2.0","method":"tools/list","id":1}))
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(resp.status(), 401);
+    assert_auth_denied(list_tool_names_header(&server.url(), &token).await);
     server.shutdown(Duration::from_secs(5)).await;
 }
 
@@ -201,70 +245,68 @@ async fn wrong_brain_session_id_rejected() {
         .expect("start B");
 
     let token_from_a = server_a.issue_token("d-1", Duration::from_secs(60));
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(server_b.url())
-        .bearer_auth(&token_from_a)
-        .json(&serde_json::json!({"jsonrpc":"2.0","method":"tools/list","id":1}))
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(
-        resp.status(),
-        401,
-        "token from server A must be rejected by server B"
-    );
+    assert_auth_denied(list_tool_names_header(&server_b.url(), &token_from_a).await);
 
     server_a.shutdown(Duration::from_secs(5)).await;
     server_b.shutdown(Duration::from_secs(5)).await;
 }
 
-/// Send a header line longer than MAX_HEADER_LINE (8192 bytes) with no
-/// trailing newline. The server must detect the truncated read and close the
-/// connection with 401 well before the 15-second headers-phase timeout.
 #[tokio::test]
-#[ignore = "rewrite under T_TESTS-rewrite"]
-async fn long_header_line_without_newline_rejected_quickly() {
+async fn long_bearer_token_rejected_quickly() {
     let (_dir, server) = test_server().await;
+    let long_token = "a".repeat(9000);
 
-    let url = server.url();
-    let addr = url.trim_start_matches("http://").trim_end_matches("/mcp");
-    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-
-    // Send a valid request line.
-    stream
-        .write_all(b"POST /mcp HTTP/1.1\r\n")
-        .await
-        .expect("write request line");
-
-    // Send a header that exceeds MAX_HEADER_LINE without a newline.
-    let long_header = format!("X-Long: {}", "a".repeat(9000));
-    stream
-        .write_all(long_header.as_bytes())
-        .await
-        .expect("write long header");
-
-    // The server should reject quickly (well under the 15s header-phase
-    // timeout). We give it 10s as a generous upper bound.
     let start = std::time::Instant::now();
-    let mut buf = vec![0u8; 1024];
-    let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf))
-        .await
-        .expect("server should respond well under 15s")
-        .expect("read");
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        list_tool_names_header(&server.url(), &long_token),
+    )
+    .await
+    .expect("oversized header token should fail quickly");
     let elapsed = start.elapsed();
 
-    let response = String::from_utf8_lossy(&buf[..n]);
-    assert!(
-        response.contains("401"),
-        "expected 401 for truncated header, got: {response}"
-    );
+    assert_header_phase_rejected(result);
     assert!(
         elapsed < Duration::from_secs(10),
         "should reject quickly, took {:?}",
         elapsed
     );
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn session_reuse_survives_expired_token_after_session_open() {
+    let (_dir, server) = test_server().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("unix time")
+        .as_secs();
+    // Token expires very soon. Session-open succeeds, then token expires.
+    let short_lived = server.issue_token_with_expiry("d-1", now + 1);
+
+    let url_with_token = format!("{}?token={}", server.url(), short_lived);
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(url_with_token))
+        .await
+        .expect("session-open should succeed with short-lived token");
+    let first = client
+        .list_all_tools()
+        .await
+        .expect("first call should succeed before token expiry");
+    assert!(!first.is_empty(), "tools/list should return curated tools");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let second = client
+        .list_all_tools()
+        .await
+        .expect("session-bound request should succeed after token expiry");
+    assert!(
+        !second.is_empty(),
+        "session-bound follow-up should not require revalidating expired token"
+    );
+    drop(client);
 
     server.shutdown(Duration::from_secs(5)).await;
 }

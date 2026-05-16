@@ -14,6 +14,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use rmcp::{transport::StreamableHttpClientTransport, ServiceExt};
 use spur_acp::config::SpurConfig;
 use spur_acp::types::SessionId;
 use spur_core::Orchestrator;
@@ -122,4 +123,22 @@ async fn ensure_worker_mcp_server_boots_real_listener_and_caches() {
         !token.contains('\n') && !token.contains(' '),
         "token must be URL-safe Base64Url (no whitespace), got: {token}"
     );
+
+    // WorkerMcpFetcher::fetch_url_token assembles `<url>?token=<token>` for
+    // dispatch. Smoke that exact wire shape end-to-end by opening a real RMCP
+    // client with the composed URL and listing tools.
+    let url_with_token = format!("{}?token={token}", server.url());
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(url_with_token))
+        .await
+        .expect("rmcp session should open against ensured worker server");
+    let tools = client
+        .list_all_tools()
+        .await
+        .expect("tools/list should succeed via ensured worker MCP URL");
+    assert!(
+        tools.iter().any(|tool| tool.name == "get_issue"),
+        "curated worker surface should include get_issue"
+    );
+    drop(client);
 }
