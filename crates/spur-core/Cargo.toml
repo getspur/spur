@@ -52,6 +52,7 @@ spur-license = { workspace = true, features = ["test-support"] }
 proptest = "1"
 fs4 = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
+rmcp = { workspace = true }
 
 [[test]]
 name = "shutdown_mcp_server_bounded"
