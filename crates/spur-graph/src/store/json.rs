@@ -9,13 +9,13 @@ use crate::discovery::discover_files;
 use crate::extract::{build_facts_for_paths, GraphFacts};
 use crate::validation::compute_anchor_hash;
 use crate::{
-    GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
-    GraphSymbolArtifact, NodeKind, RelationKind, SourceSpan,
+    GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact,
+    GraphIndexHeader, GraphNode, GraphSymbolArtifact, NodeKind, RelationKind, SourceSpan,
 };
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v3";
-pub const EXTRACTOR_VERSION: &str = "2026-05-16-stable-key-v2";
+pub const EXTRACTOR_VERSION: &str = "2026-05-16-persisted-edges-v3";
 
 const TAG_QUERY_BYTES: &[&[u8]] = &[
     include_bytes!("../../queries/markdown/tags.scm"),
@@ -35,6 +35,7 @@ struct FileBucket {
     file: GraphFileArtifact,
     manifest: GraphFileManifestEntry,
     symbols: Vec<GraphSymbolArtifact>,
+    edges: Vec<GraphEdgeArtifact>,
 }
 
 pub fn current_manifest_version() -> String {
@@ -197,6 +198,7 @@ fn build_artifact_from_facts_and_stats(
                             node_ids: vec![node.node_id],
                         },
                         symbols: Vec::new(),
+                        edges: Vec::new(),
                     });
             }
             NodeKind::Module
@@ -242,6 +244,7 @@ fn build_artifact_from_facts_and_stats(
                             node_ids: Vec::new(),
                         },
                         symbols: Vec::new(),
+                        edges: Vec::new(),
                     }
                 });
                 entry.manifest.node_ids.push(node.node_id);
@@ -249,6 +252,59 @@ fn build_artifact_from_facts_and_stats(
             }
             _ => {}
         }
+    }
+
+    for edge in &facts.edges {
+        let Some(source_node) = nodes_by_id.get(&edge.source_node_id).copied() else {
+            tracing::warn!(
+                source_node_id = edge.source_node_id.get(),
+                "spur-graph: dropping edge with unknown source node"
+            );
+            continue;
+        };
+        let Some(source_file_path) = node_file_path(facts, source_node, &spans_by_id) else {
+            tracing::warn!(
+                source_stable_key = %source_node.stable_key,
+                source_node_id = edge.source_node_id.get(),
+                relation = %relation_discriminator(edge.relation),
+                "spur-graph: dropping edge with unknown source file path"
+            );
+            continue;
+        };
+        let target_stable_symbol_id = nodes_by_id
+            .get(&edge.target_node_id)
+            .map(|node| node.stable_key.clone());
+        let entry = buckets.entry(source_file_path.clone()).or_insert_with(|| {
+            let stable_file_id = stable_file_id_from_path(&source_file_path);
+            let stats = if let Some(stats_map) = known_stats {
+                stats_map.get(&source_file_path).copied().unwrap_or((0, 0))
+            } else {
+                file_stats(worktree_root, &source_file_path)
+            };
+            FileBucket {
+                file: GraphFileArtifact {
+                    stable_file_id: stable_file_id.clone(),
+                    file_path: source_file_path.clone(),
+                },
+                manifest: GraphFileManifestEntry {
+                    stable_file_id,
+                    path: source_file_path.clone(),
+                    mtime_nanos: stats.0,
+                    size_bytes: stats.1,
+                    node_ids: Vec::new(),
+                },
+                symbols: Vec::new(),
+                edges: Vec::new(),
+            }
+        });
+        entry.edges.push(GraphEdgeArtifact {
+            source_stable_symbol_id: source_node.stable_key.clone(),
+            target_stable_symbol_id,
+            target_label: edge.target_label.clone(),
+            relation: edge.relation,
+            confidence: edge.confidence,
+            confidence_score: edge.confidence_score,
+        });
     }
 
     for bucket in buckets.values_mut() {
@@ -259,6 +315,9 @@ fn build_artifact_from_facts_and_stats(
                 .then(a.entity_name.cmp(&b.entity_name))
                 .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
         });
+        bucket
+            .edges
+            .sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
     }
 
     Ok(rebuild_from_buckets(buckets, current_manifest_version()))
@@ -299,9 +358,68 @@ fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, File
                         node_ids: Vec::new(),
                     }),
                 symbols: Vec::new(),
+                edges: Vec::new(),
             })
             .symbols
             .push(symbol.clone());
+    }
+
+    let symbol_file_by_stable_id: HashMap<_, _> = artifact
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.stable_symbol_id.clone(), symbol.file_path.clone()))
+        .collect();
+    let file_path_by_stable_file_id: HashMap<_, _> = artifact
+        .files
+        .iter()
+        .map(|file| (file.stable_file_id.clone(), file.file_path.clone()))
+        .collect();
+    let stable_file_id_by_path: HashMap<_, _> = artifact
+        .files
+        .iter()
+        .map(|file| (file.file_path.clone(), file.stable_file_id.clone()))
+        .collect();
+    for edge in &artifact.edges {
+        let source_path = symbol_file_by_stable_id
+            .get(&edge.source_stable_symbol_id)
+            .cloned()
+            .or_else(|| {
+                file_path_by_stable_file_id
+                    .get(&edge.source_stable_symbol_id)
+                    .cloned()
+            });
+        let Some(source_path) = source_path else {
+            tracing::warn!(
+                source_stable_symbol_id = %edge.source_stable_symbol_id,
+                "spur-graph: dropping artifact edge with unknown source stable id"
+            );
+            continue;
+        };
+        by_path
+            .entry(source_path.clone())
+            .or_insert_with(|| FileBucket {
+                file: GraphFileArtifact {
+                    stable_file_id: stable_file_id_by_path
+                        .get(&source_path)
+                        .cloned()
+                        .unwrap_or_else(|| stable_file_id_from_path(&source_path)),
+                    file_path: source_path.clone(),
+                },
+                manifest: GraphFileManifestEntry {
+                    stable_file_id: stable_file_id_by_path
+                        .get(&source_path)
+                        .cloned()
+                        .unwrap_or_else(|| stable_file_id_from_path(&source_path)),
+                    path: source_path.clone(),
+                    mtime_nanos: 0,
+                    size_bytes: 0,
+                    node_ids: Vec::new(),
+                },
+                symbols: Vec::new(),
+                edges: Vec::new(),
+            })
+            .edges
+            .push(edge.clone());
     }
 
     for (path, file) in files_by_path {
@@ -317,6 +435,7 @@ fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, File
                 }),
             file,
             symbols: Vec::new(),
+            edges: Vec::new(),
         });
     }
 
@@ -330,6 +449,7 @@ fn rebuild_from_buckets(
     let mut files = Vec::new();
     let mut symbols = Vec::new();
     let mut manifests = Vec::new();
+    let mut edges = Vec::new();
 
     for bucket in buckets.values_mut() {
         bucket.symbols.sort_by(|a, b| {
@@ -339,9 +459,13 @@ fn rebuild_from_buckets(
                 .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
         });
         bucket.manifest.node_ids.sort_by_key(|id| id.get());
+        bucket
+            .edges
+            .sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
         files.push(bucket.file.clone());
         symbols.extend(bucket.symbols.clone());
         manifests.push(bucket.manifest.clone());
+        edges.extend(bucket.edges.clone());
     }
 
     files.sort_by(|a, b| a.file_path.cmp(&b.file_path));
@@ -353,6 +477,7 @@ fn rebuild_from_buckets(
             .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
     });
     manifests.sort_by(|a, b| a.path.cmp(&b.path));
+    edges.sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
 
     GraphIndexArtifact {
         header: GraphIndexHeader {
@@ -362,8 +487,45 @@ fn rebuild_from_buckets(
         file_manifests: manifests,
         files,
         symbols,
+        edges,
         diagnostics: Vec::new(),
     }
+}
+
+fn edge_sort_key(edge: &GraphEdgeArtifact) -> (&str, &str, &str, &str) {
+    (
+        edge.source_stable_symbol_id.as_str(),
+        edge.target_stable_symbol_id.as_deref().unwrap_or(""),
+        relation_discriminator(edge.relation),
+        edge.target_label.as_deref().unwrap_or(""),
+    )
+}
+
+fn relation_discriminator(relation: RelationKind) -> &'static str {
+    match relation {
+        RelationKind::Imports => "imports",
+        RelationKind::Calls => "calls",
+        RelationKind::Contains => "contains",
+        RelationKind::Implements => "implements",
+        RelationKind::Defines => "defines",
+        RelationKind::References => "references",
+        RelationKind::Uses => "uses",
+        RelationKind::Extends => "extends",
+        RelationKind::Links => "links",
+    }
+}
+
+fn node_file_path(
+    facts: &GraphFacts,
+    node: &GraphNode,
+    spans_by_id: &HashMap<crate::SpanId, &SourceSpan>,
+) -> Option<String> {
+    if node.kind == NodeKind::File {
+        return Some(node.label.clone());
+    }
+    let span_id = node.source_span_id?;
+    let span = spans_by_id.get(&span_id).copied()?;
+    file_path_for_span(facts, span)
 }
 
 fn file_path_for_span(facts: &GraphFacts, span: &SourceSpan) -> Option<String> {
