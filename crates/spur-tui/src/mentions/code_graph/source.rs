@@ -1,4 +1,7 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
 use spur_graph::{
@@ -9,14 +12,22 @@ use spur_graph::{
 
 pub struct CodeGraphMentionSource {
     artifact_path: PathBuf,
-    payloads: Vec<(String, CodeMentionPayload)>,
+    cache_key: Option<(PathBuf, SystemTime)>,
+    cached_entries: Vec<MentionEntry>,
+    payloads: Vec<(String, Arc<CodeMentionPayload>)>,
+    #[cfg(test)]
+    reload_count: usize,
 }
 
 impl CodeGraphMentionSource {
     pub fn new(artifact_path: impl Into<PathBuf>) -> Self {
         Self {
             artifact_path: artifact_path.into(),
+            cache_key: None,
+            cached_entries: Vec::new(),
             payloads: Vec::new(),
+            #[cfg(test)]
+            reload_count: 0,
         }
     }
 }
@@ -27,13 +38,40 @@ impl MentionSource for CodeGraphMentionSource {
     }
 
     fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
-        self.payloads.clear();
+        let modified = fs::metadata(&self.artifact_path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        let cached = matches!(
+            (&self.cache_key, modified),
+            (Some((path, cached_mtime)), Some(current_mtime))
+                if path == &self.artifact_path && *cached_mtime == current_mtime
+        );
+        let span = tracing::info_span!(
+            "code_graph_build",
+            path = %self.artifact_path.display(),
+            cached = cached
+        );
+        let _guard = span.enter();
+
+        if cached {
+            return Ok(self.cached_entries.clone());
+        }
 
         if !self.artifact_path.is_file() {
+            self.cache_key = None;
+            self.cached_entries.clear();
+            self.payloads.clear();
             return Ok(Vec::new());
         }
 
-        let artifact = match load_artifact(&self.artifact_path) {
+        #[cfg(test)]
+        {
+            self.reload_count += 1;
+        }
+
+        let artifact = match tracing::debug_span!("load_artifact")
+            .in_scope(|| load_artifact(&self.artifact_path))
+        {
             Ok(artifact) => artifact,
             Err(error) => {
                 tracing::warn!(
@@ -41,6 +79,9 @@ impl MentionSource for CodeGraphMentionSource {
                     path = %self.artifact_path.display(),
                     "code graph mention source disabled for unreadable artifact"
                 );
+                self.cache_key = None;
+                self.cached_entries.clear();
+                self.payloads.clear();
                 return Ok(Vec::new());
             }
         };
@@ -52,17 +93,23 @@ impl MentionSource for CodeGraphMentionSource {
             );
         }
 
-        Ok(entries_and_payloads(artifact, &mut self.payloads))
+        let mut payloads = Vec::new();
+        let entries = tracing::debug_span!("materialize_entries")
+            .in_scope(|| entries_and_payloads(artifact, &mut payloads));
+        self.payloads = payloads;
+        self.cached_entries = entries.clone();
+        self.cache_key = modified.map(|mtime| (self.artifact_path.clone(), mtime));
+        Ok(entries)
     }
 
-    fn code_payloads(&self) -> Vec<(String, CodeMentionPayload)> {
-        self.payloads.clone()
+    fn code_payloads(&self) -> &[(String, Arc<CodeMentionPayload>)] {
+        &self.payloads
     }
 }
 
 fn entries_and_payloads(
     artifact: GraphIndexArtifact,
-    payloads: &mut Vec<(String, CodeMentionPayload)>,
+    payloads: &mut Vec<(String, Arc<CodeMentionPayload>)>,
 ) -> Vec<MentionEntry> {
     let graph_index_version = artifact.header.graph_index_version;
     let mut entries = Vec::with_capacity(artifact.files.len() + artifact.symbols.len());
@@ -72,7 +119,7 @@ fn entries_and_payloads(
         let display = file.file_path.clone();
         payloads.push((
             uri.clone(),
-            file_payload(&file, &uri, &display, &graph_index_version),
+            Arc::new(file_payload(&file, &uri, &display, &graph_index_version)),
         ));
         entries.push(MentionEntry {
             section_header: None,
@@ -93,7 +140,12 @@ fn entries_and_payloads(
         let secondary = symbol_secondary(&symbol);
         payloads.push((
             uri.clone(),
-            symbol_payload(&symbol, &uri, &display, &graph_index_version),
+            Arc::new(symbol_payload(
+                &symbol,
+                &uri,
+                &display,
+                &graph_index_version,
+            )),
         ));
         entries.push(MentionEntry {
             section_header: None,
@@ -195,4 +247,91 @@ fn symbol_search_text(symbol: &GraphSymbolArtifact) -> String {
         text.push_str(scope);
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn write_fixture(path: &Path, file_path: &str) {
+        let artifact = format!(
+            r#"{{
+  "header": {{ "graph_index_version": "v1" }},
+  "manifest_version": "v1",
+  "file_manifests": [],
+  "files": [
+    {{ "stable_file_id": "file-1", "file_path": "{file_path}" }}
+  ],
+  "symbols": []
+}}"#
+        );
+        std::fs::write(path, artifact).expect("write fixture");
+    }
+
+    fn rewrite_until_mtime_changes(path: &Path, file_path: &str, previous: SystemTime) {
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(10));
+            write_fixture(path, file_path);
+            let current = std::fs::metadata(path)
+                .expect("metadata")
+                .modified()
+                .expect("modified");
+            if current != previous {
+                return;
+            }
+        }
+        panic!("artifact mtime did not change");
+    }
+
+    #[test]
+    fn build_uses_mtime_cache_and_reloads_on_change() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("graph-index.json");
+        write_fixture(&artifact_path, "src/main.rs");
+        let mut source = CodeGraphMentionSource::new(&artifact_path);
+
+        let first = source.build(Path::new(".")).expect("first build");
+        assert_eq!(first.len(), 1);
+        assert_eq!(source.reload_count, 1);
+
+        let second = source.build(Path::new(".")).expect("second build");
+        assert_eq!(second.len(), 1);
+        assert_eq!(source.reload_count, 1);
+
+        let previous_mtime = std::fs::metadata(&artifact_path)
+            .expect("metadata")
+            .modified()
+            .expect("modified");
+        rewrite_until_mtime_changes(&artifact_path, "src/lib.rs", previous_mtime);
+
+        let third = source.build(Path::new(".")).expect("third build");
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].display, "src/lib.rs");
+        assert_eq!(source.reload_count, 2);
+    }
+
+    #[test]
+    fn code_payloads_cache_hit_reuses_arc_instances() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("graph-index.json");
+        write_fixture(&artifact_path, "src/main.rs");
+        let mut source = CodeGraphMentionSource::new(&artifact_path);
+
+        let _ = source.build(Path::new(".")).expect("first build");
+        let first = source.code_payloads();
+        let (uri, first_payload) = first.first().expect("first payload");
+        let uri = uri.clone();
+        let first_payload = Arc::clone(first_payload);
+
+        let _ = source.build(Path::new(".")).expect("second build");
+        let second = source.code_payloads();
+        let second_payload = second
+            .iter()
+            .find(|(candidate_uri, _)| candidate_uri == &uri)
+            .map(|(_, payload)| payload)
+            .expect("second payload");
+
+        assert!(Arc::ptr_eq(&first_payload, second_payload));
+    }
 }
