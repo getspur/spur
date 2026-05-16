@@ -570,14 +570,16 @@ fn assert_dispatched_base_oid_for_active_status(
             | PlanTaskStatus::AwaitingReview { .. }
             | PlanTaskStatus::Approved { .. }
     );
-    assert!(
-        !requires_base_oid || entry.dispatched_base_oid.is_some(),
-        "invariant:{site} dispatched_base_oid missing for active status (plan_id={}, task_id={}) expected dispatched_base_oid=Some(_) whenever status is Dispatched/AwaitingReview/Approved, got status={:?}, dispatched_base_oid={:?}",
-        plan_id,
-        task_id,
-        entry.status,
-        entry.dispatched_base_oid,
-    );
+    // Tier-0 tactical relaxation; bd-3sk retires this branch (see RCA §10.1/§11/§12.2).
+    if requires_base_oid && entry.dispatched_base_oid.is_none() {
+        tracing::error!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            site,
+            status = ?entry.status,
+            "label_index_drift: active status missing dispatched_base_oid; likely operator-closed shadow task persisted into cache. Keeping degraded entry and skipping panic."
+        );
+    }
 }
 
 /// Returns the most recent delegation id for a task entry, falling back to
