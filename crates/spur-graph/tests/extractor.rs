@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
+use pretty_assertions::assert_eq;
 use spur_graph::build_facts;
 use spur_graph::graph::petgraph_builder::build_petgraph;
 use spur_graph::load_artifact;
@@ -71,13 +72,12 @@ fn normalize_for_golden(
     artifact
 }
 
-fn normalize_for_edge_compare(
-    mut artifact: spur_graph::GraphIndexArtifact,
+fn normalize_for_comparison(
+    artifact: spur_graph::GraphIndexArtifact,
 ) -> spur_graph::GraphIndexArtifact {
-    artifact.manifest_version = "<normalized>".to_string();
+    let mut artifact = normalize_for_golden(artifact);
     for entry in &mut artifact.file_manifests {
-        entry.mtime_nanos = 0;
-        entry.size_bytes = 0;
+        entry.node_ids.clear();
     }
     artifact
 }
@@ -100,6 +100,12 @@ fn call_edge_target_for(
                 && edge.target_label.as_deref() == Some("callee")
         })
         .and_then(|edge| edge.target_stable_symbol_id.clone())
+}
+
+enum EditStep {
+    Write(&'static str, &'static str),
+    Rename(&'static str, &'static str),
+    Delete(&'static str),
 }
 
 #[test]
@@ -816,6 +822,93 @@ fn incremental_round_trip_preserves_edges() {
 }
 
 #[test]
+fn incremental_matches_full_under_edit_sequence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+
+    let steps = vec![
+        EditStep::Write("src/a.rs", "pub fn alpha() {}\n"),
+        EditStep::Write("src/b.rs", "pub fn beta() { alpha(); }\n"),
+        EditStep::Write("src/a.rs", "\npub fn alpha() {}\n"),
+        EditStep::Write("src/a.rs", "pub fn alpha() {}\npub fn gamma() {}\n"),
+        EditStep::Write("src/a.rs", "pub fn gamma() {}\npub fn alpha() {}\n"),
+        EditStep::Write("src/b.rs", "pub fn beta() { gamma(); }\n"),
+        EditStep::Rename("src/a.rs", "src/renamed.rs"),
+        EditStep::Delete("src/renamed.rs"),
+        EditStep::Write("src/a.rs", "pub fn gamma() {}\n"),
+    ];
+
+    for step in steps.iter().take(2) {
+        sleep(Duration::from_millis(5));
+        match step {
+            EditStep::Write(path, content) => {
+                let full_path = root.join(path);
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent).expect("mkdir parent");
+                }
+                fs::write(full_path, content).expect("write step file");
+            }
+            EditStep::Rename(from, to) => {
+                let from_path = root.join(from);
+                let to_path = root.join(to);
+                if let Some(parent) = to_path.parent() {
+                    fs::create_dir_all(parent).expect("mkdir parent");
+                }
+                fs::rename(from_path, to_path).expect("rename step file");
+            }
+            EditStep::Delete(path) => {
+                fs::remove_file(root.join(path)).expect("delete step file");
+            }
+        }
+    }
+
+    let mut prev_incremental = artifact_from_facts(
+        &build_facts(root)
+            .expect("extract baseline after steps 1-2")
+            .0,
+        root,
+    )
+    .expect("baseline artifact after steps 1-2");
+
+    for step in steps.into_iter().skip(2) {
+        sleep(Duration::from_millis(5));
+        match step {
+            EditStep::Write(path, content) => {
+                let full_path = root.join(path);
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent).expect("mkdir parent");
+                }
+                fs::write(full_path, content).expect("write step file");
+            }
+            EditStep::Rename(from, to) => {
+                let from_path = root.join(from);
+                let to_path = root.join(to);
+                if let Some(parent) = to_path.parent() {
+                    fs::create_dir_all(parent).expect("mkdir parent");
+                }
+                fs::rename(from_path, to_path).expect("rename step file");
+            }
+            EditStep::Delete(path) => {
+                fs::remove_file(root.join(path)).expect("delete step file");
+            }
+        }
+        let full =
+            artifact_from_facts(&build_facts(root).expect("extract full").0, root).expect("full");
+        let (incremental, mode) =
+            artifact_from_facts_incremental(&prev_incremental, root).expect("extract incremental");
+        assert_eq!(mode, BuildMode::Incremental);
+
+        assert_eq!(
+            normalize_for_comparison(full.clone()),
+            normalize_for_comparison(incremental.clone())
+        );
+
+        prev_incremental = incremental;
+    }
+}
+
+#[test]
 fn incremental_modify_one_file_replaces_only_that_bucket() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -974,12 +1067,12 @@ fn full_and_incremental_emit_byte_identical_edges_for_same_state() {
     )
     .expect("rewrite callee.rs");
 
-    let full_x = normalize_for_edge_compare(
+    let full_x = normalize_for_comparison(
         artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full x"),
     );
     let (incremental_x, mode) = artifact_from_facts_incremental(&y, root).expect("incremental x");
     assert_eq!(mode, BuildMode::Incremental);
-    let incremental_x = normalize_for_edge_compare(incremental_x);
+    let incremental_x = normalize_for_comparison(incremental_x);
 
     let full_edges = serde_json::to_vec(&full_x.edges).expect("serialize full edges");
     let incremental_edges =
@@ -1025,10 +1118,10 @@ fn incremental_drops_removed_cross_file_call_edge() {
         "incremental artifact should not retain removed callee call edge"
     );
 
-    let full_after = normalize_for_edge_compare(
+    let full_after = normalize_for_comparison(
         artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full after"),
     );
-    let incremental = normalize_for_edge_compare(incremental);
+    let incremental = normalize_for_comparison(incremental);
     assert_eq!(
         serde_json::to_vec(&incremental.edges).expect("serialize incremental edges"),
         serde_json::to_vec(&full_after.edges).expect("serialize full edges")
