@@ -143,7 +143,7 @@ async fn persist_dispatched_base_oid_label(
     };
 
     let issue = pm.get_issue(issue_id).await.map_err(|e| {
-        AttemptSetupError::WorktreeFailed(format!("persist dispatched base OID label: {e}"))
+        AttemptSetupError::WorktreeFailed(format!("persist dispatched base OID label: {e:#}"))
     })?;
     let label = spur_mcp::plan::labels::dispatched_base_oid(dispatched_base_oid);
     let remove_labels = issue
@@ -172,7 +172,7 @@ async fn persist_dispatched_base_oid_label(
     )
     .await
     .map_err(|e| {
-        AttemptSetupError::WorktreeFailed(format!("persist dispatched base OID label: {e}"))
+        AttemptSetupError::WorktreeFailed(format!("persist dispatched base OID label: {e:#}"))
     })
 }
 
@@ -277,7 +277,11 @@ pub(crate) async fn run_one_worker_attempt(
             &base_branch,
         )
         .await
-        .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
+        // {e:#} walks the anyhow source chain so the underlying `git worktree add`
+        // stderr (path collision, missing ref, disk full, etc.) is surfaced in the
+        // returned AttemptSetupError instead of being hidden behind the top-level
+        // `failed to create v2 worktree at <path>` context wrapper.
+        .map_err(|e| AttemptSetupError::WorktreeFailed(format!("{e:#}")))?;
 
     // The snapshot branch is only needed as a base ref for worktree creation.
     // Once the worktree exists, delete it immediately to prevent ref leaks.
@@ -320,13 +324,13 @@ pub(crate) async fn run_one_worker_attempt(
         Err(e) => {
             let _ = worktrees.remove_worktree(&worker_session).await;
             return Err(AttemptSetupError::WorktreeFailed(format!(
-                "resolve worktree HEAD: {e}"
+                "resolve worktree HEAD: {e:#}"
             )));
         }
     };
     worktrees
         .update_base_commit(&worker_session, dispatched_base_oid.clone())
-        .map_err(|e| AttemptSetupError::WorktreeFailed(format!("update base commit: {e}")))?;
+        .map_err(|e| AttemptSetupError::WorktreeFailed(format!("update base commit: {e:#}")))?;
     if let Some(prior_branch) = ctx.prior_branch_for_reuse.as_deref() {
         preapply_prior_branch_for_reuse(
             worktrees,
@@ -902,6 +906,57 @@ mod context_files_wiring_tests {
     fn format_worker_task_is_available_in_orchestrator_module() {
         let out = format_worker_task("t", &["x".into()]);
         assert!(out.contains("## Relevant Files"));
+    }
+}
+
+#[cfg(test)]
+mod attempt_setup_error_chain_visibility_tests {
+    use super::AttemptSetupError;
+    use anyhow::Context;
+
+    /// Pin the contract that all `AttemptSetupError::WorktreeFailed` callsites
+    /// use `format!("{e:#}")` (or equivalent chain-walking format) so that the
+    /// underlying error source (e.g. raw git stderr from
+    /// `WorktreeManager::create_worktree_v2`) survives into the surfaced
+    /// `Display` output.
+    ///
+    /// Before this guard, the lossy pattern `e.to_string()` was used at 5
+    /// call sites in this file. That dropped the anyhow source chain entirely,
+    /// leaving callers with only the top-level context (e.g. "failed to create
+    /// v2 worktree at <path>") and no way to know WHY git failed. The 2026-05-16
+    /// otobank investigation lost hours diagnosing repeated worktree-creation
+    /// failures because the actual git error (a "fatal: ..." stderr line) was
+    /// invisible to both the brain and the operator.
+    ///
+    /// If this test fails, you've probably reverted one of the `{e:#}` formats
+    /// back to `{e}` or `e.to_string()`. Do not "fix" the test — restore the
+    /// `{e:#}` format at the failing callsite.
+    #[test]
+    fn worktree_failed_display_preserves_source_chain() {
+        // Build a 2-level anyhow chain: leaf = simulated git stderr,
+        // outer = create_worktree_v2 context wrapper.
+        let leaf =
+            anyhow::anyhow!("git worktree add failed (exit 128): fatal: invalid reference: xyz");
+        let outer = Err::<(), anyhow::Error>(leaf)
+            .context("failed to create v2 worktree at /tmp/spur-test-fake-uuid")
+            .unwrap_err();
+
+        // Apply the same wrapping shape used at the create_worktree_v2 callsite.
+        let setup_err = AttemptSetupError::WorktreeFailed(format!("{outer:#}"));
+        let surfaced = format!("{setup_err}");
+
+        assert!(
+            surfaced.contains("invalid reference: xyz"),
+            "WorktreeFailed must preserve the deepest source (git stderr). Got: {surfaced}"
+        );
+        assert!(
+            surfaced.contains("git worktree add failed (exit 128)"),
+            "WorktreeFailed must preserve the run_git wrapper context. Got: {surfaced}"
+        );
+        assert!(
+            surfaced.contains("failed to create v2 worktree"),
+            "WorktreeFailed must preserve the create_worktree_v2 top context. Got: {surfaced}"
+        );
     }
 }
 
