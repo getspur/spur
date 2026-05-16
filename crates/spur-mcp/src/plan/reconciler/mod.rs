@@ -128,6 +128,178 @@ fn is_review_rejected_label(label: &str) -> bool {
     label == crate::plan::labels::REVIEW_REJECTED || label == "review-rejected"
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LabelDriftEvent {
+    label_family: &'static str,
+    direction: &'static str,
+}
+
+struct LabelReconcileBuffers<'a> {
+    add_labels: &'a mut Vec<String>,
+    remove_labels: &'a mut Vec<String>,
+    drift_events: &'a mut Vec<LabelDriftEvent>,
+}
+
+fn emit_label_index_drift(event: &LabelDriftEvent) {
+    tracing::info!(
+        label_kind = event.label_family,
+        direction = event.direction,
+        "label_index_drift"
+    );
+}
+
+fn expected_plan_id_from_audits(
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+) -> Option<String> {
+    use crate::plan::audit_sentinel::AuditSentinelKind;
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::PlanSubmit { plan_id, .. }
+            | AuditSentinelKind::EpicCompletion { plan_id, .. }
+            | AuditSentinelKind::TaskTransition { plan_id, .. }
+            | AuditSentinelKind::EscalationRequested { plan_id, .. } => {
+                return Some(plan_id.clone());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn expected_plan_task_id_from_audits(
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+) -> Option<String> {
+    if let Some((task_id, _)) = crate::plan::projector::latest_task_spec(audits) {
+        return Some(task_id);
+    }
+    use crate::plan::audit_sentinel::AuditSentinelKind;
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::TaskTransition { task_id, .. }
+            | AuditSentinelKind::EscalationRequested { task_id, .. } => {
+                return Some(task_id.clone());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn expected_agent_from_audits(
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+) -> Option<String> {
+    let (_, agent, _) = crate::plan::projector::latest_extended_task_spec(audits);
+    agent
+}
+
+fn expected_plan_complete_from_audits(
+    issue_id: &str,
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+) -> Option<bool> {
+    for audit in audits.iter().rev() {
+        if let crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+            epic_issue_id, ..
+        } = audit
+        {
+            return Some(epic_issue_id == issue_id);
+        }
+    }
+    None
+}
+
+fn expected_plan_pending_from_audits(
+    _issue_id: &str,
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+) -> Option<bool> {
+    // `spur:plan-pending` exists only as a pre-audit transient while
+    // `build_epic_subgraph` is still creating children/dependency edges.
+    // The label is removed before `PlanSubmit` is emitted, so once any
+    // `PlanSubmit` appears in audits this label MUST be absent.
+    // `Some(true)` is structurally unreachable.
+    for audit in audits.iter().rev() {
+        if matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit { .. }
+        ) {
+            return Some(false);
+        }
+    }
+    None
+}
+
+fn reconcile_singleton_label(
+    label_family: &'static str,
+    expected: Option<String>,
+    existing: Vec<String>,
+    add_labels: &mut Vec<String>,
+    remove_labels: &mut Vec<String>,
+    drift_events: &mut Vec<LabelDriftEvent>,
+) {
+    match expected {
+        Some(expected) => {
+            let has_expected = existing.iter().any(|label| label == &expected);
+            if !has_expected {
+                drift_events.push(LabelDriftEvent {
+                    label_family,
+                    direction: if existing.is_empty() {
+                        "missing"
+                    } else {
+                        "mismatched"
+                    },
+                });
+                add_labels.push(expected.clone());
+            }
+            for existing_label in existing {
+                if existing_label != expected {
+                    drift_events.push(LabelDriftEvent {
+                        label_family,
+                        direction: "mismatched",
+                    });
+                    remove_labels.push(existing_label);
+                }
+            }
+        }
+        None => {
+            for existing_label in existing {
+                drift_events.push(LabelDriftEvent {
+                    label_family,
+                    direction: "stale",
+                });
+                remove_labels.push(existing_label);
+            }
+        }
+    }
+}
+
+fn reconcile_presence_label(
+    label_family: &'static str,
+    canonical_label: &'static str,
+    is_family_label: impl Fn(&str) -> bool,
+    expected_present: bool,
+    issue_labels: &[String],
+    buffers: &mut LabelReconcileBuffers<'_>,
+) {
+    let has_present = issue_labels.iter().any(|label| is_family_label(label));
+    if expected_present && !has_present {
+        buffers.drift_events.push(LabelDriftEvent {
+            label_family,
+            direction: "missing",
+        });
+        buffers.add_labels.push(canonical_label.to_string());
+    }
+    if !expected_present {
+        for label in issue_labels {
+            if is_family_label(label) {
+                buffers.drift_events.push(LabelDriftEvent {
+                    label_family,
+                    direction: "stale",
+                });
+                buffers.remove_labels.push(label.clone());
+            }
+        }
+    }
+}
+
 fn unresolved_blocker_issue_ids(
     projected: &crate::plan::PlanState,
     task: &crate::plan::PlanTaskEntry,
@@ -1182,13 +1354,14 @@ impl Reconciler {
             let comments = adv.list_comments(&issue.id).await?;
             let audits =
                 crate::plan::projector::collect_sorted_audits_for_issue(&issue.id, comments)?;
-            did_work |= self.index_hygiene_sweep(&issue, &audits).await?;
+            did_work |= self.index_hygiene_sweep(adv, &issue, &audits).await?;
         }
         Ok(did_work)
     }
 
     async fn index_hygiene_sweep(
         &self,
+        adv: &dyn spur_pm::BeadsAdvanced,
         issue: &spur_pm::IssueSummary,
         audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
     ) -> anyhow::Result<bool> {
@@ -1207,103 +1380,136 @@ impl Reconciler {
             terminal,
             Some(crate::plan::projector::TerminalAuditKind::Rejection)
         );
+        let expected_plan_id_value = match expected_plan_id_from_audits(audits) {
+            Some(plan_id) => Some(plan_id),
+            None => self.expected_plan_id_from_parent_epic(adv, issue).await?,
+        };
+        let expected_plan_id =
+            expected_plan_id_value.map(|plan_id| crate::plan::labels::plan_id(&plan_id));
+        let expected_plan_task_id = expected_plan_task_id_from_audits(audits)
+            .map(|task_id| crate::plan::labels::plan_task_id(&task_id));
+        let expected_agent =
+            expected_agent_from_audits(audits).map(|agent| crate::plan::labels::agent(&agent));
+        let expected_plan_complete =
+            expected_plan_complete_from_audits(&issue.id, audits).unwrap_or(false);
+        let expected_plan_pending =
+            expected_plan_pending_from_audits(&issue.id, audits).unwrap_or(false);
 
         let mut add_labels = Vec::new();
         let mut remove_labels = Vec::new();
+        let mut drift_events = Vec::new();
 
         let existing_delegations = issue
             .labels
             .iter()
             .filter_map(|label| delegation_label_value(label))
+            .map(crate::plan::labels::delegation_id)
             .collect::<Vec<_>>();
-        match expected_delegation.as_deref() {
-            Some(expected) => {
-                let has_expected = existing_delegations.contains(&expected);
-                if !has_expected {
-                    let direction = if existing_delegations.is_empty() {
-                        "missing"
-                    } else {
-                        "mismatched"
-                    };
-                    tracing::info!(label_kind = "delegation_id", direction, "label_index_drift");
-                    add_labels.push(crate::plan::labels::delegation_id(expected));
-                }
-                for label in &issue.labels {
-                    if let Some(existing) = delegation_label_value(label) {
-                        if existing != expected {
-                            tracing::info!(
-                                label_kind = "delegation_id",
-                                direction = "mismatched",
-                                "label_index_drift"
-                            );
-                            remove_labels.push(label.clone());
-                        }
-                    }
-                }
-            }
-            None => {
-                for label in &issue.labels {
-                    if delegation_label_value(label).is_some() {
-                        tracing::info!(
-                            label_kind = "delegation_id",
-                            direction = "stale",
-                            "label_index_drift"
-                        );
-                        remove_labels.push(label.clone());
-                    }
-                }
-            }
-        }
-
-        let has_ready_for_review = issue
+        let expected_delegation_label = expected_delegation
+            .as_deref()
+            .map(crate::plan::labels::delegation_id);
+        reconcile_singleton_label(
+            "delegation_id",
+            expected_delegation_label,
+            existing_delegations,
+            &mut add_labels,
+            &mut remove_labels,
+            &mut drift_events,
+        );
+        reconcile_presence_label(
+            "ready_for_review",
+            crate::plan::labels::READY_FOR_REVIEW,
+            is_ready_for_review_label,
+            expected_ready_for_review,
+            &issue.labels,
+            &mut LabelReconcileBuffers {
+                add_labels: &mut add_labels,
+                remove_labels: &mut remove_labels,
+                drift_events: &mut drift_events,
+            },
+        );
+        reconcile_presence_label(
+            "review_rejected",
+            crate::plan::labels::REVIEW_REJECTED,
+            is_review_rejected_label,
+            expected_review_rejected,
+            &issue.labels,
+            &mut LabelReconcileBuffers {
+                add_labels: &mut add_labels,
+                remove_labels: &mut remove_labels,
+                drift_events: &mut drift_events,
+            },
+        );
+        let existing_plan_ids = issue
             .labels
             .iter()
-            .any(|label| is_ready_for_review_label(label));
-        if expected_ready_for_review && !has_ready_for_review {
-            tracing::info!(
-                label_kind = "ready_for_review",
-                direction = "missing",
-                "label_index_drift"
-            );
-            add_labels.push(crate::plan::labels::READY_FOR_REVIEW.to_string());
-        }
-        if !expected_ready_for_review {
-            for label in &issue.labels {
-                if is_ready_for_review_label(label) {
-                    tracing::info!(
-                        label_kind = "ready_for_review",
-                        direction = "stale",
-                        "label_index_drift"
-                    );
-                    remove_labels.push(label.clone());
-                }
-            }
-        }
-
-        let has_review_rejected = issue
+            .filter(|label| crate::plan::labels::parse_plan_id(label).is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        reconcile_singleton_label(
+            "plan_id",
+            expected_plan_id,
+            existing_plan_ids,
+            &mut add_labels,
+            &mut remove_labels,
+            &mut drift_events,
+        );
+        let existing_plan_task_ids = issue
             .labels
             .iter()
-            .any(|label| is_review_rejected_label(label));
-        if expected_review_rejected && !has_review_rejected {
-            tracing::info!(
-                label_kind = "review_rejected",
-                direction = "missing",
-                "label_index_drift"
-            );
-            add_labels.push(crate::plan::labels::REVIEW_REJECTED.to_string());
-        }
-        if !expected_review_rejected {
-            for label in &issue.labels {
-                if is_review_rejected_label(label) {
-                    tracing::info!(
-                        label_kind = "review_rejected",
-                        direction = "stale",
-                        "label_index_drift"
-                    );
-                    remove_labels.push(label.clone());
-                }
-            }
-        }
+            .filter(|label| crate::plan::labels::parse_plan_task_id(label).is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        reconcile_singleton_label(
+            "plan_task_id",
+            expected_plan_task_id,
+            existing_plan_task_ids,
+            &mut add_labels,
+            &mut remove_labels,
+            &mut drift_events,
+        );
+        let existing_agents = issue
+            .labels
+            .iter()
+            .filter(|label| crate::plan::labels::parse_agent(label).is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        reconcile_singleton_label(
+            "agent",
+            expected_agent,
+            existing_agents,
+            &mut add_labels,
+            &mut remove_labels,
+            &mut drift_events,
+        );
+        reconcile_presence_label(
+            "plan_complete",
+            crate::plan::labels::PLAN_COMPLETE,
+            |label| label == crate::plan::labels::PLAN_COMPLETE,
+            expected_plan_complete,
+            &issue.labels,
+            &mut LabelReconcileBuffers {
+                add_labels: &mut add_labels,
+                remove_labels: &mut remove_labels,
+                drift_events: &mut drift_events,
+            },
+        );
+        reconcile_presence_label(
+            "plan_pending",
+            crate::plan::labels::PLAN_PENDING,
+            |label| label == crate::plan::labels::PLAN_PENDING,
+            expected_plan_pending,
+            &issue.labels,
+            &mut LabelReconcileBuffers {
+                add_labels: &mut add_labels,
+                remove_labels: &mut remove_labels,
+                drift_events: &mut drift_events,
+            },
+        );
+        // Intentionally exempt `spur:superseded-by:*` + `spur:mutation-id:*` from
+        // index-hygiene repair. These families are irreducible label-only fields:
+        // `partial_compare_status` accepts legacy Superseded data that shadow
+        // projection cannot reconstruct from audits (`projector.rs:412-439`).
 
         add_labels.sort();
         add_labels.dedup();
@@ -1314,6 +1520,12 @@ impl Reconciler {
             return Ok(false);
         }
 
+        for event in &drift_events {
+            emit_label_index_drift(event);
+        }
+
+        // TOCTOU note: comments/audits may change between `list_comments` and this
+        // write. The sweep is idempotent and converges on the next tick.
         self.pm
             .update_issue(
                 &issue.id,
@@ -1326,8 +1538,28 @@ impl Reconciler {
             .await?;
         Ok(true)
     }
+
+    async fn expected_plan_id_from_parent_epic(
+        &self,
+        adv: &dyn spur_pm::BeadsAdvanced,
+        issue: &spur_pm::IssueSummary,
+    ) -> anyhow::Result<Option<String>> {
+        let detail = self.pm.get_issue(&issue.id).await?;
+        // Deterministic parent selection: never depend on backend `blocked_by`
+        // iteration order.
+        let mut parents: Vec<String> = detail.blocked_by.to_vec();
+        parents.sort();
+        for parent_id in &parents {
+            let comments = adv.list_comments(parent_id).await?;
+            let audits =
+                crate::plan::projector::collect_sorted_audits_for_issue(parent_id, comments)?;
+            if let Some(plan_id) = expected_plan_id_from_audits(&audits) {
+                return Ok(Some(plan_id));
+            }
+        }
+        Ok(None)
+    }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests;
