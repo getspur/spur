@@ -510,6 +510,7 @@ pub struct ReconcilerConfig {
     pub idle_ceiling: Duration,
     pub backoff_factor: u32,
     pub dispatch_lease_duration: Duration,
+    pub label_only_dispatch_grace: Duration,
     pub repo_root: PathBuf,
     pub predispatch_preview: PreviewStrategy,
 }
@@ -521,6 +522,7 @@ impl Default for ReconcilerConfig {
             idle_ceiling: Duration::from_secs(30),
             backoff_factor: 2,
             dispatch_lease_duration: Duration::from_secs(600),
+            label_only_dispatch_grace: Duration::from_secs(30),
             repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             predispatch_preview: PreviewStrategy::Real,
         }
@@ -1366,7 +1368,7 @@ impl Reconciler {
         audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
     ) -> anyhow::Result<bool> {
         if audits.is_empty() {
-            return Ok(false);
+            return self.reconcile_label_only_dispatch(issue).await;
         }
         let terminal = crate::plan::projector::terminal_status_from_audits(audits);
         let expected_delegation = if terminal.is_some() {
@@ -1538,6 +1540,50 @@ impl Reconciler {
                 &issue.id,
                 spur_pm::IssueUpdate {
                     add_labels,
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(true)
+    }
+
+    async fn reconcile_label_only_dispatch(
+        &self,
+        issue: &spur_pm::IssueSummary,
+    ) -> anyhow::Result<bool> {
+        let remove_labels = issue
+            .labels
+            .iter()
+            .filter(|label| delegation_label_value(label).is_some())
+            .cloned()
+            .chain(
+                issue
+                    .labels
+                    .iter()
+                    .filter(|label| crate::plan::labels::parse_lease_expires_at(label).is_some())
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+        if remove_labels.is_empty() {
+            return Ok(false);
+        }
+
+        let detail = self.pm.get_issue(&issue.id).await?;
+        let now: chrono::DateTime<chrono::Utc> = self.now().into();
+        let age = now.signed_duration_since(detail.updated_at);
+        if age
+            .to_std()
+            .map(|age| age < self.config.label_only_dispatch_grace)
+            .unwrap_or(true)
+        {
+            return Ok(false);
+        }
+
+        self.pm
+            .update_issue(
+                &issue.id,
+                spur_pm::IssueUpdate {
                     remove_labels,
                     ..Default::default()
                 },

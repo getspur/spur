@@ -171,6 +171,7 @@ impl<S: OutcomeStore> OutcomeStore for MeasuredOutcomeStore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OutcomeBlobKind;
     use crate::{ContentType, MemoryOutcomeStore};
     use chrono::Utc;
     use sha2::{Digest, Sha256};
@@ -195,6 +196,7 @@ mod tests {
             )),
             delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
             attempt: 1,
+            kind: OutcomeBlobKind::ResultJson,
         }
     }
 

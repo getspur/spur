@@ -150,7 +150,7 @@ impl OutcomeStore for MemoryOutcomeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ContentType;
+    use crate::{ContentType, OutcomeBlobKind};
     use chrono::Utc;
     use spur_acp::SessionId;
 
@@ -159,6 +159,7 @@ mod tests {
             brain_session_id: BrainSessionId::new(SessionId(session.into())),
             delegation_id: delegation.into(),
             attempt,
+            kind: OutcomeBlobKind::ResultJson,
         }
     }
 

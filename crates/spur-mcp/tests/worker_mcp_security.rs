@@ -472,6 +472,7 @@ async fn t32_cross_brain_session_fetch_unauthorized() {
         brain_session_id: brain_y.clone(),
         delegation_id: DELEGATION_A.into(),
         attempt: 1,
+        kind: spur_blob_store::OutcomeBlobKind::ResultJson,
     };
     let body = b"secret outcome owned by brain Y";
     let metadata = OutcomeMetadata {

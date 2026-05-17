@@ -19,6 +19,7 @@ fn outcome_key(delegation_id: DelegationId, attempt: u32) -> OutcomeKey {
         )),
         delegation_id,
         attempt,
+        kind: spur_acp::domain::outcome::OutcomeBlobKind::ResultJson,
     }
 }
 

@@ -52,6 +52,22 @@ impl Reconciler {
                 .filter_map(|label| crate::plan::labels::parse_lease_expires_at(label))
                 .max()
             else {
+                let has_delegation_label = summary
+                    .labels
+                    .iter()
+                    .any(|label| crate::plan::labels::parse_delegation_id(label).is_some());
+                let has_dispatch_audit = if has_delegation_label {
+                    true
+                } else {
+                    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                        &summary.id,
+                        adv.list_comments(&summary.id).await?,
+                    )?;
+                    crate::plan::projector::current_delegation_from_audits(&audits).is_some()
+                };
+                if !has_dispatch_audit {
+                    continue;
+                }
                 let plan_id = summary
                     .labels
                     .iter()

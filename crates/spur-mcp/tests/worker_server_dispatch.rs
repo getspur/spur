@@ -3,7 +3,8 @@
 //! Verifies that `tools/list` returns the curated 8-tool subset, that
 //! `tools/call` routes by name to the freestanding handlers, that unknown
 //! tool names produce `-32601`, and that batched JSON-RPC requests are
-//! rejected with `-32600` (per-element token attribution is unsupported).
+//! rejected at the transport decoder (per-element token attribution is
+//! unsupported).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -539,14 +540,46 @@ async fn tools_call_unknown_tool_returns_method_not_found() {
 async fn json_rpc_batched_request_rejected() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
-    // rmcp's typed client API cannot encode batched JSON-RPC payload arrays,
-    // so this negative wire-contract assertion must send raw JSON over HTTP.
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let initialize = client
         .post(server.url())
         .header(
             reqwest::header::ACCEPT,
             "application/json, text/event-stream",
         )
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "spur-worker-dispatch-test",
+                    "version": "0.0.0"
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("initialize request");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("initialize response must carry mcp-session-id")
+        .to_string();
+
+    // rmcp's typed client API cannot encode batched JSON-RPC payload arrays,
+    // so this negative wire-contract assertion must send raw JSON over HTTP.
+    let response = client
+        .post(server.url())
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
+        .header("mcp-session-id", session_id)
         .bearer_auth(token)
         .json(&serde_json::json!([
             {"jsonrpc":"2.0","method":"tools/list","id":1},
@@ -555,11 +588,16 @@ async fn json_rpc_batched_request_rejected() {
         .send()
         .await
         .expect("request");
-    let body: Value = response.json().await.expect("json");
+    let status = response.status();
+    let body = response.text().await.expect("response body");
     assert_eq!(
-        body["error"]["code"].as_i64(),
-        Some(-32600),
-        "batches must be -32600 Invalid Request, got: {body}"
+        status,
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "batches must be rejected as malformed transport requests, got {status}: {body}"
+    );
+    assert!(
+        body.contains("JsonRpcMessage"),
+        "batch rejection should identify malformed JSON-RPC payload, got: {body}"
     );
     server.shutdown(Duration::from_secs(5)).await;
 }

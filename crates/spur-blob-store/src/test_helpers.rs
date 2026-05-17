@@ -110,6 +110,7 @@ impl OutcomeStore for MockFailingOutcomeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OutcomeBlobKind;
     use spur_acp::SessionId;
 
     fn key() -> OutcomeKey {
@@ -119,6 +120,7 @@ mod tests {
             )),
             delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
             attempt: 1,
+            kind: OutcomeBlobKind::ResultJson,
         }
     }
 
