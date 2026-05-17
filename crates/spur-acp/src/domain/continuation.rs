@@ -293,6 +293,7 @@ mod tests {
                 )),
                 delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
                 attempt: 1,
+                kind: crate::domain::outcome::OutcomeBlobKind::ResultJson,
             }),
             fetch_hint: Some("Full diff truncated. Call fetch_outcome_artifact.".into()),
             base_hint: None,

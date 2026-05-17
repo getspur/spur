@@ -939,6 +939,29 @@ impl McpCallbackServer {
         state
     }
 
+    async fn refresh_unversioned_cached_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<crate::handlers::ResolvedPlanState, String> {
+        let pm = self
+            .submit_plan_substrate_pm()
+            .ok_or_else(|| format!("unknown plan '{plan_id}'"))?;
+        let projected = crate::plan::projector::project_plan_from_beads(
+            pm,
+            plan_id,
+            self.feature_gate.as_ref(),
+        )
+        .await
+        .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
+        let state = self
+            .install_projected_plan_with_version(projected, unknown_beads_version())
+            .await;
+        Ok(crate::handlers::ResolvedPlanState {
+            state,
+            freshness: crate::handlers::PlanStateFreshness::Projection,
+        })
+    }
+
     async fn maybe_churn_beads_version_for_test(&self, epic_id: &str) -> Result<(), String> {
         let churn_epic = self.version_churn_epic_for_test.lock().await.clone();
         if churn_epic.as_deref() != Some(epic_id) {
@@ -1141,17 +1164,36 @@ impl McpCallbackServer {
         &self,
         plan_id: &str,
     ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
+        Ok(self
+            .load_or_project_plan_with_freshness(plan_id)
+            .await?
+            .state)
+    }
+
+    async fn load_or_project_plan_with_freshness(
+        &self,
+        plan_id: &str,
+    ) -> Result<crate::handlers::ResolvedPlanState, String> {
         let cached = self.active_plans.lock().await.get(plan_id).cloned();
         if let Some(existing) = cached.clone() {
-            let epic_id = {
+            let (epic_id, has_nonterminal_tasks) = {
                 let state = existing.state.lock().await;
-                state.epic_id.clone()
+                (
+                    state.epic_id.clone(),
+                    state.tasks.iter().any(|task| !task.status.is_terminal()),
+                )
             };
-            if let Some(epic_id) = epic_id {
-                if self.versioned_cache_serve {
+            if self.versioned_cache_serve {
+                if let Some(epic_id) = epic_id {
                     let current_version = self.beads_version_for_epic(&epic_id).await?;
                     if current_version == existing.beads_version {
-                        return Ok(existing.state);
+                        return Ok(crate::handlers::ResolvedPlanState {
+                            state: existing.state,
+                            freshness: crate::handlers::PlanStateFreshness::Cache {
+                                beads_version_verified: true,
+                                cached_age_ms: existing.cached_at.elapsed().as_millis() as u64,
+                            },
+                        });
                     }
                     tracing::debug!(
                         %plan_id,
@@ -1162,6 +1204,42 @@ impl McpCallbackServer {
                         "persisted plan cache version mismatch; re-projecting from beads"
                     );
                 }
+            } else {
+                if epic_id.is_some()
+                    && has_nonterminal_tasks
+                    && existing.cached_at.elapsed() >= UNVERSIONED_PLAN_CACHE_REFRESH_AFTER
+                {
+                    match tokio::time::timeout(
+                        UNVERSIONED_PLAN_CACHE_INLINE_REFRESH_TIMEOUT,
+                        self.refresh_unversioned_cached_plan(plan_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(resolved)) => return Ok(resolved),
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                %plan_id,
+                                %error,
+                                "stale unversioned plan cache refresh failed; serving cache"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                %plan_id,
+                                timeout_ms = UNVERSIONED_PLAN_CACHE_INLINE_REFRESH_TIMEOUT
+                                    .as_millis(),
+                                "stale unversioned plan cache refresh timed out; serving cache"
+                            );
+                        }
+                    }
+                }
+                return Ok(crate::handlers::ResolvedPlanState {
+                    state: existing.state,
+                    freshness: crate::handlers::PlanStateFreshness::Cache {
+                        beads_version_verified: false,
+                        cached_age_ms: existing.cached_at.elapsed().as_millis() as u64,
+                    },
+                });
             }
         }
 
@@ -1173,9 +1251,13 @@ impl McpCallbackServer {
                 let (projected, beads_version) = self
                     .project_plan_from_beads_with_stable_version(pm_service, plan_id)
                     .await?;
-                return Ok(self
+                let state = self
                     .install_projected_plan_with_version(projected, beads_version)
-                    .await);
+                    .await;
+                return Ok(crate::handlers::ResolvedPlanState {
+                    state,
+                    freshness: crate::handlers::PlanStateFreshness::Projection,
+                });
             }
         }
 
@@ -1186,9 +1268,13 @@ impl McpCallbackServer {
         )
         .await
         .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
-        Ok(self
+        let state = self
             .install_projected_plan_with_version(projected, unknown_beads_version())
-            .await)
+            .await;
+        Ok(crate::handlers::ResolvedPlanState {
+            state,
+            freshness: crate::handlers::PlanStateFreshness::Projection,
+        })
     }
 }
 
@@ -1210,6 +1296,13 @@ impl crate::handlers::PlanResolver for McpCallbackServer {
         plan_id: &str,
     ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
         McpCallbackServer::load_or_project_plan(self, plan_id).await
+    }
+
+    async fn load_or_project_plan_with_freshness(
+        &self,
+        plan_id: &str,
+    ) -> Result<crate::handlers::ResolvedPlanState, String> {
+        McpCallbackServer::load_or_project_plan_with_freshness(self, plan_id).await
     }
 }
 

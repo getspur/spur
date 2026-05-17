@@ -59,7 +59,7 @@ impl SamplingState {
         }
 
         sampler.overflow = sampler.overflow.wrapping_add(1);
-        sampler.overflow % SAMPLE_EVERY_N_OVERFLOW == 0
+        sampler.overflow.is_multiple_of(SAMPLE_EVERY_N_OVERFLOW)
     }
 }
 
@@ -157,6 +157,7 @@ impl BatchSender {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }

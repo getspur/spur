@@ -13,9 +13,26 @@ use serde::{Deserialize, Serialize};
 use crate::domain::artifact::{ArtifactKind as WorkerArtifactKind, WorkerArtifact};
 use crate::{BrainSessionId, DelegationId};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeBlobKind {
+    #[default]
+    ResultJson,
+    RawStdout,
+}
+
+impl OutcomeBlobKind {
+    pub fn as_ref_component(self) -> &'static str {
+        match self {
+            Self::ResultJson => "result-json",
+            Self::RawStdout => "raw-stdout",
+        }
+    }
+}
+
 /// Identifier for a single delegation outcome blob.
 ///
-/// Granularity is `(brain_session, delegation, attempt)` — each retry
+/// Granularity is `(brain_session, delegation, attempt, kind)` — each retry
 /// gets its own key so historical outcomes are addressable. Round 11
 /// (MF1) — earlier per-session granularity caused overwrites.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -23,6 +40,8 @@ pub struct OutcomeKey {
     pub brain_session_id: BrainSessionId,
     pub delegation_id: DelegationId,
     pub attempt: u32,
+    #[serde(default)]
+    pub kind: OutcomeBlobKind,
 }
 
 /// Identifies which storage backend produced this outcome blob.
@@ -81,8 +100,11 @@ impl OutcomeRef {
         match (&self.backend, &self.git_blob_sha) {
             (BackendTag::GitBlob, Some(git_sha)) => Some(WorkerArtifact {
                 object_ref: format!(
-                    "refs/spur/outcomes/{}/{}-{}.blob",
-                    self.key.brain_session_id, self.key.delegation_id, self.key.attempt,
+                    "refs/spur/outcomes/{}/{}-{}-{}.blob",
+                    self.key.brain_session_id,
+                    self.key.delegation_id,
+                    self.key.attempt,
+                    self.key.kind.as_ref_component(),
                 ),
                 blob_sha: git_sha.clone(),
                 size_bytes: usize::try_from(self.byte_size).unwrap_or(usize::MAX),
@@ -106,6 +128,7 @@ mod tests {
             )),
             delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
             attempt: 1,
+            kind: OutcomeBlobKind::ResultJson,
         }
     }
 
@@ -147,6 +170,18 @@ mod tests {
     }
 
     #[test]
+    fn outcome_blob_kind_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&OutcomeBlobKind::ResultJson).expect("ser"),
+            "\"result_json\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OutcomeBlobKind::RawStdout).expect("ser"),
+            "\"raw_stdout\""
+        );
+    }
+
+    #[test]
     fn outcome_key_is_hashable() {
         use std::collections::HashSet;
         let mut s = HashSet::new();
@@ -169,7 +204,7 @@ mod tests {
         assert_eq!(
             wa.object_ref,
             "refs/spur/outcomes/550e8400-e29b-41d4-a716-446655440000/\
-             deadbeef-1111-2222-3333-444455556666-1.blob"
+             deadbeef-1111-2222-3333-444455556666-1-result-json.blob"
         );
         // blob_sha must be the 40-char git SHA-1, NOT the content SHA-256.
         // Phase 1's fetch_outcome_artifact runs `git cat-file -p blob_sha`.
@@ -195,7 +230,7 @@ mod tests {
         assert_eq!(
             wa.object_ref,
             "refs/spur/outcomes/550e8400-e29b-41d4-a716-446655440000/\
-             deadbeef-1111-2222-3333-444455556666-5.blob"
+             deadbeef-1111-2222-3333-444455556666-5-result-json.blob"
         );
         assert_eq!(wa.kind, WorkerArtifactKind::Diagnostic);
     }

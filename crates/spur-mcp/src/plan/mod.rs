@@ -3144,7 +3144,7 @@ pub(crate) async fn push_plan_completed_continuation(
     failed_count: u32,
     cancelled_count: u32,
 ) {
-    let delegation_id = format!("plan::{plan_id}::completed");
+    let delegation_id = plan_completed_artifact_delegation_id(plan_id);
     let result = DelegationResult {
         status: DelegationStatus::Success,
         diff: None,
@@ -3166,6 +3166,19 @@ pub(crate) async fn push_plan_completed_continuation(
         spur_acp::domain::ContinuationSource::PlanCompleted,
     )
     .await;
+}
+
+fn plan_completed_artifact_delegation_id(plan_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"spur.plan-completed-artifact.v1");
+    hasher.update([0]);
+    hasher.update(plan_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 // ─── Status rendering ────────────────────────────────────────────────

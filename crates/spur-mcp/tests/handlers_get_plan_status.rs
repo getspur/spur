@@ -5,6 +5,7 @@
 //! `PlanResolver` so the test does not depend on `McpCallbackServer`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -64,6 +65,15 @@ struct MissingPlanResolver;
 impl PlanResolver for MissingPlanResolver {
     async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String> {
         Err(format!("unknown plan '{plan_id}'"))
+    }
+}
+
+struct HangingPlanResolver;
+
+#[async_trait]
+impl PlanResolver for HangingPlanResolver {
+    async fn load_or_project_plan(&self, _plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String> {
+        std::future::pending().await
     }
 }
 
@@ -137,5 +147,42 @@ async fn get_plan_status_unknown_plan_id_invalid_params() {
     assert!(
         matches!(err, McpHandlerError::InvalidParams(_)),
         "preserves -32602 (invalid_params) wire behavior; got {err:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn get_plan_status_times_out_stuck_plan_resolution() {
+    let join = tokio::spawn(async move {
+        let resolver = HangingPlanResolver;
+        let outcomes = Mutex::new(OutcomeStore::default());
+        get_plan_status(
+            &resolver,
+            &outcomes,
+            &ctx(),
+            json!({ "plan_id": "p-stuck" }),
+        )
+        .await
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+
+    let completion = tokio::time::timeout(Duration::from_millis(1), join);
+    tokio::pin!(completion);
+    tokio::time::advance(Duration::from_millis(1)).await;
+
+    let err = completion
+        .await
+        .expect("get_plan_status must complete after its bounded resolver timeout")
+        .expect("handler task must not panic")
+        .expect_err("stuck resolver must surface as a structured error");
+
+    assert!(
+        matches!(err, McpHandlerError::Internal(_)),
+        "resolver timeout should be an internal MCP error; got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("timed out"),
+        "timeout error should be explicit; got {err}"
     );
 }

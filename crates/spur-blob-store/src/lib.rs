@@ -11,7 +11,7 @@
 //!
 //! Spec: `docs/superpowers/specs/2026-04-25-brain-continuation-artifact-store-design.md` §6.
 
-pub use spur_acp::domain::outcome::{BackendTag, OutcomeKey, OutcomeRef};
+pub use spur_acp::domain::outcome::{BackendTag, OutcomeBlobKind, OutcomeKey, OutcomeRef};
 
 pub mod fs_store;
 pub mod measured;

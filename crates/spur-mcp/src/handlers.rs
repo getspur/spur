@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -8,6 +9,8 @@ use tokio::sync::Mutex;
 use crate::outcome_materializer::OutcomeMaterializer;
 use crate::plan::outcomes::OutcomeStore;
 use crate::plan::PlanState;
+
+const PLAN_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct WorkerCallContext {
@@ -217,6 +220,73 @@ pub async fn update_issue(
 #[async_trait]
 pub trait PlanResolver: Send + Sync {
     async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String>;
+
+    async fn load_or_project_plan_with_freshness(
+        &self,
+        plan_id: &str,
+    ) -> Result<ResolvedPlanState, String> {
+        Ok(ResolvedPlanState {
+            state: self.load_or_project_plan(plan_id).await?,
+            freshness: PlanStateFreshness::Unknown,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedPlanState {
+    pub state: Arc<Mutex<PlanState>>,
+    pub freshness: PlanStateFreshness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanStateFreshness {
+    Cache {
+        beads_version_verified: bool,
+        cached_age_ms: u64,
+    },
+    Projection,
+    Unknown,
+}
+
+impl PlanStateFreshness {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Cache {
+                beads_version_verified,
+                cached_age_ms,
+            } => serde_json::json!({
+                "source": "cache",
+                "beads_version_verified": beads_version_verified,
+                "cached_age_ms": cached_age_ms,
+            }),
+            Self::Projection => serde_json::json!({
+                "source": "projection",
+                "beads_version_verified": true,
+            }),
+            Self::Unknown => serde_json::json!({
+                "source": "unknown",
+                "beads_version_verified": false,
+            }),
+        }
+    }
+}
+
+async fn load_plan_with_timeout(
+    plan_resolver: &dyn PlanResolver,
+    plan_id: &str,
+) -> Result<ResolvedPlanState, McpHandlerError> {
+    tokio::time::timeout(
+        PLAN_RESOLUTION_TIMEOUT,
+        plan_resolver.load_or_project_plan_with_freshness(plan_id),
+    )
+    .await
+    .map_err(|_| {
+        McpHandlerError::Internal(format!(
+            "timed out after {}s resolving plan_id '{plan_id}'",
+            PLAN_RESOLUTION_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|_| McpHandlerError::InvalidParams(format!("Unknown plan_id: '{plan_id}'")))
 }
 
 pub async fn get_plan_status(
@@ -231,15 +301,13 @@ pub async fn get_plan_status(
         .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'plan_id'".into()))?
         .to_string();
 
-    let plan_state = plan_resolver
-        .load_or_project_plan(&plan_id)
-        .await
-        .map_err(|_| McpHandlerError::InvalidParams(format!("Unknown plan_id: '{plan_id}'")))?;
+    let resolved = load_plan_with_timeout(plan_resolver, &plan_id).await?;
 
-    let state = plan_state.lock().await;
+    let state = resolved.state.lock().await;
     let mut status = crate::plan::build_plan_status(&plan_id, &state);
     let outcomes = reconciler_outcomes.lock().await;
     if let serde_json::Value::Object(ref mut fields) = status {
+        fields.insert("plan_state_freshness".into(), resolved.freshness.to_json());
         fields.insert(
             "recent_outcomes".into(),
             serde_json::json!(outcomes.recent_outcomes(&plan_id)),
@@ -320,6 +388,7 @@ pub async fn fetch_outcome_artifact(
         )),
         delegation_id: delegation_id.clone(),
         attempt,
+        kind: spur_acp::domain::outcome::OutcomeBlobKind::ResultJson,
     };
 
     let start = std::time::Instant::now();
@@ -410,10 +479,7 @@ pub async fn get_task_diff(
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
 
-    let plan_arc = plan_resolver
-        .load_or_project_plan(&plan_id)
-        .await
-        .map_err(McpHandlerError::InvalidParams)?;
+    let plan_arc = load_plan_with_timeout(plan_resolver, &plan_id).await?.state;
 
     let (
         current_attempt,
