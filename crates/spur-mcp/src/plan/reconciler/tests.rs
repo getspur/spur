@@ -1,5 +1,6 @@
 use super::*;
 use proptest::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -54,7 +55,7 @@ impl CapturedCompletionCollectorErrors {
 
 impl tracing::Subscriber for CapturedCompletionCollectorErrors {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        *metadata.level() <= tracing::Level::ERROR
+        *metadata.level() <= tracing::Level::INFO
     }
 
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -66,9 +67,6 @@ impl tracing::Subscriber for CapturedCompletionCollectorErrors {
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        if *event.metadata().level() != tracing::Level::ERROR {
-            return;
-        }
         let mut visitor = CompletionCollectorVisitor::default();
         event.record(&mut visitor);
         self.events
@@ -104,6 +102,13 @@ impl Visit for CompletionCollectorVisitor {
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.push_str(field.name());
+        self.0.push('=');
+        self.0.push_str(&value.to_string());
+        self.0.push(' ');
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
         self.0.push_str(field.name());
         self.0.push('=');
         self.0.push_str(&value.to_string());
@@ -149,6 +154,251 @@ async fn completion_collector_logs_panic_with_structured_context() {
             .iter()
             .map(|event| format!("{} {}", event.target, event.fields))
             .collect::<Vec<_>>()
+    );
+}
+
+#[derive(Default)]
+struct RecordingEventSink {
+    events: std::sync::Mutex<Vec<spur_acp::SpurEventBody>>,
+}
+
+impl crate::events::McpEventSink for RecordingEventSink {
+    fn emit(&self, event: spur_acp::SpurEventBody) {
+        self.events.lock().expect("events lock").push(event);
+    }
+}
+
+#[derive(Default)]
+struct CompletionTimeoutAdvanced {
+    comments: std::sync::Mutex<Vec<spur_pm::Comment>>,
+}
+
+#[async_trait::async_trait]
+impl spur_pm::BeadsAdvanced for CompletionTimeoutAdvanced {
+    async fn list_ready(
+        &self,
+        _filter: spur_pm::ReadyFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+        Ok(self.comments.lock().expect("comments lock").clone())
+    }
+
+    async fn add_comment(&self, _issue_id: &str, body: &str) -> anyhow::Result<String> {
+        let mut comments = self.comments.lock().expect("comments lock");
+        let id = format!("c{}", comments.len() + 1);
+        comments.push(spur_pm::Comment {
+            id: id.clone(),
+            body: body.to_string(),
+            actor: "spur-test".to_string(),
+            created_at: chrono::Utc::now(),
+        });
+        Ok(id)
+    }
+
+    async fn remove_dependency(&self, _issue_id: &str, _depends_on_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct CompletionTimeoutPm {
+    advanced: CompletionTimeoutAdvanced,
+    labels: std::sync::Mutex<Vec<String>>,
+    updates: std::sync::Mutex<Vec<spur_pm::IssueUpdate>>,
+}
+
+#[async_trait::async_trait]
+impl crate::plan::PmLike for CompletionTimeoutPm {
+    async fn list_issues(
+        &self,
+        _filter: spur_pm::IssueFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        std::future::pending().await
+    }
+
+    async fn update_issue(&self, _id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+        self.updates
+            .lock()
+            .expect("updates lock")
+            .push(update.clone());
+        let mut labels = self.labels.lock().expect("labels lock");
+        for remove in update.remove_labels {
+            labels.retain(|label| label != &remove);
+        }
+        for add in update.add_labels {
+            if !labels.contains(&add) {
+                labels.push(add);
+            }
+        }
+        Ok(())
+    }
+
+    async fn issue_labels(&self, _id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.labels.lock().expect("labels lock").clone())
+    }
+
+    fn closed_status(&self) -> &str {
+        "closed"
+    }
+
+    fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+        Some(&self.advanced)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_collector_project_timeout_abandons_snapshot_and_continuation() {
+    let plan_id = "plan-timeout";
+    let task_id = "task-timeout";
+    let issue_id = "bd-timeout";
+    let delegation_id = "del-timeout";
+    let attempt = 1;
+    let pm = Arc::new(CompletionTimeoutPm::default());
+    let feature_gate = pro_feature_gate();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-timeout".into()));
+    let materializer = crate::outcome_materializer::OutcomeMaterializer::new(Arc::new(
+        spur_blob_store::MemoryOutcomeStore::new(),
+    ));
+    let result = spur_acp::DelegationResult {
+        status: spur_acp::DelegationStatus::Success,
+        diff: None,
+        diff_summary: None,
+        summary: Some("worker done".to_string()),
+        estimated_cost_usd: 0.0,
+        worker_branch: Some("spur/worker-timeout".to_string()),
+        artifact: None,
+    };
+    let deferred = crate::plan::persist_worker_completion_and_notify(
+        pm.as_ref(),
+        issue_id,
+        feature_gate.as_ref(),
+        plan_id,
+        delegation_id,
+        &None,
+        &result,
+        &brain_session_id,
+        attempt,
+        &materializer,
+        None,
+        Some(task_id),
+    )
+    .await
+    .expect("persist completion")
+    .expect("successful completion should defer notification");
+
+    let captured = CapturedCompletionCollectorErrors::default();
+    let sink = Arc::new(RecordingEventSink::default());
+    let continuation_count = Arc::new(AtomicUsize::new(0));
+    let continuation_count_for_ctx = Arc::clone(&continuation_count);
+    let continuation_ctx = Arc::new(crate::server::DetachedContinuationCtx {
+        on_complete: Arc::new(move |_, _| {
+            let continuation_count = Arc::clone(&continuation_count_for_ctx);
+            Box::pin(async move {
+                continuation_count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    });
+    let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
+    let tracker = tokio_util::task::TaskTracker::new();
+    let context = CompletionCollectorLogContext {
+        plan_id: plan_id.to_string(),
+        task_id: task_id.to_string(),
+        delegation_id: delegation_id.to_string(),
+        brain_session_id: brain_session_id.to_string(),
+        attempt,
+    };
+
+    let guard = tracing::subscriber::set_default(captured.clone());
+    spawn_completion_collector(&tracker, context, {
+        let pm = Arc::clone(&pm);
+        let feature_gate = Arc::clone(&feature_gate);
+        let sink = Arc::clone(&sink);
+        let continuation_ctx = Arc::clone(&continuation_ctx);
+        let outcomes = Arc::clone(&outcomes);
+        let brain_session_id = brain_session_id.clone();
+        async move {
+            project_completion_snapshot_and_deliver(
+                crate::plan::projector::project_plan_from_beads(
+                    pm.as_ref(),
+                    plan_id,
+                    feature_gate.as_ref(),
+                ),
+                &outcomes,
+                Some(sink.as_ref()),
+                continuation_ctx.as_ref(),
+                Some(deferred),
+                CompletionProjectionLogContext {
+                    plan_id,
+                    task_id,
+                    delegation_id,
+                    brain_session_id: &brain_session_id,
+                    attempt,
+                },
+            )
+            .await;
+        }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(COMPLETION_PROJECTION_TIMEOUT + Duration::from_millis(1)).await;
+    tracker.close();
+    tokio::time::timeout(Duration::from_secs(12), tracker.wait())
+        .await
+        .expect("completion collector must return after projection timeout");
+    drop(guard);
+
+    assert!(
+        captured.contains_event_with(&[
+            "project stage timed out",
+            "plan_id=plan-timeout",
+            "task_id=task-timeout",
+            "delegation_id=del-timeout",
+            "brain_session_id=brain-timeout",
+            "attempt=1",
+            "timeout_ms=10000",
+        ]),
+        "expected timeout error log, got {:?}",
+        captured
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| format!("{} {}", event.target, event.fields))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        captured.contains_event_with(&["stage_completed_project_timeout"]),
+        "expected timeout checkpoint"
+    );
+    assert!(
+        sink.events.lock().expect("events lock").is_empty(),
+        "timeout must not emit PlanTaskAwaitingReview"
+    );
+    assert_eq!(
+        continuation_count.load(Ordering::SeqCst),
+        0,
+        "timeout must not push continuation"
+    );
+    assert!(
+        pm.advanced
+            .comments
+            .lock()
+            .expect("comments lock")
+            .iter()
+            .any(|comment| matches!(
+                crate::plan::audit_sentinel::parse_comment(&comment.body),
+                Some(Ok(
+                    crate::plan::audit_sentinel::AuditSentinelKind::Completion { .. }
+                ))
+            )),
+        "completion audit should be durable before projection timeout"
     );
 }
 

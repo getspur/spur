@@ -375,6 +375,9 @@ async fn detect_repo_via_gh(repo_root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use tracing::field::{Field, Visit};
+
     #[test]
     fn closed_status_defaults_to_closed_when_none() {
         assert_eq!(super::resolve_closed_status(None), "closed");
@@ -406,5 +409,123 @@ mod tests {
             limit: Some(25),
             ..Default::default()
         });
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedPmTrace {
+        events: Arc<std::sync::Mutex<Vec<CapturedTraceEvent>>>,
+    }
+
+    #[derive(Default)]
+    struct CapturedTraceEvent {
+        target: String,
+        fields: String,
+    }
+
+    impl CapturedPmTrace {
+        fn contains(&self, target: &str, needles: &[&str]) -> bool {
+            self.events.lock().unwrap().iter().any(|event| {
+                event.target == target && needles.iter().all(|needle| event.fields.contains(needle))
+            })
+        }
+    }
+
+    impl tracing::Subscriber for CapturedPmTrace {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::INFO
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = TraceVisitor::default();
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(CapturedTraceEvent {
+                target: event.metadata().target().to_string(),
+                fields: visitor.0,
+            });
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct TraceVisitor(String);
+
+    impl Visit for TraceVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(field.name());
+            self.0.push('=');
+            self.0.push_str(&format!("{value:?}"));
+            self.0.push(' ');
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push_str(field.name());
+            self.0.push('=');
+            self.0.push_str(value);
+            self.0.push(' ');
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.push_str(field.name());
+            self.0.push('=');
+            self.0.push_str(&value.to_string());
+            self.0.push(' ');
+        }
+    }
+
+    #[tokio::test]
+    async fn pmservice_lock_acquire_release_emits_spur_pm_tracing() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");
+        let pm = super::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new")
+            .expect("beads pm service");
+
+        let captured = CapturedPmTrace::default();
+        let guard = tracing::subscriber::set_default(captured.clone());
+        pm.poll().await.expect("poll");
+        drop(guard);
+
+        assert!(
+            captured.contains(
+                "spur.pm.lock",
+                &[
+                    "action=acquire",
+                    "lock=beads.cursor",
+                    "owner=BeadsCrateAdapter::poll_with_limit",
+                ],
+            ),
+            "expected acquire trace, got {:?}",
+            captured
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| format!("{} {}", event.target, event.fields))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            captured.contains(
+                "spur.pm.lock",
+                &[
+                    "action=release",
+                    "lock=beads.cursor",
+                    "owner=BeadsCrateAdapter::poll_with_limit",
+                    "hold_ms=",
+                ],
+            ),
+            "expected release trace"
+        );
     }
 }

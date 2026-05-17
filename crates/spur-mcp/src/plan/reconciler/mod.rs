@@ -45,6 +45,8 @@ use crate::plan::outcomes::{
     DispatchOutcome, NoReadyReason, OutcomeLogDecision, OutcomeStore, SkipReason, StuckTask,
 };
 
+const COMPLETION_PROJECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
 mod ready;
 
 mod conflict;
@@ -150,6 +152,132 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
         return message.clone();
     }
     "non-string panic payload".to_string()
+}
+
+struct CompletionProjectionLogContext<'a> {
+    plan_id: &'a str,
+    task_id: &'a str,
+    delegation_id: &'a str,
+    brain_session_id: &'a spur_acp::BrainSessionId,
+    attempt: u32,
+}
+
+async fn project_completion_snapshot_and_deliver<F>(
+    projection: F,
+    outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
+    event_sink: Option<&dyn crate::events::McpEventSink>,
+    continuation_ctx: &crate::server::DetachedContinuationCtx,
+    deferred: Option<crate::plan::DeferredCompletionPush>,
+    context: CompletionProjectionLogContext<'_>,
+) where
+    F: Future<Output = anyhow::Result<crate::plan::PlanState>>,
+{
+    match tokio::time::timeout(COMPLETION_PROJECTION_TIMEOUT, projection).await {
+        Ok(Ok(projected)) => {
+            tracing::info!(
+                target: "spur.reconciler.completion_collector",
+                plan_id = %context.plan_id,
+                task_id = %context.task_id,
+                delegation_id = %context.delegation_id,
+                brain_session_id = %context.brain_session_id,
+                attempt = context.attempt,
+                projected_task_count = projected.tasks.len(),
+                "stage_completed_project"
+            );
+            tracing::info!(
+                target: "spur.reconciler.completion_collector",
+                plan_id = %context.plan_id,
+                task_id = %context.task_id,
+                delegation_id = %context.delegation_id,
+                brain_session_id = %context.brain_session_id,
+                attempt = context.attempt,
+                "stage_entered_prune"
+            );
+            prune_projected_terminal_task_outcomes(outcomes, context.plan_id, &projected.tasks)
+                .await;
+            tracing::info!(
+                target: "spur.reconciler.completion_collector",
+                plan_id = %context.plan_id,
+                task_id = %context.task_id,
+                delegation_id = %context.delegation_id,
+                brain_session_id = %context.brain_session_id,
+                attempt = context.attempt,
+                "stage_completed_prune"
+            );
+            if let Some(sink) = event_sink {
+                tracing::info!(
+                    target: "spur.reconciler.completion_collector",
+                    plan_id = %context.plan_id,
+                    task_id = %context.task_id,
+                    delegation_id = %context.delegation_id,
+                    brain_session_id = %context.brain_session_id,
+                    attempt = context.attempt,
+                    "stage_entered_snapshot"
+                );
+                crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected);
+                tracing::info!(
+                    target: "spur.reconciler.completion_collector",
+                    plan_id = %context.plan_id,
+                    task_id = %context.task_id,
+                    delegation_id = %context.delegation_id,
+                    brain_session_id = %context.brain_session_id,
+                    attempt = context.attempt,
+                    "stage_completed_snapshot"
+                );
+            }
+        }
+        Ok(Err(error)) => tracing::warn!(
+            plan_id = %context.plan_id,
+            task_id = %context.task_id,
+            "failed to project plan snapshot after completion: {error}"
+        ),
+        Err(_) => {
+            let timeout_ms = COMPLETION_PROJECTION_TIMEOUT.as_millis() as u64;
+            tracing::error!(
+                target: "spur.reconciler.completion_collector",
+                plan_id = %context.plan_id,
+                task_id = %context.task_id,
+                delegation_id = %context.delegation_id,
+                brain_session_id = %context.brain_session_id,
+                attempt = context.attempt,
+                timeout_ms,
+                "project stage timed out — abandoning snapshot+event for this completion"
+            );
+            tracing::info!(
+                target: "spur.reconciler.completion_collector",
+                plan_id = %context.plan_id,
+                task_id = %context.task_id,
+                delegation_id = %context.delegation_id,
+                brain_session_id = %context.brain_session_id,
+                attempt = context.attempt,
+                timeout_ms,
+                "stage_completed_project_timeout"
+            );
+            return;
+        }
+    }
+
+    if let Some(deferred) = deferred {
+        tracing::info!(
+            target: "spur.reconciler.completion_collector",
+            plan_id = %context.plan_id,
+            task_id = %context.task_id,
+            delegation_id = %context.delegation_id,
+            brain_session_id = %context.brain_session_id,
+            attempt = context.attempt,
+            "stage_entered_deliver"
+        );
+        deferred.deliver(event_sink, continuation_ctx).await;
+        tracing::info!(
+            target: "spur.reconciler.completion_collector",
+            plan_id = %context.plan_id,
+            task_id = %context.task_id,
+            delegation_id = %context.delegation_id,
+            brain_session_id = %context.brain_session_id,
+            attempt = context.attempt,
+            "stage_completed_deliver"
+        );
+    }
 }
 
 fn issue_to_summary(issue: spur_pm::Issue) -> spur_pm::IssueSummary {
@@ -1395,99 +1523,25 @@ impl Reconciler {
                         attempt = task_attempt,
                         "stage_entered_project"
                     );
-                    match crate::plan::projector::project_plan_from_beads(
-                        pm.as_ref(),
-                        &plan_id,
-                        feature_gate.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(projected) => {
-                            tracing::info!(
-                                target: "spur.reconciler.completion_collector",
-                                %plan_id,
-                                %task_id,
-                                delegation_id = %delegation_id_for_completion,
-                                brain_session_id = %brain_session_id,
-                                attempt = task_attempt,
-                                projected_task_count = projected.tasks.len(),
-                                "stage_completed_project"
-                            );
-                            tracing::info!(
-                                target: "spur.reconciler.completion_collector",
-                                %plan_id,
-                                %task_id,
-                                delegation_id = %delegation_id_for_completion,
-                                brain_session_id = %brain_session_id,
-                                attempt = task_attempt,
-                                "stage_entered_prune"
-                            );
-                            prune_projected_terminal_task_outcomes(
-                                &outcomes,
-                                &plan_id,
-                                &projected.tasks,
-                            )
-                            .await;
-                            tracing::info!(
-                                target: "spur.reconciler.completion_collector",
-                                %plan_id,
-                                %task_id,
-                                delegation_id = %delegation_id_for_completion,
-                                brain_session_id = %brain_session_id,
-                                attempt = task_attempt,
-                                "stage_completed_prune"
-                            );
-                            if let Some(sink) = event_sink.as_deref() {
-                                tracing::info!(
-                                    target: "spur.reconciler.completion_collector",
-                                    %plan_id,
-                                    %task_id,
-                                    delegation_id = %delegation_id_for_completion,
-                                    brain_session_id = %brain_session_id,
-                                    attempt = task_attempt,
-                                    "stage_entered_snapshot"
-                                );
-                                crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected);
-                                tracing::info!(
-                                    target: "spur.reconciler.completion_collector",
-                                    %plan_id,
-                                    %task_id,
-                                    delegation_id = %delegation_id_for_completion,
-                                    brain_session_id = %brain_session_id,
-                                    attempt = task_attempt,
-                                    "stage_completed_snapshot"
-                                );
-                            }
-                        }
-                        Err(error) => tracing::warn!(
-                            %plan_id,
-                            %task_id,
-                            "failed to project plan snapshot after completion: {error}"
+                    project_completion_snapshot_and_deliver(
+                        crate::plan::projector::project_plan_from_beads(
+                            pm.as_ref(),
+                            &plan_id,
+                            feature_gate.as_ref(),
                         ),
-                    }
-                    if let Some(deferred) = deferred {
-                        tracing::info!(
-                            target: "spur.reconciler.completion_collector",
-                            %plan_id,
-                            %task_id,
-                            delegation_id = %delegation_id_for_completion,
-                            brain_session_id = %brain_session_id,
-                            attempt = task_attempt,
-                            "stage_entered_deliver"
-                        );
-                        deferred
-                            .deliver(event_sink.as_deref(), continuation_ctx.as_ref())
-                            .await;
-                        tracing::info!(
-                            target: "spur.reconciler.completion_collector",
-                            %plan_id,
-                            %task_id,
-                            delegation_id = %delegation_id_for_completion,
-                            brain_session_id = %brain_session_id,
-                            attempt = task_attempt,
-                            "stage_completed_deliver"
-                        );
-                    }
+                        &outcomes,
+                        event_sink.as_deref(),
+                        continuation_ctx.as_ref(),
+                        deferred,
+                        CompletionProjectionLogContext {
+                            plan_id: &plan_id,
+                            task_id: &task_id,
+                            delegation_id: &delegation_id_for_completion,
+                            brain_session_id: &brain_session_id,
+                            attempt: task_attempt,
+                        },
+                    )
+                    .await;
                 },
             );
 

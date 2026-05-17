@@ -92,6 +92,10 @@ impl Governor {
     /// Record a REST response's parsed rate-limit headers.
     pub async fn observe_rest(&self, remaining: Option<u32>, reset_at: Option<Instant>) {
         {
+            let _state_trace = crate::lock_trace::LockTraceGuard::lock(
+                "github.governor.state",
+                "Governor::observe_rest",
+            );
             let mut s = self.inner.state.lock().await;
             if let Some(r) = remaining {
                 s.rest_remaining = Some(r);
@@ -110,6 +114,10 @@ impl Governor {
     /// Record a GraphQL response's `rateLimit` block.
     pub async fn observe_graphql(&self, rate: &RateLimit) {
         {
+            let _state_trace = crate::lock_trace::LockTraceGuard::lock(
+                "github.governor.state",
+                "Governor::observe_graphql",
+            );
             let mut s = self.inner.state.lock().await;
             s.graphql_remaining = Some(rate.remaining);
             s.graphql_reset_at = Some(rate.reset_at);
@@ -121,7 +129,13 @@ impl Governor {
     /// configured floor. Returns immediately if there is budget available.
     pub async fn throttle_rest(&self) {
         for _ in 0..8 {
-            let snapshot = { *self.inner.state.lock().await };
+            let snapshot = {
+                let _state_trace = crate::lock_trace::LockTraceGuard::lock(
+                    "github.governor.state",
+                    "Governor::throttle_rest",
+                );
+                *self.inner.state.lock().await
+            };
             if let (Some(remaining), Some(reset_at)) =
                 (snapshot.rest_remaining, snapshot.rest_reset_at)
             {
@@ -134,7 +148,13 @@ impl Governor {
         }
 
         // Avoid a pathological notify loop by doing one final check and sleep.
-        let snapshot = { *self.inner.state.lock().await };
+        let snapshot = {
+            let _state_trace = crate::lock_trace::LockTraceGuard::lock(
+                "github.governor.state",
+                "Governor::throttle_rest",
+            );
+            *self.inner.state.lock().await
+        };
         if let (Some(remaining), Some(reset_at)) = (snapshot.rest_remaining, snapshot.rest_reset_at)
         {
             if remaining < self.inner.config.rest_floor {
@@ -145,7 +165,13 @@ impl Governor {
 
     pub async fn throttle_graphql(&self) {
         for _ in 0..8 {
-            let snapshot = { *self.inner.state.lock().await };
+            let snapshot = {
+                let _state_trace = crate::lock_trace::LockTraceGuard::lock(
+                    "github.governor.state",
+                    "Governor::throttle_graphql",
+                );
+                *self.inner.state.lock().await
+            };
             if let (Some(remaining), Some(reset_at)) =
                 (snapshot.graphql_remaining, snapshot.graphql_reset_at)
             {
@@ -165,7 +191,13 @@ impl Governor {
         }
 
         // Avoid a pathological notify loop by doing one final check and sleep.
-        let snapshot = { *self.inner.state.lock().await };
+        let snapshot = {
+            let _state_trace = crate::lock_trace::LockTraceGuard::lock(
+                "github.governor.state",
+                "Governor::throttle_graphql",
+            );
+            *self.inner.state.lock().await
+        };
         if let (Some(remaining), Some(reset_at)) =
             (snapshot.graphql_remaining, snapshot.graphql_reset_at)
         {
