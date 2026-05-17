@@ -12,6 +12,8 @@ use tempfile::TempDir;
 
 mod common;
 
+static STARTUP_RECOVERY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn continuation_ctx() -> DetachedContinuationCtx {
     DetachedContinuationCtx {
         on_complete: Arc::new(|_, _| Box::pin(async {})),
@@ -114,6 +116,7 @@ fn set_created_at(repo: &Path, issue_id: &str, seconds_ago: i64) {
 
 #[tokio::test]
 async fn start_does_not_recover_before_brain_session_is_bound() {
+    let _test_guard = STARTUP_RECOVERY_TEST_LOCK.lock().await;
     skip_if_no_loopback!("start_does_not_recover_before_brain_session_is_bound");
 
     let dir = TempDir::new().expect("tempdir");
@@ -168,6 +171,7 @@ async fn start_does_not_recover_before_brain_session_is_bound() {
 
 #[tokio::test]
 async fn start_returns_before_deferred_pending_sweep_finishes() {
+    let _test_guard = STARTUP_RECOVERY_TEST_LOCK.lock().await;
     skip_if_no_loopback!("start_returns_before_deferred_pending_sweep_finishes");
 
     let dir = TempDir::new().expect("tempdir");
@@ -236,6 +240,7 @@ async fn start_returns_before_deferred_pending_sweep_finishes() {
 
 #[tokio::test]
 async fn dropping_startup_recovery_handle_cancels_in_flight_task() {
+    let _test_guard = STARTUP_RECOVERY_TEST_LOCK.lock().await;
     let dir = TempDir::new().expect("tempdir");
     let (_beads, pm) = common::beads::init_beads_pm(dir.path()).await;
     let owner = BrainSessionId::new(SessionId("brain-current".into()));
@@ -282,6 +287,7 @@ async fn dropping_startup_recovery_handle_cancels_in_flight_task() {
 
 #[tokio::test]
 async fn recover_persisted_plans_skips_other_owned_and_unowned_plans() {
+    let _test_guard = STARTUP_RECOVERY_TEST_LOCK.lock().await;
     let dir = TempDir::new().expect("tempdir");
     let (_beads, pm) = common::beads::init_beads_pm(dir.path()).await;
     let current = BrainSessionId::new(SessionId("brain-current".into()));
