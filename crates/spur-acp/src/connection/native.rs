@@ -72,6 +72,9 @@ use crate::error::AcpError;
 use crate::spur_agent_caps::SpurAgentCaps;
 use crate::types::{AgentHealth, AgentKind};
 
+const NATIVE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const NATIVE_SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Spur's canonical `ClientCapabilities` literal advertised at every
 /// `initialize` call. Spec §6.2.
 ///
@@ -413,6 +416,46 @@ impl NativeAcpConnection {
     pub fn set_log_config(&mut self, log_config: LogConfig) {
         self.log_config = log_config;
     }
+
+    fn kill_subprocess_now(&self) {
+        let pgid = self
+            .child_pgid
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some(pgid) = pgid {
+            killpg(pgid, "KILL");
+            let registry = crate::orphan_registry::PgidRegistry::new(
+                self.repo_root.join(".spur").join("pgids"),
+            );
+            let _ = registry.delete(pgid);
+        }
+    }
+
+    async fn wait_for_thread_until(
+        handle: std::thread::JoinHandle<()>,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        let mut handle = Some(handle);
+        while let Some(h) = handle {
+            if h.is_finished() {
+                let _ = h.join();
+                return true;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                drop(h);
+                return false;
+            }
+            handle = Some(h);
+            let sleep_for = std::cmp::min(
+                NATIVE_SHUTDOWN_POLL,
+                deadline.saturating_duration_since(now),
+            );
+            tokio::time::sleep(sleep_for).await;
+        }
+        true
+    }
 }
 
 /// Send `signal` (e.g. `"TERM"`, `"KILL"`) to the process group `pgid` via the
@@ -445,15 +488,7 @@ impl Drop for NativeAcpConnection {
         if self.cmd_tx.is_none() {
             return;
         }
-        if let Ok(guard) = self.child_pgid.lock() {
-            if let Some(pgid) = *guard {
-                killpg(pgid, "KILL");
-                let registry = crate::orphan_registry::PgidRegistry::new(
-                    self.repo_root.join(".spur").join("pgids"),
-                );
-                let _ = registry.delete(pgid);
-            }
-        }
+        self.kill_subprocess_now();
     }
 }
 
@@ -672,21 +707,47 @@ impl AgentConnection for NativeAcpConnection {
 
     async fn shutdown(&mut self) -> anyhow::Result<()> {
         tracing::info!(agent = %self.agent_name, "NativeAcpConnection: shutting down");
+        let deadline = tokio::time::Instant::now() + NATIVE_SHUTDOWN_TIMEOUT;
+        let mut force_kill = false;
 
-        if let Some(cmd_tx) = self.cmd_tx.take() {
+        if let Some(cmd_tx) = self.cmd_tx.as_ref() {
             let (reply_tx, reply_rx) = oneshot::channel();
             // If the thread is already dead, that's fine — we'll just drop.
             let _ = cmd_tx.send(AcpCommand::Shutdown { reply: reply_tx });
-            // Wait for acknowledgement, but don't fail if the thread is gone.
-            let _ = reply_rx.await;
+            // Keep `cmd_tx` populated until shutdown completes so Drop still
+            // has kill authority if we time out before the ACP thread exits.
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if tokio::time::timeout(remaining, reply_rx).await.is_err() {
+                force_kill = true;
+                tracing::warn!(
+                    agent = %self.agent_name,
+                    "NativeAcpConnection: shutdown ack timed out; forcing subprocess kill",
+                );
+                self.kill_subprocess_now();
+            }
         }
 
-        // Wait for the thread to finish.
+        // Wait for the thread to finish within the same bounded window.
         if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+            let joined = Self::wait_for_thread_until(handle, deadline).await;
+            if !joined {
+                force_kill = true;
+                tracing::warn!(
+                    agent = %self.agent_name,
+                    "NativeAcpConnection: ACP thread join timed out; forcing subprocess kill",
+                );
+                self.kill_subprocess_now();
+            }
         }
 
+        self.cmd_tx = None;
         self.health_status = AgentHealth::Unknown;
+        if force_kill {
+            tracing::warn!(
+                agent = %self.agent_name,
+                "NativeAcpConnection: shutdown completed after forced-kill fallback",
+            );
+        }
         tracing::info!(agent = %self.agent_name, "NativeAcpConnection: shutdown complete");
         Ok(())
     }
@@ -2389,6 +2450,67 @@ mod set_session_model_dispatch_tests {
             Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "set_model"),
             other => panic!("expected CapabilityMissing(\"set_model\"), got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shutdown_timeout_tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::connection::AgentConnection;
+    use tokio::sync::mpsc;
+
+    async fn pid_alive(pid: u32) -> bool {
+        tokio::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn shutdown_times_out_and_kills_subprocess_without_leak() {
+        let mut conn = NativeAcpConnection::new("test-agent", "/bin/false", vec![], None);
+        let mut sleeper = tokio::process::Command::new("/bin/sh");
+        sleeper
+            .arg("-c")
+            .arg("sleep 60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let mut child = sleeper.spawn().expect("spawn sleeper");
+        let pid = child.id().expect("pid should exist");
+        assert!(
+            pid_alive(pid).await,
+            "sleeper should be alive before shutdown"
+        );
+
+        *conn.child_pgid.lock().unwrap() = Some(pid as i32);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        conn.cmd_tx = Some(cmd_tx);
+        drop(cmd_rx);
+        conn.thread_handle = Some(std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(30));
+        }));
+
+        let started = Instant::now();
+        conn.shutdown().await.expect("shutdown should succeed");
+        assert!(
+            started.elapsed() <= Duration::from_millis(1200),
+            "shutdown should return within the bounded timeout",
+        );
+        assert!(conn.cmd_tx.is_none(), "shutdown should consume cmd_tx");
+        assert!(
+            conn.thread_handle.is_none(),
+            "shutdown should clear the thread handle"
+        );
+        tokio::time::timeout(Duration::from_secs(1), child.wait())
+            .await
+            .expect("sleeper should exit after shutdown fallback")
+            .expect("waiting on sleeper should succeed");
     }
 }
 

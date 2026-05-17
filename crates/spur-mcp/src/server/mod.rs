@@ -131,6 +131,8 @@ pub struct McpCallbackServer {
     pub(crate) cancel_token: CancellationToken,
     /// v3-c: handle to the root listener task so `force_abort` can stop it.
     pub(crate) root_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Graceful-shutdown signal for the root listener task.
+    pub(crate) root_shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Handle to the optional beads reconciler task. It is enabled only after
     /// the orchestrator binds this server to a derived brain_session_id.
     pub(crate) reconciler_handle: Mutex<Option<ReconcilerTaskHandle>>,
@@ -216,6 +218,7 @@ impl McpCallbackServer {
             retiring: AtomicBool::new(false),
             cancel_token: CancellationToken::new(),
             root_handle: Mutex::new(None),
+            root_shutdown_tx: Mutex::new(None),
             reconciler_handle: Mutex::new(None),
             startup_recovery: Mutex::new(StartupRecoveryState::default()),
             reconciler_enabled: false,
@@ -344,6 +347,7 @@ impl McpCallbackServer {
 
     pub fn force_abort(&self) {
         self.task_tracker.close();
+        self.root_shutdown_tx.lock().unwrap().take();
         let startup_recovery_handle = {
             let mut state = self.startup_recovery.lock().unwrap();
             state.pending = false;
@@ -447,6 +451,9 @@ impl McpCallbackServer {
     /// for all in-flight result collectors to finish.
     pub async fn shutdown(&self) {
         self.task_tracker.close();
+        if let Some(tx) = self.root_shutdown_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
         let startup_recovery_handle = {
             let mut state = self.startup_recovery.lock().unwrap();
             state.pending = false;
@@ -657,9 +664,15 @@ impl McpCallbackServer {
 
         info!(url = %url, "MCP callback server listening (streamable HTTP)");
 
+        let (root_shutdown_tx, root_shutdown_rx) = tokio::sync::oneshot::channel();
         let (root_done_tx, root_done_rx) = tokio::sync::oneshot::channel();
         let root_handle = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, router).await {
+            if let Err(error) = axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = root_shutdown_rx.await;
+                })
+                .await
+            {
                 debug!(%error, "RMCP callback server exited");
             }
             if let Some(tx) = signal_watcher_cancel_tx {
@@ -670,6 +683,7 @@ impl McpCallbackServer {
             }
             let _ = root_done_tx.send(());
         });
+        *self.root_shutdown_tx.lock().unwrap() = Some(root_shutdown_tx);
         *self.root_handle.lock().unwrap() = Some(root_handle);
         Arc::clone(&self).spawn_startup_recovery_if_ready();
 
@@ -691,6 +705,7 @@ impl McpCallbackServer {
                 if let Some(handle) = self.server.reconciler_handle.lock().unwrap().take() {
                     handle.abort();
                 }
+                self.server.root_shutdown_tx.lock().unwrap().take();
                 if let Some(handle) = self.server.root_handle.lock().unwrap().take() {
                     handle.abort();
                 }
