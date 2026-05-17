@@ -55,7 +55,11 @@ impl ReaderPool {
             .acquire()
             .await
             .expect("ReaderPool semaphore never closed");
+        let capacity_trace =
+            crate::lock_trace::LockTraceGuard::lock("reader_pool.capacity", "ReaderPool::checkout");
         let cached = {
+            let _free_trace =
+                crate::lock_trace::LockTraceGuard::lock("reader_pool.free", "ReaderPool::checkout");
             let mut free = self.free.lock().unwrap();
             free.pop()
         };
@@ -63,10 +67,14 @@ impl ReaderPool {
             Some(c) => c,
             None => SqliteStorage::open(&self.beads_dir.join("beads.db"))?,
         };
+        let conn_trace =
+            crate::lock_trace::LockTraceGuard::conn("reader_pool.sqlite", "ReaderPool::checkout");
         Ok(ReaderGuard {
             pool: self,
             conn: Some(conn),
             _permit: permit,
+            _capacity_trace: capacity_trace,
+            _conn_trace: conn_trace,
         })
     }
 }
@@ -75,6 +83,8 @@ pub struct ReaderGuard<'a> {
     pool: &'a ReaderPool,
     conn: Option<SqliteStorage>,
     _permit: SemaphorePermit<'a>,
+    _capacity_trace: crate::lock_trace::LockTraceGuard,
+    _conn_trace: crate::lock_trace::LockTraceGuard,
 }
 
 impl<'a> ReaderGuard<'a> {
@@ -88,6 +98,8 @@ impl<'a> ReaderGuard<'a> {
 impl<'a> Drop for ReaderGuard<'a> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            let _free_trace =
+                crate::lock_trace::LockTraceGuard::lock("reader_pool.free", "ReaderGuard::drop");
             let mut free = self.pool.free.lock().unwrap();
             free.push(conn);
         }
