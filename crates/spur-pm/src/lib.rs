@@ -6,6 +6,7 @@ pub mod github;
 pub mod graph;
 pub mod graph_engine;
 pub mod ingest;
+mod lock_trace;
 pub mod pidfile;
 pub mod poll_cursor;
 pub mod service;
