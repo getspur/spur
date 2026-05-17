@@ -3,6 +3,7 @@ use proptest::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use tracing::field::{Field, Visit};
 
 fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
     let gate = Arc::new(spur_license::FeatureGate::new(
@@ -29,6 +30,126 @@ fn projected_test_state(plan_id: &str) -> crate::plan::PlanState {
         merge_state: crate::plan::PlanMergeState::NotStarted,
         epic_id: None,
     }
+}
+
+#[derive(Clone, Default)]
+struct CapturedCompletionCollectorErrors {
+    events: Arc<std::sync::Mutex<Vec<CapturedCompletionCollectorEvent>>>,
+}
+
+#[derive(Default)]
+struct CapturedCompletionCollectorEvent {
+    target: String,
+    fields: String,
+}
+
+impl CapturedCompletionCollectorErrors {
+    fn contains_event_with(&self, needles: &[&str]) -> bool {
+        self.events.lock().unwrap().iter().any(|event| {
+            event.target == "spur.reconciler.completion_collector"
+                && needles.iter().all(|needle| event.fields.contains(needle))
+        })
+    }
+}
+
+impl tracing::Subscriber for CapturedCompletionCollectorErrors {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::ERROR
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        let mut visitor = CompletionCollectorVisitor::default();
+        event.record(&mut visitor);
+        self.events
+            .lock()
+            .unwrap()
+            .push(CapturedCompletionCollectorEvent {
+                target: event.metadata().target().to_string(),
+                fields: visitor.0,
+            });
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[derive(Default)]
+struct CompletionCollectorVisitor(String);
+
+impl Visit for CompletionCollectorVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(field.name());
+        self.0.push('=');
+        self.0.push_str(&format!("{value:?}"));
+        self.0.push(' ');
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0.push_str(field.name());
+        self.0.push('=');
+        self.0.push_str(value);
+        self.0.push(' ');
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.push_str(field.name());
+        self.0.push('=');
+        self.0.push_str(&value.to_string());
+        self.0.push(' ');
+    }
+}
+
+#[tokio::test]
+async fn completion_collector_logs_panic_with_structured_context() {
+    let captured = CapturedCompletionCollectorErrors::default();
+    let tracker = tokio_util::task::TaskTracker::new();
+    let context = CompletionCollectorLogContext {
+        plan_id: "plan-panic".into(),
+        task_id: "task-panic".into(),
+        delegation_id: "del-panic".into(),
+        brain_session_id: "brain-panic".into(),
+        attempt: 7,
+    };
+
+    let guard = tracing::subscriber::set_default(captured.clone());
+    spawn_completion_collector(&tracker, context, async {
+        panic!("H1 simulated completion collector panic");
+    });
+    tracker.close();
+    tracker.wait().await;
+    drop(guard);
+
+    assert!(
+        captured.contains_event_with(&[
+            "plan_id=plan-panic",
+            "task_id=task-panic",
+            "delegation_id=del-panic",
+            "brain_session_id=brain-panic",
+            "attempt=7",
+            "H1 simulated completion collector panic",
+            "backtrace=",
+        ]),
+        "expected structured panic event, got {:?}",
+        captured
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| format!("{} {}", event.target, event.fields))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

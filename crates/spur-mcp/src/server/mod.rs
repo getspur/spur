@@ -62,6 +62,7 @@ pub use plan_builder::{
     build_entries_with_task_map, build_epic_subgraph, emit_plan_submit_audit,
     plan_epic_issue_creates, EpicSubgraph, PlanSubmitAuditContext,
 };
+pub(crate) use recovery::{replay_awaiting_review_continuation, AwaitingReviewReplay};
 pub(crate) use sync::*;
 pub use sync::{compensate_mutation_orphans, resolve_dispatch_orphan};
 pub use types::*;
@@ -140,6 +141,9 @@ pub struct McpCallbackServer {
     /// decides whether it is needed; the task is spawned after the server has
     /// a brain_session_id so recovery can be owner-aware.
     pub(crate) startup_recovery: Mutex<StartupRecoveryState>,
+    /// One-shot attach sweep that replays AwaitingReview continuations whose
+    /// durable audit is present but whose live collector is no longer active.
+    pub(crate) awaiting_review_rediscovery_started: AtomicBool,
     /// v0a.3: if true, `enable_reconciler` may spawn the reconciler after
     /// the brain_session_id is bound. Wired via `set_reconciler_enabled`.
     pub(crate) reconciler_enabled: bool,
@@ -221,6 +225,7 @@ impl McpCallbackServer {
             root_shutdown_tx: Mutex::new(None),
             reconciler_handle: Mutex::new(None),
             startup_recovery: Mutex::new(StartupRecoveryState::default()),
+            awaiting_review_rediscovery_started: AtomicBool::new(false),
             reconciler_enabled: false,
             reconciler_fast_forward: None,
             repo_root: None,
@@ -302,6 +307,7 @@ impl McpCallbackServer {
             }
         };
         if result.is_ok() {
+            Arc::clone(self).spawn_awaiting_review_rediscovery_if_ready();
             Arc::clone(self).spawn_startup_recovery_if_ready();
         }
         result

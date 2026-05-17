@@ -3,6 +3,7 @@ use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState};
 use crate::plan::PlanTask;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 
 async fn init_repo() -> TempDir {
@@ -35,6 +36,36 @@ fn no_op_continuation_ctx() -> DetachedContinuationCtx {
     }
 }
 
+#[derive(Default)]
+struct RecordingSink {
+    events: std::sync::Mutex<Vec<spur_acp::SpurEventBody>>,
+}
+
+impl crate::events::McpEventSink for RecordingSink {
+    fn emit(&self, event: spur_acp::SpurEventBody) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+type RecordedContinuations =
+    Arc<tokio::sync::Mutex<Vec<(spur_acp::domain::BrainContinuation, String)>>>;
+
+fn recording_continuation_ctx() -> (DetachedContinuationCtx, RecordedContinuations) {
+    let continuations = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&continuations);
+    (
+        DetachedContinuationCtx {
+            on_complete: Arc::new(move |cont, delegation_id| {
+                let captured = Arc::clone(&captured);
+                Box::pin(async move {
+                    captured.lock().await.push((cont, delegation_id));
+                })
+            }),
+        },
+        continuations,
+    )
+}
+
 fn response_text(response: &super::JsonRpcResponse) -> &str {
     response.result.as_ref().expect("success result")["content"][0]["text"]
         .as_str()
@@ -45,6 +76,7 @@ struct RecoveryFixture {
     _beads: spur_pm::test_workspace::TestBeadsWorkspace,
     pm: Arc<spur_pm::PmService>,
     feature_gate: Arc<spur_license::FeatureGate>,
+    epic_id: String,
     task_issue_id: String,
 }
 
@@ -95,6 +127,7 @@ async fn setup_recovery_task(
         _beads: beads,
         pm,
         feature_gate,
+        epic_id: subgraph.epic_id,
         task_issue_id,
     }
 }
@@ -115,6 +148,130 @@ fn recovery_server(
     );
     server.set_repo_root(repo.to_path_buf());
     server
+}
+
+#[tokio::test]
+async fn brain_attach_rediscovery_replays_awaiting_review_task_once() {
+    let dir = init_repo().await;
+    commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+    let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+        .await
+        .expect("base oid");
+    let worker_branch = "spur/worker/rediscovery-awaiting-review";
+    run_git_capture(
+        dir.path(),
+        None,
+        &["checkout", "-q", "-b", worker_branch, &base_oid],
+    )
+    .await
+    .expect("checkout worker branch");
+    commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+    run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+        .await
+        .expect("checkout main");
+
+    let fixture = setup_recovery_task(dir.path(), "rediscover-awaiting", "del-rediscover").await;
+    let brain_session = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
+    fixture
+        .pm
+        .update_issue(
+            &fixture.epic_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::plan_owner(
+                    &brain_session.as_session_id().0,
+                )],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("stamp owner label");
+    super::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        fixture.feature_gate.as_ref(),
+    )
+    .expect("test feature gate should allow beads advanced");
+    let adv = fixture.pm.advanced().expect("advanced beads backend");
+    adv.add_comment(
+        &fixture.task_issue_id,
+        &crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+            delegation_id: "del-rediscover".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some(worker_branch.into()),
+            result_summary: Some("ready for review".into()),
+            artifact_uri: None,
+            dispatched_base_oid: Some(base_oid.clone()),
+        }),
+    )
+    .await
+    .expect("completion audit");
+    fixture
+        .pm
+        .update_issue(
+            &fixture.task_issue_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("ready label");
+
+    let sink = Arc::new(RecordingSink::default());
+    let sink_obj: Arc<dyn crate::events::McpEventSink> = sink.clone();
+    let (continuation_ctx, continuations) = recording_continuation_ctx();
+    let (mut server, _channel) = McpCallbackServer::new(
+        None,
+        Some(Arc::clone(&fixture.pm)),
+        Some(sink_obj),
+        continuation_ctx,
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        Arc::clone(&fixture.feature_gate),
+    );
+    server.set_repo_root(dir.path().to_path_buf());
+    let server = Arc::new(server);
+
+    server
+        .set_brain_session_id(brain_session)
+        .expect("bind brain session");
+
+    for _ in 0..50 {
+        if continuations.lock().await.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let recorded = continuations.lock().await;
+    assert_eq!(recorded.len(), 1, "expected one replayed continuation");
+    assert_eq!(recorded[0].1, "del-rediscover");
+    assert_eq!(
+        recorded[0].0.source,
+        spur_acp::domain::ContinuationSource::PlanTaskAwaitingReview
+    );
+    drop(recorded);
+
+    let events = sink.events.lock().unwrap();
+    let awaiting_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                spur_acp::SpurEventBody::PlanTaskAwaitingReview {
+                    plan_id,
+                    task_id,
+                    delegation_id,
+                } if plan_id == "rediscover-awaiting"
+                    && task_id == "task-a"
+                    && delegation_id == "del-rediscover"
+            )
+        })
+        .collect();
+    assert_eq!(
+        awaiting_events.len(),
+        1,
+        "expected one PlanTaskAwaitingReview event, got {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -260,6 +417,115 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
             Some(worker_branch),
             Some(base_oid.as_str())
         ))
+    );
+}
+
+#[tokio::test]
+async fn recover_orphaned_dispatch_reemits_already_awaiting_review_without_new_audit() {
+    let dir = init_repo().await;
+    commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+    let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+        .await
+        .expect("base oid");
+    let worker_branch = "spur/worker/already-awaiting-review";
+    run_git_capture(
+        dir.path(),
+        None,
+        &["checkout", "-q", "-b", worker_branch, &base_oid],
+    )
+    .await
+    .expect("checkout worker branch");
+    commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+
+    let fixture = setup_recovery_task(dir.path(), "recover-reemit-awaiting", "del-reemit").await;
+    super::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        fixture.feature_gate.as_ref(),
+    )
+    .expect("test feature gate should allow beads advanced");
+    let adv = fixture.pm.advanced().expect("advanced beads backend");
+    adv.add_comment(
+        &fixture.task_issue_id,
+        &crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+            delegation_id: "del-reemit".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some(worker_branch.into()),
+            result_summary: Some("already ready".into()),
+            artifact_uri: None,
+            dispatched_base_oid: Some(base_oid.clone()),
+        }),
+    )
+    .await
+    .expect("completion audit");
+    fixture
+        .pm
+        .update_issue(
+            &fixture.task_issue_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("ready label");
+    let before_comments = adv
+        .list_comments(&fixture.task_issue_id)
+        .await
+        .expect("list comments before")
+        .len();
+
+    let sink = Arc::new(RecordingSink::default());
+    let sink_obj: Arc<dyn crate::events::McpEventSink> = sink.clone();
+    let (continuation_ctx, continuations) = recording_continuation_ctx();
+    let brain_session = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        Some(&brain_session),
+        Some(Arc::clone(&fixture.pm)),
+        Some(sink_obj),
+        continuation_ctx,
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        Arc::clone(&fixture.feature_gate),
+    );
+    server.set_repo_root(dir.path().to_path_buf());
+
+    let msg = server
+        .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+        .await
+        .expect("already AwaitingReview task should replay");
+
+    assert!(
+        msg.contains("continuation re-emitted"),
+        "unexpected response: {msg}"
+    );
+    let after_comments = adv
+        .list_comments(&fixture.task_issue_id)
+        .await
+        .expect("list comments after")
+        .len();
+    assert_eq!(
+        after_comments, before_comments,
+        "must not write duplicate audit"
+    );
+
+    let recorded = continuations.lock().await;
+    assert_eq!(recorded.len(), 1, "expected one replayed continuation");
+    assert_eq!(recorded[0].1, "del-reemit");
+    drop(recorded);
+
+    let events = sink.events.lock().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            spur_acp::SpurEventBody::PlanTaskAwaitingReview {
+                plan_id,
+                task_id,
+                delegation_id,
+            } if plan_id == "recover-reemit-awaiting"
+                && task_id == "task-a"
+                && delegation_id == "del-reemit"
+        )),
+        "expected PlanTaskAwaitingReview event, got {events:?}"
     );
 }
 
@@ -638,7 +904,7 @@ async fn recover_orphaned_dispatch_rejects_zero_commits() {
 }
 
 #[tokio::test]
-async fn recover_orphaned_dispatch_rejects_already_completed_delegation() {
+async fn recover_orphaned_dispatch_reemits_legacy_already_awaiting_review_delegation() {
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -681,13 +947,13 @@ async fn recover_orphaned_dispatch_rejects_already_completed_delegation() {
         Arc::clone(&fixture.feature_gate),
     );
 
-    let err = server
+    let msg = server
         .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
         .await
-        .expect_err("already completed delegation must be rejected");
+        .expect("already AwaitingReview delegation should replay");
     assert!(
-        err.contains("already has a completion audit") || err.contains("no audit attestation"),
-        "unexpected error: {err}"
+        msg.contains("continuation re-emitted"),
+        "unexpected response: {msg}"
     );
 }
 

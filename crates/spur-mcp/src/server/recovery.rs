@@ -1,6 +1,176 @@
 use super::*;
 
+const AWAITING_REVIEW_REDISCOVERY_LIMIT: usize = 100;
+
+#[derive(Clone, Debug)]
+pub(crate) struct AwaitingReviewReplay {
+    pub(crate) plan_id: String,
+    pub(crate) task_id: String,
+    pub(crate) delegation_id: String,
+    pub(crate) attempt: u32,
+    pub(crate) summary: Option<String>,
+    pub(crate) worker_branch: Option<String>,
+}
+
+pub(crate) async fn replay_awaiting_review_continuation(
+    event_sink: Option<&Arc<dyn crate::events::McpEventSink>>,
+    continuation_ctx: &DetachedContinuationCtx,
+    materializer: &OutcomeMaterializer,
+    brain_session_id: &spur_acp::BrainSessionId,
+    replay: AwaitingReviewReplay,
+) {
+    let result = spur_acp::DelegationResult {
+        status: spur_acp::DelegationStatus::Success,
+        diff: None,
+        diff_summary: None,
+        summary: replay.summary.clone(),
+        estimated_cost_usd: 0.0,
+        worker_branch: replay.worker_branch.clone(),
+        artifact: None,
+    };
+    let cont = build_detached_continuation(
+        &spur_acp::DelegationId::from(replay.delegation_id.as_str()),
+        &result,
+        spur_acp::domain::ContinuationSource::PlanTaskAwaitingReview,
+        replay.attempt,
+        brain_session_id.as_session_id().clone(),
+        event_sink,
+        materializer,
+    )
+    .await;
+
+    if let Some(sink) = event_sink.map(|sink| sink.as_ref()) {
+        sink.emit(spur_acp::SpurEventBody::PlanTaskAwaitingReview {
+            plan_id: replay.plan_id.clone(),
+            task_id: replay.task_id.clone(),
+            delegation_id: replay.delegation_id.clone(),
+        });
+    }
+    (continuation_ctx.on_complete)(cont, replay.delegation_id).await;
+}
+
 impl McpCallbackServer {
+    /// Spawn one owner-aware rediscovery sweep after the brain session id is
+    /// bound. This is independent from legacy startup recovery: even a fully
+    /// modern plan can have a persisted Completion audit whose live collector
+    /// died before delivering the brain continuation.
+    pub(crate) fn spawn_awaiting_review_rediscovery_if_ready(self: Arc<Self>) {
+        if self
+            .awaiting_review_rediscovery_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        if self.task_tracker.is_closed() || self.brain_session_id.get().is_none() {
+            return;
+        }
+        let Some(pm) = self.reconciler_pm() else {
+            return;
+        };
+        if self
+            .require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
+            .is_err()
+            || pm.advanced().is_none()
+        {
+            return;
+        }
+        let task_tracker = self.task_tracker.clone();
+        let server = Arc::clone(&self);
+        task_tracker.spawn(async move {
+            match server.rediscover_awaiting_review_tasks(pm).await {
+                Ok(summary) => tracing::info!(
+                    target: "spur.reconciler.awaiting_review_rediscovery",
+                    swept_plans = summary.swept_plans,
+                    fired_continuations = summary.fired_continuations,
+                    skipped_live_delegations = summary.skipped_live_delegations,
+                    "rediscovery swept {} plans, fired {} continuations, skipped {} live-delegations",
+                    summary.swept_plans,
+                    summary.fired_continuations,
+                    summary.skipped_live_delegations,
+                ),
+                Err(error) => tracing::warn!(
+                    target: "spur.reconciler.awaiting_review_rediscovery",
+                    %error,
+                    "AwaitingReview rediscovery failed"
+                ),
+            }
+        });
+    }
+
+    async fn rediscover_awaiting_review_tasks(
+        &self,
+        pm: Arc<dyn crate::plan::PmLike>,
+    ) -> anyhow::Result<AwaitingReviewRediscoverySummary> {
+        let brain_session_id = self.brain_session_id_ready().await.clone();
+        let epics = pm
+            .list_issues(spur_pm::IssueFilter {
+                status: Some("open".to_string()),
+                issue_type: Some("epic".to_string()),
+                limit: Some(1_000),
+                ..Default::default()
+            })
+            .await?;
+
+        let mut summary = AwaitingReviewRediscoverySummary::default();
+        for plan_id in discover_plan_ids_owned_by(&epics, brain_session_id.as_session_id()) {
+            if summary.fired_continuations >= AWAITING_REVIEW_REDISCOVERY_LIMIT {
+                break;
+            }
+            summary.swept_plans += 1;
+            let projected = crate::plan::projector::project_plan_from_beads(
+                pm.as_ref(),
+                &plan_id,
+                self.feature_gate.as_ref(),
+            )
+            .await?;
+            for task in &projected.tasks {
+                if summary.fired_continuations >= AWAITING_REVIEW_REDISCOVERY_LIMIT {
+                    break;
+                }
+                if !matches!(
+                    task.status,
+                    crate::plan::PlanTaskStatus::AwaitingReview { .. }
+                ) {
+                    continue;
+                }
+                let Some(delegation_id) = task.last_delegation_id.clone() else {
+                    continue;
+                };
+                if self
+                    .active_delegations
+                    .lock()
+                    .await
+                    .contains(&spur_acp::DelegationId::from(delegation_id.as_str()))
+                {
+                    summary.skipped_live_delegations += 1;
+                    continue;
+                }
+                let replay = AwaitingReviewReplay {
+                    plan_id: plan_id.clone(),
+                    task_id: task.spec.task_id.clone(),
+                    delegation_id,
+                    attempt: task.attempt,
+                    summary: match &task.status {
+                        crate::plan::PlanTaskStatus::AwaitingReview { summary } => summary.clone(),
+                        _ => None,
+                    },
+                    worker_branch: task.worker_branch.clone(),
+                };
+                replay_awaiting_review_continuation(
+                    self.event_sink.as_ref(),
+                    self.continuation_ctx.as_ref(),
+                    &self.materializer,
+                    &brain_session_id,
+                    replay,
+                )
+                .await;
+                summary.fired_continuations += 1;
+            }
+        }
+
+        Ok(summary)
+    }
+
     pub(crate) fn request_startup_recovery(&self) {
         let mut state = self.startup_recovery.lock().unwrap();
         if state.handle.is_none() {
@@ -408,4 +578,11 @@ impl McpCallbackServer {
         debug!("startup recovery maintenance finished");
         Ok(())
     }
+}
+
+#[derive(Default)]
+struct AwaitingReviewRediscoverySummary {
+    swept_plans: usize,
+    fired_continuations: usize,
+    skipped_live_delegations: usize,
 }

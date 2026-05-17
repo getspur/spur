@@ -227,9 +227,25 @@ impl McpCallbackServer {
             format!("recover_orphaned_dispatch: parse comments({issue_id}) failed: {error}")
         })?;
         let delegation_audit = crate::plan::projector::current_delegation_from_audits(&audits);
-        let delegation_id = match (delegation_audit, delegation_label) {
-            (Some(audit_id), Some(label_id)) if audit_id == label_id => audit_id,
-            (Some(audit_id), Some(_)) => {
+        let has_ready_label =
+            crate::plan::projector::has_ready_for_review_label_compat(&issue.labels);
+        let awaiting_review_audit = crate::plan::projector::awaiting_review_from_audits(&audits);
+        let awaiting_review_completion_delegation =
+            audits.iter().rev().find_map(|audit| match audit {
+                crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                    delegation_id,
+                    completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                    ..
+                } => Some(delegation_id.clone()),
+                _ => None,
+            });
+        let delegation_id = match (
+            delegation_audit,
+            delegation_label,
+            awaiting_review_completion_delegation,
+        ) {
+            (Some(audit_id), Some(label_id), _) if audit_id == label_id => audit_id,
+            (Some(audit_id), Some(_), _) => {
                 crate::plan::projector::emit_label_audit_drift(
                     "delegation-id",
                     "mismatch",
@@ -237,7 +253,7 @@ impl McpCallbackServer {
                 );
                 audit_id
             }
-            (Some(audit_id), None) => {
+            (Some(audit_id), None, _) => {
                 crate::plan::projector::emit_label_audit_drift(
                     "delegation-id",
                     "audit_only",
@@ -245,7 +261,13 @@ impl McpCallbackServer {
                 );
                 audit_id
             }
-            (None, Some(_label_id)) => {
+            (None, Some(label_id), Some(completed_id))
+                if awaiting_review_audit && label_id == completed_id =>
+            {
+                completed_id
+            }
+            (None, None, Some(completed_id)) if awaiting_review_audit => completed_id,
+            (None, Some(_label_id), _) => {
                 crate::plan::projector::emit_label_audit_drift(
                     "delegation-id",
                     "label_only",
@@ -255,15 +277,28 @@ impl McpCallbackServer {
                     "recover_orphaned_dispatch: issue {issue_id} has delegation-id label but no audit attestation"
                 ));
             }
-            (None, None) => {
+            (None, None, _) => {
                 return Err(format!(
                     "recover_orphaned_dispatch: issue {issue_id} is missing spur:delegation-id:<id> label"
                 ));
             }
         };
-        let has_ready_label =
-            crate::plan::projector::has_ready_for_review_label_compat(&issue.labels);
-        let awaiting_review_audit = crate::plan::projector::awaiting_review_from_audits(&audits);
+        let plan_id = issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_plan_id(label))
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "recover_orphaned_dispatch: issue {issue_id} is missing spur:plan-id:<id> label (orphan recovery is only supported for tasks dispatched via submit_plan/execute_epic; ad-hoc delegate_to_worker tasks are not supported)"
+                )
+            })?;
+        let task_id = issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
+            .unwrap_or_else(|| issue_id.to_string())
+            .to_string();
         if has_ready_label && !awaiting_review_audit {
             crate::plan::projector::emit_label_audit_drift(
                 "ready-for-review",
@@ -279,9 +314,29 @@ impl McpCallbackServer {
                     issue_id,
                 );
             }
-            return Err(format!(
-                "recover_orphaned_dispatch: issue {issue_id} is already awaiting review per audit"
-            ));
+            let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
+            let (_, worker_branch, summary, _, _) =
+                crate::plan::projector::latest_completion_facts(&audits).ok_or_else(|| {
+                    format!(
+                        "recover_orphaned_dispatch: issue {issue_id} is already awaiting review but has no latest completion facts"
+                    )
+                })?;
+            crate::server::replay_awaiting_review_continuation(
+                self.event_sink.as_ref(),
+                self.continuation_ctx.as_ref(),
+                &self.materializer,
+                self.brain_session_id(),
+                crate::server::AwaitingReviewReplay {
+                    plan_id,
+                    task_id,
+                    delegation_id,
+                    attempt,
+                    summary,
+                    worker_branch,
+                },
+            )
+            .await;
+            return Ok("Task already awaiting review - continuation re-emitted.".to_string());
         }
         let dispatched_base_oid = issue
             .labels
@@ -316,21 +371,6 @@ impl McpCallbackServer {
             ));
         }
 
-        let plan_id = issue
-            .labels
-            .iter()
-            .find_map(|label| crate::plan::labels::parse_plan_id(label))
-            .map(str::to_string)
-            .ok_or_else(|| {
-                format!(
-                    "recover_orphaned_dispatch: issue {issue_id} is missing spur:plan-id:<id> label (orphan recovery is only supported for tasks dispatched via submit_plan/execute_epic; ad-hoc delegate_to_worker tasks are not supported)"
-                )
-            })?;
-        let task_id = issue
-            .labels
-            .iter()
-            .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
-            .unwrap_or_else(|| issue_id.to_string());
         let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
 
         let result = DelegationResult {
