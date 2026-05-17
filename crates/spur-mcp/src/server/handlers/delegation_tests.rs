@@ -52,7 +52,7 @@ mod retirement_state_tests {
     use std::time::Duration;
 
     use spur_acp::{BrainSessionId, SessionId};
-    use tokio::sync::Notify;
+    use tokio::sync::{oneshot, Notify};
 
     fn no_op_ctx() -> super::DetachedContinuationCtx {
         super::DetachedContinuationCtx {
@@ -213,6 +213,44 @@ mod retirement_state_tests {
             dropped.load(Ordering::SeqCst),
             "force_abort must still abort the root task after shutdown has already started"
         );
+    }
+
+    #[tokio::test]
+    async fn test_server_shutdown_signals_root_listener() {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (server, _channel) = super::McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
+        );
+        let server = Arc::new(server);
+
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (root_shutdown_tx, root_shutdown_rx) = oneshot::channel();
+        *server.root_shutdown_tx.lock().unwrap() = Some(root_shutdown_tx);
+        *server.root_handle.lock().unwrap() = Some(tokio::spawn({
+            let started = Arc::clone(&started);
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _flag = DropFlag(dropped);
+                started.notify_one();
+                let _ = root_shutdown_rx.await;
+            }
+        }));
+
+        started.notified().await;
+        server.shutdown().await;
+        tokio::time::timeout(Duration::from_millis(200), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown should signal and finish the root listener task");
     }
 }
 
