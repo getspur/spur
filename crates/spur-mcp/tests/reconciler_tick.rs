@@ -1991,6 +1991,114 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
 }
 
 #[tokio::test]
+async fn lease_sweep_does_not_report_missing_lease_without_dispatch_marker() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Ready but never dispatched",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-no-dispatch"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t-ready"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+        }),
+        Some("plan-no-dispatch".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let _ = reconciler.tick_once().await.expect("tick_once");
+    let outcomes = reconciler.outcomes();
+    let outcomes = outcomes.lock().await;
+    assert!(
+        outcomes.stuck_tasks_for_plan("plan-no-dispatch").is_empty(),
+        "ordinary tasks without dispatch markers must not be reported as missing lease expiry"
+    );
+}
+
+#[tokio::test]
+async fn index_hygiene_removes_label_only_dispatch_after_grace() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Label-only dispatched",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-label-only"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t-label"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    label_issue(
+        dir.path(),
+        &task_id,
+        &labels::delegation_id("del-label-only"),
+    );
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig {
+            label_only_dispatch_grace: std::time::Duration::ZERO,
+            ..ReconcilerConfig::default()
+        },
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some("plan-label-only".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    assert!(reconciler.tick_once().await.expect("tick_once"));
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(
+        !issue
+            .labels
+            .iter()
+            .any(|label| labels::parse_delegation_id(label).is_some()),
+        "label-only dispatch marker must be removed after grace"
+    );
+}
+
+#[tokio::test]
 async fn worker_success_after_orphan_clear_is_superseded() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

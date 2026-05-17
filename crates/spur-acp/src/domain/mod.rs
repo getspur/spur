@@ -25,7 +25,7 @@ pub use events::{
     PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent, SpurEvent,
     SpurEventBody,
 };
-pub use outcome::{BackendTag, OutcomeKey, OutcomeRef};
+pub use outcome::{BackendTag, OutcomeBlobKind, OutcomeKey, OutcomeRef};
 pub use peer_message::{
     LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
 };

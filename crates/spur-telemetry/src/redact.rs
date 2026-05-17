@@ -190,6 +190,7 @@ pub fn sha256_prefix(value: &str) -> String {
         .collect::<String>()
 }
 
+#[allow(dead_code)]
 pub fn classify_server(server_name: &str) -> crate::tier2_events::McpServerName {
     match server_name.trim().to_ascii_lowercase().as_str() {
         "github" => crate::tier2_events::McpServerName::Github,
@@ -206,6 +207,7 @@ pub fn classify_server(server_name: &str) -> crate::tier2_events::McpServerName 
     }
 }
 
+#[allow(dead_code)]
 pub fn classify_tool(server_name: &str, tool_name: &str) -> crate::tier2_events::McpToolName {
     let server = classify_server(server_name);
     if matches!(server, crate::tier2_events::McpServerName::Custom(_)) {

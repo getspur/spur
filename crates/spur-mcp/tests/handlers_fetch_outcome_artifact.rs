@@ -61,6 +61,7 @@ async fn put_outcome(
         brain_session_id: brain_session.clone(),
         delegation_id: delegation_id.into(),
         attempt,
+        kind: spur_blob_store::OutcomeBlobKind::ResultJson,
     };
     store.put(&key, &bytes, &metadata).await.expect("put");
 }

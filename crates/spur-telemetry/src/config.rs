@@ -46,7 +46,7 @@ pub fn load_or_default() -> TelemetryConfig {
 }
 
 fn load_or_default_at(path: &Path) -> TelemetryConfig {
-    let contents = match std::fs::read_to_string(&path) {
+    let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return TelemetryConfig::default()
@@ -98,7 +98,7 @@ fn save_atomic_at(path: &Path, cfg: &TelemetryConfig) -> Result<()> {
     let tmp_path = path.with_extension("toml.tmp");
     let encoded = toml::to_string_pretty(cfg)?;
     std::fs::write(&tmp_path, encoded)?;
-    std::fs::rename(&tmp_path, &path)?;
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 

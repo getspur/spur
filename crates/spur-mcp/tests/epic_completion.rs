@@ -558,6 +558,13 @@ async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready
         .expect("PlanCompleted continuation should arrive")
         .expect("continuation channel open");
     assert_eq!(continuation.source, ContinuationSource::PlanCompleted);
+    let artifact_id = continuation
+        .payload
+        .artifact_id
+        .as_ref()
+        .expect("PlanCompleted continuation should carry materialized artifact id");
+    uuid::Uuid::parse_str(artifact_id.delegation_id.as_str())
+        .expect("plan-completion artifact delegation id must satisfy backend UUID validation");
 }
 
 #[tokio::test]

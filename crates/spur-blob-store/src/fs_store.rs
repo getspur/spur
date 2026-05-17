@@ -1,8 +1,8 @@
 //! Filesystem-backed `OutcomeStore`.
 //!
 //! Path layout:
-//!   <root>/<brain_session_id>/<delegation_id>/<attempt>.bin   # content bytes
-//!   <root>/<brain_session_id>/<delegation_id>/<attempt>.meta  # OutcomeMetadata JSON
+//!   <root>/<brain_session_id>/<delegation_id>/<attempt>.<kind>.bin   # content bytes
+//!   <root>/<brain_session_id>/<delegation_id>/<attempt>.<kind>.meta  # OutcomeMetadata JSON
 //!
 //! Both `brain_session_id` and `delegation_id` accept EITHER a 36-char UUID
 //! (legacy) OR a 16-char `[0-9a-f]+` short hex form (post-`bd-ttyo`):
@@ -43,8 +43,8 @@ use tokio::fs;
 
 use crate::trait_def::OutcomeStore;
 use crate::{
-    BackendTag, DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef,
-    Section, StoreError, SweepReport,
+    BackendTag, ContentType, DeleteNamespaceReport, OutcomeBlobKind, OutcomeContent, OutcomeKey,
+    OutcomeMetadata, OutcomeRef, Section, StoreError, SweepReport,
 };
 
 const MIN_TTL_SECS: u64 = 86_400;
@@ -102,6 +102,17 @@ impl FsOutcomeStore {
     }
 
     fn paths_for(&self, key: &OutcomeKey) -> (PathBuf, PathBuf, PathBuf) {
+        let session_dir = self
+            .root
+            .join(key.brain_session_id.as_session_id().0.as_str());
+        let delegation_dir = session_dir.join(key.delegation_id.as_str());
+        let stem = format!("{}.{}", key.attempt, key.kind.as_ref_component());
+        let bin = delegation_dir.join(format!("{stem}.bin"));
+        let meta = delegation_dir.join(format!("{stem}.meta"));
+        (delegation_dir, bin, meta)
+    }
+
+    fn legacy_paths_for(&self, key: &OutcomeKey) -> (PathBuf, PathBuf, PathBuf) {
         let session_dir = self
             .root
             .join(key.brain_session_id.as_session_id().0.as_str());
@@ -209,15 +220,28 @@ impl OutcomeStore for FsOutcomeStore {
         // No exists() pre-check — eliminates TOCTOU race with concurrent
         // delete_namespace/sweep (gemini Plan-2 Task 5 review). Map
         // io::ErrorKind::NotFound directly to StoreError::NotFound.
-        let raw_meta = match fs::read(&meta_path).await {
-            Ok(b) => b,
+        let (raw_meta, bin_path, legacy_fallback) = match fs::read(&meta_path).await {
+            Ok(b) => (b, bin_path, false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(StoreError::NotFound(key.clone()));
+                if key.kind != OutcomeBlobKind::ResultJson {
+                    return Err(StoreError::NotFound(key.clone()));
+                }
+                let (_, legacy_bin, legacy_meta) = self.legacy_paths_for(key);
+                match fs::read(&legacy_meta).await {
+                    Ok(b) => (b, legacy_bin, true),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(StoreError::NotFound(key.clone()));
+                    }
+                    Err(e) => return Err(StoreError::Io(e)),
+                }
             }
             Err(e) => return Err(StoreError::Io(e)),
         };
         let metadata: OutcomeMetadata = serde_json::from_slice(&raw_meta)
             .map_err(|e| StoreError::Backend(format!("corrupt sidecar: {e}")))?;
+        if legacy_fallback && metadata.content_type != ContentType::Json {
+            return Err(StoreError::NotFound(key.clone()));
+        }
         let bytes = fs::read(&bin_path).await?;
         Ok(OutcomeContent { bytes, metadata })
     }
@@ -365,6 +389,7 @@ mod tests {
             brain_session_id: BrainSessionId::new(SessionId(session.into())),
             delegation_id: delegation.into(),
             attempt,
+            kind: OutcomeBlobKind::ResultJson,
         }
     }
 
@@ -395,6 +420,27 @@ mod tests {
 
         let got = store.get(&k, Some(Section::Full)).await.expect("get");
         assert_eq!(got.bytes, body);
+    }
+
+    #[tokio::test]
+    async fn fs_store_result_json_ignores_non_json_legacy_ref() {
+        let td = TempDir::new().unwrap();
+        let store = FsOutcomeStore::new(td.path().to_path_buf());
+        let k = key(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "deadbeef-1111-2222-3333-444455556666",
+            1,
+        );
+        let body = b"stdout".to_vec();
+        let (dir, legacy_bin, legacy_meta) = store.legacy_paths_for(&k);
+        fs::create_dir_all(dir).await.unwrap();
+        fs::write(legacy_bin, &body).await.unwrap();
+        fs::write(legacy_meta, serde_json::to_vec(&metadata(&body)).unwrap())
+            .await
+            .unwrap();
+
+        let err = store.get(&k, Some(Section::Full)).await.unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
     }
 
     #[tokio::test]
@@ -443,6 +489,7 @@ mod tests {
             brain_session_id: BrainSessionId::new(SessionId("../etc/passwd".into())),
             delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
             attempt: 1,
+            kind: OutcomeBlobKind::ResultJson,
         };
         let body = b"x".to_vec();
         let err = store.put(&bad, &body, &metadata(&body)).await.unwrap_err();
@@ -513,6 +560,7 @@ mod tests {
             )),
             delegation_id: "d04edac4e67c46".into(),
             attempt: 1,
+            kind: OutcomeBlobKind::ResultJson,
         };
         let body = b"x".to_vec();
         let err = store.put(&bad, &body, &metadata(&body)).await.unwrap_err();
@@ -530,6 +578,7 @@ mod tests {
             // 16 chars but contains non-hex `g`
             delegation_id: "d04edac4e67c464g".into(),
             attempt: 1,
+            kind: OutcomeBlobKind::ResultJson,
         };
         let body = b"x".to_vec();
         let err = store.put(&bad, &body, &metadata(&body)).await.unwrap_err();
