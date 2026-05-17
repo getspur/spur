@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use spur_acp::domain::{
     ArtifactRef, BrainContinuation, ContinuationPayload, ContinuationSource, DelegationId,
-    DelegationResult, OutcomeKey,
+    DelegationResult, OutcomeBlobKind, OutcomeKey,
 };
 use spur_acp::BrainSessionId;
 use spur_blob_store::OutcomeStore;
@@ -155,6 +155,7 @@ impl OutcomeMaterializer {
             brain_session_id: brain_session.clone(),
             delegation_id: delegation_id.clone(),
             attempt,
+            kind: OutcomeBlobKind::ResultJson,
         };
 
         let bytes = match serde_json::to_vec(&result) {

@@ -45,6 +45,10 @@ pub(crate) const VERSIONED_PLAN_CACHE_BACKOFFS: [std::time::Duration;
     std::time::Duration::from_millis(500),
     std::time::Duration::from_millis(2_000),
 ];
+pub(crate) const UNVERSIONED_PLAN_CACHE_REFRESH_AFTER: std::time::Duration =
+    std::time::Duration::from_millis(0);
+pub(crate) const UNVERSIONED_PLAN_CACHE_INLINE_REFRESH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(250);
 
 /// How long completed delegation results are retained before lazy eviction.
 ///

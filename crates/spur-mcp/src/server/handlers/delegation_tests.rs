@@ -630,6 +630,7 @@ mod fetch_outcome_artifact_tests {
             brain_session_id: brain_session.clone(),
             delegation_id,
             attempt,
+            kind: spur_blob_store::OutcomeBlobKind::ResultJson,
         };
         store
             .put(&key, &bytes, &metadata)
@@ -927,6 +928,7 @@ mod fetch_outcome_artifact_tests {
             brain_session_id: brain_session.clone(),
             delegation_id: delegation_id.clone(),
             attempt: 1,
+            kind: spur_blob_store::OutcomeBlobKind::ResultJson,
         };
         let bytes = b"not a delegation result";
         let metadata = outcome_metadata(bytes);

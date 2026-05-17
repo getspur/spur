@@ -4,7 +4,8 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use spur_acp::{BrainSessionId, SessionId};
 use spur_blob_store::{
-    BackendTag, ContentType, OutcomeKey, OutcomeMetadata, OutcomeStore, Section, StoreError,
+    BackendTag, ContentType, OutcomeBlobKind, OutcomeKey, OutcomeMetadata, OutcomeStore, Section,
+    StoreError,
 };
 use spur_worktree::git_blob_store::GitBlobOutcomeStore;
 use std::process::Command;
@@ -41,18 +42,60 @@ fn init_repo(p: &std::path::Path) {
         .unwrap();
 }
 
+fn write_git_blob(repo: &std::path::Path, body: &[u8]) -> String {
+    String::from_utf8(
+        Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.as_mut().unwrap().write_all(body).unwrap();
+                c.wait_with_output()
+            })
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string()
+}
+
+fn update_git_ref(repo: &std::path::Path, ref_name: &str, sha: &str) {
+    let output = Command::new("git")
+        .args(["update-ref", ref_name, sha])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "update-ref {ref_name}");
+}
+
 fn key(s: &str, d: &str, a: u32) -> OutcomeKey {
     OutcomeKey {
         brain_session_id: BrainSessionId::new(SessionId(s.into())),
         delegation_id: d.into(),
         attempt: a,
+        kind: OutcomeBlobKind::ResultJson,
+    }
+}
+
+fn key_with_kind(s: &str, d: &str, a: u32, kind: OutcomeBlobKind) -> OutcomeKey {
+    OutcomeKey {
+        kind,
+        ..key(s, d, a)
     }
 }
 
 fn metadata(content: &[u8]) -> OutcomeMetadata {
+    metadata_with_type(content, ContentType::Stdout)
+}
+
+fn metadata_with_type(content: &[u8], content_type: ContentType) -> OutcomeMetadata {
     OutcomeMetadata {
         created_at: Utc::now(),
-        content_type: ContentType::Stdout,
+        content_type,
         original_byte_size: content.len() as u64,
         stored_byte_size: content.len() as u64,
         sha256: sha256_hex(content),
@@ -114,6 +157,65 @@ async fn git_blob_store_content_mismatch() {
 }
 
 #[tokio::test]
+async fn git_blob_store_allows_distinct_blob_kinds_for_same_attempt() {
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let session = "550e8400-e29b-41d4-a716-446655440000";
+    let delegation = "deadbeef-1111-2222-3333-444455556666";
+    let result_key = key_with_kind(session, delegation, 1, OutcomeBlobKind::ResultJson);
+    let stdout_key = key_with_kind(session, delegation, 1, OutcomeBlobKind::RawStdout);
+
+    store
+        .put(&stdout_key, b"raw stdout", &metadata(b"raw stdout"))
+        .await
+        .unwrap();
+    store
+        .put(
+            &result_key,
+            b"{\"status\":\"ok\"}",
+            &metadata_with_type(b"{\"status\":\"ok\"}", ContentType::Json),
+        )
+        .await
+        .unwrap();
+
+    let stdout = store.get(&stdout_key, None).await.unwrap();
+    let result = store.get(&result_key, None).await.unwrap();
+    assert_eq!(stdout.bytes, b"raw stdout");
+    assert_eq!(result.bytes, b"{\"status\":\"ok\"}");
+}
+
+#[tokio::test]
+async fn git_blob_store_result_json_reads_legacy_unkinded_ref() {
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "deadbeef-1111-2222-3333-444455556666",
+        1,
+    );
+    let body = b"{\"legacy\":true}";
+    let meta = serde_json::to_vec(&metadata_with_type(body, ContentType::Json)).unwrap();
+
+    let body_sha = write_git_blob(td.path(), body);
+    let meta_sha = write_git_blob(td.path(), &meta);
+    update_git_ref(
+        td.path(),
+        "refs/spur/outcomes/550e8400-e29b-41d4-a716-446655440000/deadbeef-1111-2222-3333-444455556666-1.blob",
+        &body_sha,
+    );
+    update_git_ref(
+        td.path(),
+        "refs/spur/outcomes/550e8400-e29b-41d4-a716-446655440000/deadbeef-1111-2222-3333-444455556666-1.meta",
+        &meta_sha,
+    );
+
+    let got = store.get(&k, None).await.unwrap();
+    assert_eq!(got.bytes, body);
+}
+
+#[tokio::test]
 async fn git_blob_store_namespace_isolation() {
     let td = TempDir::new().unwrap();
     init_repo(td.path());
@@ -144,6 +246,7 @@ async fn git_blob_store_rejects_non_uuid() {
         brain_session_id: BrainSessionId::new(SessionId("../etc/passwd".into())),
         delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
         attempt: 1,
+        kind: OutcomeBlobKind::ResultJson,
     };
     let err = store.put(&bad, b"x", &metadata(b"x")).await.unwrap_err();
     // brain_session_id now validates via `validate_id` (16 OR 36 char) post-bd-ttyo;

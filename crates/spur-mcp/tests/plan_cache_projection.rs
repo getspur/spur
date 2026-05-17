@@ -74,7 +74,7 @@ fn extract_submit_plan_task_issue_id(response: &Value, task_id: &str) -> String 
 }
 
 #[tokio::test]
-async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted_cache() {
+async fn get_plan_status_serves_cached_plan_with_freshness_when_present() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -118,15 +118,39 @@ async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted
         .await
         .expect("corrupt cached plan");
 
-    let refreshed = decode_tool_response(
+    let cached = decode_tool_response(
         &server
             .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
             .await,
     );
 
     assert_eq!(
-        refreshed, baseline,
-        "get_plan_status must rebuild persisted state instead of trusting corrupted cache"
+        cached["tasks"][0]["status"], "approved",
+        "get_plan_status should serve the cached plan instead of blocking on durable reprojection"
+    );
+    assert_eq!(
+        cached["plan_state_freshness"]["source"], "cache",
+        "cached responses must expose their freshness source: {cached}"
+    );
+    assert_eq!(
+        cached["plan_state_freshness"]["beads_version_verified"], false,
+        "versioned_cache_serve=false must mark cached reads as unverified: {cached}"
+    );
+
+    server.__test_clear_active_plans().await;
+    let reprojected = decode_tool_response(
+        &server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
+            .await,
+    );
+
+    assert_ne!(
+        reprojected["tasks"][0]["status"], "approved",
+        "cache absence must rebuild persisted state instead of keeping corrupted cache"
+    );
+    assert_eq!(
+        reprojected["plan_state_freshness"]["source"], "projection",
+        "cache misses must expose durable projection as the source: {reprojected}"
     );
 }
 
@@ -192,6 +216,7 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
     .await
     .expect("persist dispatch intent");
 
+    server.__test_clear_active_plans().await;
     let projected = decode_tool_response(
         &server
             .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))

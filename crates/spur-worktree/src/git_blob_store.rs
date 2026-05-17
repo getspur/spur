@@ -4,8 +4,8 @@
 //! `git update-ref` / `git cat-file` plumbing.
 //!
 //! Ref namespace (Round 11 MF1+MF2):
-//!   refs/spur/outcomes/<session-id>/<delegation-id>-<attempt>.blob   # content
-//!   refs/spur/outcomes/<session-id>/<delegation-id>-<attempt>.meta   # OutcomeMetadata JSON
+//!   refs/spur/outcomes/<session-id>/<delegation-id>-<attempt>-<kind>.blob   # content
+//!   refs/spur/outcomes/<session-id>/<delegation-id>-<attempt>-<kind>.meta   # OutcomeMetadata JSON
 //!
 //! Both refs are leaves under the namespace — no D/F conflict with the
 //! legacy `refs/spur/artifacts/<session-id>` ref (which remains
@@ -31,8 +31,8 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use spur_acp::BrainSessionId;
 use spur_blob_store::{
-    BackendTag, DeleteNamespaceReport, OutcomeContent, OutcomeKey, OutcomeMetadata, OutcomeRef,
-    OutcomeStore, Section, StoreError, SweepReport,
+    BackendTag, ContentType, DeleteNamespaceReport, OutcomeBlobKind, OutcomeContent, OutcomeKey,
+    OutcomeMetadata, OutcomeRef, OutcomeStore, Section, StoreError, SweepReport,
 };
 use tokio::process::Command;
 
@@ -99,6 +99,26 @@ impl GitBlobOutcomeStore {
 
     fn blob_ref(key: &OutcomeKey) -> String {
         format!(
+            "refs/spur/outcomes/{}/{}-{}-{}.blob",
+            Self::brain_session_str(&key.brain_session_id),
+            key.delegation_id.as_str(),
+            key.attempt,
+            key.kind.as_ref_component(),
+        )
+    }
+
+    fn meta_ref(key: &OutcomeKey) -> String {
+        format!(
+            "refs/spur/outcomes/{}/{}-{}-{}.meta",
+            Self::brain_session_str(&key.brain_session_id),
+            key.delegation_id.as_str(),
+            key.attempt,
+            key.kind.as_ref_component(),
+        )
+    }
+
+    fn legacy_blob_ref(key: &OutcomeKey) -> String {
+        format!(
             "refs/spur/outcomes/{}/{}-{}.blob",
             Self::brain_session_str(&key.brain_session_id),
             key.delegation_id.as_str(),
@@ -106,7 +126,7 @@ impl GitBlobOutcomeStore {
         )
     }
 
-    fn meta_ref(key: &OutcomeKey) -> String {
+    fn legacy_meta_ref(key: &OutcomeKey) -> String {
         format!(
             "refs/spur/outcomes/{}/{}-{}.meta",
             Self::brain_session_str(&key.brain_session_id),
@@ -172,9 +192,12 @@ impl GitBlobOutcomeStore {
     }
 
     async fn read_meta(&self, key: &OutcomeKey) -> Result<Option<OutcomeMetadata>, StoreError> {
-        let meta_ref = Self::meta_ref(key);
+        self.read_meta_ref(&Self::meta_ref(key)).await
+    }
+
+    async fn read_meta_ref(&self, meta_ref: &str) -> Result<Option<OutcomeMetadata>, StoreError> {
         let rev_parse = Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", &meta_ref])
+            .args(["rev-parse", "--verify", "--quiet", meta_ref])
             .current_dir(&*self.repo_root)
             .output()
             .await
@@ -326,11 +349,21 @@ impl OutcomeStore for GitBlobOutcomeStore {
             "brain_session_id",
         )?;
         Self::validate_id(key.delegation_id.as_str(), "delegation_id")?;
-        let meta = match self.read_meta(key).await? {
-            Some(m) => m,
+        let blob_ref = Self::blob_ref(key);
+        let (meta, blob_ref) = match self.read_meta(key).await? {
+            Some(m) => (m, blob_ref),
+            None if key.kind == OutcomeBlobKind::ResultJson => {
+                let legacy_meta_ref = Self::legacy_meta_ref(key);
+                let Some(meta) = self.read_meta_ref(&legacy_meta_ref).await? else {
+                    return Err(StoreError::NotFound(key.clone()));
+                };
+                if meta.content_type != ContentType::Json {
+                    return Err(StoreError::NotFound(key.clone()));
+                }
+                (meta, Self::legacy_blob_ref(key))
+            }
             None => return Err(StoreError::NotFound(key.clone())),
         };
-        let blob_ref = Self::blob_ref(key);
         let blob_sha_out = self.run_git(&["rev-parse", "--verify", &blob_ref]).await?;
         let blob_sha = String::from_utf8_lossy(&blob_sha_out).trim().to_string();
         let bytes = self.run_git(&["cat-file", "-p", &blob_sha]).await?;

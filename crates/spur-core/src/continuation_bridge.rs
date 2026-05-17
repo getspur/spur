@@ -675,6 +675,7 @@ mod tests {
             )),
             delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
             attempt: 1,
+            kind: spur_acp::domain::outcome::OutcomeBlobKind::ResultJson,
         });
         continuation.payload.fetch_hint = Some("Call fetch_outcome_artifact.".into());
         continuation.payload.base_hint = Some("Pass worker_branch as base for follow-up.".into());

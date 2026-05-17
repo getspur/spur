@@ -725,6 +725,7 @@ pub(crate) async fn run_one_worker_attempt(
             brain_session_id: ctx.brain_session_id.clone(),
             delegation_id: spur_acp::DelegationId::from(ctx.request_id),
             attempt: ctx.attempt,
+            kind: spur_acp::domain::outcome::OutcomeBlobKind::RawStdout,
         };
         let metadata = OutcomeMetadata {
             created_at: chrono::Utc::now(),

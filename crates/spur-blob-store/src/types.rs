@@ -154,6 +154,7 @@ mod tests {
             )),
             delegation_id: "deadbeef-1111-2222-3333-444455556666".into(),
             attempt: 1,
+            kind: crate::OutcomeBlobKind::ResultJson,
         };
         let err = StoreError::ContentMismatch {
             key: key.clone(),
