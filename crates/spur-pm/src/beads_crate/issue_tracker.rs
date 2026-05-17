@@ -92,6 +92,10 @@ pub(crate) fn br_to_pm_summary(br: beads_rust::model::Issue) -> IssueSummary {
 
 impl BeadsCrateAdapter {
     pub(crate) async fn poll_with_limit(&self, limit: usize) -> anyhow::Result<Vec<PmEvent>> {
+        let _cursor_trace = crate::lock_trace::LockTraceGuard::lock(
+            "beads.cursor",
+            "BeadsCrateAdapter::poll_with_limit",
+        );
         let mut guard = self.cursor.lock().await;
         let prior_cursor = guard.clone();
         let had_prior = prior_cursor.is_some();

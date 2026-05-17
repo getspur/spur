@@ -405,6 +405,8 @@ impl IssueTracker for GitHubAdapter {
 
         let now = Utc::now();
         let last_poll = {
+            let _last_poll_trace =
+                crate::lock_trace::LockTraceGuard::lock("github.last_poll", "GitHubAdapter::poll");
             let guard = self
                 .last_poll
                 .lock()
@@ -441,6 +443,8 @@ impl IssueTracker for GitHubAdapter {
 
         // Update last_poll timestamp
         {
+            let _last_poll_trace =
+                crate::lock_trace::LockTraceGuard::lock("github.last_poll", "GitHubAdapter::poll");
             let mut guard = self
                 .last_poll
                 .lock()
