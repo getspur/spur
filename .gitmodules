@@ -1,6 +1,3 @@
 [submodule "public-releases"]
 	path = public-releases
 	url = https://github.com/getspur/spur-releases.git
-[submodule "resources/landing"]
-	path = resources/landing
-	url = git@github.com:kevintruong/spur-orches.git
