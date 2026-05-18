@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod advanced;
 pub mod beads_crate;
+mod blocking_pool_probe;
 pub mod bv;
 pub mod github;
 pub mod graph;
