@@ -566,7 +566,7 @@ where
     Ok(Arc::new(project.await?))
 }
 
-async fn prune_projected_terminal_task_outcomes(
+pub(crate) async fn prune_projected_terminal_task_outcomes(
     outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
     plan_id: &str,
     tasks: &[crate::plan::PlanTaskEntry],
