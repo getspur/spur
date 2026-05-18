@@ -39,6 +39,7 @@ pub struct PmService {
     inner: PmBackendInner,
     bv: Option<BvAdapter>,
     closed_status: String,
+    blocking_pool_probe: Option<tokio::task::JoinHandle<()>>,
     /// Optional GitHub `ExternalPmSync` for `spur pm ingest github`.
     /// Populated by `try_new_with_actor` when Beads is the active backend
     /// AND a GitHub token + repo can be resolved non-interactively. Lives
@@ -119,6 +120,7 @@ impl PmService {
             } else {
                 None
             };
+            let blocking_pool_probe = Some(crate::blocking_pool_probe::spawn_blocking_pool_probe());
             return Ok(Some(Self {
                 inner: PmBackendInner::Beads {
                     beads: Box::new(beads),
@@ -126,6 +128,7 @@ impl PmService {
                 },
                 bv,
                 closed_status: resolved_closed,
+                blocking_pool_probe,
                 github_sync,
             }));
         }
@@ -136,6 +139,7 @@ impl PmService {
                     inner: PmBackendInner::GitHub { adapter: gh },
                     bv: None,
                     closed_status: resolved_closed,
+                    blocking_pool_probe: None,
                     github_sync: None,
                 }));
             }
@@ -340,6 +344,14 @@ impl PmService {
                 Some(&**beads as &dyn crate::advanced::BeadsAdvanced)
             }
             PmBackendInner::GitHub { .. } => None,
+        }
+    }
+}
+
+impl Drop for PmService {
+    fn drop(&mut self) {
+        if let Some(probe) = self.blocking_pool_probe.take() {
+            probe.abort();
         }
     }
 }
