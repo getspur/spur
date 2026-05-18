@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::adapter::IssueTracker;
 use crate::beads_crate::adapter::BeadsCrateAdapter;
@@ -43,6 +43,142 @@ fn validate_added_labels<'a>(labels: impl IntoIterator<Item = &'a String>) -> an
         validate_added_label(label)?;
     }
     Ok(())
+}
+
+const CREATE_ISSUE_MAX_ATTEMPTS: usize = 5;
+
+fn generate_checked_issue_id(
+    s: &beads_rust::storage::sqlite::SqliteStorage,
+    params: &IssueCreate,
+    now: DateTime<Utc>,
+) -> String {
+    let id_gen = beads_rust::util::id::IdGenerator::with_defaults();
+    let issue_count = s.count_issues().unwrap_or(0).saturating_add(1);
+    id_gen.generate(
+        &params.title,
+        params.description.as_deref(),
+        Some("spur"),
+        now,
+        issue_count,
+        |candidate| s.id_exists(candidate).unwrap_or(false),
+    )
+}
+
+fn build_br_issue(
+    params: &IssueCreate,
+    actor: &str,
+    id: String,
+    now: DateTime<Utc>,
+) -> beads_rust::model::Issue {
+    let issue_type = params
+        .issue_type
+        .as_deref()
+        .map(|t| {
+            beads_rust::model::IssueType::from_str(t).unwrap_or(beads_rust::model::IssueType::Task)
+        })
+        .unwrap_or_default();
+
+    let priority = params
+        .priority
+        .map(beads_rust::model::Priority)
+        .unwrap_or_default();
+
+    beads_rust::model::Issue {
+        id,
+        title: params.title.clone(),
+        description: params.description.clone(),
+        status: beads_rust::model::Status::Open,
+        priority,
+        issue_type,
+        created_at: now,
+        updated_at: now,
+        assignee: params.assignee.clone(),
+        owner: None,
+        estimated_minutes: params.estimate_minutes.and_then(|m| i32::try_from(m).ok()),
+        due_at: None,
+        defer_until: None,
+        external_ref: params.external_ref.clone(),
+        ephemeral: false,
+        content_hash: None,
+        design: None,
+        acceptance_criteria: None,
+        notes: None,
+        created_by: Some(actor.to_string()),
+        closed_at: None,
+        close_reason: None,
+        closed_by_session: None,
+        source_system: params.source_system.clone(),
+        source_repo: params.source_repo.clone(),
+        deleted_at: None,
+        deleted_by: None,
+        delete_reason: None,
+        original_type: None,
+        compaction_level: None,
+        compacted_at: None,
+        compacted_at_commit: None,
+        original_size: None,
+        sender: None,
+        pinned: false,
+        is_template: false,
+        labels: Vec::new(),
+        dependencies: Vec::new(),
+        comments: Vec::new(),
+    }
+}
+
+fn create_issue_with_retry<F>(
+    s: &mut beads_rust::storage::sqlite::SqliteStorage,
+    params: IssueCreate,
+    actor: &str,
+    mut before_create: F,
+) -> anyhow::Result<String>
+where
+    F: FnMut(
+        &mut beads_rust::storage::sqlite::SqliteStorage,
+        &beads_rust::model::Issue,
+    ) -> anyhow::Result<()>,
+{
+    for attempt in 0..CREATE_ISSUE_MAX_ATTEMPTS {
+        let now = Utc::now();
+        let id = generate_checked_issue_id(s, &params, now);
+        let issue = build_br_issue(&params, actor, id.clone(), now);
+
+        before_create(s, &issue)?;
+
+        if let Err(error) = s.create_issue(&issue, actor) {
+            let error = anyhow::Error::from(error);
+            if attempt + 1 < CREATE_ISSUE_MAX_ATTEMPTS && is_retryable_issue_id_collision(&error) {
+                continue;
+            }
+            return Err(error);
+        }
+
+        if !params.labels.is_empty() {
+            s.set_labels(&id, &params.labels, actor)?;
+        }
+
+        if let Some(parent) = params.parent.as_deref() {
+            s.add_dependency(&id, parent, "parent-child", actor)?;
+        }
+        for dep in &params.depends_on {
+            s.add_dependency(&id, dep, "blocks", actor)?;
+        }
+
+        return Ok(id);
+    }
+
+    unreachable!("create issue retry loop always returns on final attempt")
+}
+
+fn is_retryable_issue_id_collision(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<beads_rust::error::BeadsError>()
+            .is_some_and(|error| matches!(error, beads_rust::error::BeadsError::IdCollision { .. }))
+            || cause
+                .to_string()
+                .contains("UNIQUE constraint failed: issues.id")
+    })
 }
 
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
@@ -299,85 +435,7 @@ impl IssueTracker for BeadsCrateAdapter {
                 }
             }
 
-            let now = Utc::now();
-            let id = beads_rust::util::generate_id(
-                &params.title,
-                params.description.as_deref(),
-                Some("spur"),
-                now,
-            );
-
-            let issue_type = params
-                .issue_type
-                .as_deref()
-                .map(|t| {
-                    beads_rust::model::IssueType::from_str(t)
-                        .unwrap_or(beads_rust::model::IssueType::Task)
-                })
-                .unwrap_or_default();
-
-            let priority = params
-                .priority
-                .map(beads_rust::model::Priority)
-                .unwrap_or_default();
-
-            let issue = beads_rust::model::Issue {
-                id: id.clone(),
-                title: params.title,
-                description: params.description,
-                status: beads_rust::model::Status::Open,
-                priority,
-                issue_type,
-                created_at: now,
-                updated_at: now,
-                assignee: params.assignee,
-                owner: None,
-                estimated_minutes: params.estimate_minutes.and_then(|m| i32::try_from(m).ok()),
-                due_at: None,
-                defer_until: None,
-                external_ref: params.external_ref,
-                ephemeral: false,
-                content_hash: None,
-                design: None,
-                acceptance_criteria: None,
-                notes: None,
-                created_by: Some(actor.clone()),
-                closed_at: None,
-                close_reason: None,
-                closed_by_session: None,
-                source_system: params.source_system,
-                source_repo: params.source_repo,
-                deleted_at: None,
-                deleted_by: None,
-                delete_reason: None,
-                original_type: None,
-                compaction_level: None,
-                compacted_at: None,
-                compacted_at_commit: None,
-                original_size: None,
-                sender: None,
-                pinned: false,
-                is_template: false,
-                labels: Vec::new(),
-                dependencies: Vec::new(),
-                comments: Vec::new(),
-            };
-            let labels = params.labels;
-
-            s.create_issue(&issue, &actor)?;
-
-            if !labels.is_empty() {
-                s.set_labels(&id, &labels, &actor)?;
-            }
-
-            if let Some(parent) = params.parent.as_deref() {
-                s.add_dependency(&id, parent, "parent-child", &actor)?;
-            }
-            for dep in &params.depends_on {
-                s.add_dependency(&id, dep, "blocks", &actor)?;
-            }
-
-            Ok(id)
+            create_issue_with_retry(s, params, &actor, |_, _| Ok(()))
         })
         .await
     }
@@ -462,9 +520,10 @@ mod tests {
     use std::collections::HashSet;
 
     use beads_rust::model::{Issue as BrIssue, IssueType, Priority, Status};
-    use chrono::Utc;
+    use chrono::{TimeZone, Timelike, Utc};
     use tempfile::TempDir;
 
+    use super::{create_issue_with_retry, generate_checked_issue_id};
     use crate::adapter::IssueTracker;
     use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
     use crate::types::{IssueCreate, IssueFilter, IssueUpdate, PmEvent};
@@ -582,6 +641,92 @@ mod tests {
             fetched.labels,
             vec!["lbl-a".to_string(), "lbl-b".to_string()]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_issue_uses_checked_id_lookup() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        let now = Utc
+            .with_ymd_and_hms(2026, 5, 18, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(123)
+            .unwrap();
+        let params = IssueCreate {
+            title: "colliding task".into(),
+            description: Some("same body".into()),
+            ..Default::default()
+        };
+        let colliding_id = beads_rust::util::id::IdGenerator::with_defaults().generate_candidate(
+            &params.title,
+            params.description.as_deref(),
+            Some("spur"),
+            now,
+            0,
+            3,
+        );
+
+        adapter
+            .write({
+                let params = params.clone();
+                move |s| {
+                    let seed_issue = minimal_issue(&colliding_id, "seeded collision");
+                    s.create_issue(&seed_issue, "test")?;
+
+                    let generated = generate_checked_issue_id(s, &params, now);
+
+                    assert_ne!(generated, colliding_id);
+                    assert!(!s.id_exists(&generated)?);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_issue_retries_on_id_collision_from_storage() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .write(|s| {
+                let mut collided = false;
+                create_issue_with_retry(
+                    s,
+                    IssueCreate {
+                        title: "race window".into(),
+                        description: Some("body".into()),
+                        ..Default::default()
+                    },
+                    "test",
+                    |s, issue| {
+                        if !collided {
+                            collided = true;
+                            let seed_issue = minimal_issue(&issue.id, "forced collision");
+                            s.create_issue(&seed_issue, "test")?;
+                        }
+                        Ok(())
+                    },
+                )
+            })
+            .await
+            .unwrap();
+
+        let issues = adapter
+            .list_issues(IssueFilter {
+                include_closed: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ids: HashSet<_> = issues.into_iter().map(|issue| issue.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&id));
     }
 
     #[tokio::test(flavor = "multi_thread")]
