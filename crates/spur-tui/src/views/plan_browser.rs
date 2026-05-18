@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -23,19 +24,133 @@ fn token(theme: &Theme, name: &str) -> Color {
 }
 
 const STATUS_HINT: &str =
-    " [j/k]navigate [p]plan peek/open [o]work item peek/open [c]claim [s]start/resume [r]refresh [Esc]summary/back";
-const STATUS_HINT_COMPACT: &str = " [j/k]nav [p]plan [o]item [c]claim [s]start [Esc]back";
+    " [j/k]navigate [p]plan peek/open [o]work item peek/open [c]claim [s]start/resume [S]sort [f]filter [r]refresh [Esc]summary/back";
+const STATUS_HINT_COMPACT: &str =
+    " [j/k]nav [p]plan [o]item [c]claim [s]start [S]sort [f]filter [Esc]back";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortMode {
+    #[default]
+    UpdatedDesc,
+    CreatedDesc,
+    Title,
+    Lifecycle,
+    Owner,
+}
+
+impl SortMode {
+    fn next(self) -> Self {
+        match self {
+            SortMode::UpdatedDesc => SortMode::CreatedDesc,
+            SortMode::CreatedDesc => SortMode::Title,
+            SortMode::Title => SortMode::Lifecycle,
+            SortMode::Lifecycle => SortMode::Owner,
+            SortMode::Owner => SortMode::UpdatedDesc,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::UpdatedDesc => "updated\u{2193}",
+            SortMode::CreatedDesc => "created\u{2193}",
+            SortMode::Title => "title",
+            SortMode::Lifecycle => "lifecycle",
+            SortMode::Owner => "owner",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterMode {
+    #[default]
+    All,
+    Mine,
+    Unowned,
+    Active,
+    Terminal,
+}
+
+impl FilterMode {
+    fn next(self) -> Self {
+        match self {
+            FilterMode::All => FilterMode::Mine,
+            FilterMode::Mine => FilterMode::Unowned,
+            FilterMode::Unowned => FilterMode::Active,
+            FilterMode::Active => FilterMode::Terminal,
+            FilterMode::Terminal => FilterMode::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            FilterMode::All => "all",
+            FilterMode::Mine => "mine",
+            FilterMode::Unowned => "unowned",
+            FilterMode::Active => "active",
+            FilterMode::Terminal => "terminal",
+        }
+    }
+
+    fn matches(self, plan: &PlanSummaryEvent) -> bool {
+        match self {
+            FilterMode::All => true,
+            FilterMode::Mine => matches!(plan.owner_state, PlanOwnerStateEvent::Mine),
+            FilterMode::Unowned => matches!(plan.owner_state, PlanOwnerStateEvent::Unowned),
+            FilterMode::Active => plan_is_active(plan),
+            FilterMode::Terminal => !plan_is_active(plan),
+        }
+    }
+}
+
+pub fn format_relative_time(ts: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - ts).num_seconds();
+    if secs < 0 {
+        return "just now".into();
+    }
+    if secs < 60 {
+        return "just now".into();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return format!("{days}d ago");
+    }
+    if days < 365 {
+        let months = days / 30;
+        return format!("{months}mo ago");
+    }
+    let years = days / 365;
+    format!("{years}y ago")
+}
+
+fn format_relative_opt(ts: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    ts.map(|t| format_relative_time(t, now))
+        .unwrap_or_else(|| "--".into())
+}
 
 #[derive(Debug, Clone)]
 pub struct PlanBrowserView {
     current_session: SessionId,
     plans: Vec<PlanSummaryEvent>,
     warnings: Vec<PlanLoadWarningEvent>,
+    /// Index into `view_index`, not `plans`. Selection is over the
+    /// filtered+sorted view; the underlying `plans` order is preserved
+    /// so `focus_plan_id` and `pending_focus_plan_id` remain meaningful.
     selected: usize,
     detail_peek: DetailPeek,
     confirm: Option<PlanConfirm>,
     hint: Option<String>,
     pending_focus_plan_id: Option<String>,
+    sort_mode: SortMode,
+    filter_mode: FilterMode,
+    view_index: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +178,48 @@ impl PlanBrowserView {
             confirm: None,
             hint: None,
             pending_focus_plan_id: None,
+            sort_mode: SortMode::default(),
+            filter_mode: FilterMode::default(),
+            view_index: Vec::new(),
         }
+    }
+
+    fn recompute_view(&mut self) {
+        let mut indices: Vec<usize> = self
+            .plans
+            .iter()
+            .enumerate()
+            .filter(|(_, plan)| self.filter_mode.matches(plan))
+            .map(|(i, _)| i)
+            .collect();
+        let plans = &self.plans;
+        let mode = self.sort_mode;
+        indices.sort_by(|&a, &b| {
+            let pa = &plans[a];
+            let pb = &plans[b];
+            let primary = match mode {
+                SortMode::UpdatedDesc => pb.updated_at.cmp(&pa.updated_at),
+                SortMode::CreatedDesc => pb.created_at.cmp(&pa.created_at),
+                SortMode::Title => pa.title.cmp(&pb.title),
+                SortMode::Lifecycle => {
+                    Self::lifecycle_label(pa.lifecycle).cmp(Self::lifecycle_label(pb.lifecycle))
+                }
+                SortMode::Owner => {
+                    Self::owner_label(&pa.owner_state).cmp(&Self::owner_label(&pb.owner_state))
+                }
+            };
+            primary.then_with(|| pa.plan_id.cmp(&pb.plan_id))
+        });
+        self.view_index = indices;
+        if self.view_index.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.view_index.len() {
+            self.selected = self.view_index.len() - 1;
+        }
+    }
+
+    fn current_plan_index(&self) -> Option<usize> {
+        self.view_index.get(self.selected).copied()
     }
 
     pub fn plans(&self) -> &[PlanSummaryEvent] {
@@ -77,7 +233,12 @@ impl PlanBrowserView {
     }
 
     pub fn focus_plan_id(&mut self, plan_id: String) {
-        if let Some(index) = self.plans.iter().position(|plan| plan.plan_id == plan_id) {
+        let view_pos = self
+            .plans
+            .iter()
+            .position(|plan| plan.plan_id == plan_id)
+            .and_then(|plan_idx| self.view_index.iter().position(|&i| i == plan_idx));
+        if let Some(index) = view_pos {
             if self.selected != index {
                 self.detail_peek = DetailPeek::Summary;
             }
@@ -94,7 +255,7 @@ impl PlanBrowserView {
     }
 
     fn selected_plan(&self) -> Option<&PlanSummaryEvent> {
-        self.plans.get(self.selected)
+        self.current_plan_index().and_then(|i| self.plans.get(i))
     }
 
     fn current_active_plan<'a>(
@@ -124,12 +285,12 @@ impl PlanBrowserView {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.plans.is_empty() {
+        if self.view_index.is_empty() {
             self.selected = 0;
             self.detail_peek = DetailPeek::Summary;
             return;
         }
-        let len = self.plans.len() as isize;
+        let len = self.view_index.len() as isize;
         let next = (self.selected as isize + delta).clamp(0, len - 1) as usize;
         if next != self.selected {
             self.detail_peek = DetailPeek::Summary;
@@ -145,13 +306,39 @@ impl PlanBrowserView {
     }
 
     fn select_last(&mut self) {
-        if !self.plans.is_empty() {
-            let next = self.plans.len() - 1;
+        if !self.view_index.is_empty() {
+            let next = self.view_index.len() - 1;
             if next != self.selected {
                 self.detail_peek = DetailPeek::Summary;
             }
             self.selected = next;
         }
+    }
+
+    fn cycle_sort(&mut self) {
+        self.sort_mode = self.sort_mode.next();
+        let anchor = self.current_plan_index();
+        self.recompute_view();
+        if let Some(plan_idx) = anchor {
+            if let Some(new_pos) = self.view_index.iter().position(|&i| i == plan_idx) {
+                self.selected = new_pos;
+            }
+        }
+        self.detail_peek = DetailPeek::Summary;
+        self.hint = None;
+    }
+
+    fn cycle_filter(&mut self) {
+        self.filter_mode = self.filter_mode.next();
+        let anchor = self.current_plan_index();
+        self.recompute_view();
+        if let Some(plan_idx) = anchor {
+            if let Some(new_pos) = self.view_index.iter().position(|&i| i == plan_idx) {
+                self.selected = new_pos;
+            }
+        }
+        self.detail_peek = DetailPeek::Summary;
+        self.hint = None;
     }
 
     fn open_selected(&self, ctx: &ViewContext<'_>) -> Option<Action> {
@@ -410,6 +597,11 @@ impl PlanBrowserView {
             Line::from(
                 "p Implementation plan/open   o Work item/open   c Claim   s Start/Resume   Enter Open visible   r Refresh",
             ),
+            Line::from(format!(
+                "Sort: {}   Filter: {}   (S sort  f filter)",
+                self.sort_mode.label(),
+                self.filter_mode.label()
+            )),
         ];
         let block = Block::default()
             .title(" Plans ")
@@ -418,7 +610,7 @@ impl PlanBrowserView {
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 
-    fn render_plan_list(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_plan_list(&self, frame: &mut Frame, area: Rect, theme: &Theme, now: DateTime<Utc>) {
         let block = Block::default()
             .title(" Plans ")
             .borders(Borders::ALL)
@@ -426,12 +618,19 @@ impl PlanBrowserView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        if self.plans.is_empty() {
-            let msg =
-                Paragraph::new("No plans found.\nPress b to open Backlog and execute an epic.")
-                    .style(Style::default().fg(token(theme, "plan_browser.empty.fg")))
-                    .alignment(Alignment::Center);
-            frame.render_widget(msg, inner);
+        if self.view_index.is_empty() {
+            let msg = if self.plans.is_empty() {
+                "No plans found.\nPress b to open Backlog and execute an epic.".to_string()
+            } else {
+                format!(
+                    "No plans match filter '{}'. Press f to cycle.",
+                    self.filter_mode.label()
+                )
+            };
+            let para = Paragraph::new(msg)
+                .style(Style::default().fg(token(theme, "plan_browser.empty.fg")))
+                .alignment(Alignment::Center);
+            frame.render_widget(para, inner);
             return;
         }
 
@@ -442,11 +641,14 @@ impl PlanBrowserView {
             Cell::from("Owner").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("State").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Progress").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Updated").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Created").style(Style::default().add_modifier(Modifier::BOLD)),
         ]);
 
         let rows: Vec<Row> = self
-            .plans
+            .view_index
             .iter()
+            .map(|&i| &self.plans[i])
             .map(|plan| {
                 Row::new([
                     Cell::from(truncate(&plan.plan_id, 16)),
@@ -455,6 +657,8 @@ impl PlanBrowserView {
                     Cell::from(truncate(&Self::owner_label(&plan.owner_state), 12)),
                     Cell::from(Self::lifecycle_label(plan.lifecycle)),
                     Cell::from(Self::progress_text(plan.counts.as_ref())),
+                    Cell::from(format_relative_opt(plan.updated_at, now)),
+                    Cell::from(format_relative_opt(plan.created_at, now)),
                 ])
             })
             .collect();
@@ -465,6 +669,8 @@ impl PlanBrowserView {
             Constraint::Min(12),
             Constraint::Length(12),
             Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(10),
             Constraint::Length(10),
         ];
 
@@ -480,7 +686,7 @@ impl PlanBrowserView {
         frame.render_stateful_widget(table, inner, &mut state);
     }
 
-    fn render_detail(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_detail(&self, frame: &mut Frame, area: Rect, theme: &Theme, now: DateTime<Utc>) {
         let title = match self.detail_peek {
             DetailPeek::Summary => " Plan / Work Item Summary ",
             DetailPeek::Plan => " Implementation Plan ",
@@ -495,8 +701,8 @@ impl PlanBrowserView {
 
         let lines = if let Some(plan) = self.selected_plan() {
             let mut lines = match self.detail_peek {
-                DetailPeek::Summary => self.render_summary_lines(plan, theme),
-                DetailPeek::Plan => self.render_plan_lines(plan, theme),
+                DetailPeek::Summary => self.render_summary_lines(plan, theme, now),
+                DetailPeek::Plan => self.render_plan_lines(plan, theme, now),
                 DetailPeek::WorkItem => self.render_work_item_lines(plan, theme),
             };
             let notice = if let Some(hint) = self.hint.as_ref() {
@@ -548,7 +754,12 @@ impl PlanBrowserView {
         ))
     }
 
-    fn render_summary_lines(&self, plan: &PlanSummaryEvent, theme: &Theme) -> Vec<Line<'static>> {
+    fn render_summary_lines(
+        &self,
+        plan: &PlanSummaryEvent,
+        theme: &Theme,
+        now: DateTime<Utc>,
+    ) -> Vec<Line<'static>> {
         vec![
             Self::field_line("Plan", plan.plan_id.clone(), theme),
             Self::field_line("Work item", plan.epic_id.clone(), theme),
@@ -558,7 +769,8 @@ impl PlanBrowserView {
             Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle), theme),
             Self::field_line("Progress", Self::progress_text(plan.counts.as_ref()), theme),
             Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref()), theme),
-            Self::field_line("Updated", Self::updated_text(plan), theme),
+            Self::field_line("Updated", Self::updated_text(plan, now), theme),
+            Self::field_line("Created", Self::created_text(plan, now), theme),
             Self::field_line("Next", Self::next_action_text(plan), theme),
             Self::action_line(
                 "p: implementation plan   o: work item   c: claim   s: start/resume",
@@ -567,7 +779,12 @@ impl PlanBrowserView {
         ]
     }
 
-    fn render_plan_lines(&self, plan: &PlanSummaryEvent, theme: &Theme) -> Vec<Line<'static>> {
+    fn render_plan_lines(
+        &self,
+        plan: &PlanSummaryEvent,
+        theme: &Theme,
+        now: DateTime<Utc>,
+    ) -> Vec<Line<'static>> {
         vec![
             Self::field_line("Plan", plan.plan_id.clone(), theme),
             Self::field_line("Work item", plan.epic_id.clone(), theme),
@@ -576,7 +793,8 @@ impl PlanBrowserView {
             Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle), theme),
             Self::field_line("Progress", Self::progress_text(plan.counts.as_ref()), theme),
             Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref()), theme),
-            Self::field_line("Updated", Self::updated_text(plan), theme),
+            Self::field_line("Updated", Self::updated_text(plan, now), theme),
+            Self::field_line("Created", Self::created_text(plan, now), theme),
             Self::field_line("Description", Self::body_preview_text(plan), theme),
             Self::action_line("Press p again to open the implementation plan board", theme),
         ]
@@ -641,11 +859,12 @@ impl PlanBrowserView {
         )
     }
 
-    fn updated_text(plan: &PlanSummaryEvent) -> String {
-        plan.updated_at
-            .as_ref()
-            .map(|updated_at| updated_at.to_rfc3339())
-            .unwrap_or_else(|| "--".into())
+    fn updated_text(plan: &PlanSummaryEvent, now: DateTime<Utc>) -> String {
+        format_relative_opt(plan.updated_at, now)
+    }
+
+    fn created_text(plan: &PlanSummaryEvent, now: DateTime<Utc>) -> String {
+        format_relative_opt(plan.created_at, now)
     }
 
     fn render_status(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -783,6 +1002,17 @@ impl View for PlanBrowserView {
                 None
             }
             KeyCode::Char('r') if key.modifiers.is_empty() => Some(Action::RefreshPlans),
+            KeyCode::Char('S')
+                if key.modifiers.is_empty()
+                    || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+            {
+                self.cycle_sort();
+                None
+            }
+            KeyCode::Char('f') if key.modifiers.is_empty() => {
+                self.cycle_filter();
+                None
+            }
             KeyCode::Enter if key.modifiers.is_empty() => self.open_selected(ctx),
             KeyCode::Char('p') if key.modifiers.is_empty() => {
                 self.view_selected_implementation_plan(ctx)
@@ -811,26 +1041,30 @@ impl View for PlanBrowserView {
                 let selected_plan_id = self.selected_plan().map(|plan| plan.plan_id.clone());
                 self.plans = plans.clone();
                 self.warnings = warnings.clone();
-                self.selected = self
+                self.recompute_view();
+                let resolved_view_pos = self
                     .pending_focus_plan_id
                     .as_ref()
                     .and_then(|id| self.plans.iter().position(|plan| plan.plan_id == *id))
+                    .and_then(|plan_idx| self.view_index.iter().position(|&i| i == plan_idx))
                     .or_else(|| {
                         selected_plan_id
-                            .and_then(|id| self.plans.iter().position(|plan| plan.plan_id == id))
-                    })
-                    .unwrap_or(0);
-                if self.pending_focus_plan_id.as_ref().is_some_and(|id| {
-                    self.plans
-                        .get(self.selected)
-                        .is_some_and(|plan| plan.plan_id == *id)
-                }) {
-                    self.pending_focus_plan_id = None;
+                            .as_ref()
+                            .and_then(|id| self.plans.iter().position(|plan| plan.plan_id == *id))
+                            .and_then(|plan_idx| {
+                                self.view_index.iter().position(|&i| i == plan_idx)
+                            })
+                    });
+                self.selected = resolved_view_pos.unwrap_or(0);
+                if let Some(pending) = self.pending_focus_plan_id.clone() {
+                    if self
+                        .selected_plan()
+                        .is_some_and(|plan| plan.plan_id == pending)
+                    {
+                        self.pending_focus_plan_id = None;
+                    }
                 }
-                if self.selected >= self.plans.len() {
-                    self.selected = self.plans.len().saturating_sub(1);
-                }
-                if self.plans.is_empty() {
+                if self.view_index.is_empty() {
                     self.detail_peek = DetailPeek::Summary;
                 }
                 self.hint = None;
@@ -864,17 +1098,18 @@ impl View for PlanBrowserView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &ViewContext) {
+        let now = Utc::now();
         let chunks = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Min(6),
-            Constraint::Length(10),
+            Constraint::Length(11),
             Constraint::Length(1),
         ])
         .split(area);
 
         self.render_header(frame, chunks[0], ctx);
-        self.render_plan_list(frame, chunks[1], ctx.theme);
-        self.render_detail(frame, chunks[2], ctx.theme);
+        self.render_plan_list(frame, chunks[1], ctx.theme, now);
+        self.render_detail(frame, chunks[2], ctx.theme, now);
         self.render_status(frame, chunks[3], ctx.theme);
         self.render_confirm(frame, area, ctx.theme);
     }
@@ -947,6 +1182,7 @@ fn plan_is_active(plan: &PlanSummaryEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use spur_acp::{
         PlanOwnerStateEvent, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask,
@@ -987,6 +1223,7 @@ mod tests {
                 cancelled: 0,
             }),
             updated_at: None,
+            created_at: None,
         }
     }
 
@@ -1311,5 +1548,142 @@ mod tests {
             action,
             Some(Action::ResumePlan { plan_id }) if plan_id == "plan-1"
         ));
+    }
+
+    #[test]
+    fn format_relative_time_buckets_match_spec() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let cases = [
+            (now - chrono::Duration::seconds(5), "just now"),
+            (now - chrono::Duration::seconds(59), "just now"),
+            (now - chrono::Duration::seconds(60), "1m ago"),
+            (now - chrono::Duration::minutes(59), "59m ago"),
+            (now - chrono::Duration::minutes(60), "1h ago"),
+            (now - chrono::Duration::hours(23), "23h ago"),
+            (now - chrono::Duration::hours(24), "1d ago"),
+            (now - chrono::Duration::days(29), "29d ago"),
+            (now - chrono::Duration::days(30), "1mo ago"),
+            (now - chrono::Duration::days(364), "12mo ago"),
+            (now - chrono::Duration::days(365), "1y ago"),
+            (now - chrono::Duration::days(400), "1y ago"),
+            (now + chrono::Duration::seconds(10), "just now"),
+        ];
+        for (ts, expected) in cases {
+            assert_eq!(format_relative_time(ts, now), expected, "ts={ts}");
+        }
+    }
+
+    fn summary_with_times(
+        plan_id: &str,
+        updated: Option<chrono::DateTime<chrono::Utc>>,
+        created: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> PlanSummaryEvent {
+        PlanSummaryEvent {
+            updated_at: updated,
+            created_at: created,
+            ..summary(plan_id)
+        }
+    }
+
+    fn loaded(plans: Vec<PlanSummaryEvent>) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::PlansLoaded {
+            plans,
+            warnings: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn capital_s_cycles_sort_mode_and_reorders_view() {
+        let session_id = SessionId("brain-1".into());
+        let projection = PlanProjectionStore::new();
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanBrowserView::new(session_id);
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        view.handle_spur_event(
+            &loaded(vec![
+                summary_with_times("plan-old", Some(t0), Some(t0)),
+                summary_with_times(
+                    "plan-new",
+                    Some(t0 + chrono::Duration::hours(1)),
+                    Some(t0 + chrono::Duration::hours(1)),
+                ),
+            ]),
+            &ctx,
+        );
+
+        // Default UpdatedDesc: newest first.
+        assert_eq!(view.selected_plan().unwrap().plan_id, "plan-new");
+
+        // Cycle: UpdatedDesc -> CreatedDesc (still newest first).
+        view.handle_key(key(KeyCode::Char('S')), &ctx);
+        assert_eq!(view.sort_mode, SortMode::CreatedDesc);
+        assert_eq!(view.selected_plan().unwrap().plan_id, "plan-new");
+
+        // Cycle: CreatedDesc -> Title (alphabetical).
+        view.handle_key(key(KeyCode::Char('S')), &ctx);
+        assert_eq!(view.sort_mode, SortMode::Title);
+
+        // Five cycles -> back to UpdatedDesc.
+        for _ in 0..3 {
+            view.handle_key(key(KeyCode::Char('S')), &ctx);
+        }
+        assert_eq!(view.sort_mode, SortMode::UpdatedDesc);
+    }
+
+    #[test]
+    fn f_cycles_filter_and_hides_non_matching_plans() {
+        let session_id = SessionId("brain-1".into());
+        let projection = PlanProjectionStore::new();
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanBrowserView::new(session_id);
+        view.handle_spur_event(
+            &loaded(vec![
+                summary_with_owner("plan-mine", PlanOwnerStateEvent::Mine),
+                summary_with_owner("plan-unowned", PlanOwnerStateEvent::Unowned),
+            ]),
+            &ctx,
+        );
+
+        assert_eq!(view.view_index.len(), 2);
+
+        view.handle_key(key(KeyCode::Char('f')), &ctx);
+        assert_eq!(view.filter_mode, FilterMode::Mine);
+        assert_eq!(view.view_index.len(), 1);
+        assert_eq!(view.selected_plan().unwrap().plan_id, "plan-mine");
+
+        view.handle_key(key(KeyCode::Char('f')), &ctx);
+        assert_eq!(view.filter_mode, FilterMode::Unowned);
+        assert_eq!(view.view_index.len(), 1);
+        assert_eq!(view.selected_plan().unwrap().plan_id, "plan-unowned");
+
+        // Cycle through Active, Terminal back to All.
+        for _ in 0..3 {
+            view.handle_key(key(KeyCode::Char('f')), &ctx);
+        }
+        assert_eq!(view.filter_mode, FilterMode::All);
+        assert_eq!(view.view_index.len(), 2);
+    }
+
+    #[test]
+    fn confirm_popup_swallows_sort_and_filter_keys() {
+        let session_id = SessionId("brain-1".into());
+        let projection = PlanProjectionStore::new();
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanBrowserView::new(session_id);
+        view.handle_spur_event(&loaded(vec![summary("plan-1")]), &ctx);
+        view.handle_key(key(KeyCode::Char('c')), &ctx);
+        assert!(view.confirm.is_some());
+
+        // While confirm popup is open, S/f must NOT cycle sort/filter.
+        view.handle_key(key(KeyCode::Char('S')), &ctx);
+        assert_eq!(view.sort_mode, SortMode::UpdatedDesc);
+        view.handle_key(key(KeyCode::Char('f')), &ctx);
+        assert_eq!(view.filter_mode, FilterMode::All);
     }
 }
