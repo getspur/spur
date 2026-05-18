@@ -15,8 +15,54 @@ use crate::beads_crate::backoff::BackoffPolicy;
 use crate::beads_crate::init;
 use crate::beads_crate::metrics::ContentionMetrics;
 use crate::beads_crate::snapshot::{Conflict, Snapshot};
-use crate::beads_crate::{wal_checkpoint, write_lock};
+#[cfg(not(test))]
+use crate::beads_crate::wal_checkpoint;
+use crate::beads_crate::write_lock;
 use crate::poll_cursor::PollCursor;
+
+#[cfg(test)]
+mod wal_checkpoint {
+    use std::path::Path;
+
+    pub(crate) fn checkpoint_wal_truncate_best_effort(db_path: &Path) {
+        super::test_checkpoint_hook::before_checkpoint(db_path);
+        crate::beads_crate::wal_checkpoint::checkpoint_wal_truncate_best_effort(db_path);
+    }
+}
+
+#[cfg(test)]
+mod test_checkpoint_hook {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    type Hook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+
+    pub(super) struct CheckpointHookGuard;
+
+    pub(super) fn install(hook: Hook) -> CheckpointHookGuard {
+        *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hook);
+        CheckpointHookGuard
+    }
+
+    pub(super) fn before_checkpoint(db_path: &Path) {
+        let hook = HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap()
+            .clone();
+        if let Some(hook) = hook {
+            hook(db_path);
+        }
+    }
+
+    impl Drop for CheckpointHookGuard {
+        fn drop(&mut self) {
+            *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = None;
+        }
+    }
+}
 
 /// Coarse data_version proxy. beads_rust 0.2.1 does not expose
 /// `PRAGMA data_version`; until it does, we use `count_issues()`. This
@@ -242,6 +288,7 @@ impl BeadsCrateAdapter {
             )?;
             let outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir);
             drop(storage);
+            drop(_flock);
             wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
             let outcome = outcome?;
             if outcome.flushed {
@@ -394,16 +441,17 @@ impl BeadsCrateAdapter {
             let drop_started = Instant::now();
             drop(storage);
             let drop_ms = drop_started.elapsed().as_millis() as u64;
+            let flock_drop_started = Instant::now();
+            drop(_flock);
+            let flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64;
             if should_checkpoint {
                 wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
             }
-            let flock_drop_started = Instant::now();
-            drop(_flock);
             tracing::info!(
                 target: "issue_probe",
                 site = "beads_validate_and_commit_drop",
                 drop_ms = drop_ms,
-                flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64
+                flock_drop_ms = flock_drop_ms
             );
             result
         })
@@ -462,14 +510,15 @@ impl BeadsCrateAdapter {
             let drop_started = Instant::now();
             drop(storage);
             let drop_ms = drop_started.elapsed().as_millis() as u64;
-            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
             let flock_drop_started = Instant::now();
             drop(_flock);
+            let flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64;
+            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
             tracing::info!(
                 target: "issue_probe",
                 site = "beads_write_drop",
                 drop_ms = drop_ms,
-                flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64
+                flock_drop_ms = flock_drop_ms
             );
             result
         })
@@ -480,6 +529,9 @@ impl BeadsCrateAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    use std::sync::{mpsc, Condvar, Mutex};
     use tempfile::TempDir;
 
     use crate::adapter::IssueTracker;
@@ -593,6 +645,64 @@ mod tests {
                 .write_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flock_released_before_checkpoint() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        let db_path = dir.path().join("beads.db");
+        let lock_path = dir.path().join(".write.lock");
+        let (checkpoint_started_tx, checkpoint_started_rx) = mpsc::channel();
+        let release_checkpoint = Arc::new((Mutex::new(false), Condvar::new()));
+        let hook_db_path = db_path.clone();
+        let release_checkpoint_for_hook = Arc::clone(&release_checkpoint);
+
+        let _hook = test_checkpoint_hook::install(Arc::new(move |checkpoint_db_path| {
+            if checkpoint_db_path == hook_db_path {
+                checkpoint_started_tx
+                    .send(())
+                    .expect("test should observe checkpoint start");
+                let (released, cvar) = &*release_checkpoint_for_hook;
+                let released = released.lock().unwrap();
+                let (_released, wait_result) = cvar
+                    .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+                    .unwrap();
+                assert!(!wait_result.timed_out(), "test should release checkpoint");
+            }
+        }));
+
+        let writer =
+            tokio::spawn(async move { adapter.write(|_s| Ok::<_, anyhow::Error>(())).await });
+
+        tokio::task::spawn_blocking(move || {
+            checkpoint_started_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("checkpoint should start")
+        })
+        .await
+        .unwrap();
+
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open write lock");
+        let lock_result = contender.try_lock_exclusive();
+
+        let (released, cvar) = &*release_checkpoint;
+        *released.lock().unwrap() = true;
+        cvar.notify_one();
+        writer.await.unwrap().unwrap();
+
+        assert!(
+            lock_result.is_ok(),
+            ".write.lock must be acquirable while checkpoint is still running"
         );
     }
 
