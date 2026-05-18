@@ -4966,6 +4966,51 @@ pub mod test_support {
         .await
     }
 
+    /// Test-only access to the worker-completion persistence path with the
+    /// same `task_id` argument the reconciler completion collector passes.
+    /// The cec4a975 concurrent-load simulator needs this to exercise the
+    /// production collector body without dispatching real workers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_worker_completion_and_notify_with_task_id(
+        pm: &dyn PmLike,
+        issue_id: &str,
+        feature_gate: &spur_license::FeatureGate,
+        plan_id: &str,
+        delegation_id: &str,
+        fast_forward: &Option<Arc<tokio::sync::Notify>>,
+        result: &spur_acp::DelegationResult,
+        brain_session_id: &spur_acp::BrainSessionId,
+        attempt: u32,
+        materializer: &crate::outcome_materializer::OutcomeMaterializer,
+        dispatched_base_oid: Option<String>,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<Option<super::DeferredCompletionPush>> {
+        super::persist_worker_completion_and_notify(
+            pm,
+            issue_id,
+            feature_gate,
+            plan_id,
+            delegation_id,
+            fast_forward,
+            result,
+            brain_session_id,
+            attempt,
+            materializer,
+            dispatched_base_oid,
+            task_id,
+        )
+        .await
+    }
+
+    pub async fn prune_projected_terminal_task_outcomes_for_test(
+        outcomes: &Arc<Mutex<crate::plan::outcomes::OutcomeStore>>,
+        plan_id: &str,
+        tasks: &[super::PlanTaskEntry],
+    ) {
+        crate::plan::reconciler::prune_projected_terminal_task_outcomes(outcomes, plan_id, tasks)
+            .await;
+    }
+
     /// A `PmLike` implementation whose `update_issue` fires a signal and then
     /// sleeps for a fixed duration.  The signal lets the test observe that
     /// `update_issue` has been entered (and therefore the plan lock must already
