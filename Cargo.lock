@@ -6922,7 +6922,7 @@ dependencies = [
 
 [[package]]
 name = "spur-acp"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -6954,7 +6954,7 @@ dependencies = [
 
 [[package]]
 name = "spur-blob-store"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6971,7 +6971,7 @@ dependencies = [
 
 [[package]]
 name = "spur-bot"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -6993,7 +6993,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cli"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -7028,7 +7028,7 @@ dependencies = [
 
 [[package]]
 name = "spur-context"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7047,7 +7047,7 @@ dependencies = [
 
 [[package]]
 name = "spur-core"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7086,7 +7086,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cost"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7103,7 +7103,7 @@ dependencies = [
 
 [[package]]
 name = "spur-graph"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "blake3",
@@ -7125,7 +7125,7 @@ dependencies = [
 
 [[package]]
 name = "spur-interactive"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7138,7 +7138,7 @@ dependencies = [
 
 [[package]]
 name = "spur-license"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -7164,7 +7164,7 @@ dependencies = [
 
 [[package]]
 name = "spur-license-admin"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "base64",
@@ -7183,7 +7183,7 @@ dependencies = [
 
 [[package]]
 name = "spur-mcp"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7222,7 +7222,7 @@ dependencies = [
 
 [[package]]
 name = "spur-pm"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7251,7 +7251,7 @@ dependencies = [
 
 [[package]]
 name = "spur-telemetry"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "chrono",
  "dirs",
@@ -7272,7 +7272,7 @@ dependencies = [
 
 [[package]]
 name = "spur-tui"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7318,7 +7318,7 @@ dependencies = [
 
 [[package]]
 name = "spur-worktree"
-version = "1.1.15"
+version = "1.1.16"
 dependencies = [
  "anyhow",
  "async-trait",
