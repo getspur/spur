@@ -482,8 +482,7 @@ enum BotCommands {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     // rustls 0.23 requires an explicit default CryptoProvider before any TLS
     // handshake. `octocrab` (used by `spur pm ingest github`) pulls in rustls
     // and would otherwise panic on first network call. `install_default()` is
@@ -491,13 +490,27 @@ async fn main() -> ExitCode {
     // re-install error from any future caller that wired a provider earlier.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(2048)
+        .build()
+    {
+        Ok(runtime) => runtime,
         Err(err) => {
-            render_top_level_error(&err);
-            ExitCode::FAILURE
+            eprintln!("Error: failed to initialize tokio runtime: {err}");
+            return ExitCode::FAILURE;
         }
-    }
+    };
+
+    runtime.block_on(async {
+        match run().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                render_top_level_error(&err);
+                ExitCode::FAILURE
+            }
+        }
+    })
 }
 
 /// Render the top-level error. If stderr is a TTY (or
