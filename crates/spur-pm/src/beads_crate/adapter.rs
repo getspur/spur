@@ -300,6 +300,10 @@ impl BeadsCrateAdapter {
                 total_ms = dispatch_started.elapsed().as_millis() as u64,
                 "BeadsCrateAdapter::read timing",
             );
+            let drop_started = Instant::now();
+            drop(storage);
+            let drop_ms = drop_started.elapsed().as_millis() as u64;
+            tracing::info!(target: "issue_probe", site = "beads_read_drop", drop_ms = drop_ms);
             result
         })
         .await?
@@ -325,12 +329,17 @@ impl BeadsCrateAdapter {
                 &db_path,
                 Some(lock_timeout_ms),
             )?;
-            let value = f(&storage)?;
-            let data_version = read_data_version(&storage)?;
-            Ok(Snapshot {
-                value,
-                data_version,
-            })
+            let result = f(&storage).and_then(|value| {
+                Ok(Snapshot {
+                    value,
+                    data_version: read_data_version(&storage)?,
+                })
+            });
+            let drop_started = Instant::now();
+            drop(storage);
+            let drop_ms = drop_started.elapsed().as_millis() as u64;
+            tracing::info!(target: "issue_probe", site = "beads_read_snapshot_drop", drop_ms = drop_ms);
+            result
         })
         .await?
     }
@@ -370,17 +379,32 @@ impl BeadsCrateAdapter {
                 Some(lock_timeout_ms),
             )?;
             let current = read_data_version(&storage)?;
-            if current != snapshot.data_version {
+            let should_checkpoint = current == snapshot.data_version;
+            let result = if !should_checkpoint {
                 metrics.incr_conflict();
-                anyhow::bail!(Conflict::data_version(snapshot.data_version, current));
-            }
-            metrics.incr_write();
-            let result = write(&mut storage, snapshot.value);
-            if result.is_err() {
-                metrics.incr_write_error();
-            }
+                Err(Conflict::data_version(snapshot.data_version, current).into())
+            } else {
+                metrics.incr_write();
+                let result = write(&mut storage, snapshot.value);
+                if result.is_err() {
+                    metrics.incr_write_error();
+                }
+                result
+            };
+            let drop_started = Instant::now();
             drop(storage);
-            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
+            let drop_ms = drop_started.elapsed().as_millis() as u64;
+            if should_checkpoint {
+                wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
+            }
+            let flock_drop_started = Instant::now();
+            drop(_flock);
+            tracing::info!(
+                target: "issue_probe",
+                site = "beads_validate_and_commit_drop",
+                drop_ms = drop_ms,
+                flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64
+            );
             result
         })
         .await?
@@ -435,8 +459,18 @@ impl BeadsCrateAdapter {
             if result.is_err() {
                 metrics.incr_write_error();
             }
+            let drop_started = Instant::now();
             drop(storage);
+            let drop_ms = drop_started.elapsed().as_millis() as u64;
             wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
+            let flock_drop_started = Instant::now();
+            drop(_flock);
+            tracing::info!(
+                target: "issue_probe",
+                site = "beads_write_drop",
+                drop_ms = drop_ms,
+                flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64
+            );
             result
         })
         .await?
