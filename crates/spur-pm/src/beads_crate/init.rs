@@ -284,9 +284,10 @@ mod sweep_tests {
 /// Cheap filesystem-only probe used to decide whether the boot-time
 /// `init_writer_with_flush` sequence has anything to do. The full sequence
 /// holds `.write.lock` across SQLite open + `sweep_stale_jsonl_temps` +
-/// `sync::auto_flush` + WAL checkpoint, which can take several seconds on a
-/// busy beads dir and starves any concurrent process trying to acquire the
-/// lock during PM startup. When the filesystem signals no pending work we
+/// `sync::auto_flush`, then releases it before the WAL checkpoint. It can
+/// still take several seconds on a busy beads dir and starve any concurrent
+/// process trying to acquire the lock during PM startup. When the filesystem
+/// signals no pending work we
 /// can skip the lock entirely; the next mutation will trigger a regular
 /// `auto_flush` and correct any state we left untouched.
 ///
@@ -400,6 +401,7 @@ pub(crate) fn init_writer_with_flush(
     let _ = sweep_stale_jsonl_temps(beads_dir, stale_tmp_min_age);
     let result = sync::auto_flush(&mut storage, beads_dir);
     drop(storage);
+    drop(_guard);
     wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
     result?;
     Ok(())
