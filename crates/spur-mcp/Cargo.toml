@@ -52,3 +52,4 @@ tempfile = "3"
 # start_paused = true on #[tokio::test] requires test-util feature.
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = { workspace = true }
+tracing-subscriber = { workspace = true }
