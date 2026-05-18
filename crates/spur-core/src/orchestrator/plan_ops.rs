@@ -308,8 +308,12 @@ pub(super) async fn load_plan_summaries(
             }
         };
 
-        let source_body_preview = match pm.get_issue(&epic.id).await {
-            Ok(issue) => issue_body_preview(&issue.body),
+        let (source_body_preview, created_at, updated_at) = match pm.get_issue(&epic.id).await {
+            Ok(issue) => (
+                issue_body_preview(&issue.body),
+                Some(issue.created_at),
+                Some(issue.updated_at),
+            ),
             Err(err) => {
                 warn!(
                     plan_id = %plan_id,
@@ -317,7 +321,7 @@ pub(super) async fn load_plan_summaries(
                     error = %err,
                     "failed to load plan source issue body preview"
                 );
-                None
+                (None, None, None)
             }
         };
 
@@ -330,7 +334,8 @@ pub(super) async fn load_plan_summaries(
                 owner_state: plan_owner_state_from_labels(&epic.labels, current_brain_session),
                 lifecycle: lifecycle_from_plan(&epic, counts.as_ref()),
                 counts,
-                updated_at: None,
+                updated_at,
+                created_at,
             },
             canonical_epic_id: None,
         });
@@ -449,6 +454,7 @@ mod plan_summary_warning_tests {
                 lifecycle: PlanLifecycleEvent::Pending,
                 counts: None,
                 updated_at: None,
+                created_at: None,
             },
             canonical_epic_id: canonical_epic_id.map(str::to_string),
         }

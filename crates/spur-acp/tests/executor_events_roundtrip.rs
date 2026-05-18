@@ -444,6 +444,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                     cancelled: 0,
                 }),
                 updated_at: Some(Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap()),
+                created_at: Some(Utc.with_ymd_and_hms(2026, 5, 1, 9, 30, 0).unwrap()),
             },
             PlanSummaryEvent {
                 plan_id: "plan-c3".into(),
@@ -456,6 +457,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 lifecycle: PlanLifecycleEvent::AwaitingReview,
                 counts: None,
                 updated_at: None,
+                created_at: None,
             },
             PlanSummaryEvent {
                 plan_id: "plan-d4".into(),
@@ -468,6 +470,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 lifecycle: PlanLifecycleEvent::Unknown,
                 counts: None,
                 updated_at: None,
+                created_at: None,
             },
         ],
         warnings: vec![PlanLoadWarningEvent {

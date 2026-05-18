@@ -1,6 +1,5 @@
 //! Snapshot/state tests for the plan browser.
 
-use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use spur_acp::{
@@ -100,7 +99,8 @@ fn summary(
             failed: 0,
             cancelled: 0,
         }),
-        updated_at: Some(Utc::now()),
+        updated_at: None,
+        created_at: None,
     }
 }
 
@@ -152,7 +152,7 @@ fn renders_all_owner_state_rows_with_lifecycle_and_progress() {
     let ctx = view_ctx(&lineage, &plans);
     view.handle_spur_event(&loaded_event(), &ctx);
 
-    let backend = TestBackend::new(120, 22);
+    let backend = TestBackend::new(140, 28);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| view.render(frame, frame.area(), &ctx))
@@ -171,6 +171,10 @@ fn renders_all_owner_state_rows_with_lifecycle_and_progress() {
         "0/3 done",
         "other-brain",
         "ambiguous",
+        "Sort: updated",
+        "Filter: all",
+        "Updated",
+        "Created",
     ] {
         assert!(
             rendered.contains(expected),
