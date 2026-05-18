@@ -68,6 +68,7 @@ mod plan_browser_navigation_tests {
             lifecycle: PlanLifecycleEvent::Pending,
             counts: None,
             updated_at: None,
+            created_at: None,
         }
     }
 
