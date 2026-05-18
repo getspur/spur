@@ -31,6 +31,7 @@ fn read_data_version(s: &beads_rust::storage::sqlite::SqliteStorage) -> anyhow::
     Ok(count as i64)
 }
 
+#[allow(dead_code)]
 fn acquire_write_lock_with_backoff(
     beads_dir: &Path,
     backoff: &BackoffPolicy,
@@ -58,6 +59,56 @@ fn acquire_write_lock_with_backoff(
                     );
                 };
                 std::thread::sleep(delay);
+                attempt += 1;
+            }
+        }
+    }
+}
+
+async fn acquire_write_lock_async(
+    beads_dir: PathBuf,
+    backoff: BackoffPolicy,
+    lock_timeout_ms: u64,
+    metrics: Arc<ContentionMetrics>,
+) -> anyhow::Result<std::fs::File> {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(lock_timeout_ms);
+    let mut attempt: u32 = 0;
+
+    loop {
+        let dir_for_attempt = beads_dir.clone();
+        match tokio::task::spawn_blocking(move || {
+            write_lock::try_blocking_write_lock_once(&dir_for_attempt)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("write lock attempt task failed: {e}"))??
+        {
+            write_lock::WriteLockAttempt::Acquired(file) => {
+                metrics.record_lock_wait(start.elapsed());
+                return Ok(file);
+            }
+            write_lock::WriteLockAttempt::Busy => {
+                metrics.incr_busy();
+                let elapsed = start.elapsed();
+                if elapsed >= timeout {
+                    metrics.incr_ceiling();
+                    anyhow::bail!("write lock acquisition timed out after {lock_timeout_ms}ms");
+                }
+                let rand = fastrand_unit();
+                let Some(delay) = backoff.step(attempt, elapsed, rand) else {
+                    metrics.incr_ceiling();
+                    anyhow::bail!(
+                        "write lock acquisition exceeded ceiling after {:?}",
+                        elapsed
+                    );
+                };
+                let remaining = timeout.saturating_sub(start.elapsed());
+                tokio::time::sleep(
+                    delay
+                        .min(write_lock::WRITE_LOCK_POLL_INTERVAL)
+                        .min(remaining),
+                )
+                .await;
                 attempt += 1;
             }
         }
@@ -175,9 +226,15 @@ impl BeadsCrateAdapter {
         let backoff = self.config.backoff.clone();
         let lock_timeout_ms = self.config.lock_timeout_ms;
         let metrics = Arc::clone(&self.metrics);
+        let flock = acquire_write_lock_async(
+            beads_dir.clone(),
+            backoff,
+            lock_timeout_ms,
+            Arc::clone(&metrics),
+        )
+        .await?;
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let _flock =
-                acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let _flock = flock;
             let db_path = beads_dir.join("beads.db");
             let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
                 &db_path,
@@ -298,9 +355,15 @@ impl BeadsCrateAdapter {
         let beads_dir = self.beads_dir.clone();
         let backoff = self.config.backoff.clone();
         let lock_timeout_ms = self.config.lock_timeout_ms;
+        let flock = acquire_write_lock_async(
+            beads_dir.clone(),
+            backoff,
+            lock_timeout_ms,
+            Arc::clone(&metrics),
+        )
+        .await?;
         tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
-            let _flock =
-                acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let _flock = flock;
             let db_path = beads_dir.join("beads.db");
             let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
                 &db_path,
@@ -353,9 +416,15 @@ impl BeadsCrateAdapter {
         let beads_dir = self.beads_dir.clone();
         let backoff = self.config.backoff.clone();
         let lock_timeout_ms = self.config.lock_timeout_ms;
+        let flock = acquire_write_lock_async(
+            beads_dir.clone(),
+            backoff,
+            lock_timeout_ms,
+            Arc::clone(&metrics),
+        )
+        .await?;
         tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
-            let _flock =
-                acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let _flock = flock;
             let db_path = beads_dir.join("beads.db");
             let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
                 &db_path,
@@ -659,5 +728,54 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn read_completes_while_writer_waits_for_flock_on_single_blocking_thread() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let dir = TempDir::new().unwrap();
+            let adapter = Arc::new(
+                BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+                    .await
+                    .unwrap(),
+            );
+            let held_lock =
+                write_lock::blocking_write_lock_with_timeout(dir.path(), Some(50)).unwrap();
+
+            let writer = {
+                let adapter = Arc::clone(&adapter);
+                tokio::spawn(async move { adapter.write(|_s| Ok::<_, anyhow::Error>(())).await })
+            };
+
+            while adapter
+                .metrics()
+                .lock_busy_total
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+
+            let read = tokio::time::timeout(Duration::from_millis(100), async {
+                adapter.read(|s| Ok(s.count_issues()?)).await
+            })
+            .await;
+
+            drop(held_lock);
+            writer.await.unwrap().unwrap();
+
+            assert!(
+                read.is_ok(),
+                "read should not queue behind an async writer waiting for the flock"
+            );
+            assert_eq!(read.unwrap().unwrap(), 0);
+        });
     }
 }
