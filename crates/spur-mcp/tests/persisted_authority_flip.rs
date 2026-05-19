@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde_json::json;
@@ -23,6 +23,15 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 mod common;
+
+static PERSISTED_AUTHORITY_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+async fn persisted_authority_serial_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    PERSISTED_AUTHORITY_SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .await
+}
 
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
@@ -179,6 +188,7 @@ fn persisted_task_with_context(agent: &str, context_files: &[&str]) -> Vec<PlanT
 
 #[tokio::test]
 async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -213,6 +223,7 @@ async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
 
 #[tokio::test]
 async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -267,6 +278,7 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn active_plan_cache_converges_when_reconciler_ticks_race_review_task() {
+    let _serial = persisted_authority_serial_guard().await;
     const N: usize = 8;
 
     let dir = TempDir::new().expect("tempdir");
@@ -392,6 +404,7 @@ async fn active_plan_cache_converges_when_reconciler_ticks_race_review_task() {
 #[tokio::test]
 #[ignore = "pinned residual; closes in PR3"]
 async fn versioned_cache_stays_stale_when_only_task_audits_advance() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -463,6 +476,7 @@ async fn versioned_cache_stays_stale_when_only_task_audits_advance() {
 
 #[tokio::test]
 async fn versioned_cache_load_or_project_plan_bounds_retries_at_3() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -509,6 +523,7 @@ async fn versioned_cache_load_or_project_plan_bounds_retries_at_3() {
 
 #[tokio::test]
 async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -556,6 +571,7 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
 
 #[tokio::test]
 async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -624,6 +640,7 @@ async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
 
 #[tokio::test]
 async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -721,6 +738,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
 
 #[tokio::test]
 async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -838,6 +856,7 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
 
 #[tokio::test]
 async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -869,6 +888,7 @@ async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
 
 #[tokio::test]
 async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -936,6 +956,7 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
 
 #[tokio::test]
 async fn t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals() {
+    let _serial = persisted_authority_serial_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -975,6 +996,7 @@ async fn t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals() {
 
 #[tokio::test]
 async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
+    let _serial = persisted_authority_serial_guard().await;
     skip_if_no_loopback!("t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch");
 
     let dir = TempDir::new().expect("tempdir");
@@ -1033,6 +1055,7 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
 
 #[tokio::test]
 async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
+    let _serial = persisted_authority_serial_guard().await;
     skip_if_no_loopback!("t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch");
 
     let dir = TempDir::new().expect("tempdir");

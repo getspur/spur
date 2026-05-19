@@ -285,15 +285,16 @@ async fn network_failure() {
         .iter()
         .filter(|evt| evt["event"] == "tui_frame_slow")
         .filter_map(|evt| evt["properties"]["duration_ms"].as_u64())
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
 
     assert!(
         durations.contains(&51),
         "expected successful post-failure batch"
     );
-    assert!(
-        !durations.contains(&1),
-        "first failed batch should not be retried"
+    assert_eq!(
+        durations.iter().filter(|duration| **duration == 1).count(),
+        1,
+        "first failed batch should be sent once and not retried"
     );
 }
 

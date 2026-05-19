@@ -29,9 +29,11 @@ regex = { workspace = true }
 semver = "1"
 tempfile = "3"
 # GitHub adapter (Phase 1 ingest). Pinned exact per docs/architecture/spur-pm-github-ingest.md.
-octocrab = "=0.50.0"
+octocrab = { version = "=0.50.0", features = ["rustls-webpki-tokio"] }
 http = "1"
 secrecy = "=0.10.3"
+# rustls provider for octocrab when the GitHub adapter is used outside spur-cli.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 filetime = "0.2"

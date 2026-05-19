@@ -1,4 +1,14 @@
 use super::*;
+use std::sync::OnceLock;
+
+static BEADS_SQLITE_SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+async fn beads_sqlite_serial_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    BEADS_SQLITE_SERIAL
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
 
 #[cfg(test)]
 fn attach_beads_workspace(repo: &std::path::Path, w: &spur_pm::test_workspace::TestBeadsWorkspace) {

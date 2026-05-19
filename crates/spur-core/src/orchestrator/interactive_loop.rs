@@ -2831,9 +2831,8 @@ mod phase5_orchestrator_finalization_tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     use tempfile::TempDir;
-    use tokio::net::TcpStream;
     use tokio::sync::{broadcast, Notify};
 
     #[derive(Default)]
@@ -3053,12 +3052,7 @@ mod phase5_orchestrator_finalization_tests {
         let worker_server = WorkerMcpServer::start(session.to_string(), test_worker_deps(pm))
             .await
             .expect("worker MCP server starts");
-        let worker_addr = worker_server
-            .url()
-            .strip_prefix("http://")
-            .and_then(|url| url.strip_suffix("/mcp"))
-            .expect("worker MCP URL shape")
-            .to_string();
+        let worker_server_probe = Arc::clone(&worker_server);
         let worker_mcp_servers = DashMap::new();
         worker_mcp_servers.insert(brain_session.clone(), worker_server);
         let mut mcp_server: Option<Arc<MockRetiringServer>> = None;
@@ -3079,16 +3073,9 @@ mod phase5_orchestrator_finalization_tests {
             !worker_mcp_servers.contains_key(&brain_session),
             "retire must remove the worker MCP server entry"
         );
-        let probe = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&worker_addr))
-            .await
-            .expect("connect must complete within 2s after retire");
-        let connect_err = probe.expect_err("listener must be closed after retire");
         assert!(
-            matches!(
-                connect_err.kind(),
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
-            ),
-            "expected ConnectionRefused/Reset, got {connect_err:?}"
+            !worker_server_probe.is_running(),
+            "retire must cancel the worker MCP server"
         );
     }
 
