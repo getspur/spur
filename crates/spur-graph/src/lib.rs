@@ -1,5 +1,7 @@
+pub mod content_hash;
 pub mod discovery;
 pub mod extract;
+pub mod git;
 pub mod graph;
 pub mod identity;
 pub mod schema;
@@ -7,8 +9,10 @@ pub mod store;
 pub mod validation;
 pub mod worktree;
 
+pub use content_hash::*;
 pub use discovery::*;
 pub use extract::*;
+pub use git::*;
 pub use graph::*;
 pub use identity::*;
 pub use schema::*;

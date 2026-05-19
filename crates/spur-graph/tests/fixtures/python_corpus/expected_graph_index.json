@@ -3,12 +3,12 @@
     "graph_index_version": "spur-graph-phase2"
   },
   "manifest_version": "<normalized>",
+  "graph_content_hash": "",
   "file_manifests": [
     {
       "stable_file_id": "fa1b8fd6988afb15",
       "path": "src/helpers.py",
-      "mtime_nanos": 0,
-      "size_bytes": 0,
+      "content_oid": "",
       "node_ids": [
         1,
         2
@@ -17,8 +17,7 @@
     {
       "stable_file_id": "7637220ca411355c",
       "path": "src/main.py",
-      "mtime_nanos": 0,
-      "size_bytes": 0,
+      "content_oid": "",
       "node_ids": [
         3,
         4,
@@ -28,8 +27,7 @@
     {
       "stable_file_id": "88080f65b93577ff",
       "path": "src/models.py",
-      "mtime_nanos": 0,
-      "size_bytes": 0,
+      "content_oid": "",
       "node_ids": [
         6,
         7,
@@ -41,8 +39,7 @@
     {
       "stable_file_id": "438512d0ff1861c0",
       "path": "src/pkg.py",
-      "mtime_nanos": 0,
-      "size_bytes": 0,
+      "content_oid": "",
       "node_ids": [
         11,
         12,
@@ -407,5 +404,6 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0
     }
-  ]
+  ],
+  "tombstones": []
 }
