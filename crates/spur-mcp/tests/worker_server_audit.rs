@@ -412,22 +412,24 @@ async fn flush_delegation_drains_buffer_and_emits_summary_once() {
         "flush_delegation should emit exactly one summary event"
     );
 
-    let events = sink.events.lock().expect("recording sink lock");
-    let summary = events.iter().find_map(|event| {
-        if let SpurEventBody::WorkerMcpDelegationSummary {
-            delegation_id,
-            calls_total,
-            calls_by_tool,
-            errors,
-            ..
-        } = event
-        {
-            if delegation_id == "d-sync" {
-                return Some((*calls_total, calls_by_tool.clone(), *errors));
+    let summary = {
+        let events = sink.events.lock().expect("recording sink lock");
+        events.iter().find_map(|event| {
+            if let SpurEventBody::WorkerMcpDelegationSummary {
+                delegation_id,
+                calls_total,
+                calls_by_tool,
+                errors,
+                ..
+            } = event
+            {
+                if delegation_id == "d-sync" {
+                    return Some((*calls_total, calls_by_tool.clone(), *errors));
+                }
             }
-        }
-        None
-    });
+            None
+        })
+    };
     let (calls_total, calls_by_tool, errors) = summary.expect("summary event should exist");
     assert_eq!(
         calls_total, 3,
@@ -439,8 +441,6 @@ async fn flush_delegation_drains_buffer_and_emits_summary_once() {
         "summary must attribute all calls to get_issue"
     );
     assert_eq!(errors, 0, "successful reads should not increment errors");
-    drop(events);
-
     let sentinel = wait_for_read_aggregate_comment(&pm, &issue_id, Duration::from_secs(5))
         .await
         .expect("read aggregate sentinel should be persisted");
@@ -533,28 +533,28 @@ async fn idle_flusher_drains_buffer_and_complete_emits_single_summary() {
         "complete_delegation should emit exactly one summary after idle flush"
     );
 
-    let events = sink.events.lock().expect("recording sink lock");
-    let summary = events.iter().find_map(|event| {
-        if let SpurEventBody::WorkerMcpDelegationSummary {
-            delegation_id,
-            calls_total,
-            calls_by_tool,
-            errors,
-            ..
-        } = event
-        {
-            if delegation_id == "d-async" {
-                return Some((*calls_total, calls_by_tool.clone(), *errors));
+    let summary = {
+        let events = sink.events.lock().expect("recording sink lock");
+        events.iter().find_map(|event| {
+            if let SpurEventBody::WorkerMcpDelegationSummary {
+                delegation_id,
+                calls_total,
+                calls_by_tool,
+                errors,
+                ..
+            } = event
+            {
+                if delegation_id == "d-async" {
+                    return Some((*calls_total, calls_by_tool.clone(), *errors));
+                }
             }
-        }
-        None
-    });
+            None
+        })
+    };
     let (calls_total, calls_by_tool, errors) = summary.expect("summary event should exist");
     assert_eq!(calls_total, 1);
     assert_eq!(calls_by_tool.get("get_issue").copied().unwrap_or(0), 1);
     assert_eq!(errors, 0);
-    drop(events);
-
     let sentinel = wait_for_read_aggregate_comment(&pm, &issue_id, Duration::from_secs(5))
         .await
         .expect("idle flush should persist read aggregate sentinel");

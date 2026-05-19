@@ -25,13 +25,16 @@ impl super::Reconciler {
                 self.outcomes.lock().await.drop_plan(plan_id);
                 return Ok(Vec::new());
             }
-            adv.list_ready(ReadyFilter {
-                labels_all: vec![crate::plan::labels::plan_id(plan_id)],
-                // Limit is per plan; global reconcilers enumerate plans first.
-                limit: Some(1000),
-                ..Default::default()
-            })
-            .await?
+            let summaries = adv
+                .list_ready(ReadyFilter {
+                    labels_all: vec![crate::plan::labels::plan_id(plan_id)],
+                    // Limit is per plan; global reconcilers enumerate plans first.
+                    limit: Some(1000),
+                    ..Default::default()
+                })
+                .await?;
+            self.record_tick_plans_enumerated(1).await;
+            summaries
         } else {
             let epics = self
                 .pm
@@ -44,6 +47,7 @@ impl super::Reconciler {
                 .await?;
             let mut summaries = Vec::new();
             let mut seen_summary_ids = HashSet::new();
+            let mut seen_plan_ids = HashSet::new();
             for epic in epics {
                 let Some(plan_id) = epic
                     .labels
@@ -54,20 +58,28 @@ impl super::Reconciler {
                         .await;
                     continue;
                 };
-                for summary in adv
+                if !seen_plan_ids.insert(plan_id.to_string()) {
+                    continue;
+                }
+                let plan_summaries = adv
                     .list_ready(ReadyFilter {
                         labels_all: vec![crate::plan::labels::plan_id(plan_id)],
                         // Limit is per plan; global reconcilers enumerate plans first.
                         limit: Some(1000),
                         ..Default::default()
                     })
-                    .await?
-                {
+                    .await?;
+                if plan_summaries.is_empty() {
+                    self.record_no_ready(Some(plan_id)).await;
+                    continue;
+                }
+                for summary in plan_summaries {
                     if seen_summary_ids.insert(summary.id.clone()) {
                         summaries.push(summary);
                     }
                 }
             }
+            self.record_tick_plans_enumerated(seen_plan_ids.len()).await;
             summaries
         };
         let had_ready_summaries = !summaries.is_empty();
