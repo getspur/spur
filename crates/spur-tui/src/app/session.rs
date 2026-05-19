@@ -38,6 +38,7 @@ impl App {
             license_state,
             landing,
             config_path,
+            None,
         )
     }
 
@@ -64,9 +65,10 @@ impl App {
         license_state: LicenseStateEvent,
         landing: crate::landing::LandingDecision,
         config_path: Option<std::path::PathBuf>,
+        upgrade_rx: Option<UpgradeReceiver>,
     ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
-        Self::build_with_license_state_from_metadata_path(
+        let mut app = Self::build_with_license_state_from_metadata_path(
             user_input_tx,
             start_in_picker_with_preselect,
             config,
@@ -74,7 +76,9 @@ impl App {
             landing,
             metadata_path,
             config_path,
-        )
+        );
+        app.upgrade_rx = upgrade_rx;
+        app
     }
 
     pub(super) fn build_with_license_state_from_metadata_path(
@@ -140,6 +144,7 @@ impl App {
             should_quit: false,
             dirty: true, // initial render
             user_warning: None,
+            upgrade_rx: None,
             user_input_tx,
             #[cfg(any(test, debug_assertions))]
             user_input_rx_for_test: None,

@@ -44,6 +44,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
 directories = { workspace = true }
+reqwest = { workspace = true }
+semver = { workspace = true }
 file-rotate = "0.8"
 # rustls provider for octocrab's TLS handshake — see main.rs for the
 # install_default() call. `ring` keeps us off the heavier `aws-lc-rs`.
@@ -58,3 +60,4 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 assert_cmd = "2"
 uuid = { workspace = true }
+wiremock = "0.6"

@@ -1,5 +1,7 @@
+mod cmd;
 mod commands;
 mod onboarding;
+pub mod upgrade_check;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -250,6 +252,15 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+    /// Check for and apply SPUR CLI upgrades
+    Upgrade {
+        /// Check the latest published version without installing anything.
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt before running the install command.
+        #[arg(long)]
+        force: bool,
     },
     /// Manage workflows
     Workflow {
@@ -804,6 +815,10 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Auth { command } => commands::auth::run(command).await,
+        Commands::Upgrade { check, force } => {
+            let exit = cmd::upgrade::run(cmd::upgrade::UpgradeArgs { check, force }).await?;
+            std::process::exit(exit);
+        }
         Commands::Workflow { command } => {
             match command {
                 WorkflowCommands::Validate { file } => {
@@ -1117,6 +1132,28 @@ async fn run() -> Result<()> {
             // Run TUI (blocks). Capture the result so we can run structured
             // shutdown before propagating any error — otherwise `?` would
             // leak the orchestrator/dispatcher/translator tasks.
+            let upgrade_rx = if !upgrade_check::upgrade_check_disabled() && !is_non_interactive() {
+                match upgrade_check::cache_path() {
+                    Some(path) => {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        tokio::spawn(async move {
+                            let upgrade =
+                                upgrade_check::check_for_upgrade(&path).await.map(|info| {
+                                    spur_core::UpgradeBanner {
+                                        current: info.current.to_string(),
+                                        latest: info.latest.to_string(),
+                                    }
+                                });
+                            let _ = tx.send(upgrade);
+                        });
+                        Some(rx)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+
             let tui_result = spur_tui::app::run_tui_with_license(
                 event_rx,
                 Some(tui_tx),
@@ -1127,6 +1164,7 @@ async fn run() -> Result<()> {
                 landing.clone(),
                 config_path,
                 repo_root.clone(),
+                upgrade_rx,
             )
             .await;
 
@@ -1141,6 +1179,24 @@ async fn run() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn is_non_interactive() -> bool {
+    is_non_interactive_with_stdout_terminal(std::io::stdout().is_terminal())
+}
+
+fn is_non_interactive_with_stdout_terminal(stdout_is_terminal: bool) -> bool {
+    // Keep in sync with spur-telemetry's private CI rule:
+    // crates/spur-telemetry/src/consent.rs::ci_env_disables.
+    let ci_set = std::env::var("CI")
+        .ok()
+        .map(|value| {
+            let value = value.trim();
+            !(value.is_empty() || value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false);
+
+    ci_set || !stdout_is_terminal
 }
 
 async fn route_tui_input_to_host(
@@ -1851,6 +1907,7 @@ fn parse_range(range: Option<&str>, today: bool, _week: bool) -> Result<spur_con
 #[cfg(test)]
 mod resolve_landing_tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     fn empty_store() -> spur_tui::session_metadata::SessionMetadataStore {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -1889,5 +1946,58 @@ mod resolve_landing_tests {
             landing,
             spur_tui::landing::LandingDecision::ShowDashboard
         ));
+    }
+
+    #[test]
+    fn is_non_interactive_true_for_truthy_ci_values() {
+        with_ci(Some("1"), || {
+            assert!(is_non_interactive_with_stdout_terminal(true))
+        });
+        with_ci(Some("true"), || {
+            assert!(is_non_interactive_with_stdout_terminal(true))
+        });
+        with_ci(Some("TRUE"), || {
+            assert!(is_non_interactive_with_stdout_terminal(true))
+        });
+        with_ci(Some("anything"), || {
+            assert!(is_non_interactive_with_stdout_terminal(true))
+        });
+    }
+
+    #[test]
+    fn is_non_interactive_false_for_false_empty_or_unset_ci_when_stdout_is_terminal() {
+        with_ci(Some("false"), || {
+            assert!(!is_non_interactive_with_stdout_terminal(true));
+        });
+        with_ci(Some(""), || {
+            assert!(!is_non_interactive_with_stdout_terminal(true));
+        });
+        with_ci(None, || {
+            assert!(!is_non_interactive_with_stdout_terminal(true));
+        });
+    }
+
+    fn with_ci<F>(value: Option<&str>, f: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = env_lock().lock().expect("env test lock");
+        let old = std::env::var("CI").ok();
+        match value {
+            Some(value) => std::env::set_var("CI", value),
+            None => std::env::remove_var("CI"),
+        }
+
+        f();
+
+        match old {
+            Some(old) => std::env::set_var("CI", old),
+            None => std::env::remove_var("CI"),
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 }
