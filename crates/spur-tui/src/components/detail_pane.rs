@@ -222,20 +222,102 @@ impl DetailPane {
         let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
         let body_area = chunks[1];
 
-        // ── 2. Compute body content. ─────────────────────────────────
+        // ── 2. Render tabs (shared across all tabs). ─────────────────
+        let tabs_widget = self.build_tabs_widget();
+
+        // ── 3. Per-tab body rendering. ───────────────────────────────
+        //
+        // The Stream tab delegates to the reusable `stream_pane::render_stream`
+        // so the future plan_inspector peek overlay can reuse the same
+        // renderer with its own independent `StreamViewState`. We sync
+        // `self.scroll_offset` / `self.is_following` into a transient
+        // `StreamViewState` and copy back the post-clamp values.
+        //
+        // Non-Stream tabs continue to render inline because they depend on
+        // private `render_*` helpers that need `&ExecutorNode`.
+        match self.current_tab {
+            DetailTab::Stream => {
+                // Layout: tabs row at the top, then the stream pane (which
+                // owns its own borders) consumes the remainder. The body
+                // area inside render_stream is `area.height - 1 (tabs) -
+                // 2 (borders)` rows, identical to the original layout.
+                let stream_chunks =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+                frame.render_widget(tabs_widget, stream_chunks[0]);
+
+                let bottom_right_hint = if issue_badge.is_some() {
+                    Some("[I]ssue detail")
+                } else {
+                    None
+                };
+                let mut state = crate::components::stream_pane::StreamViewState {
+                    scroll_offset: self.scroll_offset,
+                    is_following: self.is_following,
+                };
+                crate::components::stream_pane::render_stream(
+                    frame,
+                    stream_chunks[1],
+                    &node.agent,
+                    issue_badge,
+                    bottom_right_hint,
+                    stream_trace,
+                    &mut state,
+                );
+                self.scroll_offset = state.scroll_offset;
+                self.is_following = state.is_following;
+            }
+            _ => {
+                self.render_non_stream(
+                    frame,
+                    area,
+                    chunks[0],
+                    body_area,
+                    node,
+                    issue_badge,
+                    tabs_widget,
+                );
+            }
+        }
+    }
+
+    fn build_tabs_widget(&self) -> Tabs<'static> {
+        let titles: Vec<Line<'static>> = DetailTab::all()
+            .iter()
+            .map(|t| {
+                let style = if *t == self.current_tab {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                Line::from(Span::styled(t.label(), style))
+            })
+            .collect();
+        Tabs::new(titles)
+            .select(
+                DetailTab::all()
+                    .iter()
+                    .position(|t| *t == self.current_tab)
+                    .unwrap_or(0),
+            )
+            .divider(" ")
+    }
+
+    fn render_non_stream(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        tabs_area: Rect,
+        body_area: Rect,
+        node: &ExecutorNode,
+        issue_badge: Option<&str>,
+        tabs_widget: Tabs<'static>,
+    ) {
         let visible_h = body_area.height as usize;
 
         let body_lines = match self.current_tab {
-            DetailTab::Stream => {
-                if let Some(trace) = stream_trace {
-                    trace.build_body_lines(body_area.width)
-                } else {
-                    vec![Line::from(Span::styled(
-                        "(no stream yet)",
-                        Style::default().fg(Color::DarkGray),
-                    ))]
-                }
-            }
+            DetailTab::Stream => unreachable!("Stream handled in render()"),
             DetailTab::Artifacts => self.render_artifacts(node),
             DetailTab::Attempts => self.render_attempts(node),
             DetailTab::Task => self.render_task(node),
@@ -247,10 +329,9 @@ impl DetailPane {
             .collect();
         let total = wrapped.len();
 
-        // ── 3. Apply the scroll clamp + re-engage-following BEFORE
-        //       deriving the label and rendering the block. This fixes
-        //       the one-frame lag where the border used to show stale
-        //       "not following" on the frame the user reached bottom. ─
+        // Apply the scroll clamp + re-engage-following BEFORE deriving the
+        // label and rendering the block so the border reflects post-clamp
+        // state on the same frame.
         let max_offset = total.saturating_sub(visible_h);
         if self.is_following {
             self.scroll_offset = max_offset;
@@ -261,7 +342,6 @@ impl DetailPane {
             }
         }
 
-        // ── 4. Derive the scroll label from final post-clamp state. ──
         let scroll_label_text = scroll_label(
             self.current_tab,
             total,
@@ -269,15 +349,13 @@ impl DetailPane {
             self.scroll_offset,
             self.is_following,
         );
-        let position_indicator =
-            position_indicator(total, visible_h, self.scroll_offset, area.width);
+        let pos_indicator = position_indicator(total, visible_h, self.scroll_offset, area.width);
 
-        // ── 5. Build the real block with all titles. ─────────────────
         let mut block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .title(format!(" {} ", node.agent))
             .title_bottom(scroll_label_text.as_ref().to_string());
-        if let Some(pos) = position_indicator {
+        if let Some(pos) = pos_indicator {
             block = block.title_bottom(
                 Line::from(pos)
                     .alignment(Alignment::Right)
@@ -291,31 +369,8 @@ impl DetailPane {
         }
         frame.render_widget(block, area);
 
-        // ── 6. Render tabs. ──────────────────────────────────────────
-        let titles: Vec<Line> = DetailTab::all()
-            .iter()
-            .map(|t| {
-                let style = if *t == self.current_tab {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                Line::from(Span::styled(t.label(), style))
-            })
-            .collect();
-        let tabs = Tabs::new(titles)
-            .select(
-                DetailTab::all()
-                    .iter()
-                    .position(|t| *t == self.current_tab)
-                    .unwrap_or(0),
-            )
-            .divider(" ");
-        frame.render_widget(tabs, chunks[0]);
+        frame.render_widget(tabs_widget, tabs_area);
 
-        // ── 7. Render body. ──────────────────────────────────────────
         let p = Paragraph::new(wrapped).scroll((self.scroll_offset as u16, 0));
         frame.render_widget(p, body_area);
     }
