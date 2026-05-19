@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod log_writer;
+pub mod upgrade_check;
 
 pub use log_writer::{build_rotator, today_basepath};
 

@@ -1,9 +1,29 @@
 use super::*;
 use futures::StreamExt;
 use tokio::sync::broadcast;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+type UpgradeResult = Result<Option<spur_core::UpgradeBanner>, oneshot::error::RecvError>;
+
+pub(super) async fn next_upgrade_result(upgrade_rx: &mut Option<UpgradeReceiver>) -> UpgradeResult {
+    match upgrade_rx.as_mut() {
+        Some(rx) => rx.await,
+        None => std::future::pending().await,
+    }
+}
+
 impl App {
+    pub(super) fn handle_upgrade_result(&mut self, result: UpgradeResult) {
+        self.upgrade_rx = None;
+        if let Ok(Some(info)) = result {
+            self.show_user_warning(format!(
+                "SPUR {} is available; current {}. Run: spur upgrade",
+                info.latest, info.current
+            ));
+        }
+    }
+
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
         let resolved = license_state_event_to_state(&license_state);
         self.feature_gate.update_state(&resolved);
@@ -554,6 +574,7 @@ pub async fn run_tui(
         crate::landing::LandingDecision::ShowDashboard,
         None,
         repo_root,
+        None,
     )
     .await
 }
@@ -569,6 +590,7 @@ pub async fn run_tui_with_license(
     landing: crate::landing::LandingDecision,
     config_path: Option<std::path::PathBuf>,
     repo_root: std::path::PathBuf,
+    upgrade_rx: Option<tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>>,
 ) -> anyhow::Result<()> {
     let mut terminal = crate::tui::setup()?;
     let mut app = App::build_with_license_state(
@@ -578,6 +600,7 @@ pub async fn run_tui_with_license(
         license_state,
         landing,
         config_path,
+        upgrade_rx,
     );
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
@@ -721,6 +744,9 @@ pub async fn run_tui_with_license(
             } => {
                 app.handle_permission_request(perm);
             }
+            result = next_upgrade_result(&mut app.upgrade_rx) => {
+                app.handle_upgrade_result(result);
+            }
             _ = shutdown_rx.recv() => {
                 // SIGINT / SIGTERM / SIGHUP / SIGQUIT: take the same path as a confirmed
                 // Ctrl-Q. confirm_quit() flushes drafts + sets should_quit; the
@@ -821,6 +847,7 @@ pub async fn run_tui_with_config(
         crate::landing::LandingDecision::ShowDashboard,
         config_path,
         repo_root,
+        None,
     )
     .await
 }
