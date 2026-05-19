@@ -16,6 +16,16 @@ use crate::theme::{resolve_token, ColorDepth, Theme};
 
 use super::View;
 
+#[derive(Debug)]
+pub enum PlanInspectorMode {
+    Browse,
+    StreamPeek {
+        executor_id: String,
+        task_id: String,
+        state: crate::components::stream_pane::StreamViewState,
+    },
+}
+
 fn token(theme: &Theme, name: &str) -> Color {
     resolve_token(theme, name, ColorDepth::Truecolor)
 }
@@ -29,6 +39,7 @@ pub struct PlanInspectorView {
     open_issue_id: Option<String>,
     issue_states: HashMap<String, TaskIssueState>,
     task_detail_scroll: usize,
+    mode: PlanInspectorMode,
 }
 
 #[derive(Debug)]
@@ -49,6 +60,7 @@ impl PlanInspectorView {
             open_issue_id: None,
             issue_states: HashMap::new(),
             task_detail_scroll: 0,
+            mode: PlanInspectorMode::Browse,
         }
     }
 
@@ -62,11 +74,37 @@ impl PlanInspectorView {
             open_issue_id: None,
             issue_states: HashMap::new(),
             task_detail_scroll: 0,
+            mode: PlanInspectorMode::Browse,
         }
     }
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    pub fn mode(&self) -> &PlanInspectorMode {
+        &self.mode
+    }
+
+    pub fn enter_stream_peek(&mut self, executor_id: String, task_id: String) {
+        self.mode = PlanInspectorMode::StreamPeek {
+            executor_id,
+            task_id,
+            state: crate::components::stream_pane::StreamViewState::new(),
+        };
+    }
+
+    pub fn leave_stream_peek(&mut self) {
+        self.mode = PlanInspectorMode::Browse;
+    }
+
+    #[allow(dead_code)]
+    fn peek_state_mut(&mut self) -> Option<&mut crate::components::stream_pane::StreamViewState> {
+        if let PlanInspectorMode::StreamPeek { state, .. } = &mut self.mode {
+            Some(state)
+        } else {
+            None
+        }
     }
 
     fn active_plan<'a>(&self, ctx: &'a super::ViewContext<'_>) -> Option<&'a TrackedPlan> {
@@ -996,6 +1034,39 @@ mod tests {
             }),
         }));
         projection
+    }
+
+    #[test]
+    fn new_view_starts_in_browse_mode() {
+        let v = PlanInspectorView::new(SessionId("s".into()));
+        assert!(matches!(v.mode(), PlanInspectorMode::Browse));
+    }
+
+    #[test]
+    fn enter_stream_peek_sets_mode_and_initial_state() {
+        let mut v = PlanInspectorView::new(SessionId("s".into()));
+        v.enter_stream_peek("worker-session-1".into(), "t-12".into());
+        match v.mode() {
+            PlanInspectorMode::StreamPeek {
+                executor_id,
+                task_id,
+                state,
+            } => {
+                assert_eq!(executor_id, "worker-session-1");
+                assert_eq!(task_id, "t-12");
+                assert!(state.is_following);
+                assert_eq!(state.scroll_offset, 0);
+            }
+            _ => panic!("expected StreamPeek"),
+        }
+    }
+
+    #[test]
+    fn leave_stream_peek_returns_to_browse() {
+        let mut v = PlanInspectorView::new(SessionId("s".into()));
+        v.enter_stream_peek("w".into(), "t".into());
+        v.leave_stream_peek();
+        assert!(matches!(v.mode(), PlanInspectorMode::Browse));
     }
 
     #[test]
