@@ -61,6 +61,16 @@ impl super::Reconciler {
                 if !seen_plan_ids.insert(plan_id.to_string()) {
                     continue;
                 }
+                if let Some(dispatch) = self.dispatch.as_ref() {
+                    if let crate::plan::ownership::PlanOwnerMatch::OwnedByOther { .. } =
+                        crate::plan::ownership::classify_owner(
+                            &epic.labels,
+                            dispatch.brain_session_id.as_session_id(),
+                        )
+                    {
+                        continue;
+                    }
+                }
                 let plan_summaries = adv
                     .list_ready(ReadyFilter {
                         labels_all: vec![crate::plan::labels::plan_id(plan_id)],

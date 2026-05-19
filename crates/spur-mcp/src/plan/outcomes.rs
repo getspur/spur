@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 pub const TRANSITION_RING_CAP: usize = 64;
+pub const GLOBAL_RECENT_CAP: usize = 256;
 pub const STUCK_DURATION: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,7 +110,7 @@ pub struct ReconcilerStatus {
     pub stuck_tasks: Vec<StuckTask>,
     pub last_tick_at: Option<SystemTime>,
     pub last_tick_plans_enumerated: usize,
-    pub last_tick_plans_dispatched: usize,
+    pub last_tick_tasks_dispatched: usize,
 }
 
 /// Ephemeral reconciler outcomes. MUST NOT be persisted to beads; reconstruct
@@ -265,14 +266,14 @@ pub struct OutcomeStore {
     skip_observations: HashMap<(String, String), SkipObservation>,
     last_tick_at: Option<SystemTime>,
     last_tick_plans_enumerated: usize,
-    last_tick_plans_dispatched: usize,
+    last_tick_tasks_dispatched: usize,
 }
 
 impl OutcomeStore {
     pub fn mark_tick(&mut self, now: SystemTime) {
         self.last_tick_at = Some(now);
         self.last_tick_plans_enumerated = 0;
-        self.last_tick_plans_dispatched = 0;
+        self.last_tick_tasks_dispatched = 0;
     }
 
     pub fn record_tick_plans_enumerated(&mut self, count: usize) {
@@ -352,7 +353,7 @@ impl OutcomeStore {
             timestamp: now,
         };
         self.record_outcome(Some(plan_id), outcome.clone());
-        self.last_tick_plans_dispatched += 1;
+        self.last_tick_tasks_dispatched += 1;
         outcome
     }
 
@@ -428,7 +429,8 @@ impl OutcomeStore {
                 .values()
                 .flat_map(OutcomeBuffer::snapshot),
         );
-        outcomes.sort_by_key(DispatchOutcome::timestamp);
+        outcomes.sort_by(|a, b| b.timestamp().cmp(&a.timestamp()));
+        outcomes.truncate(GLOBAL_RECENT_CAP);
         outcomes
     }
 
@@ -463,7 +465,7 @@ impl OutcomeStore {
             stuck_tasks: self.stuck_tasks(),
             last_tick_at: self.last_tick_at,
             last_tick_plans_enumerated: self.last_tick_plans_enumerated,
-            last_tick_plans_dispatched: self.last_tick_plans_dispatched,
+            last_tick_tasks_dispatched: self.last_tick_tasks_dispatched,
         }
     }
 
@@ -929,11 +931,11 @@ mod tests {
             status.recent_outcomes.as_slice(),
             [
                 DispatchOutcome::Skipped {
-                    reason: SkipReason::MissingIssueId,
+                    reason: SkipReason::DuplicateIssueId,
                     ..
                 },
                 DispatchOutcome::Skipped {
-                    reason: SkipReason::DuplicateIssueId,
+                    reason: SkipReason::MissingIssueId,
                     ..
                 }
             ]
@@ -1057,5 +1059,34 @@ mod tests {
         store.mark_tick(ts(42));
 
         assert_eq!(store.reconciler_status().last_tick_at, Some(ts(42)));
+    }
+
+    #[test]
+    fn last_tick_tasks_dispatched_counts_dispatched_tasks() {
+        let mut store = OutcomeStore::default();
+        store.mark_tick(ts(1));
+
+        store.record_dispatched("P1", "task-1", "codex", "del-1", false, ts(2));
+        store.record_dispatched("P1", "task-2", "codex", "del-2", false, ts(3));
+        store.record_dispatched("P1", "task-3", "codex", "del-3", false, ts(4));
+
+        assert_eq!(store.reconciler_status().last_tick_tasks_dispatched, 3);
+    }
+
+    #[test]
+    fn global_recent_outcomes_is_capped_across_plans() {
+        let mut store = OutcomeStore::default();
+        for plan_index in 0..50 {
+            let plan_id = format!("P{plan_index}");
+            for outcome_index in 0..10 {
+                store.record_no_ready(
+                    &plan_id,
+                    NoReadyReason::NoMatchingRows,
+                    ts((plan_index * 10 + outcome_index) as u64),
+                );
+            }
+        }
+
+        assert!(store.global_recent_outcomes().len() <= GLOBAL_RECENT_CAP);
     }
 }
