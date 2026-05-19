@@ -204,6 +204,9 @@ fn buckets_from_facts(
 
         match node.kind {
             NodeKind::File => {
+                if !current_entries.contains_key(&node.label) {
+                    continue;
+                }
                 let stable_file_id = node.stable_key.clone();
                 buckets
                     .entry(node.label.clone())
@@ -234,6 +237,9 @@ fn buckets_from_facts(
             | NodeKind::TypeAlias
             | NodeKind::Section => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
+                if !current_entries.contains_key(&file_path) {
+                    continue;
+                }
                 let anchor_hash = anchor_hash(worktree_root, &file_path, span);
                 let symbol = GraphSymbolArtifact {
                     stable_symbol_id: node.stable_key.clone(),
@@ -286,6 +292,9 @@ fn buckets_from_facts(
             );
             continue;
         };
+        if !current_entries.contains_key(&source_file_path) {
+            continue;
+        }
         let target_stable_symbol_id = edge
             .target_node_id
             .and_then(|target_node_id| nodes_by_id.get(&target_node_id))
