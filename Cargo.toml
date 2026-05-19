@@ -78,6 +78,7 @@ thiserror = "2"
 anyhow = "1"
 directories = "5"
 regex = "1"
+semver = "1"
 sha2 = "0.10"
 proptest = "1"
 petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }
