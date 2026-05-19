@@ -1,7 +1,7 @@
 # Upgrade Check — Design Spec
 
-**Status:** Approved for planning (v2 — incorporates codex review)
-**Date:** 2026-05-19 (v2: 2026-05-19, same day)
+**Status:** Approved for planning (v3 — incorporates codex second-pass review)
+**Date:** 2026-05-19 (v3: 2026-05-19, same day)
 **Owner:** Kevin Truong
 **Crates touched:** `spur-cli` (new module + subcommand), `spur-tui` (banner receiver), workspace `Cargo.toml` (promote `semver`)
 **Distribution context:** SPUR ships as a Rust binary wrapped by the npm package `@getspur/spur-cli`.
@@ -29,7 +29,7 @@ The banner reuses the existing top-row `user_warning` surface in `spur-tui` (`cr
 SPUR 1.2.0 is available; current 1.1.16. Run: spur upgrade
 ```
 
-The banner is dismissible via the existing `user_warning` clear keybind. If the user dismisses it, the cache's `last_notified_at` field is bumped so we don't show it again for 3 days regardless of cache state (matches vercel's `notifyInterval`).
+The banner is dismissible via the existing `user_warning` clear keybind. To keep the TUI from needing a cache handle, **`last_notified_at` is bumped at banner-render time** (not on dismissal): immediately before calling `show_user_warning`, the spawn-side code (or a small helper) writes the cache with `last_notified_at = now`. On subsequent launches `check_for_upgrade` consults `last_notified_at` and suppresses the banner if `now - last_notified_at < NOTIFY_INTERVAL` (3 days). Matches vercel's `notifyInterval`. The TUI side never touches the cache.
 
 ## 3. Architecture
 
@@ -53,9 +53,10 @@ All three functions are infallible from the caller's perspective: `cache_path()`
 
 `check_for_upgrade` is the only async entry point. It:
 
-1. Reads cache at `cache_path`. If cache age < `CHECK_INTERVAL` (24h), returns cached result.
-2. Otherwise, GETs `https://registry.npmjs.org/@getspur/spur-cli/latest` with a 2s total timeout, parses `{ "version": "..." }`, writes the cache, and returns `Some(UpgradeInfo)` iff `latest > current` (semver-aware, ignoring pre-releases — see §5).
-3. Any failure (network, parse, JSON shape, fs) → `debug!` log, return `None`. **Never blocks, never panics, never surfaces to user.**
+1. Reads cache at `cache_path`. Two TTLs apply: `CHECK_INTERVAL` (24h) gates re-fetching from npm; `NOTIFY_INTERVAL` (3d) gates whether to return `Some(_)` even when a newer version is known.
+2. If cache age < `CHECK_INTERVAL`, skip the network call and use cached `latest`. Otherwise, GET `https://registry.npmjs.org/@getspur/spur-cli/latest` (and `/@getspur/spur-cli` for `dist-tags` if current is pre-release — see §5) with a 2s total timeout, parse `{ "version": "..." }`, update the cache.
+3. If `latest > current` (semver-aware): return `Some(UpgradeInfo)` **iff** `now - last_notified_at >= NOTIFY_INTERVAL`. When returning `Some`, write `last_notified_at = now` to the cache atomically so subsequent launches stay silent for 3 days. The TUI never writes the cache; suppression lives entirely inside this module.
+4. Any failure (network, parse, JSON shape, fs) → `debug!` log, return `None`. **Never blocks, never panics, never surfaces to user.**
 
 ### 3.2 Wire-in: `crates/spur-cli/src/main.rs`
 
@@ -135,7 +136,7 @@ Do not hand-roll comparison.
 }
 ```
 
-**Atomic write strategy.** `tempfile` is currently a dev-dep only in `spur-cli`. Rather than promoting it to a runtime dep just for this, write to a sibling path (`upgrade-check.json.tmp.<pid>`) then `std::fs::rename` to the final path. Same atomicity guarantee on the same filesystem, zero new deps. Parse failures → log `warn!` and overwrite on next successful check.
+**Atomic write strategy.** `tempfile` is currently a dev-dep only in `spur-cli`. Rather than promoting it to a runtime dep just for this, write to a sibling path (`upgrade-check.json.tmp.<pid>`) then `std::fs::rename` to the final path. Same-filesystem atomicity is guaranteed on Unix (macOS APFS, Linux ext4/xfs/btrfs). On Windows, `std::fs::rename` over an existing target is supported since Rust 1.62 but has historically been platform-quirky; if/when SPUR ships a Windows build, add a smoke test that exercises this path. The cache is non-critical state — a failed write degrades to "ask npm again next launch", never blocks. Parse failures → log `warn!` and overwrite on next successful check.
 
 ## 4. `spur upgrade` subcommand
 
@@ -152,7 +153,7 @@ spur upgrade [--check] [--force]
 | Detection order | Signal | Verdict |
 |---|---|---|
 | 1 | Canonical path contains `/.volta/tools/image/packages/@getspur/` | `Volta` → `volta install @getspur/spur-cli@latest` |
-| 2 | Canonical path contains `/.asdf/installs/nodejs/` and `/lib/node_modules/@getspur/` | `Asdf` → `npm install -g @getspur/spur-cli@latest` (asdf reshims automatically) |
+| 2 | Canonical path contains `/installs/nodejs/` **and** `/lib/node_modules/@getspur/` (whether under `~/.asdf/` or a custom `$ASDF_DATA_DIR`) | `Asdf` → `npm install -g @getspur/spur-cli@latest && asdf reshim nodejs` — asdf does **not** auto-reshim on global npm installs; reshim is required for new executables. (Re-installs of an existing executable keep working via the existing shim, but always emit the reshim command so the guidance is correct for both first installs and version bumps.) |
 | 3 | Canonical path contains `/.fnm/node-versions/` or `/fnm_multishells/` | `Fnm` → `npm install -g @getspur/spur-cli@latest` |
 | 4 | Canonical path contains `/pnpm/global/` or `$PNPM_HOME/` | `Pnpm` → `pnpm add -g @getspur/spur-cli@latest` |
 | 5 | Canonical path contains `/.bun/install/global/` | `Bun` → `bun add -g @getspur/spur-cli@latest` |
@@ -168,7 +169,7 @@ Order matters: Volta/asdf/fnm shims often live under paths that also match the g
 ## 5. Edge cases
 
 - **Offline / 5xx / DNS failure:** silent. `debug!` log only.
-- **Pre-release current** (e.g. `1.3.0-beta.1`): when the installed binary is a pre-release, **also query** `https://registry.npmjs.org/@getspur/spur-cli` (without `/latest`) and inspect `dist-tags.beta` (and `dist-tags.next` if present). Notify if a higher pre-release exists on the same dist-tag. Continue to also notify when stable `latest` exceeds the pre-release (the user can choose to leave the beta channel). Never recommend downgrade from beta to lower stable. **Without this, beta users are stranded** — `latest` only tracks the stable channel.
+- **Pre-release current** (e.g. `1.3.0-beta.1`): when the installed binary is a pre-release, **also query** `https://registry.npmjs.org/@getspur/spur-cli` (without `/latest`) and inspect `dist-tags.beta` and `dist-tags.next`. Both tags are **optional** — their absence is not an error and must not cause the check to fail; treat a missing tag exactly like a non-pre-release current (only `latest` is consulted). Notify if a higher pre-release exists on a tag that does exist. Continue to also notify when stable `latest` exceeds the pre-release (the user can choose to leave the beta channel). Never recommend downgrade from beta to lower stable. **Without this, beta users are stranded** — `latest` only tracks the stable channel.
 - **Downgrade scenario** (`latest < current`, e.g. user is on a dev build): cache the value, do not show banner, log at `debug!`. This is benign drift.
 - **Crate ↔ npm wrapper version drift:** the npm wrapper is the source of truth for the user's installed version because that's how they actually installed it. We compare `env!("CARGO_PKG_VERSION")` (the binary the npm wrapper shipped) against `registry.npmjs.org/.../latest`. If the wrapper later diverges from the binary's crate version, the banner is still actionable ("run `spur upgrade`").
 - **Cache corruption:** treat as cache-miss, overwrite on next check.
@@ -215,6 +216,14 @@ No new events. If the existing `spur-telemetry` Tier-1 channel is enabled, an ex
 No modern tool uses the `update-notifier` npm library — too heavy. We follow the lightweight detached-check pattern.
 
 ## 11. Revision history
+
+**v3 (2026-05-19, post-codex-second-pass).** Five fixes from codex's review of v2:
+
+1. **`last_notified_at` wiring.** v2 specified bumping the cache on dismissal, but the TUI receives only `UpgradeInfo` and has no cache handle. Moved the bump entirely into `check_for_upgrade`: when it returns `Some`, it has already written `last_notified_at = now`. The TUI side never touches the cache. Updated §2 and §3.1 accordingly.
+2. **asdf reshim guidance.** v2 said asdf "reshims automatically" — incorrect. asdf requires `asdf reshim nodejs` after npm global installs of new executables. Updated §4 step 2 to emit the reshim command.
+3. **asdf detection too narrow.** v2 matched `~/.asdf/installs/nodejs/`, missing custom `$ASDF_DATA_DIR` setups. Broadened the pattern to `/installs/nodejs/` + `/lib/node_modules/@getspur/` independent of the `~/.asdf/` prefix.
+4. **`dist-tags.beta` / `next` made explicitly optional.** v2 didn't say what happens if those tags don't exist on the registry. §5 now states their absence is not an error and falls back to `latest`-only behavior.
+5. **Windows atomic-rename caveat.** v2 implied universal atomicity. Added a note that Unix is guaranteed; Windows needs a smoke test if/when SPUR ships there. Emphasized the cache is non-critical so a failed write degrades safely.
 
 **v2 (2026-05-19, post-codex-review).** Fixes from codex review of v1:
 
