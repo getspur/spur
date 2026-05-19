@@ -141,9 +141,16 @@ impl PlanInspectorView {
     }
 
     fn set_selected_task_id_inner(&mut self, task_id: Option<String>) {
-        if self.selected_task_id.as_deref() != task_id.as_deref() {
+        let previous_task_id = self.selected_task_id.as_deref();
+        let selection_changed = previous_task_id != task_id.as_deref();
+        if selection_changed {
             self.open_issue_id = None;
             self.task_detail_scroll = 0;
+            if previous_task_id.is_some()
+                && matches!(self.mode, PlanInspectorMode::StreamPeek { .. })
+            {
+                self.mode = PlanInspectorMode::Browse;
+            }
         }
         self.selected_task_id = task_id;
     }
@@ -1194,6 +1201,75 @@ mod tests {
         projection
     }
 
+    fn projection_with_two_running_tasks(session_id: &SessionId) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "running".into(),
+                progress: "0/2 done".into(),
+                next_action: "watch workers".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    dispatched: 2,
+                    ..Default::default()
+                },
+                tasks: vec![
+                    PlanSnapshotTask {
+                        task_id: "t-12".into(),
+                        task_name: "Stage A".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-epic.1".into()),
+                        issue_title: None,
+                        status: "dispatched".into(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        depends_on: Vec::new(),
+                        blocked_by: Vec::new(),
+                        unblocks: Vec::new(),
+                        summary: None,
+                        feedback: None,
+                        error: None,
+                        worker_branch: None,
+                        delegation_id: Some("deleg-12".into()),
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: Vec::new(),
+                        next_action: "watch stream".into(),
+                    },
+                    PlanSnapshotTask {
+                        task_id: "t-13".into(),
+                        task_name: "Stage B".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-epic.2".into()),
+                        issue_title: None,
+                        status: "dispatched".into(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        depends_on: Vec::new(),
+                        blocked_by: Vec::new(),
+                        unblocks: Vec::new(),
+                        summary: None,
+                        feedback: None,
+                        error: None,
+                        worker_branch: None,
+                        delegation_id: Some("deleg-13".into()),
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: Vec::new(),
+                        next_action: "watch stream".into(),
+                    },
+                ],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
     fn lineage_with_worker_for_task(
         session_id: &SessionId,
         task_id: &str,
@@ -1217,6 +1293,47 @@ mod tests {
             from: session_id.clone(),
             request_id: "deleg-12".into(),
             executor_id: worker_session.into(),
+        }));
+        lineage
+    }
+
+    fn lineage_with_two_workers(session_id: &SessionId) -> ExecutorLineage {
+        let mut lineage = ExecutorLineage::new();
+        lineage.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+            agent: "codex".into(),
+            session: SessionId("worker-session-1".into()),
+            worktree: std::path::PathBuf::from("/tmp/worker-1"),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+            agent: "codex".into(),
+            session: SessionId("worker-session-2".into()),
+            worktree: std::path::PathBuf::from("/tmp/worker-2"),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+            from: session_id.clone(),
+            to_agent: "codex".into(),
+            task: "t-12".into(),
+            request_id: "deleg-12".into(),
+            delegation_plan: None,
+            issue_id: Some("bd-epic.1".into()),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+            from: session_id.clone(),
+            to_agent: "codex".into(),
+            task: "t-13".into(),
+            request_id: "deleg-13".into(),
+            delegation_plan: None,
+            issue_id: Some("bd-epic.2".into()),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+            from: session_id.clone(),
+            request_id: "deleg-12".into(),
+            executor_id: "worker-session-1".into(),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+            from: session_id.clone(),
+            request_id: "deleg-13".into(),
+            executor_id: "worker-session-2".into(),
         }));
         lineage
     }
@@ -1554,6 +1671,23 @@ mod tests {
         if let PlanInspectorMode::StreamPeek { state, .. } = view.mode() {
             assert_eq!(state.is_following, !initial);
         }
+    }
+
+    #[test]
+    fn peek_auto_closes_when_selected_task_changes() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_two_running_tasks(&session_id);
+        let lineage = lineage_with_two_workers(&session_id);
+        let _ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        view.set_selected_task_id_for_tests(Some("t-13".into()));
+
+        assert_eq!(view.selected_task_id_for_tests(), Some("t-13".into()));
+        assert!(matches!(view.mode(), PlanInspectorMode::Browse));
     }
 
     #[test]
