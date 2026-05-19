@@ -38,6 +38,7 @@ impl App {
             license_state,
             landing,
             config_path,
+            None,
         )
     }
 
@@ -64,6 +65,7 @@ impl App {
         license_state: LicenseStateEvent,
         landing: crate::landing::LandingDecision,
         config_path: Option<std::path::PathBuf>,
+        _upgrade_rx: Option<tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>>,
     ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
         Self::build_with_license_state_from_metadata_path(
