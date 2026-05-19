@@ -3,12 +3,12 @@
     "graph_index_version": "spur-graph-phase2"
   },
   "manifest_version": "<normalized>",
+  "graph_content_hash": "",
   "file_manifests": [
     {
       "stable_file_id": "c5ed2ae8f633f186",
       "path": "src/lib.rs",
-      "mtime_nanos": 0,
-      "size_bytes": 0,
+      "content_oid": "",
       "node_ids": [
         1,
         2,
@@ -23,8 +23,7 @@
     {
       "stable_file_id": "9776f1a0b79c3f6f",
       "path": "src/utils.rs",
-      "mtime_nanos": 0,
-      "size_bytes": 0,
+      "content_oid": "",
       "node_ids": [
         9,
         10,
@@ -335,5 +334,6 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0
     }
-  ]
+  ],
+  "tombstones": []
 }

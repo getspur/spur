@@ -290,7 +290,7 @@ fn extract_files(
             None
         };
         for path in files {
-            let source = match fs::read_to_string(path) {
+            let source_bytes = match fs::read(path) {
                 Ok(source) => source,
                 Err(err) => {
                     tracing::warn!(
@@ -301,12 +301,23 @@ fn extract_files(
                     continue;
                 }
             };
-            let Some(tree) = parser.parse(&source, None) else {
+            let Some(tree) = parser.parse(&source_bytes, None) else {
                 tracing::warn!(
                     path = %path.display(),
                     "spur-graph: skipping file (tree-sitter parse failed)"
                 );
                 continue;
+            };
+            let source = match String::from_utf8(source_bytes) {
+                Ok(source) => source,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "spur-graph: skipping file (source is not valid UTF-8)"
+                    );
+                    continue;
+                }
             };
             let result = if *label == "markdown" {
                 extract_markdown_file(
