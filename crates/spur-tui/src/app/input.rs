@@ -222,10 +222,13 @@ impl App {
                         .session_picker
                         .as_mut()
                         .and_then(|p| p.handle_key(key, &ctx)),
-                    ViewId::PlanInspector(_) => self
-                        .plan_inspector
-                        .as_mut()
-                        .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::PlanInspector(_) => {
+                        if let Some(view) = self.plan_inspector.as_mut() {
+                            view.handle_key_with_worker_streams(key, &mut self.worker_streams, &ctx)
+                        } else {
+                            None
+                        }
+                    }
                     ViewId::PlanBrowser => self
                         .plan_browser
                         .as_mut()
