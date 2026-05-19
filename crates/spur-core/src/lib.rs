@@ -24,6 +24,7 @@ pub mod session_synopsis;
 pub mod skills;
 pub mod skip_perm;
 pub mod spur_ext_interp;
+pub mod upgrade;
 pub mod worktree_authority;
 
 pub use lineage::{
@@ -41,4 +42,5 @@ pub use session_synopsis::{SessionSynopsis, SessionSynopsisProjection};
 pub use spur_acp::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
+pub use upgrade::UpgradeBanner;
 pub use worktree_authority::{AuthorityConfig, SweepReport, WorktreeAuthority};
