@@ -584,6 +584,7 @@ pub async fn run_tui_with_license(
     let mut event_rx = event_rx;
 
     // === bd-1vnk: rehydrate projections from prior NDJSON before drain begins ===
+    spur_core::project_root::warn_on_nested_layout(&repo_root);
     let replay_cfg = spur_core::event_replay::ReplayConfig {
         events_dir: repo_root.join(".spur").join("events"),
         replay_horizon: std::time::Duration::from_secs(config.log.event_replay_horizon_secs),
