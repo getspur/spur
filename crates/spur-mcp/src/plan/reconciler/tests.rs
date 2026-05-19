@@ -1,5 +1,7 @@
 use super::*;
+use crate::plan::PmLike;
 use proptest::prelude::*;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -787,6 +789,242 @@ fn test_dispatch_ctx(
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         }),
     }
+}
+
+struct ScriptedReadyPm {
+    inner: Arc<crate::plan::test_util::MockPm>,
+    empty_plan_ids: HashSet<String>,
+}
+
+#[async_trait::async_trait]
+impl crate::plan::PmLike for ScriptedReadyPm {
+    async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+        self.inner.get_issue(id).await
+    }
+
+    async fn list_issues(
+        &self,
+        filter: spur_pm::IssueFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        self.inner.list_issues(filter).await
+    }
+
+    async fn create_issue(&self, params: spur_pm::IssueCreate) -> anyhow::Result<String> {
+        self.inner.create_issue(params).await
+    }
+
+    async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+        self.inner.update_issue(id, update).await
+    }
+
+    async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        self.inner.add_dependency(issue_id, depends_on_id).await
+    }
+
+    async fn issue_labels(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.issue_labels(id).await
+    }
+
+    fn closed_status(&self) -> &str {
+        self.inner.closed_status()
+    }
+
+    fn source_str(&self) -> &'static str {
+        self.inner.source_str()
+    }
+
+    fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl spur_pm::BeadsAdvanced for ScriptedReadyPm {
+    async fn list_ready(
+        &self,
+        filter: spur_pm::ReadyFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        if filter.labels_all.iter().any(|label| {
+            crate::plan::labels::parse_plan_id(label)
+                .is_some_and(|plan_id| self.empty_plan_ids.contains(plan_id))
+        }) {
+            return Ok(Vec::new());
+        }
+        spur_pm::BeadsAdvanced::list_ready(self.inner.as_ref(), filter).await
+    }
+
+    async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+        spur_pm::BeadsAdvanced::list_comments(self.inner.as_ref(), issue_id).await
+    }
+
+    async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<String> {
+        spur_pm::BeadsAdvanced::add_comment(self.inner.as_ref(), issue_id, body).await
+    }
+
+    async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        spur_pm::BeadsAdvanced::remove_dependency(self.inner.as_ref(), issue_id, depends_on_id)
+            .await
+    }
+
+    async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+        spur_pm::BeadsAdvanced::dep_cycles(self.inner.as_ref()).await
+    }
+}
+
+async fn seed_mock_complete_epic(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    brain_session_id: &spur_acp::BrainSessionId,
+) -> String {
+    pm.create_issue(spur_pm::IssueCreate {
+        title: format!("{plan_id}: epic"),
+        description: Some(format!("{plan_id} test epic")),
+        issue_type: Some("epic".into()),
+        labels: vec![
+            crate::plan::labels::plan_id(plan_id),
+            crate::plan::labels::PLAN_COMPLETE.to_string(),
+            crate::plan::labels::plan_owner(&brain_session_id.as_session_id().0),
+        ],
+        ..Default::default()
+    })
+    .await
+    .expect("create mock complete epic")
+}
+
+async fn seed_mock_ready_task_plan(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    task_id: &str,
+    brain_session_id: &spur_acp::BrainSessionId,
+) -> String {
+    let epic_id = seed_mock_complete_epic(pm, plan_id, brain_session_id).await;
+    let issue_id = pm
+        .create_issue(spur_pm::IssueCreate {
+            title: format!("{task_id}: ready task"),
+            description: Some(format!("{task_id} test task")),
+            issue_type: Some("task".into()),
+            labels: vec![
+                crate::plan::labels::plan_id(plan_id),
+                crate::plan::labels::plan_task_id(task_id),
+                crate::plan::labels::agent("codex"),
+            ],
+            parent: Some(epic_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("create mock ready task");
+
+    let adv =
+        crate::plan::PmLike::advanced(pm.as_ref()).expect("mock pm should expose beads advanced");
+    adv.add_comment(
+        &epic_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                plan_id: plan_id.to_string(),
+                epic_issue_id: epic_id.clone(),
+                task_ids: vec![issue_id.clone()],
+                base_snapshot_branch: Some("main".to_string()),
+                base_snapshot_oid: None,
+                execution_mode: None,
+                brain_session_id: Some(brain_session_id.as_session_id().0.clone()),
+                explicit_base: None,
+            },
+        ),
+    )
+    .await
+    .expect("plan submit audit");
+    crate::plan::emit_task_spec_audit(adv, &issue_id, task_id, "codex", &[])
+        .await
+        .expect("task spec audit");
+
+    issue_id
+}
+
+#[tokio::test]
+async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_plan() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-global-ready".into()));
+    seed_mock_complete_epic(&pm, "P1", &brain_session_id).await;
+    seed_mock_ready_task_plan(&pm, "P2", "T2", &brain_session_id).await;
+    let scripted_pm = Arc::new(ScriptedReadyPm {
+        inner: Arc::clone(&pm),
+        empty_plan_ids: HashSet::from(["P1".to_string()]),
+    });
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        scripted_pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        None,
+        pro_feature_gate(),
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick once");
+    let request = delegation_rx.recv().await.expect("dispatch request");
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let p1_outcomes = outcomes.recent_outcomes("P1");
+    let p2_outcomes = outcomes.recent_outcomes("P2");
+
+    assert!(did_work, "mixed global tick should dispatch P2");
+    assert_eq!(request.issue_id.as_deref(), Some("bd-mock-3"));
+    assert_eq!(
+        p1_outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                DispatchOutcome::NoReadyTasks {
+                    plan_id,
+                    reason: NoReadyReason::NoMatchingRows,
+                    ..
+                } if plan_id == "P1"
+            ))
+            .count(),
+        1,
+        "P1 should record one per-plan NoReadyTasks outcome, got {p1_outcomes:?}"
+    );
+    assert!(
+        p2_outcomes.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Dispatched { task_id, agent, .. }
+                if task_id == "T2" && agent == "codex"
+        )),
+        "P2 should record a dispatched outcome, got {p2_outcomes:?}"
+    );
+}
+
+#[tokio::test]
+async fn global_reconciler_status_reports_plans_enumerated_and_dispatched_per_tick() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-global-status".into()));
+    seed_mock_complete_epic(&pm, "P1", &brain_session_id).await;
+    seed_mock_ready_task_plan(&pm, "P2", "T2", &brain_session_id).await;
+    let scripted_pm = Arc::new(ScriptedReadyPm {
+        inner: Arc::clone(&pm),
+        empty_plan_ids: HashSet::from(["P1".to_string()]),
+    });
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        scripted_pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+    let _request = delegation_rx.recv().await.expect("dispatch request");
+    let outcomes_store = reconciler.outcomes();
+    let status = outcomes_store.lock().await.reconciler_status();
+
+    assert_eq!(status.last_tick_plans_enumerated, 2);
+    assert_eq!(status.last_tick_plans_dispatched, 1);
 }
 
 async fn seed_ready_overlay_plan(

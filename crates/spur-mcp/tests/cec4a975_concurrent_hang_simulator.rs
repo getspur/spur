@@ -417,9 +417,9 @@ async fn drive_completion_collectors(fixture: &TestFixture) -> Vec<CompletionObs
                     issue_id: target.issue_id,
                     delegation_id: target.delegation_id,
                     elapsed_ms: started.elapsed().as_millis(),
-                    outcome: CompletionOutcome::Panicked(format!(
-                        "completion collector thread disconnected before send"
-                    )),
+                    outcome: CompletionOutcome::Panicked(
+                        "completion collector thread disconnected before send".to_string(),
+                    ),
                 });
             }
             Err(error) => {
