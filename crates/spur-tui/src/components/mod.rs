@@ -45,6 +45,7 @@ pub mod session_preview;
 pub mod snippet;
 pub mod spinner;
 pub mod status_bar;
+pub mod stream_pane;
 pub mod theme_query_source;
 pub mod tombstone;
 pub(crate) mod trace_format;
