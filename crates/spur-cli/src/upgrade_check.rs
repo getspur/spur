@@ -1,6 +1,7 @@
 mod cache;
 mod install_source;
-mod registry;
+#[allow(dead_code)]
+pub(crate) mod registry;
 
 use std::path::{Path, PathBuf};
 
