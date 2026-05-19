@@ -113,6 +113,11 @@ impl PlanInspectorView {
     }
 
     #[cfg(test)]
+    fn set_open_issue_id_for_tests(&mut self, id: Option<String>) {
+        self.open_issue_id = id;
+    }
+
+    #[cfg(test)]
     fn selected_task_id_for_tests(&self) -> Option<String> {
         self.selected_task_id.clone()
     }
@@ -532,6 +537,12 @@ impl PlanInspectorView {
         key: KeyEvent,
         ctx: &super::ViewContext,
     ) -> Option<Action> {
+        if self.open_issue_id.is_some() {
+            // The issue detail overlay owns modal focus; ignore peek shortcuts here
+            // and let the base view consume or ignore the key without stacking modals.
+            return None;
+        }
+
         let plan = self.active_plan(ctx)?;
         let task = self.selected_task(plan)?;
         let task_id = task.task_id.clone();
@@ -1641,6 +1652,24 @@ mod tests {
         let action = view.handle_key_with_worker_streams(key_char('s'), &mut ws, &ctx);
 
         assert!(matches!(view.mode(), PlanInspectorMode::StreamPeek { .. }));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn s_does_not_open_peek_when_issue_overlay_is_active() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+        view.set_open_issue_id_for_tests(Some("bd-epic.1".into()));
+
+        let action = view.handle_key_with_worker_streams(key_char('s'), &mut ws, &ctx);
+
+        assert!(matches!(view.mode(), PlanInspectorMode::Browse));
         assert!(action.is_none());
     }
 
