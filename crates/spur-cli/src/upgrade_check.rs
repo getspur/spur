@@ -38,7 +38,8 @@ pub fn cache_path() -> Option<PathBuf> {
     })
 }
 
-pub async fn check_for_upgrade(_cache_path: &Path) -> Option<UpgradeInfo> {
+pub async fn check_for_upgrade(cache_path: &Path) -> Option<UpgradeInfo> {
+    let _cache = cache::read(cache_path);
     None
 }
 
