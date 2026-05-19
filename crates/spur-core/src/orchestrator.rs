@@ -238,7 +238,7 @@ impl Orchestrator {
             .and_then(|v| v.as_bytes())
             .unwrap_or(crate::event_sink::DEFAULT_MAX_BYTES);
         let max_total_bytes = config.log.events_max_total_bytes;
-        crate::event_sink::spawn_sink(event_tx.subscribe(), max_bytes, max_total_bytes);
+        crate::event_sink::spawn_sink(event_tx.subscribe(), &repo_root, max_bytes, max_total_bytes);
         let review_sink = ReviewSink::new();
 
         let mut orchestrator = Self {
