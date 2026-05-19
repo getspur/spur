@@ -1,5 +1,6 @@
 mod commands;
 mod onboarding;
+pub mod upgrade_check;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
