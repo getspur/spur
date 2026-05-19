@@ -236,6 +236,13 @@ pub enum Action {
     /// \> most recent worker). Emitted by Alt+g globally (toggles between
     /// SessionDetail and Dashboard with Agents focused).
     InspectWorkers,
+    /// Navigate to Dashboard, focus the executor with this id in `AgentsTree`,
+    /// and call `DetailPane::jump_to_tab(tab)`. Emitted by PlanInspector's `S`
+    /// key when the selected task has a resolved worker executor.
+    FocusWorkerInDashboard {
+        executor_id: String,
+        tab: crate::components::detail_pane::DetailTab,
+    },
     /// Plan C Tier 2 — show the capability-tease modal in response to
     /// a TUI-side feature-gate denial. The orchestrator-resolved
     /// `required_tier` (if any) is surfaced as the upgrade target;
@@ -277,4 +284,25 @@ pub enum ViewId {
     #[cfg(feature = "markdown")]
     MermaidOverlay(SessionId),
     Insights,
+}
+
+#[cfg(test)]
+mod focus_worker_action_tests {
+    use super::*;
+    use crate::components::detail_pane::DetailTab;
+
+    #[test]
+    fn focus_worker_in_dashboard_action_constructs() {
+        let a = Action::FocusWorkerInDashboard {
+            executor_id: "worker-session-42".into(),
+            tab: DetailTab::Stream,
+        };
+        match a {
+            Action::FocusWorkerInDashboard { executor_id, tab } => {
+                assert_eq!(executor_id, "worker-session-42");
+                assert_eq!(tab, DetailTab::Stream);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 }

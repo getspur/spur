@@ -979,6 +979,7 @@ impl App {
             | Action::ScrollToTop
             | Action::ScrollToBottom
             | Action::CycleFocus
+            | Action::FocusWorkerInDashboard { .. }
             | Action::Tick => {}
 
             // Issue actions — wired to the PM backend; IssuesPanel not yet implemented.
