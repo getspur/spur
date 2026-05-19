@@ -14,17 +14,18 @@ use tokio::sync::broadcast;
 
 #[tokio::test(flavor = "current_thread")]
 async fn funnel_plus_sink_round_trip() {
-    // Isolate events dir. `event_sink::events_dir()` is cwd-relative
-    // (".spur/events"), so we cd into a tempdir for this test.
+    // Isolate events dir under a tempdir-rooted `.spur/events/`.
     let tmpdir = tempfile::tempdir().unwrap();
-    std::env::set_current_dir(tmpdir.path()).unwrap();
-    fs::create_dir_all(".spur/events").unwrap();
+    let repo_root = tmpdir.path().to_path_buf();
+    std::env::set_current_dir(&repo_root).unwrap();
+    fs::create_dir_all(repo_root.join(".spur").join("events")).unwrap();
 
     let (bcast_tx, mut bcast_rx) = broadcast::channel(256);
     let seq = Arc::new(AtomicU64::new(0));
     let funnel = spawn_funnel(bcast_tx.clone(), seq);
     spawn_sink(
         bcast_tx.subscribe(),
+        &repo_root,
         spur_core::event_sink::DEFAULT_MAX_BYTES,
         u64::MAX,
     );
@@ -47,7 +48,7 @@ async fn funnel_plus_sink_round_trip() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     // Find the JSONL file.
-    let files: Vec<_> = fs::read_dir(".spur/events")
+    let files: Vec<_> = fs::read_dir(repo_root.join(".spur").join("events"))
         .unwrap()
         .filter_map(Result::ok)
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ndjson"))
