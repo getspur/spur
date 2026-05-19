@@ -55,6 +55,7 @@ fn advanced_beads<'a>(
 
 #[tokio::test]
 async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     let (_beads, pm) = super::init_beads_pm(dir.path()).await;
     let feature_gate = super::pro_feature_gate();
@@ -129,6 +130,7 @@ async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
 
 #[tokio::test]
 async fn derive_beads_version_does_not_collide_across_plan_restart_same_plan_id() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     let (_beads, pm) = super::init_beads_pm(dir.path()).await;
     let feature_gate = super::pro_feature_gate();
@@ -210,6 +212,7 @@ async fn derive_beads_version_does_not_collide_across_plan_restart_same_plan_id(
 
 #[tokio::test]
 async fn derive_beads_version_includes_malformed_task_audit_sentinel() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     let (_beads, pm) = super::init_beads_pm(dir.path()).await;
     let feature_gate = super::pro_feature_gate();
