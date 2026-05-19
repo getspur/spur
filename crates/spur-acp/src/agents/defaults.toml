@@ -62,3 +62,34 @@ strengths = ["multi-modal input handling"]
 limitations = []
 input_expectations = ""
 output_shape = "Narrative analysis + action items."
+
+[opencode]
+description = "Generalist agent routed via OpenRouter models; useful for A/B checks with non-Anthropic and non-OpenAI models."
+tier = "generalist"
+good_for = [
+  "single-file edits with non-Anthropic models",
+  "experiments comparing model behavior on the same task",
+]
+avoid_for = [
+  "tasks needing strong long-context reasoning",
+  "workflows depending on Anthropic- or OpenAI-specific behaviors",
+]
+strengths = ["model flexibility via OpenRouter"]
+limitations = ["behavior varies by routed model"]
+input_expectations = "Specify the routed model in seed args; assume baseline capability."
+output_shape = "Unified diff + brief rationale."
+
+[kimi]
+description = "Generalist agent (Moonshot) with strong long-context reasoning; ACP transport."
+tier = "generalist"
+good_for = [
+  "long-context analysis and summarization",
+  "multi-file edits when full repo context fits",
+]
+avoid_for = [
+  "tasks requiring proprietary OpenAI/Anthropic tool integrations",
+]
+strengths = ["large context window", "low latency"]
+limitations = ["may rate-limit on heavy sessions"]
+input_expectations = ""
+output_shape = "Unified diff + summary."
