@@ -32,9 +32,15 @@ pub struct ReplayConfig {
 }
 
 impl Default for ReplayConfig {
+    /// `events_dir` defaults to an empty `PathBuf` — callers MUST set
+    /// it from a discovered project root before invoking
+    /// `replay_events`. Anchoring the default to a raw relative
+    /// `.spur/events` allowed nested `.spur/.spur/events/` trees to
+    /// appear when SPUR was launched from inside its own state
+    /// directory; see `spur_core::project_root::discover`.
     fn default() -> Self {
         Self {
-            events_dir: PathBuf::from(".spur/events"),
+            events_dir: PathBuf::new(),
             replay_horizon: Duration::from_secs(7 * 86400),
             skip_pid: Some(std::process::id()),
             max_line_bytes: 8 * 1024 * 1024,
@@ -131,6 +137,10 @@ pub fn replay_events<F>(config: &ReplayConfig, mut on_event: F) -> std::io::Resu
 where
     F: FnMut(&SpurEvent),
 {
+    debug_assert!(
+        !config.events_dir.as_os_str().is_empty(),
+        "replay_events: events_dir is empty — caller forgot to override ReplayConfig::default().events_dir with a path anchored to the discovered project root",
+    );
     let start = Instant::now();
     let mut stats = ReplayStats::default();
     let cutoff = std::time::SystemTime::now().checked_sub(config.replay_horizon);
@@ -213,7 +223,7 @@ mod tests {
     fn replay_config_default_uses_current_pid() {
         let cfg = ReplayConfig::default();
         assert_eq!(cfg.skip_pid, Some(std::process::id()));
-        assert_eq!(cfg.events_dir, std::path::PathBuf::from(".spur/events"));
+        assert_eq!(cfg.events_dir, std::path::PathBuf::new());
         assert_eq!(
             cfg.replay_horizon,
             std::time::Duration::from_secs(7 * 86400)

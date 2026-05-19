@@ -203,6 +203,7 @@ mod worker_stream_routing_tests {
         // against it directly, mirroring run_tui_with_license's wiring.
         let mut app = test_app();
         let cfg = spur_core::event_replay::ReplayConfig {
+            events_dir: std::path::PathBuf::from(".spur/events"),
             replay_horizon: std::time::Duration::from_secs(86400 * 365),
             skip_pid: None, // include all PIDs in this test
             ..Default::default()
