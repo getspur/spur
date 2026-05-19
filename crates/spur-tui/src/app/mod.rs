@@ -637,7 +637,12 @@ impl App {
             }
             ViewId::PlanInspector(_) => {
                 if let Some(ref mut view) = self.plan_inspector {
-                    view.render(frame, view_area, &ctx);
+                    view.render_with_worker_streams(
+                        frame,
+                        view_area,
+                        &mut self.worker_streams,
+                        &ctx,
+                    );
                 }
             }
             ViewId::PlanBrowser => {

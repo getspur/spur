@@ -973,13 +973,24 @@ impl App {
                 self.dirty = true;
             }
 
+            Action::FocusWorkerInDashboard { executor_id, tab } => {
+                use crate::views::dashboard::Panel;
+                let eid = spur_core::ExecutorId(executor_id);
+                self.dashboard.set_focused_panel(Panel::Agents);
+                self.dashboard
+                    .agents_tree_mut()
+                    .set_selected(Some(eid.clone()));
+                self.dashboard.set_focused_node(Some(eid));
+                self.dashboard.detail_pane_mut().jump_to_tab(tab);
+                self.navigate_to(ViewId::Dashboard);
+            }
+
             // Scroll actions are already handled inside the views' handle_key methods.
             Action::ScrollUp
             | Action::ScrollDown
             | Action::ScrollToTop
             | Action::ScrollToBottom
             | Action::CycleFocus
-            | Action::FocusWorkerInDashboard { .. }
             | Action::Tick => {}
 
             // Issue actions — wired to the PM backend; IssuesPanel not yet implemented.
@@ -1290,4 +1301,43 @@ impl App {
 
 fn to_wire_decision(d: &spur_core::ReviewDecision) -> spur_acp::ReviewDecision {
     d.clone()
+}
+
+#[cfg(test)]
+mod focus_worker_routing_tests {
+    use super::*;
+    use crate::action::{Action, ViewId};
+    use crate::components::detail_pane::DetailTab;
+    use crate::views::dashboard::Panel;
+
+    #[test]
+    fn focus_worker_action_navigates_to_dashboard_and_targets_executor() {
+        let mut app = App::new_for_tests();
+
+        // Seed an executor so AgentsTree has a node to select.
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::ExecutorSpawned {
+            id: "worker-session-1".into(),
+            parent_id: None,
+            session_id: SessionId("brain-1".into()),
+            agent: "codex".into(),
+            role: spur_acp::Role::Executor,
+            task_spec: "test task".into(),
+        }));
+
+        app.process_action(Action::FocusWorkerInDashboard {
+            executor_id: "worker-session-1".into(),
+            tab: DetailTab::Stream,
+        });
+
+        assert_eq!(app.current_view(), &ViewId::Dashboard);
+        assert_eq!(app.dashboard_for_test().focused_panel(), Panel::Agents);
+        assert_eq!(
+            app.dashboard_for_test().focused_node(),
+            Some(&spur_core::ExecutorId("worker-session-1".into()))
+        );
+        assert_eq!(
+            app.dashboard_for_test().detail_pane().current_tab(),
+            DetailTab::Stream
+        );
+    }
 }
