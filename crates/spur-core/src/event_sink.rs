@@ -121,10 +121,12 @@ impl SinkState {
     fn open_with_caps(dir: &Path, max_per_file: u64, max_total: u64) -> std::io::Result<Self> {
         let mut state = Self::open(dir, max_per_file)?;
         state.max_total_bytes = Some(max_total);
-        let effective = max_total.saturating_sub(state.max_bytes);
-        if let Err(e) = enforce_event_cap(&state.dir, effective, &state.current_path) {
-            tracing::warn!(error = %e,
-                "event_sink: enforce_event_cap failed");
+        if let Some(effective) = effective_cap_with_headroom(max_total, state.max_bytes, "startup")
+        {
+            if let Err(e) = enforce_event_cap(&state.dir, effective, &state.current_path) {
+                tracing::warn!(error = %e,
+                    "event_sink: enforce_event_cap failed");
+            }
         }
         Ok(state)
     }
@@ -155,10 +157,11 @@ impl SinkState {
             // Reserve `max_bytes` of headroom so the freshly opened file
             // can grow up to its rotation threshold without pushing the
             // directory total past the user-visible cap.
-            let effective = cap.saturating_sub(self.max_bytes);
-            if let Err(e) = enforce_event_cap(&self.dir, effective, &self.current_path) {
-                tracing::warn!(error = %e,
-                    "event_sink: enforce_event_cap failed");
+            if let Some(effective) = effective_cap_with_headroom(cap, self.max_bytes, "rotation") {
+                if let Err(e) = enforce_event_cap(&self.dir, effective, &self.current_path) {
+                    tracing::warn!(error = %e,
+                        "event_sink: enforce_event_cap failed");
+                }
             }
         }
         Ok(())
@@ -167,6 +170,21 @@ impl SinkState {
     fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }
+}
+
+fn effective_cap_with_headroom(max_total: u64, max_bytes: u64, phase: &'static str) -> Option<u64> {
+    let effective = max_total.saturating_sub(max_bytes);
+    if effective < max_bytes {
+        tracing::warn!(
+            max_total_bytes = max_total,
+            max_bytes,
+            effective_cap_bytes = effective,
+            phase,
+            "event_sink: total cap too small to reserve active-file headroom; skipping event cap enforcement"
+        );
+        return None;
+    }
+    Some(effective)
 }
 
 /// Garbage-collect oldest `.ndjson` files in `dir` until the cumulative
@@ -376,5 +394,84 @@ mod tests {
             total,
             max_total
         );
+    }
+
+    fn write_sized_ndjson(dir: &Path, name: &str, size: usize) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, vec![b'x'; size]).unwrap();
+        path
+    }
+
+    fn ndjson_total_bytes(dir: &Path) -> u64 {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("ndjson"))
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum::<u64>()
+    }
+
+    #[test]
+    fn open_with_caps_keeps_existing_files_when_total_cap_has_headroom() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path().join("events");
+        fs::create_dir_all(&dir).unwrap();
+
+        let files = [
+            write_sized_ndjson(&dir, "old-0.ndjson", 3 * 1024 * 1024),
+            write_sized_ndjson(&dir, "old-1.ndjson", 3 * 1024 * 1024),
+            write_sized_ndjson(&dir, "old-2.ndjson", 4 * 1024 * 1024),
+        ];
+
+        let _state =
+            SinkState::open_with_caps(&dir, DEFAULT_MAX_BYTES, 128 * 1024 * 1024).expect("open");
+
+        for file in files {
+            assert!(file.exists(), "expected {} to remain", file.display());
+        }
+    }
+
+    #[test]
+    fn open_with_caps_deletes_oldest_until_effective_headroom_cap() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path().join("events");
+        fs::create_dir_all(&dir).unwrap();
+
+        write_sized_ndjson(&dir, "old-0.ndjson", 7 * 1024 * 1024);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_sized_ndjson(&dir, "old-1.ndjson", 7 * 1024 * 1024);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let newest = write_sized_ndjson(&dir, "old-2.ndjson", 6 * 1024 * 1024);
+
+        let _state =
+            SinkState::open_with_caps(&dir, DEFAULT_MAX_BYTES, 16 * 1024 * 1024).expect("open");
+
+        let effective_cap = 16 * 1024 * 1024 - DEFAULT_MAX_BYTES;
+        assert!(
+            ndjson_total_bytes(&dir) <= effective_cap,
+            "total bytes {} exceeds effective cap {}",
+            ndjson_total_bytes(&dir),
+            effective_cap
+        );
+        assert!(newest.exists(), "expected newest file to remain");
+    }
+
+    #[test]
+    fn open_with_caps_skips_startup_gc_when_cap_cannot_fit_headroom() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path().join("events");
+        fs::create_dir_all(&dir).unwrap();
+
+        let files = [
+            write_sized_ndjson(&dir, "old-0.ndjson", 1024 * 1024),
+            write_sized_ndjson(&dir, "old-1.ndjson", 1024 * 1024),
+        ];
+
+        let _state =
+            SinkState::open_with_caps(&dir, DEFAULT_MAX_BYTES, DEFAULT_MAX_BYTES).expect("open");
+
+        for file in files {
+            assert!(file.exists(), "expected {} to remain", file.display());
+        }
     }
 }

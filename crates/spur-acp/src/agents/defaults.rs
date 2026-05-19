@@ -26,6 +26,7 @@ pub fn builtin_descriptor(agent_name: &str) -> Option<DelegationDescriptor> {
     let key = match agent_name {
         "claude-code" => "claude-code-acp",
         "codex-acp" => "codex",
+        "codex-bin" => "codex",
         "gemini-acp" => "gemini",
         other => other,
     };
@@ -41,8 +42,11 @@ pub fn known_agents() -> &'static [&'static str] {
         "kiro",
         "codex",
         "codex-acp",
+        "codex-bin",
         "gemini",
         "gemini-acp",
+        "opencode",
+        "kimi",
     ]
 }
 
@@ -253,6 +257,27 @@ transport = "acp""#,
         // good_for starts empty by default; should get populated
         apply_builtin_defaults(&mut cfg);
         assert!(cfg.delegation.good_for.len() >= 3);
+    }
+
+    #[test]
+    fn opencode_builtin_default_populates_good_for() {
+        let mut cfg = minimal_agent("opencode");
+        apply_builtin_defaults(&mut cfg);
+        assert!(!cfg.delegation.good_for.is_empty());
+    }
+
+    #[test]
+    fn kimi_builtin_default_populates_good_for() {
+        let mut cfg = minimal_agent("kimi");
+        apply_builtin_defaults(&mut cfg);
+        assert!(!cfg.delegation.good_for.is_empty());
+    }
+
+    #[test]
+    fn codex_bin_alias_populates_good_for() {
+        let mut cfg = minimal_agent("codex-bin");
+        apply_builtin_defaults(&mut cfg);
+        assert!(!cfg.delegation.good_for.is_empty());
     }
 
     #[test]
