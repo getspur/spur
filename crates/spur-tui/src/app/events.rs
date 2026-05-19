@@ -540,6 +540,10 @@ pub async fn run_tui(
     perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
     start_in_picker: bool,
 ) -> anyhow::Result<()> {
+    let repo_root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| spur_core::project_root::discover(&cwd).ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     run_tui_with_license(
         event_rx,
         user_input_tx,
@@ -549,6 +553,7 @@ pub async fn run_tui(
         App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
         None,
+        repo_root,
     )
     .await
 }
@@ -563,6 +568,7 @@ pub async fn run_tui_with_license(
     license_state: LicenseStateEvent,
     landing: crate::landing::LandingDecision,
     config_path: Option<std::path::PathBuf>,
+    repo_root: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let mut terminal = crate::tui::setup()?;
     let mut app = App::build_with_license_state(
@@ -578,7 +584,9 @@ pub async fn run_tui_with_license(
     let mut event_rx = event_rx;
 
     // === bd-1vnk: rehydrate projections from prior NDJSON before drain begins ===
+    spur_core::project_root::warn_on_nested_layout(&repo_root);
     let replay_cfg = spur_core::event_replay::ReplayConfig {
+        events_dir: repo_root.join(".spur").join("events"),
         replay_horizon: std::time::Duration::from_secs(config.log.event_replay_horizon_secs),
         ..Default::default()
     };
@@ -799,6 +807,10 @@ pub async fn run_tui_with_config(
     config: std::sync::Arc<spur_acp::SpurConfig>,
     config_path: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
+    let repo_root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| spur_core::project_root::discover(&cwd).ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     run_tui_with_license(
         event_rx,
         user_input_tx,
@@ -808,6 +820,7 @@ pub async fn run_tui_with_config(
         App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
         config_path,
+        repo_root,
     )
     .await
 }
