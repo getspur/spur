@@ -1,3 +1,4 @@
+mod cmd;
 mod commands;
 mod onboarding;
 pub mod upgrade_check;
@@ -251,6 +252,15 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+    /// Check for and apply SPUR CLI upgrades
+    Upgrade {
+        /// Check the latest published version without installing anything.
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt before running the install command.
+        #[arg(long)]
+        force: bool,
     },
     /// Manage workflows
     Workflow {
@@ -805,6 +815,10 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Auth { command } => commands::auth::run(command).await,
+        Commands::Upgrade { check, force } => {
+            let exit = cmd::upgrade::run(cmd::upgrade::UpgradeArgs { check, force }).await?;
+            std::process::exit(exit);
+        }
         Commands::Workflow { command } => {
             match command {
                 WorkflowCommands::Validate { file } => {
