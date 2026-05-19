@@ -763,9 +763,12 @@ impl View for PlanInspectorView {
         .split(area);
         self.stacked_mode = area.width < 90;
 
-        let selected_task_has_issue = if let Some(plan) = self.active_plan(ctx) {
+        let (selected_task_has_issue, selected_task_available) = if let Some(plan) =
+            self.active_plan(ctx)
+        {
             self.ensure_selection(plan);
             let selected = self.selected_task(plan);
+            let selected_task_available = selected.is_some();
             let selected_stage_idx = selected.map(|t| t.stage_idx).unwrap_or(0);
             let live_node =
                 selected
@@ -951,7 +954,10 @@ impl View for PlanInspectorView {
                 }
             }
 
-            selected.and_then(|task| task.issue_id.as_deref()).is_some()
+            (
+                selected.and_then(|task| task.issue_id.as_deref()).is_some(),
+                selected_task_available,
+            )
         } else {
             let message = self
                 .pinned_plan_id
@@ -964,7 +970,7 @@ impl View for PlanInspectorView {
                 Paragraph::new(message).block(Block::default().borders(Borders::ALL)),
                 chunks[1],
             );
-            false
+            (false, false)
         };
 
         let enter_hint = if self.open_issue_id.is_some() {
@@ -979,11 +985,16 @@ impl View for PlanInspectorView {
         } else {
             ""
         };
+        let peek_hint = if self.open_issue_id.is_none() && selected_task_available {
+            "  s: stream peek  S: jump to worker"
+        } else {
+            ""
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 format!(
-                    " h/l: lane  j/k: task  b: blocker  {}  o: work item  g/G: ends  Alt+P/Esc: close {}",
-                    enter_hint, scroll_hint
+                    " h/l: lane  j/k: task  b: blocker  {}  o: work item{}  g/G: ends  Alt+P/Esc: close {}",
+                    enter_hint, peek_hint, scroll_hint
                 ),
                 Style::default().fg(token(ctx.theme, "plan_inspector.footer_hint.fg")),
             )])),
@@ -1584,6 +1595,67 @@ mod tests {
             "expected 'stream:' title in buffer"
         );
         assert!(dump.contains("t-12"), "expected task id in buffer");
+    }
+
+    #[test]
+    fn footer_advertises_peek_keys_in_browse_mode() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            dump.contains("s: stream peek"),
+            "expected footer to advertise stream peek:\n{dump}"
+        );
+        assert!(
+            dump.contains("S: jump to worker"),
+            "expected footer to advertise dashboard jump:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn footer_omits_peek_keys_when_issue_overlay_open() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+        view.set_open_issue_id_for_tests(Some("bd-epic.1".into()));
+
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            !dump.contains("s: stream peek"),
+            "expected footer not to advertise stream peek while issue overlay is open:\n{dump}"
+        );
+        assert!(
+            !dump.contains("S: jump to worker"),
+            "expected footer not to advertise dashboard jump while issue overlay is open:\n{dump}"
+        );
     }
 
     #[test]
