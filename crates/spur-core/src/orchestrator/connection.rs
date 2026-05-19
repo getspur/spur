@@ -141,7 +141,7 @@ impl Orchestrator {
         // callbacks (ACP native); other transports ignore the value.
         let perm_tx = if perms.skip { None } else { permission_tx };
 
-        build_connection_from_transport(config, args, perm_tx)
+        build_connection_from_transport(config, args, perm_tx, &self.repo_root)
     }
 
     pub(super) async fn list_sessions_from_rpc(
@@ -406,15 +406,20 @@ pub(super) fn build_connection_from_transport(
     config: &spur_acp::config::AgentConfig,
     spawn_args: Vec<String>,
     permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
+    repo_root: &Path,
 ) -> Box<dyn AgentConnection> {
     match config.transport {
-        TransportKind::Acp => Box::new(NativeAcpConnection::new_with_kind(
-            config.name.clone(),
-            config.command.clone(),
-            spawn_args,
-            config.kind,
-            permission_tx,
-        )),
+        TransportKind::Acp => {
+            let mut conn = NativeAcpConnection::new_with_kind(
+                config.name.clone(),
+                config.command.clone(),
+                spawn_args,
+                config.kind,
+                permission_tx,
+            );
+            conn.set_repo_root(repo_root.to_path_buf());
+            Box::new(conn)
+        }
         TransportKind::Stdio => Box::new(StdioAdapter::new(
             config.name.clone(),
             config.command.clone(),

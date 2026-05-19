@@ -33,8 +33,13 @@ static ROTATION_SEQ: AtomicU64 = AtomicU64::new(0);
 /// `max_bytes` controls per-file rotation. `max_total_bytes` caps the
 /// cumulative size of all `.ndjson` files in the events dir; oldest
 /// files are deleted on every rotation to honour the cap.
-pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>, max_bytes: u64, max_total_bytes: u64) {
-    let events_dir = events_dir();
+pub fn spawn_sink(
+    mut rx: broadcast::Receiver<SpurEvent>,
+    repo_root: &Path,
+    max_bytes: u64,
+    max_total_bytes: u64,
+) {
+    let events_dir = events_dir(repo_root);
     if let Err(e) = fs::create_dir_all(&events_dir) {
         tracing::error!(error = %e, dir = %events_dir.display(),
             "event_sink: failed to create events dir; sink disabled");
@@ -214,8 +219,8 @@ fn enforce_event_cap(dir: &Path, cap_bytes: u64, protected: &Path) -> std::io::R
     Ok(deleted)
 }
 
-pub(crate) fn events_dir() -> PathBuf {
-    PathBuf::from(".spur/events")
+pub(crate) fn events_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join(".spur").join("events")
 }
 
 fn rotated_path(dir: &Path) -> PathBuf {

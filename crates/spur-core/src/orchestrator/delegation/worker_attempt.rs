@@ -378,8 +378,12 @@ pub(crate) async fn run_one_worker_attempt(
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
     let spawn_args = ctx.agent_config.effective_args();
-    let mut connection: Box<dyn AgentConnection> =
-        connection::build_connection_from_transport(ctx.agent_config, spawn_args, None);
+    let mut connection: Box<dyn AgentConnection> = connection::build_connection_from_transport(
+        ctx.agent_config,
+        spawn_args,
+        None,
+        &worktrees.repo_root,
+    );
 
     // S5 — consume `_spur/*` ExtNotifications from this worker and
     // translate them into SpurEvent variants via the funnel. Must run
