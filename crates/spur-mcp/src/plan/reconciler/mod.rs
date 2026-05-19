@@ -842,6 +842,13 @@ impl Reconciler {
         self.outcomes.lock().await.mark_tick(now);
     }
 
+    async fn record_tick_plans_enumerated(&self, count: usize) {
+        self.outcomes
+            .lock()
+            .await
+            .record_tick_plans_enumerated(count);
+    }
+
     async fn record_outcome(&self, plan_id: Option<&str>, outcome: DispatchOutcome) {
         self.outcomes.lock().await.record_outcome(plan_id, outcome);
     }

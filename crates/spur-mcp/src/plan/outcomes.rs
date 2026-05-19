@@ -108,6 +108,8 @@ pub struct ReconcilerStatus {
     pub recent_outcomes: Vec<DispatchOutcome>,
     pub stuck_tasks: Vec<StuckTask>,
     pub last_tick_at: Option<SystemTime>,
+    pub last_tick_plans_enumerated: usize,
+    pub last_tick_plans_dispatched: usize,
 }
 
 /// Ephemeral reconciler outcomes. MUST NOT be persisted to beads; reconstruct
@@ -262,11 +264,19 @@ pub struct OutcomeStore {
     pub outcomes_global: OutcomeBuffer,
     skip_observations: HashMap<(String, String), SkipObservation>,
     last_tick_at: Option<SystemTime>,
+    last_tick_plans_enumerated: usize,
+    last_tick_plans_dispatched: usize,
 }
 
 impl OutcomeStore {
     pub fn mark_tick(&mut self, now: SystemTime) {
         self.last_tick_at = Some(now);
+        self.last_tick_plans_enumerated = 0;
+        self.last_tick_plans_dispatched = 0;
+    }
+
+    pub fn record_tick_plans_enumerated(&mut self, count: usize) {
+        self.last_tick_plans_enumerated += count;
     }
 
     pub fn record_outcome(&mut self, plan_id: Option<&str>, outcome: DispatchOutcome) {
@@ -342,6 +352,7 @@ impl OutcomeStore {
             timestamp: now,
         };
         self.record_outcome(Some(plan_id), outcome.clone());
+        self.last_tick_plans_dispatched += 1;
         outcome
     }
 
@@ -451,6 +462,8 @@ impl OutcomeStore {
             recent_outcomes: self.global_recent_outcomes(),
             stuck_tasks: self.stuck_tasks(),
             last_tick_at: self.last_tick_at,
+            last_tick_plans_enumerated: self.last_tick_plans_enumerated,
+            last_tick_plans_dispatched: self.last_tick_plans_dispatched,
         }
     }
 
