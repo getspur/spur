@@ -1,6 +1,57 @@
 ## Unreleased
 
 ### Added
+- **`spur-graph` content-hash invalidation substrate (bd-jvers, v2.1).**
+  Replaces mtime/size per-file invalidation with a filtered-content hash
+  over `(path, content_oid)` pairs, where `content_oid` is the git blob OID
+  (from `git ls-files -s` for clean files; locally computed via
+  `sha1("blob " || decimal(size) || "\0" || bytes)` for dirty / untracked /
+  fs-mode files; `gitlink:<oid>` for submodules). Cache key derivation
+  reads only the git index + dirty file bytes — does not depend on `HEAD`.
+  - **Canonical artifact** at `<git_common_dir>/spur-graph/artifacts/<manifest_version>/<graph_content_hash>.json`
+    (immutable per key, content-addressed).
+  - **Per-worktree** `.spur/graph-index.json` retained as a full artifact,
+    hardlinked to the canonical (with `fs::copy` fallback across filesystems).
+    Existing direct consumers (`crates/spur-tui/src/mentions/code_graph/source.rs`)
+    are source-compatible — no API changes.
+  - **Optional pointer sidecar** at `.spur/graph-index.pointer.json` carries
+    provenance (`indexed_commit_oid`, `source_kind`, `manifest_version`).
+  - **Bucket reuse.** Within a worktree, unchanged paths (same `content_oid`
+    as the previous artifact) are cloned wholesale — no tree-sitter parsing
+    or symbol extraction. This is the per-build extraction-saving mechanism.
+  - **Cross-worktree dedup.** Two worktrees with identical filtered content
+    derive the same canonical key regardless of commit history, so the
+    second writer skips the canonical JSON write and hardlinks the existing
+    artifact. (Each worktree still computes its own discovery + hash;
+    pre-extraction shortcircuit is tracked as a followup, bd-5yful.)
+  - **Dirty == committed (I2).** A worktree's dirty `content_oid` equals
+    the blob OID git would assign if the file were committed, so
+    `graph_content_hash` before and after committing identical bytes
+    matches and every bucket is reused on the next build.
+  - `fs2` exclusive lock with 5s timeout + worktree-only fallback on
+    contention; atomic write via tmp + rename + best-effort `fsync_dir`.
+  - Schema bumped to `spur-graph-schema-v4`: `GraphFileManifestEntry` swaps
+    `mtime_nanos`/`size_bytes` for `content_oid`; `GraphIndexArtifact` gains
+    `graph_content_hash` and value-level `tombstones` (no commit OID).
+  - Design spec: `docs/architecture/spur-graph-git-invalidation.md`.
+- **`spur-graph` benchmark gate.** Criterion bench at
+  `crates/spur-graph/benches/incremental.rs` covers four scenarios:
+  clean cold (cache miss), clean warm (cache hit via hardlink), 1k-file
+  change set over baseline, and dirty unstaged mods overlay. Env-knob
+  scaling via `BENCH_FILE_COUNT` / `BENCH_CHANGE_SET` / `BENCH_DIRTY_MODS`.
+
+### Fixed
+- **`spur-graph` cache lock-timeout no longer leaves a ghost pointer**
+  (bd-jvers followup). On `fs2` lock contention, `write_with_dedup`
+  previously wrote the worktree artifact and ALSO wrote a pointer sidecar
+  whose `canonical_artifact_path` referenced a canonical file that was
+  never created — any pointer-following reader hit a deterministic
+  missing-file failure. Fix: on lock-timeout, write the worktree artifact
+  (still authoritative) and remove any pre-existing pointer so it cannot
+  be stale. Convergent finding from claude-code and kimi reviews. Test
+  `lock_timeout_writes_worktree_only` extended to stage a stale pointer
+  before the lock-contended write and assert no pointer exists after.
+
 - **Experimental TUI Insights view (`--features analytics`, default OFF).**
   `Alt+a` from any view opens a 4-tab Insights surface (Overview / Timeline /
   Breakdown / Live) backed by `spur-context::AnalyticsEngine`'s DuckDB store.
