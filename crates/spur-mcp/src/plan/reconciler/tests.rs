@@ -1056,9 +1056,11 @@ async fn global_reconciler_skips_other_brain_plan_without_emitting_no_ready() {
     let outcomes = outcomes_store.lock().await;
     let p1_outcomes = outcomes.recent_outcomes("P1");
     let p2_outcomes = outcomes.recent_outcomes("P2");
+    let status = outcomes.reconciler_status();
 
     assert!(did_work, "mixed global tick should dispatch P2");
     assert_eq!(request.issue_id.as_deref(), Some("bd-mock-3"));
+    assert_eq!(status.last_tick_plans_enumerated, 1);
     assert!(
         !p1_outcomes.iter().any(|outcome| matches!(
             outcome,
@@ -1143,6 +1145,45 @@ async fn global_reconciler_status_reports_tasks_dispatched_per_tick() {
     assert_eq!(requests.len(), 3);
     assert_eq!(status.last_tick_plans_enumerated, 1);
     assert_eq!(status.last_tick_tasks_dispatched, 3);
+}
+
+#[tokio::test]
+async fn last_tick_counters_reset_between_ticks() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-global-counter-reset".into()));
+    seed_mock_ready_tasks_plan(&pm, "P1", &["T1", "T2", "T3"], &brain_session_id).await;
+    let scripted_pm = Arc::new(ScriptedReadyPm {
+        inner: Arc::clone(&pm),
+        empty_plan_ids: HashSet::new(),
+    });
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(3);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        scripted_pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("first tick");
+    let mut requests = Vec::new();
+    for _ in 0..3 {
+        requests.push(delegation_rx.recv().await.expect("dispatch request"));
+    }
+    let outcomes_store = reconciler.outcomes();
+    let first_status = outcomes_store.lock().await.reconciler_status();
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(first_status.last_tick_tasks_dispatched, 3);
+
+    reconciler.tick_once().await.expect("second tick");
+    let second_status = outcomes_store.lock().await.reconciler_status();
+
+    assert_eq!(second_status.last_tick_tasks_dispatched, 0);
+    assert_eq!(second_status.last_tick_plans_enumerated, 1);
 }
 
 async fn seed_ready_overlay_plan(
