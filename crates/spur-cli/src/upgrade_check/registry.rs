@@ -134,17 +134,9 @@ fn parse_optional_version(field: &str, value: Option<String>) -> Option<Option<V
 mod tests {
     use super::*;
     use semver::Version;
-    use std::sync::OnceLock;
     use std::time::Duration;
-    use tokio::sync::Mutex;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().await
-    }
 
     fn client() -> reqwest::Client {
         reqwest::Client::builder()
@@ -163,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_returns_version_from_latest_endpoint() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
@@ -182,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_returns_none_for_malformed_json() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
@@ -199,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_returns_none_when_version_is_missing() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
@@ -216,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_returns_none_for_server_errors() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
@@ -233,7 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_returns_none_when_request_times_out() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
@@ -254,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_dist_tags_allows_missing_beta_and_next() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
@@ -282,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_dist_tags_returns_latest_beta_and_next() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
@@ -312,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_dist_tags_returns_none_for_malformed_semver() {
-        let _guard = lock_env().await;
+        let _guard = super::super::lock_registry_env().await;
         let server = MockServer::start().await;
         use_registry(&server);
         Mock::given(method("GET"))
