@@ -429,7 +429,7 @@ impl OutcomeStore {
                 .values()
                 .flat_map(OutcomeBuffer::snapshot),
         );
-        outcomes.sort_by(|a, b| b.timestamp().cmp(&a.timestamp()));
+        outcomes.sort_by_key(|outcome| std::cmp::Reverse(outcome.timestamp()));
         outcomes.truncate(GLOBAL_RECENT_CAP);
         outcomes
     }
@@ -1087,6 +1087,11 @@ mod tests {
             }
         }
 
-        assert!(store.global_recent_outcomes().len() <= GLOBAL_RECENT_CAP);
+        let outcomes = store.global_recent_outcomes();
+        assert!(outcomes.len() <= GLOBAL_RECENT_CAP);
+        assert!(outcomes
+            .iter()
+            .any(|outcome| outcome.timestamp() == ts(499)));
+        assert!(!outcomes.iter().any(|outcome| outcome.timestamp() == ts(0)));
     }
 }

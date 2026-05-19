@@ -36,10 +36,16 @@ impl super::Reconciler {
             self.record_tick_plans_enumerated(1).await;
             summaries
         } else {
+            let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
+            if let Some(dispatch) = self.dispatch.as_ref() {
+                labels.push(crate::plan::labels::plan_owner(
+                    &dispatch.brain_session_id.as_session_id().0,
+                ));
+            }
             let epics = self
                 .pm
                 .list_issues(IssueFilter {
-                    labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+                    labels,
                     issue_type: Some("epic".into()),
                     limit: Some(10_000),
                     ..Default::default()
@@ -60,16 +66,6 @@ impl super::Reconciler {
                 };
                 if !seen_plan_ids.insert(plan_id.to_string()) {
                     continue;
-                }
-                if let Some(dispatch) = self.dispatch.as_ref() {
-                    if let crate::plan::ownership::PlanOwnerMatch::OwnedByOther { .. } =
-                        crate::plan::ownership::classify_owner(
-                            &epic.labels,
-                            dispatch.brain_session_id.as_session_id(),
-                        )
-                    {
-                        continue;
-                    }
                 }
                 let plan_summaries = adv
                     .list_ready(ReadyFilter {
