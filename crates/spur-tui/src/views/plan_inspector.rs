@@ -370,6 +370,72 @@ impl PlanInspectorView {
     }
 }
 
+impl PlanInspectorView {
+    pub fn render_with_worker_streams(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        worker_streams: &mut crate::worker_streams::WorkerStreams,
+        ctx: &super::ViewContext,
+    ) {
+        <Self as View>::render(self, frame, area, ctx);
+
+        if let PlanInspectorMode::StreamPeek {
+            executor_id,
+            task_id,
+            state,
+        } = &mut self.mode
+        {
+            let trace = worker_streams.get_mut(executor_id);
+            Self::render_peek_overlay(frame, area, executor_id, task_id, trace, state);
+        }
+    }
+
+    pub fn handle_key_with_worker_streams(
+        &mut self,
+        key: KeyEvent,
+        worker_streams: &mut crate::worker_streams::WorkerStreams,
+        ctx: &super::ViewContext,
+    ) -> Option<Action> {
+        let _ = worker_streams;
+
+        if let PlanInspectorMode::StreamPeek { .. } = &self.mode {
+            if let Some(action) = self.handle_peek_key(key) {
+                return Some(action);
+            }
+            return None;
+        }
+
+        if let Some(action) = self.maybe_handle_open_peek(key, ctx) {
+            return Some(action);
+        }
+
+        <Self as View>::handle_key(self, key, ctx)
+    }
+
+    fn render_peek_overlay(
+        _frame: &mut Frame,
+        _area: Rect,
+        _executor_id: &str,
+        _task_id: &str,
+        _trace: Option<&mut crate::components::react_trace::ReactTrace>,
+        _state: &mut crate::components::stream_pane::StreamViewState,
+    ) {
+    }
+
+    fn handle_peek_key(&mut self, _key: KeyEvent) -> Option<Action> {
+        None
+    }
+
+    fn maybe_handle_open_peek(
+        &mut self,
+        _key: KeyEvent,
+        _ctx: &super::ViewContext,
+    ) -> Option<Action> {
+        None
+    }
+}
+
 impl View for PlanInspectorView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         let key = super::normalize_macos_option(key);
@@ -1067,6 +1133,25 @@ mod tests {
         v.enter_stream_peek("w".into(), "t".into());
         v.leave_stream_peek();
         assert!(matches!(v.mode(), PlanInspectorMode::Browse));
+    }
+
+    #[test]
+    fn render_with_worker_streams_does_not_panic_when_no_streams() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
+            })
+            .unwrap();
     }
 
     #[test]
