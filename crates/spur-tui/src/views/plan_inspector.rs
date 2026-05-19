@@ -409,6 +409,11 @@ impl PlanInspectorView {
     ) {
         <Self as View>::render(self, frame, area, ctx);
 
+        if self.stream_peek_executor_is_stale(ctx) {
+            self.leave_stream_peek();
+            return;
+        }
+
         if let PlanInspectorMode::StreamPeek {
             executor_id,
             task_id,
@@ -419,6 +424,35 @@ impl PlanInspectorView {
             let node = ctx.lineage.node(&ExecutorId(executor_id.clone()));
             Self::render_peek_overlay(frame, area, executor_id, task_id, node, trace, state);
         }
+    }
+
+    fn stream_peek_executor_is_stale(&self, ctx: &super::ViewContext) -> bool {
+        let PlanInspectorMode::StreamPeek {
+            executor_id,
+            task_id,
+            ..
+        } = &self.mode
+        else {
+            return false;
+        };
+
+        let Some(task) = self
+            .active_plan(ctx)
+            .and_then(|plan| plan.task(task_id.as_str()))
+        else {
+            return true;
+        };
+
+        let current_executor_id = task.delegation_id.as_ref().and_then(|delegation_id| {
+            ctx.lineage
+                .executor_id_for_delegation(&spur_acp::domain::delegation::DelegationId(
+                    delegation_id.clone(),
+                ))
+        });
+
+        current_executor_id
+            .map(|current| current.0 != *executor_id)
+            .unwrap_or(true)
     }
 
     pub fn handle_key_with_worker_streams(
@@ -1181,6 +1215,13 @@ mod tests {
     }
 
     fn projection_with_epic_and_worker(session_id: &SessionId) -> PlanProjectionStore {
+        projection_with_epic_and_worker_for_delegation(session_id, "deleg-12")
+    }
+
+    fn projection_with_epic_and_worker_for_delegation(
+        session_id: &SessionId,
+        delegation_id: &str,
+    ) -> PlanProjectionStore {
         let mut projection = PlanProjectionStore::new();
         projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
             session_id: session_id.clone(),
@@ -1211,7 +1252,7 @@ mod tests {
                     feedback: None,
                     error: None,
                     worker_branch: None,
-                    delegation_id: Some("deleg-12".into()),
+                    delegation_id: Some(delegation_id.into()),
                     diff_summary: None,
                     mutation_id: None,
                     superseded_by: Vec::new(),
@@ -1299,6 +1340,15 @@ mod tests {
         task_id: &str,
         worker_session: &str,
     ) -> ExecutorLineage {
+        lineage_with_worker_for_task_and_delegation(session_id, task_id, worker_session, "deleg-12")
+    }
+
+    fn lineage_with_worker_for_task_and_delegation(
+        session_id: &SessionId,
+        task_id: &str,
+        worker_session: &str,
+        delegation_id: &str,
+    ) -> ExecutorLineage {
         let mut lineage = ExecutorLineage::new();
         lineage.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
             agent: "codex".into(),
@@ -1309,13 +1359,13 @@ mod tests {
             from: session_id.clone(),
             to_agent: "codex".into(),
             task: task_id.into(),
-            request_id: "deleg-12".into(),
+            request_id: delegation_id.into(),
             delegation_plan: None,
             issue_id: Some("bd-epic.1".into()),
         }));
         lineage.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
             from: session_id.clone(),
-            request_id: "deleg-12".into(),
+            request_id: delegation_id.into(),
             executor_id: worker_session.into(),
         }));
         lineage
@@ -1510,10 +1560,9 @@ mod tests {
     #[test]
     fn peek_overlay_renders_in_60_col_terminal_without_panic() {
         let session_id = SessionId("brain-1".into());
-        let projection = projection_with_epic(&session_id);
-        let lineage = ExecutorLineage::new();
-        let synopsis = SessionSynopsisProjection::new();
-        let ctx = ctx(&lineage, &projection, &synopsis);
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
 
         let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
         view.enter_stream_peek("worker-session-1".into(), "t-12".into());
@@ -1602,10 +1651,9 @@ mod tests {
     #[test]
     fn peek_overlay_falls_back_to_fullscreen_below_60_cols() {
         let session_id = SessionId("brain-1".into());
-        let projection = projection_with_epic(&session_id);
-        let lineage = ExecutorLineage::new();
-        let synopsis = SessionSynopsisProjection::new();
-        let ctx = ctx(&lineage, &projection, &synopsis);
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
 
         let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
         view.enter_stream_peek("worker-session-1".into(), "t-12".into());
@@ -1791,6 +1839,36 @@ mod tests {
         view.set_selected_task_id_for_tests(Some("t-13".into()));
 
         assert_eq!(view.selected_task_id_for_tests(), Some("t-13".into()));
+        assert!(matches!(view.mode(), PlanInspectorMode::Browse));
+    }
+
+    #[test]
+    fn peek_auto_closes_when_task_delegation_swaps_executor() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_epic_and_worker_for_delegation(&session_id, "deleg-retry-1");
+        let lineage = lineage_with_worker_for_task_and_delegation(
+            &session_id,
+            "t-12",
+            "worker-session-2",
+            "deleg-retry-1",
+        );
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
+            })
+            .unwrap();
+
         assert!(matches!(view.mode(), PlanInspectorMode::Browse));
     }
 
