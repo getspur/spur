@@ -1,11 +1,13 @@
-# spur-graph: git-as-invalidation-signal (v2 — content-hash substrate, no renames)
+# spur-graph: git-as-invalidation-signal (v2.1 — content-hash substrate, no renames)
 
 **Issue:** bd-jvers
 **Parent:** bd-270mj
-**Status:** Proposed (v2, post-review)
+**Status:** Proposed (v2.1, post-review + dirty-hash correction)
 **Owner:** spur-graph
 **Scope:** `crates/spur-graph/`, `crates/spur-cli/src/commands/graph.rs`
 
+> **v2.1 changelog vs v2.** Fixed I2: dirty-file `content_oid` now uses git's blob-OID format computed locally (`sha1("blob " || decimal(size) || "\0" || bytes)`) instead of `dirty:blake3(bytes)`. This makes a dirty file's hash byte-identical to the blob OID it would receive on commit, so the cache key before and after committing the same edits is identical. Algorithm parity with `git hash-object --stdin` verified against text, empty, and binary-with-NUL inputs. `sha1` is already vendored in `Cargo.lock` transitively (`0.10.6`) — only a direct-dep declaration in `spur-graph/Cargo.toml` is needed. bd-jvers' "no `git hash-object`" constraint is about shell-out latency — local sha1 is microseconds per file and is permitted.
+>
 > **v2 changelog vs v1.** Canonical identity moved from `commit_oid` to a filtered-content hash over `(path, blob_oid)` pairs. Provenance (commit_oid, dirty_overlay_hash) moved from the shared artifact body into the per-worktree pointer. Tombstones are value-level (no commit OID). Dirty overlay collapses into the same hash function (no side-cache). HEAD-race retry logic dissolves (cache key is index-snapshot-derived, not HEAD-derived). The per-worktree `.spur/graph-index.json` keeps its current full-artifact shape (so the TUI and other direct consumers see no change). See §15 for the review history that drove these changes.
 
 ---
@@ -42,10 +44,14 @@ Replace the `(mtime_nanos, size_bytes)` per-file invalidation in `spur-graph` wi
 canonical artifact key  =  graph_content_hash
                         =  blake3(sorted(path "\0" content_oid for each indexed path))
 where:
-  content_oid  =  blob_oid              (clean tracked file)
-                  | "dirty:" || blake3(fs::read(file_bytes))    (dirty / untracked)
-                  | "fs:"    || blake3(fs::read(file_bytes))    (non-git workspace)
-                  | "gitlink:" || gitlink_oid                   (submodule pointer)
+  content_oid  =  blob_oid                                     (clean tracked file; from git ls-files -s)
+                  | git_blob_oid(fs::read(file_bytes))         (dirty / untracked; locally computed sha1)
+                  | git_blob_oid(fs::read(file_bytes))         (non-git workspace; same algorithm)
+                  | "gitlink:" || gitlink_oid                  (submodule pointer)
+
+  git_blob_oid(bytes) = sha1("blob " || decimal(bytes.len()) || "\0" || bytes)
+                       // identical to what `git hash-object --stdin` would return;
+                       // implemented locally (no shell-out) so dirty == committed.
 
 stable_file_id   = path-keyed (unchanged from v1)
 stable_symbol_id = AST-path-derived (unchanged from v1)
@@ -63,10 +69,10 @@ provenance = {
 
 **Key invariants** (must be testable):
 
-- I1: Two worktrees with the same filtered file content map to the same canonical key, regardless of commit history.
-- I2: A clean worktree at commit C and a worktree that has uncommitted edits exactly equal to the diff `C → C'` produce identical canonical keys after C' is committed.
-- I3: Dirty edits and clean edits go through the same hash function. There is no "overlay" side-cache.
-- I4: Cache key derivation reads only the git index (`ls-files -s`) and any dirty file bytes. It does NOT depend on `HEAD`.
+- **I1** Two worktrees with the same filtered file content map to the same canonical key, regardless of commit history.
+- **I2** A worktree with dirty edits and a worktree where those same edits are committed produce **identical** canonical keys for the same byte content. (Holds because dirty `content_oid` uses the git blob-OID algorithm, locally computed.)
+- **I3** Dirty edits, clean tracked files, and non-git files go through the same hash function family (`git_blob_oid(bytes)` for dirty/fs/untracked, equal to the blob_oid git would assign on commit).
+- **I4** Cache key derivation reads only the git index (`ls-files -s`) and any dirty file bytes. It does NOT depend on `HEAD`.
 
 ---
 
@@ -284,7 +290,7 @@ pub struct GraphIndexArtifact {
 pub struct GraphFileManifestEntry {
     pub stable_file_id: String,
     pub path: String,
-    pub content_oid: String,    // "<40 hex>" | "dirty:<32 hex>" | "fs:<32 hex>" | "gitlink:<40 hex>"
+    pub content_oid: String,    // "<40 hex git blob OID>" | "gitlink:<40 hex>"
     pub node_ids: Vec<NodeId>,
     // mtime_nanos and size_bytes REMOVED
 }
@@ -353,10 +359,10 @@ Filters applied at discovery:
      git mode: ls-files -s, filtered; merge with status --porcelain dirty
      fs  mode: ignore-walk; substitute "fs:<blake3>" for content_oid
 3. content_oid per path:
-     clean tracked → blob_oid
-     dirty/untracked → "dirty:<blake3 of fs::read(path)>"
-     gitlink (160000) → "gitlink:<oid>"
-     fs-mode → "fs:<blake3 of fs::read(path)>"
+     clean tracked (git mode) → blob_oid from `ls-files -s`
+     dirty / untracked        → git_blob_oid(fs::read(path))     // local sha1
+     gitlink (160000)         → "gitlink:" + oid_from_ls_files
+     fs-mode (no git)         → git_blob_oid(fs::read(path))     // same algorithm
 4. graph_content_hash = blake3(sorted(path "\0" content_oid for each entry))
 5. canonical_path = <common>/spur-graph/artifacts/<mver>/<hash>.json
 6. if exists(canonical_path):
@@ -426,7 +432,8 @@ match hard_link(canonical_path, worktree_path):
 | 3 Change feed | `inrust_manifest_diff_handles_add_modify_delete` | per-path diff produces correct rebuild set |
 | 4 Provenance | `provenance_lives_in_pointer_not_artifact` | artifact body has no commit_oid |
 | 5 Layout | `canonical_under_git_common_dir`, `worktree_artifact_hardlinked` | hardlink inode == canonical inode |
-| 6 Dirty → unified hash | `dirty_then_commit_collides_with_clean_key` (I2) | hash before+after commit identical when content identical |
+| 6 Dirty → unified hash | `dirty_then_commit_collides_with_clean_key` (I2) | local git_blob_oid(bytes) for dirty equals ls-files blob_oid after commit |
+| 6.1 Algorithm parity | `local_git_blob_oid_matches_git_hash_object` | for 50 random byte strings, our sha1 impl matches `git hash-object --stdin` output |
 | 7 HEAD race (dissolved) | `head_change_during_build_only_affects_provenance` | cache key unchanged when HEAD moves mid-build |
 | 8 Tombstones | `delete_emits_value_level_tombstone`, `tombstone_purges_when_path_returns` | no commit_oid field |
 | 9 Fallbacks | `non_git_uses_fs_blake3`, `legacy_artifact_triggers_full_rebuild`, `fs2_lock_timeout_writes_worktree_only` | each fallback exercised |
@@ -456,7 +463,7 @@ match hard_link(canonical_path, worktree_path):
 
 ## 13. Implementation notes
 
-- `Cargo.toml`: add `fs2 = "0.4"` only. No `git2`/`gix`.
+- `Cargo.toml`: add `fs2 = "0.4"` and `sha1 = "0.10"` as direct deps of `spur-graph`. `sha1` is already in `Cargo.lock` transitively (currently `0.10.6`), so the crate is vendored — only a direct-dep declaration is needed. No `git2`/`gix`.
 - `SCHEMA_VERSION` → `"spur-graph-schema-v4"`. `EXTRACTOR_VERSION` change unrelated.
 - Existing `tree_sitter.rs:293` reads files as UTF-8 String. v2 must switch to `fs::read` (Vec<u8>) and pass `&[u8]` into the parser (tree-sitter supports this) so dirty-hash bytes match the parsed input. Removes BOM/CRLF/invalid-UTF-8 hazard.
 - Snapshot tests under `crates/spur-graph/tests/` need fixture regeneration. Mechanical, one-time noise.
@@ -467,7 +474,7 @@ match hard_link(canonical_path, worktree_path):
 ## 14. Execution plan
 
 1. Add `crates/spur-graph/src/git.rs` (no `diff_name_status`, no `is_ancestor`) + unit tests.
-2. Add `crates/spur-graph/src/content_hash.rs` + unit tests covering: clean, dirty, gitlink, fs-mode, sort stability.
+2. Add `crates/spur-graph/src/content_hash.rs` + unit tests covering: clean, dirty, gitlink, fs-mode, sort stability, and parity between local `git_blob_oid(bytes)` and `git hash-object --stdin` for ≥50 random inputs.
 3. Switch `extract/tree_sitter.rs:293` from `read_to_string` to `read` (bytes). Re-run snapshot tests.
 4. Add `fs2`; implement `store/cache.rs` (canonical write + hardlink/copy + pointer sidecar).
 5. Bump `schema.rs` to v4 (graph_content_hash, content_oid, value-level tombstones).
