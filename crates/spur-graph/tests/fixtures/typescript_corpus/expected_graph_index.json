@@ -3,12 +3,12 @@
     "graph_index_version": "spur-graph-phase2"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "",
+  "graph_content_hash": "a7fef1609be9f584ad08fa40cc79032a46f9081b93ce80bade71f8ebcb8eab83",
   "file_manifests": [
     {
       "stable_file_id": "cfb90035f8daa878",
       "path": "src/app.tsx",
-      "content_oid": "",
+      "content_oid": "408858a9a04565d88c7ff77bd03bd9e7dbafdd45",
       "node_ids": [
         1,
         2,
@@ -23,7 +23,7 @@
     {
       "stable_file_id": "c0a4422c47da8073",
       "path": "src/helpers.ts",
-      "content_oid": "",
+      "content_oid": "1521b0b7654bca3780979ee440bad6400bfb1594",
       "node_ids": [
         9,
         10,

@@ -3,12 +3,12 @@
     "graph_index_version": "spur-graph-phase2"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "",
+  "graph_content_hash": "9ea20754498b67c44f3aeb5da8c0f780288828cf712588f3f6033c8982b9954f",
   "file_manifests": [
     {
       "stable_file_id": "fa1b8fd6988afb15",
       "path": "src/helpers.py",
-      "content_oid": "",
+      "content_oid": "a6aeb60ac53e4c57b17b90b85cd158ac5a86c617",
       "node_ids": [
         1,
         2
@@ -17,7 +17,7 @@
     {
       "stable_file_id": "7637220ca411355c",
       "path": "src/main.py",
-      "content_oid": "",
+      "content_oid": "db42304b57f00ee6ed29c9deb0fa264c65fca6ad",
       "node_ids": [
         3,
         4,
@@ -27,7 +27,7 @@
     {
       "stable_file_id": "88080f65b93577ff",
       "path": "src/models.py",
-      "content_oid": "",
+      "content_oid": "06ab8ebd70675319942d021707cd7dcd121910fe",
       "node_ids": [
         6,
         7,
@@ -39,7 +39,7 @@
     {
       "stable_file_id": "438512d0ff1861c0",
       "path": "src/pkg.py",
-      "content_oid": "",
+      "content_oid": "e1db523c1d482ea9cf95381f71efa23e24c72170",
       "node_ids": [
         11,
         12,
