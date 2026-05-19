@@ -166,7 +166,7 @@ fn cached_candidate_if_fresh(
         .ok()
 }
 
-async fn fetch_candidate(current: &Version) -> Option<Version> {
+pub(crate) async fn fetch_candidate(current: &Version) -> Option<Version> {
     let client = reqwest::Client::new();
     let latest = registry::fetch_latest(&client).await?;
 
