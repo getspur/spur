@@ -554,6 +554,7 @@ pub async fn run_tui(
         crate::landing::LandingDecision::ShowDashboard,
         None,
         repo_root,
+        None,
     )
     .await
 }
@@ -569,6 +570,7 @@ pub async fn run_tui_with_license(
     landing: crate::landing::LandingDecision,
     config_path: Option<std::path::PathBuf>,
     repo_root: std::path::PathBuf,
+    upgrade_rx: Option<tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>>,
 ) -> anyhow::Result<()> {
     let mut terminal = crate::tui::setup()?;
     let mut app = App::build_with_license_state(
@@ -578,6 +580,7 @@ pub async fn run_tui_with_license(
         license_state,
         landing,
         config_path,
+        upgrade_rx,
     );
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
@@ -821,6 +824,7 @@ pub async fn run_tui_with_config(
         crate::landing::LandingDecision::ShowDashboard,
         config_path,
         repo_root,
+        None,
     )
     .await
 }
