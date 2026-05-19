@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 use spur_acp::{SessionId, SpurEvent};
-use spur_core::TrackedPlan;
+use spur_core::{ExecutorId, ExecutorNode, LifecycleState, TrackedPlan};
 
 use crate::action::{Action, IssueAction};
 use crate::theme::{resolve_token, ColorDepth, Theme};
@@ -411,7 +411,8 @@ impl PlanInspectorView {
         } = &mut self.mode
         {
             let trace = worker_streams.get_mut(executor_id);
-            Self::render_peek_overlay(frame, area, executor_id, task_id, trace, state);
+            let node = ctx.lineage.node(&ExecutorId(executor_id.clone()));
+            Self::render_peek_overlay(frame, area, executor_id, task_id, node, trace, state);
         }
     }
 
@@ -442,6 +443,7 @@ impl PlanInspectorView {
         parent_area: Rect,
         executor_id: &str,
         task_id: &str,
+        node: Option<&ExecutorNode>,
         trace: Option<&mut crate::components::react_trace::ReactTrace>,
         state: &mut crate::components::stream_pane::StreamViewState,
     ) {
@@ -459,10 +461,13 @@ impl PlanInspectorView {
 
         frame.render_widget(Clear, area);
 
-        let title_left = format!("stream: {executor_id} ({task_id})");
-        // TODO(peek-completed-badge): ReactTrace does not currently expose a
-        // terminal/done/idle predicate for the peek title decoration.
-        let title_right = None;
+        let title_name = node
+            .map(|node| node.agent.as_str())
+            .filter(|agent| !agent.is_empty())
+            .unwrap_or(executor_id);
+        let title_left = format!("stream: {title_name} ({task_id})");
+        let title_right =
+            node.and_then(|node| is_terminal_phase(node.phase).then_some("[completed]"));
         let bottom_hint = "[esc] close · [j/k] scroll · [f] follow";
 
         crate::components::stream_pane::render_stream(
@@ -561,6 +566,13 @@ impl PlanInspectorView {
             _ => None,
         }
     }
+}
+
+fn is_terminal_phase(phase: LifecycleState) -> bool {
+    matches!(
+        phase,
+        LifecycleState::Succeeded | LifecycleState::Failed | LifecycleState::Cancelled
+    )
 }
 
 impl View for PlanInspectorView {
@@ -1059,7 +1071,8 @@ fn truncate_display(s: &str, max: usize) -> String {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use spur_acp::{
-        PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent, SpurEventBody,
+        LifecycleState, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent,
+        SpurEventBody,
     };
     use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 
@@ -1511,6 +1524,68 @@ mod tests {
             "expected 'stream:' title in buffer"
         );
         assert!(dump.contains("t-12"), "expected task id in buffer");
+    }
+
+    #[test]
+    fn peek_overlay_title_uses_agent_name_when_lineage_knows_executor() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
+            })
+            .unwrap();
+
+        let dump = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            dump.contains("stream: codex (t-12)"),
+            "expected peek title to use the agent name:\n{dump}"
+        );
+        assert!(
+            !dump.contains("stream: worker-session-1 (t-12)"),
+            "expected peek title not to expose the raw executor id:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn peek_overlay_title_shows_completed_badge_for_terminal_executor() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let mut lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorPhaseChanged {
+            id: "worker-session-1".into(),
+            phase: LifecycleState::Succeeded,
+        }));
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
+            })
+            .unwrap();
+
+        let dump = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            dump.contains("[completed]"),
+            "expected peek title to show completed badge:\n{dump}"
+        );
     }
 
     #[test]
