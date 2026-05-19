@@ -614,6 +614,12 @@ impl ExecutorLineage {
         })
     }
 
+    /// Resolve a delegation id to the owning executor id, if any.
+    pub fn executor_id_for_delegation(&self, delegation_id: &DelegationId) -> Option<ExecutorId> {
+        self.find_node_by_delegation(delegation_id)
+            .map(|node| node.id.clone())
+    }
+
     fn find_node_mut_by_delegation(
         &mut self,
         delegation_id: &DelegationId,
@@ -630,5 +636,45 @@ fn terminal_attempt_status(p: LifecycleState) -> Option<AttemptStatus> {
         LifecycleState::Failed => Some(AttemptStatus::Failed),
         LifecycleState::Cancelled => Some(AttemptStatus::Cancelled),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+
+    #[test]
+    fn executor_id_for_delegation_returns_node_id_when_present() {
+        let mut lineage = ExecutorLineage::new();
+        let eid = ExecutorId::new("worker-session-1");
+        let did = DelegationId("delegation-abc".into());
+
+        lineage.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+            agent: "codex".into(),
+            session: SessionId(eid.0.clone()),
+            worktree: PathBuf::from("/tmp"),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+            from: SessionId("brain-session-1".into()),
+            to_agent: "codex".into(),
+            task: "inspect stream".into(),
+            request_id: did.0.clone(),
+            delegation_plan: None,
+            issue_id: None,
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+            from: SessionId("brain-session-1".into()),
+            request_id: did.0.clone(),
+            executor_id: eid.0.clone(),
+        }));
+
+        assert_eq!(lineage.executor_id_for_delegation(&did), Some(eid));
+        assert_eq!(
+            lineage.executor_id_for_delegation(&DelegationId("nope".into())),
+            None
+        );
     }
 }
