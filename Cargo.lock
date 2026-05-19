@@ -7001,7 +7001,9 @@ dependencies = [
  "clap",
  "directories",
  "file-rotate",
+ "reqwest 0.12.28",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "spur-acp",
@@ -7024,6 +7026,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
