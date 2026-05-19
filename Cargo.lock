@@ -7237,6 +7237,7 @@ dependencies = [
  "proptest",
  "regex",
  "rusqlite",
+ "rustls",
  "secrecy",
  "semver",
  "serde",

@@ -46,6 +46,19 @@ pub struct DetailPane {
     is_following: bool,
 }
 
+struct NonStreamLayout {
+    area: Rect,
+    tabs_area: Rect,
+    body_area: Rect,
+}
+
+struct NonStreamRenderArgs<'a> {
+    layout: NonStreamLayout,
+    node: &'a ExecutorNode,
+    issue_badge: Option<&'a str>,
+    tabs_widget: Tabs<'static>,
+}
+
 impl Default for DetailPane {
     fn default() -> Self {
         Self::new()
@@ -269,12 +282,16 @@ impl DetailPane {
             _ => {
                 self.render_non_stream(
                     frame,
-                    area,
-                    chunks[0],
-                    body_area,
-                    node,
-                    issue_badge,
-                    tabs_widget,
+                    NonStreamRenderArgs {
+                        layout: NonStreamLayout {
+                            area,
+                            tabs_area: chunks[0],
+                            body_area,
+                        },
+                        node,
+                        issue_badge,
+                        tabs_widget,
+                    },
                 );
             }
         }
@@ -304,16 +321,18 @@ impl DetailPane {
             .divider(" ")
     }
 
-    fn render_non_stream(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        tabs_area: Rect,
-        body_area: Rect,
-        node: &ExecutorNode,
-        issue_badge: Option<&str>,
-        tabs_widget: Tabs<'static>,
-    ) {
+    fn render_non_stream(&mut self, frame: &mut Frame, args: NonStreamRenderArgs<'_>) {
+        let NonStreamRenderArgs {
+            layout:
+                NonStreamLayout {
+                    area,
+                    tabs_area,
+                    body_area,
+                },
+            node,
+            issue_badge,
+            tabs_widget,
+        } = args;
         let visible_h = body_area.height as usize;
 
         let body_lines = match self.current_tab {

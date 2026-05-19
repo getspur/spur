@@ -289,6 +289,7 @@ impl GitHubClient {
     /// Build an `Octocrab` instance from a personal access token (env var
     /// or `gh auth token`). Used by `GitHubSync::new`.
     pub fn build_octocrab(token: &str) -> SyncResult<Octocrab> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Octocrab::builder()
             .personal_token(token.to_string())
             .build()

@@ -152,6 +152,7 @@ fn recovery_server(
 
 #[tokio::test]
 async fn brain_attach_rediscovery_replays_awaiting_review_task_once() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -276,6 +277,7 @@ async fn brain_attach_rediscovery_replays_awaiting_review_task_once() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -422,6 +424,7 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_reemits_already_awaiting_review_without_new_audit() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -531,6 +534,7 @@ async fn recover_orphaned_dispatch_reemits_already_awaiting_review_without_new_a
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_accepts_legacy_delegation_label() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -588,6 +592,7 @@ async fn recover_orphaned_dispatch_accepts_legacy_delegation_label() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -667,6 +672,7 @@ async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_uses_audit_delegation_when_label_mismatches() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -731,6 +737,7 @@ async fn recover_orphaned_dispatch_uses_audit_delegation_when_label_mismatches()
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_rejects_label_only_delegation_without_audit() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -800,6 +807,7 @@ async fn recover_orphaned_dispatch_rejects_label_only_delegation_without_audit()
 #[tokio::test]
 #[ignore = "pinned residual; requires deterministic-recovery follow-up"]
 async fn recover_orphaned_dispatch_with_split_dispatched_base_oid_labels() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let worker_branch = "spur/worker/split-dispatched-base-labels";
@@ -844,6 +852,7 @@ async fn recover_orphaned_dispatch_with_split_dispatched_base_oid_labels() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_rejects_more_than_one_commit() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -879,6 +888,7 @@ async fn recover_orphaned_dispatch_rejects_more_than_one_commit() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_rejects_zero_commits() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -905,6 +915,7 @@ async fn recover_orphaned_dispatch_rejects_zero_commits() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_reemits_legacy_already_awaiting_review_delegation() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -959,6 +970,7 @@ async fn recover_orphaned_dispatch_reemits_legacy_already_awaiting_review_delega
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_rejects_missing_branch() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -984,6 +996,7 @@ async fn recover_orphaned_dispatch_rejects_missing_branch() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_rejects_missing_plan_id() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
@@ -1031,6 +1044,7 @@ async fn recover_orphaned_dispatch_rejects_missing_plan_id() {
 
 #[tokio::test]
 async fn recover_orphaned_dispatch_rejects_non_ancestor_base() {
+    let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
     let original_base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
