@@ -83,6 +83,8 @@ pub struct TransientHint {
     pub expires_at: Instant,
 }
 
+type UpgradeReceiver = tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>;
+
 /// A user input message or control command sent from the TUI to the backend.
 pub enum UserInput {
     Message {
@@ -344,6 +346,7 @@ pub struct App {
     pub(super) dirty: bool,
     /// Top-level user-visible warning banner rendered in a reserved top row.
     user_warning: Option<String>,
+    upgrade_rx: Option<UpgradeReceiver>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     #[cfg(any(test, debug_assertions))]
     user_input_rx_for_test: Option<mpsc::Receiver<UserInput>>,
