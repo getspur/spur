@@ -232,12 +232,14 @@ impl Orchestrator {
             crate::AuthorityConfig::default(),
         ));
         // S3 — durable JSONL sink subscribes to the same broadcast.
-        let max_bytes = feature_gate
+        let max_bytes = crate::event_sink::DEFAULT_MAX_BYTES;
+        let configured_total_bytes = config.log.events_max_total_bytes;
+        let max_total_bytes = feature_gate
             .as_ref()
             .and_then(|g| g.quota(spur_license::QuotaKey::EventRetentionBytes))
             .and_then(|v| v.as_bytes())
-            .unwrap_or(crate::event_sink::DEFAULT_MAX_BYTES);
-        let max_total_bytes = config.log.events_max_total_bytes;
+            .map(|license_cap| configured_total_bytes.min(license_cap))
+            .unwrap_or(configured_total_bytes);
         crate::event_sink::spawn_sink(event_tx.subscribe(), &repo_root, max_bytes, max_total_bytes);
         let review_sink = ReviewSink::new();
 
