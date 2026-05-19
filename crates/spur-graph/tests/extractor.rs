@@ -66,8 +66,7 @@ fn normalize_for_golden(
 ) -> spur_graph::GraphIndexArtifact {
     artifact.manifest_version = "<normalized>".to_string();
     for entry in &mut artifact.file_manifests {
-        entry.mtime_nanos = 0;
-        entry.size_bytes = 0;
+        entry.content_oid = String::new();
     }
     artifact
 }
