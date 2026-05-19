@@ -1,9 +1,29 @@
 use super::*;
 use futures::StreamExt;
 use tokio::sync::broadcast;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+type UpgradeResult = Result<Option<spur_core::UpgradeBanner>, oneshot::error::RecvError>;
+
+pub(super) async fn next_upgrade_result(upgrade_rx: &mut Option<UpgradeReceiver>) -> UpgradeResult {
+    match upgrade_rx.as_mut() {
+        Some(rx) => rx.await,
+        None => std::future::pending().await,
+    }
+}
+
 impl App {
+    pub(super) fn handle_upgrade_result(&mut self, result: UpgradeResult) {
+        self.upgrade_rx = None;
+        if let Ok(Some(info)) = result {
+            self.show_user_warning(format!(
+                "SPUR {} is available; current {}. Run: spur upgrade",
+                info.latest, info.current
+            ));
+        }
+    }
+
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
         let resolved = license_state_event_to_state(&license_state);
         self.feature_gate.update_state(&resolved);
@@ -723,6 +743,9 @@ pub async fn run_tui_with_license(
                 }
             } => {
                 app.handle_permission_request(perm);
+            }
+            result = next_upgrade_result(&mut app.upgrade_rx) => {
+                app.handle_upgrade_result(result);
             }
             _ = shutdown_rx.recv() => {
                 // SIGINT / SIGTERM / SIGHUP / SIGQUIT: take the same path as a confirmed
