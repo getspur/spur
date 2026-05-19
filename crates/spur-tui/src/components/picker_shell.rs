@@ -58,15 +58,21 @@ pub fn compute_picker_layout(
         };
     };
 
+    // Keep the popover's bottom edge above the input bar (anchor row) so it
+    // never overlaps the user's typing line, even when the popover is taller
+    // than the picker itself.
+    let sidecar_y_max = anchor
+        .y
+        .saturating_sub(popover_height)
+        .min(container.y + container.height.saturating_sub(popover_height));
+
     let right_x = picker_rect
         .x
         .saturating_add(picker_rect.width)
         .saturating_add(1);
     let right_fits = right_x.saturating_add(popover_width) <= container.x + container.width;
     if right_fits {
-        let y = picker_rect
-            .y
-            .min(container.y + container.height.saturating_sub(popover_height));
+        let y = picker_rect.y.min(sidecar_y_max);
         return PickerLayout {
             picker_rect,
             popover_rect: Some(Rect::new(right_x, y, popover_width, popover_height)),
@@ -79,9 +85,7 @@ pub fn compute_picker_layout(
         .saturating_sub(popover_width.saturating_add(1));
     let left_fits = picker_rect.x >= container.x.saturating_add(popover_width.saturating_add(1));
     if left_fits {
-        let y = picker_rect
-            .y
-            .min(container.y + container.height.saturating_sub(popover_height));
+        let y = picker_rect.y.min(sidecar_y_max);
         return PickerLayout {
             picker_rect,
             popover_rect: Some(Rect::new(left_x, y, popover_width, popover_height)),
@@ -395,7 +399,12 @@ impl PickerShell {
                     .width
                     .saturating_sub(popup_width.saturating_add(3)),
             );
-            let height = 18u16.min(container.height.saturating_sub(2));
+            // Clamp popover height to the rows available *above* the input bar
+            // (anchor row). Using `container.height - 2` instead would let a
+            // tall popover render down into a multi-row input bar on short
+            // terminals, hiding what the user is typing.
+            let available_above_input = anchor.y.saturating_sub(container.y);
+            let height = 18u16.min(available_above_input);
             (width > 0 && height > 0).then_some((width, height))
         } else {
             None
@@ -1079,6 +1088,68 @@ mod tests {
         let layout = compute_picker_layout(container, anchor, (60, 10), Some((30, 10)));
         assert_eq!(layout.popover_anchor, PopoverAnchor::Left);
         assert_eq!(layout.popover_rect, Some(Rect::new(29, 20, 30, 10)));
+    }
+
+    #[test]
+    fn popover_does_not_render_into_multi_row_input_bar() {
+        // Regression: in production the InputBar is multi-row (chunks[4] with
+        // input_height > 1). The anchor passed to render is the *top* of the
+        // input bar, so the popover must not paint at or below anchor.y.
+        // Before the fix, popover_height was clamped only to container.height,
+        // so on shorter terminals it spilled down into the typed text.
+        let width = 120u16;
+        let height = 20u16;
+        let anchor_y = 6u16; // input bar occupies rows 6..20 (14 rows tall)
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut shell = PickerShell::open(Box::new(PreviewSource));
+        terminal
+            .draw(|f| {
+                let anchor = Rect::new(0, anchor_y, width, height - anchor_y);
+                let container = Rect::new(0, 0, width, height);
+                shell.render(f, anchor, container, crate::theme::fallback_theme());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        if let Some((_, py)) = find_text_start(buffer, width, height, "Preview-only") {
+            assert!(
+                py < anchor_y,
+                "preview text at y={py} must be above input bar (anchor.y={anchor_y})",
+            );
+        }
+        // The block border row (the popover's bottom) must also stay above
+        // the input bar.
+        for y in anchor_y..height {
+            for x in 0..width {
+                let sym = buffer.cell((x, y)).unwrap().symbol();
+                assert_ne!(
+                    sym, "─",
+                    "popover border at ({x},{y}) overlaps input bar (anchor.y={anchor_y})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compute_picker_layout_keeps_popover_above_input_bar_when_taller_than_picker() {
+        // Regression: with a short picker and a tall popover, the popover used
+        // to be clamped only against the container bottom, leaving its last
+        // painted row on top of the input bar (anchor row) and hiding what
+        // the user was typing. Invariant: popover.y + popover.height <= anchor.y
+        // (ratatui rects occupy y..y+height, so equality means the last painted
+        // row is anchor.y - 1).
+        let container = Rect::new(0, 0, 160, 40);
+        let anchor = Rect::new(10, 39, 150, 1);
+        let layout = compute_picker_layout(container, anchor, (60, 3), Some((80, 18)));
+        assert_eq!(layout.popover_anchor, PopoverAnchor::Right);
+        let popover = layout.popover_rect.expect("popover rect");
+        assert!(
+            popover.y + popover.height <= anchor.y,
+            "popover bottom {} must be at or above input bar at y={} (popover={:?})",
+            popover.y + popover.height,
+            anchor.y,
+            popover,
+        );
     }
 
     #[test]
