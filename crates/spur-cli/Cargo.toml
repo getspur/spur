@@ -60,3 +60,4 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 assert_cmd = "2"
 uuid = { workspace = true }
+wiremock = "0.6"
