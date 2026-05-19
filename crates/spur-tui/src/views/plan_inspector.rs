@@ -107,6 +107,23 @@ impl PlanInspectorView {
         }
     }
 
+    #[cfg(test)]
+    fn set_selected_task_id_for_tests(&mut self, task_id: Option<String>) {
+        self.set_selected_task_id(task_id);
+    }
+
+    #[cfg(test)]
+    fn selected_task_id_for_tests(&self) -> Option<String> {
+        self.selected_task_id.clone()
+    }
+
+    #[cfg(test)]
+    fn peek_state_mut_for_tests(
+        &mut self,
+    ) -> Option<&mut crate::components::stream_pane::StreamViewState> {
+        self.peek_state_mut()
+    }
+
     fn active_plan<'a>(&self, ctx: &'a super::ViewContext<'_>) -> Option<&'a TrackedPlan> {
         match self.pinned_plan_id.as_deref() {
             Some(plan_id) => ctx.plan_projection.plan(plan_id),
@@ -452,16 +469,90 @@ impl PlanInspectorView {
         );
     }
 
-    fn handle_peek_key(&mut self, _key: KeyEvent) -> Option<Action> {
-        None
+    fn handle_peek_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                self.leave_stream_peek();
+                None
+            }
+            (KeyCode::Char('S'), m) if m == KeyModifiers::SHIFT || m == KeyModifiers::NONE => {
+                let executor_id = match &self.mode {
+                    PlanInspectorMode::StreamPeek { executor_id, .. } => executor_id.clone(),
+                    _ => return None,
+                };
+                self.leave_stream_peek();
+                Some(Action::FocusWorkerInDashboard {
+                    executor_id,
+                    tab: crate::components::detail_pane::DetailTab::Stream,
+                })
+            }
+            _ => {
+                let state = self.peek_state_mut()?;
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+                        state.scroll_down_by(1);
+                        None
+                    }
+                    (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+                        state.scroll_up_by(1);
+                        None
+                    }
+                    (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                        state.scroll_to_top();
+                        None
+                    }
+                    (KeyCode::Char('G'), _) => {
+                        state.scroll_to_bottom();
+                        None
+                    }
+                    (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                        state.toggle_follow();
+                        None
+                    }
+                    _ => None,
+                }
+            }
+        }
     }
 
     fn maybe_handle_open_peek(
         &mut self,
-        _key: KeyEvent,
-        _ctx: &super::ViewContext,
+        key: KeyEvent,
+        ctx: &super::ViewContext,
     ) -> Option<Action> {
-        None
+        let plan = self.active_plan(ctx)?;
+        let task = self.selected_task(plan)?;
+        let task_id = task.task_id.clone();
+        let tab = crate::components::detail_pane::DetailTab::Stream;
+
+        let executor_id = task.delegation_id.as_ref().and_then(|did| {
+            ctx.lineage
+                .executor_id_for_delegation(&spur_acp::domain::delegation::DelegationId(
+                    did.clone(),
+                ))
+                .map(|eid| eid.0.clone())
+        });
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('s'), KeyModifiers::NONE) => match executor_id {
+                Some(executor_id) => {
+                    self.enter_stream_peek(executor_id, task_id);
+                    None
+                }
+                None => Some(Action::FlashHint {
+                    message: format!("Task {task_id} has no active worker yet"),
+                }),
+            },
+            (KeyCode::Char('S'), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
+                match executor_id {
+                    Some(executor_id) => Some(Action::FocusWorkerInDashboard { executor_id, tab }),
+                    None => Some(Action::FlashHint {
+                        message: format!("Task {task_id} has no active worker yet"),
+                    }),
+                }
+            }
+            _ => None,
+        }
     }
 }
 
@@ -975,6 +1066,18 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn key_char(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn key_shift(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+    }
+
+    fn key_code(c: KeyCode) -> KeyEvent {
+        KeyEvent::new(c, KeyModifiers::NONE)
+    }
+
     fn ctx<'a>(
         lineage: &'a ExecutorLineage,
         projection: &'a PlanProjectionStore,
@@ -993,6 +1096,14 @@ mod tests {
         }
     }
 
+    fn view_context_for_tests<'a>(
+        lineage: &'a ExecutorLineage,
+        projection: &'a PlanProjectionStore,
+    ) -> ViewContext<'a> {
+        let synopsis = Box::leak(Box::new(SessionSynopsisProjection::new()));
+        ctx(lineage, projection, synopsis)
+    }
+
     fn projection_with_epic(session_id: &SessionId) -> PlanProjectionStore {
         let mut projection = PlanProjectionStore::new();
         projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
@@ -1009,7 +1120,7 @@ mod tests {
                     ..Default::default()
                 },
                 tasks: vec![PlanSnapshotTask {
-                    task_id: "stage-a".into(),
+                    task_id: "t-12".into(),
                     task_name: "Stage A".into(),
                     agent: "codex".into(),
                     issue_id: Some("bd-epic.1".into()),
@@ -1036,6 +1147,78 @@ mod tests {
             }),
         }));
         projection
+    }
+
+    fn projection_with_epic_and_worker(session_id: &SessionId) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "running".into(),
+                progress: "0/1 done".into(),
+                next_action: "watch worker".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    dispatched: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "t-12".into(),
+                    task_name: "Stage A".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-epic.1".into()),
+                    issue_title: None,
+                    status: "dispatched".into(),
+                    attempt: 1,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: Some("deleg-12".into()),
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "watch stream".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
+    fn lineage_with_worker_for_task(
+        session_id: &SessionId,
+        task_id: &str,
+        worker_session: &str,
+    ) -> ExecutorLineage {
+        let mut lineage = ExecutorLineage::new();
+        lineage.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+            agent: "codex".into(),
+            session: SessionId(worker_session.into()),
+            worktree: std::path::PathBuf::from("/tmp"),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+            from: session_id.clone(),
+            to_agent: "codex".into(),
+            task: task_id.into(),
+            request_id: "deleg-12".into(),
+            delegation_plan: None,
+            issue_id: Some("bd-epic.1".into()),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+            from: session_id.clone(),
+            request_id: "deleg-12".into(),
+            executor_id: worker_session.into(),
+        }));
+        lineage
     }
 
     fn projection_with_blocker_cycle(session_id: &SessionId) -> PlanProjectionStore {
@@ -1250,6 +1433,127 @@ mod tests {
             action,
             Some(Action::OpenIssueInBacklog { id }) if id == "bd-epic"
         ));
+    }
+
+    #[test]
+    fn lowercase_s_enters_peek_when_task_has_worker() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let action = view.handle_key_with_worker_streams(key_char('s'), &mut ws, &ctx);
+
+        assert!(matches!(view.mode(), PlanInspectorMode::StreamPeek { .. }));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn lowercase_s_flashes_hint_when_task_has_no_worker() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let action = view.handle_key_with_worker_streams(key_char('s'), &mut ws, &ctx);
+
+        assert!(matches!(view.mode(), PlanInspectorMode::Browse));
+        assert!(matches!(action, Some(Action::FlashHint { .. })));
+    }
+
+    #[test]
+    fn shift_s_emits_focus_worker_action() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let action = view.handle_key_with_worker_streams(key_shift('S'), &mut ws, &ctx);
+
+        match action {
+            Some(Action::FocusWorkerInDashboard { executor_id, tab }) => {
+                assert_eq!(executor_id, "worker-session-1");
+                assert_eq!(tab, crate::components::detail_pane::DetailTab::Stream);
+            }
+            other => panic!("expected FocusWorkerInDashboard, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn esc_leaves_peek() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let action = view.handle_key_with_worker_streams(key_code(KeyCode::Esc), &mut ws, &ctx);
+
+        assert!(matches!(view.mode(), PlanInspectorMode::Browse));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn j_scrolls_peek_without_leaking_to_task_list() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        let initial_selection = view.selected_task_id_for_tests();
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        if let Some(state) = view.peek_state_mut_for_tests() {
+            state.scroll_offset = 10;
+            state.is_following = false;
+        }
+
+        let _ = view.handle_key_with_worker_streams(key_char('k'), &mut ws, &ctx);
+
+        if let PlanInspectorMode::StreamPeek { state, .. } = view.mode() {
+            assert_eq!(state.scroll_offset, 9);
+        }
+        assert_eq!(view.selected_task_id_for_tests(), initial_selection);
+    }
+
+    #[test]
+    fn f_toggles_follow_in_peek() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let initial = match view.mode() {
+            PlanInspectorMode::StreamPeek { state, .. } => state.is_following,
+            _ => panic!(),
+        };
+
+        let _ = view.handle_key_with_worker_streams(key_char('f'), &mut ws, &ctx);
+
+        if let PlanInspectorMode::StreamPeek { state, .. } = view.mode() {
+            assert_eq!(state.is_following, !initial);
+        }
     }
 
     #[test]
