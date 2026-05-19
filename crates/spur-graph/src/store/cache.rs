@@ -51,10 +51,11 @@ pub fn write_with_dedup(
     if !try_lock_exclusive_with_timeout(&lock, lock_timeout())? {
         tracing::warn!(
             lock_path = %lock_path.display(),
-            "spur-graph: fs2 lock unavailable; skipping canonical cache write"
+            "spur-graph: fs2 lock unavailable; writing worktree artifact without canonical pointer"
         );
         write_artifact_to_worktree(artifact, worktree_root)?;
-        write_pointer(artifact, worktree_root, ctx, &canonical)?;
+        // No canonical was written, so any prior pointer is stale; remove it.
+        remove_if_exists(&worktree_root.join(POINTER_PATH))?;
         return Ok(());
     }
 
@@ -358,6 +359,9 @@ mod tests {
         let artifact = artifact("hash-a", "src/lib.rs");
         let canonical_dir = env.common.path().join("spur-graph/artifacts/manifest-a");
         fs::create_dir_all(&canonical_dir).unwrap();
+        let pointer_path = env.worktree.path().join(".spur/graph-index.pointer.json");
+        fs::create_dir_all(pointer_path.parent().unwrap()).unwrap();
+        fs::write(&pointer_path, r#"{"stale":true}"#).unwrap();
         let lock_file = File::options()
             .read(true)
             .write(true)
@@ -371,6 +375,10 @@ mod tests {
 
         assert!(env.worktree.path().join(".spur/graph-index.json").exists());
         assert!(lookup_canonical(env.common.path(), "manifest-a", "hash-a").is_none());
+        assert!(
+            !pointer_path.exists(),
+            "lock timeout fallback must not leave a pointer to an unwritten canonical artifact"
+        );
         lock_file.unlock().unwrap();
         super::LOCK_TIMEOUT_MS_OVERRIDE.store(5_000, Ordering::SeqCst);
     }
