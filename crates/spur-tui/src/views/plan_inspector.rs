@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph},
     Frame,
 };
 use spur_acp::{SessionId, SpurEvent};
@@ -414,13 +414,42 @@ impl PlanInspectorView {
     }
 
     fn render_peek_overlay(
-        _frame: &mut Frame,
-        _area: Rect,
-        _executor_id: &str,
-        _task_id: &str,
-        _trace: Option<&mut crate::components::react_trace::ReactTrace>,
-        _state: &mut crate::components::stream_pane::StreamViewState,
+        frame: &mut Frame,
+        parent_area: Rect,
+        executor_id: &str,
+        task_id: &str,
+        trace: Option<&mut crate::components::react_trace::ReactTrace>,
+        state: &mut crate::components::stream_pane::StreamViewState,
     ) {
+        let area = if parent_area.width >= 60 {
+            let width =
+                ((parent_area.width as u32 * 80 / 100).max(60) as u16).min(parent_area.width);
+            let height =
+                ((parent_area.height as u32 * 60 / 100).max(8) as u16).min(parent_area.height);
+            let x = parent_area.x + parent_area.width.saturating_sub(width) / 2;
+            let y = parent_area.y + parent_area.height.saturating_sub(height) / 2;
+            Rect::new(x, y, width, height)
+        } else {
+            parent_area
+        };
+
+        frame.render_widget(Clear, area);
+
+        let title_left = format!("stream: {executor_id} ({task_id})");
+        // TODO(peek-completed-badge): ReactTrace does not currently expose a
+        // terminal/done/idle predicate for the peek title decoration.
+        let title_right = None;
+        let bottom_hint = "[esc] close · [j/k] scroll · [f] follow";
+
+        crate::components::stream_pane::render_stream(
+            frame,
+            area,
+            &title_left,
+            title_right,
+            Some(bottom_hint),
+            trace,
+            state,
+        );
     }
 
     fn handle_peek_key(&mut self, _key: KeyEvent) -> Option<Action> {
@@ -1147,6 +1176,58 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn peek_overlay_renders_in_60_col_terminal_without_panic() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let dump = format!("{:?}", buf);
+        assert!(
+            dump.contains("stream:"),
+            "expected 'stream:' title in buffer"
+        );
+        assert!(dump.contains("t-12"), "expected task id in buffer");
+    }
+
+    #[test]
+    fn peek_overlay_falls_back_to_fullscreen_below_60_cols() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let backend = ratatui::backend::TestBackend::new(40, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
         terminal
             .draw(|frame| {
                 view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
