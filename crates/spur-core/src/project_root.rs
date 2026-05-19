@@ -49,6 +49,53 @@ pub fn discover(start_dir: &Path) -> Result<PathBuf, DiscoverError> {
     Ok(root)
 }
 
+/// Warn once at startup if prior buggy runs left nested SPUR artifacts
+/// under canonical artifact directories.
+///
+/// Returns the number of nested locations detected, so callers can unit-test
+/// detection without installing a tracing collector.
+pub fn warn_on_nested_layout(repo_root: &Path) -> usize {
+    let mut count = 0;
+    for location in [
+        NestedLayoutLocation {
+            name: "events",
+            glob: "*.ndjson",
+        },
+        NestedLayoutLocation {
+            name: "logs",
+            glob: "*",
+        },
+    ] {
+        let canonical_dir = repo_root.join(".spur").join(location.name);
+        let nested_spur = canonical_dir.join(".spur");
+        if !nested_spur.exists() {
+            continue;
+        }
+
+        count += 1;
+        let nested_artifact_dir = nested_spur.join(location.name);
+        let move_from = nested_artifact_dir.join(location.glob);
+        let suggestion = format!(
+            "mv {} {}/ && rmdir {} {}",
+            move_from.display(),
+            canonical_dir.display(),
+            nested_artifact_dir.display(),
+            nested_spur.display()
+        );
+        tracing::warn!(
+            nested_path = %nested_spur.display(),
+            suggestion = %suggestion,
+            "nested SPUR layout detected: a prior SPUR run launched with CWD inside .spur/; events from that run are not visible to the live picker until moved"
+        );
+    }
+    count
+}
+
+struct NestedLayoutLocation {
+    name: &'static str,
+    glob: &'static str,
+}
+
 /// Error returned by [`discover`] when the resolved root would still
 /// be nested inside a `.spur/` segment — should be structurally
 /// impossible given the rewrite, but treated as a hard refusal for
@@ -255,5 +302,29 @@ mod tests {
         let p = PathBuf::from("/a/b/.spur/events/foo");
         let stripped = strip_spur_components(&p);
         assert_eq!(stripped, PathBuf::from("/a/b"));
+    }
+
+    #[test]
+    fn warn_on_nested_layout_detects_nested_events_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(
+            root.join(".spur")
+                .join("events")
+                .join(".spur")
+                .join("events"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".spur")
+                .join("events")
+                .join(".spur")
+                .join("events")
+                .join("foo.ndjson"),
+            "{}\n",
+        )
+        .unwrap();
+
+        assert_eq!(warn_on_nested_layout(&root), 1);
     }
 }
