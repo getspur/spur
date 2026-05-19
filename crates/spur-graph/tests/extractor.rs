@@ -65,10 +65,6 @@ fn normalize_for_golden(
     mut artifact: spur_graph::GraphIndexArtifact,
 ) -> spur_graph::GraphIndexArtifact {
     artifact.manifest_version = "<normalized>".to_string();
-    for entry in &mut artifact.file_manifests {
-        entry.mtime_nanos = 0;
-        entry.size_bytes = 0;
-    }
     artifact
 }
 
@@ -79,6 +75,7 @@ fn normalize_for_comparison(
     for entry in &mut artifact.file_manifests {
         entry.node_ids.clear();
     }
+    artifact.tombstones.clear();
     artifact
 }
 

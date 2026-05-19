@@ -1,20 +1,25 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::Path;
+use std::str;
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
 
+use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
 use crate::discovery::discover_files;
-use crate::extract::{build_facts_for_paths, GraphFacts};
+use crate::extract::GraphFacts;
+use crate::extract::{build_facts_for_paths, languages::all_supported_extensions};
 use crate::validation::compute_anchor_hash;
 use crate::{
-    GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact,
-    GraphIndexHeader, GraphNode, GraphSymbolArtifact, NodeKind, RelationKind, SourceSpan,
+    git, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry,
+    GraphIndexArtifact, GraphIndexHeader, GraphNode, GraphSymbolArtifact, GraphTombstoneEntry,
+    NodeKind, RelationKind, SourceSpan,
 };
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
-pub const SCHEMA_VERSION: &str = "spur-graph-schema-v3";
+pub const SCHEMA_VERSION: &str = "spur-graph-schema-v4";
 pub const EXTRACTOR_VERSION: &str = "2026-05-16-persisted-edges-v3";
 
 const TAG_QUERY_BYTES: &[&[u8]] = &[
@@ -38,13 +43,22 @@ struct FileBucket {
     edges: Vec<GraphEdgeArtifact>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CurrentFileEntry {
+    path: String,
+    content_oid: String,
+    extractable: bool,
+}
+
 #[derive(serde::Serialize)]
 struct GraphArtifactBodyForHash<'a> {
     files: &'a [GraphFileArtifact],
     symbols: &'a [GraphSymbolArtifact],
     edges: &'a [GraphEdgeArtifact],
     file_manifests: &'a [GraphFileManifestEntry],
+    graph_content_hash: &'a str,
     manifest_version: &'a str,
+    tombstones: &'a [GraphTombstoneEntry],
 }
 
 pub fn current_manifest_version() -> String {
@@ -64,7 +78,17 @@ pub fn artifact_from_facts(
     facts: &GraphFacts,
     worktree_root: &Path,
 ) -> anyhow::Result<GraphIndexArtifact> {
-    build_artifact_from_facts_and_stats(facts, worktree_root, None)
+    let worktree_root = worktree_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize `{}`", worktree_root.display()))?;
+    let current_entries = discover_current_entries(&worktree_root)?;
+    let buckets = buckets_from_facts(facts, &worktree_root, &current_entries)?;
+    Ok(compose_artifact(
+        buckets,
+        &current_entries,
+        current_manifest_version(),
+        Vec::new(),
+    ))
 }
 
 pub fn artifact_from_facts_incremental(
@@ -85,71 +109,42 @@ pub fn artifact_from_facts_incremental(
         return Ok((artifact_from_facts(&facts, &root)?, BuildMode::Full));
     }
 
-    let allowed_extensions = crate::extract::languages::all_supported_extensions();
-    let discovered_paths = discover_files(&root, &allowed_extensions)?;
-    let path_set: HashSet<String> = discovered_paths
-        .iter()
-        .filter_map(|p| p.strip_prefix(&root).ok())
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .collect();
-    let mut discovered_meta = BTreeMap::new();
-    for path in discovered_paths {
-        let relative = path
-            .strip_prefix(&root)
-            .expect("discovered path is rooted")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let meta = fs::metadata(&path)
-            .with_context(|| format!("failed to read metadata for `{}`", path.display()))?;
-        let mtime_nanos = meta
-            .modified()
-            .ok()
-            .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|dur| dur.as_nanos())
-            .unwrap_or(0);
-        discovered_meta.insert(relative, (mtime_nanos, meta.len()));
-    }
-
-    let prev_manifest_by_path: HashMap<_, _> = prev
+    let current_entries = discover_current_entries(&root)?;
+    let prev_buckets = buckets_from_artifact(prev);
+    let prev_content_oids: BTreeMap<_, _> = prev
         .file_manifests
         .iter()
-        .map(|m| (m.path.as_str(), m))
-        .collect();
-    let changed_paths: Vec<String> = discovered_meta
-        .iter()
-        .filter_map(|(path, (mtime_nanos, size_bytes))| {
-            let changed = prev_manifest_by_path
-                .get(path.as_str())
-                .map(|m| m.mtime_nanos != *mtime_nanos || m.size_bytes != *size_bytes)
-                .unwrap_or(true);
-            changed.then_some(path.clone())
-        })
+        .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
         .collect();
 
-    let mut cached_buckets = buckets_from_artifact(prev);
-    cached_buckets.retain(|path, _| path_set.contains(path));
-
-    if changed_paths.is_empty() {
-        rebind_cross_file_edges(&mut cached_buckets);
-        return Ok((
-            rebuild_from_buckets(cached_buckets, manifest_version),
-            BuildMode::Incremental,
-        ));
+    let mut buckets = BTreeMap::new();
+    let mut changed_paths = Vec::new();
+    for current in current_entries.values() {
+        if prev_content_oids
+            .get(current.path.as_str())
+            .is_some_and(|content_oid| *content_oid == current.content_oid)
+        {
+            if let Some(bucket) = prev_buckets.get(&current.path) {
+                buckets.insert(current.path.clone(), bucket.clone());
+                continue;
+            }
+        }
+        if current.extractable {
+            changed_paths.push(root.join(&current.path));
+        }
     }
 
-    let changed_full_paths: Vec<PathBuf> = changed_paths.iter().map(|p| root.join(p)).collect();
-    let changed_facts = build_facts_for_paths(&root, &changed_full_paths)?;
-    let changed_artifact =
-        build_artifact_from_facts_and_stats(&changed_facts, &root, Some(&discovered_meta))?;
-    for (path, bucket) in buckets_from_artifact(&changed_artifact) {
-        cached_buckets.insert(path, bucket);
+    if !changed_paths.is_empty() {
+        let changed_facts = build_facts_for_paths(&root, &changed_paths)?;
+        let changed_buckets = buckets_from_facts(&changed_facts, &root, &current_entries)?;
+        buckets.extend(changed_buckets);
     }
-    rebind_cross_file_edges(&mut cached_buckets);
 
-    Ok((
-        rebuild_from_buckets(cached_buckets, manifest_version),
-        BuildMode::Incremental,
-    ))
+    add_missing_manifest_buckets(&mut buckets, &current_entries);
+
+    let tombstones = tombstones_from_removed_paths(prev, &current_entries);
+    let artifact = compose_artifact(buckets, &current_entries, manifest_version, tombstones);
+    Ok((artifact, BuildMode::Incremental))
 }
 
 pub fn write_artifact(artifact: &GraphIndexArtifact, path: &Path) -> anyhow::Result<()> {
@@ -173,18 +168,20 @@ fn artifact_content_hash_blake3_hex(artifact: &GraphIndexArtifact) -> anyhow::Re
         symbols: &artifact.symbols,
         edges: &artifact.edges,
         file_manifests: &artifact.file_manifests,
+        graph_content_hash: &artifact.graph_content_hash,
         manifest_version: &artifact.manifest_version,
+        tombstones: &artifact.tombstones,
     };
     let canonical_json = serde_json::to_vec(&body)
         .context("failed to encode graph artifact body for content hash")?;
     Ok(blake3::hash(&canonical_json).to_hex().to_string())
 }
 
-fn build_artifact_from_facts_and_stats(
+fn buckets_from_facts(
     facts: &GraphFacts,
     worktree_root: &Path,
-    known_stats: Option<&BTreeMap<String, (u128, u64)>>,
-) -> anyhow::Result<GraphIndexArtifact> {
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+) -> anyhow::Result<BTreeMap<String, FileBucket>> {
     let spans_by_id: HashMap<_, _> = facts
         .spans
         .iter()
@@ -207,11 +204,9 @@ fn build_artifact_from_facts_and_stats(
 
         match node.kind {
             NodeKind::File => {
-                let stats = if let Some(stats_map) = known_stats {
-                    stats_map.get(&node.label).copied().unwrap_or((0, 0))
-                } else {
-                    file_stats(worktree_root, &node.label)
-                };
+                if !current_entries.contains_key(&node.label) {
+                    continue;
+                }
                 let stable_file_id = node.stable_key.clone();
                 buckets
                     .entry(node.label.clone())
@@ -223,8 +218,7 @@ fn build_artifact_from_facts_and_stats(
                         manifest: GraphFileManifestEntry {
                             stable_file_id,
                             path: node.label.clone(),
-                            mtime_nanos: stats.0,
-                            size_bytes: stats.1,
+                            content_oid: content_oid_for(current_entries, &node.label),
                             node_ids: vec![node.node_id],
                         },
                         symbols: Vec::new(),
@@ -243,6 +237,9 @@ fn build_artifact_from_facts_and_stats(
             | NodeKind::TypeAlias
             | NodeKind::Section => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
+                if !current_entries.contains_key(&file_path) {
+                    continue;
+                }
                 let anchor_hash = anchor_hash(worktree_root, &file_path, span);
                 let symbol = GraphSymbolArtifact {
                     stable_symbol_id: node.stable_key.clone(),
@@ -256,11 +253,6 @@ fn build_artifact_from_facts_and_stats(
                 };
                 let entry = buckets.entry(file_path.clone()).or_insert_with(|| {
                     let stable_file_id = stable_file_id_from_path(&file_path);
-                    let stats = if let Some(stats_map) = known_stats {
-                        stats_map.get(&file_path).copied().unwrap_or((0, 0))
-                    } else {
-                        file_stats(worktree_root, &file_path)
-                    };
                     FileBucket {
                         file: GraphFileArtifact {
                             stable_file_id: stable_file_id.clone(),
@@ -269,8 +261,7 @@ fn build_artifact_from_facts_and_stats(
                         manifest: GraphFileManifestEntry {
                             stable_file_id,
                             path: file_path.clone(),
-                            mtime_nanos: stats.0,
-                            size_bytes: stats.1,
+                            content_oid: content_oid_for(current_entries, &file_path),
                             node_ids: Vec::new(),
                         },
                         symbols: Vec::new(),
@@ -301,17 +292,15 @@ fn build_artifact_from_facts_and_stats(
             );
             continue;
         };
+        if !current_entries.contains_key(&source_file_path) {
+            continue;
+        }
         let target_stable_symbol_id = edge
             .target_node_id
             .and_then(|target_node_id| nodes_by_id.get(&target_node_id))
             .map(|node| node.stable_key.clone());
         let entry = buckets.entry(source_file_path.clone()).or_insert_with(|| {
             let stable_file_id = stable_file_id_from_path(&source_file_path);
-            let stats = if let Some(stats_map) = known_stats {
-                stats_map.get(&source_file_path).copied().unwrap_or((0, 0))
-            } else {
-                file_stats(worktree_root, &source_file_path)
-            };
             FileBucket {
                 file: GraphFileArtifact {
                     stable_file_id: stable_file_id.clone(),
@@ -320,8 +309,7 @@ fn build_artifact_from_facts_and_stats(
                 manifest: GraphFileManifestEntry {
                     stable_file_id,
                     path: source_file_path.clone(),
-                    mtime_nanos: stats.0,
-                    size_bytes: stats.1,
+                    content_oid: content_oid_for(current_entries, &source_file_path),
                     node_ids: Vec::new(),
                 },
                 symbols: Vec::new(),
@@ -351,8 +339,242 @@ fn build_artifact_from_facts_and_stats(
             .sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
     }
 
+    Ok(buckets)
+}
+
+fn discover_current_entries(root: &Path) -> anyhow::Result<BTreeMap<String, CurrentFileEntry>> {
+    let allowed_extensions = all_supported_extensions();
+    if let Some(ctx) = git::detect(root) {
+        discover_git_entries(root, &ctx, &allowed_extensions)
+    } else {
+        discover_fs_entries(root, &allowed_extensions)
+    }
+}
+
+fn discover_git_entries(
+    root: &Path,
+    _ctx: &GitCtx,
+    allowed_extensions: &[&str],
+) -> anyhow::Result<BTreeMap<String, CurrentFileEntry>> {
+    let dirty_entries = git::status_dirty_paths(root)?;
+    let dirty_paths: BTreeMap<String, DirtyEntry> = dirty_entries
+        .into_iter()
+        .filter(|entry| is_supported_path(&entry.path, allowed_extensions))
+        .map(|entry| (entry.path.clone(), entry))
+        .collect();
+    let mut entries = BTreeMap::new();
+
+    for tracked in git::ls_files_with_oids(root)? {
+        if !is_supported_path(&tracked.path, allowed_extensions) {
+            continue;
+        }
+
+        let content_oid = if tracked.is_gitlink {
+            tracked.content_oid
+        } else if dirty_paths.contains_key(&tracked.path) {
+            let Some(content_oid) = read_worktree_content_oid(root, &tracked.path)? else {
+                continue;
+            };
+            content_oid
+        } else {
+            tracked.content_oid
+        };
+        entries.insert(
+            tracked.path.clone(),
+            CurrentFileEntry {
+                path: tracked.path,
+                content_oid,
+                extractable: !tracked.is_gitlink,
+            },
+        );
+    }
+
+    for dirty in dirty_paths.values() {
+        if entries.contains_key(&dirty.path) {
+            continue;
+        }
+        let Some(content_oid) = read_worktree_content_oid(root, &dirty.path)? else {
+            continue;
+        };
+        entries.insert(
+            dirty.path.clone(),
+            CurrentFileEntry {
+                path: dirty.path.clone(),
+                content_oid,
+                extractable: true,
+            },
+        );
+    }
+
+    Ok(entries)
+}
+
+fn discover_fs_entries(
+    root: &Path,
+    allowed_extensions: &[&str],
+) -> anyhow::Result<BTreeMap<String, CurrentFileEntry>> {
+    let mut entries = BTreeMap::new();
+    for path in discover_files(root, allowed_extensions)? {
+        let relative_path = relative_path(root, &path)?;
+        let bytes =
+            fs::read(&path).with_context(|| format!("failed to read `{}`", path.display()))?;
+        entries.insert(
+            relative_path.clone(),
+            CurrentFileEntry {
+                path: relative_path,
+                content_oid: git_blob_oid(&bytes),
+                extractable: true,
+            },
+        );
+    }
+    Ok(entries)
+}
+
+fn read_worktree_content_oid(root: &Path, path: &str) -> anyhow::Result<Option<String>> {
+    match fs::read(root.join(path)) {
+        Ok(bytes) => Ok(Some(git_blob_oid(&bytes))),
+        Err(err) if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::IsADirectory) => Ok(None),
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to read `{}`", root.join(path).display()))
+        }
+    }
+}
+
+fn is_supported_path(path: &str, allowed_extensions: &[&str]) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            allowed_extensions
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
+}
+
+fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
+    let relative = path.strip_prefix(root).with_context(|| {
+        format!(
+            "failed to make `{}` relative to `{}`",
+            path.display(),
+            root.display()
+        )
+    })?;
+    Ok(relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn content_oid_for(current_entries: &BTreeMap<String, CurrentFileEntry>, path: &str) -> String {
+    current_entries
+        .get(path)
+        .map(|entry| entry.content_oid.clone())
+        .unwrap_or_default()
+}
+
+fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, FileBucket> {
+    let mut buckets = BTreeMap::new();
+    for manifest in &artifact.file_manifests {
+        let stable_file_id = manifest.stable_file_id.clone();
+        let path = manifest.path.clone();
+        buckets.insert(
+            path.clone(),
+            FileBucket {
+                file: artifact
+                    .files
+                    .iter()
+                    .find(|file| file.file_path == path)
+                    .cloned()
+                    .unwrap_or_else(|| GraphFileArtifact {
+                        stable_file_id: stable_file_id.clone(),
+                        file_path: path.clone(),
+                    }),
+                manifest: manifest.clone(),
+                symbols: artifact
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.file_path == path)
+                    .cloned()
+                    .collect(),
+                edges: artifact
+                    .edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.source_stable_symbol_id == stable_file_id
+                            || artifact.symbols.iter().any(|symbol| {
+                                symbol.file_path == path
+                                    && symbol.stable_symbol_id == edge.source_stable_symbol_id
+                            })
+                    })
+                    .cloned()
+                    .collect(),
+            },
+        );
+    }
+    buckets
+}
+
+fn add_missing_manifest_buckets(
+    buckets: &mut BTreeMap<String, FileBucket>,
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+) {
+    for current in current_entries.values() {
+        buckets
+            .entry(current.path.clone())
+            .or_insert_with(|| empty_bucket(&current.path, &current.content_oid));
+    }
+}
+
+fn empty_bucket(path: &str, content_oid: &str) -> FileBucket {
+    let stable_file_id = stable_file_id_from_path(path);
+    FileBucket {
+        file: GraphFileArtifact {
+            stable_file_id: stable_file_id.clone(),
+            file_path: path.to_string(),
+        },
+        manifest: GraphFileManifestEntry {
+            stable_file_id,
+            path: path.to_string(),
+            content_oid: content_oid.to_string(),
+            node_ids: Vec::new(),
+        },
+        symbols: Vec::new(),
+        edges: Vec::new(),
+    }
+}
+
+fn tombstones_from_removed_paths(
+    prev: &GraphIndexArtifact,
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+) -> Vec<GraphTombstoneEntry> {
+    let mut tombstones: Vec<_> = prev
+        .file_manifests
+        .iter()
+        .filter(|entry| !current_entries.contains_key(&entry.path))
+        .map(|entry| GraphTombstoneEntry {
+            path: entry.path.clone(),
+            stable_file_id: entry.stable_file_id.clone(),
+        })
+        .collect();
+    tombstones.sort_by(|a, b| a.path.cmp(&b.path));
+    tombstones
+}
+
+fn compose_artifact(
+    mut buckets: BTreeMap<String, FileBucket>,
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+    manifest_version: String,
+    tombstones: Vec<GraphTombstoneEntry>,
+) -> GraphIndexArtifact {
+    add_missing_manifest_buckets(&mut buckets, current_entries);
     rebind_cross_file_edges(&mut buckets);
-    Ok(rebuild_from_buckets(buckets, current_manifest_version()))
+    let graph_content_hash = compute_graph_content_hash(
+        current_entries
+            .values()
+            .map(|entry| (entry.path.as_str(), entry.content_oid.as_str())),
+    );
+    rebuild_from_buckets(buckets, manifest_version, graph_content_hash, tombstones)
 }
 
 fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
@@ -396,128 +618,11 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
     }
 }
 
-fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, FileBucket> {
-    let mut manifests_by_path: HashMap<_, _> = artifact
-        .file_manifests
-        .iter()
-        .cloned()
-        .map(|m| (m.path.clone(), m))
-        .collect();
-    let mut files_by_path: HashMap<_, _> = artifact
-        .files
-        .iter()
-        .cloned()
-        .map(|f| (f.file_path.clone(), f))
-        .collect();
-
-    let mut by_path: BTreeMap<String, FileBucket> = BTreeMap::new();
-    for symbol in &artifact.symbols {
-        by_path
-            .entry(symbol.file_path.clone())
-            .or_insert_with(|| FileBucket {
-                file: files_by_path.remove(&symbol.file_path).unwrap_or_else(|| {
-                    GraphFileArtifact {
-                        stable_file_id: stable_file_id_from_path(&symbol.file_path),
-                        file_path: symbol.file_path.clone(),
-                    }
-                }),
-                manifest: manifests_by_path
-                    .remove(&symbol.file_path)
-                    .unwrap_or_else(|| GraphFileManifestEntry {
-                        stable_file_id: stable_file_id_from_path(&symbol.file_path),
-                        path: symbol.file_path.clone(),
-                        mtime_nanos: 0,
-                        size_bytes: 0,
-                        node_ids: Vec::new(),
-                    }),
-                symbols: Vec::new(),
-                edges: Vec::new(),
-            })
-            .symbols
-            .push(symbol.clone());
-    }
-
-    let symbol_file_by_stable_id: HashMap<_, _> = artifact
-        .symbols
-        .iter()
-        .map(|symbol| (symbol.stable_symbol_id.clone(), symbol.file_path.clone()))
-        .collect();
-    let file_path_by_stable_file_id: HashMap<_, _> = artifact
-        .files
-        .iter()
-        .map(|file| (file.stable_file_id.clone(), file.file_path.clone()))
-        .collect();
-    let stable_file_id_by_path: HashMap<_, _> = artifact
-        .files
-        .iter()
-        .map(|file| (file.file_path.clone(), file.stable_file_id.clone()))
-        .collect();
-    for edge in &artifact.edges {
-        let source_path = symbol_file_by_stable_id
-            .get(&edge.source_stable_symbol_id)
-            .cloned()
-            .or_else(|| {
-                file_path_by_stable_file_id
-                    .get(&edge.source_stable_symbol_id)
-                    .cloned()
-            });
-        let Some(source_path) = source_path else {
-            tracing::warn!(
-                source_stable_symbol_id = %edge.source_stable_symbol_id,
-                "spur-graph: dropping artifact edge with unknown source stable id"
-            );
-            continue;
-        };
-        by_path
-            .entry(source_path.clone())
-            .or_insert_with(|| FileBucket {
-                file: GraphFileArtifact {
-                    stable_file_id: stable_file_id_by_path
-                        .get(&source_path)
-                        .cloned()
-                        .unwrap_or_else(|| stable_file_id_from_path(&source_path)),
-                    file_path: source_path.clone(),
-                },
-                manifest: GraphFileManifestEntry {
-                    stable_file_id: stable_file_id_by_path
-                        .get(&source_path)
-                        .cloned()
-                        .unwrap_or_else(|| stable_file_id_from_path(&source_path)),
-                    path: source_path.clone(),
-                    mtime_nanos: 0,
-                    size_bytes: 0,
-                    node_ids: Vec::new(),
-                },
-                symbols: Vec::new(),
-                edges: Vec::new(),
-            })
-            .edges
-            .push(edge.clone());
-    }
-
-    for (path, file) in files_by_path {
-        by_path.entry(path.clone()).or_insert_with(|| FileBucket {
-            manifest: manifests_by_path
-                .remove(&path)
-                .unwrap_or_else(|| GraphFileManifestEntry {
-                    stable_file_id: file.stable_file_id.clone(),
-                    path: path.clone(),
-                    mtime_nanos: 0,
-                    size_bytes: 0,
-                    node_ids: Vec::new(),
-                }),
-            file,
-            symbols: Vec::new(),
-            edges: Vec::new(),
-        });
-    }
-
-    by_path
-}
-
 fn rebuild_from_buckets(
     mut buckets: BTreeMap<String, FileBucket>,
     manifest_version: String,
+    graph_content_hash: String,
+    tombstones: Vec<GraphTombstoneEntry>,
 ) -> GraphIndexArtifact {
     let mut files = Vec::new();
     let mut symbols = Vec::new();
@@ -559,10 +664,12 @@ fn rebuild_from_buckets(
             content_hash_blake3: None,
         },
         manifest_version,
+        graph_content_hash,
         file_manifests: manifests,
         files,
         symbols,
         edges,
+        tombstones,
         diagnostics: Vec::new(),
     }
 }
@@ -620,24 +727,10 @@ fn stable_file_id_from_path(path: &str) -> String {
     )
 }
 
-fn file_stats(root: &Path, file_path: &str) -> (u128, u64) {
-    let full_path = root.join(file_path);
-    let Ok(meta) = fs::metadata(&full_path) else {
-        return (0, 0);
-    };
-    let mtime_nanos = meta
-        .modified()
-        .ok()
-        .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|dur| dur.as_nanos())
-        .unwrap_or(0);
-    (mtime_nanos, meta.len())
-}
-
 fn anchor_hash(root: &Path, file_path: &str, span: &SourceSpan) -> String {
     let full_path = root.join(file_path);
-    let content = match fs::read_to_string(&full_path) {
-        Ok(content) => content,
+    let bytes = match fs::read(&full_path) {
+        Ok(bytes) => bytes,
         Err(error) => {
             tracing::warn!(
                 file_path,
@@ -650,9 +743,19 @@ fn anchor_hash(root: &Path, file_path: &str, span: &SourceSpan) -> String {
     };
     let start = span.start_byte as usize;
     let end = span.end_byte as usize;
-    let slice = match content.get(start..end) {
-        Some(slice) => slice,
-        None => {
+    let Some(bytes) = bytes.get(start..end) else {
+        tracing::warn!(
+            file_path,
+            full_path = %full_path.display(),
+            span_start = start,
+            span_end = end,
+            "spur-graph anchor hash fallback to sentinel: byte range mismatch"
+        );
+        return "0".to_string();
+    };
+    let slice = match str::from_utf8(bytes) {
+        Ok(slice) => slice,
+        Err(_) => {
             tracing::warn!(
                 file_path,
                 full_path = %full_path.display(),
@@ -704,4 +807,157 @@ fn enclosing_scope(
             NodeKind::Impl => Some(format!("impl {}", parent.label)),
             _ => Some(parent.label.clone()),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{artifact_from_facts, artifact_from_facts_incremental, BuildMode};
+    use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
+    use crate::extract::build_facts;
+
+    #[test]
+    fn incremental_reuses_bucket_when_content_oid_is_identical() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+        fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
+
+        let mut prev =
+            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+        let b_content_oid = prev
+            .file_manifests
+            .iter()
+            .find(|entry| entry.path == "src/b.rs")
+            .expect("b manifest")
+            .content_oid
+            .clone();
+        assert!(
+            !b_content_oid.is_empty(),
+            "full build must stamp content_oid"
+        );
+
+        let marker = "reused-bucket-marker".to_string();
+        prev.symbols
+            .iter_mut()
+            .find(|symbol| symbol.file_path == "src/b.rs")
+            .expect("b symbol")
+            .enclosing_scope = Some(marker.clone());
+
+        fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n").expect("rewrite a.rs");
+
+        let (next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+        assert_eq!(mode, BuildMode::Incremental);
+        assert_eq!(
+            next.file_manifests
+                .iter()
+                .find(|entry| entry.path == "src/b.rs")
+                .expect("next b manifest")
+                .content_oid,
+            b_content_oid
+        );
+        assert_eq!(
+            next.symbols
+                .iter()
+                .find(|symbol| symbol.file_path == "src/b.rs")
+                .expect("next b symbol")
+                .enclosing_scope
+                .as_deref(),
+            Some(marker.as_str())
+        );
+        assert!(next
+            .symbols
+            .iter()
+            .any(|symbol| symbol.file_path == "src/a.rs" && symbol.entity_name == "alpha_changed"));
+    }
+
+    #[test]
+    fn incremental_uses_git_blob_oid_for_dirty_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_repo(root);
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+        git(root, &["add", "src/a.rs"]);
+        git(root, &["commit", "-m", "add a"]);
+
+        let prev =
+            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+
+        let dirty_bytes = b"pub fn alpha_dirty() {}\n";
+        fs::write(root.join("src/a.rs"), dirty_bytes).expect("dirty a.rs");
+
+        let (next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+        assert_eq!(mode, BuildMode::Incremental);
+        let expected_oid = git_blob_oid(dirty_bytes);
+        assert_eq!(
+            next.file_manifests
+                .iter()
+                .find(|entry| entry.path == "src/a.rs")
+                .expect("dirty manifest")
+                .content_oid,
+            expected_oid
+        );
+        assert_eq!(
+            next.graph_content_hash,
+            compute_graph_content_hash([("src/a.rs", expected_oid.as_str())])
+        );
+    }
+
+    #[test]
+    fn incremental_emits_tombstone_for_removed_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+        fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
+
+        let prev =
+            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+        let removed_stable_file_id = prev
+            .file_manifests
+            .iter()
+            .find(|entry| entry.path == "src/a.rs")
+            .expect("a manifest")
+            .stable_file_id
+            .clone();
+
+        fs::remove_file(root.join("src/a.rs")).expect("remove a.rs");
+        let (next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+
+        assert_eq!(mode, BuildMode::Incremental);
+        assert_eq!(next.tombstones.len(), 1);
+        assert_eq!(next.tombstones[0].path, "src/a.rs");
+        assert_eq!(next.tombstones[0].stable_file_id, removed_stable_file_id);
+        assert!(!next
+            .file_manifests
+            .iter()
+            .any(|entry| entry.path == "src/a.rs"));
+    }
+
+    fn init_repo(root: &Path) {
+        git(root, &["init"]);
+        git(root, &["config", "user.name", "Spur Test"]);
+        git(root, &["config", "user.email", "spur@example.invalid"]);
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
