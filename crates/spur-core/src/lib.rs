@@ -17,6 +17,7 @@ pub mod notification_pump;
 pub mod orchestrator;
 pub mod peer_mailbox;
 pub mod plan_projection;
+pub mod project_root;
 pub mod retry_loop;
 pub mod review_sink;
 pub mod session_synopsis;

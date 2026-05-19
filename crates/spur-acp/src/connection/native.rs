@@ -231,13 +231,16 @@ pub struct NativeAcpConnection {
 /// The file is truncated when opened and the child process appends to it
 /// for its lifetime — so one file per child-process spawn. Including PID
 /// avoids collisions when multiple agents start in the same second.
-fn build_acp_log_path(agent_name: &str) -> std::path::PathBuf {
+fn build_acp_log_path(repo_root: &std::path::Path, agent_name: &str) -> std::path::PathBuf {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let pid = std::process::id();
-    std::path::PathBuf::from(".spur/logs").join(format!("{agent_name}-{ts}-{pid}-acp.log"))
+    repo_root
+        .join(".spur")
+        .join("logs")
+        .join(format!("{agent_name}-{ts}-{pid}-acp.log"))
 }
 
 /// State-gated dispatch decision for `set_session_model`. Spec §6.3.
@@ -1079,7 +1082,7 @@ fn acp_thread_main(
         };
 
         // Spawn the agent subprocess.
-        let log_path = build_acp_log_path(&agent_name);
+        let log_path = build_acp_log_path(&repo_root, &agent_name);
         if let Some(parent) = log_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::warn!(
@@ -2527,7 +2530,8 @@ mod stderr_capture_tests {
 
     #[test]
     fn log_path_uses_spur_logs_directory() {
-        let path = build_acp_log_path("claude-code-acp");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = build_acp_log_path(tmp.path(), "claude-code-acp");
         let s = path.to_string_lossy();
         assert!(
             s.contains(".spur/logs/"),

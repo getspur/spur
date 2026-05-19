@@ -556,12 +556,28 @@ fn is_tty_or_forced() -> bool {
     false
 }
 
+fn command_initializes_orchestrator(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Agents { .. }
+            | Commands::Run { .. }
+            | Commands::Exec { .. }
+            | Commands::Sessions { .. }
+            | Commands::Bot { .. }
+    )
+}
+
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let repo_root = std::env::current_dir()?;
+    let cwd = std::env::current_dir()?;
+    let repo_root = spur_core::project_root::discover(&cwd)
+        .map_err(|e| anyhow::anyhow!("failed to discover project root: {e}"))?;
 
     let tui_mode = matches!(cli.command, Commands::Tui { .. });
     let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
+    if !tui_mode && command_initializes_orchestrator(&cli.command) {
+        spur_core::project_root::warn_on_nested_layout(&repo_root);
+    }
 
     let reaped_orphans: Vec<spur_acp::orphan_registry::PgidRecord> = {
         use spur_acp::orphan_sweeper::OrphanSweeper;
@@ -1095,10 +1111,8 @@ async fn run() -> Result<()> {
 
             // Resolve the config path that seeded `config` so the TUI can
             // persist runtime changes (e.g., `/theme <name>`) back to disk.
-            let config_path = std::env::current_dir()
-                .ok()
-                .map(|cwd| cwd.join(".spur").join("config.toml"))
-                .filter(|p| p.exists());
+            let config_path =
+                Some(repo_root.join(".spur").join("config.toml")).filter(|p| p.exists());
 
             // Run TUI (blocks). Capture the result so we can run structured
             // shutdown before propagating any error — otherwise `?` would
@@ -1112,6 +1126,7 @@ async fn run() -> Result<()> {
                 initial_license_state,
                 landing.clone(),
                 config_path,
+                repo_root.clone(),
             )
             .await;
 
