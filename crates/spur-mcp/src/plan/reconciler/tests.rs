@@ -876,6 +876,14 @@ async fn seed_mock_complete_epic(
     plan_id: &str,
     brain_session_id: &spur_acp::BrainSessionId,
 ) -> String {
+    seed_mock_complete_epic_for_owner(pm, plan_id, brain_session_id.as_session_id()).await
+}
+
+async fn seed_mock_complete_epic_for_owner(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    owner_session_id: &spur_acp::SessionId,
+) -> String {
     pm.create_issue(spur_pm::IssueCreate {
         title: format!("{plan_id}: epic"),
         description: Some(format!("{plan_id} test epic")),
@@ -883,7 +891,7 @@ async fn seed_mock_complete_epic(
         labels: vec![
             crate::plan::labels::plan_id(plan_id),
             crate::plan::labels::PLAN_COMPLETE.to_string(),
-            crate::plan::labels::plan_owner(&brain_session_id.as_session_id().0),
+            crate::plan::labels::plan_owner(&owner_session_id.0),
         ],
         ..Default::default()
     })
@@ -897,22 +905,39 @@ async fn seed_mock_ready_task_plan(
     task_id: &str,
     brain_session_id: &spur_acp::BrainSessionId,
 ) -> String {
-    let epic_id = seed_mock_complete_epic(pm, plan_id, brain_session_id).await;
-    let issue_id = pm
-        .create_issue(spur_pm::IssueCreate {
-            title: format!("{task_id}: ready task"),
-            description: Some(format!("{task_id} test task")),
-            issue_type: Some("task".into()),
-            labels: vec![
-                crate::plan::labels::plan_id(plan_id),
-                crate::plan::labels::plan_task_id(task_id),
-                crate::plan::labels::agent("codex"),
-            ],
-            parent: Some(epic_id.clone()),
-            ..Default::default()
-        })
+    seed_mock_ready_tasks_plan(pm, plan_id, &[task_id], brain_session_id)
         .await
-        .expect("create mock ready task");
+        .into_iter()
+        .next()
+        .expect("seeded one task")
+}
+
+async fn seed_mock_ready_tasks_plan(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    task_ids: &[&str],
+    brain_session_id: &spur_acp::BrainSessionId,
+) -> Vec<String> {
+    let epic_id = seed_mock_complete_epic(pm, plan_id, brain_session_id).await;
+    let mut issue_ids = Vec::with_capacity(task_ids.len());
+    for task_id in task_ids {
+        let issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: format!("{task_id}: ready task"),
+                description: Some(format!("{task_id} test task")),
+                issue_type: Some("task".into()),
+                labels: vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id(task_id),
+                    crate::plan::labels::agent("codex"),
+                ],
+                parent: Some(epic_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("create mock ready task");
+        issue_ids.push(issue_id);
+    }
 
     let adv =
         crate::plan::PmLike::advanced(pm.as_ref()).expect("mock pm should expose beads advanced");
@@ -922,7 +947,7 @@ async fn seed_mock_ready_task_plan(
             &crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
                 plan_id: plan_id.to_string(),
                 epic_issue_id: epic_id.clone(),
-                task_ids: vec![issue_id.clone()],
+                task_ids: issue_ids.clone(),
                 base_snapshot_branch: Some("main".to_string()),
                 base_snapshot_oid: None,
                 execution_mode: None,
@@ -933,11 +958,13 @@ async fn seed_mock_ready_task_plan(
     )
     .await
     .expect("plan submit audit");
-    crate::plan::emit_task_spec_audit(adv, &issue_id, task_id, "codex", &[])
-        .await
-        .expect("task spec audit");
+    for (issue_id, task_id) in issue_ids.iter().zip(task_ids) {
+        crate::plan::emit_task_spec_audit(adv, issue_id, task_id, "codex", &[])
+            .await
+            .expect("task spec audit");
+    }
 
-    issue_id
+    issue_ids
 }
 
 #[tokio::test]
@@ -997,6 +1024,63 @@ async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_
 }
 
 #[tokio::test]
+async fn global_reconciler_skips_other_brain_plan_without_emitting_no_ready() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-global-owner".into()));
+    seed_mock_complete_epic_for_owner(
+        &pm,
+        "P1",
+        &spur_acp::SessionId("other-brain-session".into()),
+    )
+    .await;
+    seed_mock_ready_task_plan(&pm, "P2", "T2", &brain_session_id).await;
+    let scripted_pm = Arc::new(ScriptedReadyPm {
+        inner: Arc::clone(&pm),
+        empty_plan_ids: HashSet::from(["P1".to_string()]),
+    });
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        scripted_pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        None,
+        pro_feature_gate(),
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick once");
+    let request = delegation_rx.recv().await.expect("dispatch request");
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let p1_outcomes = outcomes.recent_outcomes("P1");
+    let p2_outcomes = outcomes.recent_outcomes("P2");
+
+    assert!(did_work, "mixed global tick should dispatch P2");
+    assert_eq!(request.issue_id.as_deref(), Some("bd-mock-3"));
+    assert!(
+        !p1_outcomes.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::NoReadyTasks {
+                plan_id,
+                reason: NoReadyReason::NoMatchingRows,
+                ..
+            } if plan_id == "P1"
+        )),
+        "P1 should not record cross-brain NoReadyTasks, got {p1_outcomes:?}"
+    );
+    assert!(
+        p2_outcomes.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Dispatched { task_id, agent, .. }
+                if task_id == "T2" && agent == "codex"
+        )),
+        "P2 should record a dispatched outcome, got {p2_outcomes:?}"
+    );
+}
+
+#[tokio::test]
 async fn global_reconciler_status_reports_plans_enumerated_and_dispatched_per_tick() {
     let pm = crate::plan::test_util::MockPm::new().arc();
     let brain_session_id =
@@ -1024,7 +1108,41 @@ async fn global_reconciler_status_reports_plans_enumerated_and_dispatched_per_ti
     let status = outcomes_store.lock().await.reconciler_status();
 
     assert_eq!(status.last_tick_plans_enumerated, 2);
-    assert_eq!(status.last_tick_plans_dispatched, 1);
+    assert_eq!(status.last_tick_tasks_dispatched, 1);
+}
+
+#[tokio::test]
+async fn global_reconciler_status_reports_tasks_dispatched_per_tick() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-global-task-count".into()));
+    seed_mock_ready_tasks_plan(&pm, "P1", &["T1", "T2", "T3"], &brain_session_id).await;
+    let scripted_pm = Arc::new(ScriptedReadyPm {
+        inner: Arc::clone(&pm),
+        empty_plan_ids: HashSet::new(),
+    });
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(3);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        scripted_pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+    let mut requests = Vec::new();
+    for _ in 0..3 {
+        requests.push(delegation_rx.recv().await.expect("dispatch request"));
+    }
+    let outcomes_store = reconciler.outcomes();
+    let status = outcomes_store.lock().await.reconciler_status();
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(status.last_tick_plans_enumerated, 1);
+    assert_eq!(status.last_tick_tasks_dispatched, 3);
 }
 
 async fn seed_ready_overlay_plan(
