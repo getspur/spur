@@ -24,9 +24,11 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize root `{}`", root.display()))?;
-    let output = options
-        .output
-        .or_else(|| std::env::var_os("SPUR_CODE_GRAPH_INDEX").map(PathBuf::from))
+    let explicit_output = options.output;
+    let env_output = std::env::var_os("SPUR_CODE_GRAPH_INDEX").map(PathBuf::from);
+    let uses_output_override = explicit_output.is_some() || env_output.is_some();
+    let output = explicit_output
+        .or(env_output)
         .unwrap_or_else(|| root.join(DEFAULT_GRAPH_INDEX_PATH));
 
     if !options.quiet {
@@ -78,21 +80,39 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
             facts.edges.len(),
         )
     };
-    write_artifact(&artifact, &output)?;
+    let canonical_output = if uses_output_override {
+        write_artifact(&artifact, &output)?;
+        None
+    } else if let Some(ctx) = spur_graph::git::detect(&root) {
+        spur_graph::store::cache::write_with_dedup(&artifact, &root, &ctx)?;
+        spur_graph::store::cache::lookup_canonical(
+            &ctx.git_common_dir,
+            &artifact.manifest_version,
+            &artifact.graph_content_hash,
+        )
+    } else {
+        write_artifact(&artifact, &output)?;
+        None
+    };
     let language_summary = file_counts
         .iter()
         .map(|(language, count)| format!("{language}:{count}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let canonical_summary = canonical_output
+        .as_ref()
+        .map(|path| format!(", canonical: {}", path.display()))
+        .unwrap_or_default();
 
     println!(
-        "[spur] Graph index built: mode: {:?}, files: {}, nodes: {}, edges: {}, by-language: [{}], output: {}",
+        "[spur] Graph index built: mode: {:?}, files: {}, nodes: {}, edges: {}, by-language: [{}], output: {}{}",
         mode,
         artifact.files.len(),
         node_count,
         edge_count,
         language_summary,
-        output.display()
+        output.display(),
+        canonical_summary
     );
     Ok(())
 }

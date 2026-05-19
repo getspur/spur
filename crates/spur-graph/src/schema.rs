@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::BufReader;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
@@ -76,11 +77,15 @@ pub struct GraphIndexArtifact {
     #[serde(default)]
     pub manifest_version: String,
     #[serde(default)]
+    pub graph_content_hash: String,
+    #[serde(default)]
     pub file_manifests: Vec<GraphFileManifestEntry>,
     pub files: Vec<GraphFileArtifact>,
     pub symbols: Vec<GraphSymbolArtifact>,
     #[serde(default)]
     pub edges: Vec<GraphEdgeArtifact>,
+    #[serde(default)]
+    pub tombstones: Vec<GraphTombstoneEntry>,
     #[serde(default, skip)]
     pub diagnostics: Vec<String>,
 }
@@ -105,9 +110,33 @@ pub struct GraphFileArtifact {
 pub struct GraphFileManifestEntry {
     pub stable_file_id: String,
     pub path: String,
-    pub mtime_nanos: u128,
-    pub size_bytes: u64,
+    pub content_oid: String,
     pub node_ids: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphTombstoneEntry {
+    pub path: String,
+    pub stable_file_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphIndexPointer {
+    pub schema: String,
+    pub graph_content_hash: String,
+    pub manifest_version: String,
+    pub source_kind: SourceKind,
+    pub indexed_commit_oid: Option<String>,
+    pub canonical_artifact_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Git,
+    Fs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
