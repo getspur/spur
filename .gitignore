@@ -24,3 +24,6 @@ __pycache__/
 /resource/superpowers/
 .superpowers/brainstorm/
 /.spur/sessions/**
+
+# Vendored marketing skills (clone via marketing/README.md instructions)
+marketing/marketingskills/
