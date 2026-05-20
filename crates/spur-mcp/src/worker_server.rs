@@ -499,6 +499,28 @@ enum CodeAmbiguityMode {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeResolveParams {
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    selector: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeFileSymbolsParams {
+    /// Worktree-relative file path.
+    file: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSymbolInfoParams {
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+    /// deprecated; use selector. Accepts graph://symbol/<id> or bare hex id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSymbolParams {
     /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -802,6 +824,72 @@ impl WorkerToolHandler {
                     args,
                 )
                 .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_resolve",
+        description = "Resolve a code selector against the current worktree graph artifact and return only candidate rows. Use before code_subgraph when a selector may be ambiguous.",
+        input_schema = crate::tool_schemas::schema_object::<CodeResolveParams>()
+    )]
+    async fn code_resolve_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_resolve",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_resolve(&args)
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_file_symbols",
+        description = "List code symbols declared in one worktree-relative file from the current graph artifact. Rejects absolute paths and paths containing '..'.",
+        input_schema = crate::tool_schemas::schema_object::<CodeFileSymbolsParams>()
+    )]
+    async fn code_file_symbols_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_file_symbols",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_file_symbols(&args)
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_symbol_info",
+        description = "Resolve one code symbol and return metadata only. Ambiguous selectors return candidate rows.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSymbolInfoParams>()
+    )]
+    async fn code_symbol_info_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_symbol_info",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_symbol_info(&args)
             },
         )
         .await
