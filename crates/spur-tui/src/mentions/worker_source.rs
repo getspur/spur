@@ -42,6 +42,8 @@ impl MentionSource for WorkerMentionSource {
                 uri: format!("worker://{}", d.name),
                 display: format!("worker:{}", d.name),
                 secondary: d.description.clone(),
+                code_path: None,
+                code_scope: None,
                 tag: d.tier.clone(),
                 search_text: None,
                 atom_text: None,
