@@ -11,6 +11,8 @@ pub const CONTEXT_HEADER_CAP_BYTES: usize = 1500;
 pub const PER_PROMPT_CAP_BYTES: usize = 32 * 1024;
 
 const CONTEXT_TRUNCATED_MARKER: &str = "# … context truncated\n";
+const SIGNATURE_CAP_BYTES: usize = 200;
+const SIGNATURE_TRUNCATED_MARKER: &str = "…";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpandedMention {
@@ -77,11 +79,17 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
                 }
             }
 
-            let context_header = fs::read_to_string(&path)
+            let (signature, context_header) = fs::read_to_string(&path)
                 .ok()
-                .map(|content| context_header(&content, byte_range[0]))
+                .map(|content| {
+                    (
+                        first_signature_line(&content, *byte_range, entity_name),
+                        context_header(&content, byte_range[0]),
+                    )
+                })
                 .unwrap_or_default();
-            let text = symbol_expansion(payload, *line_range, &context_header);
+            let text =
+                symbol_expansion(payload, *line_range, signature.as_deref(), &context_header);
             ExpandedMention::Body { text }
         }
     }
@@ -113,6 +121,7 @@ fn symbol_validation_payload(
 fn symbol_expansion(
     payload: &CodeMentionPayload,
     line_range: [usize; 2],
+    signature: Option<&str>,
     context_header: &str,
 ) -> String {
     let symbol_kind = payload
@@ -125,14 +134,19 @@ fn symbol_expansion(
         None => payload.authoritative.display.clone(),
     };
 
+    let signature_line = signature
+        .map(|signature| format!("signature: {signature}\n"))
+        .unwrap_or_default();
+
     format!(
-        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\ngraph_index_version: {}\n\ncontext_header:\n{}",
+        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\n{}graph_index_version: {}\n\ncontext_header:\n{}",
         display_name,
         symbol_kind,
         payload.authoritative.uri,
         payload.authoritative.file_path,
         line_range[0],
         line_range[1],
+        signature_line,
         payload.display_meta.graph_index_version,
         context_header,
     )
@@ -226,6 +240,54 @@ fn context_header(content: &str, symbol_start: usize) -> String {
         CONTEXT_TRUNCATED_MARKER,
     );
     header
+}
+
+fn first_signature_line(
+    content: &str,
+    byte_range: [usize; 2],
+    entity_name: &str,
+) -> Option<String> {
+    let [start, end] = byte_range;
+    if start >= end || end > content.len() {
+        return None;
+    }
+
+    let mut line_start = 0;
+    for line_with_ending in content.split_inclusive('\n') {
+        let line_end = line_start + line_with_ending.len();
+        let line = line_with_ending
+            .trim_end_matches('\n')
+            .trim_end_matches('\r');
+        let code_start = line_start + line.len() - line.trim_start().len();
+        if code_start >= start && code_start < end && line.contains(entity_name) {
+            return Some(truncate_signature_line(trim_signature_block_open(line)));
+        }
+        line_start = line_end;
+    }
+
+    None
+}
+
+fn trim_signature_block_open(line: &str) -> String {
+    let trimmed = line.trim();
+    trimmed
+        .strip_suffix('{')
+        .map(str::trim_end)
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn truncate_signature_line(mut line: String) -> String {
+    if line.len() <= SIGNATURE_CAP_BYTES {
+        return line;
+    }
+    let keep = previous_char_boundary(
+        &line,
+        SIGNATURE_CAP_BYTES.saturating_sub(SIGNATURE_TRUNCATED_MARKER.len()),
+    );
+    line.truncate(keep);
+    line.push_str(SIGNATURE_TRUNCATED_MARKER);
+    line
 }
 
 fn is_top_context_line(trimmed: &str) -> bool {
@@ -331,7 +393,8 @@ mod tests {
     #[test]
     fn symbol_pass_path_expands_existing_body() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let source = "use crate::Config;\n\npub fn run() {\n    println!(\"run\");\n}\n";
+        let source =
+            "use crate::Config;\n\npub fn run() -> Result<()> {\n    println!(\"run\");\n}\n";
         write_source(dir.path(), "src/lib.rs", source);
         let payload = symbol_payload_from_source(
             "@run",
@@ -351,8 +414,60 @@ mod tests {
 
         assert_eq!(
             text,
-            "MENTION @run\nkind:    symbol:fn\nid:      graph://symbol/symbol-run\nfile:    src/lib.rs\nlines:   3-5\ngraph_index_version: test-version\n\ncontext_header:\nuse crate::Config;\n\n"
+            "MENTION @run\nkind:    symbol:fn\nid:      graph://symbol/symbol-run\nfile:    src/lib.rs\nlines:   3-5\nsignature: pub fn run() -> Result<()>\ngraph_index_version: test-version\n\ncontext_header:\nuse crate::Config;\n\n"
         );
+    }
+
+    #[test]
+    fn first_signature_line_extracts_function_signature() {
+        let source =
+            "use crate::Config;\n\npub fn run(args: Args) -> Result<()> {\n    Ok(())\n}\n";
+        let start = source.find("pub fn run").expect("start");
+        let end = source.len();
+
+        assert_eq!(
+            first_signature_line(source, [start, end], "run"),
+            Some("pub fn run(args: Args) -> Result<()>".to_string())
+        );
+    }
+
+    #[test]
+    fn first_signature_line_trims_trailing_block_open() {
+        let source = "impl Engine {\n    fn run(&mut self) {\n        work();\n    }\n}\n";
+        let start = source.find("fn run").expect("start");
+        let end = source.find("        work").expect("end");
+
+        assert_eq!(
+            first_signature_line(source, [start, end], "run"),
+            Some("fn run(&mut self)".to_string())
+        );
+    }
+
+    #[test]
+    fn first_signature_line_truncates_over_cap() {
+        let source = format!(
+            "pub fn run({}) -> Result<()> {{\n}}\n",
+            "arg: Type, ".repeat(30)
+        );
+        let expected = {
+            let mut line = source.lines().next().expect("signature").trim().to_string();
+            line.pop();
+            truncate_signature_line(line)
+        };
+
+        let actual =
+            first_signature_line(&source, [0, source.len()], "run").expect("signature line");
+
+        assert_eq!(actual, expected);
+        assert!(actual.len() <= 200);
+        assert!(actual.ends_with('…'), "{actual}");
+    }
+
+    #[test]
+    fn first_signature_line_returns_none_when_entity_name_absent() {
+        let source = "pub fn other() {}\n";
+
+        assert_eq!(first_signature_line(source, [0, source.len()], "run"), None);
     }
 
     #[test]
