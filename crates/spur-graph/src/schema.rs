@@ -163,6 +163,8 @@ pub struct GraphEdgeArtifact {
     pub relation: RelationKind,
     pub confidence: Confidence,
     pub confidence_score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_kind: Option<ChangeKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,6 +191,8 @@ pub struct GraphEdge {
     pub confidence_score: f32,
     pub evidence_id: EvidenceId,
     pub directed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_kind: Option<ChangeKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +224,7 @@ pub enum NodeKind {
     TypeAlias,
     Macro,
     Section,
+    Commit,
 }
 
 impl NodeKind {
@@ -240,6 +245,7 @@ impl NodeKind {
             NodeKind::TypeAlias => "type_alias",
             NodeKind::Macro => "macro",
             NodeKind::Section => "section",
+            NodeKind::Commit => "commit",
         }
     }
 }
@@ -256,6 +262,7 @@ pub enum RelationKind {
     Uses,
     Extends,
     Links,
+    Touches,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +271,31 @@ pub enum Confidence {
     SyntaxExact,
     Heuristic,
     Unknown,
+}
+
+pub type StableSymbolId = String;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    RenamedFrom(RenamePrev),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenamePrev {
+    File(PathBuf),
+    Symbol(SnapshotKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotKey {
+    pub stable_symbol_id: StableSymbolId,
+    pub commit: String,
 }
 
 pub fn load_artifact(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
@@ -339,4 +371,51 @@ fn validate_ranges(artifact: &GraphIndexArtifact) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod change_kind_tests {
+    use super::*;
+
+    #[test]
+    fn change_kind_round_trips_json() {
+        let added = ChangeKind::Added;
+        let s = serde_json::to_string(&added).unwrap();
+        assert_eq!(s, "\"added\"");
+        let back: ChangeKind = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ChangeKind::Added);
+
+        let renamed = ChangeKind::RenamedFrom(RenamePrev::File("src/old.rs".into()));
+        let s = serde_json::to_string(&renamed).unwrap();
+        let back: ChangeKind = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, renamed);
+    }
+
+    #[test]
+    fn node_kind_has_commit_variant() {
+        let k = NodeKind::Commit;
+        let s = serde_json::to_string(&k).unwrap();
+        assert_eq!(s, "\"commit\"");
+    }
+
+    #[test]
+    fn relation_kind_has_touches_variant() {
+        let r = RelationKind::Touches;
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(s, "\"touches\"");
+    }
+
+    #[test]
+    fn graph_edge_artifact_change_kind_is_optional() {
+        let json = r#"{
+            "source_stable_symbol_id":"a",
+            "target_stable_symbol_id":"b",
+            "target_label":null,
+            "relation":"calls",
+            "confidence":"syntax_exact",
+            "confidence_score":1.0
+        }"#;
+        let e: GraphEdgeArtifact = serde_json::from_str(json).unwrap();
+        assert!(e.change_kind.is_none());
+    }
 }
