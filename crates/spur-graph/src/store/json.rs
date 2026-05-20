@@ -13,9 +13,10 @@ use crate::extract::GraphFacts;
 use crate::extract::{build_facts_for_paths, languages::all_supported_extensions};
 use crate::validation::compute_anchor_hash;
 use crate::{
-    git, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphIndexHeader, GraphNode, GraphSymbolArtifact, GraphTombstoneEntry,
-    NodeKind, RelationKind, SourceSpan,
+    git, CommitArtifact, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode, GraphSymbolArtifact,
+    GraphTombstoneEntry, NodeKind, RelationKind, SourceSpan, SymbolSnapshotArtifact,
+    TemporalEdgeArtifact,
 };
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
@@ -59,6 +60,9 @@ struct GraphArtifactBodyForHash<'a> {
     graph_content_hash: &'a str,
     manifest_version: &'a str,
     tombstones: &'a [GraphTombstoneEntry],
+    commits: &'a [CommitArtifact],
+    symbol_snapshots: &'a [SymbolSnapshotArtifact],
+    temporal_edges: &'a [TemporalEdgeArtifact],
 }
 
 pub fn current_manifest_version() -> String {
@@ -171,6 +175,9 @@ fn artifact_content_hash_blake3_hex(artifact: &GraphIndexArtifact) -> anyhow::Re
         graph_content_hash: &artifact.graph_content_hash,
         manifest_version: &artifact.manifest_version,
         tombstones: &artifact.tombstones,
+        commits: &artifact.commits,
+        symbol_snapshots: &artifact.symbol_snapshots,
+        temporal_edges: &artifact.temporal_edges,
     };
     let canonical_json = serde_json::to_vec(&body)
         .context("failed to encode graph artifact body for content hash")?;
