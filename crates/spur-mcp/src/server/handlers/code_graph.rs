@@ -1,5 +1,5 @@
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 use spur_graph::{
@@ -18,48 +18,70 @@ const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
 
 impl McpCallbackServer {
     pub(crate) async fn handle_code_resolve(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_resolve(&args))
+        code_graph_response(id, code_resolve_response(&args))
     }
 
     pub(crate) async fn handle_code_file_symbols(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_file_symbols(&args))
+        code_graph_response(id, code_file_symbols_response(&args))
     }
 
     pub(crate) async fn handle_code_symbol_info(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_symbol_info(&args))
+        code_graph_response(id, code_symbol_info_response(&args))
     }
 
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_callers(&args))
+        code_graph_response(id, code_callers_response(&args))
     }
 
     pub(crate) async fn handle_code_callees(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_callees(&args))
+        code_graph_response(id, code_callees_response(&args))
     }
 
     pub(crate) async fn handle_code_subgraph(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_subgraph(&args))
+        code_graph_response(id, code_subgraph_response(&args))
     }
 }
 
 pub(crate) fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
+    code_resolve_with_artifact(args, &artifact)
+}
+
+fn code_resolve_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_resolve_with_artifact(args, artifact))
+}
+
+fn code_resolve_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
     let selector = selector_arg(args)?;
-    let candidates = resolve_candidate_rows(&artifact, selector)?
+    let candidates = resolve_candidate_rows(artifact, selector)?
         .into_iter()
         .map(candidate_row)
         .collect::<Vec<_>>();
 
     Ok(with_graph_metadata(
-        &artifact,
+        artifact,
         json!({ "candidates": candidates }),
     ))
 }
 
 pub(crate) fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
+    code_file_symbols_with_artifact(args, &artifact)
+}
+
+fn code_file_symbols_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_file_symbols_with_artifact(args, artifact))
+}
+
+fn code_file_symbols_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
     let file = file_arg(args)?;
-    validate_file_path_arg(file)?;
+    let file = validate_file_path_arg(file)?;
     if !artifact.files.iter().any(|entry| entry.file_path == file) {
         return Err(McpHandlerError::NotFound(format!(
             "file `{file}` not found in graph artifact"
@@ -76,72 +98,107 @@ pub(crate) fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> 
     .map(candidate_row)
     .collect::<Vec<_>>();
 
-    Ok(with_graph_metadata(
-        &artifact,
-        json!({ "symbols": symbols }),
-    ))
+    Ok(with_graph_metadata(artifact, json!({ "symbols": symbols })))
 }
 
 pub(crate) fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let symbol_id = match resolve_code_selector(args, &artifact)? {
+    code_symbol_info_with_artifact(args, &artifact)
+}
+
+fn code_symbol_info_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_symbol_info_with_artifact(args, artifact))
+}
+
+fn code_symbol_info_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
+    let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(&artifact, candidates));
+            return Ok(ambiguous_response(artifact, candidates));
         }
     };
-    let symbol = symbol_by_id(&artifact, &symbol_id)?;
+    let symbol = symbol_by_id(artifact, &symbol_id)?;
 
     Ok(with_graph_metadata(
-        &artifact,
+        artifact,
         json!({ "symbol": symbol_info_row(symbol) }),
     ))
 }
 
 pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let symbol_id = match resolve_code_selector(args, &artifact)? {
+    code_callers_with_artifact(args, &artifact)
+}
+
+fn code_callers_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_callers_with_artifact(args, artifact))
+}
+
+fn code_callers_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
+    let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(&artifact, candidates));
+            return Ok(ambiguous_response(artifact, candidates));
         }
     };
 
-    let callers = find_callers(&artifact, &symbol_id)
+    let callers = find_callers(artifact, &symbol_id)
         .into_iter()
         .map(symbol_row)
         .collect::<Vec<_>>();
-    Ok(with_graph_metadata(
-        &artifact,
-        json!({ "callers": callers }),
-    ))
+    Ok(with_graph_metadata(artifact, json!({ "callers": callers })))
 }
 
 pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let symbol_id = match resolve_code_selector(args, &artifact)? {
+    code_callees_with_artifact(args, &artifact)
+}
+
+fn code_callees_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_callees_with_artifact(args, artifact))
+}
+
+fn code_callees_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
+    let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(&artifact, candidates));
+            return Ok(ambiguous_response(artifact, candidates));
         }
     };
 
-    let callees = find_callees(&artifact, &symbol_id)
+    let callees = find_callees(artifact, &symbol_id)
         .into_iter()
         .map(symbol_row)
         .collect::<Vec<_>>();
-    Ok(with_graph_metadata(
-        &artifact,
-        json!({ "callees": callees }),
-    ))
+    Ok(with_graph_metadata(artifact, json!({ "callees": callees })))
 }
 
 pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let symbol_id = match resolve_code_selector(args, &artifact)? {
+    code_subgraph_with_artifact(args, &artifact)
+}
+
+fn code_subgraph_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_subgraph_with_artifact(args, artifact))
+}
+
+fn code_subgraph_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
+    let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(&artifact, candidates));
+            return Ok(ambiguous_response(artifact, candidates));
         }
     };
 
@@ -161,7 +218,7 @@ pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
         .unwrap_or("json");
     let edge_kinds = parse_edge_kinds(args)?;
     let edge_filter = edge_kinds.as_deref();
-    let view = bounded_subgraph(&artifact, &symbol_id, radius, edge_filter);
+    let view = bounded_subgraph(artifact, &symbol_id, radius, edge_filter);
 
     match format {
         "json" => {
@@ -170,7 +227,7 @@ pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
                 metadata["warning"] = Value::String(warning);
             }
             Ok(with_graph_metadata(
-                &artifact,
+                artifact,
                 json!({
                     "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
                     "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
@@ -179,7 +236,7 @@ pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
             ))
         }
         "mermaid" => Ok(with_graph_metadata(
-            &artifact,
+            artifact,
             json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) }),
         )),
         other => Err(McpHandlerError::InvalidParams(format!(
@@ -188,18 +245,80 @@ pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
     }
 }
 
-fn code_graph_response(id: Value, result: Result<Value, McpHandlerError>) -> JsonRpcResponse {
-    match result {
-        Ok(body) => json_success(id, body),
-        Err(McpHandlerError::InvalidParams(message)) => {
-            JsonRpcResponse::invalid_params(id, message)
-        }
-        Err(McpHandlerError::NotFound(message)) => JsonRpcResponse::error(id, -32004, message),
-        Err(McpHandlerError::Unauthorized(message)) => JsonRpcResponse::error(id, -32001, message),
-        Err(McpHandlerError::UpstreamPm(message)) | Err(McpHandlerError::Internal(message)) => {
-            JsonRpcResponse::internal_error(id, message)
+type CodeGraphResult = Result<Value, CodeGraphError>;
+
+#[derive(Debug)]
+struct CodeGraphError {
+    error: McpHandlerError,
+    metadata: Option<GraphResponseMetadata>,
+}
+
+impl CodeGraphError {
+    fn without_metadata(error: McpHandlerError) -> Self {
+        Self {
+            error,
+            metadata: None,
         }
     }
+
+    fn with_artifact(error: McpHandlerError, artifact: &GraphIndexArtifact) -> Self {
+        Self {
+            error,
+            metadata: Some(GraphResponseMetadata::from_artifact(artifact)),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GraphResponseMetadata {
+    graph_content_hash: String,
+    graph_index_version: String,
+}
+
+impl GraphResponseMetadata {
+    fn from_artifact(artifact: &GraphIndexArtifact) -> Self {
+        Self {
+            graph_content_hash: artifact.graph_content_hash.clone(),
+            graph_index_version: artifact.header.graph_index_version.clone(),
+        }
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "graph_content_hash": self.graph_content_hash,
+            "graph_index_version": self.graph_index_version,
+        })
+    }
+}
+
+fn with_loaded_graph_artifact(
+    handler: impl FnOnce(&GraphIndexArtifact) -> Result<Value, McpHandlerError>,
+) -> CodeGraphResult {
+    let artifact = load_graph_artifact_for_request().map_err(CodeGraphError::without_metadata)?;
+    handler(&artifact).map_err(|error| CodeGraphError::with_artifact(error, &artifact))
+}
+
+fn code_graph_response(id: Value, result: CodeGraphResult) -> JsonRpcResponse {
+    match result {
+        Ok(body) => json_success(id, body),
+        Err(error) => code_graph_error_response(id, error),
+    }
+}
+
+fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcResponse {
+    let CodeGraphError { error, metadata } = error;
+    let mut response = match error {
+        McpHandlerError::InvalidParams(message) => JsonRpcResponse::invalid_params(id, message),
+        McpHandlerError::NotFound(message) => JsonRpcResponse::error(id, -32004, message),
+        McpHandlerError::Unauthorized(message) => JsonRpcResponse::error(id, -32001, message),
+        McpHandlerError::UpstreamPm(message) | McpHandlerError::Internal(message) => {
+            JsonRpcResponse::internal_error(id, message)
+        }
+    };
+    if let (Some(error), Some(metadata)) = (response.error.as_mut(), metadata) {
+        error.data = Some(metadata.into_value());
+    }
+    response
 }
 
 #[allow(clippy::result_large_err)]
@@ -305,18 +424,45 @@ fn file_arg(args: &Value) -> Result<&str, McpHandlerError> {
         .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'file'".into()))
 }
 
-fn validate_file_path_arg(file: &str) -> Result<(), McpHandlerError> {
-    if Path::new(file).is_absolute() {
+fn validate_file_path_arg(file: &str) -> Result<String, McpHandlerError> {
+    let path = Path::new(file);
+    if path.is_absolute() {
         return Err(McpHandlerError::InvalidParams(
             "field 'file' must be a worktree-relative path".into(),
         ));
     }
-    if file.contains("..") {
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {
+                return Err(McpHandlerError::InvalidParams(
+                    "field 'file' must not contain '.' path components".into(),
+                ));
+            }
+            Component::ParentDir => {
+                return Err(McpHandlerError::InvalidParams(
+                    "field 'file' must not contain '..' path components".into(),
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(McpHandlerError::InvalidParams(
+                    "field 'file' must be a worktree-relative path".into(),
+                ));
+            }
+        }
+    }
+
+    let normalized = normalized.to_string_lossy().into_owned();
+    if normalized != file {
         return Err(McpHandlerError::InvalidParams(
-            "field 'file' must not contain '..'".into(),
+            "field 'file' must be a normalized worktree-relative path without '.' or '..' components"
+                .into(),
         ));
     }
-    Ok(())
+
+    Ok(normalized)
 }
 
 fn string_arg<'a>(args: &'a Value, field: &str) -> Result<Option<&'a str>, McpHandlerError> {
@@ -825,6 +971,14 @@ mod tests {
         let error = response.error.expect("ambiguous error");
         assert_eq!(error.code, -32602);
         assert!(error.message.contains("selector `run` is ambiguous"));
+        assert_eq!(
+            error.data.as_ref().expect("graph metadata")["graph_content_hash"],
+            "test"
+        );
+        assert_eq!(
+            error.data.as_ref().expect("graph metadata")["graph_index_version"],
+            "test"
+        );
     }
 
     #[tokio::test]
@@ -895,5 +1049,9 @@ mod tests {
         assert!(error
             .message
             .contains(dir.path().to_string_lossy().as_ref()));
+        assert!(
+            error.data.is_none(),
+            "artifact-load failures must not echo graph metadata"
+        );
     }
 }

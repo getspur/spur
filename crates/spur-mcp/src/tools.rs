@@ -790,7 +790,11 @@ fn code_symbol_info_def() -> ToolDefinition {
                     "type": "string",
                     "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["selector"] },
+                { "required": ["symbol"] }
+            ]
         }),
     }
 }
@@ -815,7 +819,11 @@ fn code_callers_def() -> ToolDefinition {
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["selector"] },
+                { "required": ["symbol"] }
+            ]
         }),
     }
 }
@@ -840,7 +848,11 @@ fn code_callees_def() -> ToolDefinition {
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["selector"] },
+                { "required": ["symbol"] }
+            ]
         }),
     }
 }
@@ -879,7 +891,11 @@ fn code_subgraph_def() -> ToolDefinition {
                     "items": { "type": "string" },
                     "description": "Optional relation kind filter, e.g. [\"calls\", \"references\"]"
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["selector"] },
+                { "required": ["symbol"] }
+            ]
         }),
     }
 }
@@ -1424,7 +1440,12 @@ mod schema_truthfulness_tests {
 
     #[test]
     fn code_graph_schemas_advertise_selector_legacy_symbol_and_ambiguity_mode() {
-        for def in [code_callers_def(), code_callees_def(), code_subgraph_def()] {
+        for def in [
+            code_symbol_info_def(),
+            code_callers_def(),
+            code_callees_def(),
+            code_subgraph_def(),
+        ] {
             let props = def
                 .input_schema
                 .get("properties")
@@ -1442,6 +1463,18 @@ mod schema_truthfulness_tests {
                 "{} symbol deprecation description",
                 def.name
             );
+            assert_eq!(
+                def.input_schema.get("anyOf"),
+                Some(&json!([
+                    { "required": ["selector"] },
+                    { "required": ["symbol"] }
+                ])),
+                "{} selector/symbol anyOf",
+                def.name
+            );
+            if def.name == "code_symbol_info" {
+                continue;
+            }
             assert_eq!(
                 props.get("on_ambiguous").and_then(|v| v.get("enum")),
                 Some(&json!(["candidates", "error"])),

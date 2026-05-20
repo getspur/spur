@@ -234,6 +234,14 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
         .as_str()
         .expect("unknown error message")
         .contains("symbol not-in-artifact not found in graph artifact"));
+    assert_eq!(
+        unknown["error"]["data"]["graph_content_hash"],
+        artifact.graph_content_hash
+    );
+    assert_eq!(
+        unknown["error"]["data"]["graph_index_version"],
+        artifact.header.graph_index_version
+    );
 }
 
 #[tokio::test]
@@ -317,6 +325,22 @@ async fn code_file_symbols_returns_candidate_rows_for_worktree_relative_file() {
     )
     .await;
     assert_eq!(invalid["error"]["code"], -32602);
+
+    let current_dir = call_tool(
+        &server,
+        "code_file_symbols",
+        json!({ "file": "./src/lib.rs" }),
+    )
+    .await;
+    assert_eq!(current_dir["error"]["code"], -32602);
+
+    let embedded_current_dir = call_tool(
+        &server,
+        "code_file_symbols",
+        json!({ "file": "src/./lib.rs" }),
+    )
+    .await;
+    assert_eq!(embedded_current_dir["error"]["code"], -32602);
 }
 
 #[tokio::test]
