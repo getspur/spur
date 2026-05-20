@@ -72,6 +72,10 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
                 entity_name,
                 anchor_hash,
             );
+            debug_assert_eq!(
+                symbol_payload.file_path, payload.authoritative.file_path,
+                "symbol validation payload must use authoritative.file_path"
+            );
             match validate_symbol(&symbol_payload, worktree_root) {
                 ValidationOutcome::Pass => {}
                 ValidationOutcome::Fail(reason) => {
