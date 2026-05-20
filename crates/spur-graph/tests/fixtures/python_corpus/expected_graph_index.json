@@ -78,6 +78,7 @@
         2
       ],
       "entity_name": "greet",
+      "qualified_name": "greet",
       "symbol_kind": "function",
       "anchor_hash": "12461118549957327396",
       "enclosing_scope": null
@@ -94,6 +95,7 @@
         14
       ],
       "entity_name": "run",
+      "qualified_name": "run",
       "symbol_kind": "function",
       "anchor_hash": "1334120494089021360",
       "enclosing_scope": null
@@ -110,6 +112,7 @@
         18
       ],
       "entity_name": "make_message",
+      "qualified_name": "make_message",
       "symbol_kind": "function",
       "anchor_hash": "16130603700320025357",
       "enclosing_scope": null
@@ -126,6 +129,7 @@
         10
       ],
       "entity_name": "User",
+      "qualified_name": "User",
       "symbol_kind": "class",
       "anchor_hash": "16217123041392140823",
       "enclosing_scope": null
@@ -142,6 +146,7 @@
         3
       ],
       "entity_name": "__init__",
+      "qualified_name": "User::__init__",
       "symbol_kind": "method",
       "anchor_hash": "4641732598675805485",
       "enclosing_scope": "User"
@@ -158,6 +163,7 @@
         6
       ],
       "entity_name": "normalized",
+      "qualified_name": "User::normalized",
       "symbol_kind": "method",
       "anchor_hash": "6074531788373897476",
       "enclosing_scope": "User"
@@ -174,6 +180,7 @@
         10
       ],
       "entity_name": "from_parts",
+      "qualified_name": "User::from_parts",
       "symbol_kind": "method",
       "anchor_hash": "7062152415856740356",
       "enclosing_scope": "User"
@@ -190,6 +197,7 @@
         3
       ],
       "entity_name": "Client",
+      "qualified_name": "Client",
       "symbol_kind": "class",
       "anchor_hash": "2522700248575330017",
       "enclosing_scope": null
@@ -206,6 +214,7 @@
         3
       ],
       "entity_name": "send",
+      "qualified_name": "Client::send",
       "symbol_kind": "method",
       "anchor_hash": "15306036335871841256",
       "enclosing_scope": "Client"

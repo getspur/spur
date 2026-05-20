@@ -108,6 +108,12 @@ fn symbol_validation_payload(
         byte_range,
         line_range,
         entity_name: entity_name.to_string(),
+        qualified_name: payload
+            .display_meta
+            .enclosing_scope
+            .as_ref()
+            .map(|scope| format!("{scope}::{entity_name}"))
+            .unwrap_or_else(|| entity_name.to_string()),
         symbol_kind: payload
             .extraction_hints
             .symbol_kind

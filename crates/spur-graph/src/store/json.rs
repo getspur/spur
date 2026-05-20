@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
-pub const SCHEMA_VERSION: &str = "spur-graph-schema-v4";
+pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
 pub const EXTRACTOR_VERSION: &str = "2026-05-16-persisted-edges-v3";
 
 const TAG_QUERY_BYTES: &[&[u8]] = &[
@@ -192,6 +192,7 @@ fn buckets_from_facts(
         .iter()
         .map(|node| (node.node_id, node))
         .collect();
+    let parent_by_target = parent_by_target(facts);
 
     let mut buckets: BTreeMap<String, FileBucket> = BTreeMap::new();
     for node in &facts.nodes {
@@ -247,9 +248,10 @@ fn buckets_from_facts(
                     byte_range: [span.start_byte as usize, span.end_byte as usize],
                     line_range: [span.start_line as usize, span.end_line as usize],
                     entity_name: symbol_entity_name(&node.label),
+                    qualified_name: qualified_name(&parent_by_target, &nodes_by_id, node),
                     symbol_kind: symbol_kind(node.kind).to_string(),
                     anchor_hash,
-                    enclosing_scope: enclosing_scope(facts, &nodes_by_id, node),
+                    enclosing_scope: enclosing_scope(&parent_by_target, &nodes_by_id, node),
                 };
                 let entry = buckets.entry(file_path.clone()).or_insert_with(|| {
                     let stable_file_id = stable_file_id_from_path(&file_path);
@@ -790,23 +792,75 @@ fn symbol_entity_name(label: &str) -> String {
     label.strip_prefix("impl ").unwrap_or(label).to_string()
 }
 
+fn parent_by_target(facts: &GraphFacts) -> HashMap<crate::NodeId, crate::NodeId> {
+    let mut parent_by_target = HashMap::new();
+    for edge in &facts.edges {
+        if edge.relation != RelationKind::Contains {
+            continue;
+        }
+        let Some(target_node_id) = edge.target_node_id else {
+            continue;
+        };
+        parent_by_target
+            .entry(target_node_id)
+            .or_insert(edge.source_node_id);
+    }
+    parent_by_target
+}
+
+fn containing_parent<'a>(
+    parent_by_target: &HashMap<crate::NodeId, crate::NodeId>,
+    nodes_by_id: &HashMap<crate::NodeId, &'a GraphNode>,
+    node: &GraphNode,
+) -> Option<&'a GraphNode> {
+    parent_by_target
+        .get(&node.node_id)
+        .and_then(|parent_id| nodes_by_id.get(parent_id).copied())
+}
+
+fn qualified_name(
+    parent_by_target: &HashMap<crate::NodeId, crate::NodeId>,
+    nodes_by_id: &HashMap<crate::NodeId, &GraphNode>,
+    node: &GraphNode,
+) -> String {
+    let mut segments = vec![symbol_entity_name(&node.label)];
+    let mut current = node;
+    let mut seen = HashSet::new();
+    seen.insert(node.node_id);
+
+    while let Some(parent) = containing_parent(parent_by_target, nodes_by_id, current) {
+        if !seen.insert(parent.node_id) {
+            break;
+        }
+        if parent.kind == NodeKind::File {
+            break;
+        }
+
+        segments.push(qualified_scope_segment(parent));
+        current = parent;
+    }
+
+    segments.reverse();
+    segments.join("::")
+}
+
+fn qualified_scope_segment(node: &GraphNode) -> String {
+    match node.kind {
+        NodeKind::Impl => format!("impl {}", symbol_entity_name(&node.label)),
+        _ => symbol_entity_name(&node.label),
+    }
+}
+
 fn enclosing_scope(
-    facts: &GraphFacts,
+    parent_by_target: &HashMap<crate::NodeId, crate::NodeId>,
     nodes_by_id: &HashMap<crate::NodeId, &GraphNode>,
     node: &GraphNode,
 ) -> Option<String> {
-    facts
-        .edges
-        .iter()
-        .find(|edge| {
-            edge.relation == RelationKind::Contains && edge.target_node_id == Some(node.node_id)
-        })
-        .and_then(|edge| nodes_by_id.get(&edge.source_node_id).copied())
-        .and_then(|parent| match parent.kind {
-            NodeKind::File => None,
-            NodeKind::Impl => Some(format!("impl {}", parent.label)),
-            _ => Some(parent.label.clone()),
-        })
+    containing_parent(parent_by_target, nodes_by_id, node).and_then(|parent| match parent.kind {
+        NodeKind::File => None,
+        NodeKind::Impl => Some(format!("impl {}", parent.label)),
+        _ => Some(parent.label.clone()),
+    })
 }
 
 #[cfg(test)]
