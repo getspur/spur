@@ -25,5 +25,11 @@ __pycache__/
 .superpowers/brainstorm/
 /.spur/sessions/**
 
-# Vendored marketing skills (clone via marketing/README.md instructions)
-marketing/marketingskills/
+# Vendored marketing skills — ignore everything except SKILL.md files (so worker
+# worktrees can resolve them) and the upstream LICENSE / README.
+marketing/marketingskills/*
+!marketing/marketingskills/skills/
+marketing/marketingskills/skills/*/*
+!marketing/marketingskills/skills/*/SKILL.md
+!marketing/marketingskills/LICENSE
+!marketing/marketingskills/README.md
