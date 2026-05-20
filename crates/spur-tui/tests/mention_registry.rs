@@ -450,7 +450,7 @@ fn code_graph_registry_loads_fixture_files_and_symbols() {
     assert_eq!(symbol.display, "run");
     assert_eq!(
         symbol.secondary.as_deref(),
-        Some("fn crates/example/src/engine.rs:12-20 impl GraphEngine")
+        Some("impl GraphEngine::run · crates/example/src/engine.rs:12 (fn)")
     );
 }
 

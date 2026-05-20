@@ -297,15 +297,17 @@ fn symbol_payload(
 }
 
 fn symbol_secondary(symbol: &GraphSymbolArtifact) -> String {
-    let mut secondary = format!(
-        "{} {}:{}-{}",
-        symbol.symbol_kind, symbol.file_path, symbol.line_range[0], symbol.line_range[1]
-    );
     if let Some(scope) = &symbol.enclosing_scope {
-        secondary.push(' ');
-        secondary.push_str(scope);
+        format!(
+            "{}::{} · {}:{} ({})",
+            scope, symbol.entity_name, symbol.file_path, symbol.line_range[0], symbol.symbol_kind
+        )
+    } else {
+        format!(
+            "{} · {}:{} ({})",
+            symbol.entity_name, symbol.file_path, symbol.line_range[0], symbol.symbol_kind
+        )
     }
-    secondary
 }
 
 fn symbol_search_text(symbol: &GraphSymbolArtifact) -> String {
@@ -373,6 +375,39 @@ mod tests {
             }
         }
         panic!("artifact mtime did not change");
+    }
+
+    #[test]
+    fn symbol_secondary_renders_scope_name_path_line_and_kind() {
+        let scoped = GraphSymbolArtifact {
+            stable_symbol_id: "symbol-cache-run".to_string(),
+            file_path: "crates/example/src/cache.rs".to_string(),
+            byte_range: [0, 20],
+            line_range: [120, 145],
+            entity_name: "run".to_string(),
+            symbol_kind: "fn".to_string(),
+            anchor_hash: "anchor-cache-run".to_string(),
+            enclosing_scope: Some("Cache".to_string()),
+        };
+        assert_eq!(
+            symbol_secondary(&scoped),
+            "Cache::run · crates/example/src/cache.rs:120 (fn)"
+        );
+
+        let bare = GraphSymbolArtifact {
+            stable_symbol_id: "symbol-cache".to_string(),
+            file_path: "crates/example/src/cache.rs".to_string(),
+            byte_range: [0, 20],
+            line_range: [42, 88],
+            entity_name: "Cache".to_string(),
+            symbol_kind: "struct".to_string(),
+            anchor_hash: "anchor-cache".to_string(),
+            enclosing_scope: None,
+        };
+        assert_eq!(
+            symbol_secondary(&bare),
+            "Cache · crates/example/src/cache.rs:42 (struct)"
+        );
     }
 
     #[test]

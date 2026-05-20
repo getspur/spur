@@ -497,7 +497,11 @@ fn code_match_rank(
     match entry.kind {
         MentionKind::CodeSymbol => {
             if eq_ignore_ascii_case(&entry.display, query) {
-                return Some(u32::MAX);
+                return Some(if entry.code_scope.is_none() {
+                    u32::MAX
+                } else {
+                    u32::MAX - 1
+                });
             }
 
             if let Some(score) = pattern_score(pattern, matcher, buf, &entry.display)
@@ -657,6 +661,7 @@ fn typed_query_cmp(
     bucket_b
         .cmp(&bucket_a)
         .then(tier_rank(&a.entry.kind).cmp(&tier_rank(&b.entry.kind)))
+        .then(b.rank.cmp(&a.rank))
         .then(stable_tie_key(a.entry).cmp(stable_tie_key(b.entry)))
 }
 
@@ -1488,6 +1493,27 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].display, "render_dashboard");
+    }
+
+    #[test]
+    fn exact_bare_code_symbol_ranks_above_exact_scoped_symbol() {
+        let mut scoped = mention(MentionKind::CodeSymbol, 1, "Cache".into());
+        scoped.uri = "test://a-scoped-cache".into();
+        scoped.code_scope = Some("CacheStore".into());
+
+        let mut bare = mention(MentionKind::CodeSymbol, 2, "Cache".into());
+        bare.uri = "test://z-bare-cache".into();
+
+        let mut registry = test_registry(vec![Box::new(StaticSource {
+            name: "code",
+            entries: vec![scoped, bare],
+        })]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "cache", 10);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].uri, "test://z-bare-cache");
+        assert_eq!(results[1].uri, "test://a-scoped-cache");
     }
 
     #[test]
