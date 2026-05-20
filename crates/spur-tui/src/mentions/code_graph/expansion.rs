@@ -2,8 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use spur_graph::{
-    file_id_from_uri, path_in_worktree, validate_file, CodeMentionKind, CodeMentionPayload,
-    CodeMentionValidationSpec, FailureReason, GraphFileArtifact, ValidationOutcome,
+    file_id_from_uri, path_in_worktree, validate_file, validate_symbol, CodeMentionKind,
+    CodeMentionPayload, CodeMentionValidationSpec, FailureReason, GraphFileArtifact,
+    GraphSymbolArtifact, ValidationOutcome,
 };
 
 pub const CONTEXT_HEADER_CAP_BYTES: usize = 1500;
@@ -47,6 +48,8 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
         CodeMentionValidationSpec::SymbolRange {
             line_range,
             byte_range,
+            entity_name,
+            anchor_hash,
             ..
         } => {
             let Some(path) = path_in_worktree(worktree_root, &payload.authoritative.file_path)
@@ -60,6 +63,20 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
                 return warning_expansion(payload, FailureReason::FileMissing, worktree_root);
             }
 
+            let symbol_payload = symbol_validation_payload(
+                payload,
+                *line_range,
+                *byte_range,
+                entity_name,
+                anchor_hash,
+            );
+            match validate_symbol(&symbol_payload, worktree_root) {
+                ValidationOutcome::Pass => {}
+                ValidationOutcome::Fail(reason) => {
+                    return warning_expansion(payload, reason, worktree_root);
+                }
+            }
+
             let context_header = fs::read_to_string(&path)
                 .ok()
                 .map(|content| context_header(&content, byte_range[0]))
@@ -67,6 +84,29 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
             let text = symbol_expansion(payload, *line_range, &context_header);
             ExpandedMention::Body { text }
         }
+    }
+}
+
+fn symbol_validation_payload(
+    payload: &CodeMentionPayload,
+    line_range: [usize; 2],
+    byte_range: [usize; 2],
+    entity_name: &str,
+    anchor_hash: &str,
+) -> GraphSymbolArtifact {
+    GraphSymbolArtifact {
+        stable_symbol_id: payload.authoritative.uri.clone(),
+        file_path: payload.authoritative.file_path.clone(),
+        byte_range,
+        line_range,
+        entity_name: entity_name.to_string(),
+        symbol_kind: payload
+            .extraction_hints
+            .symbol_kind
+            .clone()
+            .unwrap_or_else(|| "symbol".to_string()),
+        anchor_hash: anchor_hash.to_string(),
+        enclosing_scope: payload.display_meta.enclosing_scope.clone(),
     }
 }
 
@@ -273,4 +313,229 @@ fn file_graph_uri(payload: &CodeMentionPayload) -> String {
         return payload.authoritative.uri.clone();
     }
     format!("graph://file/{}", payload.authoritative.file_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use spur_graph::validation::compute_anchor_hash;
+    use spur_graph::{
+        CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints,
+    };
+
+    use super::*;
+
+    #[test]
+    fn symbol_pass_path_expands_existing_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = "use crate::Config;\n\npub fn run() {\n    println!(\"run\");\n}\n";
+        write_source(dir.path(), "src/lib.rs", source);
+        let payload = symbol_payload_from_source(
+            "@run",
+            "graph://symbol/symbol-run",
+            "src/lib.rs",
+            source,
+            "pub fn run",
+            "\n",
+            "run",
+            "fn",
+            [3, 5],
+        );
+
+        let ExpandedMention::Body { text } = expand(&payload, dir.path()) else {
+            panic!("expected body expansion");
+        };
+
+        assert_eq!(
+            text,
+            "MENTION @run\nkind:    symbol:fn\nid:      graph://symbol/symbol-run\nfile:    src/lib.rs\nlines:   3-5\ngraph_index_version: test-version\n\ncontext_header:\nuse crate::Config;\n\n\ntopology_available_via_mcp:\n- get_callers(\"graph://symbol/symbol-run\")\n- get_callees(\"graph://symbol/symbol-run\")\n- get_subgraph(\"graph://symbol/symbol-run\", radius=1)\n"
+        );
+    }
+
+    #[test]
+    fn symbol_anchor_hash_mismatch_warns_and_replaces_with_file_mention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = "pub fn run() {}\n";
+        write_source(dir.path(), "src/lib.rs", source);
+        let payload = symbol_payload(
+            "@run",
+            "graph://symbol/symbol-run",
+            "src/lib.rs",
+            [0, source.len()],
+            [1, 1],
+            "run",
+            "fn",
+            compute_anchor_hash(source).wrapping_add(1),
+        );
+
+        let ExpandedMention::Warning {
+            text,
+            replaced_with,
+        } = expand(&payload, dir.path())
+        else {
+            panic!("expected warning expansion");
+        };
+
+        assert_eq!(replaced_with, ReplacedWith::FileMention);
+        assert!(text.contains("MENTION_WARNING @run"), "{text}");
+        assert!(
+            text.contains("failure_reason: anchor_hash_mismatch"),
+            "{text}"
+        );
+        assert!(text.contains("replaced_with:  file_mention"), "{text}");
+        assert!(text.contains("MENTION src/lib.rs\nkind: file"), "{text}");
+    }
+
+    #[test]
+    fn symbol_range_out_of_bounds_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = "pub fn run() {}\n";
+        write_source(dir.path(), "src/lib.rs", source);
+        let payload = symbol_payload(
+            "@run",
+            "graph://symbol/symbol-run",
+            "src/lib.rs",
+            [0, source.len() + 1],
+            [1, 1],
+            "run",
+            "fn",
+            0,
+        );
+
+        let ExpandedMention::Warning { text, .. } = expand(&payload, dir.path()) else {
+            panic!("expected warning expansion");
+        };
+
+        assert!(
+            text.contains("failure_reason: range_out_of_bounds"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn symbol_name_not_found_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = "pub fn run() {}\n";
+        write_source(dir.path(), "src/lib.rs", source);
+        let payload = symbol_payload(
+            "@missing",
+            "graph://symbol/symbol-run",
+            "src/lib.rs",
+            [0, source.len()],
+            [1, 1],
+            "missing",
+            "fn",
+            compute_anchor_hash(source),
+        );
+
+        let ExpandedMention::Warning { text, .. } = expand(&payload, dir.path()) else {
+            panic!("expected warning expansion");
+        };
+
+        assert!(text.contains("failure_reason: name_not_found"), "{text}");
+    }
+
+    #[test]
+    fn symbol_file_missing_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload = symbol_payload(
+            "@run",
+            "graph://symbol/symbol-run",
+            "src/missing.rs",
+            [0, 15],
+            [1, 1],
+            "run",
+            "fn",
+            0,
+        );
+
+        let ExpandedMention::Warning {
+            text,
+            replaced_with,
+        } = expand(&payload, dir.path())
+        else {
+            panic!("expected warning expansion");
+        };
+
+        assert_eq!(replaced_with, ReplacedWith::Dropped);
+        assert!(text.contains("failure_reason: file_missing"), "{text}");
+        assert!(text.contains("replaced_with:  dropped"), "{text}");
+    }
+
+    fn write_source(root: &Path, relative: &str, source: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(path, source).expect("write source");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn symbol_payload_from_source(
+        display: &str,
+        uri: &str,
+        file_path: &str,
+        source: &str,
+        start_pattern: &str,
+        end_pattern: &str,
+        entity_name: &str,
+        symbol_kind: &str,
+        line_range: [usize; 2],
+    ) -> CodeMentionPayload {
+        let start = source.find(start_pattern).expect("start pattern");
+        let end = if end_pattern == "\n" {
+            source.len()
+        } else {
+            source[start..].find(end_pattern).expect("end pattern") + start
+        };
+        let slice = &source[start..end];
+        symbol_payload(
+            display,
+            uri,
+            file_path,
+            [start, end],
+            line_range,
+            entity_name,
+            symbol_kind,
+            compute_anchor_hash(slice),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn symbol_payload(
+        display: &str,
+        uri: &str,
+        file_path: &str,
+        byte_range: [usize; 2],
+        line_range: [usize; 2],
+        entity_name: &str,
+        symbol_kind: &str,
+        anchor_hash: u64,
+    ) -> CodeMentionPayload {
+        CodeMentionPayload {
+            authoritative: CodeMentionAuthoritative {
+                display: display.to_string(),
+                uri: uri.to_string(),
+                kind: CodeMentionKind::Symbol,
+                file_path: file_path.to_string(),
+                validation: CodeMentionValidationSpec::SymbolRange {
+                    path: file_path.to_string(),
+                    line_range,
+                    byte_range,
+                    entity_name: entity_name.to_string(),
+                    anchor_hash: anchor_hash.to_string(),
+                },
+            },
+            extraction_hints: CodeMentionExtractionHints {
+                line_range: Some(line_range),
+                byte_range: Some(byte_range),
+                symbol_kind: Some(symbol_kind.to_string()),
+                entity_name: Some(entity_name.to_string()),
+            },
+            display_meta: CodeMentionDisplayMeta {
+                enclosing_scope: None,
+                graph_index_version: "test-version".to_string(),
+            },
+        }
+    }
 }
