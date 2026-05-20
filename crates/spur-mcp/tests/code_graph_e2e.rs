@@ -245,6 +245,45 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
 }
 
 #[tokio::test]
+async fn code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    assert_eq!(root_id.len(), 16);
+    assert!(root_id
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let callers = tool_body(
+        call_tool(
+            &server,
+            "code_callers",
+            json!({ "symbol": root_id.clone() }),
+        )
+        .await,
+    );
+    assert_eq!(
+        entity_names(callers["callers"].as_array().expect("callers")),
+        BTreeSet::from(["launch_order".to_string()])
+    );
+
+    let callees = tool_body(call_tool(&server, "code_callees", json!({ "symbol": root_id })).await);
+    assert_eq!(
+        entity_names(callees["callees"].as_array().expect("callees")),
+        BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+    assert_eq!(callees["graph_content_hash"], artifact.graph_content_hash);
+    assert_eq!(
+        callees["graph_index_version"],
+        artifact.header.graph_index_version
+    );
+}
+
+#[tokio::test]
 async fn code_resolve_returns_candidate_rows_without_traversal_payloads() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
