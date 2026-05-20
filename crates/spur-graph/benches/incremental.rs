@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,16 @@ const DEFAULT_DIRTY_MODS: usize = 100;
 const BENCH_FILE_COUNT_ENV: &str = "SPUR_GRAPH_BENCH_FILES";
 const BENCH_CHANGE_SET_ENV: &str = "SPUR_GRAPH_BENCH_CHANGE_SET";
 const BENCH_DIRTY_MODS_ENV: &str = "SPUR_GRAPH_BENCH_DIRTY_MODS";
+const BENCH_GIT_WALK_1K_COMMITS_ENV: &str = "SPUR_GRAPH_BENCH_GIT_WALK_1K_COMMITS";
+const BENCH_GIT_WALK_20K_COMMITS_ENV: &str = "SPUR_GRAPH_BENCH_GIT_WALK_20K_COMMITS";
+const QUICK_GIT_WALK_1K_COMMITS: usize = 100;
+const QUICK_GIT_WALK_20K_COMMITS: usize = 250;
+const SYNTHETIC_SYMBOL_COUNT: usize = 16;
+const SYNTHETIC_RENAME_RATE: f32 = 0.04;
+#[cfg(test)]
+#[allow(dead_code)]
+const SYNTHETIC_BUDGET_MERGE_DENSITY: f32 = 0.90;
+const SYNTHETIC_START_TIME: i64 = 1_700_000_000;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct PhaseTimes {
@@ -155,7 +166,270 @@ struct DiscoveryResult {
     ls_files: Duration,
 }
 
+#[derive(Clone, Debug)]
+struct SyntheticSymbol {
+    slot: usize,
+    name: String,
+    generation: usize,
+    rename_generation: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SyntheticRng {
+    state: u64,
+}
+
+struct FastImportCommit<'a> {
+    branch: &'a str,
+    mark: usize,
+    parent: Option<usize>,
+    merges: &'a [usize],
+    summary: &'a str,
+    lib_rs: &'a str,
+    commit_index: usize,
+}
+
+impl SyntheticRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        self.state
+    }
+
+    fn usize(&mut self, upper: usize) -> usize {
+        assert!(upper > 0, "upper bound must be non-zero");
+        (self.next_u64() as usize) % upper
+    }
+
+    fn chance(&mut self, probability: f32) -> bool {
+        let probability = probability.clamp(0.0, 1.0) as f64;
+        let sample = ((self.next_u64() >> 11) as f64) / ((1_u64 << 53) as f64);
+        sample < probability
+    }
+}
+
+fn build_synthetic_repo(dir: &Path, n_commits: usize, merge_density: f32) -> Vec<String> {
+    assert!(n_commits > 0, "synthetic repo must contain commits");
+    fs::create_dir_all(dir).expect("create synthetic repo dir");
+    run_git(dir, &["init"]);
+    run_git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    run_git(dir, &["config", "user.email", "spur-graph@example.invalid"]);
+    run_git(dir, &["config", "user.name", "Spur Graph Benchmark"]);
+    run_git(dir, &["config", "core.autocrlf", "false"]);
+    run_git(dir, &["config", "gc.auto", "0"]);
+
+    let mut importer = Command::new("git")
+        .args(["fast-import", "--quiet", "--date-format=raw"])
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn git fast-import");
+
+    {
+        let stdin = importer.stdin.take().expect("git fast-import stdin");
+        let mut stream = BufWriter::new(stdin);
+        let mut rng = SyntheticRng::new(0x005e_ed5e_ed14);
+        let mut symbols = initial_synthetic_symbols();
+        let mut commit_count = 0usize;
+        let mut next_mark = 1usize;
+
+        let baseline = synthetic_rust_source(&symbols);
+        write_fast_import_commit(
+            &mut stream,
+            FastImportCommit {
+                branch: "refs/heads/main",
+                mark: next_mark,
+                parent: None,
+                merges: &[],
+                summary: "synthetic baseline",
+                lib_rs: &baseline,
+                commit_index: commit_count,
+            },
+        );
+        let mut main_mark = next_mark;
+        next_mark += 1;
+        commit_count += 1;
+
+        while commit_count < n_commits {
+            let can_merge = commit_count + 2 <= n_commits;
+            if can_merge && rng.chance(merge_density) {
+                let mut side_symbols = symbols.clone();
+                mutate_synthetic_symbol(&mut side_symbols, &mut rng);
+                let side_mark = next_mark;
+                let side_ref = format!("refs/heads/spur-synthetic-side/{side_mark}");
+                let side_source = synthetic_rust_source(&side_symbols);
+                let side_summary = format!("synthetic side churn {side_mark}");
+                write_fast_import_commit(
+                    &mut stream,
+                    FastImportCommit {
+                        branch: &side_ref,
+                        mark: side_mark,
+                        parent: Some(main_mark),
+                        merges: &[],
+                        summary: &side_summary,
+                        lib_rs: &side_source,
+                        commit_index: commit_count,
+                    },
+                );
+                next_mark += 1;
+                commit_count += 1;
+
+                let merge_mark = next_mark;
+                let merge_summary = format!("merge synthetic side {side_mark}");
+                write_fast_import_commit(
+                    &mut stream,
+                    FastImportCommit {
+                        branch: "refs/heads/main",
+                        mark: merge_mark,
+                        parent: Some(main_mark),
+                        merges: &[side_mark],
+                        summary: &merge_summary,
+                        lib_rs: &side_source,
+                        commit_index: commit_count,
+                    },
+                );
+                next_mark += 1;
+                commit_count += 1;
+                main_mark = merge_mark;
+                symbols = side_symbols;
+            } else {
+                mutate_synthetic_symbol(&mut symbols, &mut rng);
+                let source = synthetic_rust_source(&symbols);
+                let summary = format!("synthetic churn {next_mark}");
+                write_fast_import_commit(
+                    &mut stream,
+                    FastImportCommit {
+                        branch: "refs/heads/main",
+                        mark: next_mark,
+                        parent: Some(main_mark),
+                        merges: &[],
+                        summary: &summary,
+                        lib_rs: &source,
+                        commit_index: commit_count,
+                    },
+                );
+                main_mark = next_mark;
+                next_mark += 1;
+                commit_count += 1;
+            }
+        }
+
+        stream.write_all(b"done\n").expect("finish fast-import");
+        stream.flush().expect("flush fast-import stream");
+    }
+
+    let output = importer
+        .wait_with_output()
+        .expect("wait for git fast-import");
+    assert!(
+        output.status.success(),
+        "git fast-import failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    run_git(dir, &["checkout", "-q", "-f", "main"]);
+    let shas: Vec<_> = git_stdout(dir, &["rev-list", "--topo-order", "--reverse", "main"])
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(shas.len(), n_commits, "synthetic commit count mismatch");
+    shas
+}
+
+fn initial_synthetic_symbols() -> Vec<SyntheticSymbol> {
+    (0..SYNTHETIC_SYMBOL_COUNT)
+        .map(|slot| SyntheticSymbol {
+            slot,
+            name: format!("symbol_{slot:03}"),
+            generation: 0,
+            rename_generation: 0,
+        })
+        .collect()
+}
+
+fn mutate_synthetic_symbol(symbols: &mut [SyntheticSymbol], rng: &mut SyntheticRng) {
+    let index = rng.usize(symbols.len());
+    let symbol = &mut symbols[index];
+    symbol.generation += 1;
+    if rng.chance(SYNTHETIC_RENAME_RATE) {
+        symbol.rename_generation += 1;
+        symbol.name = format!("symbol_{:03}_r{:03}", symbol.slot, symbol.rename_generation);
+    }
+}
+
+fn synthetic_rust_source(symbols: &[SyntheticSymbol]) -> String {
+    let mut source = String::with_capacity(symbols.len() * 240);
+    source.push_str("// Synthetic Rust fixture for spur-graph temporal walk benches.\n\n");
+    for (index, symbol) in symbols.iter().enumerate() {
+        let callee = &symbols[(index + 1) % symbols.len()].name;
+        let rotate = (symbol.generation % 31) + 1;
+        let salt = symbol.slot.wrapping_mul(97) + symbol.generation.wrapping_mul(31);
+        source.push_str(&format!(
+            "pub fn {}(input: usize) -> usize {{\n    let base = input.wrapping_add({}usize).rotate_left({});\n    let churn = base ^ {}usize;\n    if input == 0 {{\n        churn\n    }} else {{\n        churn.wrapping_add({}(input - 1))\n    }}\n}}\n\n",
+            symbol.name,
+            symbol.slot + symbol.generation,
+            rotate,
+            salt,
+            callee
+        ));
+    }
+    source
+}
+
+fn write_fast_import_commit<W: Write>(stream: &mut W, commit: FastImportCommit<'_>) {
+    let timestamp = SYNTHETIC_START_TIME + commit.commit_index as i64;
+    writeln!(stream, "commit {}", commit.branch).expect("write fast-import commit");
+    writeln!(stream, "mark :{}", commit.mark).expect("write fast-import mark");
+    writeln!(
+        stream,
+        "author Spur Synthetic <spur-graph@example.invalid> {timestamp} +0000"
+    )
+    .expect("write fast-import author");
+    writeln!(
+        stream,
+        "committer Spur Synthetic <spur-graph@example.invalid> {timestamp} +0000"
+    )
+    .expect("write fast-import committer");
+    write_fast_import_data(stream, commit.summary.as_bytes());
+    if let Some(parent) = commit.parent {
+        writeln!(stream, "from :{parent}").expect("write fast-import parent");
+    }
+    for merge in commit.merges {
+        writeln!(stream, "merge :{merge}").expect("write fast-import merge parent");
+    }
+    writeln!(stream, "M 100644 inline src/lib.rs").expect("write fast-import file command");
+    write_fast_import_data(stream, commit.lib_rs.as_bytes());
+    writeln!(stream).expect("separate fast-import commit");
+}
+
+fn write_fast_import_data<W: Write>(stream: &mut W, bytes: &[u8]) {
+    writeln!(stream, "data {}", bytes.len()).expect("write fast-import data header");
+    stream.write_all(bytes).expect("write fast-import data");
+    stream
+        .write_all(b"\n")
+        .expect("terminate fast-import data block");
+}
+
 fn benchmark_incremental(c: &mut Criterion) {
+    if !criterion_filter_allows(&[
+        "incremental",
+        "clean cold",
+        "clean warm",
+        "clean change set",
+        "dirty unstaged mods",
+    ]) {
+        return;
+    }
+
     let file_count = env_usize(BENCH_FILE_COUNT_ENV, DEFAULT_FILE_COUNT);
     let change_set = env_usize(BENCH_CHANGE_SET_ENV, DEFAULT_CHANGE_SET).min(file_count);
     let dirty_mods = env_usize(BENCH_DIRTY_MODS_ENV, DEFAULT_DIRTY_MODS).min(file_count);
@@ -237,6 +511,94 @@ fn benchmark_incremental(c: &mut Criterion) {
 
     group.finish();
     print_summary(&rows.lock().expect("summary rows").clone());
+}
+
+fn bench_full_walk_1k(c: &mut Criterion) {
+    const BENCH_NAME: &str = "git_walk full 1k linear";
+    if !criterion_filter_allows(&[BENCH_NAME]) {
+        return;
+    }
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let commit_count = synthetic_bench_commits(
+        BENCH_GIT_WALK_1K_COMMITS_ENV,
+        1_000,
+        QUICK_GIT_WALK_1K_COMMITS,
+    );
+    eprintln!("{BENCH_NAME} synthetic commits={commit_count}");
+    let shas = build_synthetic_repo(dir.path(), commit_count, 0.0);
+    c.bench_function(BENCH_NAME, |b| {
+        b.iter(|| {
+            let (graph, commits) = spur_graph::git_walk::run_full_walk_into(
+                dir.path(),
+                &spur_graph::git_walk::GitWalkConfig::default(),
+            )
+            .unwrap();
+            black_box((
+                graph.symbol_snapshots.len(),
+                graph.temporal_edges.len(),
+                commits.commits.len(),
+                shas.len(),
+            ));
+        })
+    });
+}
+
+fn bench_full_walk_20k_merges(c: &mut Criterion) {
+    const BENCH_NAME: &str = "git_walk full 20k merges";
+    if !criterion_filter_allows(&[BENCH_NAME]) {
+        return;
+    }
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let commit_count = synthetic_bench_commits(
+        BENCH_GIT_WALK_20K_COMMITS_ENV,
+        20_000,
+        QUICK_GIT_WALK_20K_COMMITS,
+    );
+    eprintln!("{BENCH_NAME} synthetic commits={commit_count}");
+    let shas = build_synthetic_repo(dir.path(), commit_count, 0.30);
+    c.bench_function(BENCH_NAME, |b| {
+        b.iter(|| {
+            let (graph, commits) = spur_graph::git_walk::run_full_walk_into(
+                dir.path(),
+                &spur_graph::git_walk::GitWalkConfig::default(),
+            )
+            .unwrap();
+            black_box((
+                graph.symbol_snapshots.len(),
+                graph.temporal_edges.len(),
+                commits.commits.len(),
+                shas.len(),
+            ));
+        })
+    });
+}
+
+fn synthetic_bench_commits(env_name: &str, default: usize, quick_default: usize) -> usize {
+    let default = if criterion_quick_mode() {
+        quick_default
+    } else {
+        default
+    };
+    env_usize(env_name, default)
+}
+
+fn criterion_quick_mode() -> bool {
+    env::args().any(|arg| arg == "--quick")
+}
+
+fn criterion_filter_allows(candidates: &[&str]) -> bool {
+    let filters: Vec<_> = env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
+    filters.is_empty()
+        || filters.iter().any(|filter| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.contains(filter))
+        })
 }
 
 fn bench_scenario<Setup, Measure>(
@@ -514,5 +876,37 @@ fn git_stdout(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("git stdout UTF-8")
 }
 
-criterion_group!(benches, benchmark_incremental);
+#[test]
+fn snapshot_growth_budget() {
+    let d1 = tempfile::TempDir::new().unwrap();
+    build_synthetic_repo(d1.path(), 1_000, SYNTHETIC_BUDGET_MERGE_DENSITY);
+    let budget_config = spur_graph::git_walk::GitWalkConfig {
+        walk_strategy: spur_graph::WalkStrategy::FirstParent,
+        ..spur_graph::git_walk::GitWalkConfig::default()
+    };
+    let (g1, _) = spur_graph::git_walk::run_full_walk_into(d1.path(), &budget_config).unwrap();
+
+    let d2 = tempfile::TempDir::new().unwrap();
+    build_synthetic_repo(d2.path(), 10_000, SYNTHETIC_BUDGET_MERGE_DENSITY);
+    let (g2, _) = spur_graph::git_walk::run_full_walk_into(d2.path(), &budget_config).unwrap();
+
+    let ratio = g2.symbol_snapshots.len() as f64 / g1.symbol_snapshots.len() as f64;
+    eprintln!(
+        "snapshot_growth_budget: 1k={} 10k={} ratio={ratio:.3}",
+        g1.symbol_snapshots.len(),
+        g2.symbol_snapshots.len()
+    );
+    assert!(
+        ratio <= 1.5 * 10.0,
+        "snapshot growth {} > 1.5x/10x budget; needs sharded persistence before merge",
+        ratio
+    );
+}
+
+criterion_group!(
+    benches,
+    benchmark_incremental,
+    bench_full_walk_1k,
+    bench_full_walk_20k_merges
+);
 criterion_main!(benches);
