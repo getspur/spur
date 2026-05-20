@@ -24,6 +24,7 @@ fn graph_facts_round_trip_through_json() {
         confidence_score: 1.0,
         evidence_id: EvidenceId(13),
         directed: true,
+        change_kind: None,
     };
     let span = SourceSpan {
         span_id: SpanId(11),
@@ -79,4 +80,5 @@ fn node_kind_discriminators_are_stable_contracts() {
     assert_eq!(NodeKind::Constant.discriminator(), "constant");
     assert_eq!(NodeKind::TypeAlias.discriminator(), "type_alias");
     assert_eq!(NodeKind::Macro.discriminator(), "macro");
+    assert_eq!(NodeKind::Commit.discriminator(), "commit");
 }

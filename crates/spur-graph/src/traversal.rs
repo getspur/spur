@@ -164,6 +164,7 @@ mod tests {
             relation,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
+            change_kind: None,
         }
     }
 

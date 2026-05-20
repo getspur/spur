@@ -183,6 +183,7 @@ impl<'a> FactBuilder<'a> {
             },
             evidence_id: EvidenceId(edge_id.get()),
             directed: true,
+            change_kind: None,
         });
     }
 
