@@ -1,6 +1,6 @@
 //! T17: JSON-RPC dispatcher tests for `WorkerMcpServer`.
 //!
-//! Verifies that `tools/list` returns the curated 8-tool subset, that
+//! Verifies that `tools/list` returns the curated worker-tool subset, that
 //! `tools/call` routes by name to the freestanding handlers, that unknown
 //! tool names produce `-32601`, and that batched JSON-RPC requests are
 //! rejected at the transport decoder (per-element token attribution is
@@ -252,29 +252,34 @@ fn service_error_response(error: ServiceError) -> Value {
 }
 
 #[tokio::test]
-async fn tools_list_returns_8_curated_tools() {
+async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let body = call_jsonrpc(&server, &token, "tools/list", serde_json::json!({})).await;
     let tools = body["result"]["tools"]
         .as_array()
         .expect("tools array present");
-    assert_eq!(
-        tools.len(),
-        8,
-        "worker subset must expose exactly 8 tools, got: {tools:?}"
-    );
-    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    for expected in [
+    let expected = [
         "get_issue",
         "list_issues",
         "get_task_diff",
         "get_plan_status",
         "fetch_outcome_artifact",
+        "code_callers",
+        "code_callees",
+        "code_subgraph",
         "update_issue",
         "report_signal",
         "report_progress",
-    ] {
+    ];
+    assert_eq!(
+        tools.len(),
+        expected.len(),
+        "worker subset must expose exactly {} tools, got: {tools:?}",
+        expected.len()
+    );
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    for expected in expected {
         assert!(
             names.contains(&expected),
             "missing curated tool: {expected}"
