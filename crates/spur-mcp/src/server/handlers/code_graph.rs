@@ -1,11 +1,13 @@
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use spur_graph::temporal::{resolve_symbol_at, symbol_history, Resolution, ResolutionFailure};
 use spur_graph::{
-    bounded_subgraph, find_callees, find_callers, find_symbol, load_artifact,
-    resolve_worktree_root_from, GraphEdgeArtifact, GraphIndexArtifact, GraphSymbolArtifact,
-    RelationKind, CODE_SYMBOL_URI_PREFIX,
+    bounded_subgraph, find_callees, find_callers, find_symbol,
+    load_artifact as load_graph_index_artifact, resolve_worktree_root_from, CommitIndexArtifact,
+    GraphEdgeArtifact, GraphIndexArtifact, GraphSymbolArtifact, RelationKind,
+    CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -28,11 +30,21 @@ impl McpCallbackServer {
     pub(crate) async fn handle_code_subgraph(&self, id: Value, args: Value) -> JsonRpcResponse {
         code_graph_response(id, code_subgraph(&args))
     }
+
+    pub(crate) async fn handle_code_symbol_history(
+        &self,
+        id: Value,
+        args: Value,
+    ) -> JsonRpcResponse {
+        code_graph_response(id, code_symbol_history(&args))
+    }
 }
 
 pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
     let symbol_id = normalize_symbol_arg(args)?;
-    let artifact = load_graph_artifact_for_request()?;
+    let worktree = current_worktree()?;
+    let artifact = load_graph_artifact_for_worktree(&worktree)?;
+    let symbol_id = resolve_symbol_for_optional_as_of(&artifact, &worktree, &symbol_id, args)?;
     ensure_symbol_exists(&artifact, &symbol_id)?;
 
     let callers = find_callers(&artifact, &symbol_id)
@@ -44,7 +56,9 @@ pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
 
 pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
     let symbol_id = normalize_symbol_arg(args)?;
-    let artifact = load_graph_artifact_for_request()?;
+    let worktree = current_worktree()?;
+    let artifact = load_graph_artifact_for_worktree(&worktree)?;
+    let symbol_id = resolve_symbol_for_optional_as_of(&artifact, &worktree, &symbol_id, args)?;
     ensure_symbol_exists(&artifact, &symbol_id)?;
 
     let callees = find_callees(&artifact, &symbol_id)
@@ -56,7 +70,9 @@ pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
 
 pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
     let symbol_id = normalize_symbol_arg(args)?;
-    let artifact = load_graph_artifact_for_request()?;
+    let worktree = current_worktree()?;
+    let artifact = load_graph_artifact_for_worktree(&worktree)?;
+    let symbol_id = resolve_symbol_for_optional_as_of(&artifact, &worktree, &symbol_id, args)?;
     ensure_symbol_exists(&artifact, &symbol_id)?;
 
     let requested_radius = args
@@ -94,6 +110,28 @@ pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
             "invalid format `{other}`; expected `json` or `mermaid`"
         ))),
     }
+}
+
+pub(crate) fn code_symbol_history(args: &Value) -> Result<Value, McpHandlerError> {
+    let symbol_id = normalize_symbol_arg(args)?;
+    let worktree = current_worktree()?;
+    let artifact = load_graph_artifact_for_worktree(&worktree)?;
+    let commits = load_commit_index_for_request(&worktree)?;
+    let events = symbol_history(&artifact, &commits, &symbol_id)
+        .into_iter()
+        .map(|(sha, change_kind, key)| {
+            json!({
+                "commit": sha,
+                "change_kind": change_kind,
+                "snapshot": key,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "symbol": symbol_uri(&symbol_id),
+        "events": events,
+    }))
 }
 
 fn code_graph_response(id: Value, result: Result<Value, McpHandlerError>) -> JsonRpcResponse {
@@ -137,23 +175,29 @@ fn normalize_symbol_arg(args: &Value) -> Result<String, McpHandlerError> {
 }
 
 #[allow(clippy::result_large_err)]
-fn load_graph_artifact_for_request() -> Result<GraphIndexArtifact, McpHandlerError> {
+fn current_worktree() -> Result<PathBuf, McpHandlerError> {
     let current_dir = std::env::current_dir().map_err(|error| {
         McpHandlerError::Internal(format!("failed to read current directory: {error}"))
     })?;
-    let worktree = resolve_worktree_root_from(current_dir);
+    Ok(resolve_worktree_root_from(current_dir))
+}
+
+#[allow(clippy::result_large_err)]
+fn load_graph_artifact_for_worktree(
+    worktree: &Path,
+) -> Result<GraphIndexArtifact, McpHandlerError> {
     let artifact_path = worktree.join(GRAPH_ARTIFACT_RELATIVE_PATH);
 
-    match load_artifact(&artifact_path) {
+    match load_graph_index_artifact(&artifact_path) {
         Ok(artifact) => Ok(artifact),
         Err(error)
             if error
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|io| io.kind() == ErrorKind::NotFound) =>
         {
-            Err(graph_artifact_missing(&worktree))
+            Err(graph_artifact_missing(worktree))
         }
-        Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(&worktree)),
+        Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(worktree)),
         Err(error) => Err(McpHandlerError::Internal(format!(
             "failed to load graph artifact `{}`: {error}",
             artifact_path.display()
@@ -166,6 +210,111 @@ fn graph_artifact_missing(worktree: &Path) -> McpHandlerError {
         "graph artifact not found; run `spur graph build` in {}",
         worktree.display()
     ))
+}
+
+fn load_commit_index_for_request(worktree: &Path) -> Result<CommitIndexArtifact, McpHandlerError> {
+    let pointer = spur_graph::store::commit_index::load_pointer(worktree).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "failed to load commit index pointer in {}: {error}",
+            worktree.display()
+        ))
+    })?;
+    let pointer = pointer.ok_or_else(|| commit_index_missing(worktree))?;
+    spur_graph::store::commit_index::load_artifact(worktree, &pointer).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "failed to load commit index artifact in {}: {error}",
+            worktree.display()
+        ))
+    })
+}
+
+fn commit_index_missing(worktree: &Path) -> McpHandlerError {
+    McpHandlerError::Internal(format!(
+        "commit index not found; run `spur graph build --history` in {}",
+        worktree.display()
+    ))
+}
+
+fn resolve_symbol_for_optional_as_of(
+    artifact: &GraphIndexArtifact,
+    worktree: &Path,
+    symbol_id: &str,
+    args: &Value,
+) -> Result<String, McpHandlerError> {
+    let Some(as_of) = parse_as_of(args)? else {
+        return Ok(symbol_id.to_string());
+    };
+    let commits = load_commit_index_for_request(worktree)?;
+    resolve_symbol_as_of(artifact, &commits, symbol_id, &as_of)
+}
+
+fn parse_as_of(args: &Value) -> Result<Option<String>, McpHandlerError> {
+    match args.get("as_of") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(Value::String(_)) => Err(McpHandlerError::InvalidParams(
+            "field 'as_of' must not be empty".to_string(),
+        )),
+        Some(_) => Err(McpHandlerError::InvalidParams(
+            "field 'as_of' must be a string".to_string(),
+        )),
+    }
+}
+
+fn resolve_symbol_as_of(
+    artifact: &GraphIndexArtifact,
+    commits: &CommitIndexArtifact,
+    symbol_id: &str,
+    as_of: &str,
+) -> Result<String, McpHandlerError> {
+    if !commits.commits.iter().any(|commit| commit.sha == as_of) {
+        return Err(McpHandlerError::InvalidParams(format!(
+            "as_of commit `{as_of}` is not indexed"
+        )));
+    }
+
+    let history = symbol_history(artifact, commits, symbol_id);
+    if history.is_empty() {
+        return Err(McpHandlerError::NotFound(format!(
+            "symbol {symbol_id} has no temporal history in graph artifact"
+        )));
+    }
+
+    let mut last_unknown = None;
+    for (_, _, key) in history {
+        match resolve_symbol_at(artifact, commits, &key.stable_symbol_id, &key.commit, as_of) {
+            Resolution::Found { value, .. } => return Ok(value),
+            Resolution::Deleted { last_seen } => return Ok(last_seen.stable_symbol_id),
+            Resolution::Ambiguous { candidates } => {
+                return Err(McpHandlerError::InvalidParams(format!(
+                    "symbol {symbol_id} is ambiguous at commit `{as_of}`; candidates: {}",
+                    candidates.join(", ")
+                )));
+            }
+            Resolution::Unknown { reason } => {
+                last_unknown = Some(reason);
+            }
+        }
+    }
+
+    let suffix = last_unknown
+        .map(|reason| format!(" ({})", format_resolution_failure(reason)))
+        .unwrap_or_default();
+    Err(McpHandlerError::NotFound(format!(
+        "symbol {symbol_id} not present at commit `{as_of}`{suffix}"
+    )))
+}
+
+fn format_resolution_failure(reason: ResolutionFailure) -> String {
+    match reason {
+        ResolutionFailure::AnchorCommitNotIndexed(commit) => {
+            format!("anchor commit `{commit}` is not indexed")
+        }
+        ResolutionFailure::SymbolNotPresentAtAnchor => {
+            "symbol is not present at anchor commit".to_string()
+        }
+        ResolutionFailure::IndexCorrupt(message) => format!("index corrupt: {message}"),
+    }
 }
 
 fn ensure_symbol_exists(
@@ -325,7 +474,7 @@ mod tests {
             dir.path().join(".spur/graph-index.json"),
             serde_json::to_string_pretty(&json!({
                 "header": {
-                    "graph_index_version": "test"
+                    "graph_index_version": "2"
                 },
                 "manifest_version": "test",
                 "graph_content_hash": "test",
