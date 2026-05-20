@@ -323,6 +323,7 @@ fn buckets_from_facts(
             relation: edge.relation,
             confidence: edge.confidence,
             confidence_score: edge.confidence_score,
+            change_kind: edge.change_kind.clone(),
         });
     }
 
@@ -694,6 +695,7 @@ fn relation_discriminator(relation: RelationKind) -> &'static str {
         RelationKind::Uses => "uses",
         RelationKind::Extends => "extends",
         RelationKind::Links => "links",
+        RelationKind::Touches => "touches",
     }
 }
 
