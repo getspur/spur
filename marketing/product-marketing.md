@@ -1,6 +1,6 @@
 # Product Marketing Context — SPUR
 
-*Last updated: 2026-05-20 — V1.1 — auto-draft + self-brainstormed proposals for pricing, goals, language, metrics. All proposed values flagged inline; confirm before launch.*
+*Last updated: 2026-05-20 — V1.2 — applied three revisions from P1 positioning recommendations: (1) Customer Language section replaced with real F2 verbatim quotes (cited); (2) Differentiation reordered to lead with unified cost ledger + brain-swap; (3) Competitive Landscape adopts peers-not-competitors framing with links to individual profiles in marketing/competitors/.*
 
 ## Product Overview
 **One-liner:** Issue in, PR out — across every agent, in parallel, with one review surface.
@@ -55,32 +55,39 @@ Rationale: Pro priced **below** Claude Code Max ($100/mo) so it's an obvious add
 
 ## Competitive Landscape
 
-**Direct (multi-agent orchestrators):**
-- **ACPX** — Node.js, CLI only. Falls short: no durable plans, no review gate, no session resume.
-- **TUICommander** — Rust+Tauri desktop. Falls short: PTY scraping (not native ACP), no plan persistence, no review gate.
-- **Ralph** — TypeScript TUI. Falls short: read-only, partial ACP.
-- **Agent Orchestrator** — Node.js web dashboard. Falls short: YAML plans only, no review gate, browser-bound.
+Full profiles for each competitor are in `marketing/competitors/`. Strategic frame in `marketing/competitors/_summary-indirect.md`: SPUR uniquely owns *"be the control tower for a heterogeneous fleet of CLI coding agents the developer has already chosen."*
 
-**Secondary (single-agent CLIs people use today):**
-- **Claude Code** — Claude only, no cross-agent, no durable plans, no resume after rate-limit.
-- **Codex CLI / Kiro CLI / Gemini CLI** — single-vendor silos; users manually shuttle context between tabs.
+**Direct (multi-agent orchestrators)** — see profiles in `marketing/competitors/`:
+- **ACPX** ([profile](competitors/acpx.md)) — Node.js ACP CLI, no built-in review/orchestration; positioned as a *protocol layer*, complementary to SPUR rather than a head-to-head competitor.
+- **TUICommander** ([profile](competitors/tuicommander.md)) — Rust+Tauri desktop, PTY scraping (not native ACP).
+- **Ralph** ([profile](competitors/ralph.md)) — TypeScript TUI, read-only.
+- **Agent Orchestrator** ([profile](competitors/agent-orchestrator.md)) — Node.js web dashboard, YAML plans only.
+
+**Peers, not competitors** — these are excellent products owning distinct jobs-to-be-done. SPUR does NOT try to compete on their turf:
+
+- **Devin** ([profile](competitors/devin.md)) — owns "autonomous engineer I can assign tickets to in Slack." Cloud-only, single-vendor. SPUR keeps the human in the loop on purpose; do not pitch as a Devin alternative.
+- **Cursor** ([profile](competitors/cursor.md)) — owns the AI IDE. SPUR sits *next to* Cursor; most SPUR users keep Cursor open in another window.
+- **Aider** ([profile](competitors/aider.md)) — owns the simplest free BYO-key single-agent CLI. Aider users are SPUR's warmest leads (terminal-native, polyamorous about models); "add SPUR above Aider" frame, not "switch from Aider."
+- **Claude Code (standalone)** ([profile](competitors/claude-code-standalone.md)) — owns the best in-session single-agent UX with Anthropic models. SPUR uses Claude Code as a worker; SPUR adds cross-session durability, cross-vendor failover, and a cost ledger that spans every CLI.
+- **Cosine Genie** ([profile](competitors/cosine.md)) — owns air-gapped + regulated-industry modernization. SPUR has no story here at launch.
 
 **Indirect (DIY alternatives):**
-- **tmux + N terminal panes + manual git worktree juggling** — what Orchestrators do today. Falls short: zero durability, no cost view, no review gate.
-- **Cloud agent platforms (Devin, Cosine, etc.)** — Falls short: not local, opaque cost, no terminal flow, no BYO-agent.
+- **tmux + N terminal panes + manual git worktree juggling** — what Orchestrators do today. SPUR's frame: *"you already built half of this in tmux — let us finish the other half"* (`marketing/research/themes.md` synthesis #3). Not "replace tmux."
 
 ## Differentiation
-**Key differentiators:**
-- Rust single binary — `cargo install spur-cli` (no Node, no Python, no Docker).
-- Native ACP + MCP dual channel — structured protocol, not PTY scraping.
-- Local-first durability — plans in SQLite (beads), events in NDJSON, outcomes in git blobs. Survives crashes, OS updates, network outages.
-- Human review as a first-class state machine with timeout / retry / merge gating (not a UI convenience).
-- Session resume via event replay — close laptop, restart SPUR, brain picks up exactly where it left off.
-- Cross-vendor orchestration with per-agent capability negotiation (`/model`, `/effort` synthesized from each agent's `InitializeResponse`).
-- Telegram bot shares the same review lane and event bus as the TUI.
-- Cherry-pick of approved subtask commits in DAG order onto a staging branch.
-- Reflexion-style retries (prior attempts fed back as context, max 3).
-- Multi-brain safety via `spur:plan-owner:<id>` label + tier-1 mutation guards.
+**Key differentiators (ordered by uniqueness, not chronology — per `marketing/competitors/_summary-indirect.md` action item #3):**
+1. **Unified cost ledger across every vendor.** Five live extractors (Claude / Codex / Gemini / OpenCode / Kimi) feeding a DuckDB engine that reads vendor JSONL/SQLite in place. The one moat no peer can close by design — Devin, Cosine, Cursor, Aider, and Claude Code each only see their own bill.
+2. **Brain-swap across vendors mid-flow.** Hit a Claude rate limit → keep working on Codex → come back to Claude when the window resets. Not session-pause-and-resume; full cross-vendor failover. Impossible inside any single-vendor tool.
+3. **Local-first durability.** Plans in SQLite (beads), events in NDJSON, outcomes in git blobs. Survives crashes, OS updates, network outages.
+4. **Human review as a first-class state machine** with timeout / retry / merge gating (not a UI convenience).
+5. **Session resume via event replay** — close laptop, restart SPUR, brain picks up exactly where it left off.
+6. **Cherry-pick of approved subtask commits in DAG order** onto a staging branch — collapses the post-worktree merge tax.
+7. **Native ACP + MCP dual channel** — structured protocol, not PTY scraping.
+8. **Telegram bot** shares the same review lane and event bus as the TUI.
+9. **Cross-vendor orchestration with per-agent capability negotiation** (`/model`, `/effort` synthesized from each agent's `InitializeResponse`).
+10. **Reflexion-style retries** (prior attempts fed back as context, max 3).
+11. **Multi-brain safety** via `spur:plan-owner:<id>` label + tier-1 mutation guards.
+12. **Rust single binary** — `cargo install spur-cli` (no Node, no Python, no Docker). Credibility token, not the lede.
 **How we do it differently:** SPUR is a *distributed-systems kernel for agent execution disguised as a TUI*. The real product isn't the panels — it's the event-sourced lineage, the durable plan reconciler, and the dual-channel protocol architecture.
 **Why that's better:** Closing your laptop doesn't lose context. A worker dying doesn't lose 11 sibling tasks. Hitting a Claude rate limit doesn't kill the plan. Reviewing on your phone uses the same state machine as reviewing in the TUI.
 **Why customers choose us:** They're already paying for 3+ agents and want one review surface, one cost ledger, and the ability to walk away from the terminal without losing the loop.
@@ -110,23 +117,22 @@ Rationale: Pro priced **below** Claude Code Max ($100/mo) so it's an obvious add
 
 ## Customer Language
 
-**Status:** Provisional — drawn from common HN / r/ClaudeAI / r/LocalLLaMA pain patterns. Replace with real verbatim quotes after F2 (customer-research) completes.
+Real verbatim from F2 customer research (full corpus in `marketing/research/voc.md` with HN item IDs for spot-check). Synthesis in `marketing/research/themes.md`.
 
-**Provisional verbatim — how they describe the problem:**
-- "Claude Code just told me I'm out of tokens for 4 more hours."
-- "I had to copy-paste my whole architecture into Codex because Claude was rate-limited."
-- "Two agents touched the same file and now my branch is broken."
-- "I have no idea what I spent on Claude this month."
-- "I closed the terminal and lost two hours of agent work."
-- "I want to run 5 refactors at once but I only have one Claude Code window."
-- "tmux + worktrees is fine until it isn't."
+**How they describe the problem (verbatim, cited):**
+- *"I run 5-10 Claude Code agents at a time across different repos. Keeping track of which one is waiting for input, which one is working, and which one broke something was chaos. I needed a control tower."* — Beefin (Amux author), HN 47104424 (`voc.md:88-94`)
+- *"Paying $200 a month, I hit my weekly in 3 days last week."* — esperent, HN 47626833 (`voc.md:21`)
+- *"You're locked out of the service … while still paying your subscription … It's ridiculous."* — TheOtherHobbes, HN 44713757 (`voc.md:44`)
+- *"I'm paying for Max, and when I use the tooling to calculate the spend returned by the API, I can see it's almost $1k!"* — buremba, HN 44598254 (`voc.md:50`)
+- *"A coworker of mine claimed they've been burning $1k a week this month. Pretty wild it's only costing the company $200 a month."* — roxolotl, HN 44598254 (`voc.md:54-56`)
+- *"Extremely infuriating because if I could have a view into how close I was to being rate limited."* — gorbypark, HN 44713757 (`voc.md:58-60`)
+- *"Yes, worktrees with workmux. I expected this to become less necessary over time as models got faster, but the opposite has happened."* — nojs, HN 47573483 (`voc.md:118-120`)
+- *"Context switching is painful, I will lose myself in ten minutes."* — sukit (`voc.md` — see themes.md theme #3)
 
-**Provisional verbatim — how they describe SPUR / what they want:**
-- "It's like a control plane for my agents."
-- "Finally, one place to approve PRs from all of them."
-- "I can review on my phone now."
-- "Rate-limit-proof Claude Code."
-- "Issue in, PR out — that's the whole pitch."
+**How they describe the want / SPUR (verbatim, cited):**
+- *"I needed a control tower."* — Beefin (canonical category phrasing — adopt verbatim, do not paraphrase)
+- *"Codex, it's much more generous. And doesn't lock you into using their CLI."* — loveparade (`voc.md`)
+- *"I've been using this to be productive all day on my phone."* — Beefin, HN 47104424 (`voc.md:136-138`)
 
 **Language to use** (developer-native, ground in pain):
 - "Don't lose context."
