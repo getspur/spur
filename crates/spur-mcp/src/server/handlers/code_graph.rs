@@ -1,5 +1,5 @@
 use std::io::ErrorKind;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use serde_json::{json, Value};
 use spur_graph::{
@@ -432,10 +432,17 @@ fn validate_file_path_arg(file: &str) -> Result<String, McpHandlerError> {
         ));
     }
 
-    let mut normalized = PathBuf::new();
+    let mut normalized = Vec::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) => normalized.push(part),
+            Component::Normal(part) => {
+                let Some(part) = part.to_str() else {
+                    return Err(McpHandlerError::InvalidParams(
+                        "field 'file' must be a UTF-8 path".into(),
+                    ));
+                };
+                normalized.push(part);
+            }
             Component::CurDir => {
                 return Err(McpHandlerError::InvalidParams(
                     "field 'file' must not contain '.' path components".into(),
@@ -454,7 +461,7 @@ fn validate_file_path_arg(file: &str) -> Result<String, McpHandlerError> {
         }
     }
 
-    let normalized = normalized.to_string_lossy().into_owned();
+    let normalized = normalized.join("/");
     if normalized != file {
         return Err(McpHandlerError::InvalidParams(
             "field 'file' must be a normalized worktree-relative path without '.' or '..' components"
@@ -833,6 +840,22 @@ mod tests {
             .expect("content text")
             .to_string();
         serde_json::from_str(&text).expect("JSON content")
+    }
+
+    #[test]
+    fn validate_file_path_arg_requires_slash_normalized_relative_paths() {
+        assert_eq!(
+            super::validate_file_path_arg("src/lib.rs").expect("valid relative file path"),
+            "src/lib.rs"
+        );
+
+        for file in ["./src/lib.rs", "src/./lib.rs", "../src/lib.rs", "/abs/path"] {
+            let error = match super::validate_file_path_arg(file) {
+                Ok(_) => panic!("`{file}` must be rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(error.json_rpc_code(), -32602);
+        }
     }
 
     #[tokio::test]
