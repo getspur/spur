@@ -823,7 +823,7 @@ fn qualified_name(
     nodes_by_id: &HashMap<crate::NodeId, &GraphNode>,
     node: &GraphNode,
 ) -> String {
-    let mut segments = vec![symbol_entity_name(&node.label)];
+    let mut segments = vec![qualified_scope_segment(node)];
     let mut current = node;
     let mut seen = HashSet::new();
     seen.insert(node.node_id);
