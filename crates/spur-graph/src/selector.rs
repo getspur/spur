@@ -525,6 +525,24 @@ mod tests {
     }
 
     #[test]
+    fn unprefixed_path_colon_qualified_name_falls_through_to_file_qualified() {
+        let artifact = artifact();
+        let double_colon_resolution = resolve_selector(&artifact, "src/cache.rs::Cache");
+
+        assert_eq!(
+            double_colon_resolution,
+            SelectorResolution::Resolved(ResolvedSymbol {
+                stable_symbol_id: "aaaaaaaaaaaaaaaa".to_string(),
+            })
+        );
+        assert_eq!(
+            resolve_selector(&artifact, "src/cache.rs:Cache"),
+            double_colon_resolution
+        );
+        assert_resolved(&artifact, "src/cache.rs:25", "bbbbbbbbbbbbbbbb");
+    }
+
+    #[test]
     fn file_qualified_name_resolves_direct_hit() {
         let artifact = artifact();
 
