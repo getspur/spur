@@ -46,39 +46,30 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                         artifact.clone(),
                         language_counts,
                         artifact.symbols.len() + artifact.files.len(),
-                        0,
+                        artifact.edges.len(),
                     )
                 }
                 Err(error) => {
                     tracing::info!(error = %error, "spur-graph: incremental rebuild failed; falling back to full");
                     let (facts, file_counts) = build_facts(&root)?;
-                    (
-                        artifact_from_facts(&facts, &root)?,
-                        file_counts,
-                        facts.nodes.len(),
-                        facts.edges.len(),
-                    )
+                    let artifact = artifact_from_facts(&facts, &root)?;
+                    let node_count = artifact.symbols.len() + artifact.files.len();
+                    (artifact, file_counts, node_count, facts.edges.len())
                 }
             },
             Err(error) => {
                 tracing::info!(error = %error, "spur-graph: failed to load previous artifact; falling back to full");
                 let (facts, file_counts) = build_facts(&root)?;
-                (
-                    artifact_from_facts(&facts, &root)?,
-                    file_counts,
-                    facts.nodes.len(),
-                    facts.edges.len(),
-                )
+                let artifact = artifact_from_facts(&facts, &root)?;
+                let node_count = artifact.symbols.len() + artifact.files.len();
+                (artifact, file_counts, node_count, facts.edges.len())
             }
         }
     } else {
         let (facts, file_counts) = build_facts(&root)?;
-        (
-            artifact_from_facts(&facts, &root)?,
-            file_counts,
-            facts.nodes.len(),
-            facts.edges.len(),
-        )
+        let artifact = artifact_from_facts(&facts, &root)?;
+        let node_count = artifact.symbols.len() + artifact.files.len();
+        (artifact, file_counts, node_count, facts.edges.len())
     };
     let canonical_output = if uses_output_override {
         write_artifact(&artifact, &output)?;
