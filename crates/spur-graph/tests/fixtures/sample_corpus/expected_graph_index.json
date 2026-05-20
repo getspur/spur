@@ -107,7 +107,7 @@
         17
       ],
       "entity_name": "App",
-      "qualified_name": "App",
+      "qualified_name": "impl App",
       "symbol_kind": "impl",
       "anchor_hash": "2471580899387477303",
       "enclosing_scope": null
@@ -209,7 +209,7 @@
         9
       ],
       "entity_name": "Helper",
-      "qualified_name": "Helper",
+      "qualified_name": "impl Helper",
       "symbol_kind": "impl",
       "anchor_hash": "10216047625779056650",
       "enclosing_scope": null
