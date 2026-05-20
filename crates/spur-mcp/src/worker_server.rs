@@ -492,13 +492,36 @@ struct FetchOutcomeArtifactParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CodeAmbiguityMode {
+    Candidates,
+    Error,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSymbolParams {
-    symbol: String,
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+    /// deprecated; use selector. Accepts graph://symbol/<id> or bare hex id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+    /// Ambiguity handling. Defaults to candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on_ambiguous: Option<CodeAmbiguityMode>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSubgraphParams {
-    symbol: String,
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+    /// deprecated; use selector. Accepts graph://symbol/<id> or bare hex id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+    /// Ambiguity handling. Defaults to candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on_ambiguous: Option<CodeAmbiguityMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     radius: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -786,7 +809,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_callers",
-        description = "List symbols that call the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.",
+        description = "List symbols that call the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.",
         input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
     )]
     async fn code_callers_tool(
@@ -808,7 +831,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_callees",
-        description = "List symbols called by the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.",
+        description = "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.",
         input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
     )]
     async fn code_callees_tool(
@@ -830,7 +853,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_subgraph",
-        description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
+        description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
         input_schema = crate::tool_schemas::schema_object::<CodeSubgraphParams>()
     )]
     async fn code_subgraph_tool(

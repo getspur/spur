@@ -744,16 +744,24 @@ fn graph_subgraph_def() -> ToolDefinition {
 fn code_callers_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callers".into(),
-        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.".into(),
+        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
                 "symbol": {
                     "type": "string",
-                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                },
+                "on_ambiguous": {
+                    "type": "string",
+                    "enum": ["candidates", "error"],
+                    "description": "Ambiguity handling (default: candidates)"
                 }
-            },
-            "required": ["symbol"]
+            }
         }),
     }
 }
@@ -761,16 +769,24 @@ fn code_callers_def() -> ToolDefinition {
 fn code_callees_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callees".into(),
-        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
                 "symbol": {
                     "type": "string",
-                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                },
+                "on_ambiguous": {
+                    "type": "string",
+                    "enum": ["candidates", "error"],
+                    "description": "Ambiguity handling (default: candidates)"
                 }
-            },
-            "required": ["symbol"]
+            }
         }),
     }
 }
@@ -782,9 +798,18 @@ fn code_subgraph_def() -> ToolDefinition {
         input_schema: json!({
             "type": "object",
             "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
                 "symbol": {
                     "type": "string",
-                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                },
+                "on_ambiguous": {
+                    "type": "string",
+                    "enum": ["candidates", "error"],
+                    "description": "Ambiguity handling (default: candidates)"
                 },
                 "radius": {
                     "type": "integer",
@@ -800,8 +825,7 @@ fn code_subgraph_def() -> ToolDefinition {
                     "items": { "type": "string" },
                     "description": "Optional relation kind filter, e.g. [\"calls\", \"references\"]"
                 }
-            },
-            "required": ["symbol"]
+            }
         }),
     }
 }
@@ -1336,6 +1360,35 @@ mod schema_truthfulness_tests {
             names.contains(&"recover_orphaned_dispatch"),
             "recover_orphaned_dispatch must appear in tools/list, got: {names:?}"
         );
+    }
+
+    #[test]
+    fn code_graph_schemas_advertise_selector_legacy_symbol_and_ambiguity_mode() {
+        for def in [code_callers_def(), code_callees_def(), code_subgraph_def()] {
+            let props = def
+                .input_schema
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("{} properties", def.name));
+            assert!(props.contains_key("selector"), "{} selector", def.name);
+            assert!(props.contains_key("symbol"), "{} legacy symbol", def.name);
+            assert!(
+                props
+                    .get("symbol")
+                    .and_then(|v| v.get("description"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|description| description
+                        == "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."),
+                "{} symbol deprecation description",
+                def.name
+            );
+            assert_eq!(
+                props.get("on_ambiguous").and_then(|v| v.get("enum")),
+                Some(&json!(["candidates", "error"])),
+                "{} on_ambiguous enum",
+                def.name
+            );
+        }
     }
 
     #[test]
