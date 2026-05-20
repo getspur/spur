@@ -1,0 +1,55 @@
+{
+  "@context": "https://schema.org",
+  "@type": "Product",
+  "name": "SPUR Pro License",
+  "description": "Pro license for SPUR — unlocks parallel workers, session resume, and rate-limit failover across Claude, Codex, Gemini, OpenCode, and Kimi. Issued as a signed Ed25519 policy document after checkout.",
+  "category": "Software License",
+  "brand": {
+    "@type": "Brand",
+    "name": "SPUR"
+  },
+  "url": "https://getspur.dev/pro",
+  "offers": [
+    {
+      "@type": "Offer",
+      "name": "Pro — Monthly",
+      "sku": "spur-pro-monthly",
+      "price": "19",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/pro?plan=monthly",
+      "availability": "https://schema.org/InStock",
+      "priceSpecification": {
+        "@type": "UnitPriceSpecification",
+        "price": "19",
+        "priceCurrency": "USD",
+        "unitText": "seat/month",
+        "billingDuration": "P1M"
+      }
+    },
+    {
+      "@type": "Offer",
+      "name": "Pro — Annual",
+      "sku": "spur-pro-annual",
+      "price": "182",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/pro?plan=annual",
+      "availability": "https://schema.org/InStock",
+      "priceSpecification": {
+        "@type": "UnitPriceSpecification",
+        "price": "182",
+        "priceCurrency": "USD",
+        "unitText": "seat/year",
+        "billingDuration": "P1Y"
+      }
+    },
+    {
+      "@type": "Offer",
+      "name": "Pro — Lifetime",
+      "sku": "spur-pro-lifetime",
+      "price": "290",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/pro?plan=lifetime",
+      "availability": "https://schema.org/InStock"
+    }
+  ]
+}
