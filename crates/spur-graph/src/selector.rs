@@ -32,11 +32,15 @@ pub fn resolve_selector(artifact: &GraphIndexArtifact, selector: &str) -> Select
     }
 
     if let Some(symbol_id) = selector.strip_prefix(CODE_SYMBOL_URI_PREFIX) {
-        return resolve_by_id(artifact, symbol_id);
+        return resolve_symbol_by_id(artifact, symbol_id)
+            .map(SelectorResolution::Resolved)
+            .unwrap_or(SelectorResolution::NotFound);
     }
 
     if is_bare_stable_symbol_id(selector) {
-        return resolve_by_id(artifact, selector);
+        if let Some(symbol) = resolve_symbol_by_id(artifact, selector) {
+            return SelectorResolution::Resolved(symbol);
+        }
     }
 
     if let Some(file_scoped) = selector
@@ -78,25 +82,23 @@ pub fn resolve_selector(artifact: &GraphIndexArtifact, selector: &str) -> Select
     resolution_from_matches(entity_matches)
 }
 
-fn resolve_by_id(artifact: &GraphIndexArtifact, symbol_id: &str) -> SelectorResolution {
+fn resolve_symbol_by_id(artifact: &GraphIndexArtifact, symbol_id: &str) -> Option<ResolvedSymbol> {
     if symbol_id.is_empty() {
-        return SelectorResolution::NotFound;
+        return None;
     }
     artifact
         .symbols
         .iter()
         .find(|symbol| symbol.stable_symbol_id == symbol_id)
         .map(resolved_symbol)
-        .map(SelectorResolution::Resolved)
-        .unwrap_or(SelectorResolution::NotFound)
 }
 
 fn is_bare_stable_symbol_id(selector: &str) -> bool {
     // Production stable IDs are always 16 lowercase hex chars: truncated SHA-256
-    // bytes interpreted as a u64 and formatted with `{:016x}`. Resolver priority
-    // is URI, then bare hex IDs (>=16), then file/line and qualified-name
-    // selectors, then entity_name. Rare hex-looking entity names can be shadowed
-    // by this tradeoff; the URI form remains the explicit stable-ID escape hatch.
+    // bytes interpreted as a u64 and formatted with `{:016x}`. Bare hex IDs
+    // are a hint: an ID hit wins, but an ID miss falls through to file/line,
+    // qualified-name, and entity_name selectors. The URI form remains the
+    // explicit stable-ID-only escape hatch.
     selector.len() >= 16
         && selector
             .bytes()
@@ -490,6 +492,59 @@ mod tests {
         ));
 
         assert_resolved(&artifact, expected_id, expected_id);
+    }
+
+    #[test]
+    fn sixteen_hex_selector_can_resolve_as_qualified_name() {
+        let mut artifact = artifact();
+        let selector = "abcdefabcdefabcd";
+        let expected_id = "hex-qualified-symbol-id";
+        artifact.symbols.push(symbol(
+            expected_id,
+            "src/build.rs",
+            [40, 41],
+            "hex_qualified",
+            selector,
+            "function",
+            None,
+        ));
+
+        assert_resolved(&artifact, selector, expected_id);
+    }
+
+    #[test]
+    fn sixteen_hex_selector_can_resolve_as_entity_name() {
+        let mut artifact = artifact();
+        let selector = "abcdefabcdefabcd";
+        let expected_id = "hex-entity-symbol-id";
+        artifact.symbols.push(symbol(
+            expected_id,
+            "src/build.rs",
+            [40, 41],
+            selector,
+            "module::hex_entity",
+            "function",
+            None,
+        ));
+
+        assert_resolved(&artifact, selector, expected_id);
+    }
+
+    #[test]
+    fn uri_symbol_selector_does_not_fall_through_on_missing_id() {
+        let mut artifact = artifact();
+        let selector = "abcdef0123456789";
+        artifact.symbols.push(symbol(
+            "hex-qualified-symbol-id",
+            "src/build.rs",
+            [40, 41],
+            "hex_qualified",
+            selector,
+            "function",
+            None,
+        ));
+
+        assert_not_found(&artifact, "graph://symbol/abcdef0123456789");
     }
 
     #[test]
