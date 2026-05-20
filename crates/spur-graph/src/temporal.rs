@@ -20,6 +20,44 @@ pub enum ResolutionFailure {
     IndexCorrupt(String),
 }
 
+pub type GitSha = String;
+
+pub fn symbol_history(
+    code: &GraphIndexArtifact,
+    commits: &CommitIndexArtifact,
+    symbol: &str,
+) -> Vec<(GitSha, ChangeKind, SnapshotKey)> {
+    let graph = CommitGraph::new(commits);
+    let mut chain_keys = seed_symbol_history_keys(code, symbol);
+    close_symbol_history_chain(code, &mut chain_keys);
+
+    let mut events: Vec<_> = code
+        .temporal_edges
+        .iter()
+        .filter_map(|edge| match (&edge.source, &edge.target) {
+            (EdgeEndpoint::Commit { sha }, EdgeEndpoint::Snapshot { key })
+                if chain_keys.contains(key) =>
+            {
+                edge.change_kind
+                    .clone()
+                    .map(|change_kind| (sha.clone(), change_kind, key.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    events.sort_by(|left, right| {
+        graph
+            .position(&left.0)
+            .cmp(&graph.position(&right.0))
+            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| left.2.stable_symbol_id.cmp(&right.2.stable_symbol_id))
+            .then_with(|| left.2.commit.cmp(&right.2.commit))
+    });
+    events.dedup();
+    events
+}
+
 pub fn resolve_symbol_at(
     code: &GraphIndexArtifact,
     commits: &CommitIndexArtifact,
@@ -61,6 +99,57 @@ pub fn resolve_symbol_at(
     };
 
     resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_key)
+}
+
+fn seed_symbol_history_keys(code: &GraphIndexArtifact, symbol: &str) -> HashSet<SnapshotKey> {
+    snapshot_keys_for_symbol(code, symbol).into_iter().collect()
+}
+
+fn close_symbol_history_chain(code: &GraphIndexArtifact, chain_keys: &mut HashSet<SnapshotKey>) {
+    loop {
+        let previous_len = chain_keys.len();
+        expand_stable_symbol_snapshots(code, chain_keys);
+        close_rename_chain(code, chain_keys);
+        if chain_keys.len() == previous_len {
+            break;
+        }
+    }
+}
+
+fn expand_stable_symbol_snapshots(
+    code: &GraphIndexArtifact,
+    chain_keys: &mut HashSet<SnapshotKey>,
+) {
+    let stable_symbol_ids: HashSet<_> = chain_keys
+        .iter()
+        .map(|key| key.stable_symbol_id.clone())
+        .collect();
+
+    for stable_symbol_id in stable_symbol_ids {
+        chain_keys.extend(snapshot_keys_for_symbol(code, &stable_symbol_id));
+    }
+}
+
+fn close_rename_chain(code: &GraphIndexArtifact, chain_keys: &mut HashSet<SnapshotKey>) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for edge in &code.temporal_edges {
+            let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind else {
+                continue;
+            };
+            let Some(next) = rename_target(edge, prev) else {
+                continue;
+            };
+
+            if chain_keys.contains(prev) && chain_keys.insert(next.clone()) {
+                changed = true;
+            }
+            if chain_keys.contains(&next) && chain_keys.insert(prev.clone()) {
+                changed = true;
+            }
+        }
+    }
 }
 
 fn resolve_from_anchor_key(
@@ -518,5 +607,30 @@ mod tests {
         let resolution = resolve_symbol_at(&graph, &commits, "old", "nonexistent", "c3");
 
         assert!(matches!(resolution, Resolution::Unknown { .. }));
+    }
+
+    #[test]
+    fn symbol_history_returns_chronological_chain() {
+        let (g, c) = fixture();
+        let hist = symbol_history(&g, &c, "old");
+
+        // old (c1, Added) -> new (c2, RenamedFrom(old))
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist[0].0, "c1");
+        assert!(matches!(hist[0].1, ChangeKind::Added));
+        assert_eq!(hist[0].2.stable_symbol_id, "old");
+        assert_eq!(hist[1].0, "c2");
+        assert!(matches!(hist[1].1, ChangeKind::RenamedFrom(_)));
+        assert_eq!(hist[1].2.stable_symbol_id, "new");
+    }
+
+    #[test]
+    fn symbol_history_walks_backward_across_rename_predecessors() {
+        let (g, c) = fixture();
+        let hist = symbol_history(&g, &c, "new");
+
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist[0].2.stable_symbol_id, "old");
+        assert_eq!(hist[1].2.stable_symbol_id, "new");
     }
 }
