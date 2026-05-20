@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -343,6 +343,7 @@ impl MentionRegistry {
                 all_entries.extend(cached.entries.iter());
             }
         }
+        dedup_file_entries_with_code_files(&mut all_entries);
         let entries = all_entries.as_slice();
 
         if query.is_empty() {
@@ -453,6 +454,30 @@ impl MentionRegistry {
 
 fn is_graph_uri(uri: &str) -> bool {
     uri.starts_with("graph://file/") || uri.starts_with("graph://symbol/")
+}
+
+fn dedup_file_entries_with_code_files(entries: &mut Vec<&MentionEntry>) {
+    let code_file_paths: HashSet<String> = entries
+        .iter()
+        .filter(|entry| entry.kind == MentionKind::CodeFile)
+        .map(|entry| mention_path_key(&entry.display))
+        .collect();
+    if code_file_paths.is_empty() {
+        return;
+    }
+
+    entries.retain(|entry| {
+        entry.kind != MentionKind::File
+            || !code_file_paths.contains(&mention_path_key(&entry.display))
+    });
+}
+
+fn mention_path_key(path: &str) -> String {
+    let mut relative = path;
+    while let Some(stripped) = relative.strip_prefix("./") {
+        relative = stripped;
+    }
+    relative.replace('\\', "/")
 }
 
 #[derive(Debug, Clone)]
@@ -1326,6 +1351,90 @@ mod tests {
             .filter_map(|entry| entry.section_header)
             .collect::<Vec<_>>();
         assert_eq!(workers_only_headers, vec!["Workers"]);
+    }
+
+    #[test]
+    fn typed_query_prefers_code_file_when_file_has_same_path() {
+        let mut registry = test_registry(vec![
+            Box::new(StaticSource {
+                name: "file",
+                entries: vec![
+                    mention(MentionKind::File, 1, "src/shared.rs".into()),
+                    mention(MentionKind::File, 2, "src/file_only.rs".into()),
+                ],
+            }),
+            Box::new(StaticSource {
+                name: "code",
+                entries: vec![
+                    mention(MentionKind::CodeFile, 3, "src/code_only.rs".into()),
+                    mention(MentionKind::CodeFile, 4, "src/shared.rs".into()),
+                ],
+            }),
+        ]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "src", 16);
+        let content: Vec<&MentionEntry> = results
+            .iter()
+            .filter(|entry| entry.section_header.is_none())
+            .collect();
+
+        assert_eq!(
+            content
+                .iter()
+                .filter(|entry| entry.display == "src/shared.rs")
+                .count(),
+            1,
+            "expected same-path File/CodeFile rows to collapse into one result: {content:?}"
+        );
+        assert!(
+            content.iter().any(
+                |entry| entry.kind == MentionKind::CodeFile && entry.display == "src/shared.rs"
+            ),
+            "expected CodeFile to survive for duplicate path: {content:?}"
+        );
+        assert!(
+            content
+                .iter()
+                .any(|entry| entry.kind == MentionKind::File
+                    && entry.display == "src/file_only.rs"),
+            "expected File-only path to survive: {content:?}"
+        );
+        assert!(
+            content
+                .iter()
+                .any(|entry| entry.kind == MentionKind::CodeFile
+                    && entry.display == "src/code_only.rs"),
+            "expected CodeFile-only path to survive: {content:?}"
+        );
+    }
+
+    #[test]
+    fn empty_query_file_header_disappears_when_files_are_code_duplicates() {
+        let mut registry = test_registry(vec![
+            Box::new(StaticSource {
+                name: "file",
+                entries: vec![mention(MentionKind::File, 1, "src/shared.rs".into())],
+            }),
+            Box::new(StaticSource {
+                name: "code",
+                entries: vec![mention(MentionKind::CodeFile, 2, "src/shared.rs".into())],
+            }),
+        ]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "", 16);
+        let headers = results
+            .iter()
+            .filter_map(|entry| entry.section_header)
+            .collect::<Vec<_>>();
+        let content = results
+            .iter()
+            .filter(|entry| entry.section_header.is_none())
+            .collect::<Vec<_>>();
+
+        assert_eq!(headers, vec!["Code"]);
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].kind, MentionKind::CodeFile);
+        assert_eq!(content[0].display, "src/shared.rs");
     }
 
     #[test]
