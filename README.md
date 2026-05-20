@@ -1,20 +1,23 @@
 # SPUR
 
-**Issue in, PR out — across every agent, in parallel, with one review surface.**
+**The control tower for your CLI coding agents.**
 
-SPUR is a Rust-native terminal orchestrator for AI coding agents. A "brain" agent reasons about your task and delegates work to one or more "worker" agents — Claude Code, Codex, Gemini, Kimi, OpenCode, or any [ACP](https://github.com/anthropics/agent-client-protocol)-speaking agent. Each worker runs in its own isolated git worktree. SPUR coordinates dispatch, review, retries, cost, and project-management state in one place.
+> Issue in, PR out — across every agent, in parallel, with one review surface.
+
+SPUR is a Rust-native terminal layer that sits above the AI coding agents you already run — Claude Code, Codex, Gemini, Kimi, OpenCode, or any [ACP](https://github.com/anthropics/agent-client-protocol)-speaking agent. A "brain" reasons about your task and delegates to one or more "workers." Each worker runs in its own isolated git worktree. SPUR coordinates dispatch, human review, cherry-pick, retries, cross-vendor cost, and project-management state in one place.
 
 > ⚠️ **Early stage** — APIs and config format may change.
 
 ## The Problem
 
-Running multiple AI coding agents today means living with three frustrations:
+Running 2+ AI coding agents today means living with four frustrations:
 
-- **Collision.** Two agents editing the same repo corrupt the working tree.
-- **Opacity.** When an agent says "done," there's no unified place to see the diff, approve, reject, or retry.
-- **Cost blindness.** Tokens accrue across five vendors with no single ledger.
+- **Rate-limit ambush.** Claude Code Max users blow through 5-hour windows in under 90 minutes. *"Paying $200 a month, I hit my weekly in 3 days last week"* (esperent, HN 47626833). When the lockout hits, the in-flight context is gone.
+- **Cost opacity.** Tokens accrue across five vendors with no single ledger. *"I'm paying for Max, and when I use the tooling to calculate the spend returned by the API, I can see it's almost $1k!"* (buremba, HN 44598254). Devs only discover the gap by reverse-engineering their own bill.
+- **Multi-agent chaos.** *"I run 5–10 Claude Code agents at a time across different repos. Keeping track of which one is waiting for input, which one is working, and which one broke something was chaos. I needed a control tower"* (Beefin, HN 47104424).
+- **Worktree merge tax.** DIY tmux + worktrees is the workaround. *"I expected this to become less necessary over time as models got faster, but the opposite has happened"* (nojs, HN 47573483).
 
-SPUR removes these by giving each worker its own git worktree, surfacing every diff in a TUI review card, and reading vendor logs into a single DuckDB-backed cost ledger.
+SPUR addresses all four: cross-vendor brain-swap when one vendor rate-limits you, a unified live cost ledger across every CLI you pay for, one review surface for parallel workers, and DAG-ordered cherry-pick of approved diffs onto a staging branch.
 
 ## How It Works
 
@@ -42,21 +45,36 @@ SPUR removes these by giving each worker its own git worktree, surfacing every d
 
 ## Capabilities
 
-- **Parallel delegation, isolated.** `delegate_to_worker`, `delegate_parallel`, and DAG-ordered `submit_plan` dispatch workers concurrently. Each gets its own git worktree on `spur/worker/v2/{agent}/...`, protected by advisory `flock` liveness probes and an orphan-collector. Approved subtask commits are cherry-picked in DAG order onto a staging branch.
-- **Review loop with Reflexion retry.** Every worker completion produces a review card — Approve / Reject / Modify / Retry. Retries feed prior attempts back as context (max 3, auto-reject on exhaustion). A dedicated dispatcher decouples decision latency from brain I/O.
-- **Heterogeneous agents over ACP.** Per-agent capability negotiation. Slash commands like `/model` and `/effort` are synthesized from each agent's `InitializeResponse`, so cross-agent model switching works on every supported worker.
+*Ordered by uniqueness — what no single-vendor or cloud peer can match by design.*
+
+- **Unified cost ledger across every vendor.** Five live extractors (Claude, Codex, Gemini, OpenCode, Kimi) feeding a DuckDB analytics engine that reads vendor JSONL/SQLite in place — no ETL. The Insights view (`Alt+a`) shows 7-day cost sparklines, per-session burn rate, and a `cost_source` provenance gauge. Devin, Cosine, Cursor, Aider, and Claude Code each only see their own bill; SPUR sees all of them in one number.
+- **Brain-swap across vendors mid-flow.** Hit a Claude rate limit → keep working on Codex → come back to Claude when the window resets. Per-agent capability negotiation; `/model` and `/effort` synthesized from each agent's `InitializeResponse`. Impossible inside any single-vendor tool.
+- **Session resume via event replay.** Close the laptop, restart SPUR, the brain picks up exactly where it left off. Not a soft-reconnect — a full replay from an event-sourced log.
+- **Local-first durability.** Plans persist as beads epics in SQLite, events as NDJSON, outcomes as content-addressed git blobs. Survives crashes, OS updates, and network outages — resilience cloud-only competitors cannot match without offline sync.
+- **Review loop with Reflexion retry.** Every worker completion produces a review card — Approve / Reject / Modify / Retry. Retries feed prior attempts back as context (max 3, auto-reject on exhaustion). A first-class state machine, not a UI convenience.
+- **Parallel delegation, isolated.** `delegate_to_worker`, `delegate_parallel`, and DAG-ordered `submit_plan` dispatch workers concurrently. Each gets its own git worktree on `spur/worker/v2/{agent}/...`, protected by advisory `flock` liveness probes and an orphan-collector.
+- **Cherry-pick in DAG order.** Approved subtask commits are cherry-picked in topological order onto a staging branch. Collapses the post-worktree merge tax that DIY tmux+worktree users hit every day.
+- **Telegram bot on the same state machine.** `spur-bot` mirrors review cards and session streams into Telegram forum topics. Same review lane, same event bus, same approval semantics as the TUI — review on the train, not just at the desk.
+- **Native ACP + MCP dual channel.** Structured JSON-RPC, not PTY scraping or prompt injection. Any ACP-speaking agent works out of the box.
+- **Durable plan mutations.** `submit_plan_mutation` supports split / replace / amend in-flight; the reconciler ticks adaptively, validates ownership, and previews overlay conflicts.
 - **Multi-brain safety.** Plans are locked to a single active brain via a `spur:plan-owner:<id>` label. Tier-1 mutating tools fail on session mismatch. `force_reclaim_plan` breaks deadlocks when a brain wedges.
 - **Structured delegation reasoning.** Brains pass a `DelegationPlan` (candidates, rationale, decomposition) with every dispatch. SPUR verifies the chosen agent matches the actual payload — preventing the LLM from lying to its own reviewer.
-- **Durable plans.** Plans persist as beads epics, not in memory. The reconciler ticks adaptively, validates ownership, previews overlay conflicts, and supports live mutations (`submit_plan_mutation`: split / replace / amend tasks in-flight) and resume after crash.
-- **Cross-vendor cost & insights.** A DuckDB analytics engine reads vendor JSONL/SQLite in place — five live extractors (Claude, Codex, Gemini, OpenCode, Kimi) and a Kiro stub. The Insights view (`Alt+a`) shows 7-day cost sparklines, per-session burn rate, and a `cost_source` provenance gauge.
 - **Stable-identity code graph.** Tree-sitter parses Rust / Python / TS / TSX / Markdown into a graph with SHA256 stable symbol IDs and incremental per-file rebuilds. Auto-discovered at the worktree root — no env var setup.
 - **Built for orchestration, not chat.** Dashboard with lineage tree, full-screen ReAct trace with inline markdown + mermaid, grouped `@mention` picker (Workers / Files / Issues / Code Graph), `Ctrl+K` universal palette, Plan Inspector (`Alt+P`), live status bar (running count, pending reviews, total cost, model labels).
-- **Telegram bot frontend.** `spur-bot` mirrors review cards and session streams into Telegram forum topics for mobile/remote approvals.
 
 ## What SPUR is NOT
 
+SPUR is built to sit *above* the agents and tools you already use. We don't try to replace them — and several excellent products own jobs SPUR explicitly does not compete on:
+
+- **Not a Devin replacement.** Devin owns "autonomous engineer I can assign tickets to in Slack." SPUR keeps the human in the loop on purpose — review is a state machine, not a slogan. If you want a fully autonomous agent, hire Devin.
+- **Not a Cursor competitor.** Cursor owns the AI IDE. SPUR sits *next to* your editor, not inside it. Most SPUR users keep Cursor open in another window.
+- **Not an Aider replacement.** Aider owns the simplest free BYO-key single-agent CLI. SPUR's value materializes at fleet size ≥ 2 — "add SPUR above Aider," not "switch from Aider." Aider-as-a-SPUR-worker is on the roadmap.
+- **Not a Claude Code replacement.** SPUR uses Claude Code as a worker. We don't try to beat the in-session UX; we add what Claude Code doesn't attempt — cross-session durability, cross-vendor failover, and a cost ledger that spans every CLI.
+- **Not autonomous.** Review gate is required by design. If you want a "set and forget" system, this is the wrong tool.
+
+And on the boring scope side:
+
 - Not a chat UI. Every interaction is task-structured.
-- Not a single-agent CLI wrapper. SPUR coordinates instances of Claude Code, Codex, etc.; it doesn't replace them.
 - Not an IDE. No editor, no LSP, no inline diff gutter.
 - Not CI/CD. Plans run locally with local worktrees, not on remote runners.
 - Not a universal PM sync. Only beads (native) and GitHub (via `gh`) are implemented today.
