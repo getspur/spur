@@ -1,0 +1,10 @@
+{
+  "expected_renames": [
+    {
+      "from": "ts_old_03",
+      "to": "ts_new_03"
+    }
+  ],
+  "expected_added": [],
+  "expected_deleted": []
+}
