@@ -89,6 +89,37 @@ fn symbol_expansion_uses_qualified_name_with_scope() {
 }
 
 #[test]
+fn symbol_expansion_uses_authoritative_path_when_validation_path_differs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "pub fn run() {}\n";
+    write_source(dir.path(), "src/authoritative.rs", source);
+    write_source(dir.path(), "src/validation.rs", "pub fn other() {}\n");
+    let mut payload = symbol_payload_from_source(
+        "run",
+        "graph://symbol/symbol-run",
+        "src/authoritative.rs",
+        source,
+        "pub fn run",
+        "\n",
+        "run",
+        "fn",
+        [1, 1],
+    );
+    let CodeMentionValidationSpec::SymbolRange { path, .. } = &mut payload.authoritative.validation
+    else {
+        unreachable!("symbol payload uses SymbolRange validation");
+    };
+    *path = "src/validation.rs".to_string();
+
+    let ExpandedMention::Body { text } = expand(&payload, dir.path()) else {
+        panic!("expected authoritative path expansion");
+    };
+
+    assert!(text.contains("file:    src/authoritative.rs"), "{text}");
+    assert!(text.contains("signature: pub fn run()"), "{text}");
+}
+
+#[test]
 fn context_header_end_truncates_at_utf8_boundary_with_marker() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut source = String::new();
