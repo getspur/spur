@@ -7,6 +7,11 @@
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# Local env files — never commit (Buffer tokens, R2 keys, etc.)
+.env
+.env.local
+.env.*.local
 python/dist/
 __pycache__/
 
