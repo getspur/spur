@@ -120,10 +120,14 @@ fn symbol_expansion(
         .symbol_kind
         .as_deref()
         .unwrap_or("symbol");
+    let display_name = match payload.display_meta.enclosing_scope.as_deref() {
+        Some(scope) => format!("{}::{}", scope, payload.authoritative.display),
+        None => payload.authoritative.display.clone(),
+    };
 
     format!(
-        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\ngraph_index_version: {}\n\ncontext_header:\n{}\ntopology_available_via_mcp:\n- get_callers(\"{}\")\n- get_callees(\"{}\")\n- get_subgraph(\"{}\", radius=1)\n",
-        payload.authoritative.display,
+        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\ngraph_index_version: {}\n\ncontext_header:\n{}",
+        display_name,
         symbol_kind,
         payload.authoritative.uri,
         payload.authoritative.file_path,
@@ -131,9 +135,6 @@ fn symbol_expansion(
         line_range[1],
         payload.display_meta.graph_index_version,
         context_header,
-        payload.authoritative.uri,
-        payload.authoritative.uri,
-        payload.authoritative.uri,
     )
 }
 
@@ -350,7 +351,7 @@ mod tests {
 
         assert_eq!(
             text,
-            "MENTION @run\nkind:    symbol:fn\nid:      graph://symbol/symbol-run\nfile:    src/lib.rs\nlines:   3-5\ngraph_index_version: test-version\n\ncontext_header:\nuse crate::Config;\n\n\ntopology_available_via_mcp:\n- get_callers(\"graph://symbol/symbol-run\")\n- get_callees(\"graph://symbol/symbol-run\")\n- get_subgraph(\"graph://symbol/symbol-run\", radius=1)\n"
+            "MENTION @run\nkind:    symbol:fn\nid:      graph://symbol/symbol-run\nfile:    src/lib.rs\nlines:   3-5\ngraph_index_version: test-version\n\ncontext_header:\nuse crate::Config;\n\n"
         );
     }
 
