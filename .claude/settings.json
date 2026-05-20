@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty' <<< \"$CLAUDE_TOOL_INPUT\"); case \"$f\" in *.rs) rustfmt --edition 2021 \"$f\" 2>/dev/null || true ;; esac"
+          },
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty' <<< \"$CLAUDE_TOOL_INPUT\"); case \"$f\" in */crates/*.rs|crates/*.rs) crate=$(echo \"$f\" | sed -nE 's|.*crates/([^/]+)/.*|\\1|p'); if [ -n \"$crate\" ]; then cd /Volumes/Projects/spur && cargo check -p \"$crate\" --message-format=short 2>&1 | tail -20; fi ;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}

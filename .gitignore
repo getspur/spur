@@ -4,7 +4,9 @@
 *.db
 .idea/
 .DS_Store
-.claude/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
 python/dist/
 __pycache__/
 
