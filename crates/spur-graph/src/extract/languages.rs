@@ -26,6 +26,12 @@ pub enum Language {
 }
 
 impl Language {
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        language_registry()
+            .iter()
+            .find_map(|descriptor| (descriptor.matcher)(path).then_some(descriptor.language))
+    }
+
     pub fn tree_sitter_language(self) -> TsLanguage {
         match self {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
