@@ -559,7 +559,7 @@ fn code_graph_accept_and_submit_expands_fixture_symbol_end_to_end() {
     assert!(!prompt.contains("source:\n"), "{prompt}");
     assert!(
         prompt.contains(
-            "topology_available_via_mcp_for_above_symbols: pass each MENTION's `id` (graph://symbol/...) to code_callers / code_callees / code_subgraph(radius=1)"
+            "topology_available_via_mcp_for_above_symbols: pass each MENTION's qualified_name OR path:line to code_callers / code_callees / code_subgraph(radius=1); use code_resolve for ambiguous names"
         ),
         "{prompt}"
     );
