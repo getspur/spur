@@ -18,6 +18,17 @@ use crate::components::query_source::{
 };
 use crate::theme::{resolve_token, ColorDepth, Theme};
 
+const CANONICAL_FILENAMES: [&str; 8] = [
+    "mod.rs",
+    "lib.rs",
+    "main.rs",
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "index.jsx",
+    "__init__.py",
+];
+
 pub(crate) fn token(theme: &Theme, name: &str) -> Color {
     resolve_token(theme, name, ColorDepth::Truecolor)
 }
@@ -664,6 +675,15 @@ fn middle_truncate_path_line(path_line: &str, max_width: usize) -> String {
     let tail_width = UnicodeWidthStr::width(tail);
     let marker = "…/";
     let marker_width = UnicodeWidthStr::width(marker);
+    if is_canonical_filename(tail) {
+        if let Some(parent_tail) = parent_tail_segment(path_line, tail) {
+            let parent_tail_width = UnicodeWidthStr::width(parent_tail.as_str());
+            if max_width >= marker_width + parent_tail_width {
+                return format!("{marker}{parent_tail}");
+            }
+        }
+    }
+
     if max_width >= marker_width + tail_width {
         return format!("{marker}{tail}");
     }
@@ -675,6 +695,27 @@ fn middle_truncate_path_line(path_line: &str, max_width: usize) -> String {
     }
 
     truncate_to_width("…", max_width)
+}
+
+fn is_canonical_filename(tail: &str) -> bool {
+    let basename = tail
+        .rsplit_once(':')
+        .filter(|(_, line)| !line.is_empty() && line.chars().all(|ch| ch.is_ascii_digit()))
+        .map(|(basename, _)| basename)
+        .unwrap_or(tail);
+    CANONICAL_FILENAMES.contains(&basename)
+}
+
+fn parent_tail_segment(path_line: &str, tail: &str) -> Option<String> {
+    let (parent_path, _) = path_line.rsplit_once('/')?;
+    let parent = parent_path
+        .rsplit_once('/')
+        .map(|(_, parent)| parent)
+        .unwrap_or(parent_path);
+    if parent.is_empty() {
+        return None;
+    }
+    Some(format!("{parent}/{tail}"))
 }
 
 fn truncate_to_width(value: &str, max_width: usize) -> String {
@@ -1171,6 +1212,30 @@ mod tests {
         assert!(text.contains("Cache::run · "), "{text}");
         assert!(text.contains("…/very_long_filename.rs:120"), "{text}");
         assert!(text.contains(" (fn)"), "{text}");
+    }
+
+    #[test]
+    fn canonical_path_truncation_preserves_parent_directory() {
+        let rendered = middle_truncate_path_line("src/foo/mod.rs:10", 15);
+
+        assert_eq!(rendered, "…/foo/mod.rs:10");
+    }
+
+    #[test]
+    fn non_canonical_path_truncation_keeps_filename_line_tail() {
+        let rendered = middle_truncate_path_line("src/a/b/c/non_canonical.rs:50", 21);
+
+        assert_eq!(rendered, "…/non_canonical.rs:50");
+    }
+
+    #[test]
+    fn canonical_same_name_paths_truncate_distinctly() {
+        let foo = middle_truncate_path_line("src/foo/mod.rs:10", 15);
+        let bar = middle_truncate_path_line("src/bar/mod.rs:10", 15);
+
+        assert_eq!(foo, "…/foo/mod.rs:10");
+        assert_eq!(bar, "…/bar/mod.rs:10");
+        assert_ne!(foo, bar);
     }
 
     #[test]
