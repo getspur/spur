@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use spur_graph::{
-    file_id_from_uri, path_in_worktree, validate_file, validate_symbol, CodeMentionKind,
+    file_id_from_uri, path_in_worktree, validate_file, validate_symbol_bytes, CodeMentionKind,
     CodeMentionPayload, CodeMentionValidationSpec, FailureReason, GraphFileArtifact,
     GraphSymbolArtifact, ValidationOutcome,
 };
@@ -76,22 +76,18 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
                 symbol_payload.file_path, payload.authoritative.file_path,
                 "symbol validation payload must use authoritative.file_path"
             );
-            match validate_symbol(&symbol_payload, worktree_root) {
+            let Ok(content) = fs::read_to_string(&path) else {
+                return warning_expansion(payload, FailureReason::FileMissing, worktree_root);
+            };
+            match validate_symbol_bytes(&symbol_payload, content.as_bytes()) {
                 ValidationOutcome::Pass => {}
                 ValidationOutcome::Fail(reason) => {
                     return warning_expansion(payload, reason, worktree_root);
                 }
             }
 
-            let (signature, context_header) = fs::read_to_string(&path)
-                .ok()
-                .map(|content| {
-                    (
-                        first_signature_line(&content, *byte_range, entity_name),
-                        context_header(&content, byte_range[0]),
-                    )
-                })
-                .unwrap_or_default();
+            let signature = first_signature_line(&content, *byte_range, entity_name);
+            let context_header = context_header(&content, byte_range[0]);
             let text =
                 symbol_expansion(payload, *line_range, signature.as_deref(), &context_header);
             ExpandedMention::Body { text }
