@@ -563,19 +563,11 @@ fn path_segments_and_stems(path: &str) -> impl Iterator<Item = &str> {
 
 fn code_entry_path(entry: &MentionEntry) -> Option<&str> {
     match entry.kind {
-        MentionKind::CodeFile => Some(entry.display.as_str()),
-        MentionKind::CodeSymbol => entry.secondary.as_deref().and_then(symbol_secondary_path),
+        MentionKind::CodeFile | MentionKind::CodeSymbol => entry.code_path.as_deref(),
         MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => {
             None
         }
     }
-}
-
-fn symbol_secondary_path(secondary: &str) -> Option<&str> {
-    secondary.split_whitespace().nth(1).and_then(|location| {
-        let path_end = location.rfind(':')?;
-        Some(&location[..path_end])
-    })
 }
 
 fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
@@ -619,6 +611,8 @@ fn append_section_rows(
         uri: String::new(),
         display: format!("── {header} ──"),
         secondary: None,
+        code_path: None,
+        code_scope: None,
         tag: None,
         search_text: None,
         atom_text: None,
@@ -1103,12 +1097,15 @@ mod tests {
     }
 
     fn mention(kind: MentionKind, id: usize, display: String) -> MentionEntry {
+        let code_path = (kind == MentionKind::CodeFile).then(|| display.clone());
         MentionEntry {
             section_header: None,
             kind,
             uri: format!("test://{id}"),
             display,
             secondary: None,
+            code_path,
+            code_scope: None,
             tag: None,
             search_text: None,
             atom_text: None,
@@ -1469,6 +1466,28 @@ mod tests {
         // Invariant under test: score bucket is the primary key. The exact
         // code-symbol hit is in a higher bucket than the weak file prefix hit.
         assert_eq!(results[0].kind, MentionKind::CodeSymbol);
+    }
+
+    #[test]
+    fn code_symbol_path_ranking_uses_structured_code_path_not_secondary() {
+        let mut symbol = mention(MentionKind::CodeSymbol, 1, "render_dashboard".into());
+        symbol.secondary = Some("not a parseable location".into());
+        symbol.code_path = Some("crates/spur-tui/src/dashboard_view.rs".into());
+
+        let mut registry = test_registry(vec![Box::new(StaticSource {
+            name: "code",
+            entries: vec![symbol],
+        })]);
+
+        let results = registry.query(
+            CompletionScope::PreSession,
+            Path::new("."),
+            "dashboard_view",
+            10,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].display, "render_dashboard");
     }
 
     #[test]

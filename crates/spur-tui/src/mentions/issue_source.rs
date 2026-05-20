@@ -91,6 +91,8 @@ impl MentionSource for IssueMentionSource {
                         DISPLAY_CHAR_LIMIT,
                     ),
                     secondary: issue_secondary(&descriptor.status, descriptor.assignee.as_deref()),
+                    code_path: None,
+                    code_scope: None,
                     tag: descriptor.priority.map(|priority| format!("P{}", priority)),
                     search_text: Some(search_text),
                     atom_text: Some(format!("@{}", descriptor.id)),
