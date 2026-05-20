@@ -52,23 +52,20 @@ pub fn validate_symbol(payload: &SymbolPayload, worktree_root: &Path) -> Validat
     let Ok(bytes) = fs::read(&path) else {
         return ValidationOutcome::Fail(FailureReason::FileMissing);
     };
-    match validate_symbol_bytes(payload, &bytes) {
-        Ok(()) => ValidationOutcome::Pass,
-        Err(reason) => ValidationOutcome::Fail(reason),
-    }
+    validate_symbol_bytes(payload, &bytes)
 }
 
-pub fn validate_symbol_bytes(payload: &SymbolPayload, bytes: &[u8]) -> Result<(), FailureReason> {
+pub fn validate_symbol_bytes(payload: &SymbolPayload, bytes: &[u8]) -> ValidationOutcome {
     let [start, end] = payload.byte_range;
     if end < start || end > bytes.len() {
-        return Err(FailureReason::RangeOutOfBounds);
+        return ValidationOutcome::Fail(FailureReason::RangeOutOfBounds);
     }
 
     let Ok(content) = std::str::from_utf8(bytes) else {
-        return Err(FailureReason::Utf8Boundary);
+        return ValidationOutcome::Fail(FailureReason::Utf8Boundary);
     };
     if !content.is_char_boundary(start) || !content.is_char_boundary(end) {
-        return Err(FailureReason::Utf8Boundary);
+        return ValidationOutcome::Fail(FailureReason::Utf8Boundary);
     }
 
     let slice = &content[start..end];
@@ -76,17 +73,17 @@ pub fn validate_symbol_bytes(payload: &SymbolPayload, bytes: &[u8]) -> Result<()
         || payload.entity_name.is_empty()
         || !contains_whole_word(slice.as_bytes(), payload.entity_name.as_bytes())
     {
-        return Err(FailureReason::NameNotFound);
+        return ValidationOutcome::Fail(FailureReason::NameNotFound);
     }
 
     let Ok(expected_hash) = payload.anchor_hash.parse::<u64>() else {
-        return Err(FailureReason::AnchorHashMismatch);
+        return ValidationOutcome::Fail(FailureReason::AnchorHashMismatch);
     };
     if compute_anchor_hash(slice) != expected_hash {
-        return Err(FailureReason::AnchorHashMismatch);
+        return ValidationOutcome::Fail(FailureReason::AnchorHashMismatch);
     }
 
-    Ok(())
+    ValidationOutcome::Pass
 }
 
 /// Computes a stable u64 anchor hash from the first and last non-whitespace
@@ -159,4 +156,63 @@ fn contains_whole_word(haystack: &[u8], needle: &[u8]) -> bool {
 
 fn is_ascii_word_byte(byte: Option<u8>) -> bool {
     matches!(byte, Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_symbol_bytes_reports_byte_level_failure_reasons_without_filesystem() {
+        let source = "fn run() {}\n";
+        let utf8_source = "fn café() {}\n";
+        let split_inside_e_acute = utf8_source.find('é').expect("accented char") + 1;
+
+        let cases = [
+            (
+                symbol_payload([0, source.len() + 1], "run", 0),
+                source.as_bytes().to_vec(),
+                FailureReason::RangeOutOfBounds,
+            ),
+            (
+                symbol_payload([0, split_inside_e_acute], "café", 0),
+                utf8_source.as_bytes().to_vec(),
+                FailureReason::Utf8Boundary,
+            ),
+            (
+                symbol_payload([0, source.len()], "missing", compute_anchor_hash(source)),
+                source.as_bytes().to_vec(),
+                FailureReason::NameNotFound,
+            ),
+            (
+                symbol_payload([0, source.len()], "run", compute_anchor_hash(source) + 1),
+                source.as_bytes().to_vec(),
+                FailureReason::AnchorHashMismatch,
+            ),
+        ];
+
+        for (payload, bytes, expected_reason) in cases {
+            assert_eq!(
+                validate_symbol_bytes(&payload, &bytes),
+                ValidationOutcome::Fail(expected_reason)
+            );
+        }
+    }
+
+    fn symbol_payload(
+        byte_range: [usize; 2],
+        entity_name: &str,
+        anchor_hash: u64,
+    ) -> GraphSymbolArtifact {
+        GraphSymbolArtifact {
+            stable_symbol_id: "symbol-run".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            byte_range,
+            line_range: [1, 1],
+            entity_name: entity_name.to_string(),
+            symbol_kind: "fn".to_string(),
+            anchor_hash: anchor_hash.to_string(),
+            enclosing_scope: None,
+        }
+    }
 }
