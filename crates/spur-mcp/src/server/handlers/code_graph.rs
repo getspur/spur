@@ -575,9 +575,16 @@ fn candidate_rows_for_symbols<'a>(
 }
 
 fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
+    let uri = format!("{CODE_SYMBOL_URI_PREFIX}{}", symbol.stable_symbol_id);
+    let selector = if symbol.qualified_name.is_empty() {
+        uri.clone()
+    } else {
+        format!("{}::{}", symbol.file_path, symbol.qualified_name)
+    };
+
     CandidateRow {
-        selector: format!("{}::{}", symbol.file_path, symbol.qualified_name),
-        uri: symbol_uri(&symbol.stable_symbol_id),
+        selector,
+        uri,
         id: symbol.stable_symbol_id.clone(),
         qualified_name: symbol.qualified_name.clone(),
         file_path: symbol.file_path.clone(),
