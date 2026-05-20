@@ -17,6 +17,7 @@ const ARTIFACTS_DIR_NAME: &str = "artifacts";
 const LOCK_FILE_NAME: &str = ".lock";
 const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph-index.json";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
+pub const COMMIT_INDEX_POINTER_PATH: &str = ".spur/commit-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 

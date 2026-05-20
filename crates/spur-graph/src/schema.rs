@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::BufReader;
 use std::path::Path;
@@ -326,6 +326,30 @@ pub struct CommitArtifact {
     pub parents: Vec<String>,
     pub author_time: i64,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalkStrategy {
+    Reachable,
+    FirstParent,
+}
+
+impl Default for WalkStrategy {
+    fn default() -> Self {
+        WalkStrategy::Reachable
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitIndexArtifact {
+    pub schema_version: u32,
+    pub commits: Vec<CommitArtifact>,
+    pub refs: BTreeMap<String, String>,
+    pub indexed_at: String,
+    #[serde(default)]
+    pub walk_strategy: WalkStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
