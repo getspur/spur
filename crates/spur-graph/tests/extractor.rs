@@ -212,6 +212,55 @@ impl Service for Store {
     );
 }
 
+#[test]
+fn artifact_distinguishes_struct_and_inherent_impl_qualified_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+struct App;
+
+impl App {
+    fn run(&self) {}
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+    let app_struct = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "struct" && symbol.entity_name == "App")
+        .expect("struct App symbol");
+    let app_impl = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "impl" && symbol.entity_name == "App")
+        .expect("impl App symbol");
+    let run_method = artifact
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.symbol_kind == "method"
+                && symbol.entity_name == "run"
+                && symbol.enclosing_scope.as_deref() == Some("impl App")
+        })
+        .expect("impl App::run method symbol");
+
+    assert_ne!(
+        app_struct.stable_symbol_id, app_impl.stable_symbol_id,
+        "struct App and impl App should remain distinct symbols"
+    );
+    assert_eq!(app_struct.qualified_name, "App");
+    assert_eq!(app_impl.qualified_name, "impl App");
+    assert_eq!(run_method.qualified_name, "impl App::run");
+}
+
 enum EditStep {
     Write(&'static str, &'static str),
     Rename(&'static str, &'static str),
