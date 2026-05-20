@@ -1,6 +1,6 @@
 # Product Marketing Context — SPUR
 
-*Last updated: 2026-05-20 — V1 auto-draft from README.md + SPUR_PRD.md v2.0. Sections marked **[NEEDS INPUT]** require Kevin's review.*
+*Last updated: 2026-05-20 — V1.1 — auto-draft + self-brainstormed proposals for pricing, goals, language, metrics. All proposed values flagged inline; confirm before launch.*
 
 ## Product Overview
 **One-liner:** Issue in, PR out — across every agent, in parallel, with one review surface.
@@ -8,7 +8,18 @@
 **What it does:** SPUR is a Rust-native terminal orchestrator for AI coding agents. A "brain" agent reasons about a task and delegates work to one or more "worker" agents (Claude Code, Codex, Gemini, Kimi, OpenCode, or any ACP-speaking agent). Each worker runs in its own isolated git worktree. SPUR coordinates dispatch, review, retries, cost, and PM state in one place.
 **Product category:** AI coding agent orchestrator / multi-agent terminal IDE-companion. "Shelf" customers search from: *Claude Code wrapper*, *multi-agent CLI*, *agent orchestrator*, *Claude Code Max rate-limit fix*.
 **Product type:** Open-source developer tool (Rust binary, `cargo install spur-cli` / `curl | sh`) + tiered commercial license (Community / Pro / Team / Enterprise).
-**Business model:** Open-core. Community free forever; Pro / Team / Enterprise gated by signed Ed25519 policy documents. Pricing tiers not yet public. **[NEEDS INPUT: per-seat $$, annual vs monthly]**
+**Business model:** Open-core. Community free forever; Pro / Team / Enterprise gated by signed Ed25519 policy documents.
+
+**Proposed pricing** *(self-brainstormed — confirm before launch)*:
+
+| Tier | Monthly | Annual (–20%) | Lifetime |
+|---|---|---|---|
+| Community | $0 | $0 | — |
+| Pro | **$19 / seat / mo** | $182 / seat / yr | **$290 one-time** *(matches `personal_lifetime` alias in `spur-license/src/lib.rs:83`)* |
+| Team | **$49 / seat / mo** (min 3 seats) | $470 / seat / yr | — |
+| Enterprise | **Contact sales** (est. $25k+/yr floor) | — | — |
+
+Rationale: Pro priced **below** Claude Code Max ($100/mo) so it's an obvious add-on not a substitute. Team 2.5× Pro reflects shared cost dashboard + RBAC + webhooks. Lifetime mirrors the existing `personal_lifetime` plan key already in the license crate. Enterprise floor sized for orgs needing SSO + audit + custom policies.
 
 ## Target Audience
 **Target companies:** Startups and mid-size eng orgs (10–200 employees) where developers already pay for Claude Code Max + Codex + Kiro/Gemini and feel the vendor sprawl. Also: solo power-users with $200–600/mo personal AI spend.
@@ -98,9 +109,26 @@
 **Anxiety (what worries them about switching):** "Will this slow me down?" "Will it break my git tree?" "Yet another config file?" "What if SPUR crashes mid-plan?" (Answer: plans are durable in beads — they survive.)
 
 ## Customer Language
-**[NEEDS INPUT — replace with verbatim user quotes once we have them]**
 
-**Provisional language to use** (developer-native, ground in pain):
+**Status:** Provisional — drawn from common HN / r/ClaudeAI / r/LocalLLaMA pain patterns. Replace with real verbatim quotes after F2 (customer-research) completes.
+
+**Provisional verbatim — how they describe the problem:**
+- "Claude Code just told me I'm out of tokens for 4 more hours."
+- "I had to copy-paste my whole architecture into Codex because Claude was rate-limited."
+- "Two agents touched the same file and now my branch is broken."
+- "I have no idea what I spent on Claude this month."
+- "I closed the terminal and lost two hours of agent work."
+- "I want to run 5 refactors at once but I only have one Claude Code window."
+- "tmux + worktrees is fine until it isn't."
+
+**Provisional verbatim — how they describe SPUR / what they want:**
+- "It's like a control plane for my agents."
+- "Finally, one place to approve PRs from all of them."
+- "I can review on my phone now."
+- "Rate-limit-proof Claude Code."
+- "Issue in, PR out — that's the whole pitch."
+
+**Language to use** (developer-native, ground in pain):
 - "Don't lose context."
 - "Issue in, PR out."
 - "One review surface."
@@ -145,7 +173,7 @@
 - Session resume = event replay (not soft-reconnect).
 - DuckDB analytics engine reads vendor JSONL/SQLite in place — no ETL.
 
-**Customers / testimonials:** **[NEEDS INPUT — none captured yet]**
+**Customers / testimonials:** None captured yet (pre-launch). **Launch-blocker:** secure 3–5 named-user quotes from the first 50 Community installs before Phase 4 (Launch). Process: ship a `spur feedback` command + a 2-question post-install survey; mine GitHub issues + Discord for quotables.
 
 **Value themes:**
 | Theme | Proof |
@@ -157,8 +185,33 @@
 | Bring your own agent | Any ACP-speaking agent + per-agent capability negotiation |
 
 ## Goals
-**Primary business goal:** **[NEEDS INPUT]** — likely: drive Community-tier adoption among Claude Code Max users → upsell Pro for parallelism + session resume.
-**Key conversion action (today):** `cargo install spur-cli` (then `spur init`).
-**Secondary conversion action:** GitHub star / repo watch / `curl | sh` install script.
-**Pro tier conversion action:** **[NEEDS INPUT — license purchase URL / signup]**
-**Current metrics:** **[NEEDS INPUT — installs, GitHub stars, MAU, paid conversion]**
+
+**Primary business goal:** Become the default terminal companion for any developer running 2+ AI coding agents. Drive Community adoption among Claude Code Max users → convert to Pro on first parallel-worker or session-resume need.
+
+**Conversion funnel (proposed):**
+
+| Stage | Action | Channel |
+|---|---|---|
+| Awareness | First mention | HN Show / Product Hunt / X / Anthropic DevRel co-marketing |
+| Trial | `cargo install spur-cli` + `spur init` | README + curl-pipe install |
+| Activation | First successful `submit_plan` with ≥2 reviewed approvals | TUI quickstart + onboarding emails |
+| Pro upgrade | Hit single-worker limit OR rate-limit failover OR session-resume need | In-TUI upgrade CTA (`spur-license/src/upgrade_cta.rs` already exists) |
+| Team upgrade | EM wants cost dashboard / RBAC across N seats | Sales-led, triggered by 3+ Pro seats on same domain |
+
+**Pro tier conversion action:** *Proposed* checkout URL: `https://getspur.dev/pro` (placeholder — domain + Stripe/Paddle setup is a launch-blocker). Lifetime SKU links to the existing `personal_lifetime` license plan key.
+
+**Target metrics (proposed, 90 days post-launch):**
+
+| Metric | Day 30 | Day 60 | Day 90 |
+|---|---|---|---|
+| GitHub stars | 1,000 | 3,000 | 7,500 |
+| `cargo install` count | 500 | 2,000 | 6,000 |
+| Activated installs (≥1 review approved) | 150 | 700 | 2,400 |
+| Pro paid conversions | 10 | 50 | 175 |
+| Pro MRR (assuming $19 + $290 lifetime mix) | $300 | $1,500 | $5,000 |
+| Team deals | 0 | 1 | 4 |
+| Telegram bot users | 50 | 300 | 1,000 |
+
+**Current metrics:** None — pre-launch. Telemetry already shipped (`SPUR_TELEMETRY=1`, opt-in Tier-2) — wire up install / activation counters before Phase 4.
+
+**North-star metric:** % of weekly active SPUR sessions where ≥2 different agent vendors are used. Captures the "multi-agent orchestrator" thesis better than installs alone.
