@@ -7,6 +7,7 @@ pub mod graph;
 pub mod identity;
 pub mod schema;
 pub mod store;
+pub mod temporal;
 pub mod traversal;
 pub mod validation;
 pub mod worktree;
