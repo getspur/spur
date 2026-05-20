@@ -261,6 +261,63 @@ impl App {
     assert_eq!(run_method.qualified_name, "impl App::run");
 }
 
+#[test]
+fn trait_impl_qualified_name_includes_trait_for_type() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+trait Service {
+    fn handle(&self);
+}
+
+struct Store;
+
+impl Service for Store {
+    fn handle(&self) {}
+}
+
+impl Store {}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+    let trait_impl = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "impl" && symbol.entity_name == "Service for Store")
+        .expect("impl Service for Store symbol");
+    let inherent_impl = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "impl" && symbol.entity_name == "Store")
+        .expect("impl Store symbol");
+    let handle_method = artifact
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.symbol_kind == "method"
+                && symbol.entity_name == "handle"
+                && symbol.enclosing_scope.as_deref() == Some("impl Service for Store")
+        })
+        .expect("impl Service for Store::handle method symbol");
+
+    assert_eq!(trait_impl.qualified_name, "impl Service for Store");
+    assert_eq!(
+        handle_method.qualified_name,
+        "impl Service for Store::handle"
+    );
+    assert_ne!(
+        trait_impl.stable_symbol_id, inherent_impl.stable_symbol_id,
+        "trait impl and inherent impl should remain distinct symbols"
+    );
+}
+
 enum EditStep {
     Write(&'static str, &'static str),
     Rename(&'static str, &'static str),
