@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod commit_index;
 pub mod json;
 pub mod snapshot;
 
