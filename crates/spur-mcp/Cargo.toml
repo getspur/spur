@@ -24,6 +24,7 @@ sha2 = { workspace = true }
 spur-acp = { workspace = true }
 spur-blob-store = { workspace = true }
 spur-license = { workspace = true }
+spur-graph = { workspace = true }
 spur-pm = { workspace = true }
 spur-worktree = { workspace = true }
 thiserror = { workspace = true }

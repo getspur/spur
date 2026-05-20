@@ -1,3 +1,4 @@
+pub(crate) mod code_graph;
 pub(crate) mod delegation;
 pub(crate) mod graph;
 pub(crate) mod plan;
@@ -131,6 +132,9 @@ impl McpCallbackServer {
             "graph_insights" => self.handle_graph_insights(id, arguments).await,
             "graph_alerts" => self.handle_graph_alerts(id, arguments).await,
             "graph_subgraph" => self.handle_graph_subgraph(id, arguments).await,
+            "code_callers" => self.handle_code_callers(id, arguments).await,
+            "code_callees" => self.handle_code_callees(id, arguments).await,
+            "code_subgraph" => self.handle_code_subgraph(id, arguments).await,
             "submit_plan" => self.handle_submit_plan(id, arguments).await,
             "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
