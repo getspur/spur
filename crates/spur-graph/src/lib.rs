@@ -2,6 +2,7 @@ pub mod content_hash;
 pub mod discovery;
 pub mod extract;
 pub mod git;
+pub mod git_walk;
 pub mod graph;
 pub mod identity;
 pub mod schema;
