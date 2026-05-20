@@ -8,6 +8,8 @@ use spur_graph::{
     RelationKind, CODE_SYMBOL_URI_PREFIX,
 };
 
+use crate::handlers::McpHandlerError;
+
 use super::McpCallbackServer;
 use super::*;
 
@@ -16,135 +18,128 @@ const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
 
 impl McpCallbackServer {
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let symbol_id = match normalize_symbol_arg(&args) {
-            Ok(symbol_id) => symbol_id,
-            Err(message) => return JsonRpcResponse::invalid_params(id, message),
-        };
-        let artifact = match load_graph_artifact_for_request(&id) {
-            Ok(artifact) => artifact,
-            Err(response) => return response,
-        };
-        if find_symbol(&artifact, &symbol_id).is_none() {
-            return symbol_not_found(id, &symbol_id);
-        }
-
-        let callers = find_callers(&artifact, &symbol_id)
-            .into_iter()
-            .map(symbol_row)
-            .collect::<Vec<_>>();
-        json_success(id, json!({ "callers": callers }))
+        code_graph_response(id, code_callers(&args))
     }
 
     pub(crate) async fn handle_code_callees(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let symbol_id = match normalize_symbol_arg(&args) {
-            Ok(symbol_id) => symbol_id,
-            Err(message) => return JsonRpcResponse::invalid_params(id, message),
-        };
-        let artifact = match load_graph_artifact_for_request(&id) {
-            Ok(artifact) => artifact,
-            Err(response) => return response,
-        };
-        if find_symbol(&artifact, &symbol_id).is_none() {
-            return symbol_not_found(id, &symbol_id);
-        }
-
-        let callees = find_callees(&artifact, &symbol_id)
-            .into_iter()
-            .map(symbol_row)
-            .collect::<Vec<_>>();
-        json_success(id, json!({ "callees": callees }))
+        code_graph_response(id, code_callees(&args))
     }
 
     pub(crate) async fn handle_code_subgraph(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let symbol_id = match normalize_symbol_arg(&args) {
-            Ok(symbol_id) => symbol_id,
-            Err(message) => return JsonRpcResponse::invalid_params(id, message),
-        };
-        let artifact = match load_graph_artifact_for_request(&id) {
-            Ok(artifact) => artifact,
-            Err(response) => return response,
-        };
-        if find_symbol(&artifact, &symbol_id).is_none() {
-            return symbol_not_found(id, &symbol_id);
-        }
+        code_graph_response(id, code_subgraph(&args))
+    }
+}
 
-        let requested_radius = args
-            .get("radius")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(1);
-        let radius = requested_radius.min(u64::from(MAX_MCP_CODE_SUBGRAPH_RADIUS)) as u8;
-        let warning = (requested_radius > u64::from(MAX_MCP_CODE_SUBGRAPH_RADIUS)).then(|| {
-            format!(
-                "radius {requested_radius} exceeds max {MAX_MCP_CODE_SUBGRAPH_RADIUS}; clamped to {MAX_MCP_CODE_SUBGRAPH_RADIUS}"
-            )
-        });
-        let format = args
-            .get("format")
-            .and_then(|value| value.as_str())
-            .unwrap_or("json");
-        let edge_kinds = match parse_edge_kinds(&args) {
-            Ok(edge_kinds) => edge_kinds,
-            Err(message) => return JsonRpcResponse::invalid_params(id, message),
-        };
-        let edge_filter = edge_kinds.as_deref();
-        let view = bounded_subgraph(&artifact, &symbol_id, radius, edge_filter);
+pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
+    let symbol_id = normalize_symbol_arg(args)?;
+    let artifact = load_graph_artifact_for_request()?;
+    ensure_symbol_exists(&artifact, &symbol_id)?;
 
-        match format {
-            "json" => {
-                let mut metadata = json!({ "radius": radius });
-                if let Some(warning) = warning {
-                    metadata["warning"] = Value::String(warning);
-                }
-                json_success(
-                    id,
-                    json!({
-                        "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
-                        "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
-                        "metadata": metadata,
-                    }),
-                )
+    let callers = find_callers(&artifact, &symbol_id)
+        .into_iter()
+        .map(symbol_row)
+        .collect::<Vec<_>>();
+    Ok(json!({ "callers": callers }))
+}
+
+pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
+    let symbol_id = normalize_symbol_arg(args)?;
+    let artifact = load_graph_artifact_for_request()?;
+    ensure_symbol_exists(&artifact, &symbol_id)?;
+
+    let callees = find_callees(&artifact, &symbol_id)
+        .into_iter()
+        .map(symbol_row)
+        .collect::<Vec<_>>();
+    Ok(json!({ "callees": callees }))
+}
+
+pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
+    let symbol_id = normalize_symbol_arg(args)?;
+    let artifact = load_graph_artifact_for_request()?;
+    ensure_symbol_exists(&artifact, &symbol_id)?;
+
+    let requested_radius = args
+        .get("radius")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1);
+    let radius = requested_radius.min(u64::from(MAX_MCP_CODE_SUBGRAPH_RADIUS)) as u8;
+    let warning = (requested_radius > u64::from(MAX_MCP_CODE_SUBGRAPH_RADIUS)).then(|| {
+        format!(
+            "radius {requested_radius} exceeds max {MAX_MCP_CODE_SUBGRAPH_RADIUS}; clamped to {MAX_MCP_CODE_SUBGRAPH_RADIUS}"
+        )
+    });
+    let format = args
+        .get("format")
+        .and_then(|value| value.as_str())
+        .unwrap_or("json");
+    let edge_kinds = parse_edge_kinds(args)?;
+    let edge_filter = edge_kinds.as_deref();
+    let view = bounded_subgraph(&artifact, &symbol_id, radius, edge_filter);
+
+    match format {
+        "json" => {
+            let mut metadata = json!({ "radius": radius });
+            if let Some(warning) = warning {
+                metadata["warning"] = Value::String(warning);
             }
-            "mermaid" => json_success(
-                id,
-                json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) }),
-            ),
-            other => JsonRpcResponse::invalid_params(
-                id,
-                format!("invalid format `{other}`; expected `json` or `mermaid`"),
-            ),
+            Ok(json!({
+                "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
+                "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
+                "metadata": metadata,
+            }))
+        }
+        "mermaid" => Ok(json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) })),
+        other => Err(McpHandlerError::InvalidParams(format!(
+            "invalid format `{other}`; expected `json` or `mermaid`"
+        ))),
+    }
+}
+
+fn code_graph_response(id: Value, result: Result<Value, McpHandlerError>) -> JsonRpcResponse {
+    match result {
+        Ok(body) => json_success(id, body),
+        Err(McpHandlerError::InvalidParams(message)) => {
+            JsonRpcResponse::invalid_params(id, message)
+        }
+        Err(McpHandlerError::NotFound(message)) => JsonRpcResponse::error(id, -32004, message),
+        Err(McpHandlerError::Unauthorized(message)) => JsonRpcResponse::error(id, -32001, message),
+        Err(McpHandlerError::UpstreamPm(message)) | Err(McpHandlerError::Internal(message)) => {
+            JsonRpcResponse::internal_error(id, message)
         }
     }
 }
 
-fn normalize_symbol_arg(args: &Value) -> Result<String, String> {
+fn normalize_symbol_arg(args: &Value) -> Result<String, McpHandlerError> {
     let symbol = args
         .get("symbol")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| "Missing required field 'symbol'".to_string())?;
+        .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'symbol'".into()))?;
     if symbol.is_empty() {
-        return Err("field 'symbol' must not be empty".to_string());
+        return Err(McpHandlerError::InvalidParams(
+            "field 'symbol' must not be empty".into(),
+        ));
     }
     if let Some(symbol_id) = symbol.strip_prefix(CODE_SYMBOL_URI_PREFIX) {
         if symbol_id.is_empty() {
-            return Err("field 'symbol' must include a symbol id".to_string());
+            return Err(McpHandlerError::InvalidParams(
+                "field 'symbol' must include a symbol id".into(),
+            ));
         }
         return Ok(symbol_id.to_string());
     }
     if symbol.contains("://") {
-        return Err(format!(
+        return Err(McpHandlerError::InvalidParams(format!(
             "invalid symbol URI prefix; expected `{CODE_SYMBOL_URI_PREFIX}` or a bare symbol id"
-        ));
+        )));
     }
     Ok(symbol.to_string())
 }
 
 #[allow(clippy::result_large_err)]
-fn load_graph_artifact_for_request(id: &Value) -> Result<GraphIndexArtifact, JsonRpcResponse> {
+fn load_graph_artifact_for_request() -> Result<GraphIndexArtifact, McpHandlerError> {
     let current_dir = std::env::current_dir().map_err(|error| {
-        JsonRpcResponse::internal_error(
-            id.clone(),
-            format!("failed to read current directory: {error}"),
-        )
+        McpHandlerError::Internal(format!("failed to read current directory: {error}"))
     })?;
     let worktree = resolve_worktree_root_from(current_dir);
     let artifact_path = worktree.join(GRAPH_ARTIFACT_RELATIVE_PATH);
@@ -156,52 +151,53 @@ fn load_graph_artifact_for_request(id: &Value) -> Result<GraphIndexArtifact, Jso
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|io| io.kind() == ErrorKind::NotFound) =>
         {
-            Err(graph_artifact_missing(id.clone(), &worktree))
+            Err(graph_artifact_missing(&worktree))
         }
-        Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(id.clone(), &worktree)),
-        Err(error) => Err(JsonRpcResponse::internal_error(
-            id.clone(),
-            format!(
-                "failed to load graph artifact `{}`: {error}",
-                artifact_path.display()
-            ),
-        )),
+        Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(&worktree)),
+        Err(error) => Err(McpHandlerError::Internal(format!(
+            "failed to load graph artifact `{}`: {error}",
+            artifact_path.display()
+        ))),
     }
 }
 
-fn graph_artifact_missing(id: Value, worktree: &Path) -> JsonRpcResponse {
-    JsonRpcResponse::internal_error(
-        id,
-        format!(
-            "graph artifact not found; run `spur graph build` in {}",
-            worktree.display()
-        ),
-    )
+fn graph_artifact_missing(worktree: &Path) -> McpHandlerError {
+    McpHandlerError::Internal(format!(
+        "graph artifact not found; run `spur graph build` in {}",
+        worktree.display()
+    ))
 }
 
-fn symbol_not_found(id: Value, symbol_id: &str) -> JsonRpcResponse {
-    JsonRpcResponse::error(
-        id,
-        -32004,
-        format!("symbol {symbol_id} not found in graph artifact"),
-    )
+fn ensure_symbol_exists(
+    artifact: &GraphIndexArtifact,
+    symbol_id: &str,
+) -> Result<(), McpHandlerError> {
+    if find_symbol(artifact, symbol_id).is_some() {
+        Ok(())
+    } else {
+        Err(McpHandlerError::NotFound(format!(
+            "symbol {symbol_id} not found in graph artifact"
+        )))
+    }
 }
 
-fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<RelationKind>>, String> {
+fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<RelationKind>>, McpHandlerError> {
     let Some(value) = args.get("edge_kinds") else {
         return Ok(None);
     };
-    let kinds = value
-        .as_array()
-        .ok_or_else(|| "field 'edge_kinds' must be an array of strings".to_string())?;
+    let kinds = value.as_array().ok_or_else(|| {
+        McpHandlerError::InvalidParams("field 'edge_kinds' must be an array of strings".to_string())
+    })?;
     kinds
         .iter()
         .map(|kind| {
-            let kind = kind
-                .as_str()
-                .ok_or_else(|| "field 'edge_kinds' must be an array of strings".to_string())?;
+            let kind = kind.as_str().ok_or_else(|| {
+                McpHandlerError::InvalidParams(
+                    "field 'edge_kinds' must be an array of strings".to_string(),
+                )
+            })?;
             serde_json::from_value::<RelationKind>(Value::String(kind.to_string()))
-                .map_err(|_| format!("invalid edge kind `{kind}`"))
+                .map_err(|_| McpHandlerError::InvalidParams(format!("invalid edge kind `{kind}`")))
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
