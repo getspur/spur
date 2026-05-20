@@ -56,6 +56,7 @@
         7
       ],
       "entity_name": "inline",
+      "qualified_name": "inline",
       "symbol_kind": "module",
       "anchor_hash": "7371619673309304903",
       "enclosing_scope": null
@@ -72,6 +73,7 @@
         6
       ],
       "entity_name": "Mode",
+      "qualified_name": "inline::Mode",
       "symbol_kind": "enum",
       "anchor_hash": "9722627701547306242",
       "enclosing_scope": "inline"
@@ -88,6 +90,7 @@
         11
       ],
       "entity_name": "App",
+      "qualified_name": "App",
       "symbol_kind": "struct",
       "anchor_hash": "563938687619549275",
       "enclosing_scope": null
@@ -104,6 +107,7 @@
         17
       ],
       "entity_name": "App",
+      "qualified_name": "App",
       "symbol_kind": "impl",
       "anchor_hash": "2471580899387477303",
       "enclosing_scope": null
@@ -120,6 +124,7 @@
         16
       ],
       "entity_name": "run",
+      "qualified_name": "impl App::run",
       "symbol_kind": "method",
       "anchor_hash": "17079285877154097774",
       "enclosing_scope": "impl App"
@@ -136,6 +141,7 @@
         21
       ],
       "entity_name": "Runner",
+      "qualified_name": "Runner",
       "symbol_kind": "trait",
       "anchor_hash": "7153298637521954677",
       "enclosing_scope": null
@@ -152,6 +158,7 @@
         25
       ],
       "entity_name": "build_app",
+      "qualified_name": "build_app",
       "symbol_kind": "function",
       "anchor_hash": "15345460006701141755",
       "enclosing_scope": null
@@ -168,6 +175,7 @@
         1
       ],
       "entity_name": "Helper",
+      "qualified_name": "Helper",
       "symbol_kind": "struct",
       "anchor_hash": "8684135188924659021",
       "enclosing_scope": null
@@ -184,6 +192,7 @@
         3
       ],
       "entity_name": "helper",
+      "qualified_name": "helper",
       "symbol_kind": "function",
       "anchor_hash": "7704067935663422720",
       "enclosing_scope": null
@@ -200,6 +209,7 @@
         9
       ],
       "entity_name": "Helper",
+      "qualified_name": "Helper",
       "symbol_kind": "impl",
       "anchor_hash": "10216047625779056650",
       "enclosing_scope": null
@@ -216,6 +226,7 @@
         8
       ],
       "entity_name": "label",
+      "qualified_name": "impl Helper::label",
       "symbol_kind": "method",
       "anchor_hash": "3395325927772554561",
       "enclosing_scope": "impl Helper"

@@ -110,6 +110,108 @@ fn write_and_read_content_hash(
         .expect("writer should stamp BLAKE3 content hash")
 }
 
+fn find_symbol_json<'a>(
+    symbols: &'a [serde_json::Value],
+    kind: &str,
+    entity_name: &str,
+    enclosing_scope: Option<&str>,
+) -> &'a serde_json::Value {
+    symbols
+        .iter()
+        .find(|symbol| {
+            symbol["symbol_kind"] == kind
+                && symbol["entity_name"] == entity_name
+                && symbol
+                    .get("enclosing_scope")
+                    .and_then(serde_json::Value::as_str)
+                    == enclosing_scope
+        })
+        .unwrap_or_else(|| {
+            panic!("missing symbol kind={kind} entity_name={entity_name} scope={enclosing_scope:?}")
+        })
+}
+
+#[test]
+fn graph_store_schema_version_is_v5() {
+    assert_eq!(
+        spur_graph::store::json::SCHEMA_VERSION,
+        "spur-graph-schema-v5"
+    );
+}
+
+#[test]
+fn artifact_symbols_persist_qualified_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+pub fn top() {}
+
+mod a {
+    pub fn f() {}
+
+    pub mod b {
+        pub fn f() {}
+    }
+}
+
+struct Cache;
+
+impl Cache {
+    pub fn run(&self) {}
+}
+
+trait Service {
+    fn service(&self);
+}
+
+struct Store;
+
+impl Service for Store {
+    fn method(&self) {}
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let artifact_json = serde_json::to_value(&artifact).expect("artifact json");
+    let symbols = artifact_json["symbols"]
+        .as_array()
+        .expect("symbols should serialize as array");
+
+    assert_eq!(
+        find_symbol_json(symbols, "function", "top", None)["qualified_name"],
+        "top"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "function", "f", Some("a"))["qualified_name"],
+        "a::f"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "function", "f", Some("b"))["qualified_name"],
+        "a::b::f"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "method", "run", Some("impl Cache"))["qualified_name"],
+        "impl Cache::run"
+    );
+    assert!(
+        symbols.iter().any(|symbol| {
+            symbol["symbol_kind"] == "impl" && symbol["entity_name"] == "Service for Store"
+        }),
+        "expected trait impl symbol to preserve trait and type in entity_name"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "method", "method", Some("impl Service for Store"))
+            ["qualified_name"],
+        "impl Service for Store::method"
+    );
+}
+
 enum EditStep {
     Write(&'static str, &'static str),
     Rename(&'static str, &'static str),

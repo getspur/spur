@@ -150,6 +150,7 @@ mod tests {
             byte_range: [0, 8],
             line_range: [1, 1],
             entity_name: id.to_string(),
+            qualified_name: id.to_string(),
             symbol_kind: "function".to_string(),
             anchor_hash: format!("hash-{id}"),
             enclosing_scope: None,

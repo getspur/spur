@@ -58,6 +58,7 @@
         5
       ],
       "entity_name": "Props",
+      "qualified_name": "Props",
       "symbol_kind": "interface",
       "anchor_hash": "11293272180817486591",
       "enclosing_scope": null
@@ -74,6 +75,7 @@
         7
       ],
       "entity_name": "AppResult",
+      "qualified_name": "AppResult",
       "symbol_kind": "type_alias",
       "anchor_hash": "10135634673480501151",
       "enclosing_scope": null
@@ -90,6 +92,7 @@
         14
       ],
       "entity_name": "App",
+      "qualified_name": "App",
       "symbol_kind": "class",
       "anchor_hash": "11904938745570157377",
       "enclosing_scope": null
@@ -106,6 +109,7 @@
         13
       ],
       "entity_name": "boot",
+      "qualified_name": "App::boot",
       "symbol_kind": "method",
       "anchor_hash": "10659050358964838496",
       "enclosing_scope": "App"
@@ -122,6 +126,7 @@
         20
       ],
       "entity_name": "createApp",
+      "qualified_name": "createApp",
       "symbol_kind": "function",
       "anchor_hash": "13736536326302918283",
       "enclosing_scope": null
@@ -138,6 +143,7 @@
         22
       ],
       "entity_name": "helper",
+      "qualified_name": "helper",
       "symbol_kind": "function",
       "anchor_hash": "3363187740877138980",
       "enclosing_scope": null
@@ -154,6 +160,7 @@
         24
       ],
       "entity_name": "Greeting",
+      "qualified_name": "Greeting",
       "symbol_kind": "function",
       "anchor_hash": "3769049393491808800",
       "enclosing_scope": null
@@ -170,6 +177,7 @@
         3
       ],
       "entity_name": "Runner",
+      "qualified_name": "Runner",
       "symbol_kind": "interface",
       "anchor_hash": "5553142598626499129",
       "enclosing_scope": null
@@ -186,6 +194,7 @@
         5
       ],
       "entity_name": "Result",
+      "qualified_name": "Result",
       "symbol_kind": "type_alias",
       "anchor_hash": "14058025228395720757",
       "enclosing_scope": null
@@ -202,6 +211,7 @@
         10
       ],
       "entity_name": "Mode",
+      "qualified_name": "Mode",
       "symbol_kind": "enum",
       "anchor_hash": "3498276602201382018",
       "enclosing_scope": null
@@ -218,6 +228,7 @@
         14
       ],
       "entity_name": "renderThing",
+      "qualified_name": "renderThing",
       "symbol_kind": "function",
       "anchor_hash": "5948454652154698542",
       "enclosing_scope": null
@@ -234,6 +245,7 @@
         20
       ],
       "entity_name": "Helper",
+      "qualified_name": "Helper",
       "symbol_kind": "class",
       "anchor_hash": "18146717976518920707",
       "enclosing_scope": null
@@ -250,6 +262,7 @@
         19
       ],
       "entity_name": "run",
+      "qualified_name": "Helper::run",
       "symbol_kind": "method",
       "anchor_hash": "15206326328853749816",
       "enclosing_scope": "Helper"

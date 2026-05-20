@@ -147,6 +147,8 @@ pub struct GraphSymbolArtifact {
     pub byte_range: SourceRange,
     pub line_range: SourceRange,
     pub entity_name: String,
+    #[serde(default)]
+    pub qualified_name: String,
     pub symbol_kind: String,
     pub anchor_hash: String,
     pub enclosing_scope: Option<String>,
