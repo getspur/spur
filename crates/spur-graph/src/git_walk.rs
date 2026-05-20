@@ -547,6 +547,15 @@ struct RenameMatch {
     score: f64,
 }
 
+pub fn try_rename_match(
+    deleted_candidates: Vec<SymbolChange>,
+    added_candidates: Vec<SymbolChange>,
+    file_change: &FileChange,
+    language: Language,
+) -> (Vec<SymbolChange>, Vec<String>) {
+    detect_renames(deleted_candidates, added_candidates, file_change, language)
+}
+
 fn detect_renames(
     deleted_candidates: Vec<SymbolChange>,
     added_candidates: Vec<SymbolChange>,

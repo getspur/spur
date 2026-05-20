@@ -1,0 +1,10 @@
+{
+  "expected_renames": [],
+  "expected_added": [
+    "rust_candidate_a_50",
+    "rust_candidate_b_50"
+  ],
+  "expected_deleted": [
+    "rust_legacy_50"
+  ]
+}

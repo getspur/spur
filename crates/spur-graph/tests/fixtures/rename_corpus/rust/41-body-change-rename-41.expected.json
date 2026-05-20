@@ -1,0 +1,10 @@
+{
+  "expected_renames": [
+    {
+      "from": "rust_before_41",
+      "to": "rust_after_41"
+    }
+  ],
+  "expected_added": [],
+  "expected_deleted": []
+}
