@@ -26,6 +26,10 @@ pub struct MentionEntry {
     pub display: String,
     /// Optional one-line description (worker description; None for files).
     pub secondary: Option<String>,
+    /// Optional relative path for code graph file and symbol entries.
+    pub code_path: Option<String>,
+    /// Optional enclosing scope for code graph symbol entries.
+    pub code_scope: Option<String>,
     /// Optional right-aligned tag (worker tier; None for files).
     pub tag: Option<String>,
     /// Optional richer haystack used for ranking.
@@ -44,6 +48,8 @@ impl Default for MentionEntry {
             uri: String::new(),
             display: String::new(),
             secondary: None,
+            code_path: None,
+            code_scope: None,
             tag: None,
             search_text: None,
             atom_text: None,
@@ -90,6 +96,8 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
         uri,
         display,
         secondary: None,
+        code_path: None,
+        code_scope: None,
         tag: None,
         search_text: None,
         atom_text: None,
