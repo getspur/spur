@@ -56,9 +56,11 @@ Substantive changes from v1, driven by reviewer findings:
 - **Rename detection has a real algorithm.** Exact-identity (stable symbol
   key) first; AST/token heuristics only with confidence scoring. Bench
   reports precision / recall / F1 against a labeled corpus.
-- **Concrete first consumer named:** the graph MCP traversal tools
-  (`graph_subgraph` / `graph_plan` family) gain a temporal-history mode
-  that calls the new API. Phase 1 does not ship without this caller.
+- **Concrete first consumer named:** the code-graph MCP tools
+  (`code_subgraph` / `code_callers` / `code_callees`) gain a
+  temporal-history mode that calls the new API, plus a new
+  `code_symbol_history` tool. Phase 1 does not ship without these
+  callers. The unrelated `graph_*` PM/beads tools are NOT touched.
 - **Failure modes expanded:** missing blob, ref-rename, packed-refs race,
   gitlinks, `git replace`/grafts, non-UTF-8 paths, no-main, partial clone.
 
@@ -94,8 +96,8 @@ traversal instead of an LLM-driven archaeology pass.
 - New `NodeKind::Commit` and new `SymbolSnapshot` node type.
 - New `RelationKind::Touches` with `ChangeKind` payload on the edge.
 - `Commit --touches--> File`, `Commit --touches--> SymbolSnapshot`,
-  `SymbolSnapshot --renamed_from--> SymbolSnapshot`,
-  `Symbol --latest_snapshot--> SymbolSnapshot`.
+  `SymbolSnapshot --renamed_from--> SymbolSnapshot`. (Latest-snapshot
+  for a live symbol is derived at query time, not materialized.)
 - Git-walk extractor that materializes these for commits reachable from
   the target ref (default `main`), full-DAG by default.
 - `extract_symbols_from_bytes` seam so historical blobs can be parsed
@@ -104,9 +106,10 @@ traversal instead of an LLM-driven archaeology pass.
 - Resolution API: `resolve_symbol_at` and `symbol_history` returning
   `Resolution<T>`.
 - Comprehensive failure-mode handling (see Failure Modes table).
-- **Concrete first consumer**: the graph MCP traversal tools gain a
-  temporal-history mode that calls the new API (see "Phase 1 Standalone
-  Consumer" below).
+- **Concrete first consumer**: the code-graph MCP tools
+  (`code_subgraph` / `code_callers` / `code_callees`) gain a
+  temporal-history mode that calls the new API, plus a new
+  `code_symbol_history` tool (see "Phase 1 Standalone Consumer" below).
 
 ### Out of scope (deferred to Phase 2+)
 
@@ -264,9 +267,9 @@ one per `(symbol, every-commit)` pair. A commit that didn't touch a
 symbol does not create a snapshot for it.
 
 The live (current-state) symbol node continues to exist and represents
-HEAD. `SymbolSnapshot` nodes coexist alongside it and are linked to the
-live symbol by a `LatestSnapshot` edge when the snapshot is at the
-indexed tip.
+HEAD. `SymbolSnapshot` nodes coexist alongside it; the latest snapshot
+for a live symbol is derived at query time (see "Edges" below), not
+materialized as an edge.
 
 ### Edges (full surface)
 
@@ -439,7 +442,7 @@ On rerun:
 |---|---|
 | Stored SHA not an ancestor of new tip (force-push) | Find merge-base of stored and new tip; invalidate all commit nodes between merge-base and stored tip; re-walk from merge-base to new tip. Log loudly. |
 | Shallow repository (`git rev-parse --is-shallow-repository` = true) | Fail closed with a clear error. Symbol history would be silently truncated otherwise. |
-| Partial clone / missing blob during walk (`git cat-file blob` returns NOENT) | (1) If a promisor remote is configured, attempt one on-demand fetch (`git cat-file --batch-check` + lazy fetch) and retry. (2) If still missing, fail closed for the affected commit; do not emit partial symbol history. Surface a single actionable error naming the missing oid. |
+| Partial clone / missing blob during walk (`git cat-file blob` returns NOENT) | (1) If a promisor remote is configured, retry `git cat-file blob` once — this call triggers the on-demand promisor fetch. (2) If still missing, fail closed for the affected commit; do not emit partial symbol history. Surface a single actionable error naming the missing oid. |
 | Target ref does not exist (no `main`, HEAD detached) | Fail closed with actionable error naming the expected ref. No silent fallback to HEAD. |
 | Ref moves between snapshot and walk completion | Pin tip OIDs at the `for-each-ref` snapshot. Treat post-snapshot ref movements as fodder for the next incremental run. |
 | Ref rename (e.g. `master` → `main`) | Detected when stored ref disappears but a new ref points at a descendant of the stored tip. Treat as continuation; record the rename in the pointer file. |
@@ -517,9 +520,11 @@ directly. We do not add named functions for these.
 - A `SymbolSnapshot` has at most one inbound `RenamedFrom` edge.
   (Rename **splits** — one old → many new — are permitted, modeled as
   multiple outbound `RenamedFrom` edges from one predecessor. Rename
-  **merges** — many old → one new — are forbidden; if detected they
-  downgrade to `Added` on the winning candidate and `Deleted` on the
-  others, with a `merge_collision` diagnostic on the commit node.)
+  **merges** — many old → one new — are forbidden; if multiple `Deleted`
+  candidates would rename to the same new snapshot, the new snapshot
+  is recorded as `Added` (no `RenamedFrom`), all candidates remain
+  `Deleted`, and a `merge_collision` diagnostic is recorded on the
+  commit node.)
   Violation at ingest = bug in the extractor; panic in debug, drop one
   edge + log + record diagnostic in release.
 - `RenamedFrom` chains form a forest (set of trees), not a general graph.
@@ -633,8 +638,8 @@ None blocking implementation. Decisions taken during triple review:
   Jaccard → none) with confidence reporting. Locked.
 - Default walk: full-DAG reachable from `main`, with `FirstParent`
   config knob. Locked.
-- First consumer: graph MCP traversal tools (`as_of` + `symbol_history`
-  accessor). Locked.
+- First consumer: code-graph MCP tools (`code_subgraph`, `code_callers`,
+  `code_callees`) gain `as_of`; new `code_symbol_history` tool. Locked.
 - Snapshot granularity: one per `(symbol, commit-that-touched-it)`,
   not one per `(symbol, every-commit)`. Locked.
 
@@ -644,7 +649,7 @@ None blocking implementation. Decisions taken during triple review:
 - Not a vector store, embedding, or similarity search of any kind.
 - Not a replacement for `git blame` at line granularity.
 - Not a new public CLI surface. The internal Rust API is consumed by the
-  existing graph MCP tools; no new CLI is added.
+  existing code-graph MCP tools; no new CLI is added.
 - Not multi-branch. Single target ref only (default `main`); other refs
   are addressable by configuration but not indexed concurrently.
 
