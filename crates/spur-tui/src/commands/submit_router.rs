@@ -229,7 +229,7 @@ pub fn assemble_blocks(
 }
 
 const CODE_SYMBOL_TOPOLOGY_HINT: &str =
-    "\ntopology_available_via_mcp_for_above_symbols: pass each MENTION's `id` (graph://symbol/...) to get_callers / get_callees / get_subgraph(radius=1)";
+    "\ntopology_available_via_mcp_for_above_symbols: pass each MENTION's `id` (graph://symbol/...) to code_callers / code_callees / code_subgraph(radius=1)";
 
 struct CodeExpansion {
     text: String,
