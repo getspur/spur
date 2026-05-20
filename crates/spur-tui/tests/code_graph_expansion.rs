@@ -9,7 +9,7 @@ use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention};
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};
 
 #[test]
-fn symbol_expansion_includes_context_header_and_mcp_topology_affordance() {
+fn symbol_expansion_uses_bare_name_without_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = r#"#![allow(dead_code)]
 use std::fmt;
@@ -25,7 +25,7 @@ impl GraphEngine {
 "#;
     write_source(dir.path(), "src/lib.rs", source);
     let payload = symbol_payload_from_source(
-        "@run",
+        "run",
         "graph://symbol/symbol-run",
         "src/lib.rs",
         source,
@@ -40,7 +40,7 @@ impl GraphEngine {
         panic!("expected body expansion");
     };
 
-    assert!(text.contains("MENTION @run"), "{text}");
+    assert!(text.contains("MENTION run"), "{text}");
     assert!(text.contains("kind:    symbol:fn"), "{text}");
     assert!(
         text.contains("id:      graph://symbol/symbol-run"),
@@ -56,7 +56,33 @@ impl GraphEngine {
         "{text}"
     );
     assert!(!text.contains("source:\n"), "{text}");
-    assert!(text.contains("topology_available_via_mcp:\n- get_callers(\"graph://symbol/symbol-run\")\n- get_callees(\"graph://symbol/symbol-run\")\n- get_subgraph(\"graph://symbol/symbol-run\", radius=1)"), "{text}");
+    assert!(!text.contains("topology_available_via_mcp"), "{text}");
+}
+
+#[test]
+fn symbol_expansion_uses_qualified_name_with_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "impl GraphEngine {\n    pub fn run(&self) {}\n}\n";
+    write_source(dir.path(), "src/lib.rs", source);
+    let mut payload = symbol_payload_from_source(
+        "run",
+        "graph://symbol/symbol-run",
+        "src/lib.rs",
+        source,
+        "pub fn run",
+        "\n",
+        "run",
+        "fn",
+        [2, 2],
+    );
+    payload.display_meta.enclosing_scope = Some("GraphEngine".to_string());
+
+    let ExpandedMention::Body { text } = expand(&payload, dir.path()) else {
+        panic!("expected body expansion");
+    };
+
+    assert!(text.starts_with("MENTION GraphEngine::run\n"), "{text}");
+    assert_eq!(payload.authoritative.display, "run");
 }
 
 #[test]
@@ -87,12 +113,117 @@ fn context_header_end_truncates_at_utf8_boundary_with_marker() {
     let header = text
         .split("context_header:\n")
         .nth(1)
-        .and_then(|rest| rest.split("\ntopology_available_via_mcp:\n").next())
         .expect("context header");
 
     assert!(header.len() <= 1500, "header too large: {}", header.len());
     assert!(header.contains("# … context truncated"), "{header:?}");
     assert!(std::str::from_utf8(header.as_bytes()).is_ok());
+}
+
+#[test]
+fn prompt_assembly_emits_topology_hint_once_for_multiple_symbols() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source_a = "pub fn first() {}\n";
+    let source_b = "pub fn second() {}\n";
+    write_source(dir.path(), "src/first.rs", source_a);
+    write_source(dir.path(), "src/second.rs", source_b);
+    let payloads = [
+        symbol_payload_from_source(
+            "first",
+            "graph://symbol/symbol-first",
+            "src/first.rs",
+            source_a,
+            "pub fn first",
+            "\n",
+            "first",
+            "fn",
+            [1, 1],
+        ),
+        symbol_payload_from_source(
+            "second",
+            "graph://symbol/symbol-second",
+            "src/second.rs",
+            source_b,
+            "pub fn second",
+            "\n",
+            "second",
+            "fn",
+            [1, 1],
+        ),
+    ];
+    let text = "@first @second";
+    let ranges = [
+        ProtectedRange {
+            start: 0,
+            end: "@first".len(),
+            kind: RangeKind::Atom,
+            uri: "graph://symbol/symbol-first".to_string(),
+            name: "first".to_string(),
+        },
+        ProtectedRange {
+            start: "@first ".len(),
+            end: text.len(),
+            kind: RangeKind::Atom,
+            uri: "graph://symbol/symbol-second".to_string(),
+            name: "second".to_string(),
+        },
+    ];
+
+    let blocks = assemble_blocks_with_code_mentions(text, &ranges, &[], dir.path(), |uri| {
+        payloads
+            .iter()
+            .find(|payload| payload.authoritative.uri == uri)
+    });
+    let flattened = flatten_text_blocks(&blocks);
+
+    assert_eq!(
+        count_occurrences(&flattened, "MENTION first"),
+        1,
+        "{flattened}"
+    );
+    assert_eq!(
+        count_occurrences(&flattened, "MENTION second"),
+        1,
+        "{flattened}"
+    );
+    assert_eq!(
+        count_occurrences(
+            &flattened,
+            "topology_available_via_mcp_for_above_symbols: get_callers / get_callees / get_subgraph (radius=1)"
+        ),
+        1,
+        "{flattened}"
+    );
+    assert!(
+        !flattened.contains("topology_available_via_mcp:\n- get_callers"),
+        "{flattened}"
+    );
+}
+
+#[test]
+fn prompt_assembly_skips_topology_hint_for_file_only_mentions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_source(dir.path(), "src/lib.rs", "pub fn run() {}\n");
+    let payload = file_payload("src/lib.rs", "graph://file/file-lib", "src/lib.rs");
+    let text = "@src/lib.rs";
+    let ranges = [ProtectedRange {
+        start: 0,
+        end: text.len(),
+        kind: RangeKind::Atom,
+        uri: "graph://file/file-lib".to_string(),
+        name: "src/lib.rs".to_string(),
+    }];
+
+    let blocks = assemble_blocks_with_code_mentions(text, &ranges, &[], dir.path(), |uri| {
+        (uri == payload.authoritative.uri).then_some(&payload)
+    });
+    let flattened = flatten_text_blocks(&blocks);
+
+    assert!(flattened.contains("MENTION src/lib.rs"), "{flattened}");
+    assert!(
+        !flattened.contains("topology_available_via_mcp"),
+        "{flattened}"
+    );
 }
 
 #[test]
@@ -153,7 +284,7 @@ fn prompt_assembly_omits_excess_code_mentions_after_prompt_cap() {
     let mut text = String::new();
     let mut ranges = Vec::new();
 
-    for i in 0..120 {
+    for i in 0..300 {
         let name = format!("@big{i}");
         let uri = format!("graph://symbol/symbol-big-{i}");
         let source = format!("pub fn big{i}() {{\n    work();\n}}\n");
@@ -196,7 +327,7 @@ fn prompt_assembly_omits_excess_code_mentions_after_prompt_cap() {
         .collect::<String>();
 
     assert!(
-        flattened.contains("MENTION_OMITTED graph://symbol/symbol-big-119 (per-prompt cap)"),
+        flattened.contains("MENTION_OMITTED graph://symbol/symbol-big-"),
         "{flattened}"
     );
 }
@@ -236,6 +367,20 @@ fn write_source(root: &std::path::Path, relative: &str, source: &str) {
     let path = root.join(relative);
     fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
     fs::write(path, source).expect("write source");
+}
+
+fn flatten_text_blocks(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(text) => text.text.as_str(),
+            other => panic!("expected text-only code expansion, got {other:?}"),
+        })
+        .collect::<String>()
+}
+
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
 }
 
 fn file_payload(display: &str, uri: &str, file_path: &str) -> CodeMentionPayload {
