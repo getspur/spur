@@ -3,6 +3,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::str;
+use std::time::Instant;
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
@@ -78,23 +79,86 @@ pub fn artifact_from_facts(
     facts: &GraphFacts,
     worktree_root: &Path,
 ) -> anyhow::Result<GraphIndexArtifact> {
+    let build_started = Instant::now();
     let worktree_root = worktree_root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize `{}`", worktree_root.display()))?;
-    let current_entries = discover_current_entries(&worktree_root)?;
+    let discover_started = Instant::now();
+    let discover_span = tracing::info_span!(
+        target: "spur_graph::build::discover",
+        "discover_current_entries",
+        root = %worktree_root.display(),
+        files = tracing::field::Empty
+    );
+    let current_entries = {
+        let _entered = discover_span.enter();
+        let result = discover_current_entries(&worktree_root);
+        match &result {
+            Ok(entries) => {
+                discover_span.record("files", entries.len());
+                tracing::info!(
+                    target: "spur_graph::build::discover",
+                    files = entries.len(),
+                    elapsed_ms = elapsed_ms(discover_started),
+                    "spur-graph build phase completed"
+                );
+            }
+            Err(error) => {
+                tracing::info!(
+                    target: "spur_graph::build::discover",
+                    error = %error,
+                    elapsed_ms = elapsed_ms(discover_started),
+                    "spur-graph build phase failed"
+                );
+            }
+        }
+        result?
+    };
     let buckets = buckets_from_facts(facts, &worktree_root, &current_entries)?;
-    Ok(compose_artifact(
-        buckets,
-        &current_entries,
-        current_manifest_version(),
-        Vec::new(),
-    ))
+    let compose_started = Instant::now();
+    let compose_span = tracing::info_span!(
+        target: "spur_graph::build::compose",
+        "compose_artifact",
+        files = current_entries.len(),
+        buckets = buckets.len()
+    );
+    let artifact = {
+        let _entered = compose_span.enter();
+        let artifact = compose_artifact(
+            buckets,
+            &current_entries,
+            current_manifest_version(),
+            Vec::new(),
+        );
+        tracing::info!(
+            target: "spur_graph::build::compose",
+            files = artifact.files.len(),
+            symbols = artifact.symbols.len(),
+            edges = artifact.edges.len(),
+            tombstones = artifact.tombstones.len(),
+            elapsed_ms = elapsed_ms(compose_started),
+            "spur-graph build phase completed"
+        );
+        artifact
+    };
+    tracing::info!(
+        target: "spur_graph::build",
+        mode = "Full",
+        files = artifact.files.len(),
+        symbols = artifact.symbols.len(),
+        edges = artifact.edges.len(),
+        changed = 0_u64,
+        elapsed_ms = elapsed_ms(build_started),
+        "spur-graph build completed"
+    );
+    Ok(artifact)
 }
 
 pub fn artifact_from_facts_incremental(
     prev: &GraphIndexArtifact,
     root: &Path,
 ) -> anyhow::Result<(GraphIndexArtifact, BuildMode)> {
+    let build_started = Instant::now();
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
@@ -105,46 +169,244 @@ pub fn artifact_from_facts_incremental(
             found = %prev.manifest_version,
             "spur-graph: full rebuild selected: manifest_version changed"
         );
-        let facts = crate::build_facts(&root)?.0;
-        return Ok((artifact_from_facts(&facts, &root)?, BuildMode::Full));
+        let extract_started = Instant::now();
+        let extract_span = tracing::info_span!(
+            target: "spur_graph::build::extract_full",
+            "build_facts",
+            root = %root.display()
+        );
+        let facts = {
+            let _entered = extract_span.enter();
+            let result = crate::build_facts(&root);
+            match &result {
+                Ok((facts, file_counts)) => {
+                    tracing::info!(
+                        target: "spur_graph::build::extract_full",
+                        files = file_counts.values().sum::<usize>(),
+                        nodes = facts.nodes.len(),
+                        edges = facts.edges.len(),
+                        elapsed_ms = elapsed_ms(extract_started),
+                        "spur-graph build phase completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::info!(
+                        target: "spur_graph::build::extract_full",
+                        error = %error,
+                        elapsed_ms = elapsed_ms(extract_started),
+                        "spur-graph build phase failed"
+                    );
+                }
+            }
+            result?.0
+        };
+        let artifact_started = Instant::now();
+        let artifact_span = tracing::info_span!(
+            target: "spur_graph::build::artifact",
+            "artifact_from_facts",
+            root = %root.display()
+        );
+        let artifact = {
+            let _entered = artifact_span.enter();
+            let result = artifact_from_facts(&facts, &root);
+            match &result {
+                Ok(artifact) => {
+                    tracing::info!(
+                        target: "spur_graph::build::artifact",
+                        files = artifact.files.len(),
+                        symbols = artifact.symbols.len(),
+                        edges = artifact.edges.len(),
+                        elapsed_ms = elapsed_ms(artifact_started),
+                        "spur-graph build phase completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::info!(
+                        target: "spur_graph::build::artifact",
+                        error = %error,
+                        elapsed_ms = elapsed_ms(artifact_started),
+                        "spur-graph build phase failed"
+                    );
+                }
+            }
+            result?
+        };
+        return Ok((artifact, BuildMode::Full));
     }
 
-    let current_entries = discover_current_entries(&root)?;
-    let prev_buckets = buckets_from_artifact(prev);
-    let prev_content_oids: BTreeMap<_, _> = prev
-        .file_manifests
-        .iter()
-        .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
-        .collect();
-
-    let mut buckets = BTreeMap::new();
-    let mut changed_paths = Vec::new();
-    for current in current_entries.values() {
-        if prev_content_oids
-            .get(current.path.as_str())
-            .is_some_and(|content_oid| *content_oid == current.content_oid)
-        {
-            if let Some(bucket) = prev_buckets.get(&current.path) {
-                buckets.insert(current.path.clone(), bucket.clone());
-                continue;
+    let discover_started = Instant::now();
+    let discover_span = tracing::info_span!(
+        target: "spur_graph::build::discover",
+        "discover_current_entries",
+        root = %root.display(),
+        files = tracing::field::Empty
+    );
+    let current_entries = {
+        let _entered = discover_span.enter();
+        let result = discover_current_entries(&root);
+        match &result {
+            Ok(entries) => {
+                discover_span.record("files", entries.len());
+                tracing::info!(
+                    target: "spur_graph::build::discover",
+                    files = entries.len(),
+                    elapsed_ms = elapsed_ms(discover_started),
+                    "spur-graph build phase completed"
+                );
+            }
+            Err(error) => {
+                tracing::info!(
+                    target: "spur_graph::build::discover",
+                    error = %error,
+                    elapsed_ms = elapsed_ms(discover_started),
+                    "spur-graph build phase failed"
+                );
             }
         }
-        if current.extractable {
-            changed_paths.push(root.join(&current.path));
+        result?
+    };
+    let rebucket_started = Instant::now();
+    let rebucket_span = tracing::info_span!(
+        target: "spur_graph::build::rebucket",
+        "buckets_from_artifact",
+        prev_files = prev.file_manifests.len(),
+        prev_symbols = prev.symbols.len(),
+        prev_edges = prev.edges.len()
+    );
+    let prev_buckets = {
+        let _entered = rebucket_span.enter();
+        let buckets = buckets_from_artifact(prev);
+        tracing::info!(
+            target: "spur_graph::build::rebucket",
+            buckets = buckets.len(),
+            elapsed_ms = elapsed_ms(rebucket_started),
+            "spur-graph build phase completed"
+        );
+        buckets
+    };
+
+    let changed_started = Instant::now();
+    let changed_span = tracing::info_span!(
+        target: "spur_graph::build::changed_paths",
+        "compute_changed_paths",
+        files = current_entries.len(),
+        prev_files = prev.file_manifests.len(),
+        changed_paths = tracing::field::Empty
+    );
+    let (mut buckets, changed_paths) = {
+        let _entered = changed_span.enter();
+        let prev_content_oids: BTreeMap<_, _> = prev
+            .file_manifests
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
+            .collect();
+
+        let mut buckets = BTreeMap::new();
+        let mut changed_paths = Vec::new();
+        let mut reused = 0_usize;
+        for current in current_entries.values() {
+            if prev_content_oids
+                .get(current.path.as_str())
+                .is_some_and(|content_oid| *content_oid == current.content_oid)
+            {
+                if let Some(bucket) = prev_buckets.get(&current.path) {
+                    buckets.insert(current.path.clone(), bucket.clone());
+                    reused += 1;
+                    continue;
+                }
+            }
+            if current.extractable {
+                changed_paths.push(root.join(&current.path));
+            }
         }
-    }
+        changed_span.record("changed_paths", changed_paths.len());
+        tracing::info!(
+            target: "spur_graph::build::changed_paths",
+            changed_paths = changed_paths.len(),
+            reused,
+            elapsed_ms = elapsed_ms(changed_started),
+            "spur-graph build phase completed"
+        );
+        (buckets, changed_paths)
+    };
+    let changed_count = changed_paths.len();
 
     if !changed_paths.is_empty() {
-        let changed_facts = build_facts_for_paths(&root, &changed_paths)?;
+        let extract_started = Instant::now();
+        let extract_span = tracing::info_span!(
+            target: "spur_graph::build::extract_changed",
+            "build_facts_for_paths",
+            changed_paths = changed_paths.len()
+        );
+        let changed_facts = {
+            let _entered = extract_span.enter();
+            let result = build_facts_for_paths(&root, &changed_paths);
+            match &result {
+                Ok(facts) => {
+                    tracing::info!(
+                        target: "spur_graph::build::extract_changed",
+                        changed_paths = changed_paths.len(),
+                        nodes = facts.nodes.len(),
+                        edges = facts.edges.len(),
+                        elapsed_ms = elapsed_ms(extract_started),
+                        "spur-graph build phase completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::info!(
+                        target: "spur_graph::build::extract_changed",
+                        changed_paths = changed_paths.len(),
+                        error = %error,
+                        elapsed_ms = elapsed_ms(extract_started),
+                        "spur-graph build phase failed"
+                    );
+                }
+            }
+            result?
+        };
         let changed_buckets = buckets_from_facts(&changed_facts, &root, &current_entries)?;
         buckets.extend(changed_buckets);
     }
 
-    add_missing_manifest_buckets(&mut buckets, &current_entries);
+    let compose_started = Instant::now();
+    let compose_span = tracing::info_span!(
+        target: "spur_graph::build::compose",
+        "compose_artifact",
+        files = current_entries.len(),
+        buckets = buckets.len()
+    );
+    let artifact = {
+        let _entered = compose_span.enter();
+        add_missing_manifest_buckets(&mut buckets, &current_entries);
 
-    let tombstones = tombstones_from_removed_paths(prev, &current_entries);
-    let artifact = compose_artifact(buckets, &current_entries, manifest_version, tombstones);
+        let tombstones = tombstones_from_removed_paths(prev, &current_entries);
+        let artifact = compose_artifact(buckets, &current_entries, manifest_version, tombstones);
+        tracing::info!(
+            target: "spur_graph::build::compose",
+            files = artifact.files.len(),
+            symbols = artifact.symbols.len(),
+            edges = artifact.edges.len(),
+            tombstones = artifact.tombstones.len(),
+            elapsed_ms = elapsed_ms(compose_started),
+            "spur-graph build phase completed"
+        );
+        artifact
+    };
+    tracing::info!(
+        target: "spur_graph::build",
+        mode = "Incremental",
+        files = artifact.files.len(),
+        symbols = artifact.symbols.len(),
+        edges = artifact.edges.len(),
+        changed = changed_count,
+        elapsed_ms = elapsed_ms(build_started),
+        "spur-graph build completed"
+    );
     Ok((artifact, BuildMode::Incremental))
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 pub fn write_artifact(artifact: &GraphIndexArtifact, path: &Path) -> anyhow::Result<()> {
@@ -904,9 +1166,12 @@ fn enclosing_scope(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact, BuildMode,
@@ -918,6 +1183,9 @@ mod tests {
         Confidence, GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry,
         GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, RelationKind,
     };
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Record};
+    use tracing::{Event, Id, Metadata, Subscriber};
 
     #[test]
     fn buckets_from_artifact_rebuckets_edges_by_file_or_symbol_source() {
@@ -977,6 +1245,53 @@ mod tests {
             b_bucket.edges,
             vec![edge("sym:b1", Some("sym:a1"), RelationKind::References)]
         );
+    }
+
+    #[test]
+    fn full_artifact_build_emits_phase_tracing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+        let facts = build_facts(root).expect("extract").0;
+        let subscriber = RecordingSubscriber::default();
+        let _guard = tracing::subscriber::set_default(subscriber.clone());
+        tracing::callsite::rebuild_interest_cache();
+
+        let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+        assert!(!artifact.files.is_empty());
+        subscriber
+            .assert_span_targets(["spur_graph::build::discover", "spur_graph::build::compose"]);
+        subscriber.assert_summary("Full", "0");
+    }
+
+    #[test]
+    fn incremental_artifact_build_emits_phase_tracing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+        fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
+        let subscriber = RecordingSubscriber::default();
+        let _guard = tracing::subscriber::set_default(subscriber.clone());
+        tracing::callsite::rebuild_interest_cache();
+        let prev =
+            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+        subscriber.clear();
+        fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n").expect("rewrite a.rs");
+
+        let (_next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+
+        assert_eq!(mode, BuildMode::Incremental);
+        subscriber.assert_span_targets([
+            "spur_graph::build::discover",
+            "spur_graph::build::rebucket",
+            "spur_graph::build::changed_paths",
+            "spur_graph::build::extract_changed",
+            "spur_graph::build::compose",
+        ]);
+        subscriber.assert_summary("Incremental", "1");
     }
 
     #[test]
@@ -1097,6 +1412,143 @@ mod tests {
             .file_manifests
             .iter()
             .any(|entry| entry.path == "src/a.rs"));
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSubscriber {
+        inner: Arc<RecordingInner>,
+    }
+
+    #[derive(Default)]
+    struct RecordingInner {
+        next_id: AtomicU64,
+        spans: Mutex<Vec<TraceRecord>>,
+        events: Mutex<Vec<TraceRecord>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TraceRecord {
+        target: &'static str,
+        name: &'static str,
+        fields: BTreeMap<String, String>,
+    }
+
+    impl RecordingSubscriber {
+        fn clear(&self) {
+            self.inner.spans.lock().expect("spans").clear();
+            self.inner.events.lock().expect("events").clear();
+        }
+
+        fn assert_span_targets<const N: usize>(&self, expected_targets: [&str; N]) {
+            let actual = self
+                .inner
+                .spans
+                .lock()
+                .expect("spans")
+                .iter()
+                .map(|record| record.target)
+                .collect::<Vec<_>>();
+            for expected in expected_targets {
+                assert!(
+                    actual.contains(&expected),
+                    "missing span target {expected}; actual targets: {actual:?}"
+                );
+            }
+        }
+
+        fn assert_summary(&self, expected_mode: &str, expected_changed: &str) {
+            let events = self.inner.events.lock().expect("events");
+            let summary = events
+                .iter()
+                .find(|record| {
+                    record.target == "spur_graph::build"
+                        && record.name.starts_with("event")
+                        && record.fields.get("mode").map(String::as_str) == Some(expected_mode)
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing {expected_mode} summary event; actual events: {:?}",
+                        *events
+                    )
+                });
+            assert_eq!(
+                summary.fields.get("changed").map(String::as_str),
+                Some(expected_changed)
+            );
+            assert!(summary.fields.contains_key("elapsed_ms"));
+            assert!(summary.fields.contains_key("files"));
+            assert!(summary.fields.contains_key("symbols"));
+            assert!(summary.fields.contains_key("edges"));
+        }
+    }
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, attrs: &Attributes<'_>) -> Id {
+            let mut visitor = FieldVisitor::default();
+            attrs.record(&mut visitor);
+            let metadata = attrs.metadata();
+            self.inner.spans.lock().expect("spans").push(TraceRecord {
+                target: metadata.target(),
+                name: metadata.name(),
+                fields: visitor.fields,
+            });
+            Id::from_u64(self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            let metadata = event.metadata();
+            self.inner.events.lock().expect("events").push(TraceRecord {
+                target: metadata.target(),
+                name: metadata.name(),
+                fields: visitor.fields,
+            });
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl Visit for FieldVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
     }
 
     fn file(stable_file_id: &str, path: &str) -> GraphFileArtifact {
