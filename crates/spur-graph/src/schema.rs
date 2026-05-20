@@ -328,17 +328,12 @@ pub struct CommitArtifact {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WalkStrategy {
+    #[default]
     Reachable,
     FirstParent,
-}
-
-impl Default for WalkStrategy {
-    fn default() -> Self {
-        WalkStrategy::Reachable
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
