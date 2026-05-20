@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::schema::WalkStrategy;
+use crate::extract::languages::Language;
+use crate::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
+use crate::schema::{ChangeKind, SnapshotKey, SymbolSnapshotArtifact, WalkStrategy};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
@@ -125,6 +127,192 @@ pub fn file_changes_for_commit(worktree: &Path, sha: &str) -> Result<Vec<FileCha
     }
 
     Ok(changes)
+}
+
+pub struct SymbolDiffCtx {
+    extractors: HashMap<Language, BytesExtractor>,
+}
+
+impl SymbolDiffCtx {
+    pub fn new() -> Self {
+        Self {
+            extractors: HashMap::new(),
+        }
+    }
+
+    fn for_language(&mut self, language: Language) -> Result<&mut BytesExtractor> {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.extractors.entry(language) {
+            entry.insert(BytesExtractor::for_language(language)?);
+        }
+        Ok(self
+            .extractors
+            .get_mut(&language)
+            .expect("extractor was just inserted"))
+    }
+}
+
+impl Default for SymbolDiffCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolChange {
+    pub snapshot: SymbolSnapshotArtifact,
+    pub change_kind: ChangeKind,
+}
+
+pub fn symbol_changes_for_commit(
+    worktree: &Path,
+    sha: &str,
+    ctx: &mut SymbolDiffCtx,
+) -> Result<Vec<SymbolChange>> {
+    let mut out = Vec::new();
+    let mut by_snapshot_key = HashMap::new();
+
+    for file_change in file_changes_for_commit(worktree, sha)? {
+        let Some(language) = Language::from_path(&file_change.path) else {
+            continue;
+        };
+
+        let blobs = blobs_for_change(worktree, sha, &file_change)?;
+        let extractor = ctx.for_language(language)?;
+        let left_symbols = extract_symbols(extractor, blobs.left_path.as_deref(), &blobs.left);
+        let right_symbols = extract_symbols(extractor, Some(&file_change.path), &blobs.right);
+
+        let mut left_by_identity: HashMap<(String, Option<String>), &ExtractedSymbol> =
+            left_symbols
+                .iter()
+                .map(|symbol| {
+                    (
+                        (symbol.entity_name.clone(), symbol.enclosing_scope.clone()),
+                        symbol,
+                    )
+                })
+                .collect();
+
+        for right in &right_symbols {
+            let identity = (right.entity_name.clone(), right.enclosing_scope.clone());
+            let change_kind = match left_by_identity.remove(&identity) {
+                Some(left) if left.anchor_hash == right.anchor_hash => continue,
+                Some(_) => ChangeKind::Modified,
+                None => ChangeKind::Added,
+            };
+
+            push_symbol_change(
+                &mut out,
+                &mut by_snapshot_key,
+                SymbolChange {
+                    snapshot: snapshot_from(sha, &file_change.path, right),
+                    change_kind,
+                },
+            );
+        }
+
+        let deleted_path = blobs.left_path.as_deref().unwrap_or(&file_change.path);
+        for (_, left) in left_by_identity {
+            push_symbol_change(
+                &mut out,
+                &mut by_snapshot_key,
+                SymbolChange {
+                    snapshot: snapshot_from(sha, deleted_path, left),
+                    change_kind: ChangeKind::Deleted,
+                },
+            );
+        }
+    }
+
+    Ok(out)
+}
+
+fn push_symbol_change(
+    out: &mut Vec<SymbolChange>,
+    by_snapshot_key: &mut HashMap<SnapshotKey, usize>,
+    change: SymbolChange,
+) {
+    if let Some(existing) = by_snapshot_key.get(&change.snapshot.key).copied() {
+        let merged = merge_change_kind(&out[existing].change_kind, change.change_kind);
+        out[existing].change_kind = merged;
+        return;
+    }
+
+    by_snapshot_key.insert(change.snapshot.key.clone(), out.len());
+    out.push(change);
+}
+
+fn merge_change_kind(existing: &ChangeKind, incoming: ChangeKind) -> ChangeKind {
+    if existing == &incoming {
+        return incoming;
+    }
+    ChangeKind::Modified
+}
+
+struct ChangeBlobs {
+    left_path: Option<PathBuf>,
+    left: Option<Vec<u8>>,
+    right: Option<Vec<u8>>,
+}
+
+fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Result<ChangeBlobs> {
+    let right = match &file_change.kind {
+        FileChangeKind::Deleted => None,
+        FileChangeKind::Added | FileChangeKind::Modified | FileChangeKind::Renamed { .. } => {
+            Some(cat_file_blob(worktree, sha, &file_change.path)?)
+        }
+    };
+
+    let left_path = match &file_change.kind {
+        FileChangeKind::Added => None,
+        FileChangeKind::Modified | FileChangeKind::Deleted => Some(file_change.path.clone()),
+        FileChangeKind::Renamed { from } => Some(from.clone()),
+    };
+    let left = match (file_change.parent_sha.as_deref(), left_path.as_ref()) {
+        (Some(parent), Some(path)) => Some(cat_file_blob(worktree, parent, path)?),
+        _ => None,
+    };
+
+    Ok(ChangeBlobs {
+        left_path,
+        left,
+        right,
+    })
+}
+
+fn cat_file_blob(worktree: &Path, sha: &str, path: &Path) -> Result<Vec<u8>> {
+    let spec = format!("{sha}:{}", path.to_string_lossy());
+    run_git_bytes(worktree, &["cat-file", "blob", &spec])
+}
+
+fn extract_symbols(
+    extractor: &mut BytesExtractor,
+    logical_path: Option<&Path>,
+    bytes: &Option<Vec<u8>>,
+) -> Vec<ExtractedSymbol> {
+    match (logical_path, bytes.as_deref()) {
+        (Some(path), Some(bytes)) => extractor.extract(path, bytes).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
+    SymbolSnapshotArtifact {
+        key: SnapshotKey {
+            stable_symbol_id: crate::identity::stable_symbol_id_for(
+                path,
+                &symbol.entity_name,
+                &symbol.anchor_hash,
+            ),
+            commit: commit.to_string(),
+        },
+        file_path: path.to_path_buf(),
+        entity_name: symbol.entity_name.clone(),
+        symbol_kind: symbol.symbol_kind.clone(),
+        enclosing_scope: symbol.enclosing_scope.clone(),
+        byte_range: symbol.byte_range,
+        line_range: symbol.line_range,
+        anchor_hash: symbol.anchor_hash.clone(),
+    }
 }
 
 fn commit_parents(worktree: &Path, sha: &str) -> Result<Vec<String>> {
@@ -278,6 +466,8 @@ pub(crate) fn run_git(worktree: &Path, args: &[&str]) -> Result<String> {
 mod tests {
     use tempfile::TempDir;
 
+    use crate::schema::ChangeKind;
+
     use super::*;
 
     fn init_repo(dir: &std::path::Path) {
@@ -367,5 +557,26 @@ mod tests {
 
         let r = changes.iter().find(|c| c.path.ends_with("new.rs")).unwrap();
         assert!(matches!(&r.kind, FileChangeKind::Renamed { from } if from.ends_with("old.rs")));
+    }
+
+    #[test]
+    fn symbol_diff_classifies_added_modified_deleted() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), b"fn a() {}\nfn b() {}\n").unwrap();
+        commit(dir.path(), "c1");
+        std::fs::write(dir.path().join("lib.rs"), b"fn a() { 42; }\nfn c() {}\n").unwrap();
+        let sha2 = commit(dir.path(), "c2");
+
+        let mut ctx = SymbolDiffCtx::new();
+        let changes = symbol_changes_for_commit(dir.path(), &sha2, &mut ctx).unwrap();
+        let by_name: std::collections::HashMap<_, _> = changes
+            .iter()
+            .map(|c| (c.snapshot.entity_name.clone(), &c.change_kind))
+            .collect();
+
+        assert!(matches!(by_name.get("a"), Some(ChangeKind::Modified)));
+        assert!(matches!(by_name.get("c"), Some(ChangeKind::Added)));
+        assert!(matches!(by_name.get("b"), Some(ChangeKind::Deleted)));
     }
 }
