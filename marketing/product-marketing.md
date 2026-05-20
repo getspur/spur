@@ -1,14 +1,14 @@
 # Product Marketing Context — SPUR
 
-*Last updated: 2026-05-20 — V1.2 — applied three revisions from P1 positioning recommendations: (1) Customer Language section replaced with real F2 verbatim quotes (cited); (2) Differentiation reordered to lead with unified cost ledger + brain-swap; (3) Competitive Landscape adopts peers-not-competitors framing with links to individual profiles in marketing/competitors/.*
+*Last updated: 2026-05-20 — V1.3 — corrected core business-model assumption: SPUR is **proprietary** (NOT open source). Replaced "open-core" framing, swapped `cargo install` for `curl | sh` signed-binary, dropped GitHub-stars / Show-HN from goals + funnel, added distribution-channel table flagging what works under proprietary constraints. V1.2 changelog: applied three revisions from P1 positioning recommendations.*
 
 ## Product Overview
 **One-liner:** Issue in, PR out — across every agent, in parallel, with one review surface.
 **Alternate (from PRD):** One brain, many workers, zero lost context.
 **What it does:** SPUR is a Rust-native terminal orchestrator for AI coding agents. A "brain" agent reasons about a task and delegates work to one or more "worker" agents (Claude Code, Codex, Gemini, Kimi, OpenCode, or any ACP-speaking agent). Each worker runs in its own isolated git worktree. SPUR coordinates dispatch, review, retries, cost, and PM state in one place.
 **Product category:** AI coding agent orchestrator / multi-agent terminal IDE-companion. "Shelf" customers search from: *Claude Code wrapper*, *multi-agent CLI*, *agent orchestrator*, *Claude Code Max rate-limit fix*.
-**Product type:** Open-source developer tool (Rust binary, `cargo install spur-cli` / `curl | sh`) + tiered commercial license (Community / Pro / Team / Enterprise).
-**Business model:** Open-core. Community free forever; Pro / Team / Enterprise gated by signed Ed25519 policy documents.
+**Product type:** Proprietary developer tool. Signed Rust binary distributed via `curl | sh` from `getspur.dev`. Tiered license (Community / Pro / Team / Enterprise). **Source is NOT publicly available.**
+**Business model:** Proprietary with a free Community tier. Community runs without a license key under the EULA; Pro / Team / Enterprise gated by signed Ed25519 policy documents purchased from the account dashboard.
 
 **Proposed pricing** *(self-brainstormed — confirm before launch)*:
 
@@ -100,7 +100,8 @@ Full profiles for each competitor are in `marketing/competitors/`. Strategic fra
 | "Another tool to configure?" | One `spur init` auto-detects installed agents and writes sensible defaults. Quickstart is 2 commands. |
 | "Why a TUI in 2026?" | Because that's where coding agents already live. SPUR sits *next to* your terminal, not in a browser tab. (And the Telegram bot covers mobile.) |
 | "Will it work with my custom agent?" | Any ACP-speaking agent works out of the box. Capability negotiation handles slash commands per-agent. |
-| "Open source — what stops me from running everything for free?" | Community tier is genuinely generous (1 brain, 1 worker, full review loop, full cost display, full lineage). Pro/Team gate parallelism, session resume, and team analytics — features that only matter once you've outgrown solo use. |
+| "Is this open source?" | No — SPUR is a proprietary tool with a free Community tier (no key required, runs under our EULA). We may open-source select crates over time (telemetry, ACP client) but the orchestration core stays proprietary. |
+| "What stops me from running everything for free?" | Community tier is genuinely generous (1 brain, 1 worker, full review loop, full cost display, full lineage). Pro/Team gate parallelism, session resume, and team analytics — features that only matter once you've outgrown solo use. |
 | "Is human review really required? I want full autonomy." | Yes by design — SPUR explicitly is not a set-and-forget autonomous system. If you want that, look elsewhere. |
 
 **Anti-personas (NOT for):**
@@ -194,30 +195,45 @@ Real verbatim from F2 customer research (full corpus in `marketing/research/voc.
 
 **Primary business goal:** Become the default terminal companion for any developer running 2+ AI coding agents. Drive Community adoption among Claude Code Max users → convert to Pro on first parallel-worker or session-resume need.
 
-**Conversion funnel (proposed):**
+**Conversion funnel (proposed — proprietary distribution):**
 
 | Stage | Action | Channel |
 |---|---|---|
-| Awareness | First mention | HN Show / Product Hunt / X / Anthropic DevRel co-marketing |
-| Trial | `cargo install spur-cli` + `spur init` | README + curl-pipe install |
-| Activation | First successful `submit_plan` with ≥2 reviewed approvals | TUI quickstart + onboarding emails |
-| Pro upgrade | Hit single-worker limit OR rate-limit failover OR session-resume need | In-TUI upgrade CTA (`spur-license/src/upgrade_cta.rs` already exists) |
+| Awareness | First mention | Product Hunt / X / LinkedIn / Anthropic DevRel co-marketing / cold email / paid (no Show HN — no public repo) |
+| Visit | Land on getspur.dev | Hero A (cost ledger) primary, Hero B/C as A/B variants |
+| Trial install | `curl -sSL getspur.dev/install.sh \| sh` → signed binary | Quickstart on landing page; no signup required for Community |
+| Activation | First successful `submit_plan` with ≥2 reviewed approvals | First-run guide + onboarding emails |
+| Pro upgrade | Hit single-worker limit OR rate-limit failover OR session-resume need | In-TUI upgrade CTA (`spur-license/src/upgrade_cta.rs` already exists) → dashboard account creation → license issuance |
 | Team upgrade | EM wants cost dashboard / RBAC across N seats | Sales-led, triggered by 3+ Pro seats on same domain |
 
-**Pro tier conversion action:** *Proposed* checkout URL: `https://getspur.dev/pro` (placeholder — domain + Stripe/Paddle setup is a launch-blocker). Lifetime SKU links to the existing `personal_lifetime` license plan key.
+**Pro tier conversion action:** Checkout at `https://getspur.dev/pro` (placeholder domain — secure + Stripe/Paddle setup is a launch-blocker). Lifetime SKU links to the existing `personal_lifetime` license plan key.
 
-**Target metrics (proposed, 90 days post-launch):**
+**Distribution channels available (proprietary constraints):**
+
+| Channel | Available? | Notes |
+|---|---|---|
+| Product Hunt | ✅ | Top of list — proprietary launches work here |
+| HN "Show HN" | ❌ | Show HN convention requires a public repo or live demo; we have no repo to show. A regular HN submission of a launch blog post is fine. |
+| X / LinkedIn / threads | ✅ | Primary social channels |
+| AlternativeTo / OSS directories | ❌ | Skip OSS-specific directories (TAAFT-AI is OK; AwesomeLists is not) |
+| Paid (Google / Meta / LinkedIn) | ✅ | Standard search + retargeting |
+| Co-marketing (Anthropic DevRel, beads/ACP authors) | ✅ | Strongest non-paid lever |
+| GitHub stars | ❌ | No public repo → no GH-discovery story. Replace with website signups + binary downloads as the equivalent metric. |
+| Cold outbound | ✅ | F6 already scoped — `marketing-cold-email` plays |
+
+**Target metrics (revised — proprietary distribution, 90 days post-launch):**
 
 | Metric | Day 30 | Day 60 | Day 90 |
 |---|---|---|---|
-| GitHub stars | 1,000 | 3,000 | 7,500 |
-| `cargo install` count | 500 | 2,000 | 6,000 |
-| Activated installs (≥1 review approved) | 150 | 700 | 2,400 |
+| Unique landing-page visitors | 5,000 | 20,000 | 60,000 |
+| `install.sh` runs (Community installs) | 500 | 2,000 | 6,000 |
+| Activated installs (≥1 review approved + ≥1 plan completed) | 150 | 700 | 2,400 |
+| Account signups (for license / dashboard) | 50 | 300 | 1,000 |
 | Pro paid conversions | 10 | 50 | 175 |
-| Pro MRR (assuming $19 + $290 lifetime mix) | $300 | $1,500 | $5,000 |
+| Pro MRR (assuming $19 monthly + $290 lifetime mix) | $300 | $1,500 | $5,000 |
 | Team deals | 0 | 1 | 4 |
-| Telegram bot users | 50 | 300 | 1,000 |
+| Telegram bot connections | 50 | 300 | 1,000 |
 
-**Current metrics:** None — pre-launch. Telemetry already shipped (`SPUR_TELEMETRY=1`, opt-in Tier-2) — wire up install / activation counters before Phase 4.
+**Current metrics:** None — pre-launch. Telemetry already shipped (`SPUR_TELEMETRY=1`, opt-in Tier-2). Wire up: (a) install-script run counter (server-side from `install.sh` request log), (b) activation event from first approved review, (c) account-signup → license-issued funnel. All before Phase 4 (Launch).
 
-**North-star metric:** % of weekly active SPUR sessions where ≥2 different agent vendors are used. Captures the "multi-agent orchestrator" thesis better than installs alone.
+**North-star metric:** % of weekly active SPUR sessions where ≥2 different agent vendors are used. Captures the "control tower" thesis better than install count alone — a single-vendor SPUR user is a Claude Code-with-extras user, not the wedge persona.
