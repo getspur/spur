@@ -193,6 +193,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         }
     }
 
