@@ -476,45 +476,84 @@ fn content_oid_for(current_entries: &BTreeMap<String, CurrentFileEntry>, path: &
 }
 
 fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, FileBucket> {
-    let mut buckets = BTreeMap::new();
+    let mut manifest_by_path = BTreeMap::new();
     for manifest in &artifact.file_manifests {
-        let stable_file_id = manifest.stable_file_id.clone();
-        let path = manifest.path.clone();
+        manifest_by_path.insert(manifest.path.as_str(), manifest);
+    }
+
+    let mut file_by_path = HashMap::new();
+    for file in &artifact.files {
+        file_by_path.entry(file.file_path.as_str()).or_insert(file);
+    }
+
+    let mut symbols_by_path: HashMap<&str, Vec<&GraphSymbolArtifact>> = HashMap::new();
+    let mut source_paths: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut seen_source_paths = HashSet::new();
+    for manifest in manifest_by_path.values() {
+        insert_source_path(
+            &mut source_paths,
+            &mut seen_source_paths,
+            manifest.stable_file_id.as_str(),
+            manifest.path.as_str(),
+        );
+    }
+    for symbol in &artifact.symbols {
+        let path = symbol.file_path.as_str();
+        symbols_by_path.entry(path).or_default().push(symbol);
+        if manifest_by_path.contains_key(path) {
+            insert_source_path(
+                &mut source_paths,
+                &mut seen_source_paths,
+                symbol.stable_symbol_id.as_str(),
+                path,
+            );
+        }
+    }
+
+    let mut edges_by_path: HashMap<&str, Vec<&GraphEdgeArtifact>> = HashMap::new();
+    for edge in &artifact.edges {
+        if let Some(paths) = source_paths.get(edge.source_stable_symbol_id.as_str()) {
+            for path in paths {
+                edges_by_path.entry(path).or_default().push(edge);
+            }
+        }
+    }
+
+    let mut buckets = BTreeMap::new();
+    for (path, manifest) in manifest_by_path {
         buckets.insert(
-            path.clone(),
+            path.to_string(),
             FileBucket {
-                file: artifact
-                    .files
-                    .iter()
-                    .find(|file| file.file_path == path)
-                    .cloned()
-                    .unwrap_or_else(|| GraphFileArtifact {
-                        stable_file_id: stable_file_id.clone(),
-                        file_path: path.clone(),
-                    }),
+                file: file_by_path.get(path).copied().cloned().unwrap_or_else(|| {
+                    GraphFileArtifact {
+                        stable_file_id: manifest.stable_file_id.clone(),
+                        file_path: manifest.path.clone(),
+                    }
+                }),
                 manifest: manifest.clone(),
-                symbols: artifact
-                    .symbols
-                    .iter()
-                    .filter(|symbol| symbol.file_path == path)
-                    .cloned()
-                    .collect(),
-                edges: artifact
-                    .edges
-                    .iter()
-                    .filter(|edge| {
-                        edge.source_stable_symbol_id == stable_file_id
-                            || artifact.symbols.iter().any(|symbol| {
-                                symbol.file_path == path
-                                    && symbol.stable_symbol_id == edge.source_stable_symbol_id
-                            })
-                    })
-                    .cloned()
-                    .collect(),
+                symbols: symbols_by_path
+                    .get(path)
+                    .map(|symbols| symbols.iter().copied().cloned().collect())
+                    .unwrap_or_default(),
+                edges: edges_by_path
+                    .get(path)
+                    .map(|edges| edges.iter().copied().cloned().collect())
+                    .unwrap_or_default(),
             },
         );
     }
     buckets
+}
+
+fn insert_source_path<'a>(
+    source_paths: &mut HashMap<&'a str, Vec<&'a str>>,
+    seen_source_paths: &mut HashSet<(&'a str, &'a str)>,
+    source_id: &'a str,
+    path: &'a str,
+) {
+    if seen_source_paths.insert((source_id, path)) {
+        source_paths.entry(source_id).or_default().push(path);
+    }
 }
 
 fn add_missing_manifest_buckets(
@@ -869,9 +908,76 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{artifact_from_facts, artifact_from_facts_incremental, BuildMode};
+    use super::{
+        artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact, BuildMode,
+        PHASE1_GRAPH_INDEX_VERSION,
+    };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::build_facts;
+    use crate::{
+        Confidence, GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry,
+        GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, RelationKind,
+    };
+
+    #[test]
+    fn buckets_from_artifact_rebuckets_edges_by_file_or_symbol_source() {
+        let artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: PHASE1_GRAPH_INDEX_VERSION.to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test-manifest".to_string(),
+            graph_content_hash: "test-hash".to_string(),
+            file_manifests: vec![
+                manifest("file:a", "src/a.rs"),
+                manifest("file:b", "src/b.rs"),
+            ],
+            files: vec![file("file:a", "src/a.rs"), file("file:b", "src/b.rs")],
+            symbols: vec![
+                symbol("sym:a1", "src/a.rs"),
+                symbol("sym:a2", "src/a.rs"),
+                symbol("sym:b1", "src/b.rs"),
+            ],
+            edges: vec![
+                edge("file:a", Some("sym:a1"), RelationKind::Contains),
+                edge("sym:a2", Some("sym:b1"), RelationKind::Calls),
+                edge("sym:b1", Some("sym:a1"), RelationKind::References),
+                edge("unknown", Some("sym:a1"), RelationKind::Uses),
+            ],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let actual = buckets_from_artifact(&artifact);
+        assert_eq!(
+            actual.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/b.rs"]
+        );
+
+        let a_bucket = actual.get("src/a.rs").expect("a bucket");
+        assert_eq!(a_bucket.file, file("file:a", "src/a.rs"));
+        assert_eq!(a_bucket.manifest, manifest("file:a", "src/a.rs"));
+        assert_eq!(
+            a_bucket.symbols,
+            vec![symbol("sym:a1", "src/a.rs"), symbol("sym:a2", "src/a.rs")]
+        );
+        assert_eq!(
+            a_bucket.edges,
+            vec![
+                edge("file:a", Some("sym:a1"), RelationKind::Contains),
+                edge("sym:a2", Some("sym:b1"), RelationKind::Calls),
+            ]
+        );
+
+        let b_bucket = actual.get("src/b.rs").expect("b bucket");
+        assert_eq!(b_bucket.file, file("file:b", "src/b.rs"));
+        assert_eq!(b_bucket.manifest, manifest("file:b", "src/b.rs"));
+        assert_eq!(b_bucket.symbols, vec![symbol("sym:b1", "src/b.rs")]);
+        assert_eq!(
+            b_bucket.edges,
+            vec![edge("sym:b1", Some("sym:a1"), RelationKind::References)]
+        );
+    }
 
     #[test]
     fn incremental_reuses_bucket_when_content_oid_is_identical() {
@@ -991,6 +1097,51 @@ mod tests {
             .file_manifests
             .iter()
             .any(|entry| entry.path == "src/a.rs"));
+    }
+
+    fn file(stable_file_id: &str, path: &str) -> GraphFileArtifact {
+        GraphFileArtifact {
+            stable_file_id: stable_file_id.to_string(),
+            file_path: path.to_string(),
+        }
+    }
+
+    fn manifest(stable_file_id: &str, path: &str) -> GraphFileManifestEntry {
+        GraphFileManifestEntry {
+            stable_file_id: stable_file_id.to_string(),
+            path: path.to_string(),
+            content_oid: format!("oid:{path}"),
+            node_ids: Vec::new(),
+        }
+    }
+
+    fn symbol(stable_symbol_id: &str, path: &str) -> GraphSymbolArtifact {
+        GraphSymbolArtifact {
+            stable_symbol_id: stable_symbol_id.to_string(),
+            file_path: path.to_string(),
+            byte_range: [0, 8],
+            line_range: [1, 1],
+            entity_name: stable_symbol_id.to_string(),
+            qualified_name: stable_symbol_id.to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: format!("hash:{stable_symbol_id}"),
+            enclosing_scope: None,
+        }
+    }
+
+    fn edge(
+        source_stable_symbol_id: &str,
+        target_stable_symbol_id: Option<&str>,
+        relation: RelationKind,
+    ) -> GraphEdgeArtifact {
+        GraphEdgeArtifact {
+            source_stable_symbol_id: source_stable_symbol_id.to_string(),
+            target_stable_symbol_id: target_stable_symbol_id.map(str::to_string),
+            target_label: None,
+            relation,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+        }
     }
 
     fn init_repo(root: &Path) {
