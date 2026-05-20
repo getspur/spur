@@ -103,8 +103,12 @@ And on the boring scope side:
 ### Install
 
 ```sh
-cargo install spur-cli
+curl -sSL https://getspur.dev/install.sh | sh
 ```
+
+Installs the signed `spur` binary. Free Community tier — no key required. Pro / Team / Enterprise unlock via a signed license file from your account dashboard.
+
+> Note: install domain is provisional; final URL will be confirmed at launch.
 
 ### Initialize a project
 
@@ -211,14 +215,8 @@ cargo run -p spur-cli -- --help
 
 Types: `feat`, `fix`, `test`, `docs`, `refactor`, `chore`. Keep subjects under 72 characters.
 
-## Contributing
-
-1. Fork the repo and create a feature branch
-2. Follow the existing code style (`cargo fmt`, `cargo clippy`)
-3. Add tests for new functionality — bug fixes follow TDD cadence (failing test first, then fix)
-4. Keep changes scoped to one crate when possible
-5. Open a PR with a clear description of the problem and solution
-
 ## License
 
-[MIT](LICENSE)
+SPUR is a proprietary product. The free Community tier is available without a license key under the terms of the EULA at [https://getspur.dev/eula](https://getspur.dev/eula). Pro / Team / Enterprise tiers require a signed license file. See [LICENSE](LICENSE) for terms.
+
+> The source in this repository is not open source. Issues, feedback, and feature requests are welcome via [https://getspur.dev/feedback](https://getspur.dev/feedback) or your team's support channel.
