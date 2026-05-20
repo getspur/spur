@@ -383,6 +383,60 @@ async fn code_file_symbols_returns_candidate_rows_for_worktree_relative_file() {
 }
 
 #[tokio::test]
+async fn code_file_symbols_uses_symbol_uri_selector_for_legacy_empty_qualified_name() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    std::fs::create_dir_all(worktree.path().join(".spur")).expect("create .spur");
+    std::fs::write(
+        worktree.path().join(".spur/graph-index.json"),
+        serde_json::to_string_pretty(&json!({
+            "header": {
+                "graph_index_version": "v4"
+            },
+            "manifest_version": "v4",
+            "graph_content_hash": "legacy-empty-qualified-name",
+            "files": [
+                { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
+            ],
+            "symbols": [
+                {
+                    "stable_symbol_id": "legacy-empty-qualified-name-id",
+                    "file_path": "src/lib.rs",
+                    "byte_range": [0, 8],
+                    "line_range": [1, 3],
+                    "entity_name": "legacy_symbol",
+                    "symbol_kind": "function",
+                    "anchor_hash": "hash-legacy-empty-qualified-name-id",
+                    "enclosing_scope": null
+                }
+            ]
+        }))
+        .expect("encode legacy artifact"),
+    )
+    .expect("write legacy artifact");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_file_symbols",
+            json!({ "file": "src/lib.rs" }),
+        )
+        .await,
+    );
+    let symbols = body["symbols"].as_array().expect("symbols");
+
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(
+        symbols[0]["selector"],
+        "graph://symbol/legacy-empty-qualified-name-id"
+    );
+    assert_ne!(symbols[0]["selector"], "src/lib.rs::");
+    assert_eq!(symbols[0]["qualified_name"], "");
+}
+
+#[tokio::test]
 async fn code_symbol_info_returns_single_symbol_metadata() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
