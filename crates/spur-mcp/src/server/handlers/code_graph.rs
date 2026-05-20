@@ -3,9 +3,9 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 use spur_graph::{
-    bounded_subgraph, find_callees, find_callers, find_symbol, load_artifact,
-    resolve_worktree_root_from, GraphEdgeArtifact, GraphIndexArtifact, GraphSymbolArtifact,
-    RelationKind, CODE_SYMBOL_URI_PREFIX,
+    bounded_subgraph, find_callees, find_callers, load_artifact, resolve_selector,
+    resolve_worktree_root_from, CandidateRow, GraphEdgeArtifact, GraphIndexArtifact,
+    GraphSymbolArtifact, RelationKind, SelectorResolution, CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -31,33 +31,51 @@ impl McpCallbackServer {
 }
 
 pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
-    let symbol_id = normalize_symbol_arg(args)?;
     let artifact = load_graph_artifact_for_request()?;
-    ensure_symbol_exists(&artifact, &symbol_id)?;
+    let symbol_id = match resolve_code_selector(args, &artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(&artifact, candidates));
+        }
+    };
 
     let callers = find_callers(&artifact, &symbol_id)
         .into_iter()
         .map(symbol_row)
         .collect::<Vec<_>>();
-    Ok(json!({ "callers": callers }))
+    Ok(with_graph_metadata(
+        &artifact,
+        json!({ "callers": callers }),
+    ))
 }
 
 pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
-    let symbol_id = normalize_symbol_arg(args)?;
     let artifact = load_graph_artifact_for_request()?;
-    ensure_symbol_exists(&artifact, &symbol_id)?;
+    let symbol_id = match resolve_code_selector(args, &artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(&artifact, candidates));
+        }
+    };
 
     let callees = find_callees(&artifact, &symbol_id)
         .into_iter()
         .map(symbol_row)
         .collect::<Vec<_>>();
-    Ok(json!({ "callees": callees }))
+    Ok(with_graph_metadata(
+        &artifact,
+        json!({ "callees": callees }),
+    ))
 }
 
 pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
-    let symbol_id = normalize_symbol_arg(args)?;
     let artifact = load_graph_artifact_for_request()?;
-    ensure_symbol_exists(&artifact, &symbol_id)?;
+    let symbol_id = match resolve_code_selector(args, &artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(&artifact, candidates));
+        }
+    };
 
     let requested_radius = args
         .get("radius")
@@ -83,13 +101,19 @@ pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
             }
-            Ok(json!({
-                "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
-                "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
-                "metadata": metadata,
-            }))
+            Ok(with_graph_metadata(
+                &artifact,
+                json!({
+                    "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
+                    "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
+                    "metadata": metadata,
+                }),
+            ))
         }
-        "mermaid" => Ok(json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) })),
+        "mermaid" => Ok(with_graph_metadata(
+            &artifact,
+            json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) }),
+        )),
         other => Err(McpHandlerError::InvalidParams(format!(
             "invalid format `{other}`; expected `json` or `mermaid`"
         ))),
@@ -108,32 +132,6 @@ fn code_graph_response(id: Value, result: Result<Value, McpHandlerError>) -> Jso
             JsonRpcResponse::internal_error(id, message)
         }
     }
-}
-
-fn normalize_symbol_arg(args: &Value) -> Result<String, McpHandlerError> {
-    let symbol = args
-        .get("symbol")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'symbol'".into()))?;
-    if symbol.is_empty() {
-        return Err(McpHandlerError::InvalidParams(
-            "field 'symbol' must not be empty".into(),
-        ));
-    }
-    if let Some(symbol_id) = symbol.strip_prefix(CODE_SYMBOL_URI_PREFIX) {
-        if symbol_id.is_empty() {
-            return Err(McpHandlerError::InvalidParams(
-                "field 'symbol' must include a symbol id".into(),
-            ));
-        }
-        return Ok(symbol_id.to_string());
-    }
-    if symbol.contains("://") {
-        return Err(McpHandlerError::InvalidParams(format!(
-            "invalid symbol URI prefix; expected `{CODE_SYMBOL_URI_PREFIX}` or a bare symbol id"
-        )));
-    }
-    Ok(symbol.to_string())
 }
 
 #[allow(clippy::result_large_err)]
@@ -168,17 +166,102 @@ fn graph_artifact_missing(worktree: &Path) -> McpHandlerError {
     ))
 }
 
-fn ensure_symbol_exists(
+enum CodeSelectorResolution {
+    Resolved(String),
+    Ambiguous(Vec<CandidateRow>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnAmbiguousMode {
+    Candidates,
+    Error,
+}
+
+fn resolve_code_selector(
+    args: &Value,
     artifact: &GraphIndexArtifact,
-    symbol_id: &str,
-) -> Result<(), McpHandlerError> {
-    if find_symbol(artifact, symbol_id).is_some() {
-        Ok(())
-    } else {
-        Err(McpHandlerError::NotFound(format!(
-            "symbol {symbol_id} not found in graph artifact"
-        )))
+) -> Result<CodeSelectorResolution, McpHandlerError> {
+    let selector = selected_code_selector(args)?;
+    let on_ambiguous = on_ambiguous_mode(args)?;
+
+    match resolve_selector(artifact, selector) {
+        SelectorResolution::Resolved(resolved) => {
+            Ok(CodeSelectorResolution::Resolved(resolved.stable_symbol_id))
+        }
+        SelectorResolution::Ambiguous { candidates: _ }
+            if on_ambiguous == OnAmbiguousMode::Error =>
+        {
+            Err(McpHandlerError::InvalidParams(format!(
+                "selector `{selector}` is ambiguous; choose one candidate selector or uri"
+            )))
+        }
+        SelectorResolution::Ambiguous { candidates } => {
+            Ok(CodeSelectorResolution::Ambiguous(candidates))
+        }
+        SelectorResolution::NotFound => Err(McpHandlerError::NotFound(format!(
+            "symbol {} not found in graph artifact",
+            missing_symbol_label(selector)
+        ))),
     }
+}
+
+fn selected_code_selector(args: &Value) -> Result<&str, McpHandlerError> {
+    let selector = string_arg(args, "selector")?;
+    let symbol = string_arg(args, "symbol")?;
+
+    match (selector, symbol) {
+        (Some(selector), Some(_)) => {
+            tracing::warn!(
+                "code graph request included deprecated `symbol` with `selector`; using `selector`"
+            );
+            Ok(selector)
+        }
+        (Some(selector), None) => Ok(selector),
+        (None, Some(symbol)) => {
+            tracing::warn!("code graph request used deprecated `symbol`; use `selector`");
+            Ok(symbol)
+        }
+        (None, None) => Err(McpHandlerError::InvalidParams(
+            "Missing required field 'selector' (or deprecated 'symbol')".into(),
+        )),
+    }
+}
+
+fn string_arg<'a>(args: &'a Value, field: &str) -> Result<Option<&'a str>, McpHandlerError> {
+    let Some(value) = args.get(field) else {
+        return Ok(None);
+    };
+    let value = value.as_str().ok_or_else(|| {
+        McpHandlerError::InvalidParams(format!("field '{field}' must be a string"))
+    })?;
+    if value.trim().is_empty() {
+        return Err(McpHandlerError::InvalidParams(format!(
+            "field '{field}' must not be empty"
+        )));
+    }
+    Ok(Some(value))
+}
+
+fn on_ambiguous_mode(args: &Value) -> Result<OnAmbiguousMode, McpHandlerError> {
+    let Some(value) = args.get("on_ambiguous") else {
+        return Ok(OnAmbiguousMode::Candidates);
+    };
+    match value.as_str() {
+        Some("candidates") => Ok(OnAmbiguousMode::Candidates),
+        Some("error") => Ok(OnAmbiguousMode::Error),
+        Some(other) => Err(McpHandlerError::InvalidParams(format!(
+            "invalid on_ambiguous `{other}`; expected `candidates` or `error`"
+        ))),
+        None => Err(McpHandlerError::InvalidParams(
+            "field 'on_ambiguous' must be a string".into(),
+        )),
+    }
+}
+
+fn missing_symbol_label(selector: &str) -> &str {
+    selector
+        .strip_prefix(CODE_SYMBOL_URI_PREFIX)
+        .unwrap_or(selector)
 }
 
 fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<RelationKind>>, McpHandlerError> {
@@ -201,6 +284,42 @@ fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<RelationKind>>, McpHandle
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn ambiguous_response(artifact: &GraphIndexArtifact, candidates: Vec<CandidateRow>) -> Value {
+    with_graph_metadata(
+        artifact,
+        json!({
+            "ambiguous": true,
+            "candidates": candidates.into_iter().map(candidate_row).collect::<Vec<_>>(),
+        }),
+    )
+}
+
+fn with_graph_metadata(artifact: &GraphIndexArtifact, mut body: Value) -> Value {
+    if let Value::Object(map) = &mut body {
+        map.insert(
+            "graph_content_hash".to_string(),
+            Value::String(artifact.graph_content_hash.clone()),
+        );
+        map.insert(
+            "graph_index_version".to_string(),
+            Value::String(artifact.header.graph_index_version.clone()),
+        );
+    }
+    body
+}
+
+fn candidate_row(candidate: CandidateRow) -> Value {
+    json!({
+        "selector": candidate.selector,
+        "uri": candidate.uri,
+        "id": candidate.id,
+        "qualified_name": candidate.qualified_name,
+        "file_path": candidate.file_path,
+        "line_range": candidate.line_range,
+        "symbol_kind": candidate.symbol_kind,
+    })
 }
 
 fn symbol_row(symbol: &GraphSymbolArtifact) -> Value {
@@ -329,15 +448,27 @@ mod tests {
                 },
                 "manifest_version": "test",
                 "graph_content_hash": "test",
-                "files": [],
+                "files": [
+                    { "stable_file_id": "file-src-caller", "file_path": "src/caller.rs" },
+                    { "stable_file_id": "file-src-root", "file_path": "src/root.rs" },
+                    { "stable_file_id": "file-src-callee", "file_path": "src/callee.rs" },
+                    { "stable_file_id": "file-crates-foo", "file_path": "crates/foo" },
+                    { "stable_file_id": "file-crates-other", "file_path": "crates/other" }
+                ],
                 "symbols": [
-                    symbol("caller", "src/caller.rs", [3, 5], "call_root"),
-                    symbol("root", "src/root.rs", [10, 12], "root"),
-                    symbol("callee", "src/callee.rs", [20, 22], "callee")
+                    symbol("caller", "src/caller.rs", [3, 5], "call_root", "call_root"),
+                    symbol("root", "src/root.rs", [10, 12], "root", "root"),
+                    symbol("callee", "src/callee.rs", [20, 22], "callee", "callee"),
+                    symbol("cache-caller", "crates/foo", [24, 26], "call_cache", "call_cache"),
+                    symbol("cache-run", "crates/foo", [30, 32], "run", "Cache::run"),
+                    symbol("cache-callee", "crates/foo", [34, 36], "finish_cache", "finish_cache"),
+                    symbol("other-run", "crates/other", [40, 42], "run", "Other::run")
                 ],
                 "edges": [
                     edge("caller", "root"),
-                    edge("root", "callee")
+                    edge("root", "callee"),
+                    edge("cache-caller", "cache-run"),
+                    edge("cache-run", "cache-callee")
                 ],
                 "tombstones": []
             }))
@@ -346,13 +477,20 @@ mod tests {
         .expect("write artifact");
     }
 
-    fn symbol(id: &str, file_path: &str, line_range: [usize; 2], entity_name: &str) -> Value {
+    fn symbol(
+        id: &str,
+        file_path: &str,
+        line_range: [usize; 2],
+        entity_name: &str,
+        qualified_name: &str,
+    ) -> Value {
         json!({
             "stable_symbol_id": id,
             "file_path": file_path,
             "byte_range": [0, 8],
             "line_range": line_range,
             "entity_name": entity_name,
+            "qualified_name": qualified_name,
             "symbol_kind": "function",
             "anchor_hash": format!("hash-{id}"),
             "enclosing_scope": null
@@ -397,6 +535,8 @@ mod tests {
         assert_eq!(body["callers"][0]["file_path"], "src/caller.rs");
         assert_eq!(body["callers"][0]["line_range"], json!([3, 5]));
         assert_eq!(body["callers"][0]["symbol_kind"], "function");
+        assert_eq!(body["graph_content_hash"], "test");
+        assert_eq!(body["graph_index_version"], "test");
     }
 
     #[tokio::test]
@@ -415,6 +555,110 @@ mod tests {
         assert_eq!(body["callees"].as_array().expect("callees").len(), 1);
         assert_eq!(body["callees"][0]["uri"], "graph://symbol/callee");
         assert_eq!(body["callees"][0]["entity_name"], "callee");
+    }
+
+    #[tokio::test]
+    async fn code_graph_handlers_resolve_selector_for_callers_and_callees() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let callers = response_json(
+            server
+                .handle_code_callers(
+                    Value::from(1),
+                    json!({ "selector": "crates/foo::Cache::run" }),
+                )
+                .await,
+        );
+        assert_eq!(callers["callers"].as_array().expect("callers").len(), 1);
+        assert_eq!(callers["callers"][0]["uri"], "graph://symbol/cache-caller");
+        assert_eq!(callers["graph_content_hash"], "test");
+        assert_eq!(callers["graph_index_version"], "test");
+
+        let callees = response_json(
+            server
+                .handle_code_callees(
+                    Value::from(1),
+                    json!({ "selector": "crates/foo::Cache::run" }),
+                )
+                .await,
+        );
+        assert_eq!(callees["callees"].as_array().expect("callees").len(), 1);
+        assert_eq!(callees["callees"][0]["uri"], "graph://symbol/cache-callee");
+        assert_eq!(callees["graph_content_hash"], "test");
+        assert_eq!(callees["graph_index_version"], "test");
+    }
+
+    #[tokio::test]
+    async fn selector_takes_precedence_over_legacy_symbol_when_both_are_present() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let body = response_json(
+            server
+                .handle_code_callees(
+                    Value::from(1),
+                    json!({ "selector": "crates/foo::Cache::run", "symbol": "root" }),
+                )
+                .await,
+        );
+
+        assert_eq!(body["callees"].as_array().expect("callees").len(), 1);
+        assert_eq!(body["callees"][0]["uri"], "graph://symbol/cache-callee");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_selector_defaults_to_successful_candidates_response() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_callers(Value::from(1), json!({ "selector": "run" }))
+            .await;
+        assert!(
+            response.error.is_none(),
+            "ambiguous default must be success"
+        );
+        let body = response_json(response);
+
+        assert_eq!(body["ambiguous"], true);
+        assert_eq!(body["candidates"].as_array().expect("candidates").len(), 2);
+        assert_eq!(body["candidates"][0]["selector"], "crates/foo::Cache::run");
+        assert_eq!(
+            body["candidates"][1]["selector"],
+            "crates/other::Other::run"
+        );
+        assert_eq!(body["graph_content_hash"], "test");
+        assert_eq!(body["graph_index_version"], "test");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_selector_can_be_returned_as_json_rpc_error() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_callers(
+                Value::from(1),
+                json!({ "selector": "run", "on_ambiguous": "error" }),
+            )
+            .await;
+
+        let error = response.error.expect("ambiguous error");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("selector `run` is ambiguous"));
     }
 
     #[tokio::test]
@@ -462,6 +706,8 @@ mod tests {
         assert!(mermaid.starts_with("graph TD\n"));
         assert!(mermaid.contains("root[\"root\"]"));
         assert!(mermaid.contains("root --> callee"));
+        assert_eq!(body["graph_content_hash"], "test");
+        assert_eq!(body["graph_index_version"], "test");
     }
 
     #[tokio::test]
