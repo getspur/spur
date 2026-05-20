@@ -552,6 +552,18 @@ struct CodeSubgraphParams {
     edge_kinds: Option<Vec<String>>,
 }
 
+fn selector_or_symbol_schema_object<T: JsonSchema>() -> JsonObject {
+    let mut schema = crate::tool_schemas::schema_object::<T>();
+    schema.insert(
+        "anyOf".to_string(),
+        json!([
+            { "required": ["selector"] },
+            { "required": ["symbol"] }
+        ]),
+    );
+    schema
+}
+
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct ReportSignalParams {
     task_id: String,
@@ -876,7 +888,7 @@ impl WorkerToolHandler {
     #[tool(
         name = "code_symbol_info",
         description = "Resolve one code symbol and return metadata only. Ambiguous selectors return candidate rows.",
-        input_schema = crate::tool_schemas::schema_object::<CodeSymbolInfoParams>()
+        input_schema = selector_or_symbol_schema_object::<CodeSymbolInfoParams>()
     )]
     async fn code_symbol_info_tool(
         &self,
@@ -898,7 +910,7 @@ impl WorkerToolHandler {
     #[tool(
         name = "code_callers",
         description = "List symbols that call the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.",
-        input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
+        input_schema = selector_or_symbol_schema_object::<CodeSymbolParams>()
     )]
     async fn code_callers_tool(
         &self,
@@ -920,7 +932,7 @@ impl WorkerToolHandler {
     #[tool(
         name = "code_callees",
         description = "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.",
-        input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
+        input_schema = selector_or_symbol_schema_object::<CodeSymbolParams>()
     )]
     async fn code_callees_tool(
         &self,
@@ -942,7 +954,7 @@ impl WorkerToolHandler {
     #[tool(
         name = "code_subgraph",
         description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
-        input_schema = crate::tool_schemas::schema_object::<CodeSubgraphParams>()
+        input_schema = selector_or_symbol_schema_object::<CodeSubgraphParams>()
     )]
     async fn code_subgraph_tool(
         &self,
