@@ -494,6 +494,8 @@ struct FetchOutcomeArtifactParams {
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSymbolParams {
     symbol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -505,6 +507,13 @@ struct CodeSubgraphParams {
     format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     edge_kinds: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSymbolHistoryParams {
+    symbol: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -845,6 +854,28 @@ impl WorkerToolHandler {
             Some(None),
             move |_worker_ctx| async move {
                 crate::server::handlers::code_graph::code_subgraph(&args)
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_symbol_history",
+        description = "Return the causal trace of a code symbol across commits, including ChangeKind and snapshot key for each touch. Requires a temporal commit index in the current worktree.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSymbolHistoryParams>()
+    )]
+    async fn code_symbol_history_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_symbol_history",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_symbol_history(&args)
             },
         )
         .await
