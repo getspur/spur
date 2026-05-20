@@ -207,6 +207,11 @@ fn entries_and_payloads(
         let uri = format!("{}{}", CODE_SYMBOL_URI_PREFIX, symbol.stable_symbol_id);
         let display = symbol.entity_name.clone();
         let secondary = symbol_secondary(&symbol);
+        let code_scope = symbol.enclosing_scope.clone();
+        let atom_text = code_scope
+            .as_ref()
+            .filter(|scope| !scope.is_empty())
+            .map(|scope| format!("@{}::{}", scope, display));
         payloads.push((
             uri.clone(),
             Arc::new(symbol_payload(
@@ -223,10 +228,10 @@ fn entries_and_payloads(
             display,
             secondary: Some(secondary),
             code_path: Some(symbol.file_path.clone()),
-            code_scope: symbol.enclosing_scope.clone(),
+            code_scope,
             tag: Some(format!("symbol:{}", symbol.symbol_kind)),
             search_text: Some(symbol_search_text(&symbol)),
-            atom_text: None,
+            atom_text,
             issue_preview: None,
         });
     }
