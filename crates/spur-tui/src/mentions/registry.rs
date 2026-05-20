@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
@@ -20,6 +21,9 @@ const GLOBAL_SOURCE_CACHE_TTL: Duration = Duration::from_secs(600);
 const SESSION_SOURCE_CACHE_TTL: Duration = Duration::from_secs(600);
 pub const CODE_GRAPH_INDEX_ENV: &str = "SPUR_CODE_GRAPH_INDEX";
 pub const CODE_GRAPH_MISSING_HINT: &str = "Run 'spur graph build' to enable code-graph mentions";
+const CODE_GRAPH_POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
+const CODE_GRAPH_POINTER_PATH: &str = ".spur/graph-index.pointer.json";
+const CODE_GRAPH_LEGACY_INDEX_PATH: &str = ".spur/graph-index.json";
 
 /// Maximum number of worker rows pinned to the top of the empty-query
 /// picker view. See design spec §4.4 / §10.1.
@@ -61,9 +65,37 @@ pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
     cache: HashMap<&'static str, CachedSourceIndex>,
     code_graph_hint: Option<&'static str>,
+    code_graph_token: Option<CodeGraphToken>,
+    code_graph_auto_discovery: bool,
     matcher: Matcher,
     #[cfg(any(test, debug_assertions))]
     query_call_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodeGraphToken {
+    Pointer {
+        canonical_artifact_path: PathBuf,
+        graph_content_hash: String,
+        manifest_version: String,
+        indexed_commit_oid: Option<String>,
+    },
+    Artifact {
+        artifact_path: PathBuf,
+        modified: Option<SystemTime>,
+        len: u64,
+    },
+}
+
+#[derive(Debug)]
+struct CodeGraphCandidate {
+    artifact_path: PathBuf,
+    token: CodeGraphToken,
+}
+
+enum CodeGraphSourceUpdate {
+    ClearAllCaches,
+    ClearCodeGraphCache,
 }
 
 impl MentionRegistry {
@@ -73,6 +105,8 @@ impl MentionRegistry {
             sources: vec![Box::new(FileMentionSource)],
             cache: HashMap::new(),
             code_graph_hint: None,
+            code_graph_token: None,
+            code_graph_auto_discovery: false,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -89,6 +123,8 @@ impl MentionRegistry {
             ],
             cache: HashMap::new(),
             code_graph_hint: None,
+            code_graph_token: None,
+            code_graph_auto_discovery: false,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -96,16 +132,13 @@ impl MentionRegistry {
     }
 
     pub fn with_code_graph(mut self, artifact_path: impl Into<PathBuf>) -> Self {
-        let source: Box<dyn MentionSource> =
-            Box::new(CodeGraphMentionSource::new(artifact_path.into()));
-        let insert_at = self
-            .sources
-            .iter()
-            .position(|source| source.name() != "file")
-            .unwrap_or(self.sources.len());
-        self.sources.insert(insert_at, source);
+        self.code_graph_auto_discovery = false;
+        self.set_code_graph_source(
+            artifact_path.into(),
+            None,
+            CodeGraphSourceUpdate::ClearAllCaches,
+        );
         self.code_graph_hint = None;
-        self.clear_cache();
         self
     }
 
@@ -116,26 +149,80 @@ impl MentionRegistry {
     /// 2. `<worktree_root>/.spur/graph-index.json` — the path `spur graph build`
     ///    writes by default. This makes the TUI work out of the box once a
     ///    user has built the index.
-    pub fn with_code_graph_from_env(self) -> Self {
-        if let Some(path) = std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|v| !v.is_empty()) {
-            let path = PathBuf::from(path);
-            return if path.is_file() {
-                self.with_code_graph(path)
-            } else {
-                self.with_code_graph_hint()
-            };
+    pub fn with_code_graph_from_env(mut self) -> Self {
+        self.code_graph_auto_discovery = true;
+        let worktree_root = spur_graph::resolve_worktree_root();
+        self.refresh_code_graph_registration(&worktree_root);
+        self
+    }
+
+    fn refresh_code_graph_registration(&mut self, cwd: &Path) {
+        if !self.code_graph_auto_discovery {
+            return;
         }
-        let default_path = spur_graph::resolve_worktree_root().join(".spur/graph-index.json");
-        if default_path.is_file() {
-            self.with_code_graph(default_path)
-        } else {
-            self.with_code_graph_hint()
+        let worktree_root = spur_graph::resolve_worktree_root_from(cwd.to_path_buf());
+        match discover_code_graph_candidate(&worktree_root) {
+            Some(candidate) => {
+                if self.code_graph_token.as_ref() != Some(&candidate.token)
+                    || !self.has_code_graph_source()
+                {
+                    self.set_code_graph_source(
+                        candidate.artifact_path,
+                        Some(candidate.token),
+                        CodeGraphSourceUpdate::ClearCodeGraphCache,
+                    );
+                }
+                self.code_graph_hint = None;
+            }
+            None => {
+                self.remove_code_graph_source();
+                self.code_graph_token = None;
+                self.code_graph_hint = Some(CODE_GRAPH_MISSING_HINT);
+            }
         }
     }
 
-    fn with_code_graph_hint(mut self) -> Self {
-        self.code_graph_hint = Some(CODE_GRAPH_MISSING_HINT);
-        self
+    fn set_code_graph_source(
+        &mut self,
+        artifact_path: PathBuf,
+        token: Option<CodeGraphToken>,
+        cache_update: CodeGraphSourceUpdate,
+    ) {
+        let source: Box<dyn MentionSource> = Box::new(CodeGraphMentionSource::new(artifact_path));
+        if let Some(index) = self
+            .sources
+            .iter()
+            .position(|source| source.name() == "code_graph")
+        {
+            self.sources[index] = source;
+        } else {
+            let insert_at = self
+                .sources
+                .iter()
+                .position(|source| source.name() != "file")
+                .unwrap_or(self.sources.len());
+            self.sources.insert(insert_at, source);
+        }
+        self.code_graph_token = token;
+        self.code_graph_hint = None;
+        match cache_update {
+            CodeGraphSourceUpdate::ClearAllCaches => self.clear_cache(),
+            CodeGraphSourceUpdate::ClearCodeGraphCache => self.clear_cache_for("code_graph"),
+        }
+    }
+
+    fn has_code_graph_source(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|source| source.name() == "code_graph")
+    }
+
+    fn remove_code_graph_source(&mut self) {
+        let previous_len = self.sources.len();
+        self.sources.retain(|source| source.name() != "code_graph");
+        if self.sources.len() != previous_len {
+            self.clear_cache_for("code_graph");
+        }
     }
 
     /// Back-compat alias used by tests and any caller that doesn't
@@ -210,7 +297,7 @@ impl MentionRegistry {
     pub fn query(
         &mut self,
         scope: CompletionScope<'_>,
-        cwd: &std::path::Path,
+        cwd: &Path,
         query: &str,
         limit: usize,
     ) -> Vec<MentionEntry> {
@@ -221,9 +308,13 @@ impl MentionRegistry {
         let _scope_key = CompletionScopeKey::from(scope);
         let _span =
             tracing::debug_span!("mention_registry_query", query_len = query.len()).entered();
+        self.refresh_code_graph_registration(cwd);
+        let pointer_token_unchanged = self.code_graph_auto_discovery
+            && matches!(self.code_graph_token, Some(CodeGraphToken::Pointer { .. }));
         for source in &mut self.sources {
             let source_name = source.name();
             let needs_rebuild = match self.cache.get(source_name) {
+                Some(_) if source_name == "code_graph" && pointer_token_unchanged => false,
                 Some(cached) => cached.built_at.elapsed() > source_cache_ttl(source_name),
                 None => true,
             };
@@ -557,6 +648,51 @@ fn source_cache_ttl(name: &'static str) -> Duration {
     }
 }
 
+fn discover_code_graph_candidate(worktree_root: &Path) -> Option<CodeGraphCandidate> {
+    if let Some(path) = std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|v| !v.is_empty()) {
+        return artifact_candidate(PathBuf::from(path));
+    }
+
+    pointer_candidate(worktree_root)
+        .or_else(|| artifact_candidate(worktree_root.join(CODE_GRAPH_LEGACY_INDEX_PATH)))
+}
+
+fn pointer_candidate(worktree_root: &Path) -> Option<CodeGraphCandidate> {
+    let pointer_path = worktree_root.join(CODE_GRAPH_POINTER_PATH);
+    let bytes = fs::read(&pointer_path).ok()?;
+    let pointer: spur_graph::GraphIndexPointer = serde_json::from_slice(&bytes).ok()?;
+    if pointer.schema != CODE_GRAPH_POINTER_SCHEMA {
+        return None;
+    }
+    if !pointer.canonical_artifact_path.is_file() {
+        return None;
+    }
+    Some(CodeGraphCandidate {
+        artifact_path: pointer.canonical_artifact_path.clone(),
+        token: CodeGraphToken::Pointer {
+            canonical_artifact_path: pointer.canonical_artifact_path,
+            graph_content_hash: pointer.graph_content_hash,
+            manifest_version: pointer.manifest_version,
+            indexed_commit_oid: pointer.indexed_commit_oid,
+        },
+    })
+}
+
+fn artifact_candidate(path: PathBuf) -> Option<CodeGraphCandidate> {
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some(CodeGraphCandidate {
+        artifact_path: path.clone(),
+        token: CodeGraphToken::Artifact {
+            artifact_path: path,
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        },
+    })
+}
+
 impl Default for MentionRegistry {
     fn default() -> Self {
         Self::new()
@@ -565,10 +701,11 @@ impl Default for MentionRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     use super::*;
@@ -576,7 +713,11 @@ mod tests {
         IssueMentionDescriptor, IssueMentionSource, MentionKind, MentionSource,
         WorkerMentionDescriptor, WorkerMentionSource,
     };
+    use filetime::{set_file_mtime, FileTime};
+    use spur_graph::{GraphIndexPointer, SourceKind};
     use spur_pm::PmSource;
+
+    static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn issue(id: &str, title: &str, assignee: Option<&str>) -> IssueMentionDescriptor {
         IssueMentionDescriptor {
@@ -603,6 +744,8 @@ mod tests {
             )]))],
             cache: HashMap::new(),
             code_graph_hint: None,
+            code_graph_token: None,
+            code_graph_auto_discovery: false,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -615,6 +758,183 @@ mod tests {
     }
 
     #[test]
+    fn code_graph_pointer_appearing_after_startup_lazy_registers_source() {
+        let _guard = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let _restore = ProcessEnvRestore::enter(root);
+
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
+        assert_eq!(registry.code_graph_hint(), Some(CODE_GRAPH_MISSING_HINT));
+
+        let artifact_path = root.join(".spur/canonical/graph-a.json");
+        write_graph_fixture(&artifact_path, "lazy-file", "src/lazy.rs", "hash-a");
+        write_pointer(
+            root,
+            &artifact_path,
+            "hash-a",
+            "manifest-a",
+            Some("commit-a"),
+        );
+
+        let hits = registry.query(CompletionScope::PreSession, root, "lazy", 10);
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.kind == MentionKind::CodeFile && hit.display == "src/lazy.rs"),
+            "expected lazy-registered code graph row, got {hits:?}"
+        );
+        assert_eq!(registry.code_graph_hint(), None);
+    }
+
+    #[test]
+    fn code_graph_pointer_path_change_reloads_immediately() {
+        let _guard = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let _restore = ProcessEnvRestore::enter(root);
+
+        let artifact_a = root.join(".spur/canonical/graph-a.json");
+        let artifact_b = root.join(".spur/canonical/graph-b.json");
+        write_graph_fixture(&artifact_a, "first-file", "src/first.rs", "hash-a");
+        write_graph_fixture(&artifact_b, "second-file", "src/second.rs", "hash-b");
+        write_pointer(root, &artifact_a, "hash-a", "manifest-a", Some("commit-a"));
+
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
+        let first = registry.query(CompletionScope::PreSession, root, "first", 10);
+        assert!(first.iter().any(|hit| hit.display == "src/first.rs"));
+
+        write_pointer(root, &artifact_b, "hash-b", "manifest-b", Some("commit-b"));
+        let second = registry.query(CompletionScope::PreSession, root, "second", 10);
+
+        assert!(
+            second.iter().any(|hit| hit.display == "src/second.rs"),
+            "expected pointer path change to reload graph rows, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn code_graph_pointer_hash_change_reloads_even_when_artifact_metadata_is_stable() {
+        let _guard = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let _restore = ProcessEnvRestore::enter(root);
+
+        let artifact_path = root.join(".spur/canonical/graph.json");
+        let stable_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+        write_graph_fixture(&artifact_path, "old-file", "src/old.rs", "hash-a");
+        set_file_mtime(&artifact_path, stable_mtime).unwrap();
+        let original_len = fs::metadata(&artifact_path).unwrap().len();
+        write_pointer(
+            root,
+            &artifact_path,
+            "hash-a",
+            "manifest-a",
+            Some("commit-a"),
+        );
+
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
+        let old = registry.query(CompletionScope::PreSession, root, "old", 10);
+        assert!(old.iter().any(|hit| hit.display == "src/old.rs"));
+
+        write_graph_fixture(&artifact_path, "new-file", "src/new.rs", "hash-b");
+        assert_eq!(
+            fs::metadata(&artifact_path).unwrap().len(),
+            original_len,
+            "fixture rewrite must keep length stable to prove pointer-token invalidation"
+        );
+        set_file_mtime(&artifact_path, stable_mtime).unwrap();
+        write_pointer(
+            root,
+            &artifact_path,
+            "hash-b",
+            "manifest-b",
+            Some("commit-b"),
+        );
+
+        let new = registry.query(CompletionScope::PreSession, root, "new", 10);
+
+        assert!(
+            new.iter().any(|hit| hit.display == "src/new.rs"),
+            "expected pointer hash change to force source reload, got {new:?}"
+        );
+    }
+
+    #[test]
+    fn code_graph_env_override_still_wins_over_pointer() {
+        let _guard = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let env_artifact = root.join("env-graph.json");
+        let pointer_artifact = root.join(".spur/canonical/pointer-graph.json");
+        write_graph_fixture(&env_artifact, "env-file", "src/env.rs", "env-hash");
+        write_graph_fixture(
+            &pointer_artifact,
+            "pointer-file",
+            "src/pointer.rs",
+            "pointer-hash",
+        );
+        write_pointer(
+            root,
+            &pointer_artifact,
+            "pointer-hash",
+            "manifest-pointer",
+            Some("commit-pointer"),
+        );
+        let _restore = ProcessEnvRestore::enter(root).with_env_override(&env_artifact);
+
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
+        let hits = registry.query(CompletionScope::PreSession, root, "env", 10);
+
+        assert!(hits.iter().any(|hit| hit.display == "src/env.rs"));
+        assert!(
+            !hits.iter().any(|hit| hit.display == "src/pointer.rs"),
+            "env override should ignore pointer artifact rows, got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn code_graph_without_pointer_falls_back_to_legacy_worktree_artifact() {
+        let _guard = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let _restore = ProcessEnvRestore::enter(root);
+
+        let legacy_artifact = root.join(".spur/graph-index.json");
+        write_graph_fixture(
+            &legacy_artifact,
+            "legacy-file",
+            "src/legacy.rs",
+            "legacy-hash",
+        );
+
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
+        let hits = registry.query(CompletionScope::PreSession, root, "legacy", 10);
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.kind == MentionKind::CodeFile && hit.display == "src/legacy.rs"),
+            "expected legacy worktree artifact fallback, got {hits:?}"
+        );
+        assert_eq!(registry.code_graph_hint(), None);
+    }
+
+    #[test]
     fn set_issue_snapshot_clears_cache_for_next_query() {
         let mut registry = MentionRegistry {
             sources: vec![Box::new(IssueMentionSource::new(vec![issue(
@@ -624,6 +944,8 @@ mod tests {
             )]))],
             cache: HashMap::new(),
             code_graph_hint: None,
+            code_graph_token: None,
+            code_graph_auto_discovery: false,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -710,6 +1032,8 @@ mod tests {
             ]))],
             cache: HashMap::new(),
             code_graph_hint: None,
+            code_graph_token: None,
+            code_graph_auto_discovery: false,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -772,10 +1096,86 @@ mod tests {
             sources,
             cache: HashMap::new(),
             code_graph_hint: None,
+            code_graph_token: None,
+            code_graph_auto_discovery: false,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
         }
+    }
+
+    struct ProcessEnvRestore {
+        previous_cwd: PathBuf,
+        previous_env: Option<std::ffi::OsString>,
+    }
+
+    impl ProcessEnvRestore {
+        fn enter(cwd: &Path) -> Self {
+            let restore = Self {
+                previous_cwd: std::env::current_dir().unwrap(),
+                previous_env: std::env::var_os(CODE_GRAPH_INDEX_ENV),
+            };
+            std::env::remove_var(CODE_GRAPH_INDEX_ENV);
+            std::env::set_current_dir(cwd).unwrap();
+            restore
+        }
+
+        fn with_env_override(self, path: &Path) -> Self {
+            std::env::set_var(CODE_GRAPH_INDEX_ENV, path);
+            self
+        }
+    }
+
+    impl Drop for ProcessEnvRestore {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous_cwd).unwrap();
+            match &self.previous_env {
+                Some(value) => std::env::set_var(CODE_GRAPH_INDEX_ENV, value),
+                None => std::env::remove_var(CODE_GRAPH_INDEX_ENV),
+            }
+        }
+    }
+
+    fn write_pointer(
+        root: &Path,
+        canonical_artifact_path: &Path,
+        graph_content_hash: &str,
+        manifest_version: &str,
+        indexed_commit_oid: Option<&str>,
+    ) {
+        let pointer = GraphIndexPointer {
+            schema: "spur-graph-pointer-v1".to_string(),
+            graph_content_hash: graph_content_hash.to_string(),
+            manifest_version: manifest_version.to_string(),
+            source_kind: SourceKind::Git,
+            indexed_commit_oid: indexed_commit_oid.map(str::to_string),
+            canonical_artifact_path: canonical_artifact_path.to_path_buf(),
+        };
+        let path = root.join(".spur/graph-index.pointer.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(&pointer).unwrap()).unwrap();
+    }
+
+    fn write_graph_fixture(path: &Path, stable_file_id: &str, file_path: &str, content_hash: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let artifact = serde_json::json!({
+            "header": {
+                "graph_index_version": "registry-test",
+                "content_hash_blake3": content_hash
+            },
+            "manifest_version": "registry-test-manifest",
+            "graph_content_hash": content_hash,
+            "files": [
+                {
+                    "stable_file_id": stable_file_id,
+                    "file_path": file_path
+                }
+            ],
+            "symbols": []
+        });
+        fs::write(path, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
     }
 
     #[test]
