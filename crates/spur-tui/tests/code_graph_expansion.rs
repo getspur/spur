@@ -9,7 +9,7 @@ use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention};
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};
 
 const TOPOLOGY_HINT: &str =
-    "topology_available_via_mcp_for_above_symbols: get_callers / get_callees / get_subgraph (radius=1)";
+    "topology_available_via_mcp_for_above_symbols: pass each MENTION's `id` (graph://symbol/...) to get_callers / get_callees / get_subgraph(radius=1)";
 
 #[test]
 fn symbol_expansion_uses_bare_name_without_scope() {
@@ -221,10 +221,7 @@ fn prompt_assembly_emits_topology_hint_once_for_multiple_symbols() {
         "{flattened}"
     );
     assert_eq!(
-        count_occurrences(
-            &flattened,
-            "topology_available_via_mcp_for_above_symbols: get_callers / get_callees / get_subgraph (radius=1)"
-        ),
+        count_occurrences(&flattened, TOPOLOGY_HINT),
         1,
         "{flattened}"
     );
