@@ -741,6 +741,71 @@ fn graph_subgraph_def() -> ToolDefinition {
     }
 }
 
+fn code_callers_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_callers".into(),
+        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                }
+            },
+            "required": ["symbol"]
+        }),
+    }
+}
+
+fn code_callees_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_callees".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                }
+            },
+            "required": ["symbol"]
+        }),
+    }
+}
+
+fn code_subgraph_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_subgraph".into(),
+        description: "Get a bounded code-symbol subgraph from the current worktree graph artifact. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                },
+                "radius": {
+                    "type": "integer",
+                    "description": "Traversal radius (default: 1, max: 3; larger values are clamped)"
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "mermaid"],
+                    "description": "Output format (default: json)"
+                },
+                "edge_kinds": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional relation kind filter, e.g. [\"calls\", \"references\"]"
+                }
+            },
+            "required": ["symbol"]
+        }),
+    }
+}
+
 // ─── Issue creation + dependency tools ────────────────────────────
 
 fn create_issue_def() -> ToolDefinition {
@@ -1168,6 +1233,9 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         graph_insights_def(),
         graph_alerts_def(),
         graph_subgraph_def(),
+        code_callers_def(),
+        code_callees_def(),
+        code_subgraph_def(),
         submit_plan_def(),
         execute_epic_def(),
         get_plan_status_def(),
@@ -1354,6 +1422,9 @@ mod worker_tools_subset_tests {
             "graph_insights",
             "graph_alerts",
             "graph_subgraph",
+            "code_callers",
+            "code_callees",
+            "code_subgraph",
         ];
         for tool in &forbidden {
             assert!(
