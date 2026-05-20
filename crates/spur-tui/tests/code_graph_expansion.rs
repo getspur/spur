@@ -9,7 +9,7 @@ use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention};
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};
 
 const TOPOLOGY_HINT: &str =
-    "topology_available_via_mcp_for_above_symbols: pass each MENTION's `id` (graph://symbol/...) to code_callers / code_callees / code_subgraph(radius=1)";
+    "topology_available_via_mcp_for_above_symbols: pass each MENTION's qualified_name OR path:line to code_callers / code_callees / code_subgraph(radius=1); use code_resolve for ambiguous names";
 
 #[test]
 fn symbol_expansion_uses_bare_name_without_scope() {
