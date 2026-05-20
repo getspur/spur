@@ -64,7 +64,7 @@ pub fn write_with_dedup(
     } else {
         write_canonical_atomically(artifact, &canonical)
     };
-    let unlock_result = lock.unlock().context("failed to unlock graph cache lock");
+    let unlock_result = fs2::FileExt::unlock(&lock).context("failed to unlock graph cache lock");
     write_result?;
     unlock_result?;
 
