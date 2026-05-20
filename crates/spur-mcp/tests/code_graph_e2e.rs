@@ -1,15 +1,18 @@
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
-use spur_graph::{artifact_from_facts, build_facts, write_artifact, GraphIndexArtifact};
+use spur_graph::{
+    artifact_from_facts, build_facts, write_artifact, GraphIndexArtifact, GraphSymbolArtifact,
+};
 use spur_mcp::server::{community_feature_gate, DetachedContinuationCtx};
 use spur_mcp::McpCallbackServer;
 use tempfile::TempDir;
 
 const ROOT_SYMBOL: &str = "orchestrate_order";
+static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 struct CwdGuard {
     original: std::path::PathBuf,
@@ -68,13 +71,20 @@ fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
 }
 
 fn symbol_id(artifact: &GraphIndexArtifact, entity_name: &str) -> String {
+    symbol_by_entity(artifact, entity_name)
+        .stable_symbol_id
+        .clone()
+}
+
+fn symbol_by_entity<'a>(
+    artifact: &'a GraphIndexArtifact,
+    entity_name: &str,
+) -> &'a GraphSymbolArtifact {
     artifact
         .symbols
         .iter()
         .find(|symbol| symbol.entity_name == entity_name)
         .unwrap_or_else(|| panic!("symbol `{entity_name}` exists in artifact"))
-        .stable_symbol_id
-        .clone()
 }
 
 async fn call_tool(server: &McpCallbackServer, tool: &str, arguments: Value) -> Value {
@@ -99,8 +109,20 @@ fn entity_names(rows: &[Value]) -> BTreeSet<String> {
         .collect()
 }
 
+fn qualified_names(rows: &[Value]) -> BTreeSet<String> {
+    rows.iter()
+        .map(|row| {
+            row["qualified_name"]
+                .as_str()
+                .expect("row has qualified_name")
+                .to_string()
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -212,4 +234,127 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
         .as_str()
         .expect("unknown error message")
         .contains("symbol not-in-artifact not found in graph artifact"));
+}
+
+#[tokio::test]
+async fn code_resolve_returns_candidate_rows_without_traversal_payloads() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body =
+        tool_body(call_tool(&server, "code_resolve", json!({ "selector": ROOT_SYMBOL })).await);
+    let candidates = body["candidates"].as_array().expect("candidates");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0]["selector"],
+        format!("{}::{}", root.file_path, root.qualified_name)
+    );
+    assert_eq!(
+        candidates[0]["uri"],
+        format!("graph://symbol/{}", root.stable_symbol_id)
+    );
+    assert_eq!(candidates[0]["id"], root.stable_symbol_id);
+    assert_eq!(candidates[0]["qualified_name"], root.qualified_name);
+    assert_eq!(candidates[0]["file_path"], root.file_path);
+    assert_eq!(candidates[0]["line_range"], json!(root.line_range));
+    assert_eq!(candidates[0]["symbol_kind"], root.symbol_kind);
+    assert!(body.get("callers").is_none());
+    assert!(body.get("callees").is_none());
+    assert!(body.get("nodes").is_none());
+    assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+    assert_eq!(
+        body["graph_index_version"],
+        artifact.header.graph_index_version
+    );
+}
+
+#[tokio::test]
+async fn code_file_symbols_returns_candidate_rows_for_worktree_relative_file() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_file_symbols",
+            json!({ "file": "src/lib.rs" }),
+        )
+        .await,
+    );
+    let symbols = body["symbols"].as_array().expect("symbols");
+
+    assert_eq!(
+        qualified_names(symbols),
+        BTreeSet::from([
+            "audit_order".to_string(),
+            "charge_order".to_string(),
+            "launch_order".to_string(),
+            "orchestrate_order".to_string(),
+            "parse_order".to_string(),
+        ])
+    );
+    assert!(symbols.iter().all(|row| row["file_path"] == "src/lib.rs"));
+    assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+    assert_eq!(
+        body["graph_index_version"],
+        artifact.header.graph_index_version
+    );
+
+    let invalid = call_tool(
+        &server,
+        "code_file_symbols",
+        json!({ "file": "../src/lib.rs" }),
+    )
+    .await;
+    assert_eq!(invalid["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn code_symbol_info_returns_single_symbol_metadata() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_symbol_info",
+            json!({ "selector": ROOT_SYMBOL }),
+        )
+        .await,
+    );
+    let symbol = &body["symbol"];
+
+    assert_eq!(symbol["qualified_name"], root.qualified_name);
+    assert_eq!(symbol["file_path"], root.file_path);
+    assert_eq!(symbol["line_range"], json!(root.line_range));
+    assert_eq!(symbol["symbol_kind"], root.symbol_kind);
+    assert_eq!(symbol["enclosing_scope"], Value::Null);
+    assert_eq!(
+        symbol["uri"],
+        format!("graph://symbol/{}", root.stable_symbol_id)
+    );
+    assert_eq!(symbol["id"], root.stable_symbol_id);
+    assert!(body.get("callers").is_none());
+    assert!(body.get("callees").is_none());
+    assert!(body.get("nodes").is_none());
+    assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+    assert_eq!(
+        body["graph_index_version"],
+        artifact.header.graph_index_version
+    );
 }

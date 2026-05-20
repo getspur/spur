@@ -741,6 +741,60 @@ fn graph_subgraph_def() -> ToolDefinition {
     }
 }
 
+fn code_resolve_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_resolve".into(),
+        description: "Resolve a code selector against the current worktree graph artifact and return only candidate rows. Use before code_subgraph when a selector may be ambiguous.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                }
+            },
+            "required": ["selector"]
+        }),
+    }
+}
+
+fn code_file_symbols_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_file_symbols".into(),
+        description: "List code symbols declared in one worktree-relative file from the current graph artifact. Rejects absolute paths and paths containing '..'.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": "Worktree-relative file path, e.g. crates/spur-mcp/src/tools.rs"
+                }
+            },
+            "required": ["file"]
+        }),
+    }
+}
+
+fn code_symbol_info_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_symbol_info".into(),
+        description: "Resolve one code symbol and return metadata only: qualified_name, file_path, line_range, symbol_kind, enclosing_scope, uri, and id. Ambiguous selectors return candidate rows.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                }
+            }
+        }),
+    }
+}
+
 fn code_callers_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callers".into(),
@@ -1257,6 +1311,9 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         graph_insights_def(),
         graph_alerts_def(),
         graph_subgraph_def(),
+        code_resolve_def(),
+        code_file_symbols_def(),
+        code_symbol_info_def(),
         code_callers_def(),
         code_callees_def(),
         code_subgraph_def(),
@@ -1293,6 +1350,9 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         get_task_diff_def(),
         get_plan_status_def(),
         fetch_outcome_artifact_def(),
+        code_resolve_def(),
+        code_file_symbols_def(),
+        code_symbol_info_def(),
         code_callers_def(),
         code_callees_def(),
         code_subgraph_def(),
@@ -1434,6 +1494,9 @@ mod worker_tools_subset_tests {
         "get_task_diff",
         "get_plan_status",
         "fetch_outcome_artifact",
+        "code_resolve",
+        "code_file_symbols",
+        "code_symbol_info",
         "code_callers",
         "code_callees",
         "code_subgraph",
