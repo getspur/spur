@@ -92,9 +92,12 @@ fn resolve_by_id(artifact: &GraphIndexArtifact, symbol_id: &str) -> SelectorReso
 }
 
 fn is_bare_stable_symbol_id(selector: &str) -> bool {
-    // Resolver priority is URI, then sufficiently long bare stable IDs, then file/line
-    // and qualified-name selectors. Keep short hex-looking names available to symbols.
-    selector.len() >= 32
+    // Production stable IDs are always 16 lowercase hex chars: truncated SHA-256
+    // bytes interpreted as a u64 and formatted with `{:016x}`. Resolver priority
+    // is URI, then bare hex IDs (>=16), then file/line and qualified-name
+    // selectors, then entity_name. Rare hex-looking entity names can be shadowed
+    // by this tradeoff; the URI form remains the explicit stable-ID escape hatch.
+    selector.len() >= 16
         && selector
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
@@ -319,7 +322,7 @@ mod tests {
             ],
             symbols: vec![
                 symbol(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaa",
                     "src/cache.rs",
                     [10, 80],
                     "Cache",
@@ -328,7 +331,7 @@ mod tests {
                     None,
                 ),
                 symbol(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "bbbbbbbbbbbbbbbb",
                     "src/cache.rs",
                     [20, 70],
                     "Cache",
@@ -337,7 +340,7 @@ mod tests {
                     None,
                 ),
                 symbol(
-                    "cccccccccccccccccccccccccccccccc",
+                    "cccccccccccccccc",
                     "src/cache.rs",
                     [30, 40],
                     "run",
@@ -346,7 +349,7 @@ mod tests {
                     Some("impl Cache"),
                 ),
                 symbol(
-                    "dddddddddddddddddddddddddddddddd",
+                    "dddddddddddddddd",
                     "src/build.rs",
                     [1, 5],
                     "init",
@@ -355,7 +358,7 @@ mod tests {
                     None,
                 ),
                 symbol(
-                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "eeeeeeeeeeeeeeee",
                     "src/build.rs",
                     [10, 20],
                     "make",
@@ -364,7 +367,7 @@ mod tests {
                     Some("Builder"),
                 ),
                 symbol(
-                    "abababababababababababababababab",
+                    "abababababababab",
                     "src/build.rs",
                     [30, 34],
                     "render",
@@ -373,7 +376,7 @@ mod tests {
                     Some("View"),
                 ),
                 symbol(
-                    "10000000000000001000000000000000",
+                    "1000000000000000",
                     "a/file.rs",
                     [5, 6],
                     "Thing",
@@ -382,7 +385,7 @@ mod tests {
                     Some("duplicate"),
                 ),
                 symbol(
-                    "20000000000000002000000000000000",
+                    "2000000000000000",
                     "b/file.rs",
                     [3, 4],
                     "Thing",
@@ -391,7 +394,7 @@ mod tests {
                     Some("duplicate"),
                 ),
                 symbol(
-                    "30000000000000003000000000000000",
+                    "3000000000000000",
                     "c/file.rs",
                     [7, 8],
                     "Thing",
@@ -400,7 +403,7 @@ mod tests {
                     Some("duplicate"),
                 ),
                 symbol(
-                    "40000000000000004000000000000000",
+                    "4000000000000000",
                     "a/file.rs",
                     [25, 26],
                     "flush",
@@ -409,7 +412,7 @@ mod tests {
                     Some("Alpha"),
                 ),
                 symbol(
-                    "50000000000000005000000000000000",
+                    "5000000000000000",
                     "b/file.rs",
                     [30, 31],
                     "flush",
@@ -418,7 +421,7 @@ mod tests {
                     Some("Beta"),
                 ),
                 symbol(
-                    "60000000000000006000000000000000",
+                    "6000000000000000",
                     "c/file.rs",
                     [35, 36],
                     "flush",
@@ -427,7 +430,7 @@ mod tests {
                     Some("Gamma"),
                 ),
                 symbol(
-                    "70000000000000007000000000000000",
+                    "7000000000000000",
                     "Scope",
                     [1, 3],
                     "run",
@@ -436,7 +439,7 @@ mod tests {
                     None,
                 ),
                 symbol(
-                    "80000000000000008000000000000000",
+                    "8000000000000000",
                     "src/runner.rs",
                     [1, 3],
                     "run",
@@ -445,7 +448,7 @@ mod tests {
                     Some("Scope"),
                 ),
                 symbol(
-                    "90000000000000009000000000000000",
+                    "9000000000000000",
                     "docs/guide.md",
                     [11, 14],
                     "Deep Dive",
@@ -466,30 +469,35 @@ mod tests {
 
         assert_resolved(
             &artifact,
-            "graph://symbol/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "graph://symbol/aaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaa",
         );
-        assert_resolved(
-            &artifact,
-            "dddddddddddddddddddddddddddddddd",
-            "dddddddddddddddddddddddddddddddd",
-        );
+        assert_resolved(&artifact, "dddddddddddddddd", "dddddddddddddddd");
+    }
+
+    #[test]
+    fn production_length_bare_hex_selector_resolves_by_id() {
+        let mut artifact = artifact();
+        let expected_id = "abcdef0123456789";
+        artifact.symbols.push(symbol(
+            expected_id,
+            "src/build.rs",
+            [40, 41],
+            "bare_id_only_target",
+            "bare_id_only_target",
+            "function",
+            None,
+        ));
+
+        assert_resolved(&artifact, expected_id, expected_id);
     }
 
     #[test]
     fn path_line_resolves_enclosing_symbol_and_prefers_innermost_overlap() {
         let artifact = artifact();
 
-        assert_resolved(
-            &artifact,
-            "src/cache.rs:25",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        );
-        assert_resolved(
-            &artifact,
-            "src/cache.rs:35",
-            "cccccccccccccccccccccccccccccccc",
-        );
+        assert_resolved(&artifact, "src/cache.rs:25", "bbbbbbbbbbbbbbbb");
+        assert_resolved(&artifact, "src/cache.rs:35", "cccccccccccccccc");
     }
 
     #[test]
@@ -520,50 +528,38 @@ mod tests {
     fn file_qualified_name_resolves_direct_hit() {
         let artifact = artifact();
 
-        assert_resolved(
-            &artifact,
-            "src/cache.rs::Cache",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
+        assert_resolved(&artifact, "src/cache.rs::Cache", "aaaaaaaaaaaaaaaa");
     }
 
     #[test]
     fn file_chain_falls_back_to_enclosing_scope_and_entity_name() {
         let artifact = artifact();
 
-        assert_resolved(
-            &artifact,
-            "src/build.rs::View::render",
-            "abababababababababababababababab",
-        );
+        assert_resolved(&artifact, "src/build.rs::View::render", "abababababababab");
     }
 
     #[test]
     fn qualified_name_resolves_single_global_match() {
         let artifact = artifact();
 
-        assert_resolved(
-            &artifact,
-            "Builder::make",
-            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        );
+        assert_resolved(&artifact, "Builder::make", "eeeeeeeeeeeeeeee");
     }
 
     #[test]
-    fn sixteen_hex_selector_can_resolve_as_qualified_name() {
+    fn entity_name_resolves_single_global_match() {
         let mut artifact = artifact();
         let expected_id = "qualified-name-symbol-id";
         artifact.symbols.push(symbol(
             expected_id,
             "src/build.rs",
             [40, 41],
-            "abcdefabcdefabcd",
-            "abcdefabcdefabcd",
+            "my_func",
+            "my_mod::my_func",
             "function",
             None,
         ));
 
-        assert_resolved(&artifact, "abcdefabcdefabcd", expected_id);
+        assert_resolved(&artifact, "my_func", expected_id);
     }
 
     #[test]
@@ -578,8 +574,8 @@ mod tests {
                 candidates: vec![
                     CandidateRow {
                         selector: "a/file.rs::duplicate::Thing".to_string(),
-                        uri: "graph://symbol/10000000000000001000000000000000".to_string(),
-                        id: "10000000000000001000000000000000".to_string(),
+                        uri: "graph://symbol/1000000000000000".to_string(),
+                        id: "1000000000000000".to_string(),
                         qualified_name: "duplicate::Thing".to_string(),
                         file_path: "a/file.rs".to_string(),
                         line_range: [5, 6],
@@ -587,8 +583,8 @@ mod tests {
                     },
                     CandidateRow {
                         selector: "b/file.rs::duplicate::Thing".to_string(),
-                        uri: "graph://symbol/20000000000000002000000000000000".to_string(),
-                        id: "20000000000000002000000000000000".to_string(),
+                        uri: "graph://symbol/2000000000000000".to_string(),
+                        id: "2000000000000000".to_string(),
                         qualified_name: "duplicate::Thing".to_string(),
                         file_path: "b/file.rs".to_string(),
                         line_range: [3, 4],
@@ -596,8 +592,8 @@ mod tests {
                     },
                     CandidateRow {
                         selector: "c/file.rs::duplicate::Thing".to_string(),
-                        uri: "graph://symbol/30000000000000003000000000000000".to_string(),
-                        id: "30000000000000003000000000000000".to_string(),
+                        uri: "graph://symbol/3000000000000000".to_string(),
+                        id: "3000000000000000".to_string(),
                         qualified_name: "duplicate::Thing".to_string(),
                         file_path: "c/file.rs".to_string(),
                         line_range: [7, 8],
@@ -652,11 +648,7 @@ mod tests {
     fn file_escape_forces_file_interpretation_for_scope_like_path() {
         let artifact = artifact();
 
-        assert_resolved(
-            &artifact,
-            "file:Scope::run",
-            "70000000000000007000000000000000",
-        );
+        assert_resolved(&artifact, "file:Scope::run", "7000000000000000");
     }
 
     #[test]
@@ -669,7 +661,7 @@ mod tests {
         assert_resolved(
             &artifact,
             "docs/guide.md::Overview::Deep Dive",
-            "90000000000000009000000000000000",
+            "9000000000000000",
         );
     }
 
@@ -685,10 +677,6 @@ mod tests {
     fn selector_with_spaces_and_markdown_special_chars_resolves() {
         let artifact = artifact();
 
-        assert_resolved(
-            &artifact,
-            "impl Cache::run",
-            "cccccccccccccccccccccccccccccccc",
-        );
+        assert_resolved(&artifact, "impl Cache::run", "cccccccccccccccc");
     }
 }
