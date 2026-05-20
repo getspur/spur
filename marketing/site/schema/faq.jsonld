@@ -1,0 +1,62 @@
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "I just use Claude Code, why do I need SPUR?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "If you're a Claude Code Max user hitting rate limits, or you want to try Codex or Gemini for specific tasks, SPUR lets you switch brains mid-session without re-explaining context. If you're happy with one vendor, you don't need SPUR yet."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is SPUR another tool I have to configure?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "One spur init auto-detects installed agents and writes sensible defaults. The quickstart is two commands: install the signed binary via curl -sSL getspur.dev/install.sh | sh, then run spur init."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why a TUI in 2026?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Because that's where coding agents already live. SPUR sits next to your terminal, not in a browser tab. The optional Telegram bot covers mobile review with the same state machine as the TUI."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Will SPUR work with my custom agent?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Any ACP-speaking agent works out of the box. Capability negotiation handles slash commands per-agent, synthesized from each agent's InitializeResponse."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is SPUR open source?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. SPUR is a proprietary tool with a free Community tier (no key required, runs under our EULA). We may open-source select crates over time (telemetry, ACP client) but the orchestration core stays proprietary."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What stops me from running everything for free on the Community tier?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Community is genuinely generous: one brain, one worker, full review loop, full cost display, full lineage. Pro and Team gate parallelism, session resume, and team analytics — features that only matter once you've outgrown solo use."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is human review really required? I want full autonomy.",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, by design. SPUR is explicitly not a set-and-forget autonomous system. Human review is a first-class state machine with timeout, retry, and merge gating. If you want full autonomy, look elsewhere."
+      }
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "SPUR",
+  "alternateName": "SPUR — Terminal Orchestrator for AI Coding Agents",
+  "description": "Rust-native terminal orchestrator for AI coding agents. A brain agent reasons about a task and delegates work to one or more worker agents (Claude Code, Codex, Gemini, Kimi, OpenCode, or any ACP-speaking agent). Each worker runs in its own isolated git worktree. SPUR coordinates dispatch, review, retries, cost, and PM state in one place.",
+  "url": "https://getspur.dev",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "AI Coding Agent Orchestrator",
+  "operatingSystem": "macOS, Linux",
+  "downloadUrl": "https://getspur.dev/install.sh",
+  "installUrl": "https://getspur.dev/install.sh",
+  "softwareRequirements": "POSIX shell (macOS 12+ or Linux x86_64/arm64); git 2.30+",
+  "featureList": [
+    "Unified cost ledger across Claude, Codex, Gemini, OpenCode, and Kimi",
+    "Brain-swap across vendors mid-flow with rate-limit failover",
+    "Local-first durability via SQLite (beads) and NDJSON event log",
+    "Human review as a first-class state machine with timeout, retry, and merge gating",
+    "Session resume via event replay",
+    "Cherry-pick of approved subtask commits onto a staging branch in DAG order",
+    "Native ACP + MCP dual channel (no PTY scraping)",
+    "Telegram bot for mobile review",
+    "Per-agent capability negotiation via InitializeResponse",
+    "Reflexion-style retries with max 3 attempts"
+  ],
+  "offers": [
+    {
+      "@type": "Offer",
+      "name": "Community",
+      "category": "Free",
+      "price": "0",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/install.sh",
+      "availability": "https://schema.org/InStock"
+    },
+    {
+      "@type": "Offer",
+      "name": "Pro (monthly)",
+      "category": "Subscription",
+      "price": "19",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/pro",
+      "availability": "https://schema.org/InStock",
+      "priceSpecification": {
+        "@type": "UnitPriceSpecification",
+        "price": "19",
+        "priceCurrency": "USD",
+        "unitText": "seat/month",
+        "billingDuration": "P1M"
+      }
+    },
+    {
+      "@type": "Offer",
+      "name": "Pro (annual)",
+      "category": "Subscription",
+      "price": "182",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/pro",
+      "availability": "https://schema.org/InStock",
+      "priceSpecification": {
+        "@type": "UnitPriceSpecification",
+        "price": "182",
+        "priceCurrency": "USD",
+        "unitText": "seat/year",
+        "billingDuration": "P1Y"
+      }
+    },
+    {
+      "@type": "Offer",
+      "name": "Pro (lifetime)",
+      "category": "OneTime",
+      "price": "290",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/pro",
+      "availability": "https://schema.org/InStock"
+    },
+    {
+      "@type": "Offer",
+      "name": "Team (monthly)",
+      "category": "Subscription",
+      "price": "49",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/team",
+      "availability": "https://schema.org/InStock",
+      "eligibleQuantity": {
+        "@type": "QuantitativeValue",
+        "minValue": 3,
+        "unitText": "seats"
+      },
+      "priceSpecification": {
+        "@type": "UnitPriceSpecification",
+        "price": "49",
+        "priceCurrency": "USD",
+        "unitText": "seat/month",
+        "billingDuration": "P1M"
+      }
+    },
+    {
+      "@type": "Offer",
+      "name": "Team (annual)",
+      "category": "Subscription",
+      "price": "470",
+      "priceCurrency": "USD",
+      "url": "https://getspur.dev/team",
+      "availability": "https://schema.org/InStock",
+      "eligibleQuantity": {
+        "@type": "QuantitativeValue",
+        "minValue": 3,
+        "unitText": "seats"
+      },
+      "priceSpecification": {
+        "@type": "UnitPriceSpecification",
+        "price": "470",
+        "priceCurrency": "USD",
+        "unitText": "seat/year",
+        "billingDuration": "P1Y"
+      }
+    },
+    {
+      "@type": "Offer",
+      "name": "Enterprise",
+      "category": "Subscription",
+      "url": "https://getspur.dev/enterprise",
+      "availability": "https://schema.org/InStock",
+      "priceSpecification": {
+        "@type": "PriceSpecification",
+        "priceCurrency": "USD",
+        "description": "Contact sales (annual contracts, SSO, audit, custom policies)"
+      }
+    }
+  ]
+}
