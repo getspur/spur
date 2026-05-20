@@ -455,6 +455,67 @@ fn code_graph_registry_loads_fixture_files_and_symbols() {
 }
 
 #[test]
+fn code_graph_symbol_atom_text_qualifies_scoped_symbols_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph_path = write_graph_fixture(
+        tmp.path(),
+        serde_json::json!({
+            "header": { "graph_index_version": "test-version" },
+            "files": [
+                {
+                    "stable_file_id": "file-cache",
+                    "file_path": "src/cache.rs"
+                }
+            ],
+            "symbols": [
+                {
+                    "stable_symbol_id": "symbol-cache-run",
+                    "file_path": "src/cache.rs",
+                    "byte_range": [0, 20],
+                    "line_range": [120, 120],
+                    "entity_name": "run",
+                    "symbol_kind": "fn",
+                    "anchor_hash": "anchor-cache-run",
+                    "enclosing_scope": "Cache"
+                },
+                {
+                    "stable_symbol_id": "symbol-run",
+                    "file_path": "src/main.rs",
+                    "byte_range": [30, 50],
+                    "line_range": [8, 8],
+                    "entity_name": "run",
+                    "symbol_kind": "fn",
+                    "anchor_hash": "anchor-run",
+                    "enclosing_scope": null
+                }
+            ]
+        }),
+    );
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 50);
+
+    let scoped = hits
+        .iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-cache-run")
+        .expect("scoped run symbol row");
+    assert_eq!(scoped.atom_text.as_deref(), Some("@Cache::run"));
+
+    let scopeless = hits
+        .iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-run")
+        .expect("scopeless run symbol row");
+    assert_eq!(scopeless.atom_text, None);
+
+    let file = hits
+        .iter()
+        .find(|hit| hit.uri == "graph://file/file-cache")
+        .expect("code file row");
+    assert_eq!(file.atom_text, None);
+}
+
+#[test]
 fn code_graph_accept_and_submit_expands_fixture_symbol_end_to_end() {
     let tmp = tempfile::tempdir().unwrap();
     let graph_path = valid_config_fixture_copy(tmp.path());
@@ -574,7 +635,7 @@ fn accepted_code_atom_carries_only_minimum_range_metadata() {
     bar.insert_atom(atom_text, symbol.uri.clone(), symbol.display.clone());
     let serialized = serde_json::to_value(bar.protected_ranges()).expect("serialize ranges");
 
-    assert_eq!(bar.text(), "@GraphEngine");
+    assert_eq!(bar.text(), "@module engine::GraphEngine");
     assert_eq!(bar.protected_ranges().len(), 1);
     assert_eq!(bar.protected_ranges()[0].uri, symbol.uri);
     assert_eq!(bar.protected_ranges()[0].name, "GraphEngine");
@@ -582,7 +643,7 @@ fn accepted_code_atom_carries_only_minimum_range_metadata() {
         serialized,
         serde_json::json!([{
             "start": 0,
-            "end": 12,
+            "end": 27,
             "uri": "graph://symbol/symbol-engine-struct",
             "name": "GraphEngine"
         }])
