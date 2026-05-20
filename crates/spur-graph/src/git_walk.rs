@@ -7,7 +7,11 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::extract::languages::Language;
 use crate::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
-use crate::schema::{ChangeKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact, WalkStrategy};
+use crate::schema::{
+    ChangeKind, CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GraphIndexArtifact,
+    GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
+    TemporalEdgeArtifact, WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
@@ -154,6 +158,156 @@ pub fn plan_incremental_walk(
         merge_base,
         to: new_tip.to_string(),
     })
+}
+
+pub fn run_full_walk_into(
+    worktree: &Path,
+    config: &GitWalkConfig,
+) -> Result<(GraphIndexArtifact, CommitIndexArtifact)> {
+    ensure_not_shallow(worktree)?;
+    check_replace_refs(worktree, config.allow_replace_refs)?;
+
+    let first_ref = config
+        .target_refs
+        .first()
+        .context("GitWalkConfig.target_refs must contain at least one ref")?;
+    let target_refs: Vec<_> = config.target_refs.iter().map(String::as_str).collect();
+    let refs = snapshot_refs(worktree, &target_refs)?;
+    let tip = refs
+        .get(first_ref)
+        .with_context(|| format!("target ref `{first_ref}` was not present after ref snapshot"))?;
+    let commit_shas = walk_commits(worktree, tip, config.walk_strategy)?;
+
+    let mut graph = empty_graph_artifact();
+    let mut commits = CommitIndexArtifact {
+        schema_version: 1,
+        commits: Vec::with_capacity(commit_shas.len()),
+        refs: refs.clone(),
+        indexed_at: chrono::Utc::now().to_rfc3339(),
+        walk_strategy: config.walk_strategy,
+    };
+    let mut ctx = SymbolDiffCtx::new();
+
+    for sha in commit_shas {
+        let commit = read_commit(worktree, &sha)?;
+        let is_merge = commit.parents.len() > 1;
+        graph.commits.push(commit.clone());
+        commits.commits.push(commit);
+
+        // Merge commits do not introduce independent symbol deltas in this
+        // first-pass walker; their parent commits already carry those changes.
+        if is_merge {
+            continue;
+        }
+
+        for file_change in file_changes_for_commit(worktree, &sha)? {
+            graph
+                .temporal_edges
+                .push(file_change_to_temporal_edge(&sha, &file_change));
+        }
+
+        for symbol_change in symbol_changes_for_commit(worktree, &sha, &mut ctx)? {
+            graph.symbol_snapshots.push(symbol_change.snapshot.clone());
+            graph.temporal_edges.push(TemporalEdgeArtifact {
+                source: EdgeEndpoint::Commit { sha: sha.clone() },
+                target: EdgeEndpoint::Snapshot {
+                    key: symbol_change.snapshot.key,
+                },
+                relation: RelationKind::Touches,
+                change_kind: Some(symbol_change.change_kind),
+            });
+        }
+    }
+
+    graph.diagnostics.extend(ctx.diagnostics().iter().cloned());
+    Ok((graph, commits))
+}
+
+fn walk_commits(worktree: &Path, tip: &str, strategy: WalkStrategy) -> Result<Vec<String>> {
+    let mut args = vec!["rev-list", "--topo-order", "--reverse"];
+    if matches!(strategy, WalkStrategy::FirstParent) {
+        args.push("--first-parent");
+    }
+    args.push(tip);
+
+    let stdout = run_git(worktree, &args)?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn read_commit(worktree: &Path, sha: &str) -> Result<CommitArtifact> {
+    let stdout = run_git(
+        worktree,
+        &["show", "-s", "--format=%H%x00%P%x00%ct%x00%s", sha],
+    )?;
+    let mut fields = stdout.trim_end_matches('\n').splitn(4, '\0');
+    let actual_sha = fields
+        .next()
+        .filter(|field| !field.is_empty())
+        .with_context(|| format!("git show emitted malformed metadata for commit `{sha}`"))?;
+    let parents = fields
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let author_time = fields
+        .next()
+        .with_context(|| format!("git show omitted author time for commit `{sha}`"))?
+        .parse::<i64>()
+        .with_context(|| format!("git show emitted invalid author time for commit `{sha}`"))?;
+    let summary = fields.next().unwrap_or_default().to_string();
+
+    Ok(CommitArtifact {
+        sha: actual_sha.to_string(),
+        parents,
+        author_time,
+        summary,
+    })
+}
+
+fn file_change_to_temporal_edge(commit_sha: &str, change: &FileChange) -> TemporalEdgeArtifact {
+    TemporalEdgeArtifact {
+        source: EdgeEndpoint::Commit {
+            sha: commit_sha.to_string(),
+        },
+        target: EdgeEndpoint::File {
+            path: change.path.clone(),
+        },
+        relation: RelationKind::Touches,
+        change_kind: Some(match &change.kind {
+            FileChangeKind::Added => ChangeKind::Added,
+            FileChangeKind::Modified | FileChangeKind::Gitlink { .. } => ChangeKind::Modified,
+            FileChangeKind::Deleted => ChangeKind::Deleted,
+            FileChangeKind::Renamed { from } => {
+                ChangeKind::RenamedFrom(RenamePrev::File(from.clone()))
+            }
+        }),
+    }
+}
+
+fn empty_graph_artifact() -> GraphIndexArtifact {
+    GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            content_hash_blake3: None,
+        },
+        manifest_version: String::new(),
+        graph_content_hash: String::new(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        symbols: Vec::new(),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
