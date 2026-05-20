@@ -139,7 +139,9 @@ fn write_temporal_fixture_artifact(worktree: &Path) {
         .expect("write temporal graph artifact");
 
     let commits = CommitIndexArtifact {
-        schema_version: 1,
+        schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+            .parse()
+            .expect("temporal graph index version is numeric"),
         commits: graph.commits.clone(),
         refs: [("HEAD".to_string(), NEW_SHA.to_string())].into(),
         indexed_at: "2026-05-20T12:00:00Z".to_string(),
@@ -150,7 +152,9 @@ fn write_temporal_fixture_artifact(worktree: &Path) {
     spur_graph::store::commit_index::save_pointer(
         worktree,
         &spur_graph::store::commit_index::CommitIndexPointer {
-            schema_version: 1,
+            schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+                .parse()
+                .expect("temporal graph index version is numeric"),
             artifact_relative_path: ".spur/commit-index.json".to_string(),
             indexed_at: commits.indexed_at.clone(),
             refs: commits.refs.clone(),
