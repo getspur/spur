@@ -1,10 +1,41 @@
 # Code as Memory — Phase 1: Code ↔ Git Commit Graph
 
 **Date:** 2026-05-20
-**Status:** Revised after triple review (codex / claude-code / gemini)
+**Status:** Revised after two rounds of triple review (codex / claude-code / gemini)
 **Crate:** `crates/spur-graph`
 
-## Revision Notes (2026-05-20, post-review)
+## Revision Notes (2026-05-20, round 2)
+
+Both round-2 reviewers (codex, claude-code) gave APPROVE-WITH-CHANGES on
+the post-round-1 spec. Round 2 changes:
+
+- **Persisted-artifact surface named concretely.** `GraphIndexArtifact`
+  gains `commits`, `symbol_snapshots`, `temporal_edges` collections;
+  `TemporalEdgeArtifact` uses tagged `EdgeEndpoint` (not string keys),
+  since the existing `GraphEdgeArtifact` cannot express `(sid, sha)`.
+  Separate `CommitIndexArtifact` for the commit DAG.
+- **MCP consumer namespace corrected.** Phase 1 modifies `code_subgraph`
+  / `code_callers` / `code_callees` and adds `code_symbol_history` —
+  not the unrelated `graph_*` PM/beads namespace.
+- **Per-parent diff is the source of truth.** No "first relevant parent"
+  shortcut. Per-parent change records carry `parent_sha`; commit-level
+  union resolves the `ChangeKind`.
+- **Lazy-snapshot resolution semantics specified.** Snapshots exist only
+  for commits-that-touched-the-symbol; resolution finds the latest
+  reachable snapshot ≤ target.
+- **`LatestSnapshot` edge dropped** (derived at query time; avoids
+  unspecified invalidation behavior).
+- **`BytesExtractor` reuse pattern** required for the historical walk
+  (one per language, reused across blobs).
+- **Per-language Jaccard threshold** (calibrated from corpus, not a
+  single 0.7); top-2 delta < 0.05 triggers `Added`+`Deleted`.
+- **`RenamedFrom` splits vs merges**: splits permitted, merges
+  forbidden with `merge_collision` diagnostic.
+- **Partial-clone promisor retry** before fail-closed.
+- **Bench reports snapshot growth ratio**; >1.5× per 10× commits is
+  blocking.
+
+## Revision Notes (2026-05-20, round 1)
 
 Substantive changes from v1, driven by reviewer findings:
 
@@ -89,10 +120,58 @@ traversal instead of an LLM-driven archaeology pass.
 ## Data Model
 
 Changes to `crates/spur-graph/src/schema.rs` are **not purely additive**:
-existing `NodeKind`, `RelationKind`, and `GraphEdge` are extended. Current-
-state graph artifacts written by today's binaries remain readable; the
-schema version is bumped so older binaries fail closed on temporal-aware
-artifacts (no silent downgrades).
+existing `NodeKind`, `RelationKind`, `GraphEdge`, `GraphEdgeArtifact`,
+and `GraphIndexArtifact` are extended, and a new `CommitIndexArtifact`
+is introduced. Current-state graph artifacts written by today's binaries
+remain readable; the schema version is bumped so older binaries fail
+closed on temporal-aware artifacts (no silent downgrades).
+
+### Persisted-artifact surface (concrete)
+
+`GraphIndexArtifact` gains:
+- `commits: Vec<CommitArtifact>`
+- `symbol_snapshots: Vec<SymbolSnapshotArtifact>`
+- `temporal_edges: Vec<TemporalEdgeArtifact>`
+
+`TemporalEdgeArtifact` uses **tagged endpoints**, not string keys:
+
+```rust
+pub enum EdgeEndpoint {
+    File { path: PathBuf },
+    Symbol { stable_symbol_id: StableSymbolId },
+    Snapshot { key: SnapshotKey },
+    Commit { sha: GitSha },
+}
+
+pub struct TemporalEdgeArtifact {
+    pub source: EdgeEndpoint,
+    pub target: EdgeEndpoint,
+    pub relation: RelationKind,
+    pub change_kind: Option<ChangeKind>,
+}
+```
+
+The existing `GraphEdgeArtifact` (whose endpoints are
+`source_stable_symbol_id: String` / `target_stable_symbol_id: String`)
+cannot express `(sid, sha)` pairs, which is why `TemporalEdgeArtifact`
+is a sibling type rather than an extension of `GraphEdgeArtifact`.
+
+A separate `CommitIndexArtifact` carries the commit DAG and the pointer
+state:
+
+```rust
+pub struct CommitIndexArtifact {
+    pub schema_version: u32,
+    pub commits: Vec<CommitArtifact>,           // ordered topologically
+    pub refs: HashMap<String, GitSha>,          // ref_name -> tip
+    pub indexed_at: String,                     // RFC3339
+    pub walk_strategy: WalkStrategy,
+}
+```
+
+`.spur/commit-index.pointer.json` is the pointer file (small, names the
+current artifact); the artifact itself sits alongside the current-state
+graph artifact. The pointer is not itself the temporal artifact.
 
 ### Naming
 
@@ -126,10 +205,16 @@ pub enum RelationKind {
 }
 ```
 
-### `GraphEdge` extension
+### `GraphEdge` / `GraphEdgeArtifact` extension
 
-Add an optional `change_kind: Option<ChangeKind>` field. Required when
-`relation == Touches`, absent otherwise.
+Add an optional `change_kind: Option<ChangeKind>` field to **both** the
+in-memory `GraphEdge` and the persisted `GraphEdgeArtifact`. Required
+when `relation == Touches`, absent otherwise.
+
+For temporal edges whose endpoints require richer addressing
+(`(stable_symbol_id, commit_sha)` pairs, commit SHAs, file paths), use
+`TemporalEdgeArtifact` (defined above) instead of `GraphEdgeArtifact` —
+the existing string-keyed endpoint fields cannot express snapshot keys.
 
 ```rust
 pub enum ChangeKind {
@@ -192,8 +277,13 @@ indexed tip.
 - `SymbolSnapshot --renamed_from--> SymbolSnapshot` — when the
   `change_kind` is `RenamedFrom`, this explicit edge makes traversal a
   single hop instead of having to decode `change_kind`.
-- `Symbol --latest_snapshot--> SymbolSnapshot` — connects the current-
-  state symbol to its most recent snapshot at the indexed tip.
+
+**No materialized `LatestSnapshot` edge.** The "latest snapshot for a
+symbol" is derived at query time by walking the symbol's snapshots in
+the indexed commit DAG and selecting the topologically-latest one
+reachable from the indexed tip. Materializing the edge would require
+rewriting it on every incremental tip update, and the spec does not
+own the invalidation behavior; derive instead.
 
 A single commit can produce many `touches` edges. A single snapshot has
 at most one inbound `RenamedFrom` edge (asserted at ingest).
@@ -213,19 +303,41 @@ A new module sibling to the existing `git.rs`.
 
 The existing `extract::*` tree-sitter extractors operate on filesystem
 paths. The git walk needs to parse blobs in memory without writing
-temporary files. Introduce:
+temporary files, and must reuse the tree-sitter `Parser` and compiled
+queries across blobs to avoid recompilation cost.
 
 ```rust
+/// Reusable extraction context for one language. The historical walk
+/// MUST construct one BytesExtractor per language and reuse it across
+/// all blobs; constructing a new one per blob recompiles queries and
+/// dominates ingest cost.
+pub struct BytesExtractor {
+    parser: tree_sitter::Parser,
+    queries: CompiledQueries,
+}
+
+impl BytesExtractor {
+    pub fn for_language(language: Language) -> Result<Self, ExtractError>;
+    pub fn extract(
+        &mut self,
+        logical_path: &Path,        // for symbol IDs / scope; never used as I/O
+        bytes: &[u8],
+    ) -> Result<Vec<ExtractedSymbol>, ExtractError>;
+}
+
+/// Convenience: builds + uses a one-shot BytesExtractor. Filesystem
+/// extractors call this after reading bytes; current-state behavior is
+/// unchanged.
 pub fn extract_symbols_from_bytes(
     language: Language,
-    logical_path: &Path,    // for symbol IDs / scope; not for I/O
+    logical_path: &Path,
     bytes: &[u8],
 ) -> Result<Vec<ExtractedSymbol>, ExtractError>;
 ```
 
-The filesystem extractors are refactored to call this helper internally.
-Behavior is identical for current-state extraction; the new entry point
-serves the historical walk.
+The filesystem extractors are refactored to drive `BytesExtractor`
+after reading bytes; current-state extraction behavior is unchanged.
+`FactBuilder` id allocation is unchanged for current-state runs.
 
 ### Per-commit algorithm
 
@@ -240,12 +352,21 @@ For commit `C` with parent set `parents(C)`:
    merged status. (For root commits, diff against the empty tree.)
 2. **Symbol-level diff.** For each touched source file (added, modified,
    or renamed) on at least one parent edge:
-   - Fetch the blob at `C` and the blob at the first relevant parent via
-     `git cat-file blob`.
-   - Parse each through `extract_symbols_from_bytes`.
-   - Emit a `SymbolSnapshot` for every symbol on the `C` side. (This is
-     where snapshots come from — one per touched symbol per commit.)
-   - Match snapshots across sides:
+   - For each parent `P` whose diff against `C` flagged this file as
+     changed: fetch the blob at `C` and at `P` via `git cat-file blob`.
+     Do not pick an arbitrary "first relevant parent" — per-parent diffs
+     are the source of truth for merge-commit symbol changes.
+   - Parse each blob through a reused `BytesExtractor`
+     (one per language, shared across the whole walk).
+   - Emit a `SymbolSnapshot` for every symbol on the `C` side, once per
+     symbol (deduplicated across parents). This is where snapshots come
+     from — one per `(symbol, commit-that-touched-it)`.
+   - Match snapshots across sides per parent. The resulting per-parent
+     change records carry `parent_sha` so the per-commit summary can
+     reflect parent-specific changes; the commit's emitted `touches`
+     edges represent the union (a symbol changed against at least one
+     parent is `Modified` for the commit; `Added` only when added vs.
+     every parent; `Deleted` only when deleted vs. every parent).
      - **Exact identity match** — same `stable_symbol_id` → `Modified`
        (or skip if `anchor_hash` is identical, meaning the symbol is
        byte-equivalent).
@@ -261,11 +382,14 @@ For commit `C` with parent set `parents(C)`:
    - **Tier 2 — token-bag Jaccard.** Extract leaf identifiers + literals
      from each candidate's tree-sitter subtree (excluding the symbol's
      own name). Compute Jaccard similarity. Match the highest pair above
-     a threshold (default `0.7`, configurable; report in bench).
-     Confidence: `Medium`.
-   - **Tier 3 — none.** If multiple candidates score near the threshold,
-     emit `Added` + `Deleted` and record an `ambiguous_rename` diagnostic
-     on the commit node. Never emit a guessed `RenamedFrom` with low
+     the per-language threshold (calibrated from the rename corpus
+     baseline; languages without a calibrated baseline disable Tier 2
+     and fall back to `Added` + `Deleted`). Confidence: `Medium`.
+   - **Tier 3 — ambiguity.** If the top-2 Jaccard scores for a single
+     `Added` candidate differ by less than `0.05` (configurable), or
+     the top score is below the language threshold, emit `Added` +
+     `Deleted` and record an `ambiguous_rename` diagnostic on the
+     commit node. Never emit a guessed `RenamedFrom` with low
      confidence.
 
    When a `RenamedFrom` is emitted, also create the
@@ -315,7 +439,7 @@ On rerun:
 |---|---|
 | Stored SHA not an ancestor of new tip (force-push) | Find merge-base of stored and new tip; invalidate all commit nodes between merge-base and stored tip; re-walk from merge-base to new tip. Log loudly. |
 | Shallow repository (`git rev-parse --is-shallow-repository` = true) | Fail closed with a clear error. Symbol history would be silently truncated otherwise. |
-| Partial clone / missing blob during walk (`git cat-file blob` returns NOENT) | Fail closed for the affected commit; do not emit partial symbol history. Surface a single actionable error naming the missing oid. |
+| Partial clone / missing blob during walk (`git cat-file blob` returns NOENT) | (1) If a promisor remote is configured, attempt one on-demand fetch (`git cat-file --batch-check` + lazy fetch) and retry. (2) If still missing, fail closed for the affected commit; do not emit partial symbol history. Surface a single actionable error naming the missing oid. |
 | Target ref does not exist (no `main`, HEAD detached) | Fail closed with actionable error naming the expected ref. No silent fallback to HEAD. |
 | Ref moves between snapshot and walk completion | Pin tip OIDs at the `for-each-ref` snapshot. Treat post-snapshot ref movements as fodder for the next incremental run. |
 | Ref rename (e.g. `master` → `main`) | Detected when stored ref disappears but a new ref points at a descendant of the stored tip. Treat as continuation; record the rename in the pointer file. |
@@ -352,9 +476,19 @@ pub enum ResolutionFailure {
     IndexCorrupt(String),
 }
 
-/// Walk forward through `RenamedFrom` edges from (snapshot at anchor) to
-/// the equivalent snapshot at `target`. If `target` is the indexed tip,
-/// the result is the live current-state symbol via `LatestSnapshot`.
+/// Resolve a symbol's effective identity as of `target`.
+///
+/// Because snapshots are emitted only for commits that touched the
+/// symbol, `target` usually has no exact snapshot. The resolver:
+///   1. Finds the latest snapshot for `symbol` (or any predecessor in
+///      its rename chain) at-or-before `target` in the indexed DAG.
+///   2. If `target` is the indexed tip, maps that snapshot to the live
+///      current-state symbol (derived, not via a materialized edge).
+///   3. Walks forward through `RenamedFrom` edges from the anchor
+///      snapshot to the snapshot at-or-before `target`.
+///
+/// Returns `Resolution::Deleted{last_seen}` if the rename chain
+/// terminates in a `Deleted` change before `target`.
 pub fn resolve_symbol_at(
     code: &GraphIndexArtifact,
     commits: &CommitIndexArtifact,
@@ -381,6 +515,11 @@ directly. We do not add named functions for these.
 ### Invariants
 
 - A `SymbolSnapshot` has at most one inbound `RenamedFrom` edge.
+  (Rename **splits** — one old → many new — are permitted, modeled as
+  multiple outbound `RenamedFrom` edges from one predecessor. Rename
+  **merges** — many old → one new — are forbidden; if detected they
+  downgrade to `Added` on the winning candidate and `Deleted` on the
+  others, with a `merge_collision` diagnostic on the commit node.)
   Violation at ingest = bug in the extractor; panic in debug, drop one
   edge + log + record diagnostic in release.
 - `RenamedFrom` chains form a forest (set of trees), not a general graph.
@@ -404,22 +543,33 @@ directly. We do not add named functions for these.
 
 ## Phase 1 Standalone Consumer
 
-Phase 1 does not merge until the following caller compiles and is
+Phase 1 does not merge until the following callers compile and are
 exercised by an end-to-end test:
 
-**Graph MCP traversal — temporal mode.** The existing graph MCP tool
-family (`graph_subgraph`, `graph_plan`, `graph_triage`, etc. in
-`spur-mcp`) gains an optional `as_of: GitSha` parameter and a new
-`symbol_history` accessor. Both call directly into the resolution API.
+**Code graph MCP — temporal mode.** The existing code-graph MCP tools
+in `crates/spur-mcp/src/worker_server.rs` (`code_subgraph`,
+`code_callers`, `code_callees`) gain an optional `as_of: GitSha`
+parameter. When set, the tool resolves the requested symbol via
+`resolve_symbol_at` to its snapshot at-or-before `as_of`, then walks
+edges using the subgraph as it existed at that commit.
 
-This pins Phase 1's value: an agent using the MCP graph tools can ask
-"show me the subgraph around `submit_plan` as it existed at commit X" or
+**New tool: `code_symbol_history`.** A dedicated MCP tool returning
+the full causal trace of a symbol — every commit that touched it,
+the `ChangeKind`, and the snapshot key at that commit — across rename
+chains.
+
+The PM/beads graph tools (`graph_subgraph`, `graph_plan`,
+`graph_triage`) are an unrelated namespace and are NOT modified in
+Phase 1.
+
+This pins Phase 1's value: an agent using the code-graph MCP tools can
+ask "show me callers of `submit_plan` as it existed at commit X" or
 "give me the history of `process_chunk`" and receive a structured
 response built from materialized edges, not LLM archaeology.
 
 The MCP wiring itself is implementation work tracked in Phase 1's plan;
-the spec only requires that the new API has at least one shipped caller
-before merge.
+the spec requires that the new API has at least one shipped caller
+(temporal-mode `code_subgraph` OR `code_symbol_history`) before merge.
 
 ## Testing
 
@@ -464,10 +614,16 @@ Extend `benches/incremental.rs`:
 - 1k-commit synthetic repo, mostly linear.
 - 20k-commit synthetic repo, ≥30% merge commits (exercises full-DAG
   walk).
-- Report: full-walk wall time, peak RSS, artifact size, 100-commit
-  incremental wall time.
+- Report: full-walk wall time, peak RSS, total artifact size (graph +
+  commit index), snapshot count, 100-commit incremental wall time.
 - Numbers logged for tracking; >2x regression against a recorded
   baseline is blocking.
+- **Snapshot-growth budget.** At 10× commits, total snapshot count
+  should grow ≤ 1.5×. Faster growth signals super-linear edge density
+  and triggers a follow-up to shard the commit-index artifact before
+  Phase 1 ships. (One per touched-symbol-per-commit *should* scale
+  near-linearly with churn; the budget guards against pathological
+  rename-chain explosions.)
 
 ## Open Questions
 
