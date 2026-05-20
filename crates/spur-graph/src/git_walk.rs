@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::extract::languages::Language;
 use crate::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
-use crate::schema::{ChangeKind, SnapshotKey, SymbolSnapshotArtifact, WalkStrategy};
+use crate::schema::{ChangeKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact, WalkStrategy};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
@@ -131,13 +131,19 @@ pub fn file_changes_for_commit(worktree: &Path, sha: &str) -> Result<Vec<FileCha
 
 pub struct SymbolDiffCtx {
     extractors: HashMap<Language, BytesExtractor>,
+    diagnostics: Vec<String>,
 }
 
 impl SymbolDiffCtx {
     pub fn new() -> Self {
         Self {
             extractors: HashMap::new(),
+            diagnostics: Vec::new(),
         }
+    }
+
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
     }
 
     fn for_language(&mut self, language: Language) -> Result<&mut BytesExtractor> {
@@ -148,6 +154,10 @@ impl SymbolDiffCtx {
             .extractors
             .get_mut(&language)
             .expect("extractor was just inserted"))
+    }
+
+    fn record_diagnostics(&mut self, diagnostics: Vec<String>) {
+        self.diagnostics.extend(diagnostics);
     }
 }
 
@@ -177,49 +187,77 @@ pub fn symbol_changes_for_commit(
         };
 
         let blobs = blobs_for_change(worktree, sha, &file_change)?;
-        let extractor = ctx.for_language(language)?;
-        let left_symbols = extract_symbols(extractor, blobs.left_path.as_deref(), &blobs.left);
-        let right_symbols = extract_symbols(extractor, Some(&file_change.path), &blobs.right);
-
-        let mut left_by_identity: HashMap<(String, Option<String>), &ExtractedSymbol> =
-            left_symbols
-                .iter()
-                .map(|symbol| {
-                    (
-                        (symbol.entity_name.clone(), symbol.enclosing_scope.clone()),
-                        symbol,
-                    )
-                })
-                .collect();
-
-        for right in &right_symbols {
-            let identity = (right.entity_name.clone(), right.enclosing_scope.clone());
-            let change_kind = match left_by_identity.remove(&identity) {
-                Some(left) if left.anchor_hash == right.anchor_hash => continue,
-                Some(_) => ChangeKind::Modified,
-                None => ChangeKind::Added,
-            };
-
-            push_symbol_change(
-                &mut out,
-                &mut by_snapshot_key,
-                SymbolChange {
-                    snapshot: snapshot_from(sha, &file_change.path, right),
-                    change_kind,
-                },
-            );
-        }
-
         let deleted_path = blobs.left_path.as_deref().unwrap_or(&file_change.path);
-        for (_, left) in left_by_identity {
-            push_symbol_change(
-                &mut out,
-                &mut by_snapshot_key,
-                SymbolChange {
+        let (left_symbols, right_symbols) = {
+            let extractor = ctx.for_language(language)?;
+            (
+                extract_symbols(extractor, blobs.left_path.as_deref(), &blobs.left),
+                extract_symbols(extractor, Some(&file_change.path), &blobs.right),
+            )
+        };
+
+        let mut direct_changes = Vec::new();
+        let mut deleted_candidates = Vec::new();
+        let mut added_candidates = Vec::new();
+
+        if matches!(file_change.kind, FileChangeKind::Renamed { .. }) {
+            deleted_candidates.extend(left_symbols.iter().map(|left| SymbolChange {
+                snapshot: snapshot_from(sha, deleted_path, left),
+                change_kind: ChangeKind::Deleted,
+            }));
+            added_candidates.extend(right_symbols.iter().map(|right| SymbolChange {
+                snapshot: snapshot_from(sha, &file_change.path, right),
+                change_kind: ChangeKind::Added,
+            }));
+        } else {
+            let mut left_by_identity: HashMap<(String, String, Option<String>), &ExtractedSymbol> =
+                left_symbols
+                    .iter()
+                    .map(|symbol| {
+                        (
+                            (
+                                symbol.entity_name.clone(),
+                                symbol.symbol_kind.clone(),
+                                symbol.enclosing_scope.clone(),
+                            ),
+                            symbol,
+                        )
+                    })
+                    .collect();
+
+            for right in &right_symbols {
+                let identity = (
+                    right.entity_name.clone(),
+                    right.symbol_kind.clone(),
+                    right.enclosing_scope.clone(),
+                );
+                match left_by_identity.remove(&identity) {
+                    Some(left) if left.anchor_hash == right.anchor_hash => continue,
+                    Some(_) => direct_changes.push(SymbolChange {
+                        snapshot: snapshot_from(sha, &file_change.path, right),
+                        change_kind: ChangeKind::Modified,
+                    }),
+                    None => added_candidates.push(SymbolChange {
+                        snapshot: snapshot_from(sha, &file_change.path, right),
+                        change_kind: ChangeKind::Added,
+                    }),
+                }
+            }
+
+            for (_, left) in left_by_identity {
+                deleted_candidates.push(SymbolChange {
                     snapshot: snapshot_from(sha, deleted_path, left),
                     change_kind: ChangeKind::Deleted,
-                },
-            );
+                });
+            }
+        }
+
+        let (rename_changes, diagnostics) =
+            detect_renames(deleted_candidates, added_candidates, &file_change, language);
+        ctx.record_diagnostics(diagnostics);
+
+        for change in direct_changes.into_iter().chain(rename_changes) {
+            push_symbol_change(&mut out, &mut by_snapshot_key, change);
         }
     }
 
@@ -246,6 +284,242 @@ fn merge_change_kind(existing: &ChangeKind, incoming: ChangeKind) -> ChangeKind 
         return incoming;
     }
     ChangeKind::Modified
+}
+
+#[derive(Debug, Clone)]
+struct RenameMatch {
+    from: SymbolChange,
+    to: SymbolChange,
+    score: f64,
+}
+
+fn detect_renames(
+    deleted_candidates: Vec<SymbolChange>,
+    added_candidates: Vec<SymbolChange>,
+    file_change: &FileChange,
+    language: Language,
+) -> (Vec<SymbolChange>, Vec<String>) {
+    if deleted_candidates.is_empty() || added_candidates.is_empty() {
+        let mut changes = deleted_candidates;
+        changes.extend(added_candidates);
+        return (changes, Vec::new());
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut matches = Vec::new();
+    let mut tier2_deleted = deleted_candidates;
+    let mut tier2_added = added_candidates;
+
+    if matches!(file_change.kind, FileChangeKind::Renamed { .. }) {
+        let (tier1_matches, remaining_deleted, remaining_added) =
+            tier1_file_rename_matches(tier2_deleted, tier2_added);
+        matches.extend(tier1_matches);
+        tier2_deleted = remaining_deleted;
+        tier2_added = remaining_added;
+    }
+
+    let tier2_matches = tier2_jaccard_matches(
+        &tier2_deleted,
+        &tier2_added,
+        file_change,
+        language,
+        &mut diagnostics,
+    );
+    matches.extend(tier2_matches);
+
+    let matched_from: HashSet<_> = matches
+        .iter()
+        .map(|rename_match| rename_match.from.snapshot.key.clone())
+        .collect();
+    let matched_to: HashSet<_> = matches
+        .iter()
+        .map(|rename_match| rename_match.to.snapshot.key.clone())
+        .collect();
+
+    let mut changes = Vec::new();
+    for rename_match in matches {
+        let mut to = rename_match.to;
+        to.change_kind =
+            ChangeKind::RenamedFrom(RenamePrev::Symbol(rename_match.from.snapshot.key.clone()));
+        changes.push(to);
+    }
+
+    changes.extend(
+        tier2_deleted
+            .into_iter()
+            .filter(|change| !matched_from.contains(&change.snapshot.key)),
+    );
+    changes.extend(
+        tier2_added
+            .into_iter()
+            .filter(|change| !matched_to.contains(&change.snapshot.key)),
+    );
+
+    (changes, diagnostics)
+}
+
+fn tier1_file_rename_matches(
+    deleted_candidates: Vec<SymbolChange>,
+    added_candidates: Vec<SymbolChange>,
+) -> (Vec<RenameMatch>, Vec<SymbolChange>, Vec<SymbolChange>) {
+    let mut matches = Vec::new();
+    let mut used_deleted = HashSet::new();
+    let mut used_added = HashSet::new();
+
+    for (added_index, added) in added_candidates.iter().enumerate() {
+        if let Some((deleted_index, deleted)) =
+            deleted_candidates
+                .iter()
+                .enumerate()
+                .find(|(deleted_index, deleted)| {
+                    !used_deleted.contains(deleted_index)
+                        && deleted.snapshot.entity_name == added.snapshot.entity_name
+                        && deleted.snapshot.symbol_kind == added.snapshot.symbol_kind
+                        && deleted.snapshot.enclosing_scope == added.snapshot.enclosing_scope
+                })
+        {
+            used_deleted.insert(deleted_index);
+            used_added.insert(added_index);
+            matches.push(RenameMatch {
+                from: deleted.clone(),
+                to: added.clone(),
+                score: 1.0,
+            });
+        }
+    }
+
+    let remaining_deleted = deleted_candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, change)| (!used_deleted.contains(&index)).then_some(change))
+        .collect();
+    let remaining_added = added_candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, change)| (!used_added.contains(&index)).then_some(change))
+        .collect();
+
+    (matches, remaining_deleted, remaining_added)
+}
+
+fn tier2_jaccard_matches(
+    deleted_candidates: &[SymbolChange],
+    added_candidates: &[SymbolChange],
+    file_change: &FileChange,
+    language: Language,
+    diagnostics: &mut Vec<String>,
+) -> Vec<RenameMatch> {
+    let Some(threshold) = jaccard_threshold_for(language) else {
+        return Vec::new();
+    };
+
+    let mut matches = Vec::new();
+    for added in added_candidates {
+        let mut scored: Vec<_> = deleted_candidates
+            .iter()
+            .map(|deleted| (deleted, jaccard_tokens(&added.snapshot, &deleted.snapshot)))
+            .collect();
+        scored.sort_by(|(_, left), (_, right)| {
+            right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let Some((best_deleted, best_score)) = scored.first().copied() else {
+            continue;
+        };
+        if best_score < threshold {
+            diagnostics.push(ambiguous_rename_diagnostic(file_change, added));
+            continue;
+        }
+        if let Some((_, second_score)) = scored.get(1).copied() {
+            if second_score >= threshold {
+                diagnostics.push(format!(
+                    "merge_collision: file={} candidate={}",
+                    file_change.path.display(),
+                    added.snapshot.entity_name
+                ));
+                continue;
+            }
+            if best_score - second_score < 0.05 {
+                diagnostics.push(ambiguous_rename_diagnostic(file_change, added));
+                continue;
+            }
+        }
+
+        matches.push(RenameMatch {
+            from: best_deleted.clone(),
+            to: added.clone(),
+            score: best_score,
+        });
+    }
+
+    reject_ambiguous_splits(matches, file_change, diagnostics)
+}
+
+fn reject_ambiguous_splits(
+    matches: Vec<RenameMatch>,
+    file_change: &FileChange,
+    diagnostics: &mut Vec<String>,
+) -> Vec<RenameMatch> {
+    let mut by_deleted: HashMap<SnapshotKey, Vec<usize>> = HashMap::new();
+    for (index, rename_match) in matches.iter().enumerate() {
+        by_deleted
+            .entry(rename_match.from.snapshot.key.clone())
+            .or_default()
+            .push(index);
+    }
+
+    let mut rejected = HashSet::new();
+    for indexes in by_deleted.values() {
+        if indexes.len() < 2 {
+            continue;
+        }
+        let mut scores: Vec<_> = indexes
+            .iter()
+            .map(|index| (*index, matches[*index].score))
+            .collect();
+        scores.sort_by(|(_, left), (_, right)| {
+            right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if scores[0].1 - scores[1].1 < 0.05 {
+            for (index, _) in scores {
+                rejected.insert(index);
+                diagnostics.push(ambiguous_rename_diagnostic(file_change, &matches[index].to));
+            }
+        }
+    }
+
+    matches
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, rename_match)| (!rejected.contains(&index)).then_some(rename_match))
+        .collect()
+}
+
+fn ambiguous_rename_diagnostic(file_change: &FileChange, change: &SymbolChange) -> String {
+    format!(
+        "ambiguous_rename: file={} candidate={}",
+        file_change.path.display(),
+        change.snapshot.entity_name
+    )
+}
+
+fn jaccard_tokens(a: &SymbolSnapshotArtifact, b: &SymbolSnapshotArtifact) -> f64 {
+    let a_tokens: HashSet<_> = a.tokens.iter().collect();
+    let b_tokens: HashSet<_> = b.tokens.iter().collect();
+    let union = a_tokens.union(&b_tokens).count();
+    if union == 0 {
+        return 0.0;
+    }
+    let intersection = a_tokens.intersection(&b_tokens).count();
+    intersection as f64 / union as f64
+}
+
+fn jaccard_threshold_for(language: Language) -> Option<f64> {
+    match language {
+        Language::Rust | Language::TypeScript => Some(0.7),
+        Language::Python => Some(0.65),
+        _ => None,
+    }
 }
 
 struct ChangeBlobs {
@@ -312,6 +586,7 @@ fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolS
         byte_range: symbol.byte_range,
         line_range: symbol.line_range,
         anchor_hash: symbol.anchor_hash.clone(),
+        tokens: symbol.tokens.clone(),
     }
 }
 
@@ -578,5 +853,129 @@ mod tests {
         assert!(matches!(by_name.get("a"), Some(ChangeKind::Modified)));
         assert!(matches!(by_name.get("c"), Some(ChangeKind::Added)));
         assert!(matches!(by_name.get("b"), Some(ChangeKind::Deleted)));
+    }
+
+    #[test]
+    fn tier1_file_rename_inheritance_matches_same_name_kind() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("old.rs"), b"pub fn helper() { 1; 2; 3; }\n").unwrap();
+        commit(dir.path(), "c1");
+        std::fs::rename(dir.path().join("old.rs"), dir.path().join("new.rs")).unwrap();
+        let sha = commit(dir.path(), "rename");
+
+        let mut ctx = SymbolDiffCtx::new();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let helper = changes
+            .iter()
+            .find(|c| c.snapshot.entity_name == "helper")
+            .unwrap();
+
+        assert!(matches!(&helper.change_kind, ChangeKind::RenamedFrom(_)));
+    }
+
+    #[test]
+    fn tier2_jaccard_matches_renamed_body_similar() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn old_name(a: u32, b: u32) -> u32 { a + b * 2 }\n",
+        )
+        .unwrap();
+        commit(dir.path(), "c1");
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn new_name(a: u32, b: u32) -> u32 { a + b * 2 }\n",
+        )
+        .unwrap();
+        let sha = commit(dir.path(), "c2");
+
+        let mut ctx = SymbolDiffCtx::new();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let renamed = changes
+            .iter()
+            .find(|c| c.snapshot.entity_name == "new_name")
+            .unwrap();
+
+        assert!(matches!(&renamed.change_kind, ChangeKind::RenamedFrom(_)));
+    }
+
+    #[test]
+    fn tier3_ambiguous_falls_back_to_added_deleted() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn old() { 1 }\n").unwrap();
+        commit(dir.path(), "c1");
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn a() { 1 }\npub fn b() { 1 }\n",
+        )
+        .unwrap();
+        let sha = commit(dir.path(), "c2");
+
+        let mut ctx = SymbolDiffCtx::new();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let kinds: Vec<_> = changes.iter().map(|c| &c.change_kind).collect();
+
+        assert!(kinds.iter().any(|k| matches!(k, ChangeKind::Deleted)));
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| matches!(k, ChangeKind::Added))
+                .count(),
+            2
+        );
+        assert!(!kinds
+            .iter()
+            .any(|k| matches!(k, ChangeKind::RenamedFrom(_))));
+        assert!(ctx
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("ambiguous_rename")));
+    }
+
+    #[test]
+    fn merge_collision_emits_added_and_keeps_deleted() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn old_a(x: u32) -> u32 { x + 1 }\npub fn old_b(x: u32) -> u32 { x + 1 }\n",
+        )
+        .unwrap();
+        commit(dir.path(), "c1");
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn merged_target(x: u32) -> u32 { x + 1 }\n",
+        )
+        .unwrap();
+        let sha = commit(dir.path(), "c2");
+
+        let mut ctx = SymbolDiffCtx::new();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let added: Vec<_> = changes
+            .iter()
+            .filter(|c| matches!(c.change_kind, ChangeKind::Added))
+            .collect();
+        let deleted: Vec<_> = changes
+            .iter()
+            .filter(|c| matches!(c.change_kind, ChangeKind::Deleted))
+            .collect();
+        let renamed: Vec<_> = changes
+            .iter()
+            .filter(|c| matches!(c.change_kind, ChangeKind::RenamedFrom(_)))
+            .collect();
+
+        assert_eq!(added.len(), 1, "merged_target should be Added");
+        assert_eq!(deleted.len(), 2, "both olds should remain Deleted");
+        assert!(
+            renamed.is_empty(),
+            "no RenamedFrom may be emitted in merge collision"
+        );
+        assert!(ctx
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("merge_collision")));
     }
 }

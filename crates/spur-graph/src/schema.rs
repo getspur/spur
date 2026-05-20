@@ -317,6 +317,8 @@ pub struct SymbolSnapshotArtifact {
     pub byte_range: SourceRange,
     pub line_range: SourceRange,
     pub anchor_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,6 +524,7 @@ mod temporal_artifact_tests {
             byte_range: [0, 42],
             line_range: [1, 5],
             anchor_hash: "deadbeef".to_string(),
+            tokens: vec!["foo".to_string()],
         };
         let j = serde_json::to_string(&s).unwrap();
         let back: SymbolSnapshotArtifact = serde_json::from_str(&j).unwrap();
