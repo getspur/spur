@@ -492,6 +492,22 @@ struct FetchOutcomeArtifactParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSymbolParams {
+    symbol: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSubgraphParams {
+    symbol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    radius: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edge_kinds: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct ReportSignalParams {
     task_id: String,
     #[schemars(with = "ReportSignalSchema")]
@@ -763,6 +779,72 @@ impl WorkerToolHandler {
                     args,
                 )
                 .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_callers",
+        description = "List symbols that call the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
+    )]
+    async fn code_callers_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_callers",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_callers(&args)
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_callees",
+        description = "List symbols called by the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
+    )]
+    async fn code_callees_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_callees",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_callees(&args)
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_subgraph",
+        description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSubgraphParams>()
+    )]
+    async fn code_subgraph_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_subgraph",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_subgraph(&args)
             },
         )
         .await

@@ -1253,7 +1253,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
 
 /// Curated worker-facing tool subset exposed by `WorkerMcpServer`.
 ///
-/// Workers receive only read-and-emit tools: 5 read tools that surface
+/// Workers receive only read-and-emit tools: read tools that surface
 /// project state plus 1 write tool (`update_issue`) and 2 fire-and-forget
 /// signal tools (`report_signal`, `report_progress`). Brain-only orchestration
 /// tools (delegate_*, submit_plan, merge_plan, execute_epic, review_task,
@@ -1269,6 +1269,9 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         get_task_diff_def(),
         get_plan_status_def(),
         fetch_outcome_artifact_def(),
+        code_callers_def(),
+        code_callees_def(),
+        code_subgraph_def(),
         update_issue_def(),
         report_signal_def(),
         report_progress_def(),
@@ -1378,6 +1381,9 @@ mod worker_tools_subset_tests {
         "get_task_diff",
         "get_plan_status",
         "fetch_outcome_artifact",
+        "code_callers",
+        "code_callees",
+        "code_subgraph",
         "update_issue",
         "report_signal",
         "report_progress",
@@ -1422,9 +1428,6 @@ mod worker_tools_subset_tests {
             "graph_insights",
             "graph_alerts",
             "graph_subgraph",
-            "code_callers",
-            "code_callees",
-            "code_subgraph",
         ];
         for tool in &forbidden {
             assert!(
