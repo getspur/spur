@@ -23,7 +23,7 @@ use crate::action::Action;
 use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
 use crate::components::query_source::RetrievalAccept;
 use crate::mentions::code_graph::expansion::{expand, ExpandedMention, PER_PROMPT_CAP_BYTES};
-use spur_graph::CodeMentionPayload;
+use spur_graph::{CodeMentionKind, CodeMentionPayload};
 
 use super::entry::Dispatch;
 use super::registry::CommandRegistry;
@@ -228,7 +228,15 @@ pub fn assemble_blocks(
     assemble_blocks_inner(text, ranges, images, None)
 }
 
-type CodeExpansionLookup<'a> = Option<&'a mut dyn FnMut(&str) -> Option<String>>;
+const CODE_SYMBOL_TOPOLOGY_HINT: &str =
+    "\ntopology_available_via_mcp_for_above_symbols: get_callers / get_callees / get_subgraph (radius=1)";
+
+struct CodeExpansion {
+    text: String,
+    is_symbol: bool,
+}
+
+type CodeExpansionLookup<'a> = Option<&'a mut dyn FnMut(&str) -> Option<CodeExpansion>>;
 
 pub fn assemble_blocks_with_code_mentions<'a>(
     text: &str,
@@ -238,8 +246,14 @@ pub fn assemble_blocks_with_code_mentions<'a>(
     mut lookup_code_payload: impl FnMut(&str) -> Option<&'a CodeMentionPayload>,
 ) -> Vec<ContentBlock> {
     let mut lookup = |uri: &str| {
-        lookup_code_payload(uri).map(|payload| match expand(payload, worktree_root) {
-            ExpandedMention::Body { text } | ExpandedMention::Warning { text, .. } => text,
+        lookup_code_payload(uri).map(|payload| {
+            let text = match expand(payload, worktree_root) {
+                ExpandedMention::Body { text } | ExpandedMention::Warning { text, .. } => text,
+            };
+            CodeExpansion {
+                text,
+                is_symbol: matches!(payload.authoritative.kind, CodeMentionKind::Symbol),
+            }
         })
     };
     assemble_blocks_inner(text, ranges, images, Some(&mut lookup))
@@ -254,6 +268,7 @@ fn assemble_blocks_inner(
     let mut out: Vec<ContentBlock> = Vec::new();
     let mut cursor = 0usize;
     let mut code_expansion_bytes = 0usize;
+    let mut expanded_symbol_mention = false;
     for r in ranges {
         if r.start > cursor {
             out.push(ContentBlock::Text(TextContent::new(
@@ -281,14 +296,15 @@ fn assemble_blocks_inner(
                         .as_deref_mut()
                         .and_then(|lookup| lookup(&r.uri))
                     {
-                        if code_expansion_bytes + expansion.len() > PER_PROMPT_CAP_BYTES {
+                        if code_expansion_bytes + expansion.text.len() > PER_PROMPT_CAP_BYTES {
                             out.push(ContentBlock::Text(TextContent::new(format!(
                                 "MENTION_OMITTED {} (per-prompt cap)\n",
                                 r.uri
                             ))));
                         } else {
-                            code_expansion_bytes += expansion.len();
-                            out.push(ContentBlock::Text(TextContent::new(expansion)));
+                            code_expansion_bytes += expansion.text.len();
+                            expanded_symbol_mention |= expansion.is_symbol;
+                            out.push(ContentBlock::Text(TextContent::new(expansion.text)));
                         }
                     } else {
                         out.push(ContentBlock::Text(TextContent::new(format!(
@@ -313,6 +329,11 @@ fn assemble_blocks_inner(
     }
     if out.is_empty() && ranges.is_empty() {
         out.push(ContentBlock::Text(TextContent::new(text.to_string())));
+    }
+    if expanded_symbol_mention {
+        out.push(ContentBlock::Text(TextContent::new(
+            CODE_SYMBOL_TOPOLOGY_HINT.to_string(),
+        )));
     }
     out
 }

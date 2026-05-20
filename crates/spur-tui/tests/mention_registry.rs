@@ -493,12 +493,17 @@ fn code_graph_accept_and_submit_expands_fixture_symbol_end_to_end() {
         })
         .collect::<String>();
 
-    assert!(prompt.contains("MENTION Config"), "{prompt}");
+    assert!(prompt.contains("MENTION module config::Config"), "{prompt}");
     assert!(prompt.contains("context_header:"), "{prompt}");
     assert!(!prompt.contains("source:\n"), "{prompt}");
-    assert!(prompt.contains("topology_available_via_mcp:"), "{prompt}");
     assert!(
-        prompt.contains("get_callers(\"graph://symbol/symbol-config-struct\")"),
+        prompt.contains(
+            "topology_available_via_mcp_for_above_symbols: get_callers / get_callees / get_subgraph (radius=1)"
+        ),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("id:      graph://symbol/symbol-config-struct"),
         "{prompt}"
     );
 }
