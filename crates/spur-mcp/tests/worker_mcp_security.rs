@@ -248,6 +248,14 @@ async fn post_with_session_id(
     request.send().await.expect("session request must complete")
 }
 
+fn json_rpc_payload_from_sse(body: &str, id: i64) -> Value {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|payload| payload.get("id").and_then(Value::as_i64) == Some(id))
+        .unwrap_or_else(|| panic!("SSE body did not include JSON-RPC id {id}: {body}"))
+}
+
 async fn wait_for_read_aggregate(
     pm: &PmService,
     issue_id: &str,
@@ -704,13 +712,14 @@ async fn post_initialize_request_without_token_succeeds_with_valid_session_id() 
         "valid server-issued session id should authorize post-initialize requests without token"
     );
     let body = response.text().await.expect("tools/list body");
+    let payload = json_rpc_payload_from_sse(&body, 2);
     assert!(
-        body.contains("\"result\""),
-        "expected successful JSON-RPC result payload, got: {body}"
+        payload.get("result").is_some(),
+        "expected successful JSON-RPC result payload, got: {payload}"
     );
     assert!(
-        !body.contains("\"error\""),
-        "valid session-id request must not return unauthorized error: {body}"
+        payload.get("error").is_none(),
+        "valid session-id request must not return unauthorized error: {payload}"
     );
 
     worker.shutdown(Duration::from_secs(5)).await;

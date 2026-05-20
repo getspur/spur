@@ -17,6 +17,18 @@ const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
 const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
 
 impl McpCallbackServer {
+    pub(crate) async fn handle_code_resolve(&self, id: Value, args: Value) -> JsonRpcResponse {
+        code_graph_response(id, code_resolve(&args))
+    }
+
+    pub(crate) async fn handle_code_file_symbols(&self, id: Value, args: Value) -> JsonRpcResponse {
+        code_graph_response(id, code_file_symbols(&args))
+    }
+
+    pub(crate) async fn handle_code_symbol_info(&self, id: Value, args: Value) -> JsonRpcResponse {
+        code_graph_response(id, code_symbol_info(&args))
+    }
+
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
         code_graph_response(id, code_callers(&args))
     }
@@ -28,6 +40,62 @@ impl McpCallbackServer {
     pub(crate) async fn handle_code_subgraph(&self, id: Value, args: Value) -> JsonRpcResponse {
         code_graph_response(id, code_subgraph(&args))
     }
+}
+
+pub(crate) fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
+    let artifact = load_graph_artifact_for_request()?;
+    let selector = selector_arg(args)?;
+    let candidates = resolve_candidate_rows(&artifact, selector)?
+        .into_iter()
+        .map(candidate_row)
+        .collect::<Vec<_>>();
+
+    Ok(with_graph_metadata(
+        &artifact,
+        json!({ "candidates": candidates }),
+    ))
+}
+
+pub(crate) fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
+    let artifact = load_graph_artifact_for_request()?;
+    let file = file_arg(args)?;
+    validate_file_path_arg(file)?;
+    if !artifact.files.iter().any(|entry| entry.file_path == file) {
+        return Err(McpHandlerError::NotFound(format!(
+            "file `{file}` not found in graph artifact"
+        )));
+    }
+
+    let symbols = candidate_rows_for_symbols(
+        artifact
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.file_path == file),
+    )
+    .into_iter()
+    .map(candidate_row)
+    .collect::<Vec<_>>();
+
+    Ok(with_graph_metadata(
+        &artifact,
+        json!({ "symbols": symbols }),
+    ))
+}
+
+pub(crate) fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
+    let artifact = load_graph_artifact_for_request()?;
+    let symbol_id = match resolve_code_selector(args, &artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(&artifact, candidates));
+        }
+    };
+    let symbol = symbol_by_id(&artifact, &symbol_id)?;
+
+    Ok(with_graph_metadata(
+        &artifact,
+        json!({ "symbol": symbol_info_row(symbol) }),
+    ))
 }
 
 pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
@@ -227,6 +295,30 @@ fn selected_code_selector(args: &Value) -> Result<&str, McpHandlerError> {
     }
 }
 
+fn selector_arg(args: &Value) -> Result<&str, McpHandlerError> {
+    string_arg(args, "selector")?
+        .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'selector'".into()))
+}
+
+fn file_arg(args: &Value) -> Result<&str, McpHandlerError> {
+    string_arg(args, "file")?
+        .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'file'".into()))
+}
+
+fn validate_file_path_arg(file: &str) -> Result<(), McpHandlerError> {
+    if Path::new(file).is_absolute() {
+        return Err(McpHandlerError::InvalidParams(
+            "field 'file' must be a worktree-relative path".into(),
+        ));
+    }
+    if file.contains("..") {
+        return Err(McpHandlerError::InvalidParams(
+            "field 'file' must not contain '..'".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn string_arg<'a>(args: &'a Value, field: &str) -> Result<Option<&'a str>, McpHandlerError> {
     let Some(value) = args.get(field) else {
         return Ok(None);
@@ -286,6 +378,68 @@ fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<RelationKind>>, McpHandle
         .map(Some)
 }
 
+fn resolve_candidate_rows(
+    artifact: &GraphIndexArtifact,
+    selector: &str,
+) -> Result<Vec<CandidateRow>, McpHandlerError> {
+    match resolve_selector(artifact, selector) {
+        SelectorResolution::Resolved(resolved) => {
+            let symbol = symbol_by_id(artifact, &resolved.stable_symbol_id)?;
+            Ok(vec![candidate_row_for_symbol(symbol)])
+        }
+        SelectorResolution::Ambiguous { candidates } => Ok(candidates),
+        SelectorResolution::NotFound => Err(McpHandlerError::NotFound(format!(
+            "symbol {} not found in graph artifact",
+            missing_symbol_label(selector)
+        ))),
+    }
+}
+
+fn symbol_by_id<'a>(
+    artifact: &'a GraphIndexArtifact,
+    symbol_id: &str,
+) -> Result<&'a GraphSymbolArtifact, McpHandlerError> {
+    artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.stable_symbol_id == symbol_id)
+        .ok_or_else(|| {
+            McpHandlerError::Internal(format!(
+                "resolved symbol id `{symbol_id}` missing from graph artifact"
+            ))
+        })
+}
+
+fn candidate_rows_for_symbols<'a>(
+    symbols: impl IntoIterator<Item = &'a GraphSymbolArtifact>,
+) -> Vec<CandidateRow> {
+    let mut rows = symbols
+        .into_iter()
+        .map(candidate_row_for_symbol)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.file_path
+            .cmp(&right.file_path)
+            .then_with(|| left.line_range[0].cmp(&right.line_range[0]))
+            .then_with(|| left.line_range[1].cmp(&right.line_range[1]))
+            .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    rows
+}
+
+fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
+    CandidateRow {
+        selector: format!("{}::{}", symbol.file_path, symbol.qualified_name),
+        uri: symbol_uri(&symbol.stable_symbol_id),
+        id: symbol.stable_symbol_id.clone(),
+        qualified_name: symbol.qualified_name.clone(),
+        file_path: symbol.file_path.clone(),
+        line_range: symbol.line_range,
+        symbol_kind: symbol.symbol_kind.clone(),
+    }
+}
+
 fn ambiguous_response(artifact: &GraphIndexArtifact, candidates: Vec<CandidateRow>) -> Value {
     with_graph_metadata(
         artifact,
@@ -319,6 +473,18 @@ fn candidate_row(candidate: CandidateRow) -> Value {
         "file_path": candidate.file_path,
         "line_range": candidate.line_range,
         "symbol_kind": candidate.symbol_kind,
+    })
+}
+
+fn symbol_info_row(symbol: &GraphSymbolArtifact) -> Value {
+    json!({
+        "qualified_name": symbol.qualified_name,
+        "file_path": symbol.file_path,
+        "line_range": symbol.line_range,
+        "symbol_kind": symbol.symbol_kind,
+        "enclosing_scope": symbol.enclosing_scope,
+        "uri": symbol_uri(&symbol.stable_symbol_id),
+        "id": symbol.stable_symbol_id,
     })
 }
 
