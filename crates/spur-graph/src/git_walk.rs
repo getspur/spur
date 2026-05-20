@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -89,11 +90,84 @@ pub fn check_replace_refs(worktree: &Path, allow: bool) -> Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncrementalPlan {
+    ColdWalk {
+        from_root: bool,
+    },
+    FastForward {
+        from: String,
+        to: String,
+    },
+    ForcePushRecover {
+        merge_base: Option<String>,
+        to: String,
+    },
+}
+
+pub fn plan_incremental_walk(
+    worktree: &Path,
+    stored_tip: Option<&str>,
+    new_tip: &str,
+) -> Result<IncrementalPlan> {
+    let Some(stored) = stored_tip else {
+        return Ok(IncrementalPlan::ColdWalk { from_root: true });
+    };
+
+    let ancestor = Command::new("git")
+        .current_dir(worktree)
+        .args(["merge-base", "--is-ancestor", stored, new_tip])
+        .status()
+        .with_context(|| {
+            format!(
+                "spawn git merge-base --is-ancestor in `{}`",
+                worktree.display()
+            )
+        })?;
+
+    if ancestor.success() {
+        return Ok(IncrementalPlan::FastForward {
+            from: stored.to_string(),
+            to: new_tip.to_string(),
+        });
+    }
+
+    tracing::warn!(
+        stored_tip = stored,
+        new_tip,
+        status = ?ancestor.code(),
+        "spur-graph: stored commit is not an ancestor of new tip; force-push recovery will re-walk the diverged range"
+    );
+    let merge_base = run_git(worktree, &["merge-base", stored, new_tip])
+        .map(|stdout| stdout.trim().to_string())
+        .inspect_err(|error| {
+            tracing::warn!(
+                stored_tip = stored,
+                new_tip,
+                error = %error,
+                "spur-graph: force-push recovery could not find a merge base; falling back to cold recovery for this ref"
+            );
+        })
+        .ok()
+        .filter(|sha| !sha.is_empty());
+
+    Ok(IncrementalPlan::ForcePushRecover {
+        merge_base,
+        to: new_tip.to_string(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileChangeKind {
     Added,
     Modified,
     Deleted,
-    Renamed { from: PathBuf },
+    Renamed {
+        from: PathBuf,
+    },
+    Gitlink {
+        old_oid: Option<String>,
+        new_oid: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,16 +188,18 @@ pub fn file_changes_for_commit(worktree: &Path, sha: &str) -> Result<Vec<FileCha
         let stdout = run_git_bytes(
             worktree,
             &[
+                "-c",
+                "core.quotepath=false",
                 "diff-tree",
                 "-r",
                 "-z",
-                "--name-status",
+                "--raw",
                 "--find-renames",
                 &parent,
                 sha,
             ],
         )?;
-        parse_name_status(&stdout, Some(parent), &mut changes)?;
+        parse_raw_diff(&stdout, Some(parent), &mut changes)?;
     }
 
     Ok(changes)
@@ -182,11 +258,35 @@ pub fn symbol_changes_for_commit(
     let mut by_snapshot_key = HashMap::new();
 
     for file_change in file_changes_for_commit(worktree, sha)? {
+        if matches!(file_change.kind, FileChangeKind::Gitlink { .. }) {
+            let diagnostic = format!(
+                "gitlink: file={} commit={} skipped submodule recursion; file-level touch retained",
+                file_change.path.display(),
+                sha
+            );
+            tracing::warn!(diagnostic = %diagnostic, "spur-graph: gitlink encountered during symbol walk");
+            ctx.record_diagnostics(vec![diagnostic]);
+            continue;
+        }
+
         let Some(language) = Language::from_path(&file_change.path) else {
             continue;
         };
 
         let blobs = blobs_for_change(worktree, sha, &file_change)?;
+        if blobs.left.as_deref().is_some_and(is_binary)
+            || blobs.right.as_deref().is_some_and(is_binary)
+        {
+            let diagnostic = format!(
+                "binary_blob: file={} commit={} skipped symbol diff; file-level touch retained",
+                file_change.path.display(),
+                sha
+            );
+            tracing::warn!(diagnostic = %diagnostic, "spur-graph: binary blob encountered during symbol walk");
+            ctx.record_diagnostics(vec![diagnostic]);
+            continue;
+        }
+
         let deleted_path = blobs.left_path.as_deref().unwrap_or(&file_change.path);
         let (left_symbols, right_symbols) = {
             let extractor = ctx.for_language(language)?;
@@ -534,10 +634,11 @@ fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Res
         FileChangeKind::Added | FileChangeKind::Modified | FileChangeKind::Renamed { .. } => {
             Some(cat_file_blob(worktree, sha, &file_change.path)?)
         }
+        FileChangeKind::Gitlink { .. } => None,
     };
 
     let left_path = match &file_change.kind {
-        FileChangeKind::Added => None,
+        FileChangeKind::Added | FileChangeKind::Gitlink { .. } => None,
         FileChangeKind::Modified | FileChangeKind::Deleted => Some(file_change.path.clone()),
         FileChangeKind::Renamed { from } => Some(from.clone()),
     };
@@ -554,8 +655,126 @@ fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Res
 }
 
 fn cat_file_blob(worktree: &Path, sha: &str, path: &Path) -> Result<Vec<u8>> {
-    let spec = format!("{sha}:{}", path.to_string_lossy());
-    run_git_bytes(worktree, &["cat-file", "blob", &spec])
+    let spec = blob_spec(sha, path);
+    let spec_display = blob_spec_display(sha, path);
+    let missing_blob_name = || {
+        blob_oid_for_path(worktree, sha, path)
+            .map(|oid| format!("{oid} (`{spec_display}`)"))
+            .unwrap_or_else(|_| spec_display.clone())
+    };
+    let attempt = || -> Result<Vec<u8>> {
+        let output = Command::new("git")
+            .current_dir(worktree)
+            .args(["cat-file", "blob"])
+            .arg(&spec)
+            .output()
+            .with_context(|| {
+                format!(
+                    "spawn git cat-file blob `{spec_display}` in `{}`",
+                    worktree.display()
+                )
+            })?;
+
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(anyhow!(
+                "git cat-file blob `{spec_display}` failed in `{}`: {}",
+                worktree.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+
+    match attempt() {
+        Ok(bytes) => Ok(bytes),
+        Err(first_error) if has_promisor_remote(worktree) => {
+            let missing = missing_blob_name();
+            tracing::warn!(
+                blob = %missing,
+                error = %first_error,
+                "spur-graph: missing blob during git walk; retrying once to trigger promisor fetch"
+            );
+            attempt().with_context(|| {
+                format!(
+                    "missing blob `{missing}` not recovered by promisor remote; fail-closed for this commit"
+                )
+            })
+        }
+        Err(error) => {
+            let missing = missing_blob_name();
+            Err(error.context(format!(
+                "missing blob `{missing}`; partial clone? fail-closed"
+            )))
+        }
+    }
+}
+
+fn blob_oid_for_path(worktree: &Path, sha: &str, path: &Path) -> Result<String> {
+    let spec = blob_spec(sha, path);
+    let spec_display = blob_spec_display(sha, path);
+    let output = Command::new("git")
+        .current_dir(worktree)
+        .arg("rev-parse")
+        .arg(&spec)
+        .output()
+        .with_context(|| {
+            format!(
+                "spawn git rev-parse `{spec_display}` in `{}`",
+                worktree.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        bail!(
+            "git rev-parse `{spec_display}` failed in `{}`: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let oid = String::from_utf8(output.stdout)
+        .with_context(|| format!("git rev-parse `{spec_display}` emitted non-UTF-8 stdout"))?
+        .trim()
+        .to_string();
+    if oid.is_empty() {
+        bail!("git rev-parse `{spec_display}` returned an empty oid");
+    }
+
+    Ok(oid)
+}
+
+#[cfg(unix)]
+fn blob_spec(sha: &str, path: &Path) -> OsString {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let mut bytes = Vec::with_capacity(sha.len() + 1 + path.as_os_str().as_bytes().len());
+    bytes.extend_from_slice(sha.as_bytes());
+    bytes.push(b':');
+    bytes.extend_from_slice(path.as_os_str().as_bytes());
+    OsString::from_vec(bytes)
+}
+
+#[cfg(not(unix))]
+fn blob_spec(sha: &str, path: &Path) -> OsString {
+    OsString::from(format!("{sha}:{}", path.to_string_lossy()))
+}
+
+fn blob_spec_display(sha: &str, path: &Path) -> String {
+    format!("{sha}:{}", path.to_string_lossy())
+}
+
+fn has_promisor_remote(worktree: &Path) -> bool {
+    run_git(
+        worktree,
+        &["config", "--get-regexp", r"^remote\..*\.promisor$"],
+    )
+    .map(|stdout| !stdout.trim().is_empty())
+    .unwrap_or(false)
+}
+
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|byte| *byte == 0)
 }
 
 fn extract_symbols(
@@ -598,60 +817,126 @@ fn commit_parents(worktree: &Path, sha: &str) -> Result<Vec<String>> {
 }
 
 fn root_commit_changes(worktree: &Path, sha: &str) -> Result<Vec<FileChange>> {
-    let stdout = run_git_bytes(worktree, &["ls-tree", "-r", "-z", "--name-only", sha])?;
+    let stdout = run_git_bytes(
+        worktree,
+        &["-c", "core.quotepath=false", "ls-tree", "-r", "-z", sha],
+    )?;
 
-    Ok(nul_fields(&stdout)
-        .map(|path| FileChange {
-            path: pathbuf_from_git_bytes(path),
-            kind: FileChangeKind::Added,
-            parent_sha: None,
-        })
-        .collect())
+    parse_ls_tree_root(&stdout)
 }
 
-fn parse_name_status(
+fn parse_ls_tree_root(stdout: &[u8]) -> Result<Vec<FileChange>> {
+    nul_fields(stdout)
+        .map(|entry| {
+            let (header, path) = split_once(entry, b'\t').with_context(|| {
+                format!(
+                    "git ls-tree emitted entry without path: `{}`",
+                    String::from_utf8_lossy(entry)
+                )
+            })?;
+            let header = std::str::from_utf8(header)
+                .with_context(|| format!("git ls-tree emitted non-UTF-8 metadata: {header:?}"))?;
+            let mut fields = header.split_whitespace();
+            let mode = fields
+                .next()
+                .with_context(|| format!("git ls-tree emitted malformed entry `{header}`"))?;
+            let object_type = fields
+                .next()
+                .with_context(|| format!("git ls-tree emitted malformed entry `{header}`"))?;
+            let oid = fields
+                .next()
+                .with_context(|| format!("git ls-tree emitted malformed entry `{header}`"))?;
+            let kind = if mode == "160000" || object_type == "commit" {
+                FileChangeKind::Gitlink {
+                    old_oid: None,
+                    new_oid: oid_option(oid),
+                }
+            } else {
+                FileChangeKind::Added
+            };
+
+            Ok(FileChange {
+                path: pathbuf_from_git_bytes(path),
+                kind,
+                parent_sha: None,
+            })
+        })
+        .collect()
+}
+
+fn parse_raw_diff(
     stdout: &[u8],
     parent_sha: Option<String>,
     changes: &mut Vec<FileChange>,
 ) -> Result<()> {
     let mut fields = nul_fields(stdout);
 
-    while let Some(field) = fields.next() {
-        let (status, first_path) = status_and_optional_path(field);
-        let path1 = match first_path {
-            Some(path) => path,
-            None => fields.next().with_context(|| {
-                format!(
-                    "git diff-tree emitted status `{}` without a path",
-                    String::from_utf8_lossy(status)
-                )
-            })?,
+    while let Some(header) = fields.next() {
+        let header = std::str::from_utf8(header)
+            .with_context(|| format!("git diff-tree emitted non-UTF-8 raw header {header:?}"))?;
+        let mut parts = header.split_whitespace();
+        let old_mode = parts
+            .next()
+            .and_then(|mode| mode.strip_prefix(':'))
+            .with_context(|| format!("git diff-tree emitted malformed raw header `{header}`"))?;
+        let new_mode = parts
+            .next()
+            .with_context(|| format!("git diff-tree emitted malformed raw header `{header}`"))?;
+        let old_oid = parts
+            .next()
+            .with_context(|| format!("git diff-tree emitted malformed raw header `{header}`"))?;
+        let new_oid = parts
+            .next()
+            .with_context(|| format!("git diff-tree emitted malformed raw header `{header}`"))?;
+        let status = parts
+            .next()
+            .with_context(|| format!("git diff-tree emitted malformed raw header `{header}`"))?;
+        let status_kind = status.as_bytes().first().copied().unwrap_or_default();
+
+        let path1 = fields.next().with_context(|| {
+            format!(
+                "git diff-tree emitted raw status `{}` without a path",
+                String::from_utf8_lossy(status.as_bytes())
+            )
+        })?;
+
+        let kind = if old_mode == "160000" || new_mode == "160000" {
+            FileChangeKind::Gitlink {
+                old_oid: oid_option(old_oid),
+                new_oid: oid_option(new_oid),
+            }
+        } else {
+            match status_kind {
+                b'A' => FileChangeKind::Added,
+                b'M' | b'T' => FileChangeKind::Modified,
+                b'D' => FileChangeKind::Deleted,
+                b'R' => FileChangeKind::Renamed {
+                    from: pathbuf_from_git_bytes(path1),
+                },
+                other => bail!(
+                    "unexpected diff status `{}` in `{status}`",
+                    char::from(other)
+                ),
+            }
         };
 
-        let status = std::str::from_utf8(status)
-            .with_context(|| format!("git diff-tree emitted non-UTF-8 status {status:?}"))?;
-        let status_kind = status.as_bytes().first().copied().unwrap_or_default();
-        let kind = match status_kind {
-            b'A' => FileChangeKind::Added,
-            b'M' | b'T' => FileChangeKind::Modified,
-            b'D' => FileChangeKind::Deleted,
-            b'R' => FileChangeKind::Renamed {
-                from: pathbuf_from_git_bytes(path1),
-            },
-            other => bail!(
-                "unexpected diff status `{}` in `{status}`",
-                char::from(other)
-            ),
-        };
         let path = match &kind {
-            FileChangeKind::Renamed { .. } => {
+            FileChangeKind::Renamed { .. } | FileChangeKind::Gitlink { .. }
+                if status_kind == b'R' =>
+            {
                 let path2 = fields.next().with_context(|| {
                     format!("git diff-tree emitted rename `{status}` without a destination path")
                 })?;
                 pathbuf_from_git_bytes(path2)
             }
-            FileChangeKind::Added | FileChangeKind::Modified | FileChangeKind::Deleted => {
-                pathbuf_from_git_bytes(path1)
+            FileChangeKind::Added
+            | FileChangeKind::Modified
+            | FileChangeKind::Deleted
+            | FileChangeKind::Gitlink { .. } => pathbuf_from_git_bytes(path1),
+            FileChangeKind::Renamed { .. } => {
+                return Err(anyhow!(
+                    "git diff-tree emitted rename status `{status}` without rename marker"
+                ))
             }
         };
 
@@ -665,11 +950,15 @@ fn parse_name_status(
     Ok(())
 }
 
-fn status_and_optional_path(field: &[u8]) -> (&[u8], Option<&[u8]>) {
-    match field.iter().position(|b| *b == b'\t') {
-        Some(tab) => (&field[..tab], Some(&field[tab + 1..])),
-        None => (field, None),
-    }
+fn oid_option(oid: &str) -> Option<String> {
+    (!oid.as_bytes().iter().all(|byte| *byte == b'0')).then(|| oid.to_string())
+}
+
+fn split_once(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
+    bytes
+        .iter()
+        .position(|byte| *byte == needle)
+        .map(|index| (&bytes[..index], &bytes[index + 1..]))
 }
 
 fn nul_fields(stdout: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -977,5 +1266,183 @@ mod tests {
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.contains("merge_collision")));
+    }
+
+    #[test]
+    fn force_push_invalidates_and_rewalks_diverged_range() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("a.rs"), b"fn a() {}\n").unwrap();
+        let sha1 = commit(dir.path(), "c1");
+        std::fs::write(dir.path().join("a.rs"), b"fn a() { 1 }\n").unwrap();
+        let sha2 = commit(dir.path(), "c2");
+
+        run_git(dir.path(), &["reset", "--hard", &sha1]).unwrap();
+        std::fs::write(dir.path().join("a.rs"), b"fn a() { 999 }\n").unwrap();
+        let sha2b = commit(dir.path(), "c2b");
+
+        let plan = plan_incremental_walk(dir.path(), Some(&sha1), &sha2b).unwrap();
+        assert!(matches!(
+            plan,
+            IncrementalPlan::FastForward { from, to } if from == sha1 && to == sha2b
+        ));
+
+        let plan = plan_incremental_walk(dir.path(), Some(&sha2), &sha2b).unwrap();
+        assert!(matches!(
+            plan,
+            IncrementalPlan::ForcePushRecover { merge_base: Some(base), to }
+                if base == sha1 && to == sha2b
+        ));
+    }
+
+    #[test]
+    fn gitlink_emits_file_change_no_recurse() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        commit(dir.path(), "c1");
+        let oid = "0123456789012345678901234567890123456789";
+        run_git(
+            dir.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                oid,
+                "vendor/submodule",
+            ],
+        )
+        .unwrap();
+        run_git(dir.path(), &["commit", "-q", "-m", "add gitlink"]).unwrap();
+        let sha = run_git(dir.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+
+        let gitlink = changes
+            .iter()
+            .find(|change| change.path.ends_with("vendor/submodule"))
+            .expect("gitlink change");
+        assert!(matches!(
+            &gitlink.kind,
+            FileChangeKind::Gitlink {
+                old_oid: None,
+                new_oid: Some(new_oid),
+            } if new_oid == oid
+        ));
+    }
+
+    #[test]
+    fn binary_blob_downgrades_to_file_level_and_logs() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), b"\0not rust\n").unwrap();
+        let sha = commit(dir.path(), "binary rust extension");
+
+        let mut ctx = SymbolDiffCtx::new();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+
+        assert!(changes.is_empty());
+        assert!(ctx
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("binary_blob")));
+    }
+
+    #[test]
+    fn missing_blob_fails_closed_with_named_oid() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), b"fn missing_blob() {}\n").unwrap();
+        let sha = commit(dir.path(), "blob to remove");
+        let blob_oid = run_git(dir.path(), &["rev-parse", &format!("{sha}:lib.rs")])
+            .unwrap()
+            .trim()
+            .to_string();
+        let object_path = git_dir(dir.path())
+            .unwrap()
+            .join("objects")
+            .join(&blob_oid[..2])
+            .join(&blob_oid[2..]);
+        std::fs::remove_file(object_path).unwrap();
+
+        let mut ctx = SymbolDiffCtx::new();
+        let error = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("missing blob"));
+        assert!(message.contains(&blob_oid), "{message}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_path_does_not_panic() {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"bad-\xff.rs"));
+        let mut blob = Command::new("git")
+            .current_dir(dir.path())
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        blob.stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"fn non_utf8_path() {}\n")
+            .unwrap();
+        let blob_output = blob.wait_with_output().unwrap();
+        assert!(blob_output.status.success());
+        let blob_oid = String::from_utf8(blob_output.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let mut tree_entry = Vec::new();
+        tree_entry.extend_from_slice(b"100644 blob ");
+        tree_entry.extend_from_slice(blob_oid.as_bytes());
+        tree_entry.push(b'\t');
+        tree_entry.extend_from_slice(path.as_os_str().as_bytes());
+        tree_entry.push(0);
+        let mut tree = Command::new("git")
+            .current_dir(dir.path())
+            .args(["mktree", "-z"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        tree.stdin.as_mut().unwrap().write_all(&tree_entry).unwrap();
+        let tree_output = tree.wait_with_output().unwrap();
+        assert!(tree_output.status.success());
+        let tree_oid = String::from_utf8(tree_output.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let sha = run_git(
+            dir.path(),
+            &["commit-tree", &tree_oid, "-m", "non-utf8 path"],
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].path.as_os_str().as_bytes(),
+            path.as_os_str().as_bytes()
+        );
+
+        let mut ctx = SymbolDiffCtx::new();
+        let symbol_changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        assert!(symbol_changes
+            .iter()
+            .any(|change| change.snapshot.entity_name == "non_utf8_path"));
     }
 }
