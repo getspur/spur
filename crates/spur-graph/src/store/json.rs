@@ -672,6 +672,9 @@ fn rebuild_from_buckets(
         edges,
         tombstones,
         diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
     }
 }
 
