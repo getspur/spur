@@ -121,6 +121,11 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
         entity_names(callers["callers"].as_array().expect("callers")),
         BTreeSet::from(["launch_order".to_string()])
     );
+    assert_eq!(callers["graph_content_hash"], artifact.graph_content_hash);
+    assert_eq!(
+        callers["graph_index_version"],
+        artifact.header.graph_index_version
+    );
 
     let callees = tool_body(
         call_tool(
@@ -133,6 +138,25 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
     assert_eq!(
         entity_names(callees["callees"].as_array().expect("callees")),
         BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+
+    let selector_callees =
+        tool_body(call_tool(&server, "code_callees", json!({ "selector": ROOT_SYMBOL })).await);
+    assert_eq!(
+        entity_names(
+            selector_callees["callees"]
+                .as_array()
+                .expect("selector callees")
+        ),
+        BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+    assert_eq!(
+        selector_callees["graph_content_hash"],
+        artifact.graph_content_hash
+    );
+    assert_eq!(
+        selector_callees["graph_index_version"],
+        artifact.header.graph_index_version
     );
 
     let radius_one = tool_body(
