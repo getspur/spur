@@ -87,7 +87,7 @@ pub struct GraphIndexArtifact {
     pub edges: Vec<GraphEdgeArtifact>,
     #[serde(default)]
     pub tombstones: Vec<GraphTombstoneEntry>,
-    #[serde(default, skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<CommitArtifact>,
@@ -430,19 +430,19 @@ pub fn symbol_id_from_uri(uri: &str) -> String {
 
 fn deduplicate_symbols(artifact: &mut GraphIndexArtifact) {
     let mut seen = HashSet::new();
-    let mut diagnostics = Vec::new();
+    let mut duplicate_diagnostics = Vec::new();
     artifact.symbols.retain(|symbol| {
         if seen.insert(symbol.stable_symbol_id.clone()) {
             true
         } else {
-            diagnostics.push(format!(
+            duplicate_diagnostics.push(format!(
                 "duplicate stable_symbol_id `{}` ignored after first occurrence",
                 symbol.stable_symbol_id
             ));
             false
         }
     });
-    artifact.diagnostics = diagnostics;
+    artifact.diagnostics.extend(duplicate_diagnostics);
 }
 
 fn validate_ranges(artifact: &GraphIndexArtifact) -> anyhow::Result<()> {
