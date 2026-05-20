@@ -8,6 +8,9 @@ use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention};
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};
 
+const TOPOLOGY_HINT: &str =
+    "topology_available_via_mcp_for_above_symbols: get_callers / get_callees / get_subgraph (radius=1)";
+
 #[test]
 fn symbol_expansion_uses_bare_name_without_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -227,6 +230,112 @@ fn prompt_assembly_skips_topology_hint_for_file_only_mentions() {
 }
 
 #[test]
+fn prompt_assembly_skips_topology_hint_for_stale_symbol_warning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "pub fn stale() {}\n";
+    write_source(dir.path(), "src/lib.rs", source);
+    let payload = stale_symbol_payload_from_source(
+        "stale",
+        "graph://symbol/symbol-stale",
+        "src/lib.rs",
+        source,
+        "pub fn stale",
+        "\n",
+        "stale",
+        "fn",
+        [1, 1],
+    );
+    let text = "@stale";
+    let ranges = [ProtectedRange {
+        start: 0,
+        end: text.len(),
+        kind: RangeKind::Atom,
+        uri: "graph://symbol/symbol-stale".to_string(),
+        name: "stale".to_string(),
+    }];
+
+    let blocks = assemble_blocks_with_code_mentions(text, &ranges, &[], dir.path(), |uri| {
+        (uri == payload.authoritative.uri).then_some(&payload)
+    });
+    let flattened = flatten_text_blocks(&blocks);
+
+    assert!(flattened.contains("MENTION_WARNING stale"), "{flattened}");
+    assert!(
+        flattened.contains("failure_reason: anchor_hash_mismatch"),
+        "{flattened}"
+    );
+    assert!(
+        !flattened.contains("topology_available_via_mcp"),
+        "{flattened}"
+    );
+}
+
+#[test]
+fn prompt_assembly_emits_topology_hint_for_mixed_body_and_stale_symbols() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let good_source = "pub fn fresh() {}\n";
+    let stale_source = "pub fn stale() {}\n";
+    write_source(dir.path(), "src/fresh.rs", good_source);
+    write_source(dir.path(), "src/stale.rs", stale_source);
+    let payloads = [
+        symbol_payload_from_source(
+            "fresh",
+            "graph://symbol/symbol-fresh",
+            "src/fresh.rs",
+            good_source,
+            "pub fn fresh",
+            "\n",
+            "fresh",
+            "fn",
+            [1, 1],
+        ),
+        stale_symbol_payload_from_source(
+            "stale",
+            "graph://symbol/symbol-stale",
+            "src/stale.rs",
+            stale_source,
+            "pub fn stale",
+            "\n",
+            "stale",
+            "fn",
+            [1, 1],
+        ),
+    ];
+    let text = "@fresh @stale";
+    let ranges = [
+        ProtectedRange {
+            start: 0,
+            end: "@fresh".len(),
+            kind: RangeKind::Atom,
+            uri: "graph://symbol/symbol-fresh".to_string(),
+            name: "fresh".to_string(),
+        },
+        ProtectedRange {
+            start: "@fresh ".len(),
+            end: text.len(),
+            kind: RangeKind::Atom,
+            uri: "graph://symbol/symbol-stale".to_string(),
+            name: "stale".to_string(),
+        },
+    ];
+
+    let blocks = assemble_blocks_with_code_mentions(text, &ranges, &[], dir.path(), |uri| {
+        payloads
+            .iter()
+            .find(|payload| payload.authoritative.uri == uri)
+    });
+    let flattened = flatten_text_blocks(&blocks);
+
+    assert!(flattened.contains("MENTION fresh"), "{flattened}");
+    assert!(flattened.contains("MENTION_WARNING stale"), "{flattened}");
+    assert_eq!(
+        count_occurrences(&flattened, TOPOLOGY_HINT),
+        1,
+        "{flattened}"
+    );
+}
+
+#[test]
 fn degraded_symbol_mentions_preserve_all_validation_failure_reasons() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "pub fn run() {}\n";
@@ -436,6 +545,38 @@ fn symbol_payload_from_source(
         symbol_kind,
         compute_anchor_hash(slice),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stale_symbol_payload_from_source(
+    display: &str,
+    uri: &str,
+    file_path: &str,
+    source: &str,
+    start_pattern: &str,
+    end_pattern: &str,
+    entity_name: &str,
+    symbol_kind: &str,
+    line_range: [usize; 2],
+) -> CodeMentionPayload {
+    let mut payload = symbol_payload_from_source(
+        display,
+        uri,
+        file_path,
+        source,
+        start_pattern,
+        end_pattern,
+        entity_name,
+        symbol_kind,
+        line_range,
+    );
+    let CodeMentionValidationSpec::SymbolRange { anchor_hash, .. } =
+        &mut payload.authoritative.validation
+    else {
+        unreachable!("symbol payload uses SymbolRange validation");
+    };
+    *anchor_hash = "not-the-anchor-hash".to_string();
+    payload
 }
 
 #[allow(clippy::too_many_arguments)]

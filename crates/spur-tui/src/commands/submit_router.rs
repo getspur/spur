@@ -233,7 +233,7 @@ const CODE_SYMBOL_TOPOLOGY_HINT: &str =
 
 struct CodeExpansion {
     text: String,
-    is_symbol: bool,
+    is_symbol_body: bool,
 }
 
 type CodeExpansionLookup<'a> = Option<&'a mut dyn FnMut(&str) -> Option<CodeExpansion>>;
@@ -247,12 +247,16 @@ pub fn assemble_blocks_with_code_mentions<'a>(
 ) -> Vec<ContentBlock> {
     let mut lookup = |uri: &str| {
         lookup_code_payload(uri).map(|payload| {
-            let text = match expand(payload, worktree_root) {
-                ExpandedMention::Body { text } | ExpandedMention::Warning { text, .. } => text,
-            };
-            CodeExpansion {
-                text,
-                is_symbol: matches!(payload.authoritative.kind, CodeMentionKind::Symbol),
+            let is_symbol = matches!(payload.authoritative.kind, CodeMentionKind::Symbol);
+            match expand(payload, worktree_root) {
+                ExpandedMention::Body { text } => CodeExpansion {
+                    text,
+                    is_symbol_body: is_symbol,
+                },
+                ExpandedMention::Warning { text, .. } => CodeExpansion {
+                    text,
+                    is_symbol_body: false,
+                },
             }
         })
     };
@@ -268,7 +272,7 @@ fn assemble_blocks_inner(
     let mut out: Vec<ContentBlock> = Vec::new();
     let mut cursor = 0usize;
     let mut code_expansion_bytes = 0usize;
-    let mut expanded_symbol_mention = false;
+    let mut expanded_symbol_body = false;
     for r in ranges {
         if r.start > cursor {
             out.push(ContentBlock::Text(TextContent::new(
@@ -303,7 +307,7 @@ fn assemble_blocks_inner(
                             ))));
                         } else {
                             code_expansion_bytes += expansion.text.len();
-                            expanded_symbol_mention |= expansion.is_symbol;
+                            expanded_symbol_body |= expansion.is_symbol_body;
                             out.push(ContentBlock::Text(TextContent::new(expansion.text)));
                         }
                     } else {
@@ -330,7 +334,7 @@ fn assemble_blocks_inner(
     if out.is_empty() && ranges.is_empty() {
         out.push(ContentBlock::Text(TextContent::new(text.to_string())));
     }
-    if expanded_symbol_mention {
+    if expanded_symbol_body {
         out.push(ContentBlock::Text(TextContent::new(
             CODE_SYMBOL_TOPOLOGY_HINT.to_string(),
         )));
