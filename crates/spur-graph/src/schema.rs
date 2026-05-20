@@ -61,6 +61,8 @@ pub struct CodeMentionExtractionHints {
     pub byte_range: Option<SourceRange>,
     pub symbol_kind: Option<String>,
     pub entity_name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub qualified_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

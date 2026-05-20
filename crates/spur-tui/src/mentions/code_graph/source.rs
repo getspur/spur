@@ -260,6 +260,7 @@ fn file_payload(
             byte_range: None,
             symbol_kind: None,
             entity_name: None,
+            qualified_name: String::new(),
         },
         display_meta: CodeMentionDisplayMeta {
             enclosing_scope: None,
@@ -293,6 +294,7 @@ fn symbol_payload(
             byte_range: Some(symbol.byte_range),
             symbol_kind: Some(symbol.symbol_kind.clone()),
             entity_name: Some(symbol.entity_name.clone()),
+            qualified_name: symbol.qualified_name.clone(),
         },
         display_meta: CodeMentionDisplayMeta {
             enclosing_scope: symbol.enclosing_scope.clone(),

@@ -89,6 +89,84 @@ fn symbol_expansion_uses_qualified_name_with_scope() {
 }
 
 #[test]
+fn symbol_expansion_includes_persisted_qualified_name_when_it_disambiguates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "impl App {\n    pub fn run(&self) {}\n}\n";
+    write_source(dir.path(), "src/lib.rs", source);
+    let mut payload = symbol_payload_from_source(
+        "run",
+        "graph://symbol/symbol-run",
+        "src/lib.rs",
+        source,
+        "pub fn run",
+        "\n",
+        "run",
+        "fn",
+        [2, 3],
+    );
+    payload.display_meta.enclosing_scope = Some("App".to_string());
+    payload.extraction_hints.qualified_name = "impl App::run".to_string();
+
+    let ExpandedMention::Body { text } = expand(&payload, dir.path()) else {
+        panic!("expected body expansion");
+    };
+
+    assert!(text.starts_with("MENTION App::run\n"), "{text}");
+    assert!(text.contains("qualified_name: impl App::run\n"), "{text}");
+}
+
+#[test]
+fn symbol_expansion_omits_empty_qualified_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "pub fn run() {}\n";
+    write_source(dir.path(), "src/lib.rs", source);
+    let payload = symbol_payload_from_source(
+        "run",
+        "graph://symbol/symbol-run",
+        "src/lib.rs",
+        source,
+        "pub fn run",
+        "\n",
+        "run",
+        "fn",
+        [1, 1],
+    );
+
+    let ExpandedMention::Body { text } = expand(&payload, dir.path()) else {
+        panic!("expected body expansion");
+    };
+
+    assert!(!text.contains("qualified_name:"), "{text}");
+}
+
+#[test]
+fn symbol_expansion_omits_qualified_name_equal_to_display_label() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "impl App {\n    pub fn run(&self) {}\n}\n";
+    write_source(dir.path(), "src/lib.rs", source);
+    let mut payload = symbol_payload_from_source(
+        "run",
+        "graph://symbol/symbol-run",
+        "src/lib.rs",
+        source,
+        "pub fn run",
+        "\n",
+        "run",
+        "fn",
+        [2, 3],
+    );
+    payload.display_meta.enclosing_scope = Some("App".to_string());
+    payload.extraction_hints.qualified_name = "App::run".to_string();
+
+    let ExpandedMention::Body { text } = expand(&payload, dir.path()) else {
+        panic!("expected body expansion");
+    };
+
+    assert!(text.starts_with("MENTION App::run\n"), "{text}");
+    assert!(!text.contains("qualified_name:"), "{text}");
+}
+
+#[test]
 fn symbol_expansion_uses_authoritative_path_when_validation_path_differs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "pub fn run() {}\n";
@@ -536,6 +614,7 @@ fn file_payload(display: &str, uri: &str, file_path: &str) -> CodeMentionPayload
             byte_range: None,
             symbol_kind: None,
             entity_name: None,
+            qualified_name: String::new(),
         },
         display_meta: CodeMentionDisplayMeta {
             enclosing_scope: None,
@@ -637,6 +716,7 @@ fn symbol_payload(
             byte_range: Some(byte_range),
             symbol_kind: Some(symbol_kind.to_string()),
             entity_name: Some(entity_name.to_string()),
+            qualified_name: String::new(),
         },
         display_meta: CodeMentionDisplayMeta {
             enclosing_scope: None,

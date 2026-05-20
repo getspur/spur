@@ -108,12 +108,7 @@ fn symbol_validation_payload(
         byte_range,
         line_range,
         entity_name: entity_name.to_string(),
-        qualified_name: payload
-            .display_meta
-            .enclosing_scope
-            .as_ref()
-            .map(|scope| format!("{scope}::{entity_name}"))
-            .unwrap_or_else(|| entity_name.to_string()),
+        qualified_name: payload.extraction_hints.qualified_name.clone(),
         symbol_kind: payload
             .extraction_hints
             .symbol_kind
@@ -143,19 +138,30 @@ fn symbol_expansion(
     let signature_line = signature
         .map(|signature| format!("signature: {signature}\n"))
         .unwrap_or_default();
+    let qualified_name_line =
+        qualified_name_line(&payload.extraction_hints.qualified_name, &display_name);
 
     format!(
-        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\n{}graph_index_version: {}\n\ncontext_header:\n{}",
+        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\n{}{}graph_index_version: {}\n\ncontext_header:\n{}",
         display_name,
         symbol_kind,
         payload.authoritative.uri,
         payload.authoritative.file_path,
         line_range[0],
         line_range[1],
+        qualified_name_line,
         signature_line,
         payload.display_meta.graph_index_version,
         context_header,
     )
+}
+
+fn qualified_name_line(qualified_name: &str, display_name: &str) -> String {
+    if qualified_name.is_empty() || qualified_name == display_name {
+        String::new()
+    } else {
+        format!("qualified_name: {qualified_name}\n")
+    }
 }
 
 fn file_expansion(payload: &CodeMentionPayload) -> String {
@@ -208,6 +214,7 @@ fn file_replacement_payload(payload: &CodeMentionPayload) -> CodeMentionPayload 
     file_payload.extraction_hints.byte_range = None;
     file_payload.extraction_hints.symbol_kind = None;
     file_payload.extraction_hints.entity_name = None;
+    file_payload.extraction_hints.qualified_name.clear();
     file_payload
 }
 
@@ -768,6 +775,7 @@ mod tests {
                 byte_range: Some(byte_range),
                 symbol_kind: Some(symbol_kind.to_string()),
                 entity_name: Some(entity_name.to_string()),
+                qualified_name: String::new(),
             },
             display_meta: CodeMentionDisplayMeta {
                 enclosing_scope: None,
