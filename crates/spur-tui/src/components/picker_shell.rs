@@ -9,6 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::components::mini_input::MiniInput;
 use crate::components::picker_popover::PickerPopover;
@@ -546,9 +547,19 @@ impl PickerShell {
                     }
                 }
                 if !r.secondary.is_empty() {
+                    let tag_width = if r.tag.is_empty() {
+                        0
+                    } else {
+                        2 + UnicodeWidthStr::width(r.tag.as_str())
+                    };
+                    let secondary_width = (list_area.width as usize)
+                        .saturating_sub(UnicodeWidthStr::width(r.primary.as_str()))
+                        .saturating_sub(2)
+                        .saturating_sub(tag_width);
+                    let secondary = middle_truncate_path_segment(&r.secondary, secondary_width);
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(
-                        r.secondary.clone(),
+                        secondary,
                         if r.dimmed {
                             Style::default().fg(token(theme, "picker.hint.fg"))
                         } else {
@@ -603,6 +614,95 @@ fn prev_selectable_index(rows: &[RetrievalRow], selected: Option<usize>) -> usiz
         }
     }
     start
+}
+
+pub(crate) fn middle_truncate_path_segment(secondary: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(secondary) <= max_width {
+        return secondary.to_string();
+    }
+
+    let Some((prefix, rest)) = secondary.split_once(" · ") else {
+        return secondary.to_string();
+    };
+    let (path_line, suffix) = split_kind_suffix(rest);
+    let fixed = format!("{prefix} · ");
+    let fixed_width = UnicodeWidthStr::width(fixed.as_str()) + UnicodeWidthStr::width(suffix);
+    let path_budget = max_width.saturating_sub(fixed_width);
+    if path_budget == 0 {
+        return truncate_to_width(secondary, max_width);
+    }
+
+    let candidate = format!(
+        "{fixed}{}{suffix}",
+        middle_truncate_path_line(path_line, path_budget)
+    );
+    if UnicodeWidthStr::width(candidate.as_str()) <= max_width {
+        candidate
+    } else {
+        truncate_to_width(&candidate, max_width)
+    }
+}
+
+fn split_kind_suffix(rest: &str) -> (&str, &str) {
+    if rest.ends_with(')') {
+        if let Some((path_line, _kind)) = rest.rsplit_once(" (") {
+            return (path_line, &rest[path_line.len()..]);
+        }
+    }
+    (rest, "")
+}
+
+fn middle_truncate_path_line(path_line: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(path_line) <= max_width {
+        return path_line.to_string();
+    }
+
+    let tail = path_line
+        .rsplit_once('/')
+        .map(|(_, tail)| tail)
+        .unwrap_or(path_line);
+    let tail_width = UnicodeWidthStr::width(tail);
+    let marker = "…/";
+    let marker_width = UnicodeWidthStr::width(marker);
+    if max_width >= marker_width + tail_width {
+        return format!("{marker}{tail}");
+    }
+
+    let ellipsis_width = UnicodeWidthStr::width("…");
+    if max_width > ellipsis_width {
+        let tail_budget = max_width.saturating_sub(ellipsis_width);
+        return format!("…{}", truncate_from_start_to_width(tail, tail_budget));
+    }
+
+    truncate_to_width("…", max_width)
+}
+
+fn truncate_to_width(value: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
+fn truncate_from_start_to_width(value: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in value.chars().rev() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.insert(0, ch);
+        width += ch_width;
+    }
+    out
 }
 
 fn truncate_preview_lines(
@@ -865,6 +965,35 @@ mod tests {
         }
     }
 
+    struct LongCodeSecondarySource;
+
+    impl QuerySource for LongCodeSecondarySource {
+        fn title(&self) -> &str {
+            "Mentions · @"
+        }
+
+        fn query_mode(&self) -> QueryMode {
+            QueryMode::ReadFromInputBar
+        }
+
+        fn refresh(&mut self, _query: &str) -> Vec<RetrievalRow> {
+            vec![RetrievalRow {
+                primary: "ƒ @run".to_string(),
+                secondary:
+                    "Cache::run · crates/spur-tui/src/some/deeply/nested/very_long_filename.rs:120 (fn)"
+                        .to_string(),
+                tag: String::new(),
+                atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
+            }]
+        }
+
+        fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
+            None
+        }
+    }
+
     fn header_row(primary: &str) -> RetrievalRow {
         RetrievalRow {
             primary: primary.to_string(),
@@ -1031,6 +1160,17 @@ mod tests {
             !text.contains("Preview-only disambiguating title"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn code_secondary_middle_truncates_path_without_losing_file_line() {
+        let mut shell = PickerShell::open(Box::new(LongCodeSecondarySource));
+
+        let text = rendered_shell_text(&mut shell, 110);
+
+        assert!(text.contains("Cache::run · "), "{text}");
+        assert!(text.contains("…/very_long_filename.rs:120"), "{text}");
+        assert!(text.contains(" (fn)"), "{text}");
     }
 
     #[test]
