@@ -412,6 +412,18 @@ available for repos that explicitly want linearized history.
 Diff against the empty tree. All files and symbols are `Added`; one
 `SymbolSnapshot` per symbol at that commit.
 
+## Phase 1 known limitations
+
+- **Total rewrite with rename:** if a symbol is renamed and its body is
+  rewritten enough to fall below the calibrated token-bag threshold,
+  Phase 1 emits `Added` + `Deleted` with `ambiguous_rename`
+  diagnostics instead of claiming a low-confidence `RenamedFrom`.
+- **Parameter-only rename:** Tier 2 token bags intentionally include
+  leaf identifiers other than the symbol's own name. Renaming every
+  parameter can therefore drive Jaccard below threshold even when the
+  body shape is otherwise identical; Phase 1 records this as `Added` +
+  `Deleted` with diagnostics rather than guessing.
+
 ### Incremental ingest
 
 Store temporal checkpoints in a **new** file
