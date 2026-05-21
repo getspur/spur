@@ -159,8 +159,9 @@ pub struct Orchestrator {
     /// Feature gate for dynamic quota/feature enforcement.
     feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     pub(crate) peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
-    /// Per-`BrainSession` worker MCP servers, lazily started on first
-    /// dispatch with `enable_worker_mcp = true`. Phase 5 / Task 25 —
+    /// Per-`BrainSession` worker MCP servers, lazily started on the
+    /// first dispatch that doesn't explicitly opt out
+    /// (`enable_worker_mcp = Some(false)`). Phase 5 / Task 25 —
     /// the field exists; population happens via
     /// [`Orchestrator::ensure_worker_mcp_server`]. Wiring into the
     /// dispatch path lands in a follow-up task.
