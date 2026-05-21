@@ -1,0 +1,7 @@
+{
+  "load_artifact_ms_median": 54.533292,
+  "load_artifact_rss_kb_median": 80256,
+  "write_artifact_ms_median": 162.41375,
+  "fixture_path": "/Volumes/Projects/spur/.spur/graph-index.json",
+  "rev": "3b53c61f9fdb547865978d977085928b489d8744"
+}

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+autobenches = false
 
 [dependencies]
 anyhow = { workspace = true }
@@ -37,3 +38,7 @@ tempfile = "3"
 [[bench]]
 name = "incremental"
 harness = false
+
+[[bin]]
+name = "capture-baselines"
+path = "benches/capture_baselines.rs"
