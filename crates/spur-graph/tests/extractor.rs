@@ -1144,6 +1144,135 @@ fn resolve_pending_edges_surfaces_ambiguous_labels() {
 }
 
 #[test]
+fn rust_extractor_emits_resolved_references_for_hof_function_values() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn edge_row(value: i32) -> i32 { value }\n\
+         pub fn count_fn(acc: usize, _value: i32) -> usize { acc + 1 }\n\
+         pub fn caller(items: Vec<i32>) -> (Vec<i32>, usize) {\n\
+             let mapped = items.iter().copied().map(edge_row).collect();\n\
+             let counted = items.into_iter().fold(0, count_fn);\n\
+             (mapped, counted)\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let labels_by_id: std::collections::HashMap<_, _> = facts
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node.label.as_str()))
+        .collect();
+    let caller = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "caller" && node.kind == NodeKind::Function)
+        .expect("caller function");
+
+    let reference_targets: BTreeSet<_> = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::References)
+        .filter(|edge| edge.source_node_id == caller.node_id)
+        .map(|edge| {
+            let target = edge.target_node_id.expect("resolved reference target");
+            (
+                edge.target_label.as_deref().expect("target label"),
+                *labels_by_id.get(&target).expect("target node label"),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        reference_targets,
+        BTreeSet::from([("count_fn", "count_fn"), ("edge_row", "edge_row")])
+    );
+}
+
+#[test]
+fn rust_extractor_drops_unresolved_hof_function_value_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn caller(items: Vec<i32>) {\n\
+             items.into_iter().map(local_var);\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+
+    assert!(!facts.edges.iter().any(|edge| {
+        edge.relation == RelationKind::References
+            && edge.target_label.as_deref() == Some("local_var")
+    }));
+}
+
+#[test]
+fn rust_extractor_drops_references_resolved_to_non_callable_symbols() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub struct EdgeRow;\n\
+         pub fn caller(items: Vec<i32>) {\n\
+             items.into_iter().map(EdgeRow);\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.label == "EdgeRow" && node.kind == NodeKind::Struct));
+
+    assert!(!facts.edges.iter().any(|edge| {
+        edge.relation == RelationKind::References && edge.target_label.as_deref() == Some("EdgeRow")
+    }));
+}
+
+#[test]
+fn rust_extractor_drops_ambiguous_hof_function_value_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn helper(value: i32) -> i32 { value }\n\
+         pub mod inner {\n\
+             pub fn helper(value: i32) -> i32 { value }\n\
+         }\n\
+         pub fn caller(items: Vec<i32>) {\n\
+             items.into_iter().map(helper);\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let helper_nodes = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "helper")
+        .count();
+    assert_eq!(helper_nodes, 2, "fixture must contain ambiguous label");
+
+    assert!(!facts.edges.iter().any(|edge| {
+        edge.relation == RelationKind::References && edge.target_label.as_deref() == Some("helper")
+    }));
+}
+
+#[test]
 fn incremental_round_trip_noop_matches_full_artifact() {
     let root = fixture_root();
     let full = artifact_from_facts(&build_facts(&root).expect("extract").0, &root).expect("full");
