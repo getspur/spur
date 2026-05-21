@@ -570,6 +570,9 @@ struct CodeSubgraphParams {
     /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selector: Option<String>,
+    /// Continuation roots from a prior truncated_frontier response. Mutually exclusive with selector and symbol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_nodes: Option<Vec<String>>,
     /// deprecated; use selector. Accepts graph://symbol/<id> or bare hex id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     symbol: Option<String>,
@@ -578,6 +581,10 @@ struct CodeSubgraphParams {
     on_ambiguous: Option<CodeAmbiguityMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     radius: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_nodes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_edges: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     format: Option<String>,
     /// Optional public edge_kind filter: calls, calls_dyn, references_hof, references_other.
@@ -999,7 +1006,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_subgraph",
-        description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other), and unresolved edges are hidden by default (include_unresolved=false). edge_kinds=[\"calls\"] is strict direct calls only; use calls_dyn separately for heuristic dyn Trait calls. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
+        description = "Get a budgeted code-symbol subgraph from the current worktree graph artifact. Traversal is deterministic BFS: seed with selector (or start_nodes order for continuation), then expand each node by graph artifact edge order. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other), and unresolved edges are hidden by default (include_unresolved=false). max_nodes defaults to 40 and clamps to 1..400; max_edges defaults to 120 and clamps to 1..1200. When truncated, truncated_frontier lists next-hop node ids reachable through excluded nodes/edges; call again with start_nodes=truncated_frontier to resume statelessly. edge_kinds=[\"calls\"] is strict direct calls only; use calls_dyn separately for heuristic dyn Trait calls. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
         input_schema = crate::tool_schemas::schema_object::<CodeSubgraphParams>()
     )]
     async fn code_subgraph_tool(
