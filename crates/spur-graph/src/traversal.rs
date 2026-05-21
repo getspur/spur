@@ -5,6 +5,12 @@ use crate::{GraphEdgeArtifact, GraphIndexArtifact, GraphSymbolArtifact, Relation
 const MAX_SUBGRAPH_RADIUS: u8 = 5;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum CalleeRecord<'a> {
+    Resolved(&'a GraphSymbolArtifact),
+    Unresolved { target_label: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubgraphView<'a> {
     pub nodes: Vec<&'a GraphSymbolArtifact>,
     pub edges: Vec<&'a GraphEdgeArtifact>,
@@ -41,6 +47,19 @@ pub fn find_callees<'a>(
     artifact: &'a GraphIndexArtifact,
     symbol_id: &str,
 ) -> Vec<&'a GraphSymbolArtifact> {
+    find_callee_edges(artifact, symbol_id)
+        .into_iter()
+        .filter_map(|record| match record {
+            CalleeRecord::Resolved(symbol) => Some(symbol),
+            CalleeRecord::Unresolved { .. } => None,
+        })
+        .collect()
+}
+
+pub fn find_callee_edges<'a>(
+    artifact: &'a GraphIndexArtifact,
+    symbol_id: &str,
+) -> Vec<CalleeRecord<'a>> {
     if find_symbol(artifact, symbol_id).is_none() {
         return Vec::new();
     }
@@ -50,10 +69,14 @@ pub fn find_callees<'a>(
         .iter()
         .filter(|edge| is_call_relation(edge.relation))
         .filter(|edge| edge.source_stable_symbol_id == symbol_id)
-        .filter_map(|edge| {
-            edge.target_stable_symbol_id
-                .as_deref()
-                .and_then(|target_id| find_symbol(artifact, target_id))
+        .filter_map(|edge| match edge.target_stable_symbol_id.as_deref() {
+            Some(target_id) => find_symbol(artifact, target_id).map(CalleeRecord::Resolved),
+            None => edge
+                .target_label
+                .as_ref()
+                .map(|target_label| CalleeRecord::Unresolved {
+                    target_label: target_label.clone(),
+                }),
         })
         .collect()
 }
@@ -168,6 +191,17 @@ mod tests {
         }
     }
 
+    fn unresolved_call_edge(source: &str, target_label: &str) -> GraphEdgeArtifact {
+        GraphEdgeArtifact {
+            source_stable_symbol_id: source.to_string(),
+            target_stable_symbol_id: None,
+            target_label: Some(target_label.to_string()),
+            relation: RelationKind::Calls,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+        }
+    }
+
     fn artifact() -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
@@ -228,6 +262,44 @@ mod tests {
         );
         assert!(find_callers(&artifact, "missing").is_empty());
         assert!(find_callees(&artifact, "missing").is_empty());
+    }
+
+    #[test]
+    fn callee_edges_include_unresolved_target_labels() {
+        let mut artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_string(),
+            graph_content_hash: "test".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            symbols: ["root", "callee"].into_iter().map(symbol).collect(),
+            edges: vec![
+                edge("root", "callee", RelationKind::Calls),
+                unresolved_call_edge("root", "into"),
+            ],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        artifact
+            .edges
+            .push(edge("root", "callee", RelationKind::References));
+
+        let callees = find_callee_edges(&artifact, "root");
+
+        assert_eq!(callees.len(), 2);
+        assert!(matches!(
+            callees[0],
+            CalleeRecord::Resolved(symbol) if symbol.stable_symbol_id == "callee"
+        ));
+        assert_eq!(
+            callees[1],
+            CalleeRecord::Unresolved {
+                target_label: "into".to_string()
+            }
+        );
     }
 
     #[test]
