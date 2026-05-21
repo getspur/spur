@@ -6,7 +6,7 @@ use spur_graph::temporal::{resolve_symbol_at, symbol_history, Resolution, Resolu
 use spur_graph::{
     bounded_subgraph, find_callees, find_callers, find_symbol,
     load_artifact as load_graph_index_artifact, resolve_worktree_root_from, CommitIndexArtifact,
-    GraphEdgeArtifact, GraphIndexArtifact, GraphSymbolArtifact, RelationKind,
+    GraphEdgeArtifact, GraphIndexArtifact, GraphSymbolArtifact, RelationKind, SnapshotKey,
     CODE_SYMBOL_URI_PREFIX,
 };
 
@@ -17,6 +17,10 @@ use super::*;
 
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
 const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
+const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
+const CODE_GRAPH_DELETED_ERROR_CODE: i64 = -32005;
+const CODE_GRAPH_AMBIGUOUS_ERROR_CODE: i64 = -32006;
+const CODE_GRAPH_UNKNOWN_ERROR_CODE: i64 = -32007;
 
 impl McpCallbackServer {
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -40,7 +44,7 @@ impl McpCallbackServer {
     }
 }
 
-pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) fn code_callers(args: &Value) -> Result<Value, CodeGraphError> {
     let symbol_id = normalize_symbol_arg(args)?;
     let worktree = current_worktree()?;
     let artifact = load_graph_artifact_for_worktree(&worktree)?;
@@ -54,7 +58,7 @@ pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
     Ok(json!({ "callers": callers }))
 }
 
-pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) fn code_callees(args: &Value) -> Result<Value, CodeGraphError> {
     let symbol_id = normalize_symbol_arg(args)?;
     let worktree = current_worktree()?;
     let artifact = load_graph_artifact_for_worktree(&worktree)?;
@@ -68,7 +72,7 @@ pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
     Ok(json!({ "callees": callees }))
 }
 
-pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) fn code_subgraph(args: &Value) -> Result<Value, CodeGraphError> {
     let symbol_id = normalize_symbol_arg(args)?;
     let worktree = current_worktree()?;
     let artifact = load_graph_artifact_for_worktree(&worktree)?;
@@ -108,11 +112,12 @@ pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
         "mermaid" => Ok(json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) })),
         other => Err(McpHandlerError::InvalidParams(format!(
             "invalid format `{other}`; expected `json` or `mermaid`"
-        ))),
+        ))
+        .into()),
     }
 }
 
-pub(crate) fn code_symbol_history(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) fn code_symbol_history(args: &Value) -> Result<Value, CodeGraphError> {
     let symbol_id = normalize_symbol_arg(args)?;
     let worktree = current_worktree()?;
     let artifact = load_graph_artifact_for_worktree(&worktree)?;
@@ -134,17 +139,139 @@ pub(crate) fn code_symbol_history(args: &Value) -> Result<Value, McpHandlerError
     }))
 }
 
-fn code_graph_response(id: Value, result: Result<Value, McpHandlerError>) -> JsonRpcResponse {
+#[derive(Debug)]
+pub(crate) enum CodeGraphError {
+    Handler(McpHandlerError),
+    Resolution {
+        code: i64,
+        message: String,
+        data: Value,
+    },
+}
+
+impl From<McpHandlerError> for CodeGraphError {
+    fn from(error: McpHandlerError) -> Self {
+        Self::Handler(error)
+    }
+}
+
+impl From<CodeGraphError> for rmcp::ErrorData {
+    fn from(error: CodeGraphError) -> Self {
+        match error {
+            CodeGraphError::Handler(McpHandlerError::NotFound(message)) => rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(CODE_GRAPH_NOT_FOUND_ERROR_CODE as i32),
+                message,
+                Some(json!({ "kind": "not_found" })),
+            ),
+            CodeGraphError::Handler(error) => error.into(),
+            CodeGraphError::Resolution {
+                code,
+                message,
+                data,
+            } => rmcp::ErrorData::new(rmcp::model::ErrorCode(code as i32), message, Some(data)),
+        }
+    }
+}
+
+fn code_graph_response(id: Value, result: Result<Value, CodeGraphError>) -> JsonRpcResponse {
     match result {
         Ok(body) => json_success(id, body),
-        Err(McpHandlerError::InvalidParams(message)) => {
+        Err(CodeGraphError::Handler(McpHandlerError::InvalidParams(message))) => {
             JsonRpcResponse::invalid_params(id, message)
         }
-        Err(McpHandlerError::NotFound(message)) => JsonRpcResponse::error(id, -32004, message),
-        Err(McpHandlerError::Unauthorized(message)) => JsonRpcResponse::error(id, -32001, message),
-        Err(McpHandlerError::UpstreamPm(message)) | Err(McpHandlerError::Internal(message)) => {
+        Err(CodeGraphError::Handler(McpHandlerError::NotFound(message))) => {
+            JsonRpcResponse::error_with_data(
+                id,
+                CODE_GRAPH_NOT_FOUND_ERROR_CODE,
+                message,
+                json!({ "kind": "not_found" }),
+            )
+        }
+        Err(CodeGraphError::Handler(McpHandlerError::Unauthorized(message))) => {
+            JsonRpcResponse::error(id, -32001, message)
+        }
+        Err(CodeGraphError::Handler(McpHandlerError::UpstreamPm(message)))
+        | Err(CodeGraphError::Handler(McpHandlerError::Internal(message))) => {
             JsonRpcResponse::internal_error(id, message)
         }
+        Err(CodeGraphError::Resolution {
+            code,
+            message,
+            data,
+        }) => JsonRpcResponse::error_with_data(id, code, message, data),
+    }
+}
+
+fn resolution_error(code: i64, message: String, data: Value) -> CodeGraphError {
+    CodeGraphError::Resolution {
+        code,
+        message,
+        data,
+    }
+}
+
+fn deleted_resolution_error(
+    symbol_id: &str,
+    as_of: &str,
+    last_seen: SnapshotKey,
+) -> CodeGraphError {
+    resolution_error(
+        CODE_GRAPH_DELETED_ERROR_CODE,
+        format!("symbol {symbol_id} was deleted at or before commit `{as_of}`"),
+        json!({
+            "kind": "deleted",
+            "last_seen": last_seen,
+        }),
+    )
+}
+
+fn ambiguous_resolution_error(
+    symbol_id: &str,
+    as_of: &str,
+    candidates: Vec<String>,
+) -> CodeGraphError {
+    resolution_error(
+        CODE_GRAPH_AMBIGUOUS_ERROR_CODE,
+        format!(
+            "symbol {symbol_id} is ambiguous at commit `{as_of}`; candidates: {}",
+            candidates.join(", ")
+        ),
+        json!({
+            "kind": "ambiguous",
+            "candidates": candidates,
+        }),
+    )
+}
+
+fn unknown_resolution_error(
+    symbol_id: &str,
+    as_of: &str,
+    reason: ResolutionFailure,
+) -> CodeGraphError {
+    let reason_message = format_resolution_failure(&reason);
+    resolution_error(
+        CODE_GRAPH_UNKNOWN_ERROR_CODE,
+        format!("symbol {symbol_id} could not be resolved at commit `{as_of}` ({reason_message})"),
+        json!({
+            "kind": "unknown",
+            "reason": resolution_failure_data(&reason),
+        }),
+    )
+}
+
+fn resolution_failure_data(reason: &ResolutionFailure) -> Value {
+    match reason {
+        ResolutionFailure::AnchorCommitNotIndexed(commit) => json!({
+            "kind": "anchor_commit_not_indexed",
+            "commit": commit,
+        }),
+        ResolutionFailure::SymbolNotPresentAtAnchor => json!({
+            "kind": "symbol_not_present_at_anchor",
+        }),
+        ResolutionFailure::IndexCorrupt(message) => json!({
+            "kind": "index_corrupt",
+            "message": message,
+        }),
     }
 }
 
@@ -240,7 +367,7 @@ fn resolve_symbol_for_optional_as_of(
     worktree: &Path,
     symbol_id: &str,
     args: &Value,
-) -> Result<String, McpHandlerError> {
+) -> Result<String, CodeGraphError> {
     let Some(as_of) = parse_as_of(args)? else {
         return Ok(symbol_id.to_string());
     };
@@ -266,30 +393,31 @@ fn resolve_symbol_as_of(
     commits: &CommitIndexArtifact,
     symbol_id: &str,
     as_of: &str,
-) -> Result<String, McpHandlerError> {
+) -> Result<String, CodeGraphError> {
     if !commits.commits.iter().any(|commit| commit.sha == as_of) {
         return Err(McpHandlerError::InvalidParams(format!(
             "as_of commit `{as_of}` is not indexed"
-        )));
+        ))
+        .into());
     }
 
     let history = symbol_history(artifact, commits, symbol_id);
     if history.is_empty() {
         return Err(McpHandlerError::NotFound(format!(
             "symbol {symbol_id} has no temporal history in graph artifact"
-        )));
+        ))
+        .into());
     }
 
     let mut last_unknown = None;
     for (_, _, key) in history {
         match resolve_symbol_at(artifact, commits, &key.stable_symbol_id, &key.commit, as_of) {
             Resolution::Found { value, .. } => return Ok(value),
-            Resolution::Deleted { last_seen } => return Ok(last_seen.stable_symbol_id),
+            Resolution::Deleted { last_seen } => {
+                return Err(deleted_resolution_error(symbol_id, as_of, last_seen));
+            }
             Resolution::Ambiguous { candidates } => {
-                return Err(McpHandlerError::InvalidParams(format!(
-                    "symbol {symbol_id} is ambiguous at commit `{as_of}`; candidates: {}",
-                    candidates.join(", ")
-                )));
+                return Err(ambiguous_resolution_error(symbol_id, as_of, candidates));
             }
             Resolution::Unknown { reason } => {
                 last_unknown = Some(reason);
@@ -297,15 +425,17 @@ fn resolve_symbol_as_of(
         }
     }
 
-    let suffix = last_unknown
-        .map(|reason| format!(" ({})", format_resolution_failure(reason)))
-        .unwrap_or_default();
+    if let Some(reason) = last_unknown {
+        return Err(unknown_resolution_error(symbol_id, as_of, reason));
+    }
+
     Err(McpHandlerError::NotFound(format!(
-        "symbol {symbol_id} not present at commit `{as_of}`{suffix}"
-    )))
+        "symbol {symbol_id} not present at commit `{as_of}`"
+    ))
+    .into())
 }
 
-fn format_resolution_failure(reason: ResolutionFailure) -> String {
+fn format_resolution_failure(reason: &ResolutionFailure) -> String {
     match reason {
         ResolutionFailure::AnchorCommitNotIndexed(commit) => {
             format!("anchor commit `{commit}` is not indexed")

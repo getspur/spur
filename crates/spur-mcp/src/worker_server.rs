@@ -599,7 +599,7 @@ impl WorkerToolHandler {
         })
     }
 
-    async fn invoke_with_lifecycle<F, Fut>(
+    async fn invoke_with_lifecycle<F, Fut, E>(
         &self,
         tool_name: &'static str,
         context: RequestContext<RoleServer>,
@@ -608,7 +608,8 @@ impl WorkerToolHandler {
     ) -> Result<CallToolResult, McpError>
     where
         F: FnOnce(WorkerCallContext) -> Fut,
-        Fut: std::future::Future<Output = Result<Value, McpHandlerError>>,
+        Fut: std::future::Future<Output = Result<Value, E>>,
+        E: Into<McpError>,
     {
         let worker_ctx = self.context_from_request(&context)?;
         if worker_ctx.brain_session_id != self.brain_session_id {
@@ -632,9 +633,7 @@ impl WorkerToolHandler {
         let is_error = result.is_err();
         record_call(&self.deps, &delegation_id, tool_name, latency_ms, is_error);
 
-        result
-            .map(CallToolResult::structured)
-            .map_err(McpError::from)
+        result.map(CallToolResult::structured).map_err(Into::into)
     }
 
     #[tool(
