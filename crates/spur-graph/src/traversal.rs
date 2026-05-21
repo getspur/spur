@@ -37,7 +37,7 @@ pub fn find_callers<'a>(
     artifact
         .edges
         .iter()
-        .filter(|edge| is_call_relation(edge.relation))
+        .filter(|edge| is_caller_relation(edge.relation))
         .filter(|edge| edge.target_stable_symbol_id.as_deref() == Some(symbol_id))
         .filter_map(|edge| find_symbol(artifact, &edge.source_stable_symbol_id))
         .collect()
@@ -67,7 +67,7 @@ pub fn find_callee_edges<'a>(
     artifact
         .edges
         .iter()
-        .filter(|edge| is_call_relation(edge.relation))
+        .filter(|edge| is_caller_relation(edge.relation))
         .filter(|edge| edge.source_stable_symbol_id == symbol_id)
         .filter_map(|edge| match edge.target_stable_symbol_id.as_deref() {
             Some(target_id) => find_symbol(artifact, target_id).map(CalleeRecord::Resolved),
@@ -154,8 +154,16 @@ pub fn bounded_subgraph<'a>(
     SubgraphView { nodes, edges }
 }
 
-fn is_call_relation(relation: RelationKind) -> bool {
-    matches!(relation, RelationKind::Calls)
+/// Edges that contribute to caller/callee relationships.
+///
+/// Includes `RelationKind::References` so that function-value passes such as
+/// `.map(fn_name)` flow through `find_callers`/`find_callee_edges` — without
+/// this, a function that is only ever referenced via higher-order method
+/// calls would appear to have zero callers (Flaw A in the code_* tool audit).
+/// Consumers that need strict-Calls-only behavior can filter at the
+/// `code_subgraph` layer via `edge_kinds=["calls"]`.
+fn is_caller_relation(relation: RelationKind) -> bool {
+    matches!(relation, RelationKind::Calls | RelationKind::References)
 }
 
 fn edge_matches_filter(edge: &GraphEdgeArtifact, edge_kinds: Option<&[RelationKind]>) -> bool {
@@ -261,7 +269,9 @@ mod tests {
     }
 
     #[test]
-    fn callers_and_callees_ignore_non_call_edges_and_unknown_targets() {
+    fn callers_and_callees_follow_calls_and_references_edges() {
+        // Fixture has a Calls edge root → caller_a AND a References edge root →
+        // caller_a. Both flow through find_callees, so caller_a appears twice.
         let artifact = artifact();
 
         assert_eq!(
@@ -270,7 +280,7 @@ mod tests {
         );
         assert_eq!(
             ids(&find_callees(&artifact, "root")),
-            vec!["caller_a", "caller_b", "callee_a"]
+            vec!["caller_a", "caller_b", "callee_a", "caller_a"]
         );
         assert!(find_callers(&artifact, "missing").is_empty());
         assert!(find_callees(&artifact, "missing").is_empty());
@@ -301,7 +311,11 @@ mod tests {
 
         let callees = find_callee_edges(&artifact, "root");
 
-        assert_eq!(callees.len(), 2);
+        // 3 records: one Calls edge to `callee`, one unresolved Calls edge with
+        // label "into", and one References edge to `callee` (the same symbol
+        // surfaces twice because Calls and References both contribute to
+        // find_callee_edges since Flaw-A's API broadening landed).
+        assert_eq!(callees.len(), 3);
         assert!(matches!(
             callees[0],
             CalleeRecord::Resolved(symbol) if symbol.stable_symbol_id == "callee"
@@ -312,6 +326,10 @@ mod tests {
                 target_label: "into".to_string()
             }
         );
+        assert!(matches!(
+            callees[2],
+            CalleeRecord::Resolved(symbol) if symbol.stable_symbol_id == "callee"
+        ));
     }
 
     #[test]
@@ -442,5 +460,29 @@ mod tests {
         let r1 = bounded_subgraph(&artifact, "root", 1, None);
         assert_eq!(r1.edges.len(), 1);
         assert_eq!(ids(&r1.nodes), vec!["root"]);
+    }
+
+    #[test]
+    fn callers_and_callees_include_references_edges() {
+        let artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_string(),
+            graph_content_hash: "test".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            symbols: ["caller", "target"].into_iter().map(symbol).collect(),
+            edges: vec![edge("caller", "target", RelationKind::References)],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        assert_eq!(ids(&find_callers(&artifact, "target")), vec!["caller"]);
+        assert_eq!(ids(&find_callees(&artifact, "caller")), vec!["target"]);
+
+        let view = bounded_subgraph(&artifact, "target", 1, None);
+        assert_eq!(ids(&view.nodes), vec!["target", "caller"]);
     }
 }
