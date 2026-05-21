@@ -676,6 +676,8 @@ pub struct TemporalEdgeArtifact {
     pub target: EdgeEndpoint,
     pub relation: RelationKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_kind: Option<ChangeKind>,
 }
 

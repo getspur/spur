@@ -172,31 +172,6 @@ fn resolve_from_anchor_key(
             };
         }
 
-        match latest_reachable_snapshots(
-            code,
-            graph,
-            target_ancestors,
-            &current.stable_symbol_id,
-            &current.commit,
-        ) {
-            Ok(latest) => {
-                if latest
-                    .iter()
-                    .any(|snapshot| is_deleted_snapshot(code, snapshot))
-                {
-                    if let [last_seen] = latest.as_slice() {
-                        return Resolution::Deleted {
-                            last_seen: last_seen.clone(),
-                        };
-                    }
-                    return Resolution::Ambiguous {
-                        candidates: vec![current.stable_symbol_id],
-                    };
-                }
-            }
-            Err(reason) => return Resolution::Unknown { reason },
-        }
-
         let mut candidates = match forward_rename_candidates(
             code,
             graph,
@@ -209,10 +184,34 @@ fn resolve_from_anchor_key(
         };
 
         if candidates.is_empty() {
-            return Resolution::Found {
-                value: current.stable_symbol_id,
-                chain,
-            };
+            match latest_reachable_snapshots(
+                code,
+                graph,
+                target_ancestors,
+                &current.stable_symbol_id,
+                &current.commit,
+            ) {
+                Ok(latest) => {
+                    if latest
+                        .iter()
+                        .any(|snapshot| is_deleted_snapshot(code, snapshot))
+                    {
+                        if let [last_seen] = latest.as_slice() {
+                            return Resolution::Deleted {
+                                last_seen: last_seen.clone(),
+                            };
+                        }
+                        return Resolution::Ambiguous {
+                            candidates: vec![current.stable_symbol_id],
+                        };
+                    }
+                    return Resolution::Found {
+                        value: current.stable_symbol_id,
+                        chain,
+                    };
+                }
+                Err(reason) => return Resolution::Unknown { reason },
+            }
         }
 
         sort_snapshot_keys(&mut candidates, graph);
@@ -551,6 +550,7 @@ mod tests {
                 key: snap_old.key.clone(),
             },
             relation: RelationKind::Touches,
+            parent: None,
             change_kind: Some(ChangeKind::Added),
         });
         graph.temporal_edges.push(TemporalEdgeArtifact {
@@ -559,6 +559,7 @@ mod tests {
                 key: snap_new.key.clone(),
             },
             relation: RelationKind::Touches,
+            parent: None,
             change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(
                 snap_old.key.clone(),
             ))),
@@ -571,6 +572,7 @@ mod tests {
                 key: snap_old.key.clone(),
             },
             relation: RelationKind::Touches,
+            parent: None,
             change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(
                 snap_old.key.clone(),
             ))),
