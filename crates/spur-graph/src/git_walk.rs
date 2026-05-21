@@ -180,7 +180,7 @@ pub fn run_full_walk_into(
 
     let mut graph = empty_graph_artifact();
     let mut commits = CommitIndexArtifact {
-        schema_version: 1,
+        schema_version: current_temporal_schema_version()?,
         commits: Vec::with_capacity(commit_shas.len()),
         refs: refs.clone(),
         indexed_at: chrono::Utc::now().to_rfc3339(),
@@ -1019,11 +1019,7 @@ fn snapshot_from(commit: &str, path: &GitPath, symbol: &ExtractedSymbol) -> Symb
     let path_buf = path.to_path_buf();
     SymbolSnapshotArtifact {
         key: SnapshotKey {
-            stable_symbol_id: crate::identity::stable_symbol_id_for(
-                &path_buf,
-                &symbol.entity_name,
-                &symbol.anchor_hash,
-            ),
+            stable_symbol_id: crate::identity::stable_symbol_id_for(&path_buf, &symbol.entity_name),
             commit: commit.to_string(),
         },
         file_path: path.clone(),
@@ -1035,6 +1031,12 @@ fn snapshot_from(commit: &str, path: &GitPath, symbol: &ExtractedSymbol) -> Symb
         anchor_hash: symbol.anchor_hash.clone(),
         tokens: symbol.tokens.clone(),
     }
+}
+
+fn current_temporal_schema_version() -> Result<u32> {
+    GRAPH_INDEX_VERSION_TEMPORAL.parse().with_context(|| {
+        format!("parse temporal graph index version `{GRAPH_INDEX_VERSION_TEMPORAL}`")
+    })
 }
 
 fn commit_parents(worktree: &Path, sha: &str) -> Result<Vec<String>> {
