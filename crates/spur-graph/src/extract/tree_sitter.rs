@@ -209,10 +209,34 @@ impl<'a> FactBuilder<'a> {
                     .or_insert(node.node_id);
             }
         }
+        let node_kind_by_id: HashMap<NodeId, NodeKind> = self
+            .facts
+            .nodes
+            .iter()
+            .map(|node| (node.node_id, node.kind))
+            .collect();
         let pending = std::mem::take(&mut self.pending_edges);
         let mut ambiguous_unresolved = 0usize;
         for edge in pending {
-            if let Some(candidates) = ambiguous_symbols_by_label.get(&edge.target_name).copied() {
+            if edge.relation == RelationKind::References {
+                if let Some(target) = singleton_symbols_by_label.get(&edge.target_name).copied() {
+                    if target != edge.source
+                        && matches!(
+                            node_kind_by_id.get(&target).copied(),
+                            Some(NodeKind::Function | NodeKind::Method)
+                        )
+                    {
+                        self.add_edge(
+                            edge.source,
+                            Some(target),
+                            edge.relation,
+                            Some(edge.target_name),
+                        );
+                    }
+                }
+            } else if let Some(candidates) =
+                ambiguous_symbols_by_label.get(&edge.target_name).copied()
+            {
                 ambiguous_unresolved += 1;
                 tracing::debug!(
                     target_label = %edge.target_name,
