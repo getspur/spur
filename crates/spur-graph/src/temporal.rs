@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::schema::{
     ChangeKind, CommitIndexArtifact, EdgeEndpoint, GraphIndexArtifact, RelationKind, RenamePrev,
-    SnapshotKey, StableSymbolId,
+    SnapshotKey, StableSymbolId, TemporalEdgeArtifact,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,42 +22,284 @@ pub enum ResolutionFailure {
 
 pub type GitSha = String;
 
-pub fn symbol_history(
-    code: &GraphIndexArtifact,
+#[derive(Debug)]
+pub struct TemporalIndex<'a> {
+    code: &'a GraphIndexArtifact,
+    edges_by_stable_symbol_id: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>>,
+    edges_by_commit_sha: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>>,
+    commit_positions: HashMap<&'a str, usize>,
+    snapshot_keys_by_stable_symbol_id: HashMap<&'a str, Vec<SnapshotKey>>,
+    rename_edges: Vec<(SnapshotKey, SnapshotKey)>,
+    rename_neighbors_by_snapshot: HashMap<SnapshotKey, Vec<SnapshotKey>>,
+    referenced_snapshot_count: usize,
+}
+
+impl<'a> TemporalIndex<'a> {
+    pub fn new(code: &'a GraphIndexArtifact) -> Self {
+        let mut edges_by_stable_symbol_id: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>> =
+            HashMap::new();
+        let mut edges_by_commit_sha: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>> =
+            HashMap::new();
+        let commit_positions = code
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(index, commit)| (commit.sha.as_str(), index))
+            .collect();
+        let mut snapshot_key_sets: HashMap<&'a str, HashSet<SnapshotKey>> = HashMap::new();
+        let mut referenced_snapshot_keys = HashSet::new();
+        let mut rename_edges = Vec::new();
+
+        for snapshot in &code.symbol_snapshots {
+            insert_snapshot_key(
+                &mut snapshot_key_sets,
+                snapshot.key.stable_symbol_id.as_str(),
+                snapshot.key.clone(),
+                &mut referenced_snapshot_keys,
+            );
+        }
+
+        for edge in &code.temporal_edges {
+            let mut stable_symbol_ids = Vec::new();
+            index_endpoint(
+                &edge.source,
+                &mut stable_symbol_ids,
+                &mut snapshot_key_sets,
+                &mut referenced_snapshot_keys,
+            );
+            index_endpoint(
+                &edge.target,
+                &mut stable_symbol_ids,
+                &mut snapshot_key_sets,
+                &mut referenced_snapshot_keys,
+            );
+
+            if let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind {
+                push_unique_stable_symbol_id(&mut stable_symbol_ids, &prev.stable_symbol_id);
+                insert_snapshot_key(
+                    &mut snapshot_key_sets,
+                    prev.stable_symbol_id.as_str(),
+                    prev.clone(),
+                    &mut referenced_snapshot_keys,
+                );
+                if let Some(next) = rename_target(edge, prev) {
+                    rename_edges.push((prev.clone(), next));
+                }
+            }
+
+            for stable_symbol_id in stable_symbol_ids {
+                edges_by_stable_symbol_id
+                    .entry(stable_symbol_id)
+                    .or_default()
+                    .push(edge);
+            }
+            if let EdgeEndpoint::Commit { sha } = &edge.source {
+                edges_by_commit_sha.entry(sha).or_default().push(edge);
+            }
+            if let EdgeEndpoint::Commit { sha } = &edge.target {
+                edges_by_commit_sha.entry(sha).or_default().push(edge);
+            }
+        }
+
+        let mut snapshot_keys_by_stable_symbol_id = HashMap::new();
+        for (stable_symbol_id, keys) in snapshot_key_sets {
+            let mut keys: Vec<_> = keys.into_iter().collect();
+            keys.sort_by(|left, right| {
+                left.commit
+                    .cmp(&right.commit)
+                    .then_with(|| left.stable_symbol_id.cmp(&right.stable_symbol_id))
+            });
+            snapshot_keys_by_stable_symbol_id.insert(stable_symbol_id, keys);
+        }
+
+        let mut rename_neighbors_by_snapshot: HashMap<SnapshotKey, Vec<SnapshotKey>> =
+            HashMap::new();
+        for (prev, next) in &rename_edges {
+            rename_neighbors_by_snapshot
+                .entry(prev.clone())
+                .or_default()
+                .push(next.clone());
+            rename_neighbors_by_snapshot
+                .entry(next.clone())
+                .or_default()
+                .push(prev.clone());
+        }
+
+        Self {
+            code,
+            edges_by_stable_symbol_id,
+            edges_by_commit_sha,
+            commit_positions,
+            snapshot_keys_by_stable_symbol_id,
+            rename_edges,
+            rename_neighbors_by_snapshot,
+            referenced_snapshot_count: referenced_snapshot_keys.len(),
+        }
+    }
+
+    pub fn artifact(&self) -> &'a GraphIndexArtifact {
+        self.code
+    }
+
+    pub fn edges_for_stable_symbol_id(
+        &self,
+        stable_symbol_id: &str,
+    ) -> &[&'a TemporalEdgeArtifact] {
+        self.edges_by_stable_symbol_id
+            .get(stable_symbol_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn edges_for_commit_sha(&self, commit_sha: &str) -> &[&'a TemporalEdgeArtifact] {
+        self.edges_by_commit_sha
+            .get(commit_sha)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn has_commit_positions(&self) -> bool {
+        !self.commit_positions.is_empty()
+    }
+
+    fn commit_position(&self, commit: &str) -> usize {
+        self.commit_positions
+            .get(commit)
+            .copied()
+            .unwrap_or(usize::MAX)
+    }
+}
+
+pub enum TemporalHistorySource<'a> {
+    Artifact(&'a GraphIndexArtifact),
+    Index(&'a TemporalIndex<'a>),
+}
+
+impl<'a> From<&'a GraphIndexArtifact> for TemporalHistorySource<'a> {
+    fn from(value: &'a GraphIndexArtifact) -> Self {
+        Self::Artifact(value)
+    }
+}
+
+impl<'a> From<&'a TemporalIndex<'a>> for TemporalHistorySource<'a> {
+    fn from(value: &'a TemporalIndex<'a>) -> Self {
+        Self::Index(value)
+    }
+}
+
+pub fn symbol_history<'a, S>(
+    source: S,
+    commits: &CommitIndexArtifact,
+    symbol: &str,
+) -> Vec<(GitSha, ChangeKind, SnapshotKey)>
+where
+    S: Into<TemporalHistorySource<'a>>,
+{
+    match source.into() {
+        TemporalHistorySource::Artifact(code) => {
+            let index = TemporalIndex::new(code);
+            symbol_history_indexed(&index, commits, symbol)
+        }
+        TemporalHistorySource::Index(index) => symbol_history_indexed(index, commits, symbol),
+    }
+}
+
+fn symbol_history_indexed(
+    index: &TemporalIndex<'_>,
     commits: &CommitIndexArtifact,
     symbol: &str,
 ) -> Vec<(GitSha, ChangeKind, SnapshotKey)> {
-    let graph = CommitGraph::new(commits);
-    let mut chain_keys = seed_symbol_history_keys(code, symbol);
-    if close_symbol_history_chain(code, &mut chain_keys).is_err() {
+    let mut chain_keys = seed_symbol_history_keys(index, symbol);
+    if close_symbol_history_chain(index, &mut chain_keys).is_err() {
         return Vec::new();
     }
 
-    let mut events: Vec<_> = code
-        .temporal_edges
+    let stable_symbol_ids: HashSet<_> = chain_keys
         .iter()
-        .filter_map(|edge| match (&edge.source, &edge.target) {
-            (EdgeEndpoint::Commit { sha }, EdgeEndpoint::Snapshot { key })
-                if chain_keys.contains(key) =>
-            {
-                edge.change_kind
-                    .clone()
-                    .map(|change_kind| (sha.clone(), change_kind, key.clone()))
-            }
-            _ => None,
-        })
+        .map(|key| key.stable_symbol_id.as_str())
         .collect();
+    let mut events = Vec::new();
+    for stable_symbol_id in stable_symbol_ids {
+        for edge in index.edges_for_stable_symbol_id(stable_symbol_id) {
+            match (&edge.source, &edge.target) {
+                (EdgeEndpoint::Commit { sha }, EdgeEndpoint::Snapshot { key })
+                    if chain_keys.contains(key) =>
+                {
+                    if let Some(change_kind) = &edge.change_kind {
+                        events.push((sha.clone(), change_kind.clone(), key.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 
+    if index.has_commit_positions() {
+        sort_history_events(&mut events, |commit| index.commit_position(commit));
+    } else {
+        let graph = CommitGraph::new(commits);
+        sort_history_events(&mut events, |commit| graph.position(commit));
+    }
+    events.dedup();
+    events
+}
+
+fn sort_history_events(
+    events: &mut [(GitSha, ChangeKind, SnapshotKey)],
+    position: impl Fn(&str) -> usize,
+) {
     events.sort_by(|left, right| {
-        graph
-            .position(&left.0)
-            .cmp(&graph.position(&right.0))
+        position(&left.0)
+            .cmp(&position(&right.0))
             .then_with(|| left.0.cmp(&right.0))
             .then_with(|| left.2.stable_symbol_id.cmp(&right.2.stable_symbol_id))
             .then_with(|| left.2.commit.cmp(&right.2.commit))
     });
-    events.dedup();
-    events
+}
+
+fn insert_snapshot_key<'a>(
+    snapshot_key_sets: &mut HashMap<&'a str, HashSet<SnapshotKey>>,
+    stable_symbol_id: &'a str,
+    key: SnapshotKey,
+    referenced_snapshot_keys: &mut HashSet<SnapshotKey>,
+) {
+    referenced_snapshot_keys.insert(key.clone());
+    snapshot_key_sets
+        .entry(stable_symbol_id)
+        .or_default()
+        .insert(key);
+}
+
+fn index_endpoint<'a>(
+    endpoint: &'a EdgeEndpoint,
+    stable_symbol_ids: &mut Vec<&'a str>,
+    snapshot_key_sets: &mut HashMap<&'a str, HashSet<SnapshotKey>>,
+    referenced_snapshot_keys: &mut HashSet<SnapshotKey>,
+) {
+    match endpoint {
+        EdgeEndpoint::Symbol { stable_symbol_id } => {
+            push_unique_stable_symbol_id(stable_symbol_ids, stable_symbol_id);
+        }
+        EdgeEndpoint::Snapshot { key } => {
+            push_unique_stable_symbol_id(stable_symbol_ids, &key.stable_symbol_id);
+            insert_snapshot_key(
+                snapshot_key_sets,
+                key.stable_symbol_id.as_str(),
+                key.clone(),
+                referenced_snapshot_keys,
+            );
+        }
+        EdgeEndpoint::File { .. } | EdgeEndpoint::Commit { .. } => {}
+    }
+}
+
+fn push_unique_stable_symbol_id<'a>(
+    stable_symbol_ids: &mut Vec<&'a str>,
+    stable_symbol_id: &'a str,
+) {
+    if !stable_symbol_ids.contains(&stable_symbol_id) {
+        stable_symbol_ids.push(stable_symbol_id);
+    }
 }
 
 pub fn resolve_symbol_at(
@@ -113,18 +355,20 @@ pub fn resolve_symbol_at(
     resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_key)
 }
 
-fn seed_symbol_history_keys(code: &GraphIndexArtifact, symbol: &str) -> HashSet<SnapshotKey> {
-    snapshot_keys_for_symbol(code, symbol).into_iter().collect()
+fn seed_symbol_history_keys(index: &TemporalIndex<'_>, symbol: &str) -> HashSet<SnapshotKey> {
+    snapshot_keys_for_symbol_indexed(index, symbol)
+        .into_iter()
+        .collect()
 }
 
 fn close_symbol_history_chain(
-    code: &GraphIndexArtifact,
+    index: &TemporalIndex<'_>,
     chain_keys: &mut HashSet<SnapshotKey>,
 ) -> Result<(), ResolutionFailure> {
     loop {
         let previous_len = chain_keys.len();
-        expand_stable_symbol_snapshots(code, chain_keys);
-        close_rename_chain(code, chain_keys)?;
+        expand_stable_symbol_snapshots(index, chain_keys);
+        close_rename_chain_indexed(index, chain_keys)?;
         if chain_keys.len() == previous_len {
             break;
         }
@@ -133,7 +377,7 @@ fn close_symbol_history_chain(
 }
 
 fn expand_stable_symbol_snapshots(
-    code: &GraphIndexArtifact,
+    index: &TemporalIndex<'_>,
     chain_keys: &mut HashSet<SnapshotKey>,
 ) {
     let stable_symbol_ids: HashSet<_> = chain_keys
@@ -142,8 +386,40 @@ fn expand_stable_symbol_snapshots(
         .collect();
 
     for stable_symbol_id in stable_symbol_ids {
-        chain_keys.extend(snapshot_keys_for_symbol(code, &stable_symbol_id));
+        chain_keys.extend(snapshot_keys_for_symbol_indexed(index, &stable_symbol_id));
     }
+}
+
+fn close_rename_chain_indexed(
+    index: &TemporalIndex<'_>,
+    chain_keys: &mut HashSet<SnapshotKey>,
+) -> Result<(), ResolutionFailure> {
+    if index.rename_edges.is_empty() {
+        return Ok(());
+    }
+
+    let snapshot_count = index.referenced_snapshot_count;
+    let mut component = HashSet::new();
+    let mut stack: Vec<_> = chain_keys.iter().cloned().collect();
+
+    while let Some(current) = stack.pop() {
+        if !component.insert(current.clone()) {
+            continue;
+        }
+        chain_keys.insert(current.clone());
+        guard_rename_chain_bound(chain_keys.len(), snapshot_count, &current)?;
+
+        if let Some(neighbors) = index.rename_neighbors_by_snapshot.get(&current) {
+            for neighbor in neighbors {
+                if !component.contains(neighbor) {
+                    stack.push(neighbor.clone());
+                }
+            }
+        }
+    }
+
+    debug_assert!(chain_keys.len() <= snapshot_count);
+    detect_reachable_rename_cycle(&index.rename_edges, &component)
 }
 
 fn close_rename_chain(
@@ -526,6 +802,17 @@ fn snapshot_keys_for_symbol(code: &GraphIndexArtifact, stable_symbol_id: &str) -
     }
 
     keys
+}
+
+fn snapshot_keys_for_symbol_indexed(
+    index: &TemporalIndex<'_>,
+    stable_symbol_id: &str,
+) -> Vec<SnapshotKey> {
+    index
+        .snapshot_keys_by_stable_symbol_id
+        .get(stable_symbol_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn is_deleted_snapshot(code: &GraphIndexArtifact, snapshot: &SnapshotKey) -> bool {
