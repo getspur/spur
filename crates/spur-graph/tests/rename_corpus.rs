@@ -146,6 +146,7 @@ fn candidate_changes(
         added.push(SymbolChange {
             snapshot: snapshot_from("new", new_path, symbol),
             change_kind: ChangeKind::Added,
+            parent_sha: None,
         });
     }
 
@@ -154,6 +155,7 @@ fn candidate_changes(
         .map(|symbol| SymbolChange {
             snapshot: snapshot_from("old", old_path, symbol),
             change_kind: ChangeKind::Deleted,
+            parent_sha: None,
         })
         .collect();
 
