@@ -1,16 +1,19 @@
 use std::collections::HashSet;
+use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path};
+use std::process::Command;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
+use spur_graph::git_blob_oid;
 use spur_graph::{
     bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
     resolve_selector, resolve_worktree_root_from, search_symbols, CalleeRecord, CallerRecord,
-    CandidateRow, GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer,
-    GraphSymbolArtifact, SearchFilters, SearchMode, SearchOptions, SelectorResolution,
-    SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
+    CandidateRow, GraphEdgeArtifact, GraphEdgeKind, GraphFileManifestEntry, GraphIndexArtifact,
+    GraphIndexPointer, GraphSymbolArtifact, SearchFilters, SearchMode, SearchOptions,
+    SelectorResolution, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -25,6 +28,7 @@ const MAX_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 400;
 const DEFAULT_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 120;
 const MIN_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1;
 const MAX_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1200;
+const MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES: usize = 50;
 const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
@@ -44,6 +48,10 @@ impl McpCallbackServer {
 
     pub(crate) async fn handle_code_symbol_info(&self, id: Value, args: Value) -> JsonRpcResponse {
         code_graph_response(id, code_symbol_info_response(&args).await).await
+    }
+
+    pub(crate) async fn handle_code_read_symbol(&self, id: Value, args: Value) -> JsonRpcResponse {
+        code_graph_response(id, code_read_symbol_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -181,6 +189,69 @@ fn code_symbol_info_with_artifact(
     let symbol = symbol_by_id(artifact, &symbol_id)?;
 
     Ok(json!({ "symbol": symbol_info_row(symbol) }))
+}
+
+pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerError> {
+    let artifact = load_graph_artifact_for_request()?;
+    let body = code_read_symbol_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
+}
+
+async fn code_read_symbol_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_read_symbol_with_artifact(args, artifact)).await
+}
+
+fn code_read_symbol_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
+    let symbol = match code_read_symbol_target(args, artifact)? {
+        CodeReadSymbolTarget::Resolved(symbol) => symbol,
+        CodeReadSymbolTarget::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(candidates));
+        }
+    };
+    let context_lines = clamped_usize_arg(
+        args,
+        "context_lines",
+        0,
+        0,
+        MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES,
+    )?;
+    let manifest = file_manifest_for_symbol(artifact, symbol)?;
+    let worktree = current_worktree_root().ok_or_else(|| {
+        McpHandlerError::Internal("failed to resolve current worktree root".into())
+    })?;
+    let indexed_bytes =
+        read_indexed_file_bytes(&worktree, &symbol.file_path, &manifest.content_oid)?;
+    let indexed_source = String::from_utf8(indexed_bytes).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "indexed blob `{}` for `{}` is not UTF-8: {error}",
+            manifest.content_oid, symbol.file_path
+        ))
+    })?;
+    let source_range = source_range_with_context(&indexed_source, symbol, context_lines.value);
+    let source = source_for_line_range(&indexed_source, source_range);
+    let current_oid = current_file_oid(&worktree, &symbol.file_path)?;
+    let stale = current_oid.as_deref() != Some(manifest.content_oid.as_str());
+
+    let mut body = json!({
+        "symbol": symbol_info_row(symbol),
+        "source": source,
+        "line_range": {
+            "start": source_range[0],
+            "end": source_range[1],
+        },
+        "file_oid": manifest.content_oid,
+        "context_lines": context_lines.value,
+    });
+    if let Some(requested_context_lines) = context_lines.requested_value {
+        body["requested_context_lines"] = requested_context_lines;
+    }
+    if stale {
+        body["stale"] = Value::Bool(true);
+    }
+    Ok(body)
 }
 
 pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
@@ -519,6 +590,11 @@ enum CodeSelectorResolution {
     Ambiguous(Vec<CandidateRow>),
 }
 
+enum CodeReadSymbolTarget<'a> {
+    Resolved(&'a GraphSymbolArtifact),
+    Ambiguous(Vec<CandidateRow>),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OnAmbiguousMode {
     Candidates,
@@ -583,6 +659,60 @@ fn selector_arg(args: &Value) -> Result<&str, McpHandlerError> {
 fn file_arg(args: &Value) -> Result<&str, McpHandlerError> {
     string_arg(args, "file")?
         .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'file'".into()))
+}
+
+fn code_read_symbol_target<'a>(
+    args: &Value,
+    artifact: &'a GraphIndexArtifact,
+) -> Result<CodeReadSymbolTarget<'a>, McpHandlerError> {
+    let stable_symbol_id = string_arg(args, "stable_symbol_id")?;
+    let path = string_arg(args, "path")?;
+    let name = string_arg(args, "name")?;
+
+    match (stable_symbol_id, path, name) {
+        (Some(stable_symbol_id), None, None) => {
+            let symbol_id = missing_symbol_label(stable_symbol_id);
+            symbol_by_id(artifact, symbol_id).map(CodeReadSymbolTarget::Resolved)
+        }
+        (None, Some(path), Some(name)) => {
+            let path = validate_worktree_relative_path_arg("path", path)?;
+            resolve_symbol_by_path_name(artifact, &path, name)
+        }
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(McpHandlerError::InvalidParams(
+            "field 'stable_symbol_id' is mutually exclusive with fields 'path' and 'name'".into(),
+        )),
+        (None, Some(_), None) | (None, None, Some(_)) => Err(McpHandlerError::InvalidParams(
+            "fields 'path' and 'name' must be provided together".into(),
+        )),
+        (None, None, None) => Err(McpHandlerError::InvalidParams(
+            "Missing required field 'stable_symbol_id' or fields 'path' and 'name'".into(),
+        )),
+    }
+}
+
+fn resolve_symbol_by_path_name<'a>(
+    artifact: &'a GraphIndexArtifact,
+    path: &str,
+    name: &str,
+) -> Result<CodeReadSymbolTarget<'a>, McpHandlerError> {
+    let matches = artifact
+        .symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.file_path == path
+                && (symbol.entity_name == name || symbol.qualified_name == name)
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] => Err(McpHandlerError::NotFound(format!(
+            "symbol `{name}` in file `{path}` not found in graph artifact"
+        ))),
+        [symbol] => Ok(CodeReadSymbolTarget::Resolved(symbol)),
+        _ => Ok(CodeReadSymbolTarget::Ambiguous(candidate_rows_for_symbols(
+            matches,
+        ))),
+    }
 }
 
 #[derive(Debug)]
@@ -1052,6 +1182,115 @@ fn symbol_by_id<'a>(
         })
 }
 
+fn file_manifest_for_symbol<'a>(
+    artifact: &'a GraphIndexArtifact,
+    symbol: &GraphSymbolArtifact,
+) -> Result<&'a GraphFileManifestEntry, McpHandlerError> {
+    artifact
+        .file_manifests
+        .iter()
+        .find(|entry| entry.path == symbol.file_path)
+        .ok_or_else(|| {
+            McpHandlerError::Internal(format!(
+                "graph artifact has no file manifest for `{}`",
+                symbol.file_path
+            ))
+        })
+}
+
+fn read_indexed_file_bytes(
+    worktree: &Path,
+    file_path: &str,
+    content_oid: &str,
+) -> Result<Vec<u8>, McpHandlerError> {
+    if content_oid.starts_with("gitlink:") {
+        return Err(McpHandlerError::Internal(format!(
+            "indexed source for `{file_path}` points to gitlink `{content_oid}`"
+        )));
+    }
+    if let Some(bytes) = read_git_blob(worktree, content_oid)? {
+        return Ok(bytes);
+    }
+
+    let current = read_current_file_bytes(worktree, file_path)?;
+    if git_blob_oid(&current) == content_oid {
+        return Ok(current);
+    }
+
+    Err(McpHandlerError::Internal(format!(
+        "indexed blob `{content_oid}` for `{file_path}` is not available in git object storage"
+    )))
+}
+
+fn read_git_blob(worktree: &Path, content_oid: &str) -> Result<Option<Vec<u8>>, McpHandlerError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["cat-file", "-p", content_oid])
+        .output()
+        .map_err(|error| {
+            McpHandlerError::Internal(format!(
+                "failed to read indexed blob `{content_oid}`: {error}"
+            ))
+        })?;
+
+    if output.status.success() {
+        Ok(Some(output.stdout))
+    } else {
+        Ok(None)
+    }
+}
+
+fn current_file_oid(worktree: &Path, file_path: &str) -> Result<Option<String>, McpHandlerError> {
+    match fs::read(worktree.join(file_path)) {
+        Ok(bytes) => Ok(Some(git_blob_oid(&bytes))),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::IsADirectory) => {
+            Ok(None)
+        }
+        Err(error) => Err(McpHandlerError::Internal(format!(
+            "failed to read current file `{}`: {error}",
+            worktree.join(file_path).display()
+        ))),
+    }
+}
+
+fn read_current_file_bytes(worktree: &Path, file_path: &str) -> Result<Vec<u8>, McpHandlerError> {
+    fs::read(worktree.join(file_path)).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "failed to read current file `{}` while resolving indexed blob: {error}",
+            worktree.join(file_path).display()
+        ))
+    })
+}
+
+fn source_range_with_context(
+    source: &str,
+    symbol: &GraphSymbolArtifact,
+    context_lines: usize,
+) -> [usize; 2] {
+    let line_count = source.split_inclusive('\n').count();
+    let symbol_start = symbol.line_range[0].max(1);
+    let symbol_end = symbol.line_range[1].max(symbol_start);
+    let start = symbol_start.saturating_sub(context_lines).max(1);
+    let end = symbol_end
+        .saturating_add(context_lines)
+        .min(line_count)
+        .max(start.saturating_sub(1));
+    [start, end]
+}
+
+fn source_for_line_range(source: &str, line_range: [usize; 2]) -> String {
+    let [start, end] = line_range;
+    source
+        .split_inclusive('\n')
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line_no = index + 1;
+            (start <= line_no && line_no <= end).then_some(line)
+        })
+        .collect()
+}
+
 fn candidate_rows_for_symbols<'a>(
     symbols: impl IntoIterator<Item = &'a GraphSymbolArtifact>,
 ) -> Vec<CandidateRow> {
@@ -1197,6 +1436,7 @@ fn candidate_row(candidate: CandidateRow) -> Value {
 fn symbol_info_row(symbol: &GraphSymbolArtifact) -> Value {
     json!({
         "qualified_name": symbol.qualified_name,
+        "entity_name": symbol.entity_name,
         "file_path": symbol.file_path,
         "line_range": symbol.line_range,
         "symbol_kind": symbol.symbol_kind,
