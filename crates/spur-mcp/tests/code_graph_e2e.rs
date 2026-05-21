@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -72,6 +73,78 @@ fn copy_fixture_crate(worktree: &Path) {
     std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
 }
 
+fn write_ambiguous_symbol_fixture(worktree: &Path) {
+    std::fs::create_dir_all(worktree.join("src")).expect("create fixture src dir");
+    std::fs::write(
+        worktree.join("Cargo.toml"),
+        "[package]\nname = \"ambiguous-code-graph-sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write fixture manifest");
+    std::fs::write(
+        worktree.join("src/lib.rs"),
+        "pub struct Alpha;\n\
+         pub struct Beta;\n\
+         \n\
+         impl Alpha {\n\
+             pub fn run(&self) -> bool {\n\
+                 true\n\
+             }\n\
+         }\n\
+         \n\
+         impl Beta {\n\
+             pub fn run(&self) -> bool {\n\
+                 false\n\
+             }\n\
+         }\n",
+    )
+    .expect("write fixture source");
+    std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
+}
+
+fn write_wide_fixture_crate(worktree: &Path, helper_count: usize) {
+    std::fs::create_dir_all(worktree.join("src")).expect("create fixture src dir");
+    std::fs::write(
+        worktree.join("Cargo.toml"),
+        "[package]\nname = \"wide-code-graph-sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write fixture manifest");
+
+    let mut source = String::from("pub fn wide_root() {\n");
+    for index in 0..helper_count {
+        source.push_str(&format!("    wide_child_{index:03}();\n"));
+    }
+    source.push_str("}\n\n");
+    for index in 0..helper_count {
+        source.push_str(&format!("pub fn wide_child_{index:03}() {{}}\n"));
+    }
+
+    std::fs::write(worktree.join("src/lib.rs"), source).expect("write fixture source");
+    std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
+}
+
+fn git(worktree: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(worktree)
+        .output()
+        .unwrap_or_else(|error| panic!("run git {}: {error}", args.join(" ")));
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("git stdout UTF-8")
+}
+
+fn commit_fixture(worktree: &Path) {
+    git(worktree, &["init", "-q"]);
+    git(worktree, &["config", "user.email", "test@spur"]);
+    git(worktree, &["config", "user.name", "SPUR Test"]);
+    git(worktree, &["add", "."]);
+    git(worktree, &["commit", "-m", "fixture"]);
+}
+
 fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     let (facts, _file_counts) = build_facts(worktree).expect("build graph facts");
     let artifact = artifact_from_facts(&facts, worktree).expect("build graph artifact");
@@ -127,6 +200,35 @@ fn symbol_by_entity<'a>(
         .unwrap_or_else(|| panic!("symbol `{entity_name}` exists in artifact"))
 }
 
+fn file_oid(artifact: &GraphIndexArtifact, file_path: &str) -> String {
+    artifact
+        .file_manifests
+        .iter()
+        .find(|entry| entry.path == file_path)
+        .unwrap_or_else(|| panic!("manifest exists for `{file_path}`"))
+        .content_oid
+        .clone()
+}
+
+fn source_for_range(worktree: &Path, file_path: &str, start: usize, end: usize) -> String {
+    let source = std::fs::read_to_string(worktree.join(file_path)).expect("read fixture source");
+    source
+        .split_inclusive('\n')
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line_no = index + 1;
+            (start <= line_no && line_no <= end).then_some(line)
+        })
+        .collect()
+}
+
+fn total_lines(worktree: &Path, file_path: &str) -> usize {
+    std::fs::read_to_string(worktree.join(file_path))
+        .expect("read fixture source")
+        .lines()
+        .count()
+}
+
 async fn call_tool(server: &McpCallbackServer, tool: &str, arguments: Value) -> Value {
     server.__test_call_tool(tool, arguments).await
 }
@@ -147,6 +249,10 @@ fn entity_names(rows: &[Value]) -> BTreeSet<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn node_entity_names(body: &Value) -> BTreeSet<String> {
+    entity_names(body["nodes"].as_array().expect("nodes"))
 }
 
 fn qualified_names(rows: &[Value]) -> BTreeSet<String> {
@@ -183,6 +289,11 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
         entity_names(callers["callers"].as_array().expect("callers")),
         BTreeSet::from(["launch_order".to_string()])
     );
+    assert_eq!(callers["callers"][0]["edge_kind"], "calls");
+    assert_eq!(callers["include_unresolved"], false);
+    assert_eq!(callers["counts_by_kind"]["calls"], 1);
+    assert_eq!(callers["counts_by_kind"]["unresolved"], 0);
+    assert_eq!(callers["unresolved_sample"], json!([]));
     assert_eq!(callers["graph_content_hash"], artifact.graph_content_hash);
     assert_eq!(
         callers["graph_index_version"],
@@ -201,6 +312,14 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
         entity_names(callees["callees"].as_array().expect("callees")),
         BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
     );
+    assert!(callees["callees"]
+        .as_array()
+        .expect("callees")
+        .iter()
+        .all(|row| row["edge_kind"] == "calls"));
+    assert_eq!(callees["include_unresolved"], false);
+    assert_eq!(callees["counts_by_kind"]["calls"], 2);
+    assert_eq!(callees["counts_by_kind"]["unresolved"], 0);
 
     let selector_callees =
         tool_body(call_tool(&server, "code_callees", json!({ "selector": ROOT_SYMBOL })).await);
@@ -245,6 +364,12 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
             .len(),
         3
     );
+    assert!(radius_one["edges"]
+        .as_array()
+        .expect("radius one edges")
+        .iter()
+        .all(|edge| edge["edge_kind"] == "calls"));
+    assert_eq!(radius_one["include_unresolved"], false);
 
     let radius_zero = tool_body(
         call_tool(
@@ -321,6 +446,80 @@ async fn code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id() {
         callees["graph_index_version"],
         artifact.header.graph_index_version
     );
+}
+
+#[tokio::test]
+async fn code_subgraph_frontier_start_nodes_resume_budgeted_exploration() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    write_wide_fixture_crate(worktree.path(), 55);
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, "wide_root");
+    let root_uri = format!("graph://symbol/{root_id}");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let unbudgeted = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "symbol": root_uri,
+                "radius": 1,
+                "edge_kinds": ["calls"],
+                "max_nodes": 400,
+                "max_edges": 1200
+            }),
+        )
+        .await,
+    );
+
+    let initial = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "symbol": root_id,
+                "radius": 1,
+                "edge_kinds": ["calls"],
+                "max_nodes": 20,
+                "max_edges": 1200
+            }),
+        )
+        .await,
+    );
+    let frontier = initial["truncated_frontier"]
+        .as_array()
+        .expect("truncated_frontier")
+        .clone();
+    assert_eq!(initial["metadata"]["truncated"], true);
+    assert_eq!(
+        initial["nodes"].as_array().expect("initial nodes").len(),
+        20
+    );
+    assert!(!frontier.is_empty());
+
+    let continuation = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "start_nodes": frontier,
+                "radius": 0,
+                "edge_kinds": ["calls"],
+                "max_nodes": 400,
+                "max_edges": 1200
+            }),
+        )
+        .await,
+    );
+
+    let mut combined = node_entity_names(&initial);
+    combined.extend(node_entity_names(&continuation));
+
+    assert_eq!(combined, node_entity_names(&unbudgeted));
+    assert_eq!(continuation["metadata"]["truncated"], false);
+    assert_eq!(continuation["truncated_frontier"], json!([]));
 }
 
 #[tokio::test]
@@ -552,6 +751,182 @@ async fn code_symbol_info_returns_single_symbol_metadata() {
         body["graph_index_version"],
         artifact.header.graph_index_version
     );
+}
+
+#[tokio::test]
+async fn code_read_symbol_reads_source_by_stable_symbol_id() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let expected_source = source_for_range(
+        worktree.path(),
+        &root.file_path,
+        root.line_range[0],
+        root.line_range[1],
+    );
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({ "stable_symbol_id": root.stable_symbol_id }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["symbol"]["id"], root.stable_symbol_id);
+    assert_eq!(body["symbol"]["qualified_name"], root.qualified_name);
+    assert_eq!(body["symbol"]["file_path"], root.file_path);
+    assert_eq!(
+        body["line_range"],
+        json!({ "start": root.line_range[0], "end": root.line_range[1] })
+    );
+    assert_eq!(body["source"], expected_source);
+    assert_eq!(body["file_oid"], file_oid(&artifact, &root.file_path));
+    assert!(body.get("stale").is_none());
+    assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+}
+
+#[tokio::test]
+async fn code_read_symbol_reads_source_by_path_name_tuple() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let expected_source = source_for_range(
+        worktree.path(),
+        &root.file_path,
+        root.line_range[0],
+        root.line_range[1],
+    );
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({ "path": root.file_path, "name": ROOT_SYMBOL }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["symbol"]["id"], root.stable_symbol_id);
+    assert_eq!(body["source"], expected_source);
+    assert_eq!(
+        body["line_range"],
+        json!({ "start": root.line_range[0], "end": root.line_range[1] })
+    );
+    assert_eq!(body["file_oid"], file_oid(&artifact, &root.file_path));
+}
+
+#[tokio::test]
+async fn code_read_symbol_returns_candidates_for_ambiguous_path_name_tuple() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    write_ambiguous_symbol_fixture(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({ "path": "src/lib.rs", "name": "run" }),
+        )
+        .await,
+    );
+    let candidates = body["candidates"].as_array().expect("candidates");
+
+    assert_eq!(body["ambiguous"], true);
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().all(|candidate| {
+        candidate["entity_name"] == "run" && candidate["file_path"] == "src/lib.rs"
+    }));
+    assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+}
+
+#[tokio::test]
+async fn code_read_symbol_marks_stale_but_returns_indexed_source() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let expected_source = source_for_range(
+        worktree.path(),
+        &root.file_path,
+        root.line_range[0],
+        root.line_range[1],
+    );
+    std::fs::write(
+        worktree.path().join("src/lib.rs"),
+        "pub fn edited_after_index() -> bool {\n    false\n}\n",
+    )
+    .expect("edit fixture after graph build");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({ "stable_symbol_id": root.stable_symbol_id }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["stale"], true);
+    assert_eq!(body["source"], expected_source);
+    assert!(!body["source"]
+        .as_str()
+        .expect("source text")
+        .contains("edited_after_index"));
+    assert_eq!(body["file_oid"], file_oid(&artifact, &root.file_path));
+}
+
+#[tokio::test]
+async fn code_read_symbol_clamps_and_echoes_context_lines() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let total_lines = total_lines(worktree.path(), &root.file_path);
+    let expected_source = source_for_range(worktree.path(), &root.file_path, 1, total_lines);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({
+                "stable_symbol_id": root.stable_symbol_id,
+                "context_lines": 999
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["context_lines"], 50);
+    assert_eq!(body["requested_context_lines"], 999);
+    assert_eq!(
+        body["line_range"],
+        json!({ "start": 1, "end": total_lines })
+    );
+    assert_eq!(body["source"], expected_source);
 }
 
 #[tokio::test]

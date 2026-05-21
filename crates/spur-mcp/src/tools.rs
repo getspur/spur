@@ -796,10 +796,56 @@ fn code_symbol_info_def() -> ToolDefinition {
     }
 }
 
+fn code_read_symbol_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_read_symbol".into(),
+        description: "Read the indexed source for one code symbol from the current graph artifact. Select by stable_symbol_id, or by the exact worktree-relative path plus symbol name. Source bytes are resolved through the artifact file content_oid; stale=true means the current worktree file differs but the returned source still matches the indexed graph.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "stable_symbol_id": {
+                    "type": "string",
+                    "description": "Stable symbol id from code_resolve/code_search/code_symbol_info. graph://symbol/<id> is accepted."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Worktree-relative file path. Required with name and mutually exclusive with stable_symbol_id."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Symbol entity_name or qualified_name within path. Required with path and mutually exclusive with stable_symbol_id."
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 50,
+                    "default": 0,
+                    "description": "Lines of context to include before and after the symbol. Values outside 0..50 are clamped and echoed as requested_context_lines."
+                }
+            },
+            "oneOf": [
+                {
+                    "required": ["stable_symbol_id"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["path"] },
+                            { "required": ["name"] }
+                        ]
+                    }
+                },
+                {
+                    "required": ["path", "name"],
+                    "not": { "required": ["stable_symbol_id"] }
+                }
+            ]
+        }),
+    }
+}
+
 fn code_callers_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callers".into(),
-        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.".into(),
+        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -815,6 +861,11 @@ fn code_callers_def() -> ToolDefinition {
                     "type": "string",
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved caller rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
                 }
             }
         }),
@@ -824,7 +875,7 @@ fn code_callers_def() -> ToolDefinition {
 fn code_callees_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callees".into(),
-        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns `callees` rows with `resolved: true` plus uri/entity_name/enclosing_scope/file_path/line_range/symbol_kind for graph-resolved calls, or `resolved: false` plus entity_name/target_label for unresolved call labels.".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -840,6 +891,11 @@ fn code_callees_def() -> ToolDefinition {
                     "type": "string",
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved callee rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
                 }
             }
         }),
@@ -890,13 +946,18 @@ fn code_search_def() -> ToolDefinition {
 fn code_subgraph_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_subgraph".into(),
-        description: "Get a bounded code-symbol subgraph from the current worktree graph artifact. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
+        description: "Get a budgeted code-symbol subgraph from the current worktree graph artifact. Traversal is deterministic BFS for a given artifact: seed with selector (or start_nodes order for continuation), then expand each node by graph artifact edge order. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other). Responses cap output with max_nodes (default 40, range 1..400) and max_edges (default 120, range 1..1200); out-of-range budgets are clamped and echoed in metadata. When truncated, truncated_frontier lists next-hop node ids reachable through excluded nodes/edges; call again with start_nodes=truncated_frontier to resume statelessly. For continuations from radius > 1 traversals, use radius one less than the original radius so frontier nodes expand the remaining hop budget. Unresolved edges are hidden by default (include_unresolved=false); when include_unresolved=true, unresolved edges count toward max_edges. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "selector": {
                     "type": "string",
                     "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
+                "start_nodes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Continuation roots from a prior truncated_frontier response. Values are bare node ids or graph://symbol/<id> URIs. Mutually exclusive with selector and symbol."
                 },
                 "symbol": {
                     "type": "string",
@@ -911,6 +972,20 @@ fn code_subgraph_def() -> ToolDefinition {
                     "type": "integer",
                     "description": "Traversal radius (default: 1, max: 3; larger values are clamped)"
                 },
+                "max_nodes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 400,
+                    "default": 40,
+                    "description": "Maximum node rows to return. Values outside 1..400 are clamped and echoed as metadata.requested_max_nodes."
+                },
+                "max_edges": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1200,
+                    "default": 120,
+                    "description": "Maximum edge rows to return, including unresolved edges when include_unresolved=true. Values outside 1..1200 are clamped and echoed as metadata.requested_max_edges."
+                },
                 "format": {
                     "type": "string",
                     "enum": ["json", "mermaid"],
@@ -918,8 +993,16 @@ fn code_subgraph_def() -> ToolDefinition {
                 },
                 "edge_kinds": {
                     "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional relation kind filter, e.g. [\"calls\", \"references\"]"
+                    "items": {
+                        "type": "string",
+                        "enum": ["calls", "calls_dyn", "references_hof", "references_other"]
+                    },
+                    "description": "Optional public edge_kind filter. edge_kinds=[\"calls\"] is strict direct calls only; use calls_dyn separately for heuristic dyn Trait calls."
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved boundary edges. Default false filters target_uri=null edges from the subgraph."
                 }
             }
         }),
@@ -1356,6 +1439,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_resolve_def(),
         code_file_symbols_def(),
         code_symbol_info_def(),
+        code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
         code_search_def(),
@@ -1396,6 +1480,7 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_resolve_def(),
         code_file_symbols_def(),
         code_symbol_info_def(),
+        code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
         code_search_def(),
@@ -1657,6 +1742,7 @@ mod worker_tools_subset_tests {
         "code_resolve",
         "code_file_symbols",
         "code_symbol_info",
+        "code_read_symbol",
         "code_callers",
         "code_callees",
         "code_search",
