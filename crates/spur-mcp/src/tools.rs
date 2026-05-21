@@ -823,7 +823,7 @@ fn code_callers_def() -> ToolDefinition {
 fn code_callees_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callees".into(),
-        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns `callees` rows with `resolved: true` plus uri/entity_name/enclosing_scope/file_path/line_range/symbol_kind for graph-resolved calls, or `resolved: false` plus entity_name/target_label for unresolved call labels.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
