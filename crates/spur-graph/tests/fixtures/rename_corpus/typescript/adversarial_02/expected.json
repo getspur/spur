@@ -1,0 +1,18 @@
+{
+  "class": "crossover",
+  "expected_renames": [],
+  "expected_added": [
+    "tsCrossoverAlphaNew",
+    "tsCrossoverBetaNew"
+  ],
+  "expected_deleted": [
+    "tsCrossoverLeftOld",
+    "tsCrossoverRightOld"
+  ],
+  "expected_ambiguous_candidates": [
+    "tsCrossoverAlphaNew",
+    "tsCrossoverBetaNew",
+    "tsCrossoverLeftOld",
+    "tsCrossoverRightOld"
+  ]
+}

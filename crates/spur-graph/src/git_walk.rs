@@ -877,6 +877,8 @@ fn tier2_jaccard_matches(
         }
         if let Some((second_deleted, second_score)) = scored.get(1).copied() {
             if second_score >= threshold {
+                record_ambiguous_rename_pair(diagnostics, file_change, added, best_deleted);
+                record_ambiguous_rename_pair(diagnostics, file_change, added, second_deleted);
                 diagnostics.push(format!(
                     "merge_collision: file={} candidate={}",
                     file_change.path.display(),

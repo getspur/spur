@@ -1,0 +1,14 @@
+{
+  "class": "params_only",
+  "expected_renames": [],
+  "expected_added": [
+    "rust_params_after"
+  ],
+  "expected_deleted": [
+    "rust_params_before"
+  ],
+  "expected_ambiguous_candidates": [
+    "rust_params_after",
+    "rust_params_before"
+  ]
+}
