@@ -8,7 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use spur_graph::{build_facts_for_paths, compute_graph_content_hash, current_manifest_version};
+use spur_graph::temporal::{symbol_history, TemporalIndex};
+use spur_graph::{
+    build_facts_for_paths, compute_graph_content_hash, current_manifest_version, ChangeKind,
+    CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GitPath, GraphIndexArtifact,
+    GraphIndexHeader, RelationKind, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
+    WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
+};
 use tempfile::TempDir;
 
 const DEFAULT_FILE_COUNT: usize = 100_000;
@@ -19,8 +25,14 @@ const BENCH_CHANGE_SET_ENV: &str = "SPUR_GRAPH_BENCH_CHANGE_SET";
 const BENCH_DIRTY_MODS_ENV: &str = "SPUR_GRAPH_BENCH_DIRTY_MODS";
 const BENCH_GIT_WALK_1K_COMMITS_ENV: &str = "SPUR_GRAPH_BENCH_GIT_WALK_1K_COMMITS";
 const BENCH_GIT_WALK_20K_COMMITS_ENV: &str = "SPUR_GRAPH_BENCH_GIT_WALK_20K_COMMITS";
+const HISTORY_WALK_ASSERT_MS_ENV: &str = "SPUR_GRAPH_HISTORY_WALK_ASSERT_MS";
+const HISTORY_WALK_ASSERT_ITERATIONS_ENV: &str = "SPUR_GRAPH_HISTORY_WALK_ASSERT_ITERATIONS";
 const QUICK_GIT_WALK_1K_COMMITS: usize = 100;
 const QUICK_GIT_WALK_20K_COMMITS: usize = 250;
+const HISTORY_WALK_SNAPSHOT_COUNT: usize = 50_000;
+const HISTORY_WALK_TARGET_CHAIN: usize = 8;
+const HISTORY_WALK_ASSERT_ITERATIONS: usize = 1_000;
+const HISTORY_WALK_ASSERT_MS: usize = 250;
 const SYNTHETIC_SYMBOL_COUNT: usize = 16;
 const SYNTHETIC_RENAME_RATE: f32 = 0.04;
 #[cfg(test)]
@@ -575,6 +587,143 @@ fn bench_full_walk_20k_merges(c: &mut Criterion) {
     });
 }
 
+fn bench_history_walk_50k_snapshots(c: &mut Criterion) {
+    const BENCH_NAME: &str = "history walk 50k snapshots";
+    if !criterion_filter_allows(&[BENCH_NAME, "history"]) {
+        return;
+    }
+
+    assert_history_walk_budget();
+
+    let (graph, commits, target_symbol) =
+        synthetic_history_artifact(HISTORY_WALK_SNAPSHOT_COUNT, HISTORY_WALK_TARGET_CHAIN);
+    let index = TemporalIndex::new(&graph);
+    c.bench_function(BENCH_NAME, |b| {
+        b.iter(|| {
+            black_box(symbol_history(
+                black_box(&index),
+                black_box(&commits),
+                black_box(&target_symbol),
+            ))
+        })
+    });
+}
+
+fn assert_history_walk_budget() {
+    let iterations = env_usize(
+        HISTORY_WALK_ASSERT_ITERATIONS_ENV,
+        HISTORY_WALK_ASSERT_ITERATIONS,
+    );
+    let max_ms = env_usize(HISTORY_WALK_ASSERT_MS_ENV, HISTORY_WALK_ASSERT_MS);
+    let (graph, commits, target_symbol) =
+        synthetic_history_artifact(HISTORY_WALK_SNAPSHOT_COUNT, HISTORY_WALK_TARGET_CHAIN);
+    let index = TemporalIndex::new(&graph);
+
+    let start = Instant::now();
+    let mut total_events = 0usize;
+    for _ in 0..iterations {
+        total_events += symbol_history(&index, &commits, &target_symbol).len();
+    }
+    let elapsed = start.elapsed();
+    black_box(total_events);
+
+    assert_eq!(
+        total_events,
+        iterations * HISTORY_WALK_TARGET_CHAIN,
+        "history walk returned an unexpected number of events"
+    );
+    assert!(
+        elapsed <= Duration::from_millis(max_ms as u64),
+        "history walk budget exceeded: {} for {iterations} walks over {HISTORY_WALK_SNAPSHOT_COUNT} snapshots, budget={} (set {HISTORY_WALK_ASSERT_MS_ENV} to tune for CI)",
+        fmt_duration(elapsed),
+        fmt_duration(Duration::from_millis(max_ms as u64))
+    );
+}
+
+fn synthetic_history_artifact(
+    snapshot_count: usize,
+    target_chain_len: usize,
+) -> (GraphIndexArtifact, CommitIndexArtifact, String) {
+    assert!(target_chain_len > 0);
+    assert!(snapshot_count >= target_chain_len);
+
+    let mut graph = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.into(),
+            content_hash_blake3: None,
+        },
+        manifest_version: String::new(),
+        graph_content_hash: String::new(),
+        file_manifests: vec![],
+        files: vec![],
+        symbols: vec![],
+        edges: vec![],
+        tombstones: vec![],
+        diagnostics: vec![],
+        commits: vec![],
+        symbol_snapshots: Vec::with_capacity(snapshot_count),
+        temporal_edges: Vec::with_capacity(snapshot_count),
+    };
+    let mut commits = Vec::with_capacity(snapshot_count);
+    let target_symbol = "history-target".to_string();
+    let mut previous_sha: Option<String> = None;
+
+    for index in 0..snapshot_count {
+        let sha = format!("history-{index:05}");
+        let commit = CommitArtifact {
+            sha: sha.clone(),
+            parents: previous_sha.iter().cloned().collect(),
+            author_time: SYNTHETIC_START_TIME + index as i64,
+            summary: format!("history snapshot {index}"),
+        };
+        graph.commits.push(commit.clone());
+        commits.push(commit);
+
+        let stable_symbol_id = if index < target_chain_len {
+            target_symbol.clone()
+        } else {
+            format!("unrelated-symbol-{index:05}")
+        };
+        let key = SnapshotKey {
+            stable_symbol_id: stable_symbol_id.clone(),
+            commit: sha.clone(),
+        };
+        graph.symbol_snapshots.push(SymbolSnapshotArtifact {
+            key: key.clone(),
+            file_path: GitPath::from_bytes(format!("src/{stable_symbol_id}.rs").into_bytes()),
+            entity_name: stable_symbol_id.clone(),
+            symbol_kind: "function".into(),
+            enclosing_scope: None,
+            byte_range: [0, 10],
+            line_range: [1, 1],
+            anchor_hash: format!("anchor-{index:05}"),
+            tokens: vec![],
+        });
+        graph.temporal_edges.push(TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit { sha: sha.clone() },
+            target: EdgeEndpoint::Snapshot { key },
+            relation: RelationKind::Touches,
+            parent: previous_sha.clone(),
+            change_kind: Some(if index == 0 {
+                ChangeKind::Added
+            } else {
+                ChangeKind::Modified
+            }),
+        });
+
+        previous_sha = Some(sha);
+    }
+
+    let commit_index = CommitIndexArtifact {
+        schema_version: 1,
+        commits,
+        refs: [("main".into(), previous_sha.unwrap())].into(),
+        indexed_at: "2026-05-21T00:00:00Z".into(),
+        walk_strategy: WalkStrategy::Reachable,
+    };
+    (graph, commit_index, target_symbol)
+}
+
 fn synthetic_bench_commits(env_name: &str, default: usize, quick_default: usize) -> usize {
     let default = if criterion_quick_mode() {
         quick_default
@@ -907,6 +1056,7 @@ criterion_group!(
     benches,
     benchmark_incremental,
     bench_full_walk_1k,
-    bench_full_walk_20k_merges
+    bench_full_walk_20k_merges,
+    bench_history_walk_50k_snapshots
 );
 criterion_main!(benches);
