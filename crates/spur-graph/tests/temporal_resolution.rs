@@ -3,6 +3,11 @@ use std::path::Path;
 use std::process::Command;
 
 use spur_graph::git_walk::{plan_incremental_walk, GitWalkConfig, IncrementalPlan};
+use spur_graph::schema::{
+    ChangeKind, CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GraphIndexArtifact,
+    GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact, WalkStrategy,
+    GRAPH_INDEX_VERSION_TEMPORAL,
+};
 use spur_graph::temporal::{resolve_symbol_at, symbol_history, Resolution};
 use tempfile::TempDir;
 
@@ -103,7 +108,7 @@ fn property_resolve_at_anchor_matches_script() {
     let add_sha = history.sha("add");
     let merge_sha = history.sha("merge");
     let initial_a = stable_id_for_snapshot(&graph, add_sha, "a");
-    let final_b = stable_id_for_entity(&graph, "b");
+    let final_b = stable_id_for_entity(&graph, &commits, "b");
 
     let resolution = resolve_symbol_at(&graph, &commits, &initial_a, add_sha, merge_sha);
     match resolution {
@@ -168,6 +173,23 @@ fn resolve_at_intermediate_commit_returns_latest_prior_snapshot() {
     match through_later_target {
         Resolution::Found { value, .. } => assert_eq!(value, stable_id),
         other => panic!("expected latest prior snapshot from {c1}, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_symbol_at_rejects_reachable_cyclic_rename_chain() {
+    let (graph, commits) = cyclic_rename_artifact();
+
+    let resolution = resolve_symbol_at(&graph, &commits, "old", "c1", "c3");
+
+    match resolution {
+        Resolution::Unknown { reason } => {
+            assert!(
+                format!("{reason:?}").contains("cycle"),
+                "expected cycle diagnostic, got {reason:?}"
+            );
+        }
+        other => panic!("expected Unknown for cyclic rename chain, got {other:?}"),
     }
 }
 
@@ -243,20 +265,155 @@ fn stable_id_for_snapshot(
 
 fn stable_id_for_entity(
     graph: &spur_graph::schema::GraphIndexArtifact,
+    commits: &CommitIndexArtifact,
     entity_name: &str,
 ) -> String {
+    let commit_positions: BTreeMap<_, _> = commits
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| (commit.sha.as_str(), index))
+        .collect();
     let mut snapshots: Vec<_> = graph
         .symbol_snapshots
         .iter()
         .filter(|snapshot| snapshot.entity_name == entity_name)
         .collect();
-    snapshots.sort_by(|left, right| left.key.commit.cmp(&right.key.commit));
+    snapshots.sort_by(|left, right| {
+        commit_positions
+            .get(left.key.commit.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+            .cmp(
+                &commit_positions
+                    .get(right.key.commit.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+            )
+            .then_with(|| left.key.commit.cmp(&right.key.commit))
+            .then_with(|| left.key.stable_symbol_id.cmp(&right.key.stable_symbol_id))
+    });
     snapshots
         .last()
         .unwrap_or_else(|| panic!("missing snapshot `{entity_name}`"))
         .key
         .stable_symbol_id
         .clone()
+}
+
+fn cyclic_rename_artifact() -> (GraphIndexArtifact, CommitIndexArtifact) {
+    let old = snapshot("old", "c1", "old");
+    let cycle = snapshot("cycle", "c1", "cycle");
+    let new = snapshot("new", "c2", "new");
+
+    let graph = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.into(),
+            content_hash_blake3: None,
+        },
+        manifest_version: String::new(),
+        graph_content_hash: String::new(),
+        file_manifests: vec![],
+        files: vec![],
+        symbols: vec![],
+        edges: vec![],
+        tombstones: vec![],
+        diagnostics: vec![],
+        commits: vec![],
+        symbol_snapshots: vec![old.clone(), cycle.clone(), new.clone()],
+        temporal_edges: vec![
+            TemporalEdgeArtifactBuilder::commit_touch("c1", old.key.clone(), ChangeKind::Added),
+            TemporalEdgeArtifactBuilder::snapshot_rename(
+                old.key.clone(),
+                cycle.key.clone(),
+                old.key.clone(),
+            ),
+            TemporalEdgeArtifactBuilder::snapshot_rename(
+                cycle.key.clone(),
+                old.key.clone(),
+                cycle.key.clone(),
+            ),
+            TemporalEdgeArtifactBuilder::commit_touch(
+                "c2",
+                new.key.clone(),
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(old.key.clone())),
+            ),
+        ],
+    };
+
+    let commits = CommitIndexArtifact {
+        schema_version: 1,
+        commits: vec![
+            commit_artifact("c1", vec![], 0),
+            commit_artifact("c2", vec!["c1"], 1),
+            commit_artifact("c3", vec!["c2"], 2),
+        ],
+        refs: [("main".into(), "c3".into())].into(),
+        indexed_at: "2026-05-21T00:00:00Z".into(),
+        walk_strategy: WalkStrategy::Reachable,
+    };
+
+    (graph, commits)
+}
+
+struct TemporalEdgeArtifactBuilder;
+
+impl TemporalEdgeArtifactBuilder {
+    fn commit_touch(
+        commit: &str,
+        key: SnapshotKey,
+        change_kind: ChangeKind,
+    ) -> spur_graph::schema::TemporalEdgeArtifact {
+        spur_graph::schema::TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: commit.to_string(),
+            },
+            target: EdgeEndpoint::Snapshot { key },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(change_kind),
+        }
+    }
+
+    fn snapshot_rename(
+        source: SnapshotKey,
+        target: SnapshotKey,
+        previous: SnapshotKey,
+    ) -> spur_graph::schema::TemporalEdgeArtifact {
+        spur_graph::schema::TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot { key: source },
+            target: EdgeEndpoint::Snapshot { key: target },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous))),
+        }
+    }
+}
+
+fn snapshot(stable_symbol_id: &str, commit: &str, entity_name: &str) -> SymbolSnapshotArtifact {
+    SymbolSnapshotArtifact {
+        key: SnapshotKey {
+            stable_symbol_id: stable_symbol_id.into(),
+            commit: commit.into(),
+        },
+        file_path: "lib.rs".into(),
+        entity_name: entity_name.into(),
+        symbol_kind: "function".into(),
+        enclosing_scope: None,
+        byte_range: [0, 10],
+        line_range: [1, 1],
+        anchor_hash: format!("{stable_symbol_id}:{commit}"),
+        tokens: vec![],
+    }
+}
+
+fn commit_artifact(sha: &str, parents: Vec<&str>, author_time: i64) -> CommitArtifact {
+    CommitArtifact {
+        sha: sha.into(),
+        parents: parents.into_iter().map(str::to_string).collect(),
+        author_time,
+        summary: sha.into(),
+    }
 }
 
 fn init_repo(dir: &Path) {
