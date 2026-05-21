@@ -630,7 +630,7 @@ fn fetch_outcome_artifact_def() -> ToolDefinition {
                     "type": "string",
                     "enum": ["status_only", "summary", "diff_only", "full"],
                     "default": "full",
-                    "description": "Which section to fetch. Phase 3."
+                    "description": "Which section to fetch."
                 }
             },
             "required": ["delegation_id"]
@@ -729,7 +729,7 @@ fn graph_subgraph_def() -> ToolDefinition {
                 },
                 "depth": {
                     "type": "integer",
-                    "description": "Max traversal depth (0 = unlimited, default)"
+                    "description": "Traversal depth in hops. Defaults to 2 when omitted. Larger values fan out further; `0` returns only the seed node."
                 },
                 "format": {
                     "type": "string",
@@ -1263,14 +1263,14 @@ pub fn review_task_def() -> ToolDefinition {
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Review notes. Required for all decisions — used as rationale for approve/reject and as retry instruction for request_changes."
+                    "description": "Optional feedback. Recommended when decision is `request_changes` so the worker has context for the next attempt."
                 },
                 "reuse_prior_worktree": {
                     "type": "boolean",
                     "description": "When request_changes is the decision, opt in to having the prior rejected attempt's diff pre-applied as uncommitted changes in the next attempt's worktree."
                 }
             },
-            "required": ["plan_id", "task_id", "decision", "feedback"]
+            "required": ["plan_id", "task_id", "decision"]
         }),
     }
 }
