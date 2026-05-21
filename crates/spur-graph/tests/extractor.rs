@@ -26,6 +26,15 @@ fn nested_fn_fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nested_fn_corpus")
 }
 
+fn rust_macro_calls_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rust_macro_calls")
+}
+
+fn rust_macro_calls_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rust_macro_calls/expected_graph_index.json")
+}
+
 fn python_fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python_corpus")
 }
@@ -97,6 +106,39 @@ fn call_edge_target_for(
                 && edge.target_label.as_deref() == Some("callee")
         })
         .and_then(|edge| edge.target_stable_symbol_id.clone())
+}
+
+fn call_edge_target_labels_for(
+    facts: &spur_graph::extract::GraphFacts,
+    caller_name: &str,
+) -> BTreeSet<String> {
+    let caller = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Function && node.label == caller_name)
+        .unwrap_or_else(|| panic!("missing caller function `{caller_name}`"));
+
+    facts
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.relation == RelationKind::Calls && edge.source_node_id == caller.node_id
+        })
+        .map(|edge| {
+            edge.target_label.clone().unwrap_or_else(|| {
+                let target_id = edge
+                    .target_node_id
+                    .unwrap_or_else(|| panic!("call edge from `{caller_name}` has no target"));
+                facts
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == target_id)
+                    .unwrap_or_else(|| panic!("missing target node {target_id:?}"))
+                    .label
+                    .clone()
+            })
+        })
+        .collect()
 }
 
 fn write_and_read_content_hash(
@@ -442,6 +484,23 @@ fn markdown_extractor_matches_corpus_golden_artifact() {
 }
 
 #[test]
+fn rust_macro_calls_extractor_matches_golden_artifact() {
+    let root = rust_macro_calls_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(rust_macro_calls_golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected =
+        fs::read_to_string(rust_macro_calls_golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn markdown_extractor_builds_section_hierarchy_and_link_edges() {
     let root = markdown_fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
@@ -481,6 +540,58 @@ fn rust_extractor_keeps_nested_functions_inside_methods_as_functions() {
         .expect("nested function is extracted");
 
     assert_eq!(baz.kind, NodeKind::Function);
+}
+
+#[test]
+fn rust_extractor_finds_call_edges_inside_macro_token_trees() {
+    let root = rust_macro_calls_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+
+    assert_eq!(
+        call_edge_target_labels_for(&facts, "a"),
+        BTreeSet::from(["bar".to_string(), "foo".to_string()])
+    );
+    assert_eq!(
+        call_edge_target_labels_for(&facts, "b"),
+        BTreeSet::from(["baz".to_string()])
+    );
+    assert_eq!(
+        call_edge_target_labels_for(&facts, "c"),
+        BTreeSet::from(["qux".to_string()])
+    );
+    assert!(
+        call_edge_target_labels_for(&facts, "d").is_empty(),
+        "integer-only macro body must not emit call edges"
+    );
+    assert!(
+        call_edge_target_labels_for(&facts, "e").is_empty(),
+        "nested macro invocation names must not emit function call edges"
+    );
+}
+
+#[test]
+fn rust_extractor_finds_scoped_call_edges_inside_macro_token_trees() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+fn target() {}
+
+fn caller() {
+    vec![crate::target()];
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+
+    assert_eq!(
+        call_edge_target_labels_for(&facts, "caller"),
+        BTreeSet::from(["target".to_string()])
+    );
 }
 
 #[test]
