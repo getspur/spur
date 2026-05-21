@@ -99,12 +99,10 @@ fn nearest_definition(
 
 fn named_child_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == kind {
-            return Some(child);
-        }
-    }
-    None
+    let child = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == kind);
+    child
 }
 
 fn first_descendant_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {

@@ -167,6 +167,8 @@ pub struct GraphEdgeArtifact {
     pub relation: RelationKind,
     pub confidence: Confidence,
     pub confidence_score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_kind: Option<GraphEdgeKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,6 +193,8 @@ pub struct GraphEdge {
     pub target_label: Option<String>,
     pub confidence: Confidence,
     pub confidence_score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_kind: Option<GraphEdgeKind>,
     pub evidence_id: EvidenceId,
     pub directed: bool,
 }
@@ -262,6 +266,26 @@ pub enum RelationKind {
     Uses,
     Extends,
     Links,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphEdgeKind {
+    Calls,
+    CallsDyn,
+    ReferencesHof,
+    ReferencesOther,
+}
+
+pub fn graph_edge_kind_or_default(
+    relation: RelationKind,
+    edge_kind: Option<GraphEdgeKind>,
+) -> GraphEdgeKind {
+    edge_kind.unwrap_or(match relation {
+        RelationKind::Calls => GraphEdgeKind::Calls,
+        RelationKind::References => GraphEdgeKind::ReferencesOther,
+        _ => GraphEdgeKind::ReferencesOther,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
