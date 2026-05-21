@@ -758,15 +758,10 @@ fn rename_target(
     prev: &SnapshotKey,
 ) -> Option<SnapshotKey> {
     match (&edge.source, &edge.target) {
-        (EdgeEndpoint::Commit { .. }, EdgeEndpoint::Snapshot { key }) if key != prev => {
-            Some(key.clone())
-        }
+        // T7 made SymbolSnapshot -> SymbolSnapshot RenamedFrom edges the
+        // authoritative traversal surface. Commit -> Snapshot change_kind
+        // remains event metadata and is intentionally ignored here.
         (EdgeEndpoint::Snapshot { key: from }, EdgeEndpoint::Snapshot { key: to })
-            if from == prev && to != prev =>
-        {
-            Some(to.clone())
-        }
-        (EdgeEndpoint::Snapshot { key: to }, EdgeEndpoint::Snapshot { key: from })
             if from == prev && to != prev =>
         {
             Some(to.clone())
@@ -923,6 +918,35 @@ impl<'a> CommitGraph<'a> {
 mod tests {
     use super::*;
     use crate::schema::*;
+
+    #[test]
+    fn rename_target_uses_t7_snapshot_edge_not_commit_edge() {
+        let prev = SnapshotKey {
+            stable_symbol_id: "old".into(),
+            commit: "c1".into(),
+        };
+        let next = SnapshotKey {
+            stable_symbol_id: "new".into(),
+            commit: "c2".into(),
+        };
+        let commit_edge = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit { sha: "c2".into() },
+            target: EdgeEndpoint::Snapshot { key: next.clone() },
+            relation: RelationKind::Touches,
+            parent: Some("c1".into()),
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev.clone()))),
+        };
+        let snapshot_edge = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot { key: prev.clone() },
+            target: EdgeEndpoint::Snapshot { key: next.clone() },
+            relation: RelationKind::Touches,
+            parent: Some("c1".into()),
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev.clone()))),
+        };
+
+        assert_eq!(rename_target(&commit_edge, &prev), None);
+        assert_eq!(rename_target(&snapshot_edge, &prev), Some(next));
+    }
 
     fn fixture() -> (GraphIndexArtifact, CommitIndexArtifact) {
         let mut graph = GraphIndexArtifact {
