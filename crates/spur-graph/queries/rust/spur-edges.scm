@@ -27,6 +27,22 @@
       name: (identifier) @call.name)
   ]) @call
 
+; Function-value passed as the first argument to a well-known higher-order method.
+; Captures `.map(name)`, `.filter(name)`, `.and_then(name)`, etc. The closed list of
+; methods bounds false-positive exposure to recognized HOF positions.
+((call_expression
+   function: (field_expression
+     field: (field_identifier) @hof_method)
+   arguments: (arguments . (identifier) @reference.name))
+ (#match? @hof_method "^(map|filter|for_each|and_then|or_else|unwrap_or_else|inspect|filter_map|flat_map|reduce|find_map|then|map_err|any|sort_by)$"))
+
+; `fold(init, fn)` places the callable in the SECOND argument position.
+((call_expression
+   function: (field_expression
+     field: (field_identifier) @hof_method)
+   arguments: (arguments (_) . (identifier) @reference.name))
+ (#match? @hof_method "^(fold)$"))
+
 ; Macro-body call sites. tree-sitter-rust parses macro arguments as
 ; flat `token_tree` (see tree-sitter-rust node-types.json: token_tree
 ; accepts only identifier/_literal/token_tree/etc., not call_expression),
