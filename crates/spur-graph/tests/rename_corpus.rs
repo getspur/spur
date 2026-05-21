@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -14,17 +14,39 @@ const MIN_CASES_PER_LANGUAGE: u32 = 50;
 #[derive(Debug, Deserialize)]
 struct Expected {
     #[serde(default)]
+    class: Option<AdversarialClass>,
+    #[serde(default)]
     expected_renames: Vec<RenamePair>,
     #[serde(default)]
     expected_added: Vec<String>,
     #[serde(default)]
     expected_deleted: Vec<String>,
+    #[serde(default)]
+    expected_ambiguous_candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 struct RenamePair {
     from: String,
     to: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AdversarialClass {
+    FullRewrite,
+    Crossover,
+    ParamsOnly,
+}
+
+impl AdversarialClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FullRewrite => "full_rewrite",
+            Self::Crossover => "crossover",
+            Self::ParamsOnly => "params_only",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -52,6 +74,30 @@ impl CorpusStats {
             2.0 * precision * recall / (precision + recall)
         }
     }
+
+    fn record(&mut self, predicted: &BTreeSet<RenamePair>, expected: &BTreeSet<RenamePair>) {
+        self.cases += 1;
+        self.tp += predicted.intersection(expected).count() as u32;
+        self.fp += predicted.difference(expected).count() as u32;
+        self.fn_ += expected.difference(predicted).count() as u32;
+    }
+}
+
+#[derive(Debug, Default)]
+struct AdversarialStats {
+    cases: u32,
+    exact_outcomes: u32,
+    renames: CorpusStats,
+}
+
+#[derive(Debug)]
+struct FixtureOutcome {
+    stem: String,
+    expected: Expected,
+    predicted_renames: BTreeSet<RenamePair>,
+    predicted_added: BTreeSet<String>,
+    predicted_deleted: BTreeSet<String>,
+    diagnostics: Vec<String>,
 }
 
 fn run_corpus(language: Language, relative_dir: &str) -> CorpusStats {
@@ -60,71 +106,116 @@ fn run_corpus(language: Language, relative_dir: &str) -> CorpusStats {
     let mut stats = CorpusStats::default();
     let mut extractor = BytesExtractor::for_language(language).expect("create extractor");
 
-    for entry in std::fs::read_dir(&lang_dir).expect("read corpus directory") {
-        let path = entry.expect("read corpus entry").path();
-        if !path.to_string_lossy().ends_with(".expected.json") {
-            continue;
-        }
-
-        stats.cases += 1;
-        let stem = path
-            .file_stem()
-            .expect("expected file stem")
-            .to_string_lossy()
-            .replace(".expected", "");
+    for path in flat_expected_files(&lang_dir) {
+        let stem = flat_fixture_stem(&path);
         let old_path = lang_dir.join(format!("{stem}.old.{extension}"));
         let new_path = lang_dir.join(format!("{stem}.new.{extension}"));
-        let expected: Expected = serde_json::from_str(
-            &std::fs::read_to_string(&path).expect("read expected corpus labels"),
-        )
-        .expect("parse expected corpus labels");
-        let old_symbols = extractor
-            .extract(
-                &old_path,
-                &std::fs::read(&old_path).expect("read old corpus blob"),
-            )
-            .expect("extract old corpus symbols");
-        let new_symbols = extractor
-            .extract(
-                &new_path,
-                &std::fs::read(&new_path).expect("read new corpus blob"),
-            )
-            .expect("extract new corpus symbols");
-
-        let (deleted_candidates, added_candidates) =
-            candidate_changes(&old_path, &new_path, &old_symbols, &new_symbols);
-        let deleted_name_by_key: HashMap<_, _> = deleted_candidates
-            .iter()
-            .map(|change| {
-                (
-                    change.snapshot.key.clone(),
-                    change.snapshot.entity_name.clone(),
-                )
-            })
-            .collect();
-        let file_change = FileChange {
-            path: logical_fixture_path(&stem, "new", extension).into(),
-            kind: FileChangeKind::Modified,
-            parent_sha: Some("old".to_string()),
-        };
-
-        let (changes, _diagnostics) =
-            try_rename_match(deleted_candidates, added_candidates, &file_change, language);
-        let predicted = predicted_renames(&changes, &deleted_name_by_key);
-        let Expected {
-            expected_renames,
-            expected_added,
-            expected_deleted,
-        } = expected;
-        let _non_rename_labels = expected_added.len() + expected_deleted.len();
-        let expected: BTreeSet<_> = expected_renames.into_iter().collect();
-
-        stats.tp += predicted.intersection(&expected).count() as u32;
-        stats.fp += predicted.difference(&expected).count() as u32;
-        stats.fn_ += expected.difference(&predicted).count() as u32;
+        let outcome = run_fixture(&mut extractor, language, &stem, &old_path, &new_path, &path);
+        let expected: BTreeSet<_> = outcome.expected.expected_renames.into_iter().collect();
+        stats.record(&outcome.predicted_renames, &expected);
     }
 
     stats
+}
+
+fn run_adversarial_corpus(
+    language: Language,
+    relative_dir: &str,
+) -> BTreeMap<AdversarialClass, AdversarialStats> {
+    let lang_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_dir);
+    let extension = extension_for(language);
+    let mut extractor = BytesExtractor::for_language(language).expect("create extractor");
+    let mut by_class = BTreeMap::<AdversarialClass, AdversarialStats>::new();
+
+    for case_dir in adversarial_case_dirs(&lang_dir) {
+        let stem = case_dir
+            .file_name()
+            .expect("adversarial fixture directory name")
+            .to_string_lossy()
+            .into_owned();
+        let outcome = run_fixture(
+            &mut extractor,
+            language,
+            &stem,
+            &case_dir.join(format!("old.{extension}")),
+            &case_dir.join(format!("new.{extension}")),
+            &case_dir.join("expected.json"),
+        );
+        let class = outcome
+            .expected
+            .class
+            .unwrap_or_else(|| panic!("{stem} expected.json must declare class"));
+        let expected_renames: BTreeSet<_> =
+            outcome.expected.expected_renames.iter().cloned().collect();
+        assert_adversarial_outcome(language_name(language), &outcome);
+        let class_stats = by_class.entry(class).or_default();
+        class_stats.cases += 1;
+        class_stats.exact_outcomes += 1;
+        class_stats
+            .renames
+            .record(&outcome.predicted_renames, &expected_renames);
+    }
+
+    by_class
+}
+
+fn run_fixture(
+    extractor: &mut BytesExtractor,
+    language: Language,
+    stem: &str,
+    old_path: &Path,
+    new_path: &Path,
+    expected_path: &Path,
+) -> FixtureOutcome {
+    let extension = extension_for(language);
+    let expected: Expected = serde_json::from_str(
+        &std::fs::read_to_string(expected_path).expect("read expected corpus labels"),
+    )
+    .expect("parse expected corpus labels");
+    let old_symbols = extractor
+        .extract(
+            old_path,
+            &std::fs::read(old_path).expect("read old corpus blob"),
+        )
+        .expect("extract old corpus symbols");
+    let new_symbols = extractor
+        .extract(
+            new_path,
+            &std::fs::read(new_path).expect("read new corpus blob"),
+        )
+        .expect("extract new corpus symbols");
+
+    let (deleted_candidates, added_candidates) =
+        candidate_changes(old_path, new_path, &old_symbols, &new_symbols);
+    let deleted_name_by_key: HashMap<_, _> = deleted_candidates
+        .iter()
+        .map(|change| {
+            (
+                change.snapshot.key.clone(),
+                change.snapshot.entity_name.clone(),
+            )
+        })
+        .collect();
+    let file_change = FileChange {
+        path: logical_fixture_path(stem, "new", extension).into(),
+        kind: FileChangeKind::Modified,
+        parent_sha: Some("old".to_string()),
+    };
+
+    let (changes, diagnostics) =
+        try_rename_match(deleted_candidates, added_candidates, &file_change, language);
+    let predicted_renames = predicted_renames(&changes, &deleted_name_by_key);
+    let predicted_added = predicted_names(&changes, |kind| matches!(kind, ChangeKind::Added));
+    let predicted_deleted = predicted_names(&changes, |kind| matches!(kind, ChangeKind::Deleted));
+
+    FixtureOutcome {
+        stem: stem.to_string(),
+        expected,
+        predicted_renames,
+        predicted_added,
+        predicted_deleted,
+        diagnostics,
+    }
 }
 
 fn candidate_changes(
@@ -180,6 +271,17 @@ fn predicted_renames(
         .collect()
 }
 
+fn predicted_names(
+    changes: &[SymbolChange],
+    predicate: impl Fn(&ChangeKind) -> bool,
+) -> BTreeSet<String> {
+    changes
+        .iter()
+        .filter(|change| predicate(&change.change_kind))
+        .map(|change| change.snapshot.entity_name.clone())
+        .collect()
+}
+
 fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
     SymbolSnapshotArtifact {
         key: SnapshotKey {
@@ -195,6 +297,39 @@ fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolS
         anchor_hash: symbol.anchor_hash.clone(),
         tokens: symbol.tokens.clone(),
     }
+}
+
+fn flat_expected_files(lang_dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = std::fs::read_dir(lang_dir)
+        .expect("read corpus directory")
+        .map(|entry| entry.expect("read corpus entry").path())
+        .filter(|path| path.is_file() && path.to_string_lossy().ends_with(".expected.json"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn adversarial_case_dirs(lang_dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = std::fs::read_dir(lang_dir)
+        .expect("read corpus directory")
+        .map(|entry| entry.expect("read corpus entry").path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("adversarial_"))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn flat_fixture_stem(path: &Path) -> String {
+    path.file_stem()
+        .expect("expected file stem")
+        .to_string_lossy()
+        .replace(".expected", "")
 }
 
 fn symbol_identity(symbol: &ExtractedSymbol) -> (String, String, Option<String>) {
@@ -216,6 +351,16 @@ fn extension_for(language: Language) -> &'static str {
         Language::Python => "py",
         Language::Tsx => "tsx",
         Language::Markdown => "md",
+    }
+}
+
+fn language_name(language: Language) -> &'static str {
+    match language {
+        Language::Rust => "rust",
+        Language::TypeScript => "typescript",
+        Language::Python => "python",
+        Language::Tsx => "tsx",
+        Language::Markdown => "markdown",
     }
 }
 
@@ -242,6 +387,87 @@ fn assert_baseline(language: &str, stats: CorpusStats, baseline: f64) {
     );
 }
 
+fn assert_adversarial_outcome(language: &str, outcome: &FixtureOutcome) {
+    let expected_renames: BTreeSet<_> = outcome.expected.expected_renames.iter().cloned().collect();
+    let expected_added: BTreeSet<_> = outcome.expected.expected_added.iter().cloned().collect();
+    let expected_deleted: BTreeSet<_> = outcome.expected.expected_deleted.iter().cloned().collect();
+
+    assert_eq!(
+        outcome.predicted_renames, expected_renames,
+        "{language} {} predicted unexpected renames",
+        outcome.stem
+    );
+    assert_eq!(
+        outcome.predicted_added, expected_added,
+        "{language} {} predicted unexpected Added set",
+        outcome.stem
+    );
+    assert_eq!(
+        outcome.predicted_deleted, expected_deleted,
+        "{language} {} predicted unexpected Deleted set",
+        outcome.stem
+    );
+
+    for candidate in &outcome.expected.expected_ambiguous_candidates {
+        assert!(
+            outcome.diagnostics.iter().any(|diagnostic| {
+                diagnostic.contains("ambiguous_rename")
+                    && diagnostic.contains(&format!("candidate={candidate}"))
+            }),
+            "{language} {} missing ambiguous_rename diagnostic for {candidate}; diagnostics={:#?}",
+            outcome.stem,
+            outcome.diagnostics
+        );
+    }
+}
+
+fn assert_adversarial_class(
+    stats_by_class: &BTreeMap<AdversarialClass, AdversarialStats>,
+    class: AdversarialClass,
+    expected_cases: u32,
+) {
+    let stats = stats_by_class
+        .get(&class)
+        .unwrap_or_else(|| panic!("missing adversarial class {}", class.label()));
+    println!(
+        "adversarial {} cases={} exact={}/{} F1={:.3} P={:.3} R={:.3} TP={} FP={} FN={}",
+        class.label(),
+        stats.cases,
+        stats.exact_outcomes,
+        stats.cases,
+        stats.renames.f1(),
+        stats.renames.precision(),
+        stats.renames.recall(),
+        stats.renames.tp,
+        stats.renames.fp,
+        stats.renames.fn_
+    );
+    assert_eq!(
+        stats.cases,
+        expected_cases,
+        "adversarial {} case count mismatch",
+        class.label()
+    );
+    assert_eq!(
+        stats.exact_outcomes,
+        expected_cases,
+        "adversarial {} exact outcomes mismatch",
+        class.label()
+    );
+    assert_eq!(
+        stats.renames.fp,
+        0,
+        "adversarial {} emitted false positive renames",
+        class.label()
+    );
+    assert_eq!(
+        stats.renames.fn_,
+        0,
+        "adversarial {} missed expected renames",
+        class.label()
+    );
+}
+
 #[test]
 fn rust_corpus_f1_meets_baseline() {
     let stats = run_corpus(Language::Rust, "tests/fixtures/rename_corpus/rust");
@@ -261,4 +487,33 @@ fn typescript_corpus_f1_meets_baseline() {
 fn python_corpus_f1_meets_baseline() {
     let stats = run_corpus(Language::Python, "tests/fixtures/rename_corpus/python");
     assert_baseline("python", stats, 0.75);
+}
+
+#[test]
+fn adversarial_corpus_has_explicit_outcomes_by_class() {
+    let mut stats_by_class = BTreeMap::<AdversarialClass, AdversarialStats>::new();
+    for (language, relative_dir) in [
+        (Language::Rust, "tests/fixtures/rename_corpus/rust"),
+        (
+            Language::TypeScript,
+            "tests/fixtures/rename_corpus/typescript",
+        ),
+        (Language::Python, "tests/fixtures/rename_corpus/python"),
+    ] {
+        for (class, stats) in run_adversarial_corpus(language, relative_dir) {
+            let combined = stats_by_class.entry(class).or_default();
+            combined.cases += stats.cases;
+            combined.exact_outcomes += stats.exact_outcomes;
+            combined.renames.cases += stats.renames.cases;
+            combined.renames.tp += stats.renames.tp;
+            combined.renames.fp += stats.renames.fp;
+            combined.renames.fn_ += stats.renames.fn_;
+        }
+    }
+
+    assert_adversarial_class(&stats_by_class, AdversarialClass::FullRewrite, 3);
+    assert_adversarial_class(&stats_by_class, AdversarialClass::Crossover, 3);
+    // Phase 1 token bags include parameter identifiers, so whole-parameter
+    // renames can fall below the calibrated language thresholds.
+    assert_adversarial_class(&stats_by_class, AdversarialClass::ParamsOnly, 3);
 }
