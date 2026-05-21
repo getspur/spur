@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::io::BufReader;
 use std::path::Path;
@@ -282,6 +283,316 @@ pub enum Confidence {
 
 pub type StableSymbolId = String;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct GitPath(Vec<u8>);
+
+impl GitPath {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    pub fn to_path_buf(&self) -> PathBuf {
+        pathbuf_from_git_bytes(&self.0)
+    }
+
+    pub fn to_string_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.0)
+    }
+
+    pub fn display(&self) -> GitPathDisplay<'_> {
+        GitPathDisplay(&self.0)
+    }
+
+    pub fn ends_with<P: AsRef<Path>>(&self, child: P) -> bool {
+        self.to_path_buf().ends_with(child)
+    }
+}
+
+impl AsRef<[u8]> for GitPath {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl From<&str> for GitPath {
+    fn from(value: &str) -> Self {
+        Self(value.as_bytes().to_vec())
+    }
+}
+
+impl From<String> for GitPath {
+    fn from(value: String) -> Self {
+        Self(value.into_bytes())
+    }
+}
+
+impl From<Vec<u8>> for GitPath {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&[u8]> for GitPath {
+    fn from(value: &[u8]) -> Self {
+        Self(value.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for GitPath {
+    fn from(value: &[u8; N]) -> Self {
+        Self(value.to_vec())
+    }
+}
+
+impl From<&Path> for GitPath {
+    fn from(value: &Path) -> Self {
+        Self(git_bytes_from_path(value))
+    }
+}
+
+impl From<PathBuf> for GitPath {
+    fn from(value: PathBuf) -> Self {
+        Self::from(value.as_path())
+    }
+}
+
+impl From<&PathBuf> for GitPath {
+    fn from(value: &PathBuf) -> Self {
+        Self::from(value.as_path())
+    }
+}
+
+impl PartialEq<PathBuf> for GitPath {
+    fn eq(&self, other: &PathBuf) -> bool {
+        self.0 == git_bytes_from_path(other.as_path())
+    }
+}
+
+impl PartialEq<GitPath> for PathBuf {
+    fn eq(&self, other: &GitPath) -> bool {
+        git_bytes_from_path(self.as_path()) == other.0
+    }
+}
+
+impl Serialize for GitPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match std::str::from_utf8(&self.0) {
+            Ok(path) => serializer.serialize_str(path),
+            Err(_) => {
+                use serde::ser::SerializeStruct;
+
+                let mut state = serializer.serialize_struct("GitPath", 2)?;
+                state.serialize_field("encoding", "base64")?;
+                state.serialize_field("bytes", &base64_encode(&self.0))?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GitPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(GitPathVisitor)
+    }
+}
+
+struct GitPathVisitor;
+
+impl<'de> serde::de::Visitor<'de> for GitPathVisitor {
+    type Value = GitPath;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a UTF-8 path string or a base64-encoded Git path object")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(GitPath::from(value))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(GitPath::from(value))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut encoding = None::<String>;
+        let mut bytes = None::<String>;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "encoding" => {
+                    if encoding.is_some() {
+                        return Err(serde::de::Error::duplicate_field("encoding"));
+                    }
+                    encoding = Some(map.next_value()?);
+                }
+                "bytes" => {
+                    if bytes.is_some() {
+                        return Err(serde::de::Error::duplicate_field("bytes"));
+                    }
+                    bytes = Some(map.next_value()?);
+                }
+                other => {
+                    return Err(serde::de::Error::unknown_field(
+                        other,
+                        &["encoding", "bytes"],
+                    ));
+                }
+            }
+        }
+
+        match encoding.as_deref() {
+            Some("base64") => {}
+            Some(other) => {
+                return Err(serde::de::Error::custom(format!(
+                    "unsupported GitPath encoding `{other}`"
+                )));
+            }
+            None => return Err(serde::de::Error::missing_field("encoding")),
+        }
+
+        let bytes = bytes.ok_or_else(|| serde::de::Error::missing_field("bytes"))?;
+        base64_decode(&bytes)
+            .map(GitPath)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+pub struct GitPathDisplay<'a>(&'a [u8]);
+
+impl fmt::Display for GitPathDisplay<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", String::from_utf8_lossy(self.0))
+    }
+}
+
+#[cfg(unix)]
+fn git_bytes_from_path(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn git_bytes_from_path(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().into_owned().into_bytes()
+}
+
+#[cfg(unix)]
+fn pathbuf_from_git_bytes(path: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+
+    PathBuf::from(std::ffi::OsStr::from_bytes(path))
+}
+
+#[cfg(not(unix))]
+fn pathbuf_from_git_bytes(path: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(path).into_owned())
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+
+        out.push(BASE64_ALPHABET[(first >> 2) as usize] as char);
+        out.push(BASE64_ALPHABET[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(
+                BASE64_ALPHABET[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char,
+            );
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(BASE64_ALPHABET[(third & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn base64_decode(encoded: &str) -> Result<Vec<u8>, String> {
+    let bytes = encoded.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return Err("base64 length must be a multiple of 4".to_string());
+    }
+
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        if chunk[0] == b'=' || chunk[1] == b'=' {
+            return Err("base64 padding cannot appear in the first two positions".to_string());
+        }
+        let padding = match (chunk[2] == b'=', chunk[3] == b'=') {
+            (false, false) => 0,
+            (false, true) => 1,
+            (true, true) => 2,
+            (true, false) => return Err("base64 padding must be contiguous".to_string()),
+        };
+
+        let v0 = base64_value(chunk[0])?;
+        let v1 = base64_value(chunk[1])?;
+        let v2 = if padding == 2 {
+            0
+        } else {
+            base64_value(chunk[2])?
+        };
+        let v3 = if padding >= 1 {
+            0
+        } else {
+            base64_value(chunk[3])?
+        };
+
+        out.push((v0 << 2) | (v1 >> 4));
+        if padding < 2 {
+            out.push((v1 << 4) | (v2 >> 2));
+        }
+        if padding == 0 {
+            out.push((v2 << 6) | v3);
+        }
+    }
+
+    Ok(out)
+}
+
+fn base64_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        other => Err(format!("invalid base64 byte 0x{other:02x}")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
@@ -294,7 +605,7 @@ pub enum ChangeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenamePrev {
-    File(PathBuf),
+    File(GitPath),
     Symbol(SnapshotKey),
 }
 
@@ -309,7 +620,7 @@ pub struct SnapshotKey {
 #[serde(deny_unknown_fields)]
 pub struct SymbolSnapshotArtifact {
     pub key: SnapshotKey,
-    pub file_path: PathBuf,
+    pub file_path: GitPath,
     pub entity_name: String,
     pub symbol_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,7 +663,7 @@ pub struct CommitIndexArtifact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "endpoint", rename_all = "snake_case")]
 pub enum EdgeEndpoint {
-    File { path: PathBuf },
+    File { path: GitPath },
     Symbol { stable_symbol_id: StableSymbolId },
     Snapshot { key: SnapshotKey },
     Commit { sha: String },
