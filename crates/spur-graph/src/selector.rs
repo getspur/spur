@@ -335,6 +335,7 @@ mod tests {
                 file("src/runner.rs"),
                 file("docs/guide.md"),
             ],
+            file_node_ids: Vec::new(),
             symbols: vec![
                 symbol(
                     "aaaaaaaaaaaaaaaa",
@@ -472,6 +473,7 @@ mod tests {
                     Some("Overview"),
                 ),
             ],
+            symbol_node_ids: Vec::new(),
             edges: Vec::new(),
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
