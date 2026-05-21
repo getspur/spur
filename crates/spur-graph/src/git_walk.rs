@@ -1,3 +1,15 @@
+//! Git history walker for code graph artifacts.
+//!
+//! `try_rename_match` is deliberately crate-private; rename-corpus coverage
+//! lives in this crate's unit tests so the heuristic is not exported as public
+//! API.
+//!
+//! ```compile_fail
+//! use spur_graph::git_walk::try_rename_match;
+//!
+//! let _ = try_rename_match;
+//! ```
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
@@ -729,7 +741,8 @@ struct RenameMatch {
     score: f64,
 }
 
-pub fn try_rename_match(
+#[cfg(test)]
+pub(crate) fn try_rename_match(
     deleted_candidates: Vec<SymbolChange>,
     added_candidates: Vec<SymbolChange>,
     file_change: &FileChange,
@@ -1401,6 +1414,10 @@ pub(crate) fn run_git(worktree: &Path, args: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout)
         .with_context(|| format!("git {args:?} emitted non-UTF-8 stdout"))
 }
+
+#[cfg(test)]
+#[path = "rename_corpus_tests.rs"]
+mod rename_corpus_tests;
 
 #[cfg(test)]
 mod tests {

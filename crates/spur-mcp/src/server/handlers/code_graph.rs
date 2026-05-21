@@ -558,6 +558,7 @@ mod tests {
     use super::super::*;
     use serde_json::{json, Value};
     use spur_acp::{BrainSessionId, SessionId};
+    use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -604,7 +605,7 @@ mod tests {
             dir.path().join(".spur/graph-index.json"),
             serde_json::to_string_pretty(&json!({
                 "header": {
-                    "graph_index_version": "2"
+                    "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
                 },
                 "manifest_version": "test",
                 "graph_content_hash": "test",

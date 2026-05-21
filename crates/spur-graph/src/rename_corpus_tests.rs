@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use spur_graph::extract::languages::Language;
-use spur_graph::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
-use spur_graph::git_walk::{try_rename_match, FileChange, FileChangeKind, SymbolChange};
-use spur_graph::{
-    stable_symbol_id_for, ChangeKind, GitPath, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
-};
+
+use super::{try_rename_match, FileChange, FileChangeKind, SymbolChange};
+use crate::extract::languages::Language;
+use crate::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
+use crate::identity::stable_symbol_id_for;
+use crate::schema::{ChangeKind, GitPath, RenamePrev, SnapshotKey, SymbolSnapshotArtifact};
 
 const MIN_CASES_PER_LANGUAGE: u32 = 50;
 
