@@ -577,10 +577,9 @@ async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
         )
         .await,
     );
-    assert_eq!(
-        callees["callees"].as_array().expect("callees"),
-        &Vec::<Value>::new()
-    );
+    let callee_names = entity_names(callees["callees"].as_array().expect("callees"));
+    assert!(callee_names.contains("submit_plan_def"));
+    assert!(callee_names.contains("code_search_def"));
 
     let search = tool_body(
         call_tool(
@@ -630,4 +629,65 @@ async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
             && candidate["symbol_kind"] == "mcp_tool"
             && candidate["file_path"] == "crates/spur-mcp/src/tools.rs"
     }));
+}
+
+#[tokio::test]
+async fn code_search_echoes_requested_limit_when_clamped() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    build_graph_artifact(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "order",
+                "mode": "substring",
+                "limit": 500
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["limit"], 200);
+    assert_eq!(body["requested_limit"], 500);
+}
+
+#[tokio::test]
+async fn code_search_candidate_rows_include_enclosing_scope() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    let artifact = build_real_tools_graph_artifact(worktree.path());
+    let mcp_tool = symbol_by_file_entity_kind(
+        &artifact,
+        "crates/spur-mcp/src/tools.rs",
+        "submit_plan",
+        "mcp_tool",
+    );
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "submit_plan",
+                "symbol_kind": "mcp_tool",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+    let candidates = body["candidates"].as_array().expect("candidates");
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate["id"] == mcp_tool.stable_symbol_id)
+        .expect("submit_plan mcp_tool candidate");
+
+    assert_eq!(candidate["enclosing_scope"], "submit_plan_def");
 }

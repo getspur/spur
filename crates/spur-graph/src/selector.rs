@@ -24,6 +24,7 @@ pub struct CandidateRow {
     pub file_path: String,
     pub line_range: [usize; 2],
     pub symbol_kind: String,
+    pub enclosing_scope: Option<String>,
 }
 
 pub fn resolve_selector(artifact: &GraphIndexArtifact, selector: &str) -> SelectorResolution {
@@ -254,6 +255,7 @@ fn candidate_row(symbol: &GraphSymbolArtifact) -> CandidateRow {
         file_path: symbol.file_path.clone(),
         line_range: symbol.line_range,
         symbol_kind: symbol.symbol_kind.clone(),
+        enclosing_scope: symbol.enclosing_scope.clone(),
     }
 }
 
@@ -690,6 +692,7 @@ mod tests {
                         file_path: "a/file.rs".to_string(),
                         line_range: [5, 6],
                         symbol_kind: "struct".to_string(),
+                        enclosing_scope: Some("duplicate".to_string()),
                     },
                     CandidateRow {
                         selector: "b/file.rs::duplicate::Thing".to_string(),
@@ -700,6 +703,7 @@ mod tests {
                         file_path: "b/file.rs".to_string(),
                         line_range: [3, 4],
                         symbol_kind: "struct".to_string(),
+                        enclosing_scope: Some("duplicate".to_string()),
                     },
                     CandidateRow {
                         selector: "c/file.rs::duplicate::Thing".to_string(),
@@ -710,6 +714,7 @@ mod tests {
                         file_path: "c/file.rs".to_string(),
                         line_range: [7, 8],
                         symbol_kind: "struct".to_string(),
+                        enclosing_scope: Some("duplicate".to_string()),
                     },
                 ],
             }
