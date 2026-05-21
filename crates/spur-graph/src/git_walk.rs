@@ -200,16 +200,32 @@ pub fn run_full_walk_into(
         }
 
         for symbol_change in symbol_changes_for_commit(worktree, &sha, &mut ctx)? {
+            let snapshot_key = symbol_change.snapshot.key.clone();
+            let parent_sha = symbol_change.parent_sha.clone();
+            let change_kind = symbol_change.change_kind.clone();
+
             graph.symbol_snapshots.push(symbol_change.snapshot.clone());
             graph.temporal_edges.push(TemporalEdgeArtifact {
                 source: EdgeEndpoint::Commit { sha: sha.clone() },
                 target: EdgeEndpoint::Snapshot {
-                    key: symbol_change.snapshot.key,
+                    key: snapshot_key.clone(),
                 },
                 relation: RelationKind::Touches,
-                parent: symbol_change.parent_sha,
-                change_kind: Some(symbol_change.change_kind),
+                parent: parent_sha.clone(),
+                change_kind: Some(change_kind.clone()),
             });
+
+            if let ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key)) = change_kind {
+                graph.temporal_edges.push(TemporalEdgeArtifact {
+                    source: EdgeEndpoint::Snapshot {
+                        key: previous_key.clone(),
+                    },
+                    target: EdgeEndpoint::Snapshot { key: snapshot_key },
+                    relation: RelationKind::Touches,
+                    parent: parent_sha,
+                    change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key))),
+                });
+            }
         }
     }
 
