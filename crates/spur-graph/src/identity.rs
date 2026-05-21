@@ -31,13 +31,11 @@ id_newtype!(SpanId);
 id_newtype!(RunId);
 id_newtype!(EvidenceId);
 
-pub fn stable_symbol_id_for(path: &Path, entity_name: &str, anchor_hash: &str) -> String {
+pub fn stable_symbol_id_for(path: &Path, entity_name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.to_string_lossy().replace('\\', "/").as_bytes());
     hasher.update([0]);
     hasher.update(entity_name.as_bytes());
-    hasher.update([0]);
-    hasher.update(anchor_hash.as_bytes());
     let digest = hasher.finalize();
     format!(
         "{:016x}",

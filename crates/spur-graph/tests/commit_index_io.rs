@@ -37,8 +37,12 @@ fn write_pointer_fixture(worktree: &Path, schema_version: u32, artifact_relative
 }
 
 fn write_commit_index_artifact(path: &Path) {
+    write_commit_index_artifact_with_schema_version(path, current_schema_version());
+}
+
+fn write_commit_index_artifact_with_schema_version(path: &Path, schema_version: u32) {
     let artifact = CommitIndexArtifact {
-        schema_version: current_schema_version(),
+        schema_version,
         commits: Vec::new(),
         refs: Default::default(),
         indexed_at: "2026-05-21T00:00:00Z".to_string(),
@@ -53,15 +57,34 @@ fn write_commit_index_artifact(path: &Path) {
 }
 
 #[test]
-fn load_pointer_rejects_v1_schema_version() {
+fn load_pointer_rejects_stale_schema_versions() {
     let worktree = tempfile::tempdir().expect("tempdir");
-    write_pointer_fixture(worktree.path(), 1, ".spur/commit-index.json");
+    for version in [1, 2] {
+        write_pointer_fixture(worktree.path(), version, ".spur/commit-index.json");
 
-    let error = load_pointer(worktree.path()).expect_err("v1 pointer should be rejected");
+        let error = load_pointer(worktree.path()).expect_err("stale pointer should be rejected");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("schema_version") && message.contains(&version.to_string()),
+            "unexpected error for version {version}: {message}"
+        );
+    }
+}
+
+#[test]
+fn load_artifact_rejects_stale_schema_versions() {
+    let worktree = tempfile::tempdir().expect("tempdir");
+    let artifact_path = worktree.path().join(".spur/commit-index.json");
+    write_commit_index_artifact_with_schema_version(&artifact_path, 2);
+    let pointer = pointer(".spur/commit-index.json");
+
+    let error =
+        load_artifact(worktree.path(), &pointer).expect_err("v2 artifact should be rejected");
     let message = error.to_string();
 
     assert!(
-        message.contains("schema_version") && message.contains('1'),
+        message.contains("schema_version") && message.contains('2'),
         "unexpected error: {message}"
     );
 }

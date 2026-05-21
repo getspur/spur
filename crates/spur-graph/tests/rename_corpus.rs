@@ -183,7 +183,7 @@ fn predicted_renames(
 fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
     SymbolSnapshotArtifact {
         key: SnapshotKey {
-            stable_symbol_id: stable_symbol_id_for(path, &symbol.entity_name, &symbol.anchor_hash),
+            stable_symbol_id: stable_symbol_id_for(path, &symbol.entity_name),
             commit: commit.to_string(),
         },
         file_path: GitPath::from(path),
