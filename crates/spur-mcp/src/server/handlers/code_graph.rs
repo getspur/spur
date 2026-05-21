@@ -1159,6 +1159,7 @@ fn edge_row(edge: &GraphEdgeArtifact) -> Value {
         "source_uri": symbol_uri(&edge.source_stable_symbol_id),
         "target_uri": edge.target_stable_symbol_id.as_ref().map(|id| symbol_uri(id)),
         "target_label": edge.target_label,
+        "resolved": edge.target_stable_symbol_id.is_some(),
         "relation": edge.relation,
         "edge_kind": edge_kind_str(edge_kind(edge)),
         "confidence": edge.confidence,
@@ -1673,6 +1674,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn code_callers_counts_legacy_references_edges_as_references_other() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
+        std::fs::write(
+            dir.path().join(".spur/graph-index.json"),
+            serde_json::to_string_pretty(&json!({
+                "header": {
+                    "graph_index_version": "test"
+                },
+                "manifest_version": "test",
+                "graph_content_hash": "test",
+                "files": [
+                    { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
+                ],
+                "symbols": [
+                    symbol("caller", "src/lib.rs", [1, 1], "caller", "caller"),
+                    symbol("root", "src/lib.rs", [3, 3], "root", "root")
+                ],
+                "edges": [
+                    {
+                        "source_stable_symbol_id": "caller",
+                        "target_stable_symbol_id": "root",
+                        "target_label": "root",
+                        "relation": "references",
+                        "confidence": "syntax_exact",
+                        "confidence_score": 1.0
+                    }
+                ],
+                "tombstones": []
+            }))
+            .expect("encode artifact"),
+        )
+        .expect("write artifact");
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let body = response_json(
+            server
+                .handle_code_callers(Value::from(1), json!({ "symbol": "root" }))
+                .await,
+        );
+
+        assert_eq!(body["callers"][0]["edge_kind"], "references_other");
+        assert_eq!(
+            body["counts_by_kind"],
+            json!({
+                "calls": 0,
+                "calls_dyn": 0,
+                "references_hof": 0,
+                "references_other": 1,
+                "unresolved": 0
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn code_callees_accepts_bare_symbol_id() {
         let _lock = CWD_LOCK.lock().expect("cwd lock");
         let dir = TempDir::new().expect("tempdir");
@@ -1971,6 +2029,37 @@ mod tests {
             .iter()
             .any(|edge| edge["target_label"] == "into" && edge["target_uri"].is_null()));
         assert_eq!(included_body["include_unresolved"], true);
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_can_include_incoming_unresolved_caller_edges() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let body = response_json(
+            server
+                .handle_code_subgraph(
+                    Value::from(1),
+                    json!({
+                        "symbol": "graph://symbol/root",
+                        "radius": 1,
+                        "edge_kinds": ["calls"],
+                        "include_unresolved": true
+                    }),
+                )
+                .await,
+        );
+        let edges = body["edges"].as_array().expect("edges");
+
+        assert!(edges.iter().any(|edge| {
+            edge["source_uri"] == "graph://symbol/unresolved-caller"
+                && edge["target_uri"].is_null()
+                && edge["target_label"] == "root"
+                && edge["resolved"] == false
+        }));
     }
 
     #[tokio::test]
