@@ -400,6 +400,38 @@ async fn code_resolve_prefers_real_submit_plan_mcp_tool_registration() {
 }
 
 #[tokio::test]
+async fn code_callees_includes_real_tools_registered_inside_vec_macro() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    let artifact = build_real_tools_graph_artifact(worktree.path());
+    let tools_list = symbol_by_file_entity_kind(
+        &artifact,
+        "crates/spur-mcp/src/tools.rs",
+        "tools_list",
+        "function",
+    );
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_callees",
+            json!({ "symbol": format!("graph://symbol/{}", tools_list.stable_symbol_id) }),
+        )
+        .await,
+    );
+    let callees = entity_names(body["callees"].as_array().expect("callees"));
+
+    for expected in ["delegate_to_worker_def", "get_issue_def", "submit_plan_def"] {
+        assert!(
+            callees.contains(expected),
+            "expected tools_list callees to include `{expected}`; got {callees:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn code_file_symbols_returns_candidate_rows_for_worktree_relative_file() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
