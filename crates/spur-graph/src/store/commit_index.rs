@@ -12,6 +12,8 @@ use crate::store::cache::COMMIT_INDEX_POINTER_PATH;
 pub enum CommitIndexLoadError {
     #[error("unsupported commit-index pointer schema_version `{found}`; expected `{expected}`")]
     UnsupportedPointerSchemaVersion { found: u32, expected: &'static str },
+    #[error("unsupported commit-index artifact schema_version `{found}`; expected `{expected}`")]
+    UnsupportedArtifactSchemaVersion { found: u32, expected: &'static str },
     #[error("commit-index artifact_relative_path must be relative, got absolute path `{path}`")]
     AbsoluteArtifactRelativePath { path: String },
     #[error("commit-index artifact_relative_path must not contain parent traversal: `{path}`")]
@@ -71,8 +73,17 @@ pub fn load_artifact(worktree: &Path, pointer: &CommitIndexPointer) -> Result<Co
     let path = canonical_artifact_path(worktree, &pointer.artifact_relative_path)?;
     let text = fs::read_to_string(&path)
         .with_context(|| format!("read commit index artifact at {}", path.display()))?;
-    serde_json::from_str(&text)
-        .with_context(|| format!("parse commit index artifact at {}", path.display()))
+    let artifact: CommitIndexArtifact = serde_json::from_str(&text)
+        .with_context(|| format!("parse commit index artifact at {}", path.display()))?;
+    let expected_schema_version = current_schema_version()?;
+    if artifact.schema_version != expected_schema_version {
+        return Err(CommitIndexLoadError::UnsupportedArtifactSchemaVersion {
+            found: artifact.schema_version,
+            expected: GRAPH_INDEX_VERSION_TEMPORAL,
+        }
+        .into());
+    }
+    Ok(artifact)
 }
 
 fn canonical_artifact_path(worktree: &Path, artifact_relative_path: &str) -> Result<PathBuf> {

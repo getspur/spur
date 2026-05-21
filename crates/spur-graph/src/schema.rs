@@ -12,7 +12,7 @@ use crate::{EdgeId, EvidenceId, FileId, NodeId, RunId, SpanId};
 
 pub const CODE_FILE_URI_PREFIX: &str = "graph://file/";
 pub const CODE_SYMBOL_URI_PREFIX: &str = "graph://symbol/";
-pub const GRAPH_INDEX_VERSION_TEMPORAL: &str = "2";
+pub const GRAPH_INDEX_VERSION_TEMPORAL: &str = "3";
 
 pub type SourceRange = [usize; 2];
 
@@ -872,8 +872,8 @@ mod temporal_artifact_tests {
     }
 
     #[test]
-    fn temporal_graph_index_version_is_v2() {
-        assert_eq!(GRAPH_INDEX_VERSION_TEMPORAL, "2");
+    fn temporal_graph_index_version_is_v3() {
+        assert_eq!(GRAPH_INDEX_VERSION_TEMPORAL, "3");
     }
 
     #[test]
