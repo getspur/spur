@@ -739,10 +739,10 @@ fn tier2_jaccard_matches(
             continue;
         };
         if best_score < threshold {
-            diagnostics.push(ambiguous_rename_diagnostic(file_change, added));
+            record_ambiguous_rename_pair(diagnostics, file_change, added, best_deleted);
             continue;
         }
-        if let Some((_, second_score)) = scored.get(1).copied() {
+        if let Some((second_deleted, second_score)) = scored.get(1).copied() {
             if second_score >= threshold {
                 diagnostics.push(format!(
                     "merge_collision: file={} candidate={}",
@@ -752,7 +752,8 @@ fn tier2_jaccard_matches(
                 continue;
             }
             if best_score - second_score < 0.05 {
-                diagnostics.push(ambiguous_rename_diagnostic(file_change, added));
+                record_ambiguous_rename_pair(diagnostics, file_change, added, best_deleted);
+                record_ambiguous_rename_pair(diagnostics, file_change, added, second_deleted);
                 continue;
             }
         }
@@ -795,7 +796,12 @@ fn reject_ambiguous_splits(
         if scores[0].1 - scores[1].1 < 0.05 {
             for (index, _) in scores {
                 rejected.insert(index);
-                diagnostics.push(ambiguous_rename_diagnostic(file_change, &matches[index].to));
+                record_ambiguous_rename_pair(
+                    diagnostics,
+                    file_change,
+                    &matches[index].to,
+                    &matches[index].from,
+                );
             }
         }
     }
@@ -807,11 +813,28 @@ fn reject_ambiguous_splits(
         .collect()
 }
 
-fn ambiguous_rename_diagnostic(file_change: &FileChange, change: &SymbolChange) -> String {
+fn record_ambiguous_rename_pair(
+    diagnostics: &mut Vec<String>,
+    file_change: &FileChange,
+    left: &SymbolChange,
+    right: &SymbolChange,
+) {
+    diagnostics.push(ambiguous_rename_diagnostic(file_change, left, right));
+    diagnostics.push(ambiguous_rename_diagnostic(file_change, right, left));
+}
+
+fn ambiguous_rename_diagnostic(
+    file_change: &FileChange,
+    change: &SymbolChange,
+    other: &SymbolChange,
+) -> String {
     format!(
-        "ambiguous_rename: file={} candidate={}",
+        "ambiguous_rename: file={} stable_symbol_id={} candidate={} other_stable_symbol_id={} other_candidate={}",
         file_change.path.display(),
-        change.snapshot.entity_name
+        change.snapshot.key.stable_symbol_id,
+        change.snapshot.entity_name,
+        other.snapshot.key.stable_symbol_id,
+        other.snapshot.entity_name
     )
 }
 
