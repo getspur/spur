@@ -68,6 +68,14 @@ impl CallerRecord<'_> {
 pub struct SubgraphView<'a> {
     pub nodes: Vec<&'a GraphSymbolArtifact>,
     pub edges: Vec<&'a GraphEdgeArtifact>,
+    pub truncated_frontier: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubgraphBudget {
+    pub max_nodes: usize,
+    pub max_edges: usize,
 }
 
 pub fn find_symbol<'a>(
@@ -179,36 +187,130 @@ pub fn bounded_subgraph<'a>(
     edge_kinds: Option<&[GraphEdgeKind]>,
     include_unresolved: bool,
 ) -> SubgraphView<'a> {
-    let Some(root) = find_symbol(artifact, root_id) else {
-        return SubgraphView {
+    bounded_subgraph_from_roots(
+        artifact,
+        &[root_id],
+        radius,
+        edge_kinds,
+        include_unresolved,
+        None,
+    )
+}
+
+pub fn bounded_subgraph_with_budget<'a>(
+    artifact: &'a GraphIndexArtifact,
+    root_ids: &[&str],
+    radius: u8,
+    edge_kinds: Option<&[GraphEdgeKind]>,
+    include_unresolved: bool,
+    budget: SubgraphBudget,
+) -> SubgraphView<'a> {
+    bounded_subgraph_from_roots(
+        artifact,
+        root_ids,
+        radius,
+        edge_kinds,
+        include_unresolved,
+        Some(budget),
+    )
+}
+
+fn bounded_subgraph_from_roots<'a>(
+    artifact: &'a GraphIndexArtifact,
+    root_ids: &[&str],
+    radius: u8,
+    edge_kinds: Option<&[GraphEdgeKind]>,
+    include_unresolved: bool,
+    budget: Option<SubgraphBudget>,
+) -> SubgraphView<'a> {
+    let mut traversal = SubgraphTraversal::new(artifact, edge_kinds, include_unresolved, budget);
+
+    for root_id in root_ids {
+        traversal.seed_root(root_id);
+    }
+
+    traversal.run(radius.min(MAX_SUBGRAPH_RADIUS));
+    traversal.finish()
+}
+
+struct SubgraphTraversal<'a, 'k> {
+    artifact: &'a GraphIndexArtifact,
+    edge_kinds: Option<&'k [GraphEdgeKind]>,
+    include_unresolved: bool,
+    budget: Option<SubgraphBudget>,
+    nodes: Vec<&'a GraphSymbolArtifact>,
+    edges: Vec<&'a GraphEdgeArtifact>,
+    visited_nodes: HashSet<String>,
+    visited_edges: HashSet<usize>,
+    queue: VecDeque<(String, u8)>,
+    truncated_frontier: Vec<String>,
+    frontier_seen: HashSet<String>,
+    truncated: bool,
+}
+
+impl<'a, 'k> SubgraphTraversal<'a, 'k> {
+    fn new(
+        artifact: &'a GraphIndexArtifact,
+        edge_kinds: Option<&'k [GraphEdgeKind]>,
+        include_unresolved: bool,
+        budget: Option<SubgraphBudget>,
+    ) -> Self {
+        Self {
+            artifact,
+            edge_kinds,
+            include_unresolved,
+            budget,
             nodes: Vec::new(),
             edges: Vec::new(),
-        };
-    };
-
-    let radius = radius.min(MAX_SUBGRAPH_RADIUS);
-    let mut nodes = vec![root];
-    let mut edges = Vec::new();
-    let mut visited_nodes = HashSet::new();
-    let mut visited_edges = HashSet::new();
-    let mut queue = VecDeque::new();
-
-    visited_nodes.insert(root.stable_symbol_id.as_str());
-    queue.push_back((root.stable_symbol_id.as_str(), 0));
-
-    while let Some((current_id, depth)) = queue.pop_front() {
-        if depth >= radius {
-            continue;
+            visited_nodes: HashSet::new(),
+            visited_edges: HashSet::new(),
+            queue: VecDeque::new(),
+            truncated_frontier: Vec::new(),
+            frontier_seen: HashSet::new(),
+            truncated: false,
         }
-        let unresolved_current_labels = include_unresolved
-            .then(|| find_symbol(artifact, current_id).map(unresolved_target_labels_for_symbol))
-            .flatten();
+    }
 
-        for (edge_index, edge) in artifact.edges.iter().enumerate() {
-            if !edge_matches_filter(edge, edge_kinds) {
+    fn seed_root(&mut self, root_id: &str) {
+        if self.visited_nodes.contains(root_id) {
+            return;
+        }
+        let Some(root) = find_symbol(self.artifact, root_id) else {
+            return;
+        };
+        if self.node_budget_full() {
+            self.truncated = true;
+            self.add_frontier(root_id);
+            return;
+        }
+
+        self.visited_nodes.insert(root_id.to_string());
+        self.nodes.push(root);
+        self.queue.push_back((root_id.to_string(), 0));
+    }
+
+    fn run(&mut self, radius: u8) {
+        while let Some((current_id, depth)) = self.queue.pop_front() {
+            if depth >= radius {
                 continue;
             }
-            if !include_unresolved && edge.target_stable_symbol_id.is_none() {
+            self.expand_node(&current_id, depth);
+        }
+    }
+
+    fn expand_node(&mut self, current_id: &str, depth: u8) {
+        let unresolved_current_labels = self
+            .include_unresolved
+            .then(|| {
+                find_symbol(self.artifact, current_id).map(unresolved_target_labels_for_symbol)
+            })
+            .flatten();
+
+        for (edge_index, edge) in self.artifact.edges.iter().enumerate() {
+            if !edge_matches_filter(edge, self.edge_kinds) {
+                continue;
+            }
+            if !self.include_unresolved && edge.target_stable_symbol_id.is_none() {
                 continue;
             }
 
@@ -218,9 +320,7 @@ pub fn bounded_subgraph<'a>(
             // don't advance depth since there is no target node to expand.
             if edge.source_stable_symbol_id == current_id && edge.target_stable_symbol_id.is_none()
             {
-                if visited_edges.insert(edge_index) {
-                    edges.push(edge);
-                }
+                self.try_add_edge(edge_index, edge);
                 continue;
             }
 
@@ -237,24 +337,7 @@ pub fn bounded_subgraph<'a>(
                 }
 
                 let caller_id = edge.source_stable_symbol_id.as_str();
-                let neighbor = if visited_nodes.contains(caller_id) {
-                    None
-                } else {
-                    let Some(symbol) = find_symbol(artifact, caller_id) else {
-                        continue;
-                    };
-                    Some(symbol)
-                };
-
-                if visited_edges.insert(edge_index) {
-                    edges.push(edge);
-                }
-
-                if let Some(symbol) = neighbor {
-                    visited_nodes.insert(symbol.stable_symbol_id.as_str());
-                    nodes.push(symbol);
-                    queue.push_back((symbol.stable_symbol_id.as_str(), depth + 1));
-                }
+                self.try_add_neighbor_edge(edge_index, edge, caller_id, depth + 1);
                 continue;
             }
 
@@ -262,28 +345,79 @@ pub fn bounded_subgraph<'a>(
                 continue;
             };
 
-            let neighbor = if visited_nodes.contains(neighbor_id) {
-                None
-            } else {
-                let Some(symbol) = find_symbol(artifact, neighbor_id) else {
-                    continue;
-                };
-                Some(symbol)
-            };
-
-            if visited_edges.insert(edge_index) {
-                edges.push(edge);
-            }
-
-            if let Some(symbol) = neighbor {
-                visited_nodes.insert(symbol.stable_symbol_id.as_str());
-                nodes.push(symbol);
-                queue.push_back((symbol.stable_symbol_id.as_str(), depth + 1));
-            }
+            self.try_add_neighbor_edge(edge_index, edge, neighbor_id, depth + 1);
         }
     }
 
-    SubgraphView { nodes, edges }
+    fn try_add_neighbor_edge(
+        &mut self,
+        edge_index: usize,
+        edge: &'a GraphEdgeArtifact,
+        neighbor_id: &str,
+        depth: u8,
+    ) {
+        if self.visited_nodes.contains(neighbor_id) {
+            self.try_add_edge(edge_index, edge);
+            return;
+        }
+
+        let Some(symbol) = find_symbol(self.artifact, neighbor_id) else {
+            return;
+        };
+        if self.node_budget_full() || self.edge_budget_full() {
+            self.truncated = true;
+            self.add_frontier(neighbor_id);
+            return;
+        }
+
+        self.visited_edges.insert(edge_index);
+        self.edges.push(edge);
+        self.visited_nodes.insert(neighbor_id.to_string());
+        self.nodes.push(symbol);
+        self.queue.push_back((neighbor_id.to_string(), depth));
+    }
+
+    fn try_add_edge(&mut self, edge_index: usize, edge: &'a GraphEdgeArtifact) -> bool {
+        if self.visited_edges.contains(&edge_index) {
+            return true;
+        }
+        if self.edge_budget_full() {
+            self.truncated = true;
+            return false;
+        }
+
+        self.visited_edges.insert(edge_index);
+        self.edges.push(edge);
+        true
+    }
+
+    fn node_budget_full(&self) -> bool {
+        self.budget
+            .is_some_and(|budget| self.nodes.len() >= budget.max_nodes)
+    }
+
+    fn edge_budget_full(&self) -> bool {
+        self.budget
+            .is_some_and(|budget| self.edges.len() >= budget.max_edges)
+    }
+
+    fn add_frontier(&mut self, symbol_id: &str) {
+        if self.visited_nodes.contains(symbol_id) {
+            return;
+        }
+        if self.frontier_seen.insert(symbol_id.to_string()) {
+            self.truncated_frontier.push(symbol_id.to_string());
+        }
+    }
+
+    fn finish(self) -> SubgraphView<'a> {
+        SubgraphView {
+            nodes: self.nodes,
+            edges: self.edges,
+            truncated_frontier: self.truncated_frontier,
+            truncated: self.truncated,
+        }
+    }
 }
 
 /// Edges that contribute to caller/callee relationships.
@@ -397,6 +531,31 @@ mod tests {
                 edge("callee_a", "caller_b", RelationKind::Calls),
                 edge("root", "caller_a", RelationKind::References),
             ],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn wide_artifact(child_count: usize) -> GraphIndexArtifact {
+        let mut symbols = vec![symbol("root")];
+        let mut edges = Vec::new();
+        for index in 0..child_count {
+            let child_id = format!("child_{index:02}");
+            symbols.push(symbol(&child_id));
+            edges.push(edge("root", &child_id, RelationKind::Calls));
+        }
+
+        GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_string(),
+            graph_content_hash: "test".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            symbols,
+            edges,
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -518,6 +677,128 @@ mod tests {
         let unfiltered_view = bounded_subgraph(&artifact, "root", 1, None, false);
 
         assert_eq!(unfiltered_view.edges.len(), 6);
+    }
+
+    #[test]
+    fn budgeted_subgraph_limits_nodes_and_returns_frontier_in_bfs_order() {
+        let artifact = wide_artifact(6);
+
+        let view = bounded_subgraph_with_budget(
+            &artifact,
+            &["root"],
+            1,
+            Some(&[GraphEdgeKind::Calls]),
+            false,
+            SubgraphBudget {
+                max_nodes: 4,
+                max_edges: 20,
+            },
+        );
+
+        assert_eq!(
+            ids(&view.nodes),
+            vec!["root", "child_00", "child_01", "child_02"]
+        );
+        assert_eq!(view.edges.len(), 3);
+        assert_eq!(
+            view.truncated_frontier,
+            vec!["child_03", "child_04", "child_05"]
+        );
+        assert!(view.truncated);
+    }
+
+    #[test]
+    fn budgeted_subgraph_limits_edges_and_frontiers_excluded_neighbors() {
+        let artifact = wide_artifact(5);
+
+        let view = bounded_subgraph_with_budget(
+            &artifact,
+            &["root"],
+            1,
+            Some(&[GraphEdgeKind::Calls]),
+            false,
+            SubgraphBudget {
+                max_nodes: 20,
+                max_edges: 2,
+            },
+        );
+
+        assert_eq!(ids(&view.nodes), vec!["root", "child_00", "child_01"]);
+        assert_eq!(view.edges.len(), 2);
+        assert_eq!(
+            view.truncated_frontier,
+            vec!["child_02", "child_03", "child_04"]
+        );
+        assert!(view.truncated);
+    }
+
+    #[test]
+    fn edge_budget_exhaustion_does_not_frontier_returned_nodes() {
+        let artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_string(),
+            graph_content_hash: "test".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            symbols: ["root", "a", "b", "c"].into_iter().map(symbol).collect(),
+            edges: vec![
+                edge("root", "a", RelationKind::Calls),
+                edge("root", "b", RelationKind::Calls),
+                edge("a", "root", RelationKind::Calls),
+                edge("root", "c", RelationKind::Calls),
+            ],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let view = bounded_subgraph_with_budget(
+            &artifact,
+            &["root"],
+            1,
+            Some(&[GraphEdgeKind::Calls]),
+            false,
+            SubgraphBudget {
+                max_nodes: 20,
+                max_edges: 2,
+            },
+        );
+        let node_ids: HashSet<_> = ids(&view.nodes).into_iter().collect();
+
+        assert_eq!(ids(&view.nodes), vec!["root", "a", "b"]);
+        assert_eq!(view.edges.len(), 2);
+        assert_eq!(view.truncated_frontier, vec!["c"]);
+        assert!(view
+            .truncated_frontier
+            .iter()
+            .all(|symbol_id| !node_ids.contains(symbol_id.as_str())));
+    }
+
+    #[test]
+    fn budgeted_subgraph_reports_empty_frontier_when_not_truncated() {
+        let artifact = wide_artifact(3);
+
+        let view = bounded_subgraph_with_budget(
+            &artifact,
+            &["root"],
+            1,
+            Some(&[GraphEdgeKind::Calls]),
+            false,
+            SubgraphBudget {
+                max_nodes: 20,
+                max_edges: 20,
+            },
+        );
+
+        assert_eq!(
+            ids(&view.nodes),
+            vec!["root", "child_00", "child_01", "child_02"]
+        );
+        assert_eq!(view.edges.len(), 3);
+        assert!(view.truncated_frontier.is_empty());
+        assert!(!view.truncated);
     }
 
     #[test]

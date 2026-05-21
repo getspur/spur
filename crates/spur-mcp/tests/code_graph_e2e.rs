@@ -72,6 +72,27 @@ fn copy_fixture_crate(worktree: &Path) {
     std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
 }
 
+fn write_wide_fixture_crate(worktree: &Path, helper_count: usize) {
+    std::fs::create_dir_all(worktree.join("src")).expect("create fixture src dir");
+    std::fs::write(
+        worktree.join("Cargo.toml"),
+        "[package]\nname = \"wide-code-graph-sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write fixture manifest");
+
+    let mut source = String::from("pub fn wide_root() {\n");
+    for index in 0..helper_count {
+        source.push_str(&format!("    wide_child_{index:03}();\n"));
+    }
+    source.push_str("}\n\n");
+    for index in 0..helper_count {
+        source.push_str(&format!("pub fn wide_child_{index:03}() {{}}\n"));
+    }
+
+    std::fs::write(worktree.join("src/lib.rs"), source).expect("write fixture source");
+    std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
+}
+
 fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     let (facts, _file_counts) = build_facts(worktree).expect("build graph facts");
     let artifact = artifact_from_facts(&facts, worktree).expect("build graph artifact");
@@ -147,6 +168,10 @@ fn entity_names(rows: &[Value]) -> BTreeSet<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn node_entity_names(body: &Value) -> BTreeSet<String> {
+    entity_names(body["nodes"].as_array().expect("nodes"))
 }
 
 fn qualified_names(rows: &[Value]) -> BTreeSet<String> {
@@ -340,6 +365,80 @@ async fn code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id() {
         callees["graph_index_version"],
         artifact.header.graph_index_version
     );
+}
+
+#[tokio::test]
+async fn code_subgraph_frontier_start_nodes_resume_budgeted_exploration() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    write_wide_fixture_crate(worktree.path(), 55);
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, "wide_root");
+    let root_uri = format!("graph://symbol/{root_id}");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let unbudgeted = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "symbol": root_uri,
+                "radius": 1,
+                "edge_kinds": ["calls"],
+                "max_nodes": 400,
+                "max_edges": 1200
+            }),
+        )
+        .await,
+    );
+
+    let initial = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "symbol": root_id,
+                "radius": 1,
+                "edge_kinds": ["calls"],
+                "max_nodes": 20,
+                "max_edges": 1200
+            }),
+        )
+        .await,
+    );
+    let frontier = initial["truncated_frontier"]
+        .as_array()
+        .expect("truncated_frontier")
+        .clone();
+    assert_eq!(initial["metadata"]["truncated"], true);
+    assert_eq!(
+        initial["nodes"].as_array().expect("initial nodes").len(),
+        20
+    );
+    assert!(!frontier.is_empty());
+
+    let continuation = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "start_nodes": frontier,
+                "radius": 0,
+                "edge_kinds": ["calls"],
+                "max_nodes": 400,
+                "max_edges": 1200
+            }),
+        )
+        .await,
+    );
+
+    let mut combined = node_entity_names(&initial);
+    combined.extend(node_entity_names(&continuation));
+
+    assert_eq!(combined, node_entity_names(&unbudgeted));
+    assert_eq!(continuation["metadata"]["truncated"], false);
+    assert_eq!(continuation["truncated_frontier"], json!([]));
 }
 
 #[tokio::test]

@@ -899,13 +899,18 @@ fn code_search_def() -> ToolDefinition {
 fn code_subgraph_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_subgraph".into(),
-        description: "Get a bounded code-symbol subgraph from the current worktree graph artifact. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other). Unresolved edges are hidden by default (include_unresolved=false). Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
+        description: "Get a budgeted code-symbol subgraph from the current worktree graph artifact. Traversal is deterministic BFS for a given artifact: seed with selector (or start_nodes order for continuation), then expand each node by graph artifact edge order. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other). Responses cap output with max_nodes (default 40, range 1..400) and max_edges (default 120, range 1..1200); out-of-range budgets are clamped and echoed in metadata. When truncated, truncated_frontier lists next-hop node ids reachable through excluded nodes/edges; call again with start_nodes=truncated_frontier to resume statelessly. For continuations from radius > 1 traversals, use radius one less than the original radius so frontier nodes expand the remaining hop budget. Unresolved edges are hidden by default (include_unresolved=false); when include_unresolved=true, unresolved edges count toward max_edges. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "selector": {
                     "type": "string",
                     "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
+                "start_nodes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Continuation roots from a prior truncated_frontier response. Values are bare node ids or graph://symbol/<id> URIs. Mutually exclusive with selector and symbol."
                 },
                 "symbol": {
                     "type": "string",
@@ -919,6 +924,20 @@ fn code_subgraph_def() -> ToolDefinition {
                 "radius": {
                     "type": "integer",
                     "description": "Traversal radius (default: 1, max: 3; larger values are clamped)"
+                },
+                "max_nodes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 400,
+                    "default": 40,
+                    "description": "Maximum node rows to return. Values outside 1..400 are clamped and echoed as metadata.requested_max_nodes."
+                },
+                "max_edges": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1200,
+                    "default": 120,
+                    "description": "Maximum edge rows to return, including unresolved edges when include_unresolved=true. Values outside 1..1200 are clamped and echoed as metadata.requested_max_edges."
                 },
                 "format": {
                     "type": "string",
