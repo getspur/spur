@@ -1,11 +1,14 @@
 use std::io::ErrorKind;
 use std::path::{Component, Path};
+use std::time::Duration;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use spur_graph::{
     bounded_subgraph, find_callees, find_callers, load_artifact, resolve_selector,
     resolve_worktree_root_from, CandidateRow, GraphEdgeArtifact, GraphIndexArtifact,
-    GraphSymbolArtifact, RelationKind, SelectorResolution, CODE_SYMBOL_URI_PREFIX,
+    GraphIndexPointer, GraphSymbolArtifact, RelationKind, SelectorResolution,
+    CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -15,40 +18,43 @@ use super::*;
 
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
 const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
+const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
+const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 
 impl McpCallbackServer {
     pub(crate) async fn handle_code_resolve(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_resolve_response(&args))
+        code_graph_response(id, code_resolve_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_file_symbols(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_file_symbols_response(&args))
+        code_graph_response(id, code_file_symbols_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_symbol_info(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_symbol_info_response(&args))
+        code_graph_response(id, code_symbol_info_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_callers_response(&args))
+        code_graph_response(id, code_callers_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_callees(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_callees_response(&args))
+        code_graph_response(id, code_callees_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_subgraph(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_subgraph_response(&args))
+        code_graph_response(id, code_subgraph_response(&args).await).await
     }
 }
 
-pub(crate) fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    code_resolve_with_artifact(args, &artifact)
+    let body = code_resolve_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
 }
 
-fn code_resolve_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_resolve_with_artifact(args, artifact))
+async fn code_resolve_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_resolve_with_artifact(args, artifact)).await
 }
 
 fn code_resolve_with_artifact(
@@ -61,19 +67,17 @@ fn code_resolve_with_artifact(
         .map(candidate_row)
         .collect::<Vec<_>>();
 
-    Ok(with_graph_metadata(
-        artifact,
-        json!({ "candidates": candidates }),
-    ))
+    Ok(json!({ "candidates": candidates }))
 }
 
-pub(crate) fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) async fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    code_file_symbols_with_artifact(args, &artifact)
+    let body = code_file_symbols_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
 }
 
-fn code_file_symbols_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_file_symbols_with_artifact(args, artifact))
+async fn code_file_symbols_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_file_symbols_with_artifact(args, artifact)).await
 }
 
 fn code_file_symbols_with_artifact(
@@ -98,16 +102,17 @@ fn code_file_symbols_with_artifact(
     .map(candidate_row)
     .collect::<Vec<_>>();
 
-    Ok(with_graph_metadata(artifact, json!({ "symbols": symbols })))
+    Ok(json!({ "symbols": symbols }))
 }
 
-pub(crate) fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) async fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    code_symbol_info_with_artifact(args, &artifact)
+    let body = code_symbol_info_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
 }
 
-fn code_symbol_info_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_symbol_info_with_artifact(args, artifact))
+async fn code_symbol_info_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_symbol_info_with_artifact(args, artifact)).await
 }
 
 fn code_symbol_info_with_artifact(
@@ -117,24 +122,22 @@ fn code_symbol_info_with_artifact(
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(artifact, candidates));
+            return Ok(ambiguous_response(candidates));
         }
     };
     let symbol = symbol_by_id(artifact, &symbol_id)?;
 
-    Ok(with_graph_metadata(
-        artifact,
-        json!({ "symbol": symbol_info_row(symbol) }),
-    ))
+    Ok(json!({ "symbol": symbol_info_row(symbol) }))
 }
 
-pub(crate) fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    code_callers_with_artifact(args, &artifact)
+    let body = code_callers_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
 }
 
-fn code_callers_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_callers_with_artifact(args, artifact))
+async fn code_callers_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_callers_with_artifact(args, artifact)).await
 }
 
 fn code_callers_with_artifact(
@@ -144,7 +147,7 @@ fn code_callers_with_artifact(
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(artifact, candidates));
+            return Ok(ambiguous_response(candidates));
         }
     };
 
@@ -152,16 +155,17 @@ fn code_callers_with_artifact(
         .into_iter()
         .map(symbol_row)
         .collect::<Vec<_>>();
-    Ok(with_graph_metadata(artifact, json!({ "callers": callers })))
+    Ok(json!({ "callers": callers }))
 }
 
-pub(crate) fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) async fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    code_callees_with_artifact(args, &artifact)
+    let body = code_callees_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
 }
 
-fn code_callees_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_callees_with_artifact(args, artifact))
+async fn code_callees_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_callees_with_artifact(args, artifact)).await
 }
 
 fn code_callees_with_artifact(
@@ -171,7 +175,7 @@ fn code_callees_with_artifact(
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(artifact, candidates));
+            return Ok(ambiguous_response(candidates));
         }
     };
 
@@ -179,16 +183,17 @@ fn code_callees_with_artifact(
         .into_iter()
         .map(symbol_row)
         .collect::<Vec<_>>();
-    Ok(with_graph_metadata(artifact, json!({ "callees": callees })))
+    Ok(json!({ "callees": callees }))
 }
 
-pub(crate) fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
+pub(crate) async fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    code_subgraph_with_artifact(args, &artifact)
+    let body = code_subgraph_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
 }
 
-fn code_subgraph_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_subgraph_with_artifact(args, artifact))
+async fn code_subgraph_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_subgraph_with_artifact(args, artifact)).await
 }
 
 fn code_subgraph_with_artifact(
@@ -198,7 +203,7 @@ fn code_subgraph_with_artifact(
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(artifact, candidates));
+            return Ok(ambiguous_response(candidates));
         }
     };
 
@@ -226,19 +231,13 @@ fn code_subgraph_with_artifact(
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
             }
-            Ok(with_graph_metadata(
-                artifact,
-                json!({
-                    "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
-                    "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
-                    "metadata": metadata,
-                }),
-            ))
+            Ok(json!({
+                "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
+                "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
+                "metadata": metadata,
+            }))
         }
-        "mermaid" => Ok(with_graph_metadata(
-            artifact,
-            json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) }),
-        )),
+        "mermaid" => Ok(json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) })),
         other => Err(McpHandlerError::InvalidParams(format!(
             "invalid format `{other}`; expected `json` or `mermaid`"
         ))),
@@ -250,7 +249,7 @@ type CodeGraphResult = Result<Value, CodeGraphError>;
 #[derive(Debug)]
 struct CodeGraphError {
     error: McpHandlerError,
-    metadata: Option<GraphResponseMetadata>,
+    metadata: Option<GraphMetadataSource>,
 }
 
 impl CodeGraphError {
@@ -264,48 +263,113 @@ impl CodeGraphError {
     fn with_artifact(error: McpHandlerError, artifact: &GraphIndexArtifact) -> Self {
         Self {
             error,
-            metadata: Some(GraphResponseMetadata::from_artifact(artifact)),
+            metadata: Some(GraphMetadataSource::from_artifact(artifact)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GraphMetadataSource {
+    graph_content_hash: String,
+    graph_index_version: String,
+    manifest_version: String,
+}
+
+impl GraphMetadataSource {
+    fn from_artifact(artifact: &GraphIndexArtifact) -> Self {
+        Self {
+            graph_content_hash: artifact.graph_content_hash.clone(),
+            graph_index_version: artifact.header.graph_index_version.clone(),
+            manifest_version: artifact.manifest_version.clone(),
         }
     }
 }
 
 #[derive(Debug)]
 struct GraphResponseMetadata {
-    graph_content_hash: String,
-    graph_index_version: String,
+    source: GraphMetadataSource,
+    graph_built_at: Option<String>,
+    indexed_head_oid: Option<String>,
+    worktree_head_oid: Option<String>,
+    worktree_dirty: Option<bool>,
 }
 
 impl GraphResponseMetadata {
-    fn from_artifact(artifact: &GraphIndexArtifact) -> Self {
+    async fn from_artifact(artifact: &GraphIndexArtifact) -> Self {
+        Self::from_source(GraphMetadataSource::from_artifact(artifact)).await
+    }
+
+    async fn from_source(source: GraphMetadataSource) -> Self {
+        let worktree = current_worktree_root();
+        let pointer = worktree
+            .as_deref()
+            .and_then(|worktree| matching_graph_pointer(worktree, &source));
+        let graph_built_at = pointer
+            .as_ref()
+            .and_then(|pointer| graph_built_at_from_pointer(pointer));
+        let indexed_head_oid = pointer
+            .as_ref()
+            .and_then(|pointer| non_empty_string(pointer.indexed_commit_oid.clone()));
+        let git = match worktree.as_deref() {
+            Some(worktree) => worktree_git_metadata(worktree).await,
+            None => None,
+        };
+        let worktree_head_oid = git.as_ref().map(|git| git.head_oid.clone());
+        let worktree_dirty = git.as_ref().and_then(|git| {
+            compute_worktree_dirty(
+                indexed_head_oid.as_deref(),
+                &git.head_oid,
+                git.has_uncommitted_changes,
+            )
+        });
+
         Self {
-            graph_content_hash: artifact.graph_content_hash.clone(),
-            graph_index_version: artifact.header.graph_index_version.clone(),
+            source,
+            graph_built_at,
+            indexed_head_oid,
+            worktree_head_oid,
+            worktree_dirty,
         }
     }
 
     fn into_value(self) -> Value {
         json!({
-            "graph_content_hash": self.graph_content_hash,
-            "graph_index_version": self.graph_index_version,
+            "graph_content_hash": self.source.graph_content_hash,
+            "graph_index_version": self.source.graph_index_version,
+            "graph_built_at": self.graph_built_at,
+            "indexed_head_oid": self.indexed_head_oid,
+            "worktree_head_oid": self.worktree_head_oid,
+            "worktree_dirty": self.worktree_dirty,
         })
+    }
+
+    fn insert_into(self, body: &mut Value) {
+        if let Value::Object(map) = body {
+            let Value::Object(metadata) = self.into_value() else {
+                return;
+            };
+            map.extend(metadata);
+        }
     }
 }
 
-fn with_loaded_graph_artifact(
+async fn with_loaded_graph_artifact(
     handler: impl FnOnce(&GraphIndexArtifact) -> Result<Value, McpHandlerError>,
 ) -> CodeGraphResult {
     let artifact = load_graph_artifact_for_request().map_err(CodeGraphError::without_metadata)?;
-    handler(&artifact).map_err(|error| CodeGraphError::with_artifact(error, &artifact))
+    let body =
+        handler(&artifact).map_err(|error| CodeGraphError::with_artifact(error, &artifact))?;
+    Ok(with_graph_metadata(&artifact, body).await)
 }
 
-fn code_graph_response(id: Value, result: CodeGraphResult) -> JsonRpcResponse {
+async fn code_graph_response(id: Value, result: CodeGraphResult) -> JsonRpcResponse {
     match result {
         Ok(body) => json_success(id, body),
-        Err(error) => code_graph_error_response(id, error),
+        Err(error) => code_graph_error_response(id, error).await,
     }
 }
 
-fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcResponse {
+async fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcResponse {
     let CodeGraphError { error, metadata } = error;
     let mut response = match error {
         McpHandlerError::InvalidParams(message) => JsonRpcResponse::invalid_params(id, message),
@@ -316,7 +380,11 @@ fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcRespons
         }
     };
     if let (Some(error), Some(metadata)) = (response.error.as_mut(), metadata) {
-        error.data = Some(metadata.into_value());
+        error.data = Some(
+            GraphResponseMetadata::from_source(metadata)
+                .await
+                .into_value(),
+        );
     }
     response
 }
@@ -600,28 +668,93 @@ fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
     }
 }
 
-fn ambiguous_response(artifact: &GraphIndexArtifact, candidates: Vec<CandidateRow>) -> Value {
-    with_graph_metadata(
-        artifact,
-        json!({
-            "ambiguous": true,
-            "candidates": candidates.into_iter().map(candidate_row).collect::<Vec<_>>(),
-        }),
-    )
+fn ambiguous_response(candidates: Vec<CandidateRow>) -> Value {
+    json!({
+        "ambiguous": true,
+        "candidates": candidates.into_iter().map(candidate_row).collect::<Vec<_>>(),
+    })
 }
 
-fn with_graph_metadata(artifact: &GraphIndexArtifact, mut body: Value) -> Value {
-    if let Value::Object(map) = &mut body {
-        map.insert(
-            "graph_content_hash".to_string(),
-            Value::String(artifact.graph_content_hash.clone()),
-        );
-        map.insert(
-            "graph_index_version".to_string(),
-            Value::String(artifact.header.graph_index_version.clone()),
-        );
-    }
+async fn with_graph_metadata(artifact: &GraphIndexArtifact, mut body: Value) -> Value {
+    GraphResponseMetadata::from_artifact(artifact)
+        .await
+        .insert_into(&mut body);
     body
+}
+
+fn current_worktree_root() -> Option<std::path::PathBuf> {
+    std::env::current_dir().ok().map(resolve_worktree_root_from)
+}
+
+fn matching_graph_pointer(
+    worktree: &Path,
+    source: &GraphMetadataSource,
+) -> Option<GraphIndexPointer> {
+    let pointer_path = worktree.join(GRAPH_POINTER_RELATIVE_PATH);
+    let bytes = std::fs::read(pointer_path).ok()?;
+    let pointer: GraphIndexPointer = serde_json::from_slice(&bytes).ok()?;
+    if pointer.graph_content_hash == source.graph_content_hash
+        && pointer.manifest_version == source.manifest_version
+    {
+        Some(pointer)
+    } else {
+        None
+    }
+}
+
+fn graph_built_at_from_pointer(pointer: &GraphIndexPointer) -> Option<String> {
+    let modified = std::fs::metadata(&pointer.canonical_artifact_path)
+        .ok()?
+        .modified()
+        .ok()?;
+    let built_at = DateTime::<Utc>::from(modified);
+    Some(built_at.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn non_empty_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| (!value.trim().is_empty()).then_some(value))
+}
+
+#[derive(Debug)]
+struct WorktreeGitMetadata {
+    head_oid: String,
+    has_uncommitted_changes: bool,
+}
+
+async fn worktree_git_metadata(worktree: &Path) -> Option<WorktreeGitMetadata> {
+    tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
+        let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
+        let status = run_git_stdout(worktree, &["status", "--porcelain"]).await?;
+        Some(WorktreeGitMetadata {
+            head_oid,
+            has_uncommitted_changes: !status.is_empty(),
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn run_git_stdout(worktree: &Path, args: &[&str]) -> Option<String> {
+    let mut command = tokio::process::Command::new("git");
+    command.args(args).current_dir(worktree).kill_on_drop(true);
+    let output = command.output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8(output.stdout).ok()?.trim().to_string())
+}
+
+fn compute_worktree_dirty(
+    indexed_head_oid: Option<&str>,
+    worktree_head_oid: &str,
+    has_uncommitted_changes: bool,
+) -> Option<bool> {
+    if has_uncommitted_changes {
+        Some(true)
+    } else {
+        indexed_head_oid.map(|indexed_head_oid| indexed_head_oid != worktree_head_oid)
+    }
 }
 
 fn candidate_row(candidate: CandidateRow) -> Value {
@@ -842,6 +975,62 @@ mod tests {
         serde_json::from_str(&text).expect("JSON content")
     }
 
+    fn assert_unavailable_freshness_metadata(body: &Value) {
+        assert_eq!(body.get("graph_built_at"), Some(&Value::Null));
+        assert_eq!(body.get("indexed_head_oid"), Some(&Value::Null));
+        assert_eq!(body.get("worktree_head_oid"), Some(&Value::Null));
+        assert_eq!(body.get("worktree_dirty"), Some(&Value::Null));
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|error| panic!("run git {}: {error}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout utf8")
+            .trim()
+            .to_string()
+    }
+
+    fn init_clean_git_fixture(dir: &std::path::Path) -> String {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "test@spur"]);
+        git(dir, &["config", "user.name", "Spur Test"]);
+        std::fs::create_dir_all(dir.join("src")).expect("create src");
+        std::fs::write(dir.join("src/root.rs"), "fn root() {}\n").expect("write source");
+        std::fs::write(dir.join(".git/info/exclude"), ".spur/\n").expect("ignore graph sidecar");
+        git(dir, &["add", "src/root.rs"]);
+        git(dir, &["commit", "-q", "-m", "initial"]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    fn write_fixture_pointer(dir: &TempDir, indexed_head_oid: &str) {
+        let pointer_path = dir.path().join(".spur/graph-index.pointer.json");
+        std::fs::create_dir_all(pointer_path.parent().expect("pointer parent"))
+            .expect("create pointer parent");
+        std::fs::write(
+            pointer_path,
+            serde_json::to_string_pretty(&json!({
+                "schema": "spur-graph-pointer-v1",
+                "graph_content_hash": "test",
+                "manifest_version": "test",
+                "source_kind": "git",
+                "indexed_commit_oid": indexed_head_oid,
+                "canonical_artifact_path": dir.path().join(".spur/graph-index.json")
+            }))
+            .expect("encode pointer"),
+        )
+        .expect("write pointer");
+    }
+
     #[test]
     fn validate_file_path_arg_requires_slash_normalized_relative_paths() {
         assert_eq!(
@@ -879,6 +1068,7 @@ mod tests {
         assert_eq!(body["callers"][0]["symbol_kind"], "function");
         assert_eq!(body["graph_content_hash"], "test");
         assert_eq!(body["graph_index_version"], "test");
+        assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
@@ -897,6 +1087,7 @@ mod tests {
         assert_eq!(body["callees"].as_array().expect("callees").len(), 1);
         assert_eq!(body["callees"][0]["uri"], "graph://symbol/callee");
         assert_eq!(body["callees"][0]["entity_name"], "callee");
+        assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
@@ -919,6 +1110,7 @@ mod tests {
         assert_eq!(callers["callers"][0]["uri"], "graph://symbol/cache-caller");
         assert_eq!(callers["graph_content_hash"], "test");
         assert_eq!(callers["graph_index_version"], "test");
+        assert_unavailable_freshness_metadata(&callers);
 
         let callees = response_json(
             server
@@ -932,6 +1124,7 @@ mod tests {
         assert_eq!(callees["callees"][0]["uri"], "graph://symbol/cache-callee");
         assert_eq!(callees["graph_content_hash"], "test");
         assert_eq!(callees["graph_index_version"], "test");
+        assert_unavailable_freshness_metadata(&callees);
     }
 
     #[tokio::test]
@@ -953,6 +1146,7 @@ mod tests {
 
         assert_eq!(body["callees"].as_array().expect("callees").len(), 1);
         assert_eq!(body["callees"][0]["uri"], "graph://symbol/cache-callee");
+        assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
@@ -981,6 +1175,7 @@ mod tests {
         );
         assert_eq!(body["graph_content_hash"], "test");
         assert_eq!(body["graph_index_version"], "test");
+        assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
@@ -1009,6 +1204,7 @@ mod tests {
             error.data.as_ref().expect("graph metadata")["graph_index_version"],
             "test"
         );
+        assert_unavailable_freshness_metadata(error.data.as_ref().expect("graph metadata"));
     }
 
     #[tokio::test]
@@ -1034,6 +1230,7 @@ mod tests {
             body["metadata"]["warning"],
             "radius 9 exceeds max 3; clamped to 3"
         );
+        assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
@@ -1058,6 +1255,51 @@ mod tests {
         assert!(mermaid.contains("root --> callee"));
         assert_eq!(body["graph_content_hash"], "test");
         assert_eq!(body["graph_index_version"], "test");
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn graph_metadata_reports_pointer_head_and_dirty_state() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        let indexed_head_oid = init_clean_git_fixture(dir.path());
+        write_fixture_artifact(&dir);
+        write_fixture_pointer(&dir, &indexed_head_oid);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let clean = response_json(
+            server
+                .handle_code_callers(Value::from(1), json!({ "symbol": "graph://symbol/root" }))
+                .await,
+        );
+
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(
+                clean["graph_built_at"].as_str().expect("graph_built_at")
+            )
+            .is_ok(),
+            "graph_built_at must be RFC3339"
+        );
+        assert_eq!(clean["indexed_head_oid"], indexed_head_oid);
+        assert_eq!(clean["worktree_head_oid"], indexed_head_oid);
+        assert_eq!(clean["worktree_dirty"], false);
+
+        std::fs::write(
+            dir.path().join("src/root.rs"),
+            "fn root() { let _dirty = true; }\n",
+        )
+        .expect("dirty source");
+
+        let dirty = response_json(
+            server
+                .handle_code_callers(Value::from(1), json!({ "symbol": "graph://symbol/root" }))
+                .await,
+        );
+
+        assert_eq!(dirty["indexed_head_oid"], indexed_head_oid);
+        assert_eq!(dirty["worktree_head_oid"], indexed_head_oid);
+        assert_eq!(dirty["worktree_dirty"], true);
     }
 
     #[tokio::test]
