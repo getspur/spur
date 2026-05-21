@@ -12,6 +12,9 @@ use crate::schema::{
     GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
     TemporalEdgeArtifact, WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
 };
+use crate::store::commit_index;
+
+const WORKTREE_GRAPH_ARTIFACT_PATH: &str = ".spur/graph-index.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
@@ -176,15 +179,37 @@ pub fn run_full_walk_into(
     let tip = refs
         .get(first_ref)
         .with_context(|| format!("target ref `{first_ref}` was not present after ref snapshot"))?;
-    let commit_shas = walk_commits(worktree, tip, config.walk_strategy)?;
+    let base = load_incremental_base(worktree, first_ref, config.walk_strategy)?;
+    let plan = plan_incremental_walk(
+        worktree,
+        base.as_ref().map(|base| base.stored_tip.as_str()),
+        tip,
+    )?;
+    let use_incremental_base =
+        matches!(plan, IncrementalPlan::FastForward { .. }) && base.is_some();
+    let commit_shas = if use_incremental_base {
+        planned_commits(worktree, &plan, tip, config.walk_strategy)?
+    } else {
+        walk_commits(worktree, tip, config.walk_strategy)?
+    };
 
-    let mut graph = empty_graph_artifact();
-    let mut commits = CommitIndexArtifact {
-        schema_version: current_temporal_schema_version()?,
-        commits: Vec::with_capacity(commit_shas.len()),
-        refs: refs.clone(),
-        indexed_at: chrono::Utc::now().to_rfc3339(),
-        walk_strategy: config.walk_strategy,
+    let (mut graph, mut commits) = if use_incremental_base {
+        let base = base.expect("incremental base checked above");
+        let mut commits = base.commits;
+        commits.refs = refs.clone();
+        commits.indexed_at = chrono::Utc::now().to_rfc3339();
+        (base.graph, commits)
+    } else {
+        (
+            empty_graph_artifact(),
+            CommitIndexArtifact {
+                schema_version: current_temporal_schema_version()?,
+                commits: Vec::with_capacity(commit_shas.len()),
+                refs: refs.clone(),
+                indexed_at: chrono::Utc::now().to_rfc3339(),
+                walk_strategy: config.walk_strategy,
+            },
+        )
     };
     let mut ctx = SymbolDiffCtx::new();
 
@@ -233,12 +258,120 @@ pub fn run_full_walk_into(
     Ok((graph, commits))
 }
 
+struct IncrementalBase {
+    graph: GraphIndexArtifact,
+    commits: CommitIndexArtifact,
+    stored_tip: String,
+}
+
+fn load_incremental_base(
+    worktree: &Path,
+    first_ref: &str,
+    walk_strategy: WalkStrategy,
+) -> Result<Option<IncrementalBase>> {
+    let Some(pointer) = commit_index::load_pointer(worktree)? else {
+        return Ok(None);
+    };
+    let commits = commit_index::load_artifact(worktree, &pointer)?;
+    if commits.walk_strategy != walk_strategy {
+        tracing::info!(
+            stored = ?commits.walk_strategy,
+            requested = ?walk_strategy,
+            "spur-graph: commit-index walk strategy changed; selecting cold temporal walk"
+        );
+        return Ok(None);
+    }
+    let Some(stored_tip) = pointer
+        .refs
+        .get(first_ref)
+        .or_else(|| commits.refs.get(first_ref))
+        .or_else(|| commits.commits.last().map(|commit| &commit.sha))
+        .cloned()
+    else {
+        return Ok(None);
+    };
+
+    let graph_path = worktree.join(WORKTREE_GRAPH_ARTIFACT_PATH);
+    if !graph_path.exists() {
+        tracing::info!(
+            path = %graph_path.display(),
+            "spur-graph: commit-index pointer exists but prior graph artifact is missing; selecting cold temporal walk"
+        );
+        return Ok(None);
+    }
+
+    let mut graph = crate::schema::load_artifact(&graph_path)?;
+    graph.header.content_hash_blake3 = None;
+    if !graph.commits.iter().any(|commit| commit.sha == stored_tip) {
+        tracing::info!(
+            stored_tip,
+            path = %graph_path.display(),
+            "spur-graph: prior graph artifact lacks stored tip; selecting cold temporal walk"
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(IncrementalBase {
+        graph,
+        commits,
+        stored_tip,
+    }))
+}
+
+fn planned_commits(
+    worktree: &Path,
+    plan: &IncrementalPlan,
+    tip: &str,
+    strategy: WalkStrategy,
+) -> Result<Vec<String>> {
+    match plan {
+        IncrementalPlan::ColdWalk { .. } => walk_commits(worktree, tip, strategy),
+        IncrementalPlan::FastForward { from, to } => {
+            walk_commit_range(worktree, Some(from), to, strategy)
+        }
+        IncrementalPlan::ForcePushRecover {
+            merge_base: Some(from),
+            to,
+        } => walk_commit_range(worktree, Some(from), to, strategy),
+        IncrementalPlan::ForcePushRecover {
+            merge_base: None,
+            to,
+        } => walk_commits(worktree, to, strategy),
+    }
+}
+
 fn walk_commits(worktree: &Path, tip: &str, strategy: WalkStrategy) -> Result<Vec<String>> {
     let mut args = vec!["rev-list", "--topo-order", "--reverse"];
     if matches!(strategy, WalkStrategy::FirstParent) {
         args.push("--first-parent");
     }
     args.push(tip);
+
+    let stdout = run_git(worktree, &args)?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn walk_commit_range(
+    worktree: &Path,
+    from_exclusive: Option<&str>,
+    tip: &str,
+    strategy: WalkStrategy,
+) -> Result<Vec<String>> {
+    let Some(from_exclusive) = from_exclusive else {
+        return walk_commits(worktree, tip, strategy);
+    };
+
+    let range = format!("{from_exclusive}..{tip}");
+    let mut args = vec!["rev-list", "--topo-order", "--reverse"];
+    if matches!(strategy, WalkStrategy::FirstParent) {
+        args.push("--first-parent");
+    }
+    args.push(&range);
 
     let stdout = run_git(worktree, &args)?;
     Ok(stdout
