@@ -30,6 +30,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
+parquet = { workspace = true, features = ["arrow"] }
 pretty_assertions = "1"
 tempfile = "3"
 
