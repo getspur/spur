@@ -12,6 +12,7 @@ use crate::extract::languages::{
     LanguageDescriptor,
 };
 use crate::extract::markdown::extract_markdown_file;
+use crate::extract::mcp_tools::emit_mcp_tools;
 use crate::extract::GraphFacts;
 use crate::{
     Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphNode, NodeId, NodeKind, RelationKind,
@@ -142,7 +143,7 @@ impl<'a> FactBuilder<'a> {
             source_span_id: Some(span_id),
             first_seen_run_id: RunId(1),
         });
-        if kind != NodeKind::File {
+        if !matches!(kind, NodeKind::File | NodeKind::McpTool) {
             self.symbol_index.entry(label).or_default().push(node_id);
         }
         node_id
@@ -342,6 +343,7 @@ fn extract_files(
             } else {
                 extract_file(
                     &mut builder,
+                    label,
                     config,
                     path,
                     &source,
@@ -364,6 +366,7 @@ fn extract_files(
 
 fn extract_file(
     builder: &mut FactBuilder<'_>,
+    language_label: &str,
     config: &crate::extract::languages::LanguageConfig,
     path: &Path,
     source: &str,
@@ -384,6 +387,17 @@ fn extract_file(
         source,
         &tag_captures,
     );
+    if language_label == "rust" {
+        emit_mcp_tools(
+            builder,
+            &relative_path,
+            file_id,
+            file_node,
+            source,
+            root_node,
+            &definitions,
+        );
+    }
     if let Some(spur_edges) = queries.spur_edges.as_ref() {
         let edge_captures = run_query(spur_edges, root_node, source);
         emit_edges(

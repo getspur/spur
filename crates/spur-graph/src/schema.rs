@@ -224,6 +224,7 @@ pub enum NodeKind {
     TypeAlias,
     Macro,
     Section,
+    McpTool,
 }
 
 impl NodeKind {
@@ -244,6 +245,7 @@ impl NodeKind {
             NodeKind::TypeAlias => "type_alias",
             NodeKind::Macro => "macro",
             NodeKind::Section => "section",
+            NodeKind::McpTool => "mcp_tool",
         }
     }
 }

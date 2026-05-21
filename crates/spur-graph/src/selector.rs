@@ -199,6 +199,15 @@ fn compare_innermost(left: &&GraphSymbolArtifact, right: &&GraphSymbolArtifact) 
 }
 
 fn resolution_from_matches(symbols: Vec<&GraphSymbolArtifact>) -> SelectorResolution {
+    let mcp_tool_matches = symbols
+        .iter()
+        .copied()
+        .filter(|symbol| symbol.symbol_kind == "mcp_tool")
+        .collect::<Vec<_>>();
+    if let [symbol] = mcp_tool_matches.as_slice() {
+        return SelectorResolution::Resolved(resolved_symbol(symbol));
+    }
+
     match symbols.as_slice() {
         [] => SelectorResolution::NotFound,
         [symbol] => SelectorResolution::Resolved(resolved_symbol(symbol)),
@@ -633,6 +642,31 @@ mod tests {
         ));
 
         assert_resolved(&artifact, "my_func", expected_id);
+    }
+
+    #[test]
+    fn exact_name_mcp_tool_match_wins_over_function_match() {
+        let mut artifact = artifact();
+        artifact.symbols.push(symbol(
+            "mcp-submit-plan-id",
+            "crates/spur-mcp/src/tools.rs",
+            [965, 965],
+            "submit_plan",
+            "submit_plan",
+            "mcp_tool",
+            Some("submit_plan_def"),
+        ));
+        artifact.symbols.push(symbol(
+            "helper-submit-plan-id",
+            "crates/spur-mcp/tests/rework_reuse_prior_worktree_e2e.rs",
+            [161, 170],
+            "submit_plan",
+            "submit_plan",
+            "function",
+            None,
+        ));
+
+        assert_resolved(&artifact, "submit_plan", "mcp-submit-plan-id");
     }
 
     #[test]
