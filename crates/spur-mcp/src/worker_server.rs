@@ -539,6 +539,9 @@ struct CodeSymbolParams {
     /// Ambiguity handling. Defaults to candidates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     on_ambiguous: Option<CodeAmbiguityMode>,
+    /// Include unresolved caller/callee rows. Defaults to false; counts_by_kind and unresolved_sample still summarize filtered rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_unresolved: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -577,8 +580,12 @@ struct CodeSubgraphParams {
     radius: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     format: Option<String>,
+    /// Optional public edge_kind filter: calls, calls_dyn, references_hof, references_other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     edge_kinds: Option<Vec<String>>,
+    /// Include unresolved boundary edges. Defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_unresolved: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -926,7 +933,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_callers",
-        description = "List symbols that call the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.",
+        description = "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other). Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample summarize filtered rows. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.",
         input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
     )]
     async fn code_callers_tool(
@@ -948,7 +955,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_callees",
-        description = "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.",
+        description = "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other). Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample summarize filtered rows. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.",
         input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
     )]
     async fn code_callees_tool(
@@ -992,7 +999,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_subgraph",
-        description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
+        description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other), and unresolved edges are hidden by default (include_unresolved=false). edge_kinds=[\"calls\"] is strict direct calls only; use calls_dyn separately for heuristic dyn Trait calls. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
         input_schema = crate::tool_schemas::schema_object::<CodeSubgraphParams>()
     )]
     async fn code_subgraph_tool(

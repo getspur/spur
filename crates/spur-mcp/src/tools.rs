@@ -798,7 +798,7 @@ fn code_symbol_info_def() -> ToolDefinition {
 fn code_callers_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callers".into(),
-        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names.".into(),
+        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -814,6 +814,11 @@ fn code_callers_def() -> ToolDefinition {
                     "type": "string",
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved caller rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
                 }
             }
         }),
@@ -823,7 +828,7 @@ fn code_callers_def() -> ToolDefinition {
 fn code_callees_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callees".into(),
-        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns `callees` rows with `resolved: true` plus uri/entity_name/enclosing_scope/file_path/line_range/symbol_kind for graph-resolved calls, or `resolved: false` plus entity_name/target_label for unresolved call labels.".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -839,6 +844,11 @@ fn code_callees_def() -> ToolDefinition {
                     "type": "string",
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved callee rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
                 }
             }
         }),
@@ -889,7 +899,7 @@ fn code_search_def() -> ToolDefinition {
 fn code_subgraph_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_subgraph".into(),
-        description: "Get a bounded code-symbol subgraph from the current worktree graph artifact. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
+        description: "Get a bounded code-symbol subgraph from the current worktree graph artifact. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other). Unresolved edges are hidden by default (include_unresolved=false). Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -917,8 +927,16 @@ fn code_subgraph_def() -> ToolDefinition {
                 },
                 "edge_kinds": {
                     "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional relation kind filter, e.g. [\"calls\", \"references\"]"
+                    "items": {
+                        "type": "string",
+                        "enum": ["calls", "calls_dyn", "references_hof", "references_other"]
+                    },
+                    "description": "Optional public edge_kind filter. edge_kinds=[\"calls\"] is strict direct calls only; use calls_dyn separately for heuristic dyn Trait calls."
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved boundary edges. Default false filters target_uri=null edges from the subgraph."
                 }
             }
         }),

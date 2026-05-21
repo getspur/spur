@@ -14,9 +14,9 @@ use crate::extract::GraphFacts;
 use crate::extract::{build_facts_for_paths, languages::all_supported_extensions};
 use crate::validation::compute_anchor_hash;
 use crate::{
-    git, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphIndexHeader, GraphNode, GraphSymbolArtifact, GraphTombstoneEntry,
-    NodeKind, RelationKind, SourceSpan,
+    git, graph_edge_kind_or_default, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphEdgeKind,
+    GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
+    GraphSymbolArtifact, GraphTombstoneEntry, NodeKind, RelationKind, SourceSpan,
 };
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
@@ -627,6 +627,7 @@ fn buckets_from_facts(
             relation: edge.relation,
             confidence: edge.confidence,
             confidence_score: edge.confidence_score,
+            edge_kind: Some(graph_edge_kind_or_default(edge.relation, edge.edge_kind)),
         });
     }
 
@@ -937,6 +938,11 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             let Some(target_label) = edge.target_label.as_deref() else {
                 continue;
             };
+            let skip_rebind =
+                edge.edge_kind == Some(GraphEdgeKind::CallsDyn) || target_label.contains("::");
+            if edge.target_stable_symbol_id.is_some() && skip_rebind {
+                continue;
+            }
             if edge.relation == RelationKind::Links {
                 continue;
             }
@@ -1231,8 +1237,9 @@ mod tests {
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::build_facts;
     use crate::{
-        Confidence, GraphEdgeArtifact, GraphFileArtifact, GraphFileManifestEntry,
-        GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, RelationKind,
+        graph_edge_kind_or_default, Confidence, GraphEdgeArtifact, GraphFileArtifact,
+        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
+        RelationKind,
     };
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
@@ -1704,6 +1711,7 @@ mod tests {
             relation,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
+            edge_kind: Some(graph_edge_kind_or_default(relation, None)),
         }
     }
 

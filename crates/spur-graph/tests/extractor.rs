@@ -11,7 +11,7 @@ use spur_graph::store::json::{
     artifact_from_facts, artifact_from_facts_incremental, write_artifact, BuildMode,
 };
 use spur_graph::{load_artifact, read_artifact_header};
-use spur_graph::{Confidence, NodeKind, RelationKind};
+use spur_graph::{Confidence, GraphEdgeKind, NodeKind, RelationKind};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_corpus")
@@ -841,15 +841,59 @@ fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
     let calls_edge = facts
         .edges
         .iter()
-        .find(|edge| edge.relation == RelationKind::Calls)
+        .find(|edge| {
+            edge.relation == RelationKind::Calls && edge.edge_kind != Some(GraphEdgeKind::CallsDyn)
+        })
         .expect("fixture has calls edge");
 
     assert_eq!(contains_edge.confidence, Confidence::SyntaxExact);
     assert_eq!(contains_edge.confidence_score, 1.0);
     assert_eq!(imports_edge.confidence, Confidence::Heuristic);
     assert_eq!(imports_edge.confidence_score, 0.8);
-    assert_eq!(calls_edge.confidence, Confidence::Heuristic);
-    assert_eq!(calls_edge.confidence_score, 0.8);
+    assert_eq!(calls_edge.confidence, Confidence::SyntaxExact);
+    assert_eq!(calls_edge.confidence_score, 1.0);
+}
+
+#[test]
+fn rust_extractor_keeps_methods_in_their_nearest_impl_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+pub struct McpCallbackServer;
+
+impl McpCallbackServer {
+    pub fn start(&self) {}
+}
+
+impl McpCallbackServer {
+    pub fn stop(&self) {}
+}
+
+impl Drop for McpCallbackServer {
+    fn drop(&mut self) {}
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+    let scope_for = |name: &str| {
+        artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.entity_name == name && symbol.symbol_kind == "method")
+            .and_then(|symbol| symbol.enclosing_scope.as_deref())
+    };
+
+    assert_eq!(scope_for("start"), Some("impl McpCallbackServer"));
+    assert_eq!(scope_for("stop"), Some("impl McpCallbackServer"));
+    assert_eq!(scope_for("drop"), Some("impl Drop for McpCallbackServer"));
 }
 
 #[test]
@@ -1270,6 +1314,106 @@ fn rust_extractor_drops_ambiguous_hof_function_value_references() {
     assert!(!facts.edges.iter().any(|edge| {
         edge.relation == RelationKind::References && edge.target_label.as_deref() == Some("helper")
     }));
+}
+
+#[test]
+fn rust_extractor_ignores_identifier_shaped_strings_when_resolving_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn submit_plan() {}\n\
+         pub fn submit_plan_def() {\n\
+             let _name = \"submit_plan\".into();\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let submit_plan_def = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "submit_plan_def")
+        .expect("submit_plan_def symbol");
+    let submit_plan = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "submit_plan")
+        .expect("submit_plan symbol");
+
+    assert!(!artifact.edges.iter().any(|edge| {
+        edge.source_stable_symbol_id == submit_plan_def.stable_symbol_id
+            && edge.target_stable_symbol_id.as_deref()
+                == Some(submit_plan.stable_symbol_id.as_str())
+            && edge.target_label.as_deref() == Some("submit_plan")
+    }));
+    assert!(!artifact.edges.iter().any(|edge| {
+        edge.source_stable_symbol_id == submit_plan_def.stable_symbol_id
+            && edge.target_stable_symbol_id.is_none()
+            && edge.target_label.as_deref() == Some("submit_plan")
+    }));
+}
+
+#[test]
+fn rust_extractor_resolves_explicit_dyn_trait_receiver_calls_to_trait_methods() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "use std::rc::Rc;\n\
+         use std::sync::Arc;\n\
+         pub trait Worker {\n\
+             fn run(&self);\n\
+         }\n\
+         pub fn by_ref(by_ref: &dyn Worker) {\n\
+             by_ref.run();\n\
+         }\n\
+         pub fn by_mut(by_mut: &mut dyn Worker) {\n\
+             by_mut.run();\n\
+         }\n\
+         pub fn boxed(boxed: Box<dyn Worker>) {\n\
+             boxed.run();\n\
+         }\n\
+         pub fn arced(arced: Arc<dyn Worker>) {\n\
+             arced.run();\n\
+         }\n\
+         pub fn rced(rced: Rc<dyn Worker>) {\n\
+             rced.run();\n\
+         }\n\
+         pub fn generic<T: Worker>(value: T) {\n\
+             value.run();\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let worker_run = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == "Worker::run" && symbol.symbol_kind == "method")
+        .expect("Worker::run method symbol");
+
+    let dyn_edges: Vec<_> = artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_kind == Some(GraphEdgeKind::CallsDyn))
+        .collect();
+
+    assert_eq!(dyn_edges.len(), 5);
+    assert!(
+        dyn_edges.iter().all(|edge| {
+            edge.target_stable_symbol_id.as_deref() == Some(worker_run.stable_symbol_id.as_str())
+                && edge.target_label.as_deref() == Some("Worker::run")
+                && edge.confidence == Confidence::Heuristic
+        }),
+        "dyn edges: {dyn_edges:#?}; worker_run: {worker_run:#?}"
+    );
 }
 
 #[test]
