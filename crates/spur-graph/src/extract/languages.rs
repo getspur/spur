@@ -277,6 +277,17 @@ pub(crate) fn emit_edges(
                     });
                 }
             }
+            "reference.name" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                let Ok(target_name) = capture.node.utf8_text(source.as_bytes()) else {
+                    continue;
+                };
+                builder.pending_edges.push(PendingEdge {
+                    source: source_id,
+                    target_name: target_name.to_string(),
+                    relation: RelationKind::References,
+                });
+            }
             _ => {}
         }
     }
