@@ -172,11 +172,12 @@ pub struct DelegationRequest {
     /// retries advance so detached continuations can report the final
     /// 1-based worker attempt that produced the result.
     pub attempt_tracker: Arc<AtomicU32>,
-    /// Phase 5 / Task 26 — opt-in to the curated worker MCP subset.
-    /// `None` or `Some(false)` preserves the historical "Workers get no
-    /// MCP servers" contract; `Some(true)` triggers the orchestrator's
-    /// per-`BrainSession` `WorkerMcpServer` boot and a 1-hour HMAC
-    /// token URL injection into the worker's `mcp_servers` config.
+    /// Default-on curated worker MCP subset. `None` (omitted) or
+    /// `Some(true)` triggers the orchestrator's per-`BrainSession`
+    /// `WorkerMcpServer` boot and a 1-hour HMAC token URL injection
+    /// into the worker's `mcp_servers` config. Only `Some(false)`
+    /// opts out and preserves the legacy "Workers get no MCP servers"
+    /// behavior.
     pub enable_worker_mcp: Option<bool>,
 }
 
@@ -368,7 +369,7 @@ pub struct ToolDefinition {
 fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Optional `enable_worker_mcp` and `enable_worker_progress` booleans default to false/omitted; workers receive no MCP or progress channel unless explicitly opted in. Use `list_available_workers` when routing is ambiguous.".into(),
+        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. `enable_worker_mcp` defaults to on — the worker receives the curated worker MCP server unless you pass `false`. `enable_worker_progress` defaults to off; opt in for progress events. Use `list_available_workers` when routing is ambiguous.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateToWorkerInput>(),
     }
 }
@@ -376,7 +377,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
 fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
-        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Per-task optional `enable_worker_mcp` and `enable_worker_progress` booleans default to false/omitted; workers receive no MCP or progress channel unless explicitly opted in. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
+        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Per-task `enable_worker_mcp` defaults to on — each worker receives the curated worker MCP server unless explicitly set to `false`. `enable_worker_progress` defaults to off; opt in per task for progress events. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
     }
 }
