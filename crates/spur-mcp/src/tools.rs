@@ -845,6 +845,47 @@ fn code_callees_def() -> ToolDefinition {
     }
 }
 
+fn code_search_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_search".into(),
+        description: "Search the worktree graph artifact for symbols by name. Lexical retrieval, not graph resolution — returns ranked candidates matching the query. Use after `code_callees` returns empty (e.g., on macro-bodied functions whose bodies are opaque to the graph) to recover candidate identifiers from the symbol index.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Search term. Non-empty."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["exact", "prefix", "substring"],
+                    "default": "substring"
+                },
+                "symbol_kind": {
+                    "type": "string",
+                    "description": "Optional filter on the artifact's symbol_kind, e.g. function, method, struct, enum, mcp_tool."
+                },
+                "file": {
+                    "type": "string",
+                    "description": "Optional exact worktree-relative file path. Mutually exclusive with file_glob."
+                },
+                "file_glob": {
+                    "type": "string",
+                    "description": "Optional glob over worktree-relative file_path (e.g. 'crates/spur-mcp/**/*.rs'). Mutually exclusive with file."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 20
+                }
+            },
+            "required": ["query"]
+        }),
+    }
+}
+
 fn code_subgraph_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_subgraph".into(),
@@ -1316,6 +1357,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_symbol_info_def(),
         code_callers_def(),
         code_callees_def(),
+        code_search_def(),
         code_subgraph_def(),
         submit_plan_def(),
         execute_epic_def(),
@@ -1355,6 +1397,7 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_symbol_info_def(),
         code_callers_def(),
         code_callees_def(),
+        code_search_def(),
         code_subgraph_def(),
         update_issue_def(),
         report_signal_def(),
@@ -1514,6 +1557,60 @@ mod schema_truthfulness_tests {
     }
 
     #[test]
+    fn code_search_schema_uses_query_not_selector_or_legacy_symbol() {
+        let def = code_search_def();
+        let props = def
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("properties");
+
+        assert!(props.contains_key("query"), "code_search query");
+        assert!(props.contains_key("mode"), "code_search mode");
+        assert!(props.contains_key("symbol_kind"), "code_search symbol_kind");
+        assert!(props.contains_key("file"), "code_search file");
+        assert!(props.contains_key("file_glob"), "code_search file_glob");
+        assert!(props.contains_key("limit"), "code_search limit");
+        assert!(
+            !props.contains_key("selector"),
+            "code_search must not advertise selector"
+        );
+        assert!(
+            !props.contains_key("symbol"),
+            "code_search must not advertise legacy symbol"
+        );
+        assert!(
+            !props.contains_key("on_ambiguous"),
+            "code_search must not advertise graph-resolution ambiguity controls"
+        );
+        assert_eq!(
+            props.get("query").and_then(|v| v.get("minLength")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            props.get("mode").and_then(|v| v.get("enum")),
+            Some(&json!(["exact", "prefix", "substring"]))
+        );
+        assert_eq!(
+            props.get("mode").and_then(|v| v.get("default")),
+            Some(&json!("substring"))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("minimum")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("maximum")),
+            Some(&json!(200))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("default")),
+            Some(&json!(20))
+        );
+        assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
+    }
+
+    #[test]
     fn fetch_outcome_artifact_schema_advertises_phase3_sections() {
         let def = fetch_outcome_artifact_def();
         let props = def
@@ -1561,6 +1658,7 @@ mod worker_tools_subset_tests {
         "code_symbol_info",
         "code_callers",
         "code_callees",
+        "code_search",
         "code_subgraph",
         "update_issue",
         "report_signal",
@@ -1607,6 +1705,10 @@ mod worker_tools_subset_tests {
             "graph_alerts",
             "graph_subgraph",
         ];
+        assert!(
+            !forbidden.contains(&"code_search"),
+            "code_search is read-only and worker-facing, not brain-only",
+        );
         for tool in &forbidden {
             assert!(
                 !actual.iter().any(|n| n == tool),

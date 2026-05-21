@@ -7112,6 +7112,7 @@ dependencies = [
  "blake3",
  "criterion",
  "fs2",
+ "globset",
  "ignore",
  "petgraph",
  "pretty_assertions",

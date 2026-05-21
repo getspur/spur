@@ -553,3 +553,81 @@ async fn code_symbol_info_returns_single_symbol_metadata() {
         artifact.header.graph_index_version
     );
 }
+
+#[tokio::test]
+async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    let artifact = build_real_tools_graph_artifact(worktree.path());
+    let tools_list = symbol_by_file_entity_kind(
+        &artifact,
+        "crates/spur-mcp/src/tools.rs",
+        "tools_list",
+        "function",
+    );
+    let tools_list_uri = format!("graph://symbol/{}", tools_list.stable_symbol_id);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let callees = tool_body(
+        call_tool(
+            &server,
+            "code_callees",
+            json!({ "selector": tools_list_uri }),
+        )
+        .await,
+    );
+    assert_eq!(
+        callees["callees"].as_array().expect("callees"),
+        &Vec::<Value>::new()
+    );
+
+    let search = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "_def",
+                "mode": "substring",
+                "file": "crates/spur-mcp/src/tools.rs",
+                "symbol_kind": "function",
+                "limit": 100
+            }),
+        )
+        .await,
+    );
+    let candidates = search["candidates"].as_array().expect("candidates");
+    let names = entity_names(candidates);
+
+    assert!(names.contains("delegate_to_worker_def"));
+    assert!(names.contains("get_issue_def"));
+    assert!(names.contains("submit_plan_def"));
+    assert!(
+        search["total_matches"].as_u64().expect("total_matches") >= 30,
+        "expected at least 30 *_def functions, got {}",
+        search["total_matches"]
+    );
+    assert!(candidates.iter().all(|candidate| candidate["entity_name"]
+        .as_str()
+        .expect("entity_name")
+        .ends_with("_def")));
+
+    let submit_tools = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "submit",
+                "symbol_kind": "mcp_tool",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+    let submit_tool_candidates = submit_tools["candidates"].as_array().expect("candidates");
+    assert!(submit_tool_candidates.iter().any(|candidate| {
+        candidate["entity_name"] == "submit_plan"
+            && candidate["symbol_kind"] == "mcp_tool"
+            && candidate["file_path"] == "crates/spur-mcp/src/tools.rs"
+    }));
+}

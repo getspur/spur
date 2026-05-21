@@ -499,6 +499,14 @@ enum CodeAmbiguityMode {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CodeSearchMode {
+    Exact,
+    Prefix,
+    Substring,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeResolveParams {
     /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
     selector: String,
@@ -531,6 +539,27 @@ struct CodeSymbolParams {
     /// Ambiguity handling. Defaults to candidates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     on_ambiguous: Option<CodeAmbiguityMode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSearchParams {
+    /// Search term. Non-empty.
+    query: String,
+    /// Search mode. Defaults to substring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<CodeSearchMode>,
+    /// Optional exact symbol_kind filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol_kind: Option<String>,
+    /// Optional exact worktree-relative file path. Mutually exclusive with file_glob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    /// Optional glob over worktree-relative file_path. Mutually exclusive with file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_glob: Option<String>,
+    /// Result limit. Clamped to 1..=200 by the handler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -934,6 +963,28 @@ impl WorkerToolHandler {
             Some(None),
             move |_worker_ctx| async move {
                 crate::server::handlers::code_graph::code_callees(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_search",
+        description = "Search the worktree graph artifact for symbols by name. Lexical retrieval, not graph resolution — returns ranked candidates matching the query.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSearchParams>()
+    )]
+    async fn code_search_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_search",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_search(&args).await
             },
         )
         .await
