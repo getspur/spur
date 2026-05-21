@@ -23,6 +23,17 @@ const OLD_CALLER_ID: &str = "caller-foo";
 const OLD_CALLEE_ID: &str = "callee-foo";
 const NEW_CALLER_ID: &str = "caller-bar";
 const NEW_CALLEE_ID: &str = "callee-bar";
+const DELETE_SHA: &str = "3333333333333333333333333333333333333333";
+const AMBIGUOUS_SHA: &str = "4444444444444444444444444444444444444444";
+const UNKNOWN_TARGET_SHA: &str = "5555555555555555555555555555555555555555";
+const UNINDEXED_SHA: &str = "6666666666666666666666666666666666666666";
+const FOUND_ORIGIN_ID: &str = "found-origin";
+const FOUND_TARGET_ID: &str = "found-target";
+const DELETED_ID: &str = "deleted-symbol";
+const AMBIGUOUS_ORIGIN_ID: &str = "ambiguous-origin";
+const AMBIGUOUS_LEFT_ID: &str = "ambiguous-left";
+const AMBIGUOUS_RIGHT_ID: &str = "ambiguous-right";
+const UNKNOWN_ID: &str = "unknown-symbol";
 
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -163,6 +174,138 @@ fn write_temporal_fixture_artifact(worktree: &Path) {
     .expect("write commit index pointer");
 }
 
+fn write_temporal_resolution_fixture_artifact(worktree: &Path) {
+    std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
+
+    let found_origin = snapshot(FOUND_ORIGIN_ID, OLD_SHA, "found_origin");
+    let found_target = snapshot(FOUND_TARGET_ID, NEW_SHA, "found_target");
+    let deleted_added = snapshot(DELETED_ID, OLD_SHA, "deleted_symbol");
+    let deleted_last_seen = snapshot(DELETED_ID, DELETE_SHA, "deleted_symbol");
+    let ambiguous_origin = snapshot(AMBIGUOUS_ORIGIN_ID, OLD_SHA, "ambiguous_origin");
+    let ambiguous_left = snapshot(AMBIGUOUS_LEFT_ID, AMBIGUOUS_SHA, "ambiguous_left");
+    let ambiguous_right = snapshot(AMBIGUOUS_RIGHT_ID, AMBIGUOUS_SHA, "ambiguous_right");
+    let unknown = snapshot(UNKNOWN_ID, UNINDEXED_SHA, "unknown_symbol");
+
+    let commits = vec![
+        CommitArtifact {
+            sha: OLD_SHA.to_string(),
+            parents: Vec::new(),
+            author_time: 1,
+            summary: "add roots".to_string(),
+        },
+        CommitArtifact {
+            sha: NEW_SHA.to_string(),
+            parents: vec![OLD_SHA.to_string()],
+            author_time: 2,
+            summary: "rename found".to_string(),
+        },
+        CommitArtifact {
+            sha: DELETE_SHA.to_string(),
+            parents: vec![NEW_SHA.to_string()],
+            author_time: 3,
+            summary: "delete symbol".to_string(),
+        },
+        CommitArtifact {
+            sha: AMBIGUOUS_SHA.to_string(),
+            parents: vec![DELETE_SHA.to_string()],
+            author_time: 4,
+            summary: "ambiguous rename".to_string(),
+        },
+        CommitArtifact {
+            sha: UNKNOWN_TARGET_SHA.to_string(),
+            parents: vec![AMBIGUOUS_SHA.to_string()],
+            author_time: 5,
+            summary: "target for unknown anchor".to_string(),
+        },
+    ];
+
+    let graph = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            content_hash_blake3: None,
+        },
+        manifest_version: "temporal-resolution-fixture".to_string(),
+        graph_content_hash: "temporal-resolution-fixture".to_string(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        symbols: vec![
+            graph_symbol(FOUND_ORIGIN_ID, "found_origin"),
+            graph_symbol(FOUND_TARGET_ID, "found_target"),
+            graph_symbol(DELETED_ID, "deleted_symbol"),
+            graph_symbol(AMBIGUOUS_ORIGIN_ID, "ambiguous_origin"),
+            graph_symbol(AMBIGUOUS_LEFT_ID, "ambiguous_left"),
+            graph_symbol(AMBIGUOUS_RIGHT_ID, "ambiguous_right"),
+            graph_symbol(UNKNOWN_ID, "unknown_symbol"),
+        ],
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: commits.clone(),
+        symbol_snapshots: vec![
+            found_origin.clone(),
+            found_target.clone(),
+            deleted_added.clone(),
+            deleted_last_seen.clone(),
+            ambiguous_origin.clone(),
+            ambiguous_left.clone(),
+            ambiguous_right.clone(),
+            unknown.clone(),
+        ],
+        temporal_edges: vec![
+            temporal_touch(OLD_SHA, found_origin.key.clone(), ChangeKind::Added),
+            temporal_touch(
+                NEW_SHA,
+                found_target.key.clone(),
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(found_origin.key)),
+            ),
+            temporal_touch(OLD_SHA, deleted_added.key, ChangeKind::Added),
+            temporal_touch(DELETE_SHA, deleted_last_seen.key, ChangeKind::Deleted),
+            temporal_touch(OLD_SHA, ambiguous_origin.key.clone(), ChangeKind::Added),
+            temporal_touch(
+                AMBIGUOUS_SHA,
+                ambiguous_left.key,
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(ambiguous_origin.key.clone())),
+            ),
+            temporal_touch(
+                AMBIGUOUS_SHA,
+                ambiguous_right.key,
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(ambiguous_origin.key)),
+            ),
+            temporal_touch(UNINDEXED_SHA, unknown.key, ChangeKind::Added),
+        ],
+    };
+    write_artifact(&graph, &worktree.join(".spur/graph-index.json"))
+        .expect("write temporal resolution graph artifact");
+
+    let commit_index = CommitIndexArtifact {
+        schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+            .parse()
+            .expect("temporal graph index version is numeric"),
+        commits,
+        refs: [("HEAD".to_string(), UNKNOWN_TARGET_SHA.to_string())].into(),
+        indexed_at: "2026-05-20T12:00:00Z".to_string(),
+        walk_strategy: WalkStrategy::Reachable,
+    };
+    spur_graph::store::commit_index::save_artifact(
+        worktree,
+        ".spur/commit-index.json",
+        &commit_index,
+    )
+    .expect("write commit index artifact");
+    spur_graph::store::commit_index::save_pointer(
+        worktree,
+        &spur_graph::store::commit_index::CommitIndexPointer {
+            schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+                .parse()
+                .expect("temporal graph index version is numeric"),
+            artifact_relative_path: ".spur/commit-index.json".to_string(),
+            indexed_at: commit_index.indexed_at.clone(),
+            refs: commit_index.refs.clone(),
+        },
+    )
+    .expect("write commit index pointer");
+}
+
 fn write_graph_without_commit_index(worktree: &Path) {
     std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
     let graph = GraphIndexArtifact {
@@ -257,6 +400,13 @@ fn tool_body(response: Value) -> Value {
         .as_str()
         .unwrap_or_else(|| panic!("successful tool response with text content: {response}"));
     serde_json::from_str(text).expect("tool text is JSON")
+}
+
+fn error_data(response: &Value) -> &Value {
+    response["error"]["data"]
+        .as_object()
+        .unwrap_or_else(|| panic!("JSON-RPC error has structured data: {response}"));
+    &response["error"]["data"]
 }
 
 fn entity_names(rows: &[Value]) -> BTreeSet<String> {
@@ -442,6 +592,91 @@ async fn code_graph_tools_resolve_requested_symbol_as_of_historical_commit() {
             "launch_bar".to_string(),
         ])
     );
+}
+
+#[tokio::test]
+async fn code_subgraph_returns_deleted_with_last_seen() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    write_temporal_resolution_fixture_artifact(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let found = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "symbol": format!("graph://symbol/{FOUND_ORIGIN_ID}"),
+                "as_of": NEW_SHA,
+                "radius": 0
+            }),
+        )
+        .await,
+    );
+    assert_eq!(
+        entity_names(found["nodes"].as_array().expect("found nodes")),
+        BTreeSet::from(["found_target".to_string()])
+    );
+
+    let deleted = call_tool(
+        &server,
+        "code_subgraph",
+        json!({
+            "symbol": format!("graph://symbol/{DELETED_ID}"),
+            "as_of": DELETE_SHA,
+            "radius": 0
+        }),
+    )
+    .await;
+    assert_eq!(deleted["error"]["code"], -32005);
+    let deleted_data = error_data(&deleted);
+    assert_eq!(deleted_data["kind"], "deleted");
+    assert_eq!(deleted_data["last_seen"]["stable_symbol_id"], DELETED_ID);
+    assert_eq!(deleted_data["last_seen"]["commit"], DELETE_SHA);
+
+    let not_found = call_tool(
+        &server,
+        "code_subgraph",
+        json!({ "symbol": "graph://symbol/not-in-artifact", "radius": 0 }),
+    )
+    .await;
+    assert_eq!(not_found["error"]["code"], -32004);
+    assert_eq!(error_data(&not_found)["kind"], "not_found");
+
+    let ambiguous = call_tool(
+        &server,
+        "code_subgraph",
+        json!({
+            "symbol": format!("graph://symbol/{AMBIGUOUS_ORIGIN_ID}"),
+            "as_of": AMBIGUOUS_SHA,
+            "radius": 0
+        }),
+    )
+    .await;
+    assert_eq!(ambiguous["error"]["code"], -32006);
+    let ambiguous_data = error_data(&ambiguous);
+    assert_eq!(ambiguous_data["kind"], "ambiguous");
+    assert_eq!(
+        ambiguous_data["candidates"].as_array().expect("candidates"),
+        &vec![json!(AMBIGUOUS_LEFT_ID), json!(AMBIGUOUS_RIGHT_ID)]
+    );
+
+    let unknown = call_tool(
+        &server,
+        "code_subgraph",
+        json!({
+            "symbol": format!("graph://symbol/{UNKNOWN_ID}"),
+            "as_of": UNKNOWN_TARGET_SHA,
+            "radius": 0
+        }),
+    )
+    .await;
+    assert_eq!(unknown["error"]["code"], -32007);
+    let unknown_data = error_data(&unknown);
+    assert_eq!(unknown_data["kind"], "unknown");
+    assert_eq!(unknown_data["reason"]["kind"], "anchor_commit_not_indexed");
+    assert_eq!(unknown_data["reason"]["commit"], UNINDEXED_SHA);
 }
 
 #[tokio::test]
