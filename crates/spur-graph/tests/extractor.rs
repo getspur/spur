@@ -7,9 +7,8 @@ use std::time::Duration;
 use pretty_assertions::assert_eq;
 use spur_graph::build_facts;
 use spur_graph::graph::petgraph_builder::build_petgraph;
-use spur_graph::store::json::{
-    artifact_from_facts, artifact_from_facts_incremental, write_artifact, BuildMode,
-};
+use spur_graph::store::build::{artifact_from_facts, artifact_from_facts_incremental, BuildMode};
+use spur_graph::store::json::write_artifact;
 use spur_graph::{load_artifact, read_artifact_header};
 use spur_graph::{Confidence, GraphEdgeKind, NodeKind, RelationKind};
 
@@ -134,7 +133,7 @@ fn find_symbol_json<'a>(
 #[test]
 fn graph_store_schema_version_is_v5() {
     assert_eq!(
-        spur_graph::store::json::SCHEMA_VERSION,
+        spur_graph::store::build::SCHEMA_VERSION,
         "spur-graph-schema-v5"
     );
 }
