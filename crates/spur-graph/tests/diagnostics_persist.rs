@@ -88,6 +88,7 @@ fn temporal_artifact() -> GraphIndexArtifact {
         },
         target: EdgeEndpoint::Snapshot { key: snapshot.key },
         relation: RelationKind::Touches,
+        parent: None,
         change_kind: None,
     });
     artifact
