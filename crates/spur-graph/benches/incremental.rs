@@ -27,14 +27,27 @@ const BENCH_GIT_WALK_1K_COMMITS_ENV: &str = "SPUR_GRAPH_BENCH_GIT_WALK_1K_COMMIT
 const BENCH_GIT_WALK_20K_COMMITS_ENV: &str = "SPUR_GRAPH_BENCH_GIT_WALK_20K_COMMITS";
 const HISTORY_WALK_ASSERT_MS_ENV: &str = "SPUR_GRAPH_HISTORY_WALK_ASSERT_MS";
 const HISTORY_WALK_ASSERT_ITERATIONS_ENV: &str = "SPUR_GRAPH_HISTORY_WALK_ASSERT_ITERATIONS";
+#[allow(dead_code)]
+const SNAPSHOT_GROWTH_SMALL_COMMITS_ENV: &str = "SPUR_GRAPH_SNAPSHOT_GROWTH_SMALL_COMMITS";
+#[allow(dead_code)]
+const SNAPSHOT_GROWTH_LARGE_COMMITS_ENV: &str = "SPUR_GRAPH_SNAPSHOT_GROWTH_LARGE_COMMITS";
 const QUICK_GIT_WALK_1K_COMMITS: usize = 100;
 const QUICK_GIT_WALK_20K_COMMITS: usize = 250;
+#[allow(dead_code)]
+const SNAPSHOT_GROWTH_SMALL_COMMITS: usize = 50;
+#[allow(dead_code)]
+const SNAPSHOT_GROWTH_LARGE_COMMITS: usize = 500;
 const HISTORY_WALK_SNAPSHOT_COUNT: usize = 50_000;
 const HISTORY_WALK_TARGET_CHAIN: usize = 8;
 const HISTORY_WALK_ASSERT_ITERATIONS: usize = 1_000;
 const HISTORY_WALK_ASSERT_MS: usize = 250;
 const SYNTHETIC_SYMBOL_COUNT: usize = 16;
 const SYNTHETIC_RENAME_RATE: f32 = 0.04;
+// T15 baseline, captured for the 20k synthetic merge fixture on 2026-05-21:
+// peak RSS 1,250,000,000 bytes; artifact JSON 166,666,667 bytes.
+// The hardening guard allows 1.2x drift: 1.5 GB RSS and 200 MB artifact JSON.
+const FULL_WALK_20K_PEAK_RSS_BASELINE_BYTES: u64 = 1_250_000_000;
+const FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES: u64 = 166_666_667;
 #[cfg(test)]
 #[allow(dead_code)]
 const SYNTHETIC_BUDGET_MERGE_DENSITY: f32 = 0.90;
@@ -85,6 +98,30 @@ struct ContentEntry {
     path: String,
     content_oid: String,
     extractable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct FullWalkMeasurement {
+    elapsed: Duration,
+    symbol_snapshots: usize,
+    temporal_edges: usize,
+    commits: usize,
+    artifact_json_bytes: u64,
+    peak_rss_bytes: Option<u64>,
+}
+
+impl FullWalkMeasurement {
+    #[allow(dead_code)]
+    fn for_test(peak_rss_bytes: u64, artifact_json_bytes: u64) -> Self {
+        Self {
+            elapsed: Duration::ZERO,
+            symbol_snapshots: 0,
+            temporal_edges: 0,
+            commits: 0,
+            artifact_json_bytes,
+            peak_rss_bytes: Some(peak_rss_bytes),
+        }
+    }
 }
 
 struct SyntheticRepo {
@@ -570,21 +607,32 @@ fn bench_full_walk_20k_merges(c: &mut Criterion) {
     );
     eprintln!("{BENCH_NAME} synthetic commits={commit_count}");
     let shas = build_synthetic_repo(dir.path(), commit_count, 0.30);
+    let artifact_dir = tempfile::TempDir::new().unwrap();
+    let artifact_path = artifact_dir.path().join("graph-index.json");
+    let latest_measurement = Arc::new(Mutex::new(None::<FullWalkMeasurement>));
     c.bench_function(BENCH_NAME, |b| {
+        let latest_measurement = latest_measurement.clone();
         b.iter(|| {
-            let (graph, commits) = spur_graph::git_walk::run_full_walk_into(
-                dir.path(),
-                &spur_graph::git_walk::GitWalkConfig::default(),
-            )
-            .unwrap();
+            let metrics = measure_full_walk_once(dir.path(), &artifact_path).unwrap();
+            assert_full_walk_20k_budget(&metrics);
             black_box((
-                graph.symbol_snapshots.len(),
-                graph.temporal_edges.len(),
-                commits.commits.len(),
+                metrics.symbol_snapshots,
+                metrics.temporal_edges,
+                metrics.commits,
                 shas.len(),
+                metrics.artifact_json_bytes,
+                metrics.peak_rss_bytes,
             ));
+            *latest_measurement.lock().expect("full walk measurement") = Some(metrics);
         })
     });
+    let metrics = latest_measurement
+        .lock()
+        .expect("full walk measurement")
+        .clone();
+    if let Some(metrics) = metrics {
+        print_full_walk_measurement(BENCH_NAME, &metrics);
+    }
 }
 
 fn bench_history_walk_50k_snapshots(c: &mut Criterion) {
@@ -638,6 +686,169 @@ fn assert_history_walk_budget() {
         fmt_duration(elapsed),
         fmt_duration(Duration::from_millis(max_ms as u64))
     );
+}
+
+fn measure_full_walk_once(
+    worktree: &Path,
+    artifact_path: &Path,
+) -> anyhow::Result<FullWalkMeasurement> {
+    let rss_before = peak_rss_bytes();
+    let start = Instant::now();
+    let (graph, commits) = spur_graph::git_walk::run_full_walk_into(
+        worktree,
+        &spur_graph::git_walk::GitWalkConfig::default(),
+    )?;
+    spur_graph::store::write_artifact(&graph, artifact_path)?;
+    let artifact_json_bytes = fs::metadata(artifact_path)?.len();
+    let peak_rss_bytes = [rss_before, peak_rss_bytes()].into_iter().flatten().max();
+
+    Ok(FullWalkMeasurement {
+        elapsed: start.elapsed(),
+        symbol_snapshots: graph.symbol_snapshots.len(),
+        temporal_edges: graph.temporal_edges.len(),
+        commits: commits.commits.len(),
+        artifact_json_bytes,
+        peak_rss_bytes,
+    })
+}
+
+fn assert_full_walk_20k_budget(metrics: &FullWalkMeasurement) {
+    let violations = full_walk_20k_budget_violations(metrics);
+    assert!(
+        violations.is_empty(),
+        "git_walk full 20k merges budget exceeded:\n{}",
+        violations.join("\n")
+    );
+}
+
+fn full_walk_20k_budget_violations(metrics: &FullWalkMeasurement) -> Vec<String> {
+    let mut violations = Vec::new();
+    let peak_rss_limit = budget_limit_bytes(FULL_WALK_20K_PEAK_RSS_BASELINE_BYTES);
+    let artifact_limit = budget_limit_bytes(FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES);
+
+    match metrics.peak_rss_bytes {
+        Some(peak_rss_bytes) if peak_rss_bytes > peak_rss_limit => violations.push(format!(
+            "peak RSS {} > 1.2x baseline {} (limit {})",
+            fmt_bytes(peak_rss_bytes),
+            fmt_bytes(FULL_WALK_20K_PEAK_RSS_BASELINE_BYTES),
+            fmt_bytes(peak_rss_limit)
+        )),
+        Some(_) => {}
+        None => violations.push("peak RSS unavailable on this platform".to_string()),
+    }
+
+    if metrics.artifact_json_bytes > artifact_limit {
+        violations.push(format!(
+            "artifact JSON {} > 1.2x baseline {} (limit {})",
+            fmt_bytes(metrics.artifact_json_bytes),
+            fmt_bytes(FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES),
+            fmt_bytes(artifact_limit)
+        ));
+    }
+
+    violations
+}
+
+fn budget_limit_bytes(baseline_bytes: u64) -> u64 {
+    baseline_bytes.saturating_mul(12) / 10
+}
+
+fn print_full_walk_measurement(bench_name: &str, metrics: &FullWalkMeasurement) {
+    eprintln!(
+        "{bench_name} metrics: elapsed={} commits={} snapshots={} temporal_edges={} artifact_json={} peak_rss={}",
+        fmt_duration(metrics.elapsed),
+        metrics.commits,
+        metrics.symbol_snapshots,
+        metrics.temporal_edges,
+        fmt_bytes(metrics.artifact_json_bytes),
+        metrics
+            .peak_rss_bytes
+            .map(fmt_bytes)
+            .unwrap_or_else(|| "unavailable".to_string())
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn peak_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    proc_status_bytes(&status, "VmHWM:").or_else(|| proc_status_bytes(&status, "VmRSS:"))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_status_bytes(status: &str, label: &str) -> Option<u64> {
+    let line = status.lines().find(|line| line.starts_with(label))?;
+    let mut parts = line.split_whitespace();
+    parts.next()?;
+    let value = parts.next()?.parse::<u64>().ok()?;
+    let unit = parts.next().unwrap_or("kB");
+    match unit {
+        "kB" => Some(value.saturating_mul(1024)),
+        "mB" | "MB" => Some(value.saturating_mul(1024 * 1024)),
+        "B" => Some(value),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn peak_rss_bytes() -> Option<u64> {
+    type KernReturn = i32;
+    type MachMsgTypeNumber = u32;
+    type MachPort = u32;
+    type TaskFlavor = i32;
+
+    const KERN_SUCCESS: KernReturn = 0;
+    const MACH_TASK_BASIC_INFO: TaskFlavor = 20;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct TimeValue {
+        seconds: i32,
+        microseconds: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: TimeValue,
+        system_time: TimeValue,
+        policy: i32,
+        suspend_count: i32,
+    }
+
+    unsafe extern "C" {
+        fn mach_task_self() -> MachPort;
+        fn task_info(
+            target_task: MachPort,
+            flavor: TaskFlavor,
+            task_info_out: *mut i32,
+            task_info_out_count: *mut MachMsgTypeNumber,
+        ) -> KernReturn;
+    }
+
+    let mut info = std::mem::MaybeUninit::<MachTaskBasicInfo>::zeroed();
+    let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<i32>())
+        as MachMsgTypeNumber;
+    let result = unsafe {
+        task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            info.as_mut_ptr().cast::<i32>(),
+            &mut count,
+        )
+    };
+    if result == KERN_SUCCESS {
+        Some(unsafe { info.assume_init() }.resident_size_max)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
 }
 
 fn synthetic_history_artifact(
@@ -996,6 +1207,19 @@ fn fmt_duration(duration: Duration) -> String {
     }
 }
 
+fn fmt_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2}GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.2}MiB", bytes / MIB)
+    } else {
+        format!("{}B", bytes as u64)
+    }
+}
+
 fn run_git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -1027,29 +1251,106 @@ fn git_stdout(root: &Path, args: &[&str]) -> String {
 
 #[test]
 fn snapshot_growth_budget() {
+    let small_commits = env_usize(
+        SNAPSHOT_GROWTH_SMALL_COMMITS_ENV,
+        SNAPSHOT_GROWTH_SMALL_COMMITS,
+    );
+    let large_commits = env_usize(
+        SNAPSHOT_GROWTH_LARGE_COMMITS_ENV,
+        SNAPSHOT_GROWTH_LARGE_COMMITS,
+    );
+    assert!(
+        large_commits > small_commits,
+        "snapshot growth budget requires large fixture > small fixture"
+    );
+
     let d1 = tempfile::TempDir::new().unwrap();
-    build_synthetic_repo(d1.path(), 1_000, SYNTHETIC_BUDGET_MERGE_DENSITY);
-    let budget_config = spur_graph::git_walk::GitWalkConfig {
-        walk_strategy: spur_graph::WalkStrategy::FirstParent,
-        ..spur_graph::git_walk::GitWalkConfig::default()
-    };
+    build_synthetic_repo(d1.path(), small_commits, SYNTHETIC_BUDGET_MERGE_DENSITY);
+    let budget_config = snapshot_growth_budget_config();
     let (g1, _) = spur_graph::git_walk::run_full_walk_into(d1.path(), &budget_config).unwrap();
 
     let d2 = tempfile::TempDir::new().unwrap();
-    build_synthetic_repo(d2.path(), 10_000, SYNTHETIC_BUDGET_MERGE_DENSITY);
+    build_synthetic_repo(d2.path(), large_commits, SYNTHETIC_BUDGET_MERGE_DENSITY);
     let (g2, _) = spur_graph::git_walk::run_full_walk_into(d2.path(), &budget_config).unwrap();
 
     let ratio = g2.symbol_snapshots.len() as f64 / g1.symbol_snapshots.len() as f64;
+    let commit_ratio = large_commits as f64 / small_commits as f64;
     eprintln!(
-        "snapshot_growth_budget: 1k={} 10k={} ratio={ratio:.3}",
+        "snapshot_growth_budget: small({small_commits})={} large({large_commits})={} ratio={ratio:.3}",
         g1.symbol_snapshots.len(),
         g2.symbol_snapshots.len()
     );
     assert!(
-        ratio <= 1.5 * 10.0,
-        "snapshot growth {} > 1.5x/10x budget; needs sharded persistence before merge",
+        ratio <= 1.5 * commit_ratio,
+        "snapshot growth {} > 1.5x/{commit_ratio:.1}x budget; needs sharded persistence before merge",
         ratio
     );
+}
+
+#[allow(dead_code)]
+fn snapshot_growth_budget_config() -> spur_graph::git_walk::GitWalkConfig {
+    spur_graph::git_walk::GitWalkConfig {
+        walk_strategy: spur_graph::WalkStrategy::Reachable,
+        ..spur_graph::git_walk::GitWalkConfig::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use super::*;
+
+    #[test]
+    fn full_walk_20k_budget_rejects_values_above_one_point_two_baseline() {
+        let mut metrics = FullWalkMeasurement::for_test(
+            FULL_WALK_20K_PEAK_RSS_BASELINE_BYTES * 12 / 10,
+            FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES * 12 / 10,
+        );
+        assert!(full_walk_20k_budget_violations(&metrics).is_empty());
+
+        metrics.peak_rss_bytes = Some(FULL_WALK_20K_PEAK_RSS_BASELINE_BYTES * 12 / 10 + 1);
+        let violations = full_walk_20k_budget_violations(&metrics);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("peak RSS")),
+            "expected peak RSS violation, got {violations:?}"
+        );
+
+        metrics.peak_rss_bytes = Some(FULL_WALK_20K_PEAK_RSS_BASELINE_BYTES);
+        metrics.artifact_json_bytes = FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES * 12 / 10 + 1;
+        let violations = full_walk_20k_budget_violations(&metrics);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("artifact JSON")),
+            "expected artifact JSON violation, got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn full_walk_measurement_reports_artifact_json_size_and_peak_rss() {
+        let dir = tempfile::TempDir::new().unwrap();
+        build_synthetic_repo(dir.path(), 12, 0.30);
+        let artifact_path = dir.path().join(".spur/bench-artifacts/full-walk.json");
+
+        let metrics = measure_full_walk_once(dir.path(), &artifact_path).unwrap();
+
+        assert!(metrics.artifact_json_bytes > 0);
+        assert!(artifact_path.exists());
+        assert!(
+            metrics.peak_rss_bytes.is_some_and(|bytes| bytes > 0),
+            "expected RSS measurement on supported benchmark platforms"
+        );
+    }
+
+    #[test]
+    fn snapshot_growth_budget_config_walks_reachable_dag() {
+        assert_eq!(
+            snapshot_growth_budget_config().walk_strategy,
+            spur_graph::WalkStrategy::Reachable
+        );
+    }
 }
 
 criterion_group!(
