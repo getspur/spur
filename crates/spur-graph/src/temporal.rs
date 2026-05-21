@@ -66,11 +66,6 @@ pub fn resolve_symbol_at(
     target: &str,
 ) -> Resolution<StableSymbolId> {
     let graph = CommitGraph::new(commits);
-    if !graph.contains(anchor) {
-        return Resolution::Unknown {
-            reason: ResolutionFailure::AnchorCommitNotIndexed(anchor.to_string()),
-        };
-    }
 
     let Some(target_ancestors) = graph.ancestors_of(target) else {
         return Resolution::Unknown {
@@ -80,6 +75,11 @@ pub fn resolve_symbol_at(
         };
     };
     if !target_ancestors.contains(anchor) {
+        if !graph.contains(anchor) {
+            return Resolution::Unknown {
+                reason: ResolutionFailure::AnchorCommitNotIndexed(anchor.to_string()),
+            };
+        }
         return Resolution::Unknown {
             reason: ResolutionFailure::IndexCorrupt(format!(
                 "anchor commit `{anchor}` is not reachable from target `{target}`"
@@ -87,18 +87,22 @@ pub fn resolve_symbol_at(
         };
     }
 
-    let Some(anchor_key) = code
-        .symbol_snapshots
-        .iter()
-        .find(|snapshot| snapshot.key.stable_symbol_id == symbol && snapshot.key.commit == anchor)
-        .map(|snapshot| snapshot.key.clone())
-    else {
+    let mut anchor_candidates = match latest_anchor_snapshots(code, &graph, symbol, anchor) {
+        Ok(candidates) => candidates,
+        Err(reason) => return Resolution::Unknown { reason },
+    };
+    if anchor_candidates.is_empty() {
         return Resolution::Unknown {
             reason: ResolutionFailure::SymbolNotPresentAtAnchor,
         };
-    };
+    }
+    if anchor_candidates.len() > 1 {
+        return Resolution::Ambiguous {
+            candidates: stable_symbol_ids(anchor_candidates),
+        };
+    }
 
-    resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_key)
+    resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_candidates.remove(0))
 }
 
 fn seed_symbol_history_keys(code: &GraphIndexArtifact, symbol: &str) -> HashSet<SnapshotKey> {
@@ -227,6 +231,33 @@ fn resolve_from_anchor_key(
     }
 }
 
+fn latest_anchor_snapshots(
+    code: &GraphIndexArtifact,
+    graph: &CommitGraph<'_>,
+    stable_symbol_id: &str,
+    anchor: &str,
+) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
+    let Some(anchor_ancestors) = graph.ancestors_of(anchor) else {
+        return Err(ResolutionFailure::AnchorCommitNotIndexed(
+            anchor.to_string(),
+        ));
+    };
+
+    let mut candidates: Vec<_> = code
+        .symbol_snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.key.stable_symbol_id == stable_symbol_id
+                && anchor_ancestors.contains(&snapshot.key.commit)
+        })
+        .map(|snapshot| snapshot.key.clone())
+        .collect();
+    sort_snapshot_keys(&mut candidates, graph);
+    candidates.dedup();
+
+    latest_from_candidates(candidates, graph)
+}
+
 fn latest_reachable_snapshots(
     code: &GraphIndexArtifact,
     graph: &CommitGraph<'_>,
@@ -241,6 +272,13 @@ fn latest_reachable_snapshots(
     sort_snapshot_keys(&mut candidates, graph);
     candidates.dedup();
 
+    latest_from_candidates(candidates, graph)
+}
+
+fn latest_from_candidates(
+    candidates: Vec<SnapshotKey>,
+    graph: &CommitGraph<'_>,
+) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
     let mut latest = Vec::new();
     'candidate: for candidate in &candidates {
         if !graph.contains(&candidate.commit) {
