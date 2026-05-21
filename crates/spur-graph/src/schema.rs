@@ -83,7 +83,11 @@ pub struct GraphIndexArtifact {
     #[serde(default)]
     pub file_manifests: Vec<GraphFileManifestEntry>,
     pub files: Vec<GraphFileArtifact>,
+    #[serde(skip)]
+    pub file_node_ids: Vec<NodeId>,
     pub symbols: Vec<GraphSymbolArtifact>,
+    #[serde(skip)]
+    pub symbol_node_ids: Vec<NodeId>,
     #[serde(default)]
     pub edges: Vec<GraphEdgeArtifact>,
     #[serde(default)]
