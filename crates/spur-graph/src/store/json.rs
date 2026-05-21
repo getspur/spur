@@ -930,6 +930,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
         }
     }
 
+    let mut ambiguous_unresolved = 0usize;
     for bucket in buckets.values_mut() {
         for edge in &mut bucket.edges {
             let Some(target_label) = edge.target_label.as_deref() else {
@@ -942,21 +943,25 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 edge.target_stable_symbol_id = None;
                 continue;
             };
-            let resolved = matches
-                .iter()
-                .map(String::as_str)
-                .min()
-                .expect("matches is non-empty");
             if matches.len() > 1 {
-                tracing::warn!(
+                ambiguous_unresolved += 1;
+                tracing::debug!(
                     target_label = target_label,
                     candidates = matches.len(),
-                    resolved_stable_symbol_id = resolved,
-                    "spur-graph: ambiguous cross-file target_label; resolved to lexicographically smallest stable_symbol_id"
+                    "spur-graph: ambiguous cross-file target_label; leaving unresolved"
                 );
+                edge.target_stable_symbol_id = None;
+            } else {
+                let resolved = matches.first().expect("matches is non-empty");
+                edge.target_stable_symbol_id = Some(resolved.clone());
             }
-            edge.target_stable_symbol_id = Some(resolved.to_string());
         }
+    }
+    if ambiguous_unresolved > 0 {
+        tracing::info!(
+            ambiguous_unresolved,
+            "spur-graph: left ambiguous cross-file edges unresolved"
+        );
     }
 }
 

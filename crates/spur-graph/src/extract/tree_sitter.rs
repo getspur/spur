@@ -187,33 +187,43 @@ impl<'a> FactBuilder<'a> {
     }
 
     fn resolve_pending_edges(&mut self) {
-        let mut by_label: HashMap<String, NodeId> = HashMap::new();
-        let mut ambiguous_labels: HashSet<String> = HashSet::new();
+        let mut singleton_symbols_by_label: HashMap<String, NodeId> = HashMap::new();
+        let mut ambiguous_symbols_by_label: HashMap<String, usize> = HashMap::new();
         for (label, ids) in &self.symbol_index {
-            if let Some(id) = ids.first() {
-                if ids.len() > 1 {
-                    tracing::warn!(
-                        label = %label,
-                        candidates = ids.len(),
-                        "spur-graph: ambiguous symbol; edges to this label resolve to first occurrence only"
-                    );
-                    ambiguous_labels.insert(label.clone());
+            match ids.as_slice() {
+                [id] => {
+                    singleton_symbols_by_label.insert(label.clone(), *id);
                 }
-                by_label.insert(label.clone(), *id);
+                [] => {}
+                _ => {
+                    ambiguous_symbols_by_label.insert(label.clone(), ids.len());
+                }
             }
         }
+        let mut files_by_label: HashMap<String, NodeId> = HashMap::new();
         for node in &self.facts.nodes {
             if node.kind == NodeKind::File {
-                by_label.entry(node.label.clone()).or_insert(node.node_id);
+                files_by_label
+                    .entry(node.label.clone())
+                    .or_insert(node.node_id);
             }
         }
         let pending = std::mem::take(&mut self.pending_edges);
-        let mut ambiguous_hits = 0usize;
+        let mut ambiguous_unresolved = 0usize;
         for edge in pending {
-            if let Some(target) = by_label.get(&edge.target_name).copied() {
-                if ambiguous_labels.contains(&edge.target_name) {
-                    ambiguous_hits += 1;
-                }
+            if let Some(candidates) = ambiguous_symbols_by_label.get(&edge.target_name).copied() {
+                ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = %edge.target_name,
+                    candidates,
+                    "spur-graph: ambiguous pending edge target; leaving unresolved"
+                );
+                self.add_edge(edge.source, None, edge.relation, Some(edge.target_name));
+            } else if let Some(target) = singleton_symbols_by_label
+                .get(&edge.target_name)
+                .copied()
+                .or_else(|| files_by_label.get(&edge.target_name).copied())
+            {
                 if target != edge.source {
                     self.add_edge(
                         edge.source,
@@ -226,10 +236,10 @@ impl<'a> FactBuilder<'a> {
                 self.add_edge(edge.source, None, edge.relation, Some(edge.target_name));
             }
         }
-        if ambiguous_hits > 0 {
-            tracing::warn!(
-                "spur-graph: {} pending edges hit ambiguous symbol labels",
-                ambiguous_hits
+        if ambiguous_unresolved > 0 {
+            tracing::info!(
+                ambiguous_unresolved,
+                "spur-graph: left ambiguous pending edges unresolved"
             );
         }
     }
@@ -544,4 +554,64 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> 
         .strip_prefix(root)
         .with_context(|| format!("`{}` is outside `{}`", path.display(), root.display()))?;
     Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ambiguous_pending_bare_name_edge_remains_unresolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "fn caller() { flush(); }\nfn flush() {}\nmod inner { fn flush() {} }\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let file_id = FileId(builder.next_file_id());
+        let source = builder.add_node(
+            "src/lib.rs",
+            "caller".to_string(),
+            "caller".to_string(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        builder.add_node(
+            "src/lib.rs",
+            "flush".to_string(),
+            "flush".to_string(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        builder.add_node(
+            "src/lib.rs",
+            "flush".to_string(),
+            "inner::flush".to_string(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "flush".to_string(),
+            relation: RelationKind::Calls,
+        });
+
+        builder.resolve_pending_edges();
+
+        assert_eq!(builder.facts.edges.len(), 1);
+        let edge = &builder.facts.edges[0];
+        assert_eq!(edge.source_node_id, source);
+        assert_eq!(edge.target_node_id, None);
+        assert_eq!(edge.target_label.as_deref(), Some("flush"));
+    }
 }
