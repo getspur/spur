@@ -31,6 +31,7 @@ const EXPECTED: &[&str] = &[
     "code_resolve",
     "code_file_symbols",
     "code_symbol_info",
+    "code_read_symbol",
     "code_callers",
     "code_callees",
     "code_search",

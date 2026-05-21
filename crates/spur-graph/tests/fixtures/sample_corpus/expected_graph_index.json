@@ -3,12 +3,12 @@
     "graph_index_version": "spur-graph-phase2"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "dcb7dadd9f833aa61cd8e7fb7ebeb2da2d5ba2049054d297fb6ab1c9fddbe273",
+  "graph_content_hash": "36018835651609826cd76fe200f7a85f56ee68fc7eb83114ef98593d8d12e005",
   "file_manifests": [
     {
       "stable_file_id": "c5ed2ae8f633f186",
       "path": "src/lib.rs",
-      "content_oid": "33e011689a90d0ba3e3fb67a9d560efd2ed31ae2",
+      "content_oid": "b5e687746be21a63e977c97830ffdbeb72a5650a",
       "node_ids": [
         1,
         2,
@@ -17,7 +17,11 @@
         5,
         6,
         7,
-        8
+        8,
+        9,
+        10,
+        11,
+        12
       ]
     },
     {
@@ -25,11 +29,11 @@
       "path": "src/utils.rs",
       "content_oid": "cf63867bec87bd095c26bb4b345f8606406c475e",
       "node_ids": [
-        9,
-        10,
-        11,
-        12,
-        13
+        13,
+        14,
+        15,
+        16,
+        17
       ]
     }
   ],
@@ -147,15 +151,83 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "1e4b6ed218256711",
+      "stable_symbol_id": "1f994108068ce029",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        218,
+        232
+      ],
+      "line_range": [
+        20,
+        20
+      ],
+      "entity_name": "run",
+      "qualified_name": "Runner::run",
+      "symbol_kind": "method",
+      "anchor_hash": "8146732795453583019",
+      "enclosing_scope": "Runner"
+    },
+    {
+      "stable_symbol_id": "34e0c16cee0a189b",
       "file_path": "src/lib.rs",
       "byte_range": [
         236,
-        292
+        293
       ],
       "line_range": [
         23,
         25
+      ],
+      "entity_name": "run_dyn",
+      "qualified_name": "run_dyn",
+      "symbol_kind": "function",
+      "anchor_hash": "6626803897514333210",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "10f44ec03d2dbcd8",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        295,
+        344
+      ],
+      "line_range": [
+        27,
+        29
+      ],
+      "entity_name": "normalize",
+      "qualified_name": "normalize",
+      "symbol_kind": "function",
+      "anchor_hash": "2956309675533488971",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "501ddd2ec286c710",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        346,
+        422
+      ],
+      "line_range": [
+        31,
+        33
+      ],
+      "entity_name": "apply",
+      "qualified_name": "apply",
+      "symbol_kind": "function",
+      "anchor_hash": "16888541125026546248",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "1e4b6ed218256711",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        424,
+        480
+      ],
+      "line_range": [
+        35,
+        37
       ],
       "entity_name": "build_app",
       "qualified_name": "build_app",
@@ -239,7 +311,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "2a74ff1fb30c8d9d",
@@ -247,7 +320,44 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "34e0c16cee0a189b",
+      "target_stable_symbol_id": null,
+      "target_label": "run",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "34e0c16cee0a189b",
+      "target_stable_symbol_id": "1f994108068ce029",
+      "target_label": "Runner::run",
+      "relation": "calls",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "calls_dyn"
+    },
+    {
+      "source_stable_symbol_id": "501ddd2ec286c710",
+      "target_stable_symbol_id": null,
+      "target_label": "map",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "501ddd2ec286c710",
+      "target_stable_symbol_id": "10f44ec03d2dbcd8",
+      "target_label": "normalize",
+      "relation": "references",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_hof"
     },
     {
       "source_stable_symbol_id": "9776f1a0b79c3f6f",
@@ -255,7 +365,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "9776f1a0b79c3f6f",
@@ -263,7 +374,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "9776f1a0b79c3f6f",
@@ -271,7 +383,17 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "98e9d54ac8d82589",
+      "target_stable_symbol_id": "1f994108068ce029",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
@@ -279,7 +401,17 @@
       "target_label": "Helper",
       "relation": "imports",
       "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "c5ed2ae8f633f186",
+      "target_stable_symbol_id": "10f44ec03d2dbcd8",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
@@ -287,7 +419,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
@@ -295,7 +428,26 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "c5ed2ae8f633f186",
+      "target_stable_symbol_id": "34e0c16cee0a189b",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "c5ed2ae8f633f186",
+      "target_stable_symbol_id": "501ddd2ec286c710",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
@@ -303,7 +455,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
@@ -311,7 +464,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
@@ -319,7 +473,8 @@
       "target_label": "helper",
       "relation": "imports",
       "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
@@ -327,15 +482,17 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c743005b36750f94",
       "target_stable_symbol_id": "bfc447c09b3027cf",
       "target_label": "helper",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "ebd7aaa1f390e384",
@@ -343,7 +500,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     }
   ],
   "tombstones": []

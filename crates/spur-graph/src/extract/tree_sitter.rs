@@ -8,15 +8,15 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::discovery::discover_files;
 use crate::extract::languages::{
-    all_supported_extensions, emit_definitions, emit_edges, language_registry, LanguageConfig,
-    LanguageDescriptor,
+    all_supported_extensions, emit_definitions, emit_edges, emit_rust_dyn_trait_edges,
+    language_registry, LanguageConfig, LanguageDescriptor,
 };
 use crate::extract::markdown::extract_markdown_file;
 use crate::extract::mcp_tools::emit_mcp_tools;
 use crate::extract::GraphFacts;
 use crate::{
-    Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphNode, NodeId, NodeKind, RelationKind,
-    RunId, SourceSpan, SpanId,
+    Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphEdgeKind, GraphNode, NodeId, NodeKind,
+    RelationKind, RunId, SourceSpan, SpanId,
 };
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ pub(crate) struct PendingEdge {
     pub(crate) source: NodeId,
     pub(crate) target_name: String,
     pub(crate) relation: RelationKind,
+    pub(crate) edge_kind: Option<GraphEdgeKind>,
 }
 
 #[derive(Debug)]
@@ -36,8 +37,9 @@ pub(crate) struct FactBuilder<'a> {
     next_span: u64,
     pub(crate) pending_edges: Vec<PendingEdge>,
     symbol_index: BTreeMap<String, Vec<NodeId>>,
-    edge_index: HashSet<(NodeId, Option<NodeId>, RelationKind, Option<String>)>,
+    edge_index: HashSet<EdgeDedupKey>,
     stable_key_ordinals: HashMap<(String, String, &'static str), u32>,
+    qualified_symbol_index: BTreeMap<String, Vec<NodeId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,13 @@ pub(crate) struct LanguageFileGroup {
 }
 
 type GroupAccumulator = BTreeMap<&'static str, (fn() -> LanguageConfig, Vec<PathBuf>)>;
+type EdgeDedupKey = (
+    NodeId,
+    Option<NodeId>,
+    RelationKind,
+    Option<String>,
+    Option<GraphEdgeKind>,
+);
 
 impl<'a> FactBuilder<'a> {
     fn new(root: &'a Path) -> Self {
@@ -74,6 +83,7 @@ impl<'a> FactBuilder<'a> {
             symbol_index: BTreeMap::new(),
             edge_index: HashSet::new(),
             stable_key_ordinals: HashMap::new(),
+            qualified_symbol_index: BTreeMap::new(),
         }
     }
 
@@ -145,6 +155,10 @@ impl<'a> FactBuilder<'a> {
         });
         if !matches!(kind, NodeKind::File | NodeKind::McpTool) {
             self.symbol_index.entry(label).or_default().push(node_id);
+            self.qualified_symbol_index
+                .entry(fqn)
+                .or_default()
+                .push(node_id);
         }
         node_id
     }
@@ -156,32 +170,35 @@ impl<'a> FactBuilder<'a> {
         relation: RelationKind,
         target_label: Option<String>,
     ) {
+        self.add_edge_with_kind(source, target, relation, target_label, None);
+    }
+
+    pub(crate) fn add_edge_with_kind(
+        &mut self,
+        source: NodeId,
+        target: Option<NodeId>,
+        relation: RelationKind,
+        target_label: Option<String>,
+        edge_kind: Option<GraphEdgeKind>,
+    ) {
         if !self
             .edge_index
-            .insert((source, target, relation, target_label.clone()))
+            .insert((source, target, relation, target_label.clone(), edge_kind))
         {
             return;
         }
         let edge_id = EdgeId(self.next_edge);
         self.next_edge += 1;
+        let (confidence, confidence_score) = confidence_for_edge(relation, edge_kind);
         self.facts.edges.push(GraphEdge {
             edge_id,
             source_node_id: source,
             target_node_id: target,
             relation,
             target_label,
-            confidence: match relation {
-                RelationKind::Contains => Confidence::SyntaxExact,
-                RelationKind::Calls | RelationKind::Imports | RelationKind::Links => {
-                    Confidence::Heuristic
-                }
-                _ => Confidence::Heuristic,
-            },
-            confidence_score: match relation {
-                RelationKind::Contains => 1.0,
-                RelationKind::Calls | RelationKind::Imports | RelationKind::Links => 0.8,
-                _ => 0.5,
-            },
+            confidence,
+            confidence_score,
+            edge_kind,
             evidence_id: EvidenceId(edge_id.get()),
             directed: true,
         });
@@ -215,10 +232,63 @@ impl<'a> FactBuilder<'a> {
             .iter()
             .map(|node| (node.node_id, node.kind))
             .collect();
+        let qualified_symbols_by_name = qualified_symbols_by_name(&self.facts);
         let pending = std::mem::take(&mut self.pending_edges);
         let mut ambiguous_unresolved = 0usize;
         for edge in pending {
-            if edge.relation == RelationKind::References {
+            if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
+                let mut candidates = Vec::new();
+                if let Some(indexed) = self.qualified_symbol_index.get(&edge.target_name) {
+                    candidates.extend(indexed.iter().copied());
+                }
+                if let Some(indexed) = qualified_symbols_by_name.get(&edge.target_name) {
+                    candidates.extend(indexed.iter().copied());
+                }
+                candidates.extend(trait_method_candidates(&self.facts, &edge.target_name));
+                candidates.sort_by_key(|id| id.get());
+                candidates.dedup();
+                match candidates.as_slice() {
+                    [target]
+                        if *target != edge.source
+                            && matches!(
+                                node_kind_by_id.get(target).copied(),
+                                Some(NodeKind::Method)
+                            ) =>
+                    {
+                        self.add_edge_with_kind(
+                            edge.source,
+                            Some(*target),
+                            edge.relation,
+                            Some(edge.target_name),
+                            edge.edge_kind,
+                        );
+                    }
+                    candidates if candidates.len() > 1 => {
+                        ambiguous_unresolved += 1;
+                        tracing::debug!(
+                            target_label = %edge.target_name,
+                            candidates = candidates.len(),
+                            "spur-graph: ambiguous dyn trait call target; leaving unresolved"
+                        );
+                        self.add_edge_with_kind(
+                            edge.source,
+                            None,
+                            edge.relation,
+                            Some(edge.target_name),
+                            edge.edge_kind,
+                        );
+                    }
+                    _ => {
+                        self.add_edge_with_kind(
+                            edge.source,
+                            None,
+                            edge.relation,
+                            Some(edge.target_name),
+                            edge.edge_kind,
+                        );
+                    }
+                }
+            } else if edge.relation == RelationKind::References {
                 if let Some(target) = singleton_symbols_by_label.get(&edge.target_name).copied() {
                     if target != edge.source
                         && matches!(
@@ -226,11 +296,12 @@ impl<'a> FactBuilder<'a> {
                             Some(NodeKind::Function | NodeKind::Method)
                         )
                     {
-                        self.add_edge(
+                        self.add_edge_with_kind(
                             edge.source,
                             Some(target),
                             edge.relation,
                             Some(edge.target_name),
+                            edge.edge_kind,
                         );
                     }
                 }
@@ -243,22 +314,35 @@ impl<'a> FactBuilder<'a> {
                     candidates,
                     "spur-graph: ambiguous pending edge target; leaving unresolved"
                 );
-                self.add_edge(edge.source, None, edge.relation, Some(edge.target_name));
+                self.add_edge_with_kind(
+                    edge.source,
+                    None,
+                    edge.relation,
+                    Some(edge.target_name),
+                    edge.edge_kind,
+                );
             } else if let Some(target) = singleton_symbols_by_label
                 .get(&edge.target_name)
                 .copied()
                 .or_else(|| files_by_label.get(&edge.target_name).copied())
             {
                 if target != edge.source {
-                    self.add_edge(
+                    self.add_edge_with_kind(
                         edge.source,
                         Some(target),
                         edge.relation,
                         Some(edge.target_name),
+                        edge.edge_kind,
                     );
                 }
             } else {
-                self.add_edge(edge.source, None, edge.relation, Some(edge.target_name));
+                self.add_edge_with_kind(
+                    edge.source,
+                    None,
+                    edge.relation,
+                    Some(edge.target_name),
+                    edge.edge_kind,
+                );
             }
         }
         if ambiguous_unresolved > 0 {
@@ -267,6 +351,20 @@ impl<'a> FactBuilder<'a> {
                 "spur-graph: left ambiguous pending edges unresolved"
             );
         }
+    }
+}
+
+fn confidence_for_edge(
+    relation: RelationKind,
+    edge_kind: Option<GraphEdgeKind>,
+) -> (Confidence, f32) {
+    if edge_kind == Some(GraphEdgeKind::CallsDyn) {
+        return (Confidence::Heuristic, 0.8);
+    }
+    match relation {
+        RelationKind::Contains | RelationKind::Calls => (Confidence::SyntaxExact, 1.0),
+        RelationKind::Imports | RelationKind::Links => (Confidence::Heuristic, 0.8),
+        _ => (Confidence::Heuristic, 0.5),
     }
 }
 
@@ -433,6 +531,9 @@ fn extract_file(
             &edge_captures,
         );
     }
+    if language_label == "rust" {
+        emit_rust_dyn_trait_edges(builder, file_node, source, &definitions, root_node);
+    }
     Ok(())
 }
 
@@ -563,12 +664,33 @@ pub(crate) fn run_query<'tree>(
     let mut hits = Vec::new();
     while let Some((query_match, capture_index)) = captures.next() {
         let capture = query_match.captures[*capture_index];
+        if is_string_literal_context(capture.node) {
+            continue;
+        }
         hits.push(CaptureHit {
             name: capture_names[capture.index as usize].to_string(),
             node: capture.node,
         });
     }
     hits
+}
+
+fn is_string_literal_context(node: Node<'_>) -> bool {
+    let mut current = Some(node);
+    while let Some(node) = current {
+        if matches!(
+            node.kind(),
+            "string_literal"
+                | "raw_string_literal"
+                | "string_content"
+                | "interpreted_string_literal"
+                | "raw_string_literal_content"
+        ) {
+            return true;
+        }
+        current = node.parent();
+    }
+    false
 }
 
 fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, ordinal: u32) -> String {
@@ -585,6 +707,113 @@ fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, ordinal: u32) -> S
         "{:016x}",
         u64::from_be_bytes(digest[..8].try_into().unwrap())
     )
+}
+
+fn qualified_symbols_by_name(facts: &GraphFacts) -> HashMap<String, Vec<NodeId>> {
+    let nodes_by_id: HashMap<_, _> = facts
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node))
+        .collect();
+    let mut parent_by_target = HashMap::new();
+    for edge in &facts.edges {
+        if edge.relation != RelationKind::Contains {
+            continue;
+        }
+        let Some(target) = edge.target_node_id else {
+            continue;
+        };
+        parent_by_target
+            .entry(target)
+            .or_insert(edge.source_node_id);
+    }
+
+    let mut index: HashMap<String, Vec<NodeId>> = HashMap::new();
+    for node in &facts.nodes {
+        if matches!(node.kind, NodeKind::File | NodeKind::McpTool) {
+            continue;
+        }
+        let qualified_name = qualified_node_name(node, &nodes_by_id, &parent_by_target);
+        index.entry(qualified_name).or_default().push(node.node_id);
+    }
+    index
+}
+
+fn qualified_node_name(
+    node: &GraphNode,
+    nodes_by_id: &HashMap<NodeId, &GraphNode>,
+    parent_by_target: &HashMap<NodeId, NodeId>,
+) -> String {
+    let mut segments = vec![qualified_node_segment(node)];
+    let mut current = node;
+    let mut seen = HashSet::new();
+    seen.insert(node.node_id);
+
+    while let Some(parent) = parent_by_target
+        .get(&current.node_id)
+        .and_then(|id| nodes_by_id.get(id).copied())
+    {
+        if !seen.insert(parent.node_id) || parent.kind == NodeKind::File {
+            break;
+        }
+        segments.push(qualified_node_segment(parent));
+        current = parent;
+    }
+
+    segments.reverse();
+    segments.join("::")
+}
+
+fn qualified_node_segment(node: &GraphNode) -> String {
+    match node.kind {
+        NodeKind::Impl => format!(
+            "impl {}",
+            node.label.strip_prefix("impl ").unwrap_or(&node.label)
+        ),
+        _ => node
+            .label
+            .strip_prefix("impl ")
+            .unwrap_or(&node.label)
+            .to_string(),
+    }
+}
+
+fn trait_method_candidates(facts: &GraphFacts, target_name: &str) -> Vec<NodeId> {
+    let Some((trait_name, method_name)) = target_name.rsplit_once("::") else {
+        return Vec::new();
+    };
+    let nodes_by_id: HashMap<_, _> = facts
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node))
+        .collect();
+    let mut parent_by_target = HashMap::new();
+    for edge in &facts.edges {
+        if edge.relation != RelationKind::Contains {
+            continue;
+        }
+        let Some(target) = edge.target_node_id else {
+            continue;
+        };
+        parent_by_target
+            .entry(target)
+            .or_insert(edge.source_node_id);
+    }
+
+    facts
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Method && node.label == method_name)
+        .filter_map(|node| {
+            let parent = parent_by_target
+                .get(&node.node_id)
+                .and_then(|id| nodes_by_id.get(id).copied())?;
+            (parent.kind == NodeKind::Trait
+                && (parent.label == trait_name
+                    || qualified_node_name(parent, &nodes_by_id, &parent_by_target) == trait_name))
+                .then_some(node.node_id)
+        })
+        .collect()
 }
 
 pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
@@ -642,6 +871,7 @@ mod tests {
             source,
             target_name: "flush".to_string(),
             relation: RelationKind::Calls,
+            edge_kind: None,
         });
 
         builder.resolve_pending_edges();
