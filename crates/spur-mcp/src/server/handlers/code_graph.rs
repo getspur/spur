@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Component, Path};
 use std::time::Duration;
@@ -5,11 +6,11 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use spur_graph::{
-    bounded_subgraph, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
+    bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
     resolve_selector, resolve_worktree_root_from, search_symbols, CalleeRecord, CallerRecord,
     CandidateRow, GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer,
     GraphSymbolArtifact, SearchFilters, SearchMode, SearchOptions, SelectorResolution,
-    CODE_SYMBOL_URI_PREFIX,
+    SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -18,6 +19,12 @@ use super::McpCallbackServer;
 use super::*;
 
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
+const DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 40;
+const MIN_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 1;
+const MAX_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 400;
+const DEFAULT_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 120;
+const MIN_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1;
+const MAX_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1200;
 const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
@@ -265,9 +272,9 @@ fn code_subgraph_with_artifact(
     artifact: &GraphIndexArtifact,
 ) -> Result<Value, McpHandlerError> {
     let request = code_traversal_request(args)?;
-    let symbol_id = match resolve_code_selector(args, artifact)? {
-        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
-        CodeSelectorResolution::Ambiguous(candidates) => {
+    let root_ids = match code_subgraph_root_ids(args, artifact)? {
+        CodeSubgraphRoots::RootIds(root_ids) => root_ids,
+        CodeSubgraphRoots::Ambiguous(candidates) => {
             return Ok(ambiguous_response(candidates));
         }
     };
@@ -288,31 +295,44 @@ fn code_subgraph_with_artifact(
         .unwrap_or("json");
     let edge_kinds = parse_edge_kinds(args)?;
     let edge_filter = edge_kinds.as_deref();
-    let view = bounded_subgraph(
+    let budget = code_subgraph_budget(args)?;
+    let root_refs = root_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let view = bounded_subgraph_with_budget(
         artifact,
-        &symbol_id,
+        &root_refs,
         radius,
         edge_filter,
         request.include_unresolved,
+        budget.budget,
     );
 
     match format {
         "json" => {
-            let mut metadata = json!({ "radius": radius });
+            let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
             }
             Ok(json!({
                 "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
                 "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
+                "truncated_frontier": view.truncated_frontier,
                 "include_unresolved": request.include_unresolved,
                 "metadata": metadata,
             }))
         }
-        "mermaid" => Ok(json!({
-            "mermaid": mermaid_subgraph(&view.nodes, &view.edges),
-            "include_unresolved": request.include_unresolved,
-        })),
+        "mermaid" => {
+            let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
+            if let Some(warning) = warning {
+                metadata["warning"] = Value::String(warning);
+            }
+            let mermaid = mermaid_subgraph(&view.nodes, &view.edges);
+            Ok(json!({
+                "mermaid": mermaid,
+                "truncated_frontier": view.truncated_frontier,
+                "include_unresolved": request.include_unresolved,
+                "metadata": metadata,
+            }))
+        }
         other => Err(McpHandlerError::InvalidParams(format!(
             "invalid format `{other}`; expected `json` or `mermaid`"
         ))),
@@ -577,6 +597,25 @@ struct CodeTraversalRequest {
 }
 
 #[derive(Debug)]
+enum CodeSubgraphRoots {
+    RootIds(Vec<String>),
+    Ambiguous(Vec<CandidateRow>),
+}
+
+#[derive(Debug)]
+struct CodeSubgraphBudgetRequest {
+    budget: SubgraphBudget,
+    requested_max_nodes: Option<Value>,
+    requested_max_edges: Option<Value>,
+}
+
+#[derive(Debug)]
+struct ClampedUsizeArg {
+    value: usize,
+    requested_value: Option<Value>,
+}
+
+#[derive(Debug)]
 struct LimitArg {
     limit: usize,
     requested_limit: Option<Value>,
@@ -618,6 +657,168 @@ fn code_traversal_request(args: &Value) -> Result<CodeTraversalRequest, McpHandl
     Ok(CodeTraversalRequest {
         include_unresolved: bool_arg(args, "include_unresolved")?.unwrap_or(false),
     })
+}
+
+fn code_subgraph_root_ids(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<CodeSubgraphRoots, McpHandlerError> {
+    if let Some(start_nodes) = start_nodes_arg(args)? {
+        if string_arg(args, "selector")?.is_some() || string_arg(args, "symbol")?.is_some() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'start_nodes' is mutually exclusive with 'selector' and 'symbol'".into(),
+            ));
+        }
+        for node_id in &start_nodes {
+            ensure_symbol_id_exists(artifact, node_id)?;
+        }
+        return Ok(CodeSubgraphRoots::RootIds(start_nodes));
+    }
+
+    match resolve_code_selector(args, artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => {
+            Ok(CodeSubgraphRoots::RootIds(vec![symbol_id]))
+        }
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            Ok(CodeSubgraphRoots::Ambiguous(candidates))
+        }
+    }
+}
+
+fn start_nodes_arg(args: &Value) -> Result<Option<Vec<String>>, McpHandlerError> {
+    let Some(value) = args.get("start_nodes") else {
+        return Ok(None);
+    };
+    let nodes = value.as_array().ok_or_else(|| {
+        McpHandlerError::InvalidParams("field 'start_nodes' must be an array of strings".into())
+    })?;
+    if nodes.is_empty() {
+        return Err(McpHandlerError::InvalidParams(
+            "field 'start_nodes' must contain at least one node id".into(),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut start_nodes = Vec::new();
+    for node in nodes {
+        let node = node.as_str().ok_or_else(|| {
+            McpHandlerError::InvalidParams("field 'start_nodes' must be an array of strings".into())
+        })?;
+        if node.trim().is_empty() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'start_nodes' must not contain empty node ids".into(),
+            ));
+        }
+        let node_id = missing_symbol_label(node);
+        if node_id.trim().is_empty() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'start_nodes' must not contain empty node ids".into(),
+            ));
+        }
+        let node_id = node_id.to_string();
+        if seen.insert(node_id.clone()) {
+            start_nodes.push(node_id);
+        }
+    }
+
+    Ok(Some(start_nodes))
+}
+
+fn ensure_symbol_id_exists(
+    artifact: &GraphIndexArtifact,
+    symbol_id: &str,
+) -> Result<(), McpHandlerError> {
+    if artifact
+        .symbols
+        .iter()
+        .any(|symbol| symbol.stable_symbol_id == symbol_id)
+    {
+        Ok(())
+    } else {
+        Err(McpHandlerError::NotFound(format!(
+            "symbol {} not found in graph artifact",
+            missing_symbol_label(symbol_id)
+        )))
+    }
+}
+
+fn code_subgraph_budget(args: &Value) -> Result<CodeSubgraphBudgetRequest, McpHandlerError> {
+    let max_nodes = clamped_usize_arg(
+        args,
+        "max_nodes",
+        DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES,
+        MIN_MCP_CODE_SUBGRAPH_MAX_NODES,
+        MAX_MCP_CODE_SUBGRAPH_MAX_NODES,
+    )?;
+    let max_edges = clamped_usize_arg(
+        args,
+        "max_edges",
+        DEFAULT_MCP_CODE_SUBGRAPH_MAX_EDGES,
+        MIN_MCP_CODE_SUBGRAPH_MAX_EDGES,
+        MAX_MCP_CODE_SUBGRAPH_MAX_EDGES,
+    )?;
+
+    Ok(CodeSubgraphBudgetRequest {
+        budget: SubgraphBudget {
+            max_nodes: max_nodes.value,
+            max_edges: max_edges.value,
+        },
+        requested_max_nodes: max_nodes.requested_value,
+        requested_max_edges: max_edges.requested_value,
+    })
+}
+
+fn clamped_usize_arg(
+    args: &Value,
+    field: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<ClampedUsizeArg, McpHandlerError> {
+    let Some(value) = args.get(field) else {
+        return Ok(ClampedUsizeArg {
+            value: default,
+            requested_value: None,
+        });
+    };
+    if let Some(limit) = value.as_i64() {
+        let clamped = limit.clamp(min as i64, max as i64);
+        return Ok(ClampedUsizeArg {
+            value: clamped as usize,
+            requested_value: (limit != clamped).then(|| json!(limit)),
+        });
+    }
+    if let Some(limit) = value.as_u64() {
+        let clamped = limit.clamp(min as u64, max as u64);
+        return Ok(ClampedUsizeArg {
+            value: clamped as usize,
+            requested_value: (limit != clamped).then(|| json!(limit)),
+        });
+    }
+
+    Err(McpHandlerError::InvalidParams(format!(
+        "field '{field}' must be an integer"
+    )))
+}
+
+fn code_subgraph_metadata(
+    radius: u8,
+    truncated: bool,
+    budget: &CodeSubgraphBudgetRequest,
+) -> Value {
+    let mut metadata = json!({
+        "radius": radius,
+        "max_nodes": budget.budget.max_nodes,
+        "max_edges": budget.budget.max_edges,
+        "truncated": truncated,
+    });
+    if let Some(requested_max_nodes) = &budget.requested_max_nodes {
+        metadata["requested_max_nodes"] = requested_max_nodes.clone();
+    }
+    if let Some(requested_max_edges) = &budget.requested_max_edges {
+        metadata["requested_max_edges"] = requested_max_edges.clone();
+    }
+    metadata
 }
 
 fn query_arg(args: &Value) -> Result<String, McpHandlerError> {
@@ -1322,6 +1523,51 @@ mod tests {
         .expect("write artifact");
     }
 
+    fn write_wide_subgraph_artifact(dir: &TempDir, child_count: usize, edge_count: usize) {
+        let child_ids = (0..child_count)
+            .map(|index| format!("wide-child-{index:03}"))
+            .collect::<Vec<_>>();
+        let mut symbols = vec![symbol(
+            "wide-root",
+            "src/wide.rs",
+            [1, 10],
+            "wide_root",
+            "wide_root",
+        )];
+        symbols.extend(child_ids.iter().enumerate().map(|(index, id)| {
+            symbol(
+                id,
+                "src/wide.rs",
+                [20 + index, 20 + index],
+                &format!("wide_child_{index:03}"),
+                &format!("wide_child_{index:03}"),
+            )
+        }));
+        let edges = (0..edge_count)
+            .map(|index| edge("wide-root", &child_ids[index % child_ids.len()]))
+            .collect::<Vec<_>>();
+
+        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
+        std::fs::write(
+            dir.path().join(".spur/graph-index.json"),
+            serde_json::to_string_pretty(&json!({
+                "header": {
+                    "graph_index_version": "test"
+                },
+                "manifest_version": "test",
+                "graph_content_hash": "wide-test",
+                "files": [
+                    { "stable_file_id": "file-src-wide", "file_path": "src/wide.rs" }
+                ],
+                "symbols": symbols,
+                "edges": edges,
+                "tombstones": []
+            }))
+            .expect("encode artifact"),
+        )
+        .expect("write artifact");
+    }
+
     fn symbol(
         id: &str,
         file_path: &str,
@@ -1980,7 +2226,133 @@ mod tests {
             body["metadata"]["warning"],
             "radius 9 exceeds max 3; clamped to 3"
         );
+        assert_eq!(body["metadata"]["max_nodes"], 40);
+        assert_eq!(body["metadata"]["max_edges"], 120);
+        assert_eq!(body["metadata"]["truncated"], false);
+        assert_eq!(body["truncated_frontier"], json!([]));
         assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_enforces_default_node_budget() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_wide_subgraph_artifact(&dir, 45, 45);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(
+                Value::from(1),
+                json!({ "symbol": "graph://symbol/wide-root", "radius": 1 }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["max_nodes"], 40);
+        assert_eq!(body["metadata"]["max_edges"], 120);
+        assert_eq!(body["metadata"]["truncated"], true);
+        assert_eq!(body["nodes"].as_array().expect("nodes").len(), 40);
+        assert_eq!(body["edges"].as_array().expect("edges").len(), 39);
+        assert_eq!(
+            body["truncated_frontier"],
+            json!([
+                "wide-child-039",
+                "wide-child-040",
+                "wide-child-041",
+                "wide-child-042",
+                "wide-child-043",
+                "wide-child-044"
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_enforces_default_edge_budget() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_wide_subgraph_artifact(&dir, 130, 130);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(
+                Value::from(1),
+                json!({
+                    "symbol": "graph://symbol/wide-root",
+                    "radius": 1,
+                    "max_nodes": 400
+                }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["max_nodes"], 400);
+        assert_eq!(body["metadata"]["max_edges"], 120);
+        assert_eq!(body["metadata"]["truncated"], true);
+        assert_eq!(body["nodes"].as_array().expect("nodes").len(), 121);
+        assert_eq!(body["edges"].as_array().expect("edges").len(), 120);
+        assert_eq!(
+            body["truncated_frontier"],
+            json!([
+                "wide-child-120",
+                "wide-child-121",
+                "wide-child-122",
+                "wide-child-123",
+                "wide-child-124",
+                "wide-child-125",
+                "wide-child-126",
+                "wide-child-127",
+                "wide-child-128",
+                "wide-child-129"
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_clamps_and_echoes_requested_budgets() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(
+                Value::from(1),
+                json!({
+                    "symbol": "root",
+                    "radius": 1,
+                    "max_nodes": 999,
+                    "max_edges": 9999
+                }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["max_nodes"], 400);
+        assert_eq!(body["metadata"]["max_edges"], 1200);
+        assert_eq!(body["metadata"]["requested_max_nodes"], 999);
+        assert_eq!(body["metadata"]["requested_max_edges"], 9999);
+        assert_eq!(body["metadata"]["truncated"], false);
+        assert_eq!(body["truncated_frontier"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_returns_empty_frontier_when_untruncated() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(Value::from(1), json!({ "symbol": "root", "radius": 1 }))
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["truncated"], false);
+        assert_eq!(body["truncated_frontier"], json!([]));
     }
 
     #[tokio::test]
