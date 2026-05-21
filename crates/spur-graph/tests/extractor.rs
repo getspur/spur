@@ -74,6 +74,8 @@ fn normalize_for_comparison(
     for entry in &mut artifact.file_manifests {
         entry.node_ids.clear();
     }
+    artifact.file_node_ids.clear();
+    artifact.symbol_node_ids.clear();
     artifact.tombstones.clear();
     artifact
 }
@@ -1108,6 +1110,34 @@ fn artifact_persists_in_file_contains_edges() {
         .iter()
         .find(|symbol| symbol.file_path == "src/lib.rs" && symbol.entity_name == "build_app")
         .expect("build_app symbol");
+    let file_index = artifact
+        .files
+        .iter()
+        .position(|candidate| candidate.stable_file_id == file.stable_file_id)
+        .expect("file node id index");
+    let symbol_index = artifact
+        .symbols
+        .iter()
+        .position(|candidate| candidate.stable_symbol_id == function.stable_symbol_id)
+        .expect("symbol node id index");
+    let expected_file_node_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.stable_key == file.stable_file_id)
+        .expect("file fact node")
+        .node_id;
+    let expected_symbol_node_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.stable_key == function.stable_symbol_id)
+        .expect("symbol fact node")
+        .node_id;
+
+    assert_eq!(artifact.file_node_ids[file_index], expected_file_node_id);
+    assert_eq!(
+        artifact.symbol_node_ids[symbol_index],
+        expected_symbol_node_id
+    );
 
     assert!(artifact.edges.iter().any(|edge| {
         edge.relation == RelationKind::Contains

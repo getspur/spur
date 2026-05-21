@@ -34,7 +34,9 @@ pub fn write_artifact(artifact: &GraphIndexArtifact, path: &Path) -> anyhow::Res
     fs::write(path, json).with_context(|| format!("failed to write `{}`", path.display()))
 }
 
-fn artifact_content_hash_blake3_hex(artifact: &GraphIndexArtifact) -> anyhow::Result<String> {
+pub(crate) fn artifact_content_hash_blake3_hex(
+    artifact: &GraphIndexArtifact,
+) -> anyhow::Result<String> {
     let body = GraphArtifactBodyForHash {
         files: &artifact.files,
         symbols: &artifact.symbols,

@@ -16,7 +16,7 @@ use crate::validation::compute_anchor_hash;
 use crate::{
     git, graph_edge_kind_or_default, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphEdgeKind,
     GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
-    GraphSymbolArtifact, GraphTombstoneEntry, NodeKind, RelationKind, SourceSpan,
+    GraphSymbolArtifact, GraphTombstoneEntry, NodeId, NodeKind, RelationKind, SourceSpan,
 };
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
@@ -62,8 +62,10 @@ pub enum BuildMode {
 #[derive(Debug, Clone)]
 struct FileBucket {
     file: GraphFileArtifact,
+    file_node_id: Option<NodeId>,
     manifest: GraphFileManifestEntry,
     symbols: Vec<GraphSymbolArtifact>,
+    symbol_node_ids: Vec<NodeId>,
     edges: Vec<GraphEdgeArtifact>,
 }
 
@@ -469,22 +471,33 @@ fn buckets_from_facts(
                     continue;
                 }
                 let stable_file_id = node.stable_key.clone();
-                buckets
+                let entry = buckets
                     .entry(node.label.clone())
                     .or_insert_with(|| FileBucket {
                         file: GraphFileArtifact {
                             stable_file_id: stable_file_id.clone(),
                             file_path: node.label.clone(),
                         },
+                        file_node_id: Some(node.node_id),
                         manifest: GraphFileManifestEntry {
-                            stable_file_id,
+                            stable_file_id: stable_file_id.clone(),
                             path: node.label.clone(),
                             content_oid: content_oid_for(current_entries, &node.label),
                             node_ids: vec![node.node_id],
                         },
                         symbols: Vec::new(),
+                        symbol_node_ids: Vec::new(),
                         edges: Vec::new(),
                     });
+                entry.file = GraphFileArtifact {
+                    stable_file_id: stable_file_id.clone(),
+                    file_path: node.label.clone(),
+                };
+                entry.file_node_id = Some(node.node_id);
+                entry.manifest.stable_file_id = stable_file_id;
+                if !entry.manifest.node_ids.contains(&node.node_id) {
+                    entry.manifest.node_ids.push(node.node_id);
+                }
             }
             NodeKind::Module
             | NodeKind::Function
@@ -521,6 +534,7 @@ fn buckets_from_facts(
                             stable_file_id: stable_file_id.clone(),
                             file_path: file_path.clone(),
                         },
+                        file_node_id: None,
                         manifest: GraphFileManifestEntry {
                             stable_file_id,
                             path: file_path.clone(),
@@ -528,10 +542,12 @@ fn buckets_from_facts(
                             node_ids: Vec::new(),
                         },
                         symbols: Vec::new(),
+                        symbol_node_ids: Vec::new(),
                         edges: Vec::new(),
                     }
                 });
                 entry.manifest.node_ids.push(node.node_id);
+                entry.symbol_node_ids.push(node.node_id);
                 entry.symbols.push(symbol);
             }
             _ => {}
@@ -569,6 +585,7 @@ fn buckets_from_facts(
                     stable_file_id: stable_file_id.clone(),
                     file_path: source_file_path.clone(),
                 },
+                file_node_id: None,
                 manifest: GraphFileManifestEntry {
                     stable_file_id,
                     path: source_file_path.clone(),
@@ -576,6 +593,7 @@ fn buckets_from_facts(
                     node_ids: Vec::new(),
                 },
                 symbols: Vec::new(),
+                symbol_node_ids: Vec::new(),
                 edges: Vec::new(),
             }
         });
@@ -592,12 +610,7 @@ fn buckets_from_facts(
 
     for bucket in buckets.values_mut() {
         bucket.manifest.node_ids.sort_by_key(|id| id.get());
-        bucket.symbols.sort_by(|a, b| {
-            a.byte_range
-                .cmp(&b.byte_range)
-                .then(a.entity_name.cmp(&b.entity_name))
-                .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
-        });
+        sort_bucket_symbols(bucket);
         bucket
             .edges
             .sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
@@ -744,11 +757,25 @@ fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, File
     }
 
     let mut file_by_path = HashMap::new();
+    let mut file_node_id_by_path = HashMap::new();
     for file in &artifact.files {
         file_by_path.entry(file.file_path.as_str()).or_insert(file);
     }
+    if artifact.file_node_ids.len() == artifact.files.len() {
+        for (file, node_id) in artifact.files.iter().zip(&artifact.file_node_ids) {
+            file_node_id_by_path
+                .entry(file.file_path.as_str())
+                .or_insert(*node_id);
+        }
+    }
 
     let mut symbols_by_path: HashMap<&str, Vec<&GraphSymbolArtifact>> = HashMap::new();
+    let mut symbol_node_id_by_stable_id = HashMap::new();
+    if artifact.symbol_node_ids.len() == artifact.symbols.len() {
+        for (symbol, node_id) in artifact.symbols.iter().zip(&artifact.symbol_node_ids) {
+            symbol_node_id_by_stable_id.insert(symbol.stable_symbol_id.as_str(), *node_id);
+        }
+    }
     let mut source_paths: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut seen_source_paths = HashSet::new();
     for manifest in manifest_by_path.values() {
@@ -792,10 +819,24 @@ fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, File
                         file_path: manifest.path.clone(),
                     }
                 }),
+                file_node_id: file_node_id_by_path.get(path).copied(),
                 manifest: manifest.clone(),
                 symbols: symbols_by_path
                     .get(path)
                     .map(|symbols| symbols.iter().copied().cloned().collect())
+                    .unwrap_or_default(),
+                symbol_node_ids: symbols_by_path
+                    .get(path)
+                    .map(|symbols| {
+                        symbols
+                            .iter()
+                            .filter_map(|symbol| {
+                                symbol_node_id_by_stable_id
+                                    .get(symbol.stable_symbol_id.as_str())
+                                    .copied()
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 edges: edges_by_path
                     .get(path)
@@ -836,6 +877,7 @@ fn empty_bucket(path: &str, content_oid: &str) -> FileBucket {
             stable_file_id: stable_file_id.clone(),
             file_path: path.to_string(),
         },
+        file_node_id: None,
         manifest: GraphFileManifestEntry {
             stable_file_id,
             path: path.to_string(),
@@ -843,6 +885,7 @@ fn empty_bucket(path: &str, content_oid: &str) -> FileBucket {
             node_ids: Vec::new(),
         },
         symbols: Vec::new(),
+        symbol_node_ids: Vec::new(),
         edges: Vec::new(),
     }
 }
@@ -938,37 +981,62 @@ fn rebuild_from_buckets(
     tombstones: Vec<GraphTombstoneEntry>,
 ) -> GraphIndexArtifact {
     let mut files = Vec::new();
+    let mut file_node_ids = Vec::new();
     let mut symbols = Vec::new();
+    let mut symbol_node_ids = Vec::new();
     let mut manifests = Vec::new();
     let mut edges = Vec::new();
 
     for bucket in buckets.values_mut() {
-        bucket.symbols.sort_by(|a, b| {
-            a.byte_range
-                .cmp(&b.byte_range)
-                .then(a.entity_name.cmp(&b.entity_name))
-                .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
-        });
+        sort_bucket_symbols(bucket);
         bucket.manifest.node_ids.sort_by_key(|id| id.get());
         bucket
             .edges
             .sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
-        files.push(bucket.file.clone());
-        symbols.extend(bucket.symbols.clone());
+        files.push((bucket.file.clone(), bucket.file_node_id));
+        if bucket.symbol_node_ids.len() == bucket.symbols.len() {
+            symbols.extend(
+                bucket
+                    .symbols
+                    .iter()
+                    .cloned()
+                    .zip(bucket.symbol_node_ids.iter().copied().map(Some)),
+            );
+        } else {
+            symbols.extend(bucket.symbols.iter().cloned().map(|symbol| (symbol, None)));
+        }
         manifests.push(bucket.manifest.clone());
         edges.extend(bucket.edges.clone());
     }
 
-    files.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    files.sort_by(|a, b| a.0.file_path.cmp(&b.0.file_path));
     symbols.sort_by(|a, b| {
-        a.file_path
-            .cmp(&b.file_path)
-            .then(a.byte_range.cmp(&b.byte_range))
-            .then(a.entity_name.cmp(&b.entity_name))
-            .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
+        a.0.file_path
+            .cmp(&b.0.file_path)
+            .then(a.0.byte_range.cmp(&b.0.byte_range))
+            .then(a.0.entity_name.cmp(&b.0.entity_name))
+            .then(a.0.stable_symbol_id.cmp(&b.0.stable_symbol_id))
     });
     manifests.sort_by(|a, b| a.path.cmp(&b.path));
     edges.sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
+    let files = files
+        .into_iter()
+        .map(|(file, node_id)| {
+            if let Some(node_id) = node_id {
+                file_node_ids.push(node_id);
+            }
+            file
+        })
+        .collect();
+    let symbols = symbols
+        .into_iter()
+        .map(|(symbol, node_id)| {
+            if let Some(node_id) = node_id {
+                symbol_node_ids.push(node_id);
+            }
+            symbol
+        })
+        .collect();
 
     GraphIndexArtifact {
         header: GraphIndexHeader {
@@ -980,10 +1048,39 @@ fn rebuild_from_buckets(
         graph_content_hash,
         file_manifests: manifests,
         files,
+        file_node_ids,
         symbols,
+        symbol_node_ids,
         edges,
         tombstones,
         diagnostics: Vec::new(),
+    }
+}
+
+fn sort_bucket_symbols(bucket: &mut FileBucket) {
+    if bucket.symbol_node_ids.len() == bucket.symbols.len() {
+        let mut symbols: Vec<_> = bucket
+            .symbols
+            .drain(..)
+            .zip(bucket.symbol_node_ids.drain(..))
+            .collect();
+        symbols.sort_by(|a, b| {
+            a.0.byte_range
+                .cmp(&b.0.byte_range)
+                .then(a.0.entity_name.cmp(&b.0.entity_name))
+                .then(a.0.stable_symbol_id.cmp(&b.0.stable_symbol_id))
+        });
+        for (symbol, node_id) in symbols {
+            bucket.symbols.push(symbol);
+            bucket.symbol_node_ids.push(node_id);
+        }
+    } else {
+        bucket.symbols.sort_by(|a, b| {
+            a.byte_range
+                .cmp(&b.byte_range)
+                .then(a.entity_name.cmp(&b.entity_name))
+                .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
+        });
     }
 }
 
@@ -1278,11 +1375,13 @@ mod tests {
                 manifest("file:b", "src/b.rs"),
             ],
             files: vec![file("file:a", "src/a.rs"), file("file:b", "src/b.rs")],
+            file_node_ids: Vec::new(),
             symbols: vec![
                 symbol("sym:a1", "src/a.rs"),
                 symbol("sym:a2", "src/a.rs"),
                 symbol("sym:b1", "src/b.rs"),
             ],
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("file:a", Some("sym:a1"), RelationKind::Contains),
                 edge("sym:a2", Some("sym:b1"), RelationKind::Calls),
