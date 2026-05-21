@@ -6,9 +6,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use spur_graph::{
     bounded_subgraph, find_callee_edges, find_callers, load_artifact, resolve_selector,
-    resolve_worktree_root_from, CalleeRecord, CandidateRow, GraphEdgeArtifact, GraphIndexArtifact,
-    GraphIndexPointer, GraphSymbolArtifact, RelationKind, SelectorResolution,
-    CODE_SYMBOL_URI_PREFIX,
+    resolve_worktree_root_from, search_symbols, CalleeRecord, CandidateRow, GraphEdgeArtifact,
+    GraphIndexArtifact, GraphIndexPointer, GraphSymbolArtifact, RelationKind, SearchFilters,
+    SearchMode, SearchOptions, SelectorResolution, CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -24,6 +24,10 @@ const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 impl McpCallbackServer {
     pub(crate) async fn handle_code_resolve(&self, id: Value, args: Value) -> JsonRpcResponse {
         code_graph_response(id, code_resolve_response(&args).await).await
+    }
+
+    pub(crate) async fn handle_code_search(&self, id: Value, args: Value) -> JsonRpcResponse {
+        code_graph_response(id, code_search_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_file_symbols(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -51,6 +55,42 @@ pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError>
     let artifact = load_graph_artifact_for_request()?;
     let body = code_resolve_with_artifact(args, &artifact)?;
     Ok(with_graph_metadata(&artifact, body).await)
+}
+
+pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
+    let artifact = load_graph_artifact_for_request()?;
+    let body = code_search_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
+}
+
+async fn code_search_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_search_with_artifact(args, artifact)).await
+}
+
+fn code_search_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
+    let options = code_search_options(args)?;
+    let result = search_symbols(artifact, &options);
+    let candidates = result
+        .candidates
+        .into_iter()
+        .map(candidate_row_for_symbol)
+        .map(candidate_row)
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "query": options.query,
+        "mode": search_mode_str(options.mode),
+        "symbol_kind": options.filters.symbol_kind,
+        "file": options.filters.file,
+        "file_glob": options.filters.file_glob,
+        "limit": options.limit,
+        "total_matches": result.total_matches,
+        "truncated": result.truncated,
+        "candidates": candidates,
+    }))
 }
 
 async fn code_resolve_response(args: &Value) -> CodeGraphResult {
@@ -492,12 +532,108 @@ fn file_arg(args: &Value) -> Result<&str, McpHandlerError> {
         .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'file'".into()))
 }
 
-fn validate_file_path_arg(file: &str) -> Result<String, McpHandlerError> {
-    let path = Path::new(file);
-    if path.is_absolute() {
+fn code_search_options(args: &Value) -> Result<SearchOptions, McpHandlerError> {
+    let query = query_arg(args)?;
+    let mode = search_mode_arg(args)?;
+    let symbol_kind = string_arg(args, "symbol_kind")?.map(str::to_string);
+    let file = string_arg(args, "file")?
+        .map(validate_file_path_arg)
+        .transpose()?;
+    let file_glob = string_arg(args, "file_glob")?
+        .map(validate_file_glob_arg)
+        .transpose()?;
+    if file.is_some() && file_glob.is_some() {
         return Err(McpHandlerError::InvalidParams(
-            "field 'file' must be a worktree-relative path".into(),
+            "fields 'file' and 'file_glob' are mutually exclusive".into(),
         ));
+    }
+    let limit = limit_arg(args)?;
+
+    Ok(SearchOptions {
+        query,
+        mode,
+        filters: SearchFilters {
+            symbol_kind,
+            file,
+            file_glob,
+        },
+        limit,
+    })
+}
+
+fn query_arg(args: &Value) -> Result<String, McpHandlerError> {
+    let value = args
+        .get("query")
+        .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'query'".into()))?;
+    let query = value
+        .as_str()
+        .ok_or_else(|| McpHandlerError::InvalidParams("field 'query' must be a string".into()))?
+        .trim();
+    if query.is_empty() {
+        return Err(McpHandlerError::InvalidParams(
+            "field 'query' must not be empty".into(),
+        ));
+    }
+    Ok(query.to_string())
+}
+
+fn search_mode_arg(args: &Value) -> Result<SearchMode, McpHandlerError> {
+    let Some(value) = args.get("mode") else {
+        return Ok(SearchMode::Substring);
+    };
+    match value.as_str() {
+        Some("exact") => Ok(SearchMode::Exact),
+        Some("prefix") => Ok(SearchMode::Prefix),
+        Some("substring") => Ok(SearchMode::Substring),
+        Some(other) => Err(McpHandlerError::InvalidParams(format!(
+            "invalid mode `{other}`; expected `exact`, `prefix`, or `substring`"
+        ))),
+        None => Err(McpHandlerError::InvalidParams(
+            "field 'mode' must be a string".into(),
+        )),
+    }
+}
+
+fn limit_arg(args: &Value) -> Result<usize, McpHandlerError> {
+    let Some(value) = args.get("limit") else {
+        return Ok(20);
+    };
+    if let Some(limit) = value.as_i64() {
+        return Ok(limit.clamp(1, 200) as usize);
+    }
+    if let Some(limit) = value.as_u64() {
+        return Ok(limit.clamp(1, 200) as usize);
+    }
+    Err(McpHandlerError::InvalidParams(
+        "field 'limit' must be an integer".into(),
+    ))
+}
+
+fn search_mode_str(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Exact => "exact",
+        SearchMode::Prefix => "prefix",
+        SearchMode::Substring => "substring",
+    }
+}
+
+fn validate_file_path_arg(file: &str) -> Result<String, McpHandlerError> {
+    validate_worktree_relative_path_arg("file", file)
+}
+
+fn validate_file_glob_arg(file_glob: &str) -> Result<String, McpHandlerError> {
+    validate_worktree_relative_path_arg("file_glob", file_glob)
+}
+
+fn validate_worktree_relative_path_arg(
+    field: &str,
+    value: &str,
+) -> Result<String, McpHandlerError> {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Err(McpHandlerError::InvalidParams(format!(
+            "field '{field}' must be a worktree-relative path"
+        )));
     }
 
     let mut normalized = Vec::new();
@@ -505,36 +641,35 @@ fn validate_file_path_arg(file: &str) -> Result<String, McpHandlerError> {
         match component {
             Component::Normal(part) => {
                 let Some(part) = part.to_str() else {
-                    return Err(McpHandlerError::InvalidParams(
-                        "field 'file' must be a UTF-8 path".into(),
-                    ));
+                    return Err(McpHandlerError::InvalidParams(format!(
+                        "field '{field}' must be a UTF-8 path"
+                    )));
                 };
                 normalized.push(part);
             }
             Component::CurDir => {
-                return Err(McpHandlerError::InvalidParams(
-                    "field 'file' must not contain '.' path components".into(),
-                ));
+                return Err(McpHandlerError::InvalidParams(format!(
+                    "field '{field}' must not contain '.' path components"
+                )));
             }
             Component::ParentDir => {
-                return Err(McpHandlerError::InvalidParams(
-                    "field 'file' must not contain '..' path components".into(),
-                ));
+                return Err(McpHandlerError::InvalidParams(format!(
+                    "field '{field}' must not contain '..' path components"
+                )));
             }
             Component::RootDir | Component::Prefix(_) => {
-                return Err(McpHandlerError::InvalidParams(
-                    "field 'file' must be a worktree-relative path".into(),
-                ));
+                return Err(McpHandlerError::InvalidParams(format!(
+                    "field '{field}' must be a worktree-relative path"
+                )));
             }
         }
     }
 
     let normalized = normalized.join("/");
-    if normalized != file {
-        return Err(McpHandlerError::InvalidParams(
-            "field 'file' must be a normalized worktree-relative path without '.' or '..' components"
-                .into(),
-        ));
+    if normalized != value {
+        return Err(McpHandlerError::InvalidParams(format!(
+            "field '{field}' must be a normalized worktree-relative path without '.' or '..' components"
+        )));
     }
 
     Ok(normalized)
@@ -661,6 +796,7 @@ fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
         selector,
         uri,
         id: symbol.stable_symbol_id.clone(),
+        entity_name: symbol.entity_name.clone(),
         qualified_name: symbol.qualified_name.clone(),
         file_path: symbol.file_path.clone(),
         line_range: symbol.line_range,
@@ -762,6 +898,7 @@ fn candidate_row(candidate: CandidateRow) -> Value {
         "selector": candidate.selector,
         "uri": candidate.uri,
         "id": candidate.id,
+        "entity_name": candidate.entity_name,
         "qualified_name": candidate.qualified_name,
         "file_path": candidate.file_path,
         "line_range": candidate.line_range,
@@ -945,7 +1082,10 @@ mod tests {
                     symbol("cache-callee", "crates/foo", [34, 36], "finish_cache", "finish_cache"),
                     symbol("mixed-root", "src/root.rs", [50, 52], "mixed_root", "mixed_root"),
                     symbol("mixed-callee", "src/callee.rs", [60, 62], "mixed_callee", "mixed_callee"),
-                    symbol("other-run", "crates/other", [40, 42], "run", "Other::run")
+                    symbol("other-run", "crates/other", [40, 42], "run", "Other::run"),
+                    symbol("search-submit", "src/search.rs", [70, 72], "submit", "submit"),
+                    symbol("search-submit-plan", "src/search.rs", [80, 82], "submit_plan", "submit_plan"),
+                    symbol_kind("search-submit-tool", "src/search.rs", [84, 84], "submit_plan", "submit_plan", "mcp_tool")
                 ],
                 "edges": [
                     edge("caller", "root"),
@@ -980,6 +1120,19 @@ mod tests {
             "anchor_hash": format!("hash-{id}"),
             "enclosing_scope": null
         })
+    }
+
+    fn symbol_kind(
+        id: &str,
+        file_path: &str,
+        line_range: [usize; 2],
+        entity_name: &str,
+        qualified_name: &str,
+        symbol_kind: &str,
+    ) -> Value {
+        let mut symbol = symbol(id, file_path, line_range, entity_name, qualified_name);
+        symbol["symbol_kind"] = Value::String(symbol_kind.to_string());
+        symbol
     }
 
     fn edge(source: &str, target: &str) -> Value {
@@ -1082,6 +1235,148 @@ mod tests {
             };
             assert_eq!(error.json_rpc_code(), -32602);
         }
+    }
+
+    #[tokio::test]
+    async fn file_and_file_glob_mutually_exclusive_in_handler() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_search(
+                Value::from(1),
+                json!({
+                    "query": "submit",
+                    "file": "src/search.rs",
+                    "file_glob": "src/*.rs"
+                }),
+            )
+            .await;
+
+        let error = response.error.expect("mutually exclusive error");
+        assert_eq!(error.code, -32602);
+        assert!(error
+            .message
+            .contains("fields 'file' and 'file_glob' are mutually exclusive"));
+        assert_eq!(
+            error.data.as_ref().expect("graph metadata")["graph_content_hash"],
+            "test"
+        );
+        assert_unavailable_freshness_metadata(error.data.as_ref().expect("graph metadata"));
+    }
+
+    #[tokio::test]
+    async fn empty_query_rejected_by_handler() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_search(Value::from(1), json!({ "query": " \n\t " }))
+            .await;
+
+        let error = response.error.expect("empty query error");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("field 'query' must not be empty"));
+        assert_unavailable_freshness_metadata(error.data.as_ref().expect("graph metadata"));
+    }
+
+    #[tokio::test]
+    async fn absolute_or_dotdot_file_rejected_by_handler() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        for args in [
+            json!({ "query": "submit", "file": "/abs/path.rs" }),
+            json!({ "query": "submit", "file": "../src/search.rs" }),
+            json!({ "query": "submit", "file_glob": "/abs/*.rs" }),
+            json!({ "query": "submit", "file_glob": "../src/*.rs" }),
+        ] {
+            let response = server.handle_code_search(Value::from(1), args).await;
+            let error = response.error.expect("invalid path error");
+            assert_eq!(error.code, -32602);
+            assert_unavailable_freshness_metadata(error.data.as_ref().expect("graph metadata"));
+        }
+    }
+
+    #[tokio::test]
+    async fn code_search_returns_ranked_candidates_with_freshness_metadata() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_search(
+                Value::from(1),
+                json!({
+                    "query": "sub",
+                    "mode": "prefix",
+                    "symbol_kind": "function",
+                    "file": "src/search.rs",
+                    "limit": 10
+                }),
+            )
+            .await;
+        let body = response_json(response);
+        let candidates = body["candidates"].as_array().expect("candidates");
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0]["selector"], "src/search.rs::submit");
+        assert_eq!(candidates[0]["uri"], "graph://symbol/search-submit");
+        assert_eq!(candidates[0]["id"], "search-submit");
+        assert_eq!(candidates[0]["entity_name"], "submit");
+        assert_eq!(candidates[0]["qualified_name"], "submit");
+        assert_eq!(candidates[0]["file_path"], "src/search.rs");
+        assert_eq!(candidates[0]["line_range"], json!([70, 72]));
+        assert_eq!(candidates[0]["symbol_kind"], "function");
+        assert_eq!(candidates[1]["entity_name"], "submit_plan");
+        assert_eq!(body["graph_content_hash"], "test");
+        assert_eq!(body["graph_index_version"], "test");
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_search_echoes_inputs_and_total_matches() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_search(
+                Value::from(1),
+                json!({
+                    "query": "submit",
+                    "mode": "substring",
+                    "symbol_kind": "function",
+                    "file_glob": "src/*.rs",
+                    "limit": 1
+                }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["query"], "submit");
+        assert_eq!(body["mode"], "substring");
+        assert_eq!(body["symbol_kind"], "function");
+        assert_eq!(body["file"], Value::Null);
+        assert_eq!(body["file_glob"], "src/*.rs");
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["total_matches"], 2);
+        assert_eq!(body["truncated"], true);
+        assert_eq!(body["candidates"].as_array().expect("candidates").len(), 1);
+        assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
