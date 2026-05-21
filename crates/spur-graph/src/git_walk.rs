@@ -190,15 +190,8 @@ pub fn run_full_walk_into(
 
     for sha in commit_shas {
         let commit = read_commit(worktree, &sha)?;
-        let is_merge = commit.parents.len() > 1;
         graph.commits.push(commit.clone());
         commits.commits.push(commit);
-
-        // Merge commits do not introduce independent symbol deltas in this
-        // first-pass walker; their parent commits already carry those changes.
-        if is_merge {
-            continue;
-        }
 
         for file_change in file_changes_for_commit(worktree, &sha)? {
             graph
@@ -214,6 +207,7 @@ pub fn run_full_walk_into(
                     key: symbol_change.snapshot.key,
                 },
                 relation: RelationKind::Touches,
+                parent: symbol_change.parent_sha,
                 change_kind: Some(symbol_change.change_kind),
             });
         }
@@ -279,6 +273,7 @@ fn file_change_to_temporal_edge(commit_sha: &str, change: &FileChange) -> Tempor
             path: change.path.clone(),
         },
         relation: RelationKind::Touches,
+        parent: change.parent_sha.clone(),
         change_kind: Some(match &change.kind {
             FileChangeKind::Added => ChangeKind::Added,
             FileChangeKind::Modified | FileChangeKind::Gitlink { .. } => ChangeKind::Modified,
@@ -400,6 +395,7 @@ impl Default for SymbolDiffCtx {
 pub struct SymbolChange {
     pub snapshot: SymbolSnapshotArtifact,
     pub change_kind: ChangeKind,
+    pub parent_sha: Option<String>,
 }
 
 pub fn symbol_changes_for_commit(
@@ -489,10 +485,12 @@ pub fn symbol_changes_for_commit(
             deleted_candidates.extend(left_symbols.iter().map(|left| SymbolChange {
                 snapshot: snapshot_from(sha, deleted_path, left),
                 change_kind: ChangeKind::Deleted,
+                parent_sha: file_change.parent_sha.clone(),
             }));
             added_candidates.extend(right_symbols.iter().map(|right| SymbolChange {
                 snapshot: snapshot_from(sha, &file_change.path, right),
                 change_kind: ChangeKind::Added,
+                parent_sha: file_change.parent_sha.clone(),
             }));
         } else {
             let mut left_by_identity: HashMap<(String, String, Option<String>), &ExtractedSymbol> =
@@ -521,10 +519,12 @@ pub fn symbol_changes_for_commit(
                     Some(_) => direct_changes.push(SymbolChange {
                         snapshot: snapshot_from(sha, &file_change.path, right),
                         change_kind: ChangeKind::Modified,
+                        parent_sha: file_change.parent_sha.clone(),
                     }),
                     None => added_candidates.push(SymbolChange {
                         snapshot: snapshot_from(sha, &file_change.path, right),
                         change_kind: ChangeKind::Added,
+                        parent_sha: file_change.parent_sha.clone(),
                     }),
                 }
             }
@@ -533,6 +533,7 @@ pub fn symbol_changes_for_commit(
                 deleted_candidates.push(SymbolChange {
                     snapshot: snapshot_from(sha, deleted_path, left),
                     change_kind: ChangeKind::Deleted,
+                    parent_sha: file_change.parent_sha.clone(),
                 });
             }
         }
@@ -551,16 +552,17 @@ pub fn symbol_changes_for_commit(
 
 fn push_symbol_change(
     out: &mut Vec<SymbolChange>,
-    by_snapshot_key: &mut HashMap<SnapshotKey, usize>,
+    by_snapshot_key: &mut HashMap<(Option<String>, SnapshotKey), usize>,
     change: SymbolChange,
 ) {
-    if let Some(existing) = by_snapshot_key.get(&change.snapshot.key).copied() {
+    let key = (change.parent_sha.clone(), change.snapshot.key.clone());
+    if let Some(existing) = by_snapshot_key.get(&key).copied() {
         let merged = merge_change_kind(&out[existing].change_kind, change.change_kind);
         out[existing].change_kind = merged;
         return;
     }
 
-    by_snapshot_key.insert(change.snapshot.key.clone(), out.len());
+    by_snapshot_key.insert(key, out.len());
     out.push(change);
 }
 

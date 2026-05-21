@@ -377,6 +377,7 @@ fn temporal_touch(commit: &str, key: SnapshotKey, change_kind: ChangeKind) -> Te
         },
         target: EdgeEndpoint::Snapshot { key },
         relation: RelationKind::Touches,
+        parent: None,
         change_kind: Some(change_kind),
     }
 }
