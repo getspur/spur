@@ -795,6 +795,52 @@ fn code_symbol_info_def() -> ToolDefinition {
     }
 }
 
+fn code_read_symbol_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_read_symbol".into(),
+        description: "Read the indexed source for one code symbol from the current graph artifact. Select by stable_symbol_id, or by the exact worktree-relative path plus symbol name. Source bytes are resolved through the artifact file content_oid; stale=true means the current worktree file differs but the returned source still matches the indexed graph.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "stable_symbol_id": {
+                    "type": "string",
+                    "description": "Stable symbol id from code_resolve/code_search/code_symbol_info. graph://symbol/<id> is accepted."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Worktree-relative file path. Required with name and mutually exclusive with stable_symbol_id."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Symbol entity_name or qualified_name within path. Required with path and mutually exclusive with stable_symbol_id."
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 50,
+                    "default": 0,
+                    "description": "Lines of context to include before and after the symbol. Values outside 0..50 are clamped and echoed as requested_context_lines."
+                }
+            },
+            "oneOf": [
+                {
+                    "required": ["stable_symbol_id"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["path"] },
+                            { "required": ["name"] }
+                        ]
+                    }
+                },
+                {
+                    "required": ["path", "name"],
+                    "not": { "required": ["stable_symbol_id"] }
+                }
+            ]
+        }),
+    }
+}
+
 fn code_callers_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callers".into(),
@@ -1392,6 +1438,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_resolve_def(),
         code_file_symbols_def(),
         code_symbol_info_def(),
+        code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
         code_search_def(),
@@ -1432,6 +1479,7 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_resolve_def(),
         code_file_symbols_def(),
         code_symbol_info_def(),
+        code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
         code_search_def(),
@@ -1693,6 +1741,7 @@ mod worker_tools_subset_tests {
         "code_resolve",
         "code_file_symbols",
         "code_symbol_info",
+        "code_read_symbol",
         "code_callers",
         "code_callees",
         "code_search",
