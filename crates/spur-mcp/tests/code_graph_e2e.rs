@@ -142,8 +142,9 @@ fn write_temporal_fixture_artifact(worktree: &Path) {
             temporal_touch(
                 NEW_SHA,
                 new_root.key.clone(),
-                ChangeKind::RenamedFrom(RenamePrev::Symbol(old_root.key)),
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(old_root.key.clone())),
             ),
+            temporal_rename(old_root.key.clone(), new_root.key.clone()),
         ],
     };
     write_artifact(&graph, &worktree.join(".spur/graph-index.json"))
@@ -256,22 +257,29 @@ fn write_temporal_resolution_fixture_artifact(worktree: &Path) {
             temporal_touch(
                 NEW_SHA,
                 found_target.key.clone(),
-                ChangeKind::RenamedFrom(RenamePrev::Symbol(found_origin.key)),
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(found_origin.key.clone())),
             ),
-            temporal_touch(OLD_SHA, deleted_added.key, ChangeKind::Added),
-            temporal_touch(DELETE_SHA, deleted_last_seen.key, ChangeKind::Deleted),
+            temporal_rename(found_origin.key.clone(), found_target.key.clone()),
+            temporal_touch(OLD_SHA, deleted_added.key.clone(), ChangeKind::Added),
+            temporal_touch(
+                DELETE_SHA,
+                deleted_last_seen.key.clone(),
+                ChangeKind::Deleted,
+            ),
             temporal_touch(OLD_SHA, ambiguous_origin.key.clone(), ChangeKind::Added),
             temporal_touch(
                 AMBIGUOUS_SHA,
-                ambiguous_left.key,
+                ambiguous_left.key.clone(),
                 ChangeKind::RenamedFrom(RenamePrev::Symbol(ambiguous_origin.key.clone())),
             ),
+            temporal_rename(ambiguous_origin.key.clone(), ambiguous_left.key.clone()),
             temporal_touch(
                 AMBIGUOUS_SHA,
-                ambiguous_right.key,
-                ChangeKind::RenamedFrom(RenamePrev::Symbol(ambiguous_origin.key)),
+                ambiguous_right.key.clone(),
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(ambiguous_origin.key.clone())),
             ),
-            temporal_touch(UNINDEXED_SHA, unknown.key, ChangeKind::Added),
+            temporal_rename(ambiguous_origin.key.clone(), ambiguous_right.key.clone()),
+            temporal_touch(UNINDEXED_SHA, unknown.key.clone(), ChangeKind::Added),
         ],
     };
     write_artifact(&graph, &worktree.join(".spur/graph-index.json"))
@@ -379,6 +387,18 @@ fn temporal_touch(commit: &str, key: SnapshotKey, change_kind: ChangeKind) -> Te
         relation: RelationKind::Touches,
         parent: None,
         change_kind: Some(change_kind),
+    }
+}
+
+fn temporal_rename(previous: SnapshotKey, next: SnapshotKey) -> TemporalEdgeArtifact {
+    TemporalEdgeArtifact {
+        source: EdgeEndpoint::Snapshot {
+            key: previous.clone(),
+        },
+        target: EdgeEndpoint::Snapshot { key: next },
+        relation: RelationKind::Touches,
+        parent: None,
+        change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous))),
     }
 }
 
