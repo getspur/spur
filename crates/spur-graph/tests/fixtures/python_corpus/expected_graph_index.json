@@ -226,48 +226,54 @@
       "target_stable_symbol_id": null,
       "target_label": "APIClient",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "0008680ec500f0cc",
       "target_stable_symbol_id": null,
       "target_label": "log",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "0008680ec500f0cc",
       "target_stable_symbol_id": "98acc27597535ad6",
       "target_label": "User",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "0008680ec500f0cc",
       "target_stable_symbol_id": "b137eda51a24b90d",
       "target_label": "send",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "0008680ec500f0cc",
       "target_stable_symbol_id": "b3e8dd9e203796dc",
       "target_label": "greet",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "0008680ec500f0cc",
       "target_stable_symbol_id": "d1aad177c35dee30",
       "target_label": "make_message",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "438512d0ff1861c0",
@@ -275,7 +281,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7637220ca411355c",
@@ -283,7 +290,8 @@
       "target_label": "pkg",
       "relation": "imports",
       "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7637220ca411355c",
@@ -291,7 +299,8 @@
       "target_label": "util",
       "relation": "imports",
       "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7637220ca411355c",
@@ -299,7 +308,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7637220ca411355c",
@@ -307,7 +317,8 @@
       "target_label": "Client",
       "relation": "imports",
       "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7637220ca411355c",
@@ -315,7 +326,8 @@
       "target_label": "User",
       "relation": "imports",
       "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7637220ca411355c",
@@ -323,7 +335,8 @@
       "target_label": "greet",
       "relation": "imports",
       "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7637220ca411355c",
@@ -331,7 +344,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "7f8a5ff1eb1843de",
@@ -339,7 +353,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "88080f65b93577ff",
@@ -347,7 +362,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "98acc27597535ad6",
@@ -355,7 +371,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "98acc27597535ad6",
@@ -363,7 +380,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "98acc27597535ad6",
@@ -371,39 +389,44 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "b137eda51a24b90d",
       "target_stable_symbol_id": "bc1353884526a3fb",
       "target_label": "normalized",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "b3e8dd9e203796dc",
       "target_stable_symbol_id": null,
       "target_label": "print",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "bc1353884526a3fb",
       "target_stable_symbol_id": null,
       "target_label": "lower",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "d1aad177c35dee30",
       "target_stable_symbol_id": null,
       "target_label": "strip",
       "relation": "calls",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     },
     {
       "source_stable_symbol_id": "fa1b8fd6988afb15",
@@ -411,7 +434,8 @@
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
-      "confidence_score": 1.0
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     }
   ],
   "tombstones": []

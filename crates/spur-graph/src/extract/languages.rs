@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use tree_sitter::{Language, Node};
 
 use crate::extract::tree_sitter::{CaptureHit, FactBuilder, PendingEdge};
-use crate::{FileId, NodeId, NodeKind, RelationKind};
+use crate::{FileId, GraphEdgeKind, NodeId, NodeKind, RelationKind};
 
 #[derive(Debug)]
 pub(crate) struct LanguageConfig {
@@ -264,6 +266,7 @@ pub(crate) fn emit_edges(
                         source: source_id,
                         target_name: imported,
                         relation,
+                        edge_kind: None,
                     });
                 }
             }
@@ -274,6 +277,7 @@ pub(crate) fn emit_edges(
                         source: source_id,
                         target_name: callee,
                         relation: RelationKind::Calls,
+                        edge_kind: None,
                     });
                 }
             }
@@ -286,11 +290,178 @@ pub(crate) fn emit_edges(
                     source: source_id,
                     target_name: target_name.to_string(),
                     relation: RelationKind::References,
+                    edge_kind: Some(GraphEdgeKind::ReferencesHof),
                 });
             }
             _ => {}
         }
     }
+}
+
+pub(crate) fn emit_rust_dyn_trait_edges(
+    builder: &mut FactBuilder<'_>,
+    file_node_id: NodeId,
+    source: &str,
+    definitions: &[DefinitionBinding<'_>],
+    root_node: Node<'_>,
+) {
+    let mut bindings_by_scope: HashMap<NodeId, HashMap<String, String>> = HashMap::new();
+    for definition in definitions {
+        let mut bindings = HashMap::new();
+        collect_dyn_trait_bindings(definition.node, definition.node, source, &mut bindings);
+        if !bindings.is_empty() {
+            bindings_by_scope.insert(definition.node_id, bindings);
+        }
+    }
+
+    let mut calls = Vec::new();
+    collect_nodes_by_kind(root_node, "call_expression", &mut calls);
+    for call in calls {
+        let source_id = nearest_parent(file_node_id, definitions, call).node_id;
+        let Some(bindings) = bindings_by_scope.get(&source_id) else {
+            continue;
+        };
+        let Some((receiver, method)) = receiver_method_call(call, source) else {
+            continue;
+        };
+        let Some(trait_name) = bindings.get(&receiver) else {
+            continue;
+        };
+        builder.pending_edges.push(PendingEdge {
+            source: source_id,
+            target_name: format!("{trait_name}::{method}"),
+            relation: RelationKind::Calls,
+            edge_kind: Some(GraphEdgeKind::CallsDyn),
+        });
+    }
+}
+
+fn collect_dyn_trait_bindings(
+    root: Node<'_>,
+    node: Node<'_>,
+    source: &str,
+    bindings: &mut HashMap<String, String>,
+) {
+    if node != root && is_definition_node(node) {
+        return;
+    }
+
+    if matches!(node.kind(), "parameter" | "let_declaration") {
+        if let Some((name, trait_name)) = dyn_trait_binding(node, source) {
+            bindings.insert(name, trait_name);
+        }
+    }
+
+    for index in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(index) {
+            collect_dyn_trait_bindings(root, child, source, bindings);
+        }
+    }
+}
+
+fn dyn_trait_binding(node: Node<'_>, source: &str) -> Option<(String, String)> {
+    let pattern = node.child_by_field_name("pattern")?;
+    let name = single_identifier_text(pattern, source)?;
+    let type_node = node.child_by_field_name("type")?;
+    let trait_name = dyn_trait_name_from_type(type_node, source)?;
+    Some((name, trait_name))
+}
+
+fn dyn_trait_name_from_type(type_node: Node<'_>, source: &str) -> Option<String> {
+    match type_node.kind() {
+        "reference_type" => {
+            let inner = type_node.child_by_field_name("type")?;
+            (inner.kind() == "dynamic_type").then(|| trait_name_from_dynamic_type(inner, source))?
+        }
+        "generic_type" => {
+            let base = type_node.child_by_field_name("type")?;
+            let base = child_text(base, source).trim();
+            if !matches!(base, "Box" | "Arc" | "Rc") {
+                return None;
+            }
+            let type_arguments = type_node.child_by_field_name("type_arguments")?;
+            let dynamic = direct_named_child_by_kind(type_arguments, "dynamic_type")?;
+            trait_name_from_dynamic_type(dynamic, source)
+        }
+        _ => None,
+    }
+}
+
+fn trait_name_from_dynamic_type(dynamic: Node<'_>, source: &str) -> Option<String> {
+    let text = child_text(dynamic, source).trim();
+    let rest = text.strip_prefix("dyn")?.trim_start();
+    let primary = rest.split('+').next()?.trim();
+    if primary.is_empty() || primary.contains(char::is_whitespace) || primary.contains('<') {
+        return None;
+    }
+    Some(primary.to_string())
+}
+
+fn direct_named_child_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    (0..node.named_child_count())
+        .filter_map(|index| node.named_child(index))
+        .find(|child| child.kind() == kind)
+}
+
+fn receiver_method_call(call: Node<'_>, source: &str) -> Option<(String, String)> {
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "field_expression" {
+        return None;
+    }
+    let receiver = function.child_by_field_name("value")?;
+    if receiver.kind() != "identifier" {
+        return None;
+    }
+    let method = function.child_by_field_name("field")?;
+    if method.kind() != "field_identifier" {
+        return None;
+    }
+    Some((
+        child_text(receiver, source).trim().to_string(),
+        child_text(method, source).trim().to_string(),
+    ))
+}
+
+fn collect_nodes_by_kind<'tree>(node: Node<'tree>, kind: &str, nodes: &mut Vec<Node<'tree>>) {
+    if node.kind() == kind {
+        nodes.push(node);
+    }
+    for index in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(index) {
+            collect_nodes_by_kind(child, kind, nodes);
+        }
+    }
+}
+
+fn single_identifier_text(node: Node<'_>, source: &str) -> Option<String> {
+    if node.kind() == "identifier" {
+        return Some(child_text(node, source).trim().to_string());
+    }
+
+    let identifiers = named_descendants_by_kind(node, "identifier");
+    match identifiers.as_slice() {
+        [identifier] => Some(child_text(*identifier, source).trim().to_string()),
+        _ => None,
+    }
+}
+
+fn named_descendants_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
+    let mut nodes = Vec::new();
+    collect_nodes_by_kind(node, kind, &mut nodes);
+    nodes
+}
+
+fn is_definition_node(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "mod_item"
+            | "struct_item"
+            | "enum_item"
+            | "trait_item"
+            | "impl_item"
+            | "function_item"
+            | "function_signature_item"
+    )
 }
 
 fn relation_kind_for_capture(
