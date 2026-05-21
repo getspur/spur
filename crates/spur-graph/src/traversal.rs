@@ -114,6 +114,18 @@ pub fn bounded_subgraph<'a>(
                 continue;
             }
 
+            // Outgoing edges with unresolved targets carry a `target_label` but
+            // no symbol to enqueue. Record them as boundary edges so subgraph
+            // consumers see the same neighbor set that `find_callee_edges` does;
+            // don't advance depth since there is no target node to expand.
+            if edge.source_stable_symbol_id == current_id && edge.target_stable_symbol_id.is_none()
+            {
+                if visited_edges.insert(edge_index) {
+                    edges.push(edge);
+                }
+                continue;
+            }
+
             let Some(neighbor_id) = incident_neighbor_id(edge, current_id) else {
                 continue;
             };
@@ -371,5 +383,64 @@ mod tests {
 
         assert!(view.nodes.is_empty());
         assert!(view.edges.is_empty());
+    }
+
+    #[test]
+    fn subgraph_includes_outgoing_unresolved_edges_without_enqueueing_neighbor() {
+        let artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_string(),
+            graph_content_hash: "test".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            symbols: ["root", "callee"].into_iter().map(symbol).collect(),
+            edges: vec![
+                edge("root", "callee", RelationKind::Calls),
+                unresolved_call_edge("root", "as_ref"),
+                unresolved_call_edge("root", "map"),
+            ],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let view = bounded_subgraph(&artifact, "root", 1, Some(&[RelationKind::Calls]));
+
+        assert_eq!(ids(&view.nodes), vec!["root", "callee"]);
+        assert_eq!(view.edges.len(), 3);
+        let unresolved_labels: Vec<&str> = view
+            .edges
+            .iter()
+            .filter(|edge| edge.target_stable_symbol_id.is_none())
+            .filter_map(|edge| edge.target_label.as_deref())
+            .collect();
+        assert_eq!(unresolved_labels, vec!["as_ref", "map"]);
+    }
+
+    #[test]
+    fn unresolved_edge_does_not_advance_radius_depth() {
+        let artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_string(),
+            graph_content_hash: "test".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            symbols: ["root"].into_iter().map(symbol).collect(),
+            edges: vec![unresolved_call_edge("root", "external")],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let r0 = bounded_subgraph(&artifact, "root", 0, None);
+        assert!(r0.edges.is_empty(), "radius 0 must skip edge scanning");
+
+        let r1 = bounded_subgraph(&artifact, "root", 1, None);
+        assert_eq!(r1.edges.len(), 1);
+        assert_eq!(ids(&r1.nodes), vec!["root"]);
     }
 }
