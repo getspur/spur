@@ -335,7 +335,7 @@ fn definition_name(
         .next()
 }
 
-fn nearest_parent<'a, 'tree>(
+pub(crate) fn nearest_parent<'a, 'tree>(
     file_node_id: NodeId,
     definitions: &'a [DefinitionBinding<'tree>],
     node: Node<'_>,
@@ -355,8 +355,8 @@ fn nearest_parent<'a, 'tree>(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Parent<'a> {
-    node_id: NodeId,
+pub(crate) struct Parent<'a> {
+    pub(crate) node_id: NodeId,
     fqn: Option<&'a str>,
 }
 
