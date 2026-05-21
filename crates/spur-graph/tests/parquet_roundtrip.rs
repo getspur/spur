@@ -2,9 +2,9 @@ use std::path::Path;
 
 use spur_graph::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet, Confidence,
-    GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, GraphTombstoneEntry, NodeId,
-    RelationKind, WriteOptions,
+    GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
+    GraphTombstoneEntry, NodeId, RelationKind, WriteOptions,
 };
 
 #[test]
@@ -40,6 +40,71 @@ fn parquet_artifact_round_trips_all_tables_with_exact_node_ids() {
 
     let actual = read_artifact_parquet(&dir).expect("read parquet artifact");
     assert_artifact_eq(&actual, &artifact);
+}
+
+#[test]
+fn rejects_directory_without_manifest() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let dir = write_artifact_parquet(&fixture_artifact(), tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    std::fs::remove_file(dir.join("manifest.json")).expect("remove manifest");
+
+    let err = read_artifact_parquet(&dir).expect_err("missing manifest must be rejected");
+
+    assert!(
+        err.to_string().contains("manifest.json"),
+        "error should mention manifest.json: {err:#}"
+    );
+}
+
+#[test]
+fn rejects_directory_with_incomplete_manifest() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let dir = write_artifact_parquet(&fixture_artifact(), tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: GraphArtifactManifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    manifest.complete = false;
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+    )
+    .expect("write incomplete manifest");
+
+    let err = read_artifact_parquet(&dir).expect_err("incomplete manifest must be rejected");
+
+    assert!(
+        err.to_string().contains("complete"),
+        "error should mention complete: {err:#}"
+    );
+}
+
+#[test]
+fn write_replaces_existing_hash_directory_before_publish() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = fixture_artifact();
+    let dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions {
+            emit_edges_by_dst: true,
+        },
+    )
+    .expect("write parquet artifact");
+    let stale = dir.join("stale-file");
+    std::fs::write(&stale, b"stale").expect("write stale file");
+
+    let rewritten = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("rewrite parquet artifact");
+
+    assert_eq!(rewritten, dir);
+    assert!(
+        !stale.exists(),
+        "existing hash directory should be removed before publication"
+    );
+    assert!(!dir.join("edges_by_dst.parquet").exists());
 }
 
 fn fixture_artifact() -> GraphIndexArtifact {
