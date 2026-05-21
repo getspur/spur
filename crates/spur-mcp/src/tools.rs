@@ -790,11 +790,7 @@ fn code_symbol_info_def() -> ToolDefinition {
                     "type": "string",
                     "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
                 }
-            },
-            "anyOf": [
-                { "required": ["selector"] },
-                { "required": ["symbol"] }
-            ]
+            }
         }),
     }
 }
@@ -819,11 +815,7 @@ fn code_callers_def() -> ToolDefinition {
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
                 }
-            },
-            "anyOf": [
-                { "required": ["selector"] },
-                { "required": ["symbol"] }
-            ]
+            }
         }),
     }
 }
@@ -848,11 +840,7 @@ fn code_callees_def() -> ToolDefinition {
                     "enum": ["candidates", "error"],
                     "description": "Ambiguity handling (default: candidates)"
                 }
-            },
-            "anyOf": [
-                { "required": ["selector"] },
-                { "required": ["symbol"] }
-            ]
+            }
         }),
     }
 }
@@ -891,11 +879,7 @@ fn code_subgraph_def() -> ToolDefinition {
                     "items": { "type": "string" },
                     "description": "Optional relation kind filter, e.g. [\"calls\", \"references\"]"
                 }
-            },
-            "anyOf": [
-                { "required": ["selector"] },
-                { "required": ["symbol"] }
-            ]
+            }
         }),
     }
 }
@@ -1381,6 +1365,25 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
 #[cfg(test)]
 mod schema_truthfulness_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CwdGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    fn enter_dir(path: &std::path::Path) -> CwdGuard {
+        let original = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set current dir");
+        CwdGuard { original }
+    }
 
     fn props_of(def: &ToolDefinition) -> Vec<String> {
         def.input_schema
@@ -1463,13 +1466,9 @@ mod schema_truthfulness_tests {
                 "{} symbol deprecation description",
                 def.name
             );
-            assert_eq!(
-                def.input_schema.get("anyOf"),
-                Some(&json!([
-                    { "required": ["selector"] },
-                    { "required": ["symbol"] }
-                ])),
-                "{} selector/symbol anyOf",
+            assert!(
+                def.input_schema.get("anyOf").is_none(),
+                "{} must not advertise top-level anyOf",
                 def.name
             );
             if def.name == "code_symbol_info" {
@@ -1482,6 +1481,35 @@ mod schema_truthfulness_tests {
                 def.name
             );
         }
+
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
+        std::fs::write(
+            dir.path().join(".spur/graph-index.json"),
+            serde_json::to_string_pretty(&json!({
+                "header": { "graph_index_version": "test" },
+                "manifest_version": "test",
+                "graph_content_hash": "test",
+                "files": [],
+                "symbols": [],
+                "edges": [],
+                "tombstones": []
+            }))
+            .expect("encode graph fixture"),
+        )
+        .expect("write graph fixture");
+        let _cwd = enter_dir(dir.path());
+
+        let error = crate::server::handlers::code_graph::code_callers(&json!({}))
+            .expect_err("handler must reject calls without selector or symbol");
+        assert_eq!(error.json_rpc_code(), -32602);
+        assert!(
+            error
+                .to_string()
+                .contains("Missing required field 'selector' (or deprecated 'symbol')"),
+            "unexpected validation error: {error}"
+        );
     }
 
     #[test]
