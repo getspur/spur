@@ -1441,8 +1441,8 @@ mod schema_truthfulness_tests {
         );
     }
 
-    #[test]
-    fn code_graph_schemas_advertise_selector_legacy_symbol_and_ambiguity_mode() {
+    #[tokio::test]
+    async fn code_graph_schemas_advertise_selector_legacy_symbol_and_ambiguity_mode() {
         for def in [
             code_symbol_info_def(),
             code_callers_def(),
@@ -1502,6 +1502,7 @@ mod schema_truthfulness_tests {
         let _cwd = enter_dir(dir.path());
 
         let error = crate::server::handlers::code_graph::code_callers(&json!({}))
+            .await
             .expect_err("handler must reject calls without selector or symbol");
         assert_eq!(error.json_rpc_code(), -32602);
         assert!(

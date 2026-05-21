@@ -845,7 +845,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_resolve(&args)
+                crate::server::handlers::code_graph::code_resolve(&args).await
             },
         )
         .await
@@ -867,7 +867,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_file_symbols(&args)
+                crate::server::handlers::code_graph::code_file_symbols(&args).await
             },
         )
         .await
@@ -889,7 +889,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_symbol_info(&args)
+                crate::server::handlers::code_graph::code_symbol_info(&args).await
             },
         )
         .await
@@ -911,7 +911,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_callers(&args)
+                crate::server::handlers::code_graph::code_callers(&args).await
             },
         )
         .await
@@ -933,7 +933,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_callees(&args)
+                crate::server::handlers::code_graph::code_callees(&args).await
             },
         )
         .await
@@ -955,7 +955,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_subgraph(&args)
+                crate::server::handlers::code_graph::code_subgraph(&args).await
             },
         )
         .await
