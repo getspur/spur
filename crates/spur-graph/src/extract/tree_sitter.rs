@@ -605,10 +605,9 @@ fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, ordinal: u32) -> S
     hasher.update([0]);
     hasher.update(ordinal.to_le_bytes());
     let digest = hasher.finalize();
-    format!(
-        "{:016x}",
-        u64::from_be_bytes(digest[..8].try_into().unwrap())
-    )
+    let mut prefix = [0; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    format!("{:016x}", u64::from_be_bytes(prefix))
 }
 
 pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {

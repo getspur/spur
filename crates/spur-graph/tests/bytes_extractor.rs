@@ -44,6 +44,21 @@ fn invalid_utf8_returns_error_not_panic() {
 }
 
 #[test]
+fn extractor_returns_err_on_invalid_tree_sitter_input() {
+    let mut extractor = BytesExtractor::for_language(Language::Rust).unwrap();
+    let corrupt_blob: Vec<u8> = (0..4096)
+        .map(|index| if index % 2 == 0 { 0xff } else { b'a' })
+        .collect();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        extractor.extract(Path::new("src/corrupt.rs"), &corrupt_blob)
+    }));
+
+    assert!(result.is_ok(), "corrupt input must not panic");
+    assert!(matches!(result.unwrap(), Err(ExtractError::InvalidUtf8(_))));
+}
+
+#[test]
 fn extracted_symbol_tokens_include_leaf_identifiers_and_literals_except_own_name() {
     let mut extractor = BytesExtractor::for_language(Language::Rust).unwrap();
     let bytes = b"fn hello(user_id: i32) -> i32 { let answer = 42; user_id + answer }\n";
