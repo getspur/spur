@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context};
 use parquet::basic::{Compression, ZstdLevel};
@@ -25,6 +27,7 @@ use crate::{
 pub const PARQUET_ROW_GROUP_SIZE: usize = 16_384;
 const ENCLOSING_SCOPE_DICTIONARY: bool = true;
 const EDGES_BY_DST_PRESENT: bool = false;
+const STALE_PARQUET_TEMP_DIR_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -127,8 +130,18 @@ pub fn write_artifact_parquet(
 ) -> anyhow::Result<PathBuf> {
     let artifact_hash = artifact_content_hash_blake3_hex(artifact)
         .context("failed to compute graph artifact content hash")?;
-    let dir = base_dir.join(format!("{artifact_hash}.parquet"));
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create `{}`", dir.display()))?;
+    fs::create_dir_all(base_dir)
+        .with_context(|| format!("failed to create `{}`", base_dir.display()))?;
+    sweep_stale_parquet_temp_dirs(base_dir);
+
+    let final_dir = base_dir.join(format!("{artifact_hash}.parquet"));
+    let temp_dir = parquet_temp_dir(base_dir, &artifact_hash);
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir)
+            .with_context(|| format!("failed to remove stale temp dir `{}`", temp_dir.display()))?;
+    }
+    fs::create_dir(&temp_dir)
+        .with_context(|| format!("failed to create `{}`", temp_dir.display()))?;
 
     let mut files = file_rows(artifact)?;
     let mut nodes = node_rows(artifact)?;
@@ -155,8 +168,8 @@ pub fn write_artifact_parquet(
     let mut tombstones = artifact.tombstones.clone();
     tombstones.sort_by(|a, b| a.path.cmp(&b.path));
 
-    write_nodes(&dir.join("nodes.parquet"), &nodes)?;
-    write_edges(&dir.join("edges.parquet"), &resolved_edges)?;
+    write_nodes(&temp_dir.join("nodes.parquet"), &nodes)?;
+    write_edges(&temp_dir.join("edges.parquet"), &resolved_edges)?;
     if options.emit_edges_by_dst {
         let mut by_dst = resolved_edges.clone();
         by_dst.sort_by(|a, b| {
@@ -165,18 +178,15 @@ pub fn write_artifact_parquet(
                 .cmp(&b.dst_id.get())
                 .then(a.src_id.get().cmp(&b.src_id.get()))
         });
-        write_edges(&dir.join("edges_by_dst.parquet"), &by_dst)?;
-    } else {
-        let by_dst_path = dir.join("edges_by_dst.parquet");
-        if by_dst_path.exists() {
-            fs::remove_file(&by_dst_path)
-                .with_context(|| format!("failed to remove `{}`", by_dst_path.display()))?;
-        }
+        write_edges(&temp_dir.join("edges_by_dst.parquet"), &by_dst)?;
     }
-    write_unresolved_edges(&dir.join("edges_unresolved.parquet"), &unresolved_edges)?;
-    write_files(&dir.join("files.parquet"), &files)?;
-    write_file_manifests(&dir.join("file_manifests.parquet"), &file_manifests)?;
-    write_tombstones(&dir.join("tombstones.parquet"), &tombstones)?;
+    write_unresolved_edges(
+        &temp_dir.join("edges_unresolved.parquet"),
+        &unresolved_edges,
+    )?;
+    write_files(&temp_dir.join("files.parquet"), &files)?;
+    write_file_manifests(&temp_dir.join("file_manifests.parquet"), &file_manifests)?;
+    write_tombstones(&temp_dir.join("tombstones.parquet"), &tombstones)?;
 
     let manifest = GraphArtifactManifest {
         graph_index_version: artifact.header.graph_index_version.clone(),
@@ -203,10 +213,23 @@ pub fn write_artifact_parquet(
     };
     let manifest_json =
         serde_json::to_string_pretty(&manifest).context("failed to encode Parquet manifest")?;
-    fs::write(dir.join("manifest.json"), manifest_json)
-        .with_context(|| format!("failed to write `{}`", dir.join("manifest.json").display()))?;
+    write_manifest(&temp_dir, &manifest_json)?;
+    fsync_dir(&temp_dir)?;
 
-    Ok(dir)
+    if final_dir.exists() {
+        fs::remove_dir_all(&final_dir)
+            .with_context(|| format!("failed to remove `{}`", final_dir.display()))?;
+    }
+    fs::rename(&temp_dir, &final_dir).with_context(|| {
+        format!(
+            "failed to atomically rename `{}` to `{}`",
+            temp_dir.display(),
+            final_dir.display()
+        )
+    })?;
+    fsync_dir(base_dir)?;
+
+    Ok(final_dir)
 }
 
 pub fn read_artifact_header_parquet(dir: &Path) -> anyhow::Result<GraphArtifactManifest> {
@@ -716,7 +739,111 @@ fn write_table(
         row_group.close().context("failed to close row group")?;
     }
     writer.close().context("failed to close Parquet writer")?;
+    sync_file(path)?;
     Ok(())
+}
+
+fn write_manifest(dir: &Path, manifest_json: &str) -> anyhow::Result<()> {
+    let manifest_path = dir.join("manifest.json");
+    let mut file = File::create(&manifest_path)
+        .with_context(|| format!("failed to create `{}`", manifest_path.display()))?;
+    file.write_all(manifest_json.as_bytes())
+        .with_context(|| format!("failed to write `{}`", manifest_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to fsync `{}`", manifest_path.display()))?;
+    Ok(())
+}
+
+fn sync_file(path: &Path) -> anyhow::Result<()> {
+    File::open(path)
+        .with_context(|| format!("failed to open `{}` for fsync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to fsync `{}`", path.display()))
+}
+
+fn fsync_dir(path: &Path) -> anyhow::Result<()> {
+    File::open(path)
+        .with_context(|| format!("failed to open directory `{}` for fsync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to fsync directory `{}`", path.display()))
+}
+
+fn parquet_temp_dir(base_dir: &Path, artifact_hash: &str) -> PathBuf {
+    base_dir.join(format!(
+        "{artifact_hash}.parquet.tmp.{}",
+        std::process::id()
+    ))
+}
+
+fn sweep_stale_parquet_temp_dirs(base_dir: &Path) {
+    let entries = match fs::read_dir(base_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                path = %base_dir.display(),
+                error = %err,
+                "spur-graph: failed to scan Parquet artifact temp dirs"
+            );
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!(
+                    path = %base_dir.display(),
+                    error = %err,
+                    "spur-graph: failed to inspect Parquet artifact temp dir entry"
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "spur-graph: failed to stat Parquet artifact temp dir entry"
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.contains(".parquet.tmp.") {
+            continue;
+        }
+        if !parquet_temp_dir_is_stale(&path) {
+            continue;
+        }
+        if let Err(err) = fs::remove_dir_all(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "spur-graph: failed to remove stale Parquet artifact temp dir"
+            );
+        }
+    }
+}
+
+fn parquet_temp_dir_is_stale(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age >= STALE_PARQUET_TEMP_DIR_AGE)
+        .unwrap_or(false)
 }
 
 fn writer_properties(dictionary_columns: &[&str]) -> anyhow::Result<WriterProperties> {
