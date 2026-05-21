@@ -6,7 +6,7 @@ use spur_graph::extract::languages::Language;
 use spur_graph::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
 use spur_graph::git_walk::{try_rename_match, FileChange, FileChangeKind, SymbolChange};
 use spur_graph::{
-    stable_symbol_id_for, ChangeKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
+    stable_symbol_id_for, ChangeKind, GitPath, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
 };
 
 const MIN_CASES_PER_LANGUAGE: u32 = 50;
@@ -103,7 +103,7 @@ fn run_corpus(language: Language, relative_dir: &str) -> CorpusStats {
             })
             .collect();
         let file_change = FileChange {
-            path: logical_fixture_path(&stem, "new", extension),
+            path: logical_fixture_path(&stem, "new", extension).into(),
             kind: FileChangeKind::Modified,
             parent_sha: Some("old".to_string()),
         };
@@ -184,7 +184,7 @@ fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolS
             stable_symbol_id: stable_symbol_id_for(path, &symbol.entity_name, &symbol.anchor_hash),
             commit: commit.to_string(),
         },
-        file_path: path.to_path_buf(),
+        file_path: GitPath::from(path),
         entity_name: symbol.entity_name.clone(),
         symbol_kind: symbol.symbol_kind.clone(),
         enclosing_scope: symbol.enclosing_scope.clone(),
