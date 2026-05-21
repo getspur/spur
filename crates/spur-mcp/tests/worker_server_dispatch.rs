@@ -287,6 +287,7 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "code_resolve",
         "code_file_symbols",
         "code_symbol_info",
+        "code_read_symbol",
         "code_callers",
         "code_callees",
         "code_subgraph",

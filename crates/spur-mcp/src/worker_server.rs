@@ -529,6 +529,22 @@ struct CodeSymbolInfoParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeReadSymbolParams {
+    /// Stable symbol id from code_resolve/code_search/code_symbol_info. graph://symbol/<id> is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stable_symbol_id: Option<String>,
+    /// Worktree-relative file path. Required with name and mutually exclusive with stable_symbol_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    /// Symbol entity_name or qualified_name within path. Required with path and mutually exclusive with stable_symbol_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Lines of context to include before and after the symbol. Values outside 0..50 are clamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_lines: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSymbolParams {
     /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -933,6 +949,28 @@ impl WorkerToolHandler {
             Some(None),
             move |_worker_ctx| async move {
                 crate::server::handlers::code_graph::code_symbol_info(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_read_symbol",
+        description = "Read the indexed source for one code symbol from the current graph artifact. Select by stable_symbol_id, or by the exact worktree-relative path plus symbol name. Source bytes are resolved through the artifact file content_oid; stale=true means the current worktree file differs but the returned source still matches the indexed graph.",
+        input_schema = crate::tool_schemas::schema_object::<CodeReadSymbolParams>()
+    )]
+    async fn code_read_symbol_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_read_symbol",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_read_symbol(&args).await
             },
         )
         .await
