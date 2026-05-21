@@ -1,14 +1,19 @@
+use std::collections::HashSet;
+use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path};
+use std::process::Command;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
+use spur_graph::git_blob_oid;
 use spur_graph::{
-    bounded_subgraph, find_callee_edges, find_callers, load_artifact, resolve_selector,
-    resolve_worktree_root_from, search_symbols, CalleeRecord, CandidateRow, GraphEdgeArtifact,
-    GraphIndexArtifact, GraphIndexPointer, GraphSymbolArtifact, RelationKind, SearchFilters,
-    SearchMode, SearchOptions, SelectorResolution, CODE_SYMBOL_URI_PREFIX,
+    bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
+    resolve_selector, resolve_worktree_root_from, search_symbols, CalleeRecord, CallerRecord,
+    CandidateRow, GraphEdgeArtifact, GraphEdgeKind, GraphFileManifestEntry, GraphIndexArtifact,
+    GraphIndexPointer, GraphSymbolArtifact, SearchFilters, SearchMode, SearchOptions,
+    SelectorResolution, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -17,6 +22,13 @@ use super::McpCallbackServer;
 use super::*;
 
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
+const DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 40;
+const MIN_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 1;
+const MAX_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 400;
+const DEFAULT_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 120;
+const MIN_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1;
+const MAX_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1200;
+const MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES: usize = 50;
 const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
@@ -36,6 +48,10 @@ impl McpCallbackServer {
 
     pub(crate) async fn handle_code_symbol_info(&self, id: Value, args: Value) -> JsonRpcResponse {
         code_graph_response(id, code_symbol_info_response(&args).await).await
+    }
+
+    pub(crate) async fn handle_code_read_symbol(&self, id: Value, args: Value) -> JsonRpcResponse {
+        code_graph_response(id, code_read_symbol_response(&args).await).await
     }
 
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -175,6 +191,69 @@ fn code_symbol_info_with_artifact(
     Ok(json!({ "symbol": symbol_info_row(symbol) }))
 }
 
+pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerError> {
+    let artifact = load_graph_artifact_for_request()?;
+    let body = code_read_symbol_with_artifact(args, &artifact)?;
+    Ok(with_graph_metadata(&artifact, body).await)
+}
+
+async fn code_read_symbol_response(args: &Value) -> CodeGraphResult {
+    with_loaded_graph_artifact(|artifact| code_read_symbol_with_artifact(args, artifact)).await
+}
+
+fn code_read_symbol_with_artifact(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<Value, McpHandlerError> {
+    let symbol = match code_read_symbol_target(args, artifact)? {
+        CodeReadSymbolTarget::Resolved(symbol) => symbol,
+        CodeReadSymbolTarget::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(candidates));
+        }
+    };
+    let context_lines = clamped_usize_arg(
+        args,
+        "context_lines",
+        0,
+        0,
+        MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES,
+    )?;
+    let manifest = file_manifest_for_symbol(artifact, symbol)?;
+    let worktree = current_worktree_root().ok_or_else(|| {
+        McpHandlerError::Internal("failed to resolve current worktree root".into())
+    })?;
+    let indexed_bytes =
+        read_indexed_file_bytes(&worktree, &symbol.file_path, &manifest.content_oid)?;
+    let indexed_source = String::from_utf8(indexed_bytes).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "indexed blob `{}` for `{}` is not UTF-8: {error}",
+            manifest.content_oid, symbol.file_path
+        ))
+    })?;
+    let source_range = source_range_with_context(&indexed_source, symbol, context_lines.value);
+    let source = source_for_line_range(&indexed_source, source_range);
+    let current_oid = current_file_oid(&worktree, &symbol.file_path)?;
+    let stale = current_oid.as_deref() != Some(manifest.content_oid.as_str());
+
+    let mut body = json!({
+        "symbol": symbol_info_row(symbol),
+        "source": source,
+        "line_range": {
+            "start": source_range[0],
+            "end": source_range[1],
+        },
+        "file_oid": manifest.content_oid,
+        "context_lines": context_lines.value,
+    });
+    if let Some(requested_context_lines) = context_lines.requested_value {
+        body["requested_context_lines"] = requested_context_lines;
+    }
+    if stale {
+        body["stale"] = Value::Bool(true);
+    }
+    Ok(body)
+}
+
 pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
     let body = code_callers_with_artifact(args, &artifact)?;
@@ -189,6 +268,7 @@ fn code_callers_with_artifact(
     args: &Value,
     artifact: &GraphIndexArtifact,
 ) -> Result<Value, McpHandlerError> {
+    let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
@@ -196,11 +276,19 @@ fn code_callers_with_artifact(
         }
     };
 
-    let callers = find_callers(artifact, &symbol_id)
+    let records = find_caller_edges(artifact, &symbol_id);
+    let summary = caller_summary(&records);
+    let callers = records
         .into_iter()
-        .map(symbol_row)
+        .filter(|record| request.include_unresolved || record.is_resolved())
+        .map(caller_row)
         .collect::<Vec<_>>();
-    Ok(json!({ "callers": callers }))
+    Ok(json!({
+        "callers": callers,
+        "include_unresolved": request.include_unresolved,
+        "counts_by_kind": summary.counts_by_kind,
+        "unresolved_sample": summary.unresolved_sample,
+    }))
 }
 
 pub(crate) async fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
@@ -217,6 +305,7 @@ fn code_callees_with_artifact(
     args: &Value,
     artifact: &GraphIndexArtifact,
 ) -> Result<Value, McpHandlerError> {
+    let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
@@ -224,11 +313,19 @@ fn code_callees_with_artifact(
         }
     };
 
-    let callees = find_callee_edges(artifact, &symbol_id)
+    let records = find_callee_edges(artifact, &symbol_id);
+    let summary = callee_summary(&records);
+    let callees = records
         .into_iter()
+        .filter(|record| request.include_unresolved || record.is_resolved())
         .map(callee_row)
         .collect::<Vec<_>>();
-    Ok(json!({ "callees": callees }))
+    Ok(json!({
+        "callees": callees,
+        "include_unresolved": request.include_unresolved,
+        "counts_by_kind": summary.counts_by_kind,
+        "unresolved_sample": summary.unresolved_sample,
+    }))
 }
 
 pub(crate) async fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
@@ -245,9 +342,10 @@ fn code_subgraph_with_artifact(
     args: &Value,
     artifact: &GraphIndexArtifact,
 ) -> Result<Value, McpHandlerError> {
-    let symbol_id = match resolve_code_selector(args, artifact)? {
-        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
-        CodeSelectorResolution::Ambiguous(candidates) => {
+    let request = code_traversal_request(args)?;
+    let root_ids = match code_subgraph_root_ids(args, artifact)? {
+        CodeSubgraphRoots::RootIds(root_ids) => root_ids,
+        CodeSubgraphRoots::Ambiguous(candidates) => {
             return Ok(ambiguous_response(candidates));
         }
     };
@@ -268,21 +366,44 @@ fn code_subgraph_with_artifact(
         .unwrap_or("json");
     let edge_kinds = parse_edge_kinds(args)?;
     let edge_filter = edge_kinds.as_deref();
-    let view = bounded_subgraph(artifact, &symbol_id, radius, edge_filter);
+    let budget = code_subgraph_budget(args)?;
+    let root_refs = root_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let view = bounded_subgraph_with_budget(
+        artifact,
+        &root_refs,
+        radius,
+        edge_filter,
+        request.include_unresolved,
+        budget.budget,
+    );
 
     match format {
         "json" => {
-            let mut metadata = json!({ "radius": radius });
+            let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
             }
             Ok(json!({
                 "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
                 "edges": view.edges.into_iter().map(edge_row).collect::<Vec<_>>(),
+                "truncated_frontier": view.truncated_frontier,
+                "include_unresolved": request.include_unresolved,
                 "metadata": metadata,
             }))
         }
-        "mermaid" => Ok(json!({ "mermaid": mermaid_subgraph(&view.nodes, &view.edges) })),
+        "mermaid" => {
+            let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
+            if let Some(warning) = warning {
+                metadata["warning"] = Value::String(warning);
+            }
+            let mermaid = mermaid_subgraph(&view.nodes, &view.edges);
+            Ok(json!({
+                "mermaid": mermaid,
+                "truncated_frontier": view.truncated_frontier,
+                "include_unresolved": request.include_unresolved,
+                "metadata": metadata,
+            }))
+        }
         other => Err(McpHandlerError::InvalidParams(format!(
             "invalid format `{other}`; expected `json` or `mermaid`"
         ))),
@@ -349,9 +470,7 @@ impl GraphResponseMetadata {
         let pointer = worktree
             .as_deref()
             .and_then(|worktree| matching_graph_pointer(worktree, &source));
-        let graph_built_at = pointer
-            .as_ref()
-            .and_then(|pointer| graph_built_at_from_pointer(pointer));
+        let graph_built_at = pointer.as_ref().and_then(graph_built_at_from_pointer);
         let indexed_head_oid = pointer
             .as_ref()
             .and_then(|pointer| non_empty_string(pointer.indexed_commit_oid.clone()));
@@ -471,6 +590,11 @@ enum CodeSelectorResolution {
     Ambiguous(Vec<CandidateRow>),
 }
 
+enum CodeReadSymbolTarget<'a> {
+    Resolved(&'a GraphSymbolArtifact),
+    Ambiguous(Vec<CandidateRow>),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OnAmbiguousMode {
     Candidates,
@@ -537,10 +661,88 @@ fn file_arg(args: &Value) -> Result<&str, McpHandlerError> {
         .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'file'".into()))
 }
 
+fn code_read_symbol_target<'a>(
+    args: &Value,
+    artifact: &'a GraphIndexArtifact,
+) -> Result<CodeReadSymbolTarget<'a>, McpHandlerError> {
+    let stable_symbol_id = string_arg(args, "stable_symbol_id")?;
+    let path = string_arg(args, "path")?;
+    let name = string_arg(args, "name")?;
+
+    match (stable_symbol_id, path, name) {
+        (Some(stable_symbol_id), None, None) => {
+            let symbol_id = missing_symbol_label(stable_symbol_id);
+            symbol_by_id(artifact, symbol_id).map(CodeReadSymbolTarget::Resolved)
+        }
+        (None, Some(path), Some(name)) => {
+            let path = validate_worktree_relative_path_arg("path", path)?;
+            resolve_symbol_by_path_name(artifact, &path, name)
+        }
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(McpHandlerError::InvalidParams(
+            "field 'stable_symbol_id' is mutually exclusive with fields 'path' and 'name'".into(),
+        )),
+        (None, Some(_), None) | (None, None, Some(_)) => Err(McpHandlerError::InvalidParams(
+            "fields 'path' and 'name' must be provided together".into(),
+        )),
+        (None, None, None) => Err(McpHandlerError::InvalidParams(
+            "Missing required field 'stable_symbol_id' or fields 'path' and 'name'".into(),
+        )),
+    }
+}
+
+fn resolve_symbol_by_path_name<'a>(
+    artifact: &'a GraphIndexArtifact,
+    path: &str,
+    name: &str,
+) -> Result<CodeReadSymbolTarget<'a>, McpHandlerError> {
+    let matches = artifact
+        .symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.file_path == path
+                && (symbol.entity_name == name || symbol.qualified_name == name)
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] => Err(McpHandlerError::NotFound(format!(
+            "symbol `{name}` in file `{path}` not found in graph artifact"
+        ))),
+        [symbol] => Ok(CodeReadSymbolTarget::Resolved(symbol)),
+        _ => Ok(CodeReadSymbolTarget::Ambiguous(candidate_rows_for_symbols(
+            matches,
+        ))),
+    }
+}
+
 #[derive(Debug)]
 struct CodeSearchRequest {
     options: SearchOptions,
     requested_limit: Option<Value>,
+}
+
+#[derive(Debug)]
+struct CodeTraversalRequest {
+    include_unresolved: bool,
+}
+
+#[derive(Debug)]
+enum CodeSubgraphRoots {
+    RootIds(Vec<String>),
+    Ambiguous(Vec<CandidateRow>),
+}
+
+#[derive(Debug)]
+struct CodeSubgraphBudgetRequest {
+    budget: SubgraphBudget,
+    requested_max_nodes: Option<Value>,
+    requested_max_edges: Option<Value>,
+}
+
+#[derive(Debug)]
+struct ClampedUsizeArg {
+    value: usize,
+    requested_value: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -579,6 +781,174 @@ fn code_search_options(args: &Value) -> Result<CodeSearchRequest, McpHandlerErro
         },
         requested_limit: limit.requested_limit,
     })
+}
+
+fn code_traversal_request(args: &Value) -> Result<CodeTraversalRequest, McpHandlerError> {
+    Ok(CodeTraversalRequest {
+        include_unresolved: bool_arg(args, "include_unresolved")?.unwrap_or(false),
+    })
+}
+
+fn code_subgraph_root_ids(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+) -> Result<CodeSubgraphRoots, McpHandlerError> {
+    if let Some(start_nodes) = start_nodes_arg(args)? {
+        if string_arg(args, "selector")?.is_some() || string_arg(args, "symbol")?.is_some() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'start_nodes' is mutually exclusive with 'selector' and 'symbol'".into(),
+            ));
+        }
+        for node_id in &start_nodes {
+            ensure_symbol_id_exists(artifact, node_id)?;
+        }
+        return Ok(CodeSubgraphRoots::RootIds(start_nodes));
+    }
+
+    match resolve_code_selector(args, artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => {
+            Ok(CodeSubgraphRoots::RootIds(vec![symbol_id]))
+        }
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            Ok(CodeSubgraphRoots::Ambiguous(candidates))
+        }
+    }
+}
+
+fn start_nodes_arg(args: &Value) -> Result<Option<Vec<String>>, McpHandlerError> {
+    let Some(value) = args.get("start_nodes") else {
+        return Ok(None);
+    };
+    let nodes = value.as_array().ok_or_else(|| {
+        McpHandlerError::InvalidParams("field 'start_nodes' must be an array of strings".into())
+    })?;
+    if nodes.is_empty() {
+        return Err(McpHandlerError::InvalidParams(
+            "field 'start_nodes' must contain at least one node id".into(),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut start_nodes = Vec::new();
+    for node in nodes {
+        let node = node.as_str().ok_or_else(|| {
+            McpHandlerError::InvalidParams("field 'start_nodes' must be an array of strings".into())
+        })?;
+        if node.trim().is_empty() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'start_nodes' must not contain empty node ids".into(),
+            ));
+        }
+        let node_id = missing_symbol_label(node);
+        if node_id.trim().is_empty() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'start_nodes' must not contain empty node ids".into(),
+            ));
+        }
+        let node_id = node_id.to_string();
+        if seen.insert(node_id.clone()) {
+            start_nodes.push(node_id);
+        }
+    }
+
+    Ok(Some(start_nodes))
+}
+
+fn ensure_symbol_id_exists(
+    artifact: &GraphIndexArtifact,
+    symbol_id: &str,
+) -> Result<(), McpHandlerError> {
+    if artifact
+        .symbols
+        .iter()
+        .any(|symbol| symbol.stable_symbol_id == symbol_id)
+    {
+        Ok(())
+    } else {
+        Err(McpHandlerError::NotFound(format!(
+            "symbol {} not found in graph artifact",
+            missing_symbol_label(symbol_id)
+        )))
+    }
+}
+
+fn code_subgraph_budget(args: &Value) -> Result<CodeSubgraphBudgetRequest, McpHandlerError> {
+    let max_nodes = clamped_usize_arg(
+        args,
+        "max_nodes",
+        DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES,
+        MIN_MCP_CODE_SUBGRAPH_MAX_NODES,
+        MAX_MCP_CODE_SUBGRAPH_MAX_NODES,
+    )?;
+    let max_edges = clamped_usize_arg(
+        args,
+        "max_edges",
+        DEFAULT_MCP_CODE_SUBGRAPH_MAX_EDGES,
+        MIN_MCP_CODE_SUBGRAPH_MAX_EDGES,
+        MAX_MCP_CODE_SUBGRAPH_MAX_EDGES,
+    )?;
+
+    Ok(CodeSubgraphBudgetRequest {
+        budget: SubgraphBudget {
+            max_nodes: max_nodes.value,
+            max_edges: max_edges.value,
+        },
+        requested_max_nodes: max_nodes.requested_value,
+        requested_max_edges: max_edges.requested_value,
+    })
+}
+
+fn clamped_usize_arg(
+    args: &Value,
+    field: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<ClampedUsizeArg, McpHandlerError> {
+    let Some(value) = args.get(field) else {
+        return Ok(ClampedUsizeArg {
+            value: default,
+            requested_value: None,
+        });
+    };
+    if let Some(limit) = value.as_i64() {
+        let clamped = limit.clamp(min as i64, max as i64);
+        return Ok(ClampedUsizeArg {
+            value: clamped as usize,
+            requested_value: (limit != clamped).then(|| json!(limit)),
+        });
+    }
+    if let Some(limit) = value.as_u64() {
+        let clamped = limit.clamp(min as u64, max as u64);
+        return Ok(ClampedUsizeArg {
+            value: clamped as usize,
+            requested_value: (limit != clamped).then(|| json!(limit)),
+        });
+    }
+
+    Err(McpHandlerError::InvalidParams(format!(
+        "field '{field}' must be an integer"
+    )))
+}
+
+fn code_subgraph_metadata(
+    radius: u8,
+    truncated: bool,
+    budget: &CodeSubgraphBudgetRequest,
+) -> Value {
+    let mut metadata = json!({
+        "radius": radius,
+        "max_nodes": budget.budget.max_nodes,
+        "max_edges": budget.budget.max_edges,
+        "truncated": truncated,
+    });
+    if let Some(requested_max_nodes) = &budget.requested_max_nodes {
+        metadata["requested_max_nodes"] = requested_max_nodes.clone();
+    }
+    if let Some(requested_max_edges) = &budget.requested_max_edges {
+        metadata["requested_max_edges"] = requested_max_edges.clone();
+    }
+    metadata
 }
 
 fn query_arg(args: &Value) -> Result<String, McpHandlerError> {
@@ -721,6 +1091,16 @@ fn string_arg<'a>(args: &'a Value, field: &str) -> Result<Option<&'a str>, McpHa
     Ok(Some(value))
 }
 
+fn bool_arg(args: &Value, field: &str) -> Result<Option<bool>, McpHandlerError> {
+    let Some(value) = args.get(field) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| McpHandlerError::InvalidParams(format!("field '{field}' must be a boolean")))
+}
+
 fn on_ambiguous_mode(args: &Value) -> Result<OnAmbiguousMode, McpHandlerError> {
     let Some(value) = args.get("on_ambiguous") else {
         return Ok(OnAmbiguousMode::Candidates);
@@ -743,7 +1123,7 @@ fn missing_symbol_label(selector: &str) -> &str {
         .unwrap_or(selector)
 }
 
-fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<RelationKind>>, McpHandlerError> {
+fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<GraphEdgeKind>>, McpHandlerError> {
     let Some(value) = args.get("edge_kinds") else {
         return Ok(None);
     };
@@ -758,8 +1138,13 @@ fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<RelationKind>>, McpHandle
                     "field 'edge_kinds' must be an array of strings".to_string(),
                 )
             })?;
-            serde_json::from_value::<RelationKind>(Value::String(kind.to_string()))
-                .map_err(|_| McpHandlerError::InvalidParams(format!("invalid edge kind `{kind}`")))
+            serde_json::from_value::<GraphEdgeKind>(Value::String(kind.to_string())).map_err(
+                |_| {
+                    McpHandlerError::InvalidParams(format!(
+                        "invalid edge kind `{kind}`; expected one of calls, calls_dyn, references_hof, references_other"
+                    ))
+                },
+            )
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
@@ -795,6 +1180,115 @@ fn symbol_by_id<'a>(
                 "resolved symbol id `{symbol_id}` missing from graph artifact"
             ))
         })
+}
+
+fn file_manifest_for_symbol<'a>(
+    artifact: &'a GraphIndexArtifact,
+    symbol: &GraphSymbolArtifact,
+) -> Result<&'a GraphFileManifestEntry, McpHandlerError> {
+    artifact
+        .file_manifests
+        .iter()
+        .find(|entry| entry.path == symbol.file_path)
+        .ok_or_else(|| {
+            McpHandlerError::Internal(format!(
+                "graph artifact has no file manifest for `{}`",
+                symbol.file_path
+            ))
+        })
+}
+
+fn read_indexed_file_bytes(
+    worktree: &Path,
+    file_path: &str,
+    content_oid: &str,
+) -> Result<Vec<u8>, McpHandlerError> {
+    if content_oid.starts_with("gitlink:") {
+        return Err(McpHandlerError::Internal(format!(
+            "indexed source for `{file_path}` points to gitlink `{content_oid}`"
+        )));
+    }
+    if let Some(bytes) = read_git_blob(worktree, content_oid)? {
+        return Ok(bytes);
+    }
+
+    let current = read_current_file_bytes(worktree, file_path)?;
+    if git_blob_oid(&current) == content_oid {
+        return Ok(current);
+    }
+
+    Err(McpHandlerError::Internal(format!(
+        "indexed blob `{content_oid}` for `{file_path}` is not available in git object storage"
+    )))
+}
+
+fn read_git_blob(worktree: &Path, content_oid: &str) -> Result<Option<Vec<u8>>, McpHandlerError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["cat-file", "-p", content_oid])
+        .output()
+        .map_err(|error| {
+            McpHandlerError::Internal(format!(
+                "failed to read indexed blob `{content_oid}`: {error}"
+            ))
+        })?;
+
+    if output.status.success() {
+        Ok(Some(output.stdout))
+    } else {
+        Ok(None)
+    }
+}
+
+fn current_file_oid(worktree: &Path, file_path: &str) -> Result<Option<String>, McpHandlerError> {
+    match fs::read(worktree.join(file_path)) {
+        Ok(bytes) => Ok(Some(git_blob_oid(&bytes))),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::IsADirectory) => {
+            Ok(None)
+        }
+        Err(error) => Err(McpHandlerError::Internal(format!(
+            "failed to read current file `{}`: {error}",
+            worktree.join(file_path).display()
+        ))),
+    }
+}
+
+fn read_current_file_bytes(worktree: &Path, file_path: &str) -> Result<Vec<u8>, McpHandlerError> {
+    fs::read(worktree.join(file_path)).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "failed to read current file `{}` while resolving indexed blob: {error}",
+            worktree.join(file_path).display()
+        ))
+    })
+}
+
+fn source_range_with_context(
+    source: &str,
+    symbol: &GraphSymbolArtifact,
+    context_lines: usize,
+) -> [usize; 2] {
+    let line_count = source.split_inclusive('\n').count();
+    let symbol_start = symbol.line_range[0].max(1);
+    let symbol_end = symbol.line_range[1].max(symbol_start);
+    let start = symbol_start.saturating_sub(context_lines).max(1);
+    let end = symbol_end
+        .saturating_add(context_lines)
+        .min(line_count)
+        .max(start.saturating_sub(1));
+    [start, end]
+}
+
+fn source_for_line_range(source: &str, line_range: [usize; 2]) -> String {
+    let [start, end] = line_range;
+    source
+        .split_inclusive('\n')
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line_no = index + 1;
+            (start <= line_no && line_no <= end).then_some(line)
+        })
+        .collect()
 }
 
 fn candidate_rows_for_symbols<'a>(
@@ -942,6 +1436,7 @@ fn candidate_row(candidate: CandidateRow) -> Value {
 fn symbol_info_row(symbol: &GraphSymbolArtifact) -> Value {
     json!({
         "qualified_name": symbol.qualified_name,
+        "entity_name": symbol.entity_name,
         "file_path": symbol.file_path,
         "line_range": symbol.line_range,
         "symbol_kind": symbol.symbol_kind,
@@ -962,25 +1457,141 @@ fn symbol_row(symbol: &GraphSymbolArtifact) -> Value {
     })
 }
 
+#[derive(Debug)]
+struct TraversalSummary {
+    counts_by_kind: Value,
+    unresolved_sample: Vec<String>,
+}
+
+fn caller_summary(records: &[CallerRecord<'_>]) -> TraversalSummary {
+    let unresolved = records.iter().filter_map(|record| match record {
+        CallerRecord::Unresolved { target_label, .. } => Some(target_label.as_str()),
+        CallerRecord::Resolved { .. } => None,
+    });
+    traversal_summary(records.iter().map(CallerRecord::edge), unresolved)
+}
+
+fn callee_summary(records: &[CalleeRecord<'_>]) -> TraversalSummary {
+    let unresolved = records.iter().filter_map(|record| match record {
+        CalleeRecord::Unresolved { target_label, .. } => Some(target_label.as_str()),
+        CalleeRecord::Resolved { .. } => None,
+    });
+    traversal_summary(records.iter().map(CalleeRecord::edge), unresolved)
+}
+
+fn traversal_summary<'a>(
+    edges: impl IntoIterator<Item = &'a GraphEdgeArtifact>,
+    unresolved_labels: impl IntoIterator<Item = &'a str>,
+) -> TraversalSummary {
+    let mut calls = 0usize;
+    let mut calls_dyn = 0usize;
+    let mut references_hof = 0usize;
+    let mut references_other = 0usize;
+    let mut unresolved = 0usize;
+
+    for edge in edges {
+        match edge_kind(edge) {
+            GraphEdgeKind::Calls => calls += 1,
+            GraphEdgeKind::CallsDyn => calls_dyn += 1,
+            GraphEdgeKind::ReferencesHof => references_hof += 1,
+            GraphEdgeKind::ReferencesOther => references_other += 1,
+        }
+        if edge.target_stable_symbol_id.is_none() {
+            unresolved += 1;
+        }
+    }
+
+    TraversalSummary {
+        counts_by_kind: json!({
+            "calls": calls,
+            "calls_dyn": calls_dyn,
+            "references_hof": references_hof,
+            "references_other": references_other,
+            "unresolved": unresolved,
+        }),
+        unresolved_sample: unresolved_sample(unresolved_labels),
+    }
+}
+
+fn unresolved_sample<'a>(labels: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut sample = Vec::new();
+    let mut bytes = 0usize;
+
+    for label in labels {
+        if sample.len() >= 5 || !seen.insert(label) {
+            continue;
+        }
+        let next_bytes = bytes + label.len();
+        if next_bytes > 120 {
+            break;
+        }
+        bytes = next_bytes;
+        sample.push(label.to_string());
+    }
+
+    sample
+}
+
+fn caller_row(caller: CallerRecord<'_>) -> Value {
+    match caller {
+        CallerRecord::Resolved { caller, edge } => {
+            let mut row = symbol_row(caller);
+            add_edge_metadata(&mut row, edge, true, None);
+            row
+        }
+        CallerRecord::Unresolved {
+            caller,
+            edge,
+            target_label,
+        } => {
+            let mut row = symbol_row(caller);
+            add_edge_metadata(&mut row, edge, false, Some(target_label));
+            row
+        }
+    }
+}
+
 fn callee_row(callee: CalleeRecord<'_>) -> Value {
     match callee {
-        CalleeRecord::Resolved(symbol) => json!({
-            "resolved": true,
-            "uri": symbol_uri(&symbol.stable_symbol_id),
-            "entity_name": symbol.entity_name,
-            "enclosing_scope": symbol.enclosing_scope,
-            "file_path": symbol.file_path,
-            "line_range": symbol.line_range,
-            "symbol_kind": symbol.symbol_kind,
-        }),
-        CalleeRecord::Unresolved { target_label } => {
+        CalleeRecord::Resolved { symbol, edge } => {
+            let mut row = symbol_row(symbol);
+            add_edge_metadata(&mut row, edge, true, None);
+            row
+        }
+        CalleeRecord::Unresolved { edge, target_label } => {
             let entity_name = target_label.clone();
-            json!({
+            let mut row = json!({
                 "resolved": false,
                 "entity_name": entity_name,
                 "target_label": target_label,
-            })
+            });
+            add_edge_metadata(&mut row, edge, false, None);
+            row
         }
+    }
+}
+
+fn add_edge_metadata(
+    row: &mut Value,
+    edge: &GraphEdgeArtifact,
+    resolved: bool,
+    unresolved_target_label: Option<String>,
+) {
+    let Some(map) = row.as_object_mut() else {
+        return;
+    };
+    map.insert("resolved".to_string(), Value::Bool(resolved));
+    let kind = edge_kind(edge);
+    map.insert(
+        "edge_kind".to_string(),
+        Value::String(edge_kind_str(kind).to_string()),
+    );
+    if let Some(target_label) = unresolved_target_label {
+        map.insert("target_label".to_string(), Value::String(target_label));
+    }
+    if kind == GraphEdgeKind::CallsDyn {
+        map.insert("confidence".to_string(), json!(edge.confidence));
     }
 }
 
@@ -989,10 +1600,21 @@ fn edge_row(edge: &GraphEdgeArtifact) -> Value {
         "source_uri": symbol_uri(&edge.source_stable_symbol_id),
         "target_uri": edge.target_stable_symbol_id.as_ref().map(|id| symbol_uri(id)),
         "target_label": edge.target_label,
+        "resolved": edge.target_stable_symbol_id.is_some(),
         "relation": edge.relation,
+        "edge_kind": edge_kind_str(edge_kind(edge)),
         "confidence": edge.confidence,
         "confidence_score": edge.confidence_score,
     })
+}
+
+fn edge_kind_str(edge_kind: GraphEdgeKind) -> &'static str {
+    match edge_kind {
+        GraphEdgeKind::Calls => "calls",
+        GraphEdgeKind::CallsDyn => "calls_dyn",
+        GraphEdgeKind::ReferencesHof => "references_hof",
+        GraphEdgeKind::ReferencesOther => "references_other",
+    }
 }
 
 fn symbol_uri(symbol_id: &str) -> String {
@@ -1108,8 +1730,11 @@ mod tests {
                 ],
                 "symbols": [
                     symbol("caller", "src/caller.rs", [3, 5], "call_root", "call_root"),
+                    symbol("unresolved-caller", "src/caller.rs", [6, 8], "call_root_unresolved", "call_root_unresolved"),
                     symbol("root", "src/root.rs", [10, 12], "root", "root"),
                     symbol("callee", "src/callee.rs", [20, 22], "callee", "callee"),
+                    symbol("dyn-callee", "src/callee.rs", [23, 25], "dyn_callee", "dyn_callee"),
+                    symbol("hof-callee", "src/callee.rs", [26, 28], "hof_callee", "hof_callee"),
                     symbol("cache-caller", "crates/foo", [24, 26], "call_cache", "call_cache"),
                     symbol("cache-run", "crates/foo", [30, 32], "run", "Cache::run"),
                     symbol("cache-callee", "crates/foo", [34, 36], "finish_cache", "finish_cache"),
@@ -1122,12 +1747,60 @@ mod tests {
                 ],
                 "edges": [
                     edge("caller", "root"),
+                    unresolved_edge("unresolved-caller", "root"),
                     edge("root", "callee"),
+                    edge_with_kind("root", "dyn-callee", "calls", "calls_dyn"),
+                    edge_with_kind("root", "hof-callee", "references", "references_hof"),
                     edge("cache-caller", "cache-run"),
                     edge("cache-run", "cache-callee"),
                     edge("mixed-root", "mixed-callee"),
                     unresolved_edge("mixed-root", "into")
                 ],
+                "tombstones": []
+            }))
+            .expect("encode artifact"),
+        )
+        .expect("write artifact");
+    }
+
+    fn write_wide_subgraph_artifact(dir: &TempDir, child_count: usize, edge_count: usize) {
+        let child_ids = (0..child_count)
+            .map(|index| format!("wide-child-{index:03}"))
+            .collect::<Vec<_>>();
+        let mut symbols = vec![symbol(
+            "wide-root",
+            "src/wide.rs",
+            [1, 10],
+            "wide_root",
+            "wide_root",
+        )];
+        symbols.extend(child_ids.iter().enumerate().map(|(index, id)| {
+            symbol(
+                id,
+                "src/wide.rs",
+                [20 + index, 20 + index],
+                &format!("wide_child_{index:03}"),
+                &format!("wide_child_{index:03}"),
+            )
+        }));
+        let edges = (0..edge_count)
+            .map(|index| edge("wide-root", &child_ids[index % child_ids.len()]))
+            .collect::<Vec<_>>();
+
+        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
+        std::fs::write(
+            dir.path().join(".spur/graph-index.json"),
+            serde_json::to_string_pretty(&json!({
+                "header": {
+                    "graph_index_version": "test"
+                },
+                "manifest_version": "test",
+                "graph_content_hash": "wide-test",
+                "files": [
+                    { "stable_file_id": "file-src-wide", "file_path": "src/wide.rs" }
+                ],
+                "symbols": symbols,
+                "edges": edges,
                 "tombstones": []
             }))
             .expect("encode artifact"),
@@ -1169,13 +1842,18 @@ mod tests {
     }
 
     fn edge(source: &str, target: &str) -> Value {
+        edge_with_kind(source, target, "calls", "calls")
+    }
+
+    fn edge_with_kind(source: &str, target: &str, relation: &str, edge_kind: &str) -> Value {
         json!({
             "source_stable_symbol_id": source,
             "target_stable_symbol_id": target,
             "target_label": null,
-            "relation": "calls",
+            "relation": relation,
             "confidence": "syntax_exact",
-            "confidence_score": 1.0
+            "confidence_score": 1.0,
+            "edge_kind": edge_kind
         })
     }
 
@@ -1186,7 +1864,8 @@ mod tests {
             "target_label": target_label,
             "relation": "calls",
             "confidence": "syntax_exact",
-            "confidence_score": 1.0
+            "confidence_score": 1.0,
+            "edge_kind": "calls"
         })
     }
 
@@ -1425,15 +2104,116 @@ mod tests {
             .await;
         let body = response_json(response);
 
-        assert_eq!(body["callers"].as_array().expect("callers").len(), 1);
-        assert_eq!(body["callers"][0]["uri"], "graph://symbol/caller");
+        let callers = body["callers"].as_array().expect("callers");
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["uri"], "graph://symbol/caller");
+        assert_eq!(body["callers"][0]["resolved"], true);
+        assert_eq!(body["callers"][0]["edge_kind"], "calls");
         assert_eq!(body["callers"][0]["entity_name"], "call_root");
         assert_eq!(body["callers"][0]["file_path"], "src/caller.rs");
         assert_eq!(body["callers"][0]["line_range"], json!([3, 5]));
         assert_eq!(body["callers"][0]["symbol_kind"], "function");
+        assert_eq!(body["include_unresolved"], false);
+        assert_eq!(
+            body["counts_by_kind"],
+            json!({
+                "calls": 2,
+                "calls_dyn": 0,
+                "references_hof": 0,
+                "references_other": 0,
+                "unresolved": 1
+            })
+        );
+        assert_eq!(body["unresolved_sample"], json!(["root"]));
         assert_eq!(body["graph_content_hash"], "test");
         assert_eq!(body["graph_index_version"], "test");
         assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_callers_can_include_unresolved_rows_when_requested() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_callers(
+                Value::from(1),
+                json!({
+                    "symbol": "graph://symbol/root",
+                    "include_unresolved": true
+                }),
+            )
+            .await;
+        let body = response_json(response);
+        let callers = body["callers"].as_array().expect("callers");
+
+        assert_eq!(callers.len(), 2);
+        assert_eq!(callers[0]["resolved"], true);
+        assert_eq!(callers[1]["resolved"], false);
+        assert_eq!(callers[1]["uri"], "graph://symbol/unresolved-caller");
+        assert_eq!(callers[1]["target_label"], "root");
+        assert_eq!(body["include_unresolved"], true);
+        assert_eq!(body["unresolved_sample"], json!(["root"]));
+    }
+
+    #[tokio::test]
+    async fn code_callers_counts_legacy_references_edges_as_references_other() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
+        std::fs::write(
+            dir.path().join(".spur/graph-index.json"),
+            serde_json::to_string_pretty(&json!({
+                "header": {
+                    "graph_index_version": "test"
+                },
+                "manifest_version": "test",
+                "graph_content_hash": "test",
+                "files": [
+                    { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
+                ],
+                "symbols": [
+                    symbol("caller", "src/lib.rs", [1, 1], "caller", "caller"),
+                    symbol("root", "src/lib.rs", [3, 3], "root", "root")
+                ],
+                "edges": [
+                    {
+                        "source_stable_symbol_id": "caller",
+                        "target_stable_symbol_id": "root",
+                        "target_label": "root",
+                        "relation": "references",
+                        "confidence": "syntax_exact",
+                        "confidence_score": 1.0
+                    }
+                ],
+                "tombstones": []
+            }))
+            .expect("encode artifact"),
+        )
+        .expect("write artifact");
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let body = response_json(
+            server
+                .handle_code_callers(Value::from(1), json!({ "symbol": "root" }))
+                .await,
+        );
+
+        assert_eq!(body["callers"][0]["edge_kind"], "references_other");
+        assert_eq!(
+            body["counts_by_kind"],
+            json!({
+                "calls": 0,
+                "calls_dyn": 0,
+                "references_hof": 0,
+                "references_other": 1,
+                "unresolved": 0
+            })
+        );
     }
 
     #[tokio::test]
@@ -1449,15 +2229,28 @@ mod tests {
             .await;
         let body = response_json(response);
 
-        assert_eq!(body["callees"].as_array().expect("callees").len(), 1);
+        assert_eq!(body["callees"].as_array().expect("callees").len(), 3);
         assert_eq!(body["callees"][0]["resolved"], true);
+        assert_eq!(body["callees"][0]["edge_kind"], "calls");
         assert_eq!(body["callees"][0]["uri"], "graph://symbol/callee");
         assert_eq!(body["callees"][0]["entity_name"], "callee");
+        assert_eq!(body["include_unresolved"], false);
+        assert_eq!(
+            body["counts_by_kind"],
+            json!({
+                "calls": 1,
+                "calls_dyn": 1,
+                "references_hof": 1,
+                "references_other": 0,
+                "unresolved": 0
+            })
+        );
+        assert_eq!(body["unresolved_sample"], json!([]));
         assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
-    async fn code_callees_returns_resolved_and_unresolved_edges() {
+    async fn code_callees_filters_unresolved_by_default_and_reports_counts() {
         let _lock = CWD_LOCK.lock().expect("cwd lock");
         let dir = TempDir::new().expect("tempdir");
         write_fixture_artifact(&dir);
@@ -1473,20 +2266,59 @@ mod tests {
         let body = response_json(response);
         let callees = body["callees"].as_array().expect("callees");
 
-        assert_eq!(callees.len(), 2);
+        assert_eq!(callees.len(), 1);
         assert_eq!(callees[0]["resolved"], true);
+        assert_eq!(callees[0]["edge_kind"], "calls");
         assert_eq!(callees[0]["uri"], "graph://symbol/mixed-callee");
         assert_eq!(callees[0]["entity_name"], "mixed_callee");
         assert_eq!(callees[0]["file_path"], "src/callee.rs");
         assert_eq!(callees[0]["line_range"], json!([60, 62]));
         assert_eq!(callees[0]["symbol_kind"], "function");
+        assert_eq!(body["include_unresolved"], false);
+        assert_eq!(
+            body["counts_by_kind"],
+            json!({
+                "calls": 2,
+                "calls_dyn": 0,
+                "references_hof": 0,
+                "references_other": 0,
+                "unresolved": 1
+            })
+        );
+        assert_eq!(body["unresolved_sample"], json!(["into"]));
 
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_callees_can_include_unresolved_rows_when_requested() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_callees(
+                Value::from(1),
+                json!({
+                    "symbol": "graph://symbol/mixed-root",
+                    "include_unresolved": true
+                }),
+            )
+            .await;
+        let body = response_json(response);
+        let callees = body["callees"].as_array().expect("callees");
+
+        assert_eq!(callees.len(), 2);
         assert_eq!(callees[1]["resolved"], false);
+        assert_eq!(callees[1]["edge_kind"], "calls");
         assert_eq!(callees[1]["entity_name"], "into");
         assert_eq!(callees[1]["target_label"], "into");
         assert!(callees[1].get("uri").is_none());
         assert!(callees[1].get("file_path").is_none());
-        assert_unavailable_freshness_metadata(&body);
+        assert_eq!(body["include_unresolved"], true);
+        assert_eq!(body["unresolved_sample"], json!(["into"]));
     }
 
     #[tokio::test]
@@ -1521,6 +2353,7 @@ mod tests {
         );
         assert_eq!(callees["callees"].as_array().expect("callees").len(), 1);
         assert_eq!(callees["callees"][0]["resolved"], true);
+        assert_eq!(callees["callees"][0]["edge_kind"], "calls");
         assert_eq!(callees["callees"][0]["uri"], "graph://symbol/cache-callee");
         assert_eq!(callees["graph_content_hash"], "test");
         assert_eq!(callees["graph_index_version"], "test");
@@ -1624,13 +2457,254 @@ mod tests {
         let body = response_json(response);
 
         assert_eq!(body["nodes"].as_array().expect("nodes").len(), 3);
-        assert_eq!(body["edges"].as_array().expect("edges").len(), 2);
+        let edges = body["edges"].as_array().expect("edges");
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|edge| edge["edge_kind"] == "calls"));
+        assert_eq!(body["include_unresolved"], false);
         assert_eq!(body["metadata"]["radius"], 3);
         assert_eq!(
             body["metadata"]["warning"],
             "radius 9 exceeds max 3; clamped to 3"
         );
+        assert_eq!(body["metadata"]["max_nodes"], 40);
+        assert_eq!(body["metadata"]["max_edges"], 120);
+        assert_eq!(body["metadata"]["truncated"], false);
+        assert_eq!(body["truncated_frontier"], json!([]));
         assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_enforces_default_node_budget() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_wide_subgraph_artifact(&dir, 45, 45);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(
+                Value::from(1),
+                json!({ "symbol": "graph://symbol/wide-root", "radius": 1 }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["max_nodes"], 40);
+        assert_eq!(body["metadata"]["max_edges"], 120);
+        assert_eq!(body["metadata"]["truncated"], true);
+        assert_eq!(body["nodes"].as_array().expect("nodes").len(), 40);
+        assert_eq!(body["edges"].as_array().expect("edges").len(), 39);
+        assert_eq!(
+            body["truncated_frontier"],
+            json!([
+                "wide-child-039",
+                "wide-child-040",
+                "wide-child-041",
+                "wide-child-042",
+                "wide-child-043",
+                "wide-child-044"
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_enforces_default_edge_budget() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_wide_subgraph_artifact(&dir, 130, 130);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(
+                Value::from(1),
+                json!({
+                    "symbol": "graph://symbol/wide-root",
+                    "radius": 1,
+                    "max_nodes": 400
+                }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["max_nodes"], 400);
+        assert_eq!(body["metadata"]["max_edges"], 120);
+        assert_eq!(body["metadata"]["truncated"], true);
+        assert_eq!(body["nodes"].as_array().expect("nodes").len(), 121);
+        assert_eq!(body["edges"].as_array().expect("edges").len(), 120);
+        assert_eq!(
+            body["truncated_frontier"],
+            json!([
+                "wide-child-120",
+                "wide-child-121",
+                "wide-child-122",
+                "wide-child-123",
+                "wide-child-124",
+                "wide-child-125",
+                "wide-child-126",
+                "wide-child-127",
+                "wide-child-128",
+                "wide-child-129"
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_clamps_and_echoes_requested_budgets() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(
+                Value::from(1),
+                json!({
+                    "symbol": "root",
+                    "radius": 1,
+                    "max_nodes": 999,
+                    "max_edges": 9999
+                }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["max_nodes"], 400);
+        assert_eq!(body["metadata"]["max_edges"], 1200);
+        assert_eq!(body["metadata"]["requested_max_nodes"], 999);
+        assert_eq!(body["metadata"]["requested_max_edges"], 9999);
+        assert_eq!(body["metadata"]["truncated"], false);
+        assert_eq!(body["truncated_frontier"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_returns_empty_frontier_when_untruncated() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_subgraph(Value::from(1), json!({ "symbol": "root", "radius": 1 }))
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["metadata"]["truncated"], false);
+        assert_eq!(body["truncated_frontier"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_filters_unresolved_by_default_and_can_include_them() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let default_body = response_json(
+            server
+                .handle_code_subgraph(
+                    Value::from(1),
+                    json!({
+                        "symbol": "graph://symbol/mixed-root",
+                        "radius": 1,
+                        "edge_kinds": ["calls"]
+                    }),
+                )
+                .await,
+        );
+        let default_edges = default_body["edges"].as_array().expect("default edges");
+        assert_eq!(default_edges.len(), 1);
+        assert!(default_edges
+            .iter()
+            .all(|edge| edge["target_uri"].as_str().is_some()));
+        assert_eq!(default_body["include_unresolved"], false);
+
+        let included_body = response_json(
+            server
+                .handle_code_subgraph(
+                    Value::from(1),
+                    json!({
+                        "symbol": "graph://symbol/mixed-root",
+                        "radius": 1,
+                        "edge_kinds": ["calls"],
+                        "include_unresolved": true
+                    }),
+                )
+                .await,
+        );
+        let included_edges = included_body["edges"].as_array().expect("included edges");
+        assert_eq!(included_edges.len(), 2);
+        assert!(included_edges
+            .iter()
+            .any(|edge| edge["target_label"] == "into" && edge["target_uri"].is_null()));
+        assert_eq!(included_body["include_unresolved"], true);
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_can_include_incoming_unresolved_caller_edges() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let body = response_json(
+            server
+                .handle_code_subgraph(
+                    Value::from(1),
+                    json!({
+                        "symbol": "graph://symbol/root",
+                        "radius": 1,
+                        "edge_kinds": ["calls"],
+                        "include_unresolved": true
+                    }),
+                )
+                .await,
+        );
+        let edges = body["edges"].as_array().expect("edges");
+
+        assert!(edges.iter().any(|edge| {
+            edge["source_uri"] == "graph://symbol/unresolved-caller"
+                && edge["target_uri"].is_null()
+                && edge["target_label"] == "root"
+                && edge["resolved"] == false
+        }));
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_edge_kinds_accept_public_edge_kind_values() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let dyn_body = response_json(
+            server
+                .handle_code_subgraph(
+                    Value::from(1),
+                    json!({ "symbol": "root", "radius": 1, "edge_kinds": ["calls_dyn"] }),
+                )
+                .await,
+        );
+        let dyn_edges = dyn_body["edges"].as_array().expect("dyn edges");
+        assert_eq!(dyn_edges.len(), 1);
+        assert_eq!(dyn_edges[0]["edge_kind"], "calls_dyn");
+
+        let hof_body = response_json(
+            server
+                .handle_code_subgraph(
+                    Value::from(1),
+                    json!({ "symbol": "root", "radius": 1, "edge_kinds": ["references_hof"] }),
+                )
+                .await,
+        );
+        let hof_edges = hof_body["edges"].as_array().expect("hof edges");
+        assert_eq!(hof_edges.len(), 1);
+        assert_eq!(hof_edges[0]["edge_kind"], "references_hof");
     }
 
     #[tokio::test]
