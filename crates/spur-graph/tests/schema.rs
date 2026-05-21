@@ -1,6 +1,6 @@
 use spur_graph::{
-    Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphNode, NodeId, NodeKind, RelationKind,
-    RunId, SourceSpan, SpanId,
+    Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphEdgeArtifact, GraphEdgeKind, GraphNode,
+    NodeId, NodeKind, RelationKind, RunId, SourceSpan, SpanId,
 };
 
 #[test]
@@ -22,6 +22,7 @@ fn graph_facts_round_trip_through_json() {
         target_label: Some("callee".to_string()),
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
+        edge_kind: None,
         evidence_id: EvidenceId(13),
         directed: true,
     };
@@ -49,6 +50,44 @@ fn syntax_exact_confidence_round_trips_as_snake_case_json() {
         serde_json::from_str::<Confidence>(&encoded).unwrap(),
         Confidence::SyntaxExact
     );
+}
+
+#[test]
+fn graph_edge_kind_round_trips_all_public_values_and_legacy_omission() {
+    for edge_kind in [
+        GraphEdgeKind::Calls,
+        GraphEdgeKind::CallsDyn,
+        GraphEdgeKind::ReferencesHof,
+        GraphEdgeKind::ReferencesOther,
+    ] {
+        let edge = GraphEdgeArtifact {
+            source_stable_symbol_id: "source".to_string(),
+            target_stable_symbol_id: Some("target".to_string()),
+            target_label: Some("target".to_string()),
+            relation: RelationKind::Calls,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            edge_kind: Some(edge_kind),
+        };
+        let encoded = serde_json::to_string(&edge).unwrap();
+        assert!(
+            encoded.contains("\"edge_kind\""),
+            "serialized edge must persist edge_kind: {encoded}"
+        );
+        let decoded: GraphEdgeArtifact = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.edge_kind, Some(edge_kind));
+    }
+
+    let legacy = r#"{
+        "source_stable_symbol_id":"source",
+        "target_stable_symbol_id":"target",
+        "target_label":"target",
+        "relation":"calls",
+        "confidence":"syntax_exact",
+        "confidence_score":1.0
+    }"#;
+    let decoded: GraphEdgeArtifact = serde_json::from_str(legacy).unwrap();
+    assert_eq!(decoded.edge_kind, None);
 }
 
 #[test]

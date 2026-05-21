@@ -283,6 +283,7 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "get_task_diff",
         "get_plan_status",
         "fetch_outcome_artifact",
+        "code_search",
         "code_resolve",
         "code_file_symbols",
         "code_symbol_info",
