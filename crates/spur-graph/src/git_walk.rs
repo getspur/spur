@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::extract::languages::Language;
 use crate::extract::tree_sitter::{BytesExtractor, ExtractError, ExtractedSymbol};
 use crate::schema::{
-    ChangeKind, CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GraphIndexArtifact,
+    ChangeKind, CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GitPath, GraphIndexArtifact,
     GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
     TemporalEdgeArtifact, WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
 };
@@ -316,7 +316,7 @@ pub enum FileChangeKind {
     Modified,
     Deleted,
     Renamed {
-        from: PathBuf,
+        from: GitPath,
     },
     Gitlink {
         old_oid: Option<String>,
@@ -326,7 +326,7 @@ pub enum FileChangeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChange {
-    pub path: PathBuf,
+    pub path: GitPath,
     pub kind: FileChangeKind,
     pub parent_sha: Option<String>,
 }
@@ -422,7 +422,8 @@ pub fn symbol_changes_for_commit(
             continue;
         }
 
-        let Some(language) = Language::from_path(&file_change.path) else {
+        let current_path = file_change.path.to_path_buf();
+        let Some(language) = Language::from_path(&current_path) else {
             continue;
         };
 
@@ -440,12 +441,13 @@ pub fn symbol_changes_for_commit(
             continue;
         }
 
-        let deleted_path = blobs.left_path.as_deref().unwrap_or(&file_change.path);
+        let deleted_path = blobs.left_path.as_ref().unwrap_or(&file_change.path);
+        let left_path_buf = blobs.left_path.as_ref().map(GitPath::to_path_buf);
         let (left_result, right_result) = {
             let extractor = ctx.for_language(language)?;
             (
-                extract_symbols(extractor, blobs.left_path.as_deref(), &blobs.left),
-                extract_symbols(extractor, Some(&file_change.path), &blobs.right),
+                extract_symbols(extractor, left_path_buf.as_deref(), &blobs.left),
+                extract_symbols(extractor, Some(&current_path), &blobs.right),
             )
         };
         let mut parse_failed = false;
@@ -815,7 +817,7 @@ fn jaccard_threshold_for(language: Language) -> Option<f64> {
 }
 
 struct ChangeBlobs {
-    left_path: Option<PathBuf>,
+    left_path: Option<GitPath>,
     left: Option<Vec<u8>>,
     right: Option<Vec<u8>>,
 }
@@ -823,9 +825,9 @@ struct ChangeBlobs {
 fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Result<ChangeBlobs> {
     let right = match &file_change.kind {
         FileChangeKind::Deleted => None,
-        FileChangeKind::Added | FileChangeKind::Modified | FileChangeKind::Renamed { .. } => {
-            Some(cat_file_blob(worktree, sha, &file_change.path)?)
-        }
+        FileChangeKind::Added | FileChangeKind::Modified | FileChangeKind::Renamed { .. } => Some(
+            cat_file_blob(worktree, sha, &file_change.path.to_path_buf())?,
+        ),
         FileChangeKind::Gitlink { .. } => None,
     };
 
@@ -835,7 +837,7 @@ fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Res
         FileChangeKind::Renamed { from } => Some(from.clone()),
     };
     let left = match (file_change.parent_sha.as_deref(), left_path.as_ref()) {
-        (Some(parent), Some(path)) => Some(cat_file_blob(worktree, parent, path)?),
+        (Some(parent), Some(path)) => Some(cat_file_blob(worktree, parent, &path.to_path_buf())?),
         _ => None,
     };
 
@@ -980,7 +982,12 @@ fn extract_symbols(
     }
 }
 
-fn parse_failed_diagnostic(commit: &str, path: &Path, side: &str, error: &ExtractError) -> String {
+fn parse_failed_diagnostic(
+    commit: &str,
+    path: &GitPath,
+    side: &str,
+    error: &ExtractError,
+) -> String {
     format!(
         "parse_failed: file={} sha={} side={} error={}; skipped symbol diff, file-level touch retained",
         path.display(),
@@ -990,17 +997,18 @@ fn parse_failed_diagnostic(commit: &str, path: &Path, side: &str, error: &Extrac
     )
 }
 
-fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
+fn snapshot_from(commit: &str, path: &GitPath, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
+    let path_buf = path.to_path_buf();
     SymbolSnapshotArtifact {
         key: SnapshotKey {
             stable_symbol_id: crate::identity::stable_symbol_id_for(
-                path,
+                &path_buf,
                 &symbol.entity_name,
                 &symbol.anchor_hash,
             ),
             commit: commit.to_string(),
         },
-        file_path: path.to_path_buf(),
+        file_path: path.clone(),
         entity_name: symbol.entity_name.clone(),
         symbol_kind: symbol.symbol_kind.clone(),
         enclosing_scope: symbol.enclosing_scope.clone(),
@@ -1058,7 +1066,7 @@ fn parse_ls_tree_root(stdout: &[u8]) -> Result<Vec<FileChange>> {
             };
 
             Ok(FileChange {
-                path: pathbuf_from_git_bytes(path),
+                path: GitPath::from_bytes(path.to_vec()),
                 kind,
                 parent_sha: None,
             })
@@ -1113,7 +1121,7 @@ fn parse_raw_diff(
                 b'M' | b'T' => FileChangeKind::Modified,
                 b'D' => FileChangeKind::Deleted,
                 b'R' => FileChangeKind::Renamed {
-                    from: pathbuf_from_git_bytes(path1),
+                    from: GitPath::from_bytes(path1.to_vec()),
                 },
                 other => bail!(
                     "unexpected diff status `{}` in `{status}`",
@@ -1129,12 +1137,12 @@ fn parse_raw_diff(
                 let path2 = fields.next().with_context(|| {
                     format!("git diff-tree emitted rename `{status}` without a destination path")
                 })?;
-                pathbuf_from_git_bytes(path2)
+                GitPath::from_bytes(path2.to_vec())
             }
             FileChangeKind::Added
             | FileChangeKind::Modified
             | FileChangeKind::Deleted
-            | FileChangeKind::Gitlink { .. } => pathbuf_from_git_bytes(path1),
+            | FileChangeKind::Gitlink { .. } => GitPath::from_bytes(path1.to_vec()),
             FileChangeKind::Renamed { .. } => {
                 return Err(anyhow!(
                     "git diff-tree emitted rename status `{status}` without rename marker"
@@ -1165,18 +1173,6 @@ fn split_once(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
 
 fn nul_fields(stdout: &[u8]) -> impl Iterator<Item = &[u8]> {
     stdout.split(|b| *b == 0).filter(|field| !field.is_empty())
-}
-
-#[cfg(unix)]
-fn pathbuf_from_git_bytes(path: &[u8]) -> PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-
-    PathBuf::from(std::ffi::OsStr::from_bytes(path))
-}
-
-#[cfg(not(unix))]
-fn pathbuf_from_git_bytes(path: &[u8]) -> PathBuf {
-    PathBuf::from(String::from_utf8_lossy(path).into_owned())
 }
 
 fn git_dir(worktree: &Path) -> Result<std::path::PathBuf> {
@@ -1636,10 +1632,7 @@ mod tests {
 
         let changes = file_changes_for_commit(dir.path(), &sha).unwrap();
         assert_eq!(changes.len(), 1);
-        assert_eq!(
-            changes[0].path.as_os_str().as_bytes(),
-            path.as_os_str().as_bytes()
-        );
+        assert_eq!(changes[0].path.as_bytes(), path.as_os_str().as_bytes());
 
         let mut ctx = SymbolDiffCtx::new();
         let symbol_changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
