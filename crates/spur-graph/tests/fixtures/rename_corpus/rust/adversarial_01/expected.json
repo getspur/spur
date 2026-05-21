@@ -1,0 +1,14 @@
+{
+  "class": "full_rewrite",
+  "expected_renames": [],
+  "expected_added": [
+    "rust_full_rewrite_after"
+  ],
+  "expected_deleted": [
+    "rust_full_rewrite_before"
+  ],
+  "expected_ambiguous_candidates": [
+    "rust_full_rewrite_after",
+    "rust_full_rewrite_before"
+  ]
+}
