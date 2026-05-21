@@ -71,7 +71,8 @@ fn code_search_with_artifact(
     args: &Value,
     artifact: &GraphIndexArtifact,
 ) -> Result<Value, McpHandlerError> {
-    let options = code_search_options(args)?;
+    let request = code_search_options(args)?;
+    let options = request.options;
     let result = search_symbols(artifact, &options);
     let candidates = result
         .candidates
@@ -80,7 +81,7 @@ fn code_search_with_artifact(
         .map(candidate_row)
         .collect::<Vec<_>>();
 
-    Ok(json!({
+    let mut body = json!({
         "query": options.query,
         "mode": search_mode_str(options.mode),
         "symbol_kind": options.filters.symbol_kind,
@@ -90,7 +91,11 @@ fn code_search_with_artifact(
         "total_matches": result.total_matches,
         "truncated": result.truncated,
         "candidates": candidates,
-    }))
+    });
+    if let Some(requested_limit) = request.requested_limit {
+        body["requested_limit"] = requested_limit;
+    }
+    Ok(body)
 }
 
 async fn code_resolve_response(args: &Value) -> CodeGraphResult {
@@ -532,7 +537,19 @@ fn file_arg(args: &Value) -> Result<&str, McpHandlerError> {
         .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'file'".into()))
 }
 
-fn code_search_options(args: &Value) -> Result<SearchOptions, McpHandlerError> {
+#[derive(Debug)]
+struct CodeSearchRequest {
+    options: SearchOptions,
+    requested_limit: Option<Value>,
+}
+
+#[derive(Debug)]
+struct LimitArg {
+    limit: usize,
+    requested_limit: Option<Value>,
+}
+
+fn code_search_options(args: &Value) -> Result<CodeSearchRequest, McpHandlerError> {
     let query = query_arg(args)?;
     let mode = search_mode_arg(args)?;
     let symbol_kind = string_arg(args, "symbol_kind")?.map(str::to_string);
@@ -549,15 +566,18 @@ fn code_search_options(args: &Value) -> Result<SearchOptions, McpHandlerError> {
     }
     let limit = limit_arg(args)?;
 
-    Ok(SearchOptions {
-        query,
-        mode,
-        filters: SearchFilters {
-            symbol_kind,
-            file,
-            file_glob,
+    Ok(CodeSearchRequest {
+        options: SearchOptions {
+            query,
+            mode,
+            filters: SearchFilters {
+                symbol_kind,
+                file,
+                file_glob,
+            },
+            limit: limit.limit,
         },
-        limit,
+        requested_limit: limit.requested_limit,
     })
 }
 
@@ -594,15 +614,26 @@ fn search_mode_arg(args: &Value) -> Result<SearchMode, McpHandlerError> {
     }
 }
 
-fn limit_arg(args: &Value) -> Result<usize, McpHandlerError> {
+fn limit_arg(args: &Value) -> Result<LimitArg, McpHandlerError> {
     let Some(value) = args.get("limit") else {
-        return Ok(20);
+        return Ok(LimitArg {
+            limit: 20,
+            requested_limit: None,
+        });
     };
     if let Some(limit) = value.as_i64() {
-        return Ok(limit.clamp(1, 200) as usize);
+        let clamped = limit.clamp(1, 200);
+        return Ok(LimitArg {
+            limit: clamped as usize,
+            requested_limit: (limit != clamped).then(|| json!(limit)),
+        });
     }
     if let Some(limit) = value.as_u64() {
-        return Ok(limit.clamp(1, 200) as usize);
+        let clamped = limit.clamp(1, 200);
+        return Ok(LimitArg {
+            limit: clamped as usize,
+            requested_limit: (limit != clamped).then(|| json!(limit)),
+        });
     }
     Err(McpHandlerError::InvalidParams(
         "field 'limit' must be an integer".into(),
@@ -801,6 +832,7 @@ fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
         file_path: symbol.file_path.clone(),
         line_range: symbol.line_range,
         symbol_kind: symbol.symbol_kind.clone(),
+        enclosing_scope: symbol.enclosing_scope.clone(),
     }
 }
 
@@ -903,6 +935,7 @@ fn candidate_row(candidate: CandidateRow) -> Value {
         "file_path": candidate.file_path,
         "line_range": candidate.line_range,
         "symbol_kind": candidate.symbol_kind,
+        "enclosing_scope": candidate.enclosing_scope,
     })
 }
 
