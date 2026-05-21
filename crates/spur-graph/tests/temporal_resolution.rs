@@ -119,6 +119,59 @@ fn property_resolve_at_anchor_matches_script() {
 }
 
 #[test]
+fn resolve_at_intermediate_commit_returns_latest_prior_snapshot() {
+    let dir = TempDir::new().unwrap();
+    init_repo(dir.path());
+
+    write(
+        dir.path(),
+        "lib.rs",
+        b"pub fn tracked(input: u32) -> u32 { input + 1 }\n",
+    );
+    let c1 = commit(dir.path(), "add tracked");
+
+    write(
+        dir.path(),
+        "other.rs",
+        b"pub fn unrelated() -> u32 { 10 }\n",
+    );
+    let c2 = commit(dir.path(), "add unrelated");
+
+    write(
+        dir.path(),
+        "lib.rs",
+        b"pub fn tracked(input: u32) -> u32 { input + 2 }\n",
+    );
+    let c3 = commit(dir.path(), "modify tracked");
+
+    let (graph, commits) =
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default()).unwrap();
+    let stable_id = stable_id_for_snapshot(&graph, &c1, "tracked");
+
+    assert!(
+        !graph
+            .symbol_snapshots
+            .iter()
+            .any(|snapshot| snapshot.key.commit == c2
+                && snapshot.key.stable_symbol_id == stable_id),
+        "fixture must not contain a tracked snapshot at the intermediate commit"
+    );
+    assert_eq!(stable_id_for_snapshot(&graph, &c3, "tracked"), stable_id);
+
+    let at_intermediate = resolve_symbol_at(&graph, &commits, &stable_id, &c2, &c2);
+    match at_intermediate {
+        Resolution::Found { value, .. } => assert_eq!(value, stable_id),
+        other => panic!("expected latest prior snapshot from {c1}, got {other:?}"),
+    }
+
+    let through_later_target = resolve_symbol_at(&graph, &commits, &stable_id, &c2, &c3);
+    match through_later_target {
+        Resolution::Found { value, .. } => assert_eq!(value, stable_id),
+        other => panic!("expected latest prior snapshot from {c1}, got {other:?}"),
+    }
+}
+
+#[test]
 fn shallow_clone_fails_closed() {
     let dir = TempDir::new().unwrap();
     init_repo(dir.path());
