@@ -262,6 +262,59 @@ impl App {
 }
 
 #[test]
+fn rust_extractor_emits_mcp_tool_symbol_for_tool_definition_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+struct ToolDefinition {
+    name: String,
+}
+
+fn submit_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan".into(),
+        description: "".into(),
+        input_schema: json!({}),
+    }
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let submit_plan_def = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "function" && symbol.entity_name == "submit_plan_def")
+        .expect("submit_plan_def function symbol");
+    let mcp_tool = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "mcp_tool" && symbol.entity_name == "submit_plan")
+        .expect("submit_plan MCP tool symbol");
+
+    assert_eq!(mcp_tool.qualified_name, "submit_plan");
+    assert_eq!(mcp_tool.file_path, "src/lib.rs");
+    assert_eq!(mcp_tool.enclosing_scope.as_deref(), Some("submit_plan_def"));
+    assert_ne!(
+        mcp_tool.stable_symbol_id, submit_plan_def.stable_symbol_id,
+        "MCP tool registration should be a distinct symbol from its factory function"
+    );
+    assert!(
+        artifact.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Contains
+                && edge.source_stable_symbol_id == submit_plan_def.stable_symbol_id
+                && edge.target_stable_symbol_id.as_deref() == Some(&mcp_tool.stable_symbol_id)
+        }),
+        "submit_plan_def should contain the submit_plan MCP tool symbol"
+    );
+}
+
+#[test]
 fn trait_impl_qualified_name_includes_trait_for_type() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();

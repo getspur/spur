@@ -21,7 +21,7 @@ use crate::{
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
-pub const EXTRACTOR_VERSION: &str = "2026-05-21-manifest-edge-queries-v1";
+pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -537,7 +537,8 @@ fn buckets_from_facts(
             | NodeKind::Enum
             | NodeKind::Method
             | NodeKind::TypeAlias
-            | NodeKind::Section => {
+            | NodeKind::Section
+            | NodeKind::McpTool => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
                 if !current_entries.contains_key(&file_path) {
                     continue;
@@ -1129,6 +1130,7 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
         NodeKind::Method => "method",
         NodeKind::TypeAlias => "type_alias",
         NodeKind::Section => "section",
+        NodeKind::McpTool => "mcp_tool",
         _ => "symbol",
     }
 }
@@ -1168,6 +1170,10 @@ fn qualified_name(
     nodes_by_id: &HashMap<crate::NodeId, &GraphNode>,
     node: &GraphNode,
 ) -> String {
+    if node.kind == NodeKind::McpTool {
+        return symbol_entity_name(&node.label);
+    }
+
     let mut segments = vec![qualified_scope_segment(node)];
     let mut current = node;
     let mut seen = HashSet::new();
