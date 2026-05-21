@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use spur_graph::git_walk::GitWalkConfig;
-use spur_graph::schema::{ChangeKind, EdgeEndpoint, RelationKind};
+use spur_graph::schema::{ChangeKind, EdgeEndpoint, GitPath, RelationKind};
 use tempfile::TempDir;
 
 #[test]
@@ -38,7 +38,7 @@ fn parse_failure_downgrades_file_to_file_level_with_diagnostic() {
             })
             && edge.target
                 == (EdgeEndpoint::File {
-                    path: PathBuf::from("valid.rs"),
+                    path: GitPath::from("valid.rs"),
                 })
             && edge.relation == RelationKind::Touches
             && edge.change_kind == Some(ChangeKind::Added)
@@ -50,7 +50,7 @@ fn parse_failure_downgrades_file_to_file_level_with_diagnostic() {
             })
             && edge.target
                 == (EdgeEndpoint::File {
-                    path: PathBuf::from("corrupt.rs"),
+                    path: GitPath::from("corrupt.rs"),
                 })
             && edge.relation == RelationKind::Touches
             && edge.change_kind == Some(ChangeKind::Added)
@@ -62,7 +62,7 @@ fn parse_failure_downgrades_file_to_file_level_with_diagnostic() {
             })
             && edge.target
                 == (EdgeEndpoint::File {
-                    path: PathBuf::from("corrupt.rs"),
+                    path: GitPath::from("corrupt.rs"),
                 })
             && edge.relation == RelationKind::Touches
             && edge.change_kind == Some(ChangeKind::Modified)
