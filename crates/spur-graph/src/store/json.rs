@@ -21,7 +21,7 @@ use crate::{
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
-pub const EXTRACTOR_VERSION: &str = "2026-05-21-rust-macro-call-edges-v1";
+pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {

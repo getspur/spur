@@ -1,7 +1,6 @@
 pub mod languages;
 pub mod markdown;
 pub mod mcp_tools;
-pub mod rust_macros;
 pub mod tree_sitter;
 
 pub use tree_sitter::{build_facts, build_facts_for_paths};
