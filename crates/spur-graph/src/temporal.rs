@@ -328,10 +328,15 @@ fn rename_target(
         (EdgeEndpoint::Commit { .. }, EdgeEndpoint::Snapshot { key }) if key != prev => {
             Some(key.clone())
         }
-        (EdgeEndpoint::Snapshot { key }, EdgeEndpoint::Snapshot { key: to_prev })
-            if to_prev == prev =>
+        (EdgeEndpoint::Snapshot { key: from }, EdgeEndpoint::Snapshot { key: to })
+            if from == prev && to != prev =>
         {
-            Some(key.clone())
+            Some(to.clone())
+        }
+        (EdgeEndpoint::Snapshot { key: to }, EdgeEndpoint::Snapshot { key: from })
+            if from == prev && to != prev =>
+        {
+            Some(to.clone())
         }
         _ => None,
     }
@@ -566,10 +571,10 @@ mod tests {
         });
         graph.temporal_edges.push(TemporalEdgeArtifact {
             source: EdgeEndpoint::Snapshot {
-                key: snap_new.key.clone(),
+                key: snap_old.key.clone(),
             },
             target: EdgeEndpoint::Snapshot {
-                key: snap_old.key.clone(),
+                key: snap_new.key.clone(),
             },
             relation: RelationKind::Touches,
             parent: None,
