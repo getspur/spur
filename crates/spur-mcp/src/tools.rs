@@ -822,22 +822,7 @@ fn code_read_symbol_def() -> ToolDefinition {
                     "default": 0,
                     "description": "Lines of context to include before and after the symbol. Values outside 0..50 are clamped and echoed as requested_context_lines."
                 }
-            },
-            "oneOf": [
-                {
-                    "required": ["stable_symbol_id"],
-                    "not": {
-                        "anyOf": [
-                            { "required": ["path"] },
-                            { "required": ["name"] }
-                        ]
-                    }
-                },
-                {
-                    "required": ["path", "name"],
-                    "not": { "required": ["stable_symbol_id"] }
-                }
-            ]
+            }
         }),
     }
 }
