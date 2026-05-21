@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
 use spur_graph::{
-    artifact_from_facts, build_facts, write_artifact, GraphIndexArtifact, GraphSymbolArtifact,
+    artifact_from_facts, build_facts, build_facts_for_paths, write_artifact, GraphIndexArtifact,
+    GraphSymbolArtifact,
 };
 use spur_mcp::server::{community_feature_gate, DetachedContinuationCtx};
 use spur_mcp::McpCallbackServer;
@@ -53,6 +54,14 @@ fn fixture_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/code_graph_sample")
 }
 
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf()
+}
+
 fn copy_fixture_crate(worktree: &Path) {
     let fixture = fixture_root();
     std::fs::create_dir_all(worktree.join("src")).expect("create fixture src dir");
@@ -70,10 +79,41 @@ fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     artifact
 }
 
+fn build_real_tools_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
+    let root = workspace_root();
+    let files = [
+        PathBuf::from("crates/spur-mcp/src/tools.rs"),
+        PathBuf::from("crates/spur-mcp/tests/rework_reuse_prior_worktree_e2e.rs"),
+    ];
+    let facts = build_facts_for_paths(&root, &files).expect("build graph facts for real tools");
+    let artifact = artifact_from_facts(&facts, &root).expect("build graph artifact");
+    write_artifact(&artifact, &worktree.join(".spur/graph-index.json")).expect("write artifact");
+    artifact
+}
+
 fn symbol_id(artifact: &GraphIndexArtifact, entity_name: &str) -> String {
     symbol_by_entity(artifact, entity_name)
         .stable_symbol_id
         .clone()
+}
+
+fn symbol_by_file_entity_kind<'a>(
+    artifact: &'a GraphIndexArtifact,
+    file_path: &str,
+    entity_name: &str,
+    symbol_kind: &str,
+) -> &'a GraphSymbolArtifact {
+    artifact
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.file_path == file_path
+                && symbol.entity_name == entity_name
+                && symbol.symbol_kind == symbol_kind
+        })
+        .unwrap_or_else(|| {
+            panic!("symbol `{entity_name}` kind `{symbol_kind}` exists in `{file_path}`")
+        })
 }
 
 fn symbol_by_entity<'a>(
@@ -319,6 +359,44 @@ async fn code_resolve_returns_candidate_rows_without_traversal_payloads() {
         body["graph_index_version"],
         artifact.header.graph_index_version
     );
+}
+
+#[tokio::test]
+async fn code_resolve_prefers_real_submit_plan_mcp_tool_registration() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    let artifact = build_real_tools_graph_artifact(worktree.path());
+    let mcp_tool = symbol_by_file_entity_kind(
+        &artifact,
+        "crates/spur-mcp/src/tools.rs",
+        "submit_plan",
+        "mcp_tool",
+    );
+    let helper = symbol_by_file_entity_kind(
+        &artifact,
+        "crates/spur-mcp/tests/rework_reuse_prior_worktree_e2e.rs",
+        "submit_plan",
+        "function",
+    );
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_resolve",
+            json!({ "selector": "submit_plan" }),
+        )
+        .await,
+    );
+    let candidates = body["candidates"].as_array().expect("candidates");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["id"], mcp_tool.stable_symbol_id);
+    assert_eq!(candidates[0]["symbol_kind"], "mcp_tool");
+    assert_eq!(candidates[0]["qualified_name"], "submit_plan");
+    assert_eq!(candidates[0]["file_path"], "crates/spur-mcp/src/tools.rs");
+    assert_ne!(candidates[0]["id"], helper.stable_symbol_id);
 }
 
 #[tokio::test]

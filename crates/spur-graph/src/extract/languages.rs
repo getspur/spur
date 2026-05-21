@@ -22,8 +22,8 @@ pub(crate) struct LanguageDescriptor {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DefinitionBinding<'tree> {
-    node: Node<'tree>,
-    node_id: NodeId,
+    pub(crate) node: Node<'tree>,
+    pub(crate) node_id: NodeId,
     fqn: String,
 }
 
