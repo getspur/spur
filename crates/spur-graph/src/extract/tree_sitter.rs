@@ -13,7 +13,6 @@ use crate::extract::languages::{
 };
 use crate::extract::markdown::extract_markdown_file;
 use crate::extract::mcp_tools::emit_mcp_tools;
-use crate::extract::rust_macros::emit_macro_call_edges;
 use crate::extract::GraphFacts;
 use crate::{
     Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphNode, NodeId, NodeKind, RelationKind,
@@ -409,12 +408,6 @@ fn extract_file(
             &definitions,
             &edge_captures,
         );
-    }
-    if language_label == "rust" {
-        // Macro-body call candidates are queued as PendingEdge values so the
-        // normal resolver and edge_index dedupe collapse any overlap with
-        // query-captured call_expression edges.
-        emit_macro_call_edges(builder, file_node, source, root_node, &definitions);
     }
     Ok(())
 }
