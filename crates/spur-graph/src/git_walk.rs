@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::extract::languages::Language;
-use crate::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
+use crate::extract::tree_sitter::{BytesExtractor, ExtractError, ExtractedSymbol};
 use crate::schema::{
     ChangeKind, CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GraphIndexArtifact,
     GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
@@ -377,13 +377,12 @@ impl SymbolDiffCtx {
     }
 
     fn for_language(&mut self, language: Language) -> Result<&mut BytesExtractor> {
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.extractors.entry(language) {
-            entry.insert(BytesExtractor::for_language(language)?);
+        match self.extractors.entry(language) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                Ok(entry.insert(BytesExtractor::for_language(language)?))
+            }
         }
-        Ok(self
-            .extractors
-            .get_mut(&language)
-            .expect("extractor was just inserted"))
     }
 
     fn record_diagnostics(&mut self, diagnostics: Vec<String>) {
@@ -442,13 +441,43 @@ pub fn symbol_changes_for_commit(
         }
 
         let deleted_path = blobs.left_path.as_deref().unwrap_or(&file_change.path);
-        let (left_symbols, right_symbols) = {
+        let (left_result, right_result) = {
             let extractor = ctx.for_language(language)?;
             (
                 extract_symbols(extractor, blobs.left_path.as_deref(), &blobs.left),
                 extract_symbols(extractor, Some(&file_change.path), &blobs.right),
             )
         };
+        let mut parse_failed = false;
+        let left_symbols = match left_result {
+            Ok(symbols) => symbols,
+            Err(error) => {
+                ctx.record_diagnostics(vec![parse_failed_diagnostic(
+                    sha,
+                    deleted_path,
+                    "left",
+                    &error,
+                )]);
+                parse_failed = true;
+                Vec::new()
+            }
+        };
+        let right_symbols = match right_result {
+            Ok(symbols) => symbols,
+            Err(error) => {
+                ctx.record_diagnostics(vec![parse_failed_diagnostic(
+                    sha,
+                    &file_change.path,
+                    "right",
+                    &error,
+                )]);
+                parse_failed = true;
+                Vec::new()
+            }
+        };
+        if parse_failed {
+            continue;
+        }
 
         let mut direct_changes = Vec::new();
         let mut deleted_candidates = Vec::new();
@@ -944,11 +973,21 @@ fn extract_symbols(
     extractor: &mut BytesExtractor,
     logical_path: Option<&Path>,
     bytes: &Option<Vec<u8>>,
-) -> Vec<ExtractedSymbol> {
+) -> std::result::Result<Vec<ExtractedSymbol>, ExtractError> {
     match (logical_path, bytes.as_deref()) {
-        (Some(path), Some(bytes)) => extractor.extract(path, bytes).unwrap_or_default(),
-        _ => Vec::new(),
+        (Some(path), Some(bytes)) => extractor.extract(path, bytes),
+        _ => Ok(Vec::new()),
     }
+}
+
+fn parse_failed_diagnostic(commit: &str, path: &Path, side: &str, error: &ExtractError) -> String {
+    format!(
+        "parse_failed: file={} sha={} side={} error={}; skipped symbol diff, file-level touch retained",
+        path.display(),
+        commit,
+        side,
+        error
+    )
 }
 
 fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
