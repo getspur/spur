@@ -133,6 +133,7 @@ impl McpCallbackServer {
             "graph_alerts" => self.handle_graph_alerts(id, arguments).await,
             "graph_subgraph" => self.handle_graph_subgraph(id, arguments).await,
             "code_resolve" => self.handle_code_resolve(id, arguments).await,
+            "code_search" => self.handle_code_search(id, arguments).await,
             "code_file_symbols" => self.handle_code_file_symbols(id, arguments).await,
             "code_symbol_info" => self.handle_code_symbol_info(id, arguments).await,
             "code_callers" => self.handle_code_callers(id, arguments).await,
