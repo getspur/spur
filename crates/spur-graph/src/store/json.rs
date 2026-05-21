@@ -21,13 +21,36 @@ use crate::{
 
 pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
-pub const EXTRACTOR_VERSION: &str = "2026-05-16-persisted-edges-v3";
+pub const EXTRACTOR_VERSION: &str = "2026-05-21-manifest-edge-queries-v1";
 
-const TAG_QUERY_BYTES: &[&[u8]] = &[
-    include_bytes!("../../queries/markdown/tags.scm"),
-    include_bytes!("../../queries/python/tags.scm"),
-    include_bytes!("../../queries/rust/tags.scm"),
-    include_bytes!("../../queries/typescript/tags.scm"),
+#[derive(Debug, Clone, Copy)]
+struct ManifestQueryBytes<'a> {
+    language: &'a str,
+    tags: &'a [u8],
+    spur_edges: &'a [u8],
+}
+
+const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
+    ManifestQueryBytes {
+        language: "markdown",
+        tags: include_bytes!("../../queries/markdown/tags.scm"),
+        spur_edges: include_bytes!("../../queries/markdown/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "python",
+        tags: include_bytes!("../../queries/python/tags.scm"),
+        spur_edges: include_bytes!("../../queries/python/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "rust",
+        tags: include_bytes!("../../queries/rust/tags.scm"),
+        spur_edges: include_bytes!("../../queries/rust/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "typescript",
+        tags: include_bytes!("../../queries/typescript/tags.scm"),
+        spur_edges: include_bytes!("../../queries/typescript/spur-edges.scm"),
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,16 +86,32 @@ struct GraphArtifactBodyForHash<'a> {
 }
 
 pub fn current_manifest_version() -> String {
+    manifest_version_from_query_bytes(SCHEMA_VERSION, EXTRACTOR_VERSION, MANIFEST_QUERY_BYTES)
+}
+
+fn manifest_version_from_query_bytes(
+    schema_version: &str,
+    extractor_version: &str,
+    query_bytes: &[ManifestQueryBytes<'_>],
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(SCHEMA_VERSION.as_bytes());
-    hasher.update([0]);
-    hasher.update(EXTRACTOR_VERSION.as_bytes());
-    hasher.update([0]);
-    for bytes in TAG_QUERY_BYTES {
-        hasher.update(bytes);
-        hasher.update([0]);
+    update_manifest_hash_field(&mut hasher, schema_version.as_bytes());
+    update_manifest_hash_field(&mut hasher, extractor_version.as_bytes());
+    let mut query_bytes_by_language = query_bytes.iter().collect::<Vec<_>>();
+    query_bytes_by_language.sort_by_key(|query| query.language);
+    for query in query_bytes_by_language {
+        update_manifest_hash_field(&mut hasher, query.language.as_bytes());
+        update_manifest_hash_field(&mut hasher, b"tags");
+        update_manifest_hash_field(&mut hasher, query.tags);
+        update_manifest_hash_field(&mut hasher, b"spur-edges");
+        update_manifest_hash_field(&mut hasher, query.spur_edges);
     }
     format!("{:x}", hasher.finalize())
+}
+
+fn update_manifest_hash_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 pub fn artifact_from_facts(
@@ -1174,7 +1213,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact, BuildMode,
+        artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
+        manifest_version_from_query_bytes, BuildMode, ManifestQueryBytes,
         PHASE1_GRAPH_INDEX_VERSION,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
@@ -1186,6 +1226,66 @@ mod tests {
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
     use tracing::{Event, Id, Metadata, Subscriber};
+
+    #[test]
+    fn manifest_version_changes_when_spur_edges_query_bytes_change() {
+        let base = [
+            ManifestQueryBytes {
+                language: "rust",
+                tags: b"rust tags",
+                spur_edges: b"rust edges v1",
+            },
+            ManifestQueryBytes {
+                language: "typescript",
+                tags: b"typescript tags",
+                spur_edges: b"typescript edges",
+            },
+        ];
+        let changed = [
+            ManifestQueryBytes {
+                language: "rust",
+                tags: b"rust tags",
+                spur_edges: b"rust edges v2",
+            },
+            ManifestQueryBytes {
+                language: "typescript",
+                tags: b"typescript tags",
+                spur_edges: b"typescript edges",
+            },
+        ];
+
+        assert_ne!(
+            manifest_version_from_query_bytes("schema", "extractor", &base),
+            manifest_version_from_query_bytes("schema", "extractor", &changed)
+        );
+    }
+
+    #[test]
+    fn manifest_version_is_deterministic_for_identical_query_inputs() {
+        let inputs = [
+            ManifestQueryBytes {
+                language: "typescript",
+                tags: b"typescript tags",
+                spur_edges: b"typescript edges",
+            },
+            ManifestQueryBytes {
+                language: "rust",
+                tags: b"rust tags",
+                spur_edges: b"rust edges",
+            },
+        ];
+
+        let first = manifest_version_from_query_bytes("schema", "extractor", &inputs);
+        let second = manifest_version_from_query_bytes("schema", "extractor", &inputs);
+
+        assert_eq!(first, second);
+
+        let reordered = [inputs[1], inputs[0]];
+        assert_eq!(
+            first,
+            manifest_version_from_query_bytes("schema", "extractor", &reordered)
+        );
+    }
 
     #[test]
     fn buckets_from_artifact_rebuckets_edges_by_file_or_symbol_source() {
