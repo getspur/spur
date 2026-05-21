@@ -5,8 +5,8 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use spur_graph::{
-    bounded_subgraph, find_callees, find_callers, load_artifact, resolve_selector,
-    resolve_worktree_root_from, CandidateRow, GraphEdgeArtifact, GraphIndexArtifact,
+    bounded_subgraph, find_callee_edges, find_callers, load_artifact, resolve_selector,
+    resolve_worktree_root_from, CalleeRecord, CandidateRow, GraphEdgeArtifact, GraphIndexArtifact,
     GraphIndexPointer, GraphSymbolArtifact, RelationKind, SelectorResolution,
     CODE_SYMBOL_URI_PREFIX,
 };
@@ -179,9 +179,9 @@ fn code_callees_with_artifact(
         }
     };
 
-    let callees = find_callees(artifact, &symbol_id)
+    let callees = find_callee_edges(artifact, &symbol_id)
         .into_iter()
-        .map(symbol_row)
+        .map(callee_row)
         .collect::<Vec<_>>();
     Ok(json!({ "callees": callees }))
 }
@@ -792,6 +792,28 @@ fn symbol_row(symbol: &GraphSymbolArtifact) -> Value {
     })
 }
 
+fn callee_row(callee: CalleeRecord<'_>) -> Value {
+    match callee {
+        CalleeRecord::Resolved(symbol) => json!({
+            "resolved": true,
+            "uri": symbol_uri(&symbol.stable_symbol_id),
+            "entity_name": symbol.entity_name,
+            "enclosing_scope": symbol.enclosing_scope,
+            "file_path": symbol.file_path,
+            "line_range": symbol.line_range,
+            "symbol_kind": symbol.symbol_kind,
+        }),
+        CalleeRecord::Unresolved { target_label } => {
+            let entity_name = target_label.clone();
+            json!({
+                "resolved": false,
+                "entity_name": entity_name,
+                "target_label": target_label,
+            })
+        }
+    }
+}
+
 fn edge_row(edge: &GraphEdgeArtifact) -> Value {
     json!({
         "source_uri": symbol_uri(&edge.source_stable_symbol_id),
@@ -921,13 +943,17 @@ mod tests {
                     symbol("cache-caller", "crates/foo", [24, 26], "call_cache", "call_cache"),
                     symbol("cache-run", "crates/foo", [30, 32], "run", "Cache::run"),
                     symbol("cache-callee", "crates/foo", [34, 36], "finish_cache", "finish_cache"),
+                    symbol("mixed-root", "src/root.rs", [50, 52], "mixed_root", "mixed_root"),
+                    symbol("mixed-callee", "src/callee.rs", [60, 62], "mixed_callee", "mixed_callee"),
                     symbol("other-run", "crates/other", [40, 42], "run", "Other::run")
                 ],
                 "edges": [
                     edge("caller", "root"),
                     edge("root", "callee"),
                     edge("cache-caller", "cache-run"),
-                    edge("cache-run", "cache-callee")
+                    edge("cache-run", "cache-callee"),
+                    edge("mixed-root", "mixed-callee"),
+                    unresolved_edge("mixed-root", "into")
                 ],
                 "tombstones": []
             }))
@@ -961,6 +987,17 @@ mod tests {
             "source_stable_symbol_id": source,
             "target_stable_symbol_id": target,
             "target_label": null,
+            "relation": "calls",
+            "confidence": "syntax_exact",
+            "confidence_score": 1.0
+        })
+    }
+
+    fn unresolved_edge(source: &str, target_label: &str) -> Value {
+        json!({
+            "source_stable_symbol_id": source,
+            "target_stable_symbol_id": null,
+            "target_label": target_label,
             "relation": "calls",
             "confidence": "syntax_exact",
             "confidence_score": 1.0
@@ -1085,8 +1122,42 @@ mod tests {
         let body = response_json(response);
 
         assert_eq!(body["callees"].as_array().expect("callees").len(), 1);
+        assert_eq!(body["callees"][0]["resolved"], true);
         assert_eq!(body["callees"][0]["uri"], "graph://symbol/callee");
         assert_eq!(body["callees"][0]["entity_name"], "callee");
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_callees_returns_resolved_and_unresolved_edges() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_callees(
+                Value::from(1),
+                json!({ "symbol": "graph://symbol/mixed-root" }),
+            )
+            .await;
+        let body = response_json(response);
+        let callees = body["callees"].as_array().expect("callees");
+
+        assert_eq!(callees.len(), 2);
+        assert_eq!(callees[0]["resolved"], true);
+        assert_eq!(callees[0]["uri"], "graph://symbol/mixed-callee");
+        assert_eq!(callees[0]["entity_name"], "mixed_callee");
+        assert_eq!(callees[0]["file_path"], "src/callee.rs");
+        assert_eq!(callees[0]["line_range"], json!([60, 62]));
+        assert_eq!(callees[0]["symbol_kind"], "function");
+
+        assert_eq!(callees[1]["resolved"], false);
+        assert_eq!(callees[1]["entity_name"], "into");
+        assert_eq!(callees[1]["target_label"], "into");
+        assert!(callees[1].get("uri").is_none());
+        assert!(callees[1].get("file_path").is_none());
         assert_unavailable_freshness_metadata(&body);
     }
 
@@ -1121,6 +1192,7 @@ mod tests {
                 .await,
         );
         assert_eq!(callees["callees"].as_array().expect("callees").len(), 1);
+        assert_eq!(callees["callees"][0]["resolved"], true);
         assert_eq!(callees["callees"][0]["uri"], "graph://symbol/cache-callee");
         assert_eq!(callees["graph_content_hash"], "test");
         assert_eq!(callees["graph_index_version"], "test");
