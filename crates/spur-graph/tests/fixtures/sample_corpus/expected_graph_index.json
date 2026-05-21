@@ -3,12 +3,12 @@
     "graph_index_version": "spur-graph-phase2"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "dcb7dadd9f833aa61cd8e7fb7ebeb2da2d5ba2049054d297fb6ab1c9fddbe273",
+  "graph_content_hash": "36018835651609826cd76fe200f7a85f56ee68fc7eb83114ef98593d8d12e005",
   "file_manifests": [
     {
       "stable_file_id": "c5ed2ae8f633f186",
       "path": "src/lib.rs",
-      "content_oid": "33e011689a90d0ba3e3fb67a9d560efd2ed31ae2",
+      "content_oid": "b5e687746be21a63e977c97830ffdbeb72a5650a",
       "node_ids": [
         1,
         2,

@@ -200,6 +200,9 @@ pub fn bounded_subgraph<'a>(
         if depth >= radius {
             continue;
         }
+        let unresolved_current_labels = include_unresolved
+            .then(|| find_symbol(artifact, current_id).map(unresolved_target_labels_for_symbol))
+            .flatten();
 
         for (edge_index, edge) in artifact.edges.iter().enumerate() {
             if !edge_matches_filter(edge, edge_kinds) {
@@ -217,6 +220,40 @@ pub fn bounded_subgraph<'a>(
             {
                 if visited_edges.insert(edge_index) {
                     edges.push(edge);
+                }
+                continue;
+            }
+
+            if edge.target_stable_symbol_id.is_none() {
+                let Some(labels) = unresolved_current_labels.as_ref() else {
+                    continue;
+                };
+                if !edge
+                    .target_label
+                    .as_deref()
+                    .is_some_and(|label| labels.contains(label))
+                {
+                    continue;
+                }
+
+                let caller_id = edge.source_stable_symbol_id.as_str();
+                let neighbor = if visited_nodes.contains(caller_id) {
+                    None
+                } else {
+                    let Some(symbol) = find_symbol(artifact, caller_id) else {
+                        continue;
+                    };
+                    Some(symbol)
+                };
+
+                if visited_edges.insert(edge_index) {
+                    edges.push(edge);
+                }
+
+                if let Some(symbol) = neighbor {
+                    visited_nodes.insert(symbol.stable_symbol_id.as_str());
+                    nodes.push(symbol);
+                    queue.push_back((symbol.stable_symbol_id.as_str(), depth + 1));
                 }
                 continue;
             }
@@ -588,6 +625,49 @@ mod tests {
             .filter_map(|edge| edge.target_label.as_deref())
             .collect();
         assert_eq!(unresolved_labels, vec!["as_ref", "map"]);
+    }
+
+    #[test]
+    fn subgraph_can_include_incoming_unresolved_caller_edges() {
+        let artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_string(),
+            graph_content_hash: "test".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            symbols: ["root", "caller", "unresolved_caller"]
+                .into_iter()
+                .map(symbol)
+                .collect(),
+            edges: vec![
+                edge("caller", "root", RelationKind::Calls),
+                unresolved_call_edge("unresolved_caller", "root"),
+            ],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let default_view =
+            bounded_subgraph(&artifact, "root", 1, Some(&[GraphEdgeKind::Calls]), false);
+        assert_eq!(ids(&default_view.nodes), vec!["root", "caller"]);
+        assert_eq!(default_view.edges.len(), 1);
+
+        let included_view =
+            bounded_subgraph(&artifact, "root", 1, Some(&[GraphEdgeKind::Calls]), true);
+
+        assert_eq!(
+            ids(&included_view.nodes),
+            vec!["root", "caller", "unresolved_caller"]
+        );
+        assert_eq!(included_view.edges.len(), 2);
+        assert!(included_view.edges.iter().any(|edge| {
+            edge.source_stable_symbol_id == "unresolved_caller"
+                && edge.target_stable_symbol_id.is_none()
+                && edge.target_label.as_deref() == Some("root")
+        }));
     }
 
     #[test]
