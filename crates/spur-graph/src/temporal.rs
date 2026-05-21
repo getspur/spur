@@ -29,7 +29,9 @@ pub fn symbol_history(
 ) -> Vec<(GitSha, ChangeKind, SnapshotKey)> {
     let graph = CommitGraph::new(commits);
     let mut chain_keys = seed_symbol_history_keys(code, symbol);
-    close_symbol_history_chain(code, &mut chain_keys);
+    if close_symbol_history_chain(code, &mut chain_keys).is_err() {
+        return Vec::new();
+    }
 
     let mut events: Vec<_> = code
         .temporal_edges
@@ -102,22 +104,32 @@ pub fn resolve_symbol_at(
         };
     }
 
-    resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_candidates.remove(0))
+    let anchor_key = anchor_candidates.remove(0);
+    let mut reachable_chain = [anchor_key.clone()].into_iter().collect();
+    if let Err(reason) = close_rename_chain(code, &mut reachable_chain) {
+        return Resolution::Unknown { reason };
+    }
+
+    resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_key)
 }
 
 fn seed_symbol_history_keys(code: &GraphIndexArtifact, symbol: &str) -> HashSet<SnapshotKey> {
     snapshot_keys_for_symbol(code, symbol).into_iter().collect()
 }
 
-fn close_symbol_history_chain(code: &GraphIndexArtifact, chain_keys: &mut HashSet<SnapshotKey>) {
+fn close_symbol_history_chain(
+    code: &GraphIndexArtifact,
+    chain_keys: &mut HashSet<SnapshotKey>,
+) -> Result<(), ResolutionFailure> {
     loop {
         let previous_len = chain_keys.len();
         expand_stable_symbol_snapshots(code, chain_keys);
-        close_rename_chain(code, chain_keys);
+        close_rename_chain(code, chain_keys)?;
         if chain_keys.len() == previous_len {
             break;
         }
     }
+    Ok(())
 }
 
 fn expand_stable_symbol_snapshots(
@@ -134,26 +146,133 @@ fn expand_stable_symbol_snapshots(
     }
 }
 
-fn close_rename_chain(code: &GraphIndexArtifact, chain_keys: &mut HashSet<SnapshotKey>) {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for edge in &code.temporal_edges {
-            let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind else {
-                continue;
-            };
-            let Some(next) = rename_target(edge, prev) else {
-                continue;
-            };
+fn close_rename_chain(
+    code: &GraphIndexArtifact,
+    chain_keys: &mut HashSet<SnapshotKey>,
+) -> Result<(), ResolutionFailure> {
+    let rename_edges = rename_edges(code);
+    if rename_edges.is_empty() {
+        return Ok(());
+    }
 
-            if chain_keys.contains(prev) && chain_keys.insert(next.clone()) {
-                changed = true;
+    let snapshot_count = referenced_snapshot_keys(code).len();
+    let mut component = HashSet::new();
+    let mut stack: Vec<_> = chain_keys.iter().cloned().collect();
+
+    while let Some(current) = stack.pop() {
+        if !component.insert(current.clone()) {
+            continue;
+        }
+        chain_keys.insert(current.clone());
+        guard_rename_chain_bound(chain_keys.len(), snapshot_count, &current)?;
+
+        for (prev, next) in &rename_edges {
+            if prev == &current && !component.contains(next) {
+                stack.push(next.clone());
             }
-            if chain_keys.contains(&next) && chain_keys.insert(prev.clone()) {
-                changed = true;
+            if next == &current && !component.contains(prev) {
+                stack.push(prev.clone());
             }
         }
     }
+
+    debug_assert!(chain_keys.len() <= snapshot_count);
+    detect_reachable_rename_cycle(&rename_edges, &component)
+}
+
+fn rename_edges(code: &GraphIndexArtifact) -> Vec<(SnapshotKey, SnapshotKey)> {
+    code.temporal_edges
+        .iter()
+        .filter_map(|edge| {
+            let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind else {
+                return None;
+            };
+            rename_target(edge, prev).map(|next| (prev.clone(), next))
+        })
+        .collect()
+}
+
+fn referenced_snapshot_keys(code: &GraphIndexArtifact) -> HashSet<SnapshotKey> {
+    let mut keys: HashSet<_> = code
+        .symbol_snapshots
+        .iter()
+        .map(|snapshot| snapshot.key.clone())
+        .collect();
+
+    for edge in &code.temporal_edges {
+        if let EdgeEndpoint::Snapshot { key } = &edge.source {
+            keys.insert(key.clone());
+        }
+        if let EdgeEndpoint::Snapshot { key } = &edge.target {
+            keys.insert(key.clone());
+        }
+        if let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind {
+            keys.insert(prev.clone());
+        }
+    }
+
+    keys
+}
+
+fn guard_rename_chain_bound(
+    chain_len: usize,
+    snapshot_count: usize,
+    key: &SnapshotKey,
+) -> Result<(), ResolutionFailure> {
+    if chain_len <= snapshot_count {
+        return Ok(());
+    }
+
+    Err(ResolutionFailure::IndexCorrupt(format!(
+        "rename chain exceeds snapshot count at `{}`@`{}`",
+        key.stable_symbol_id, key.commit
+    )))
+}
+
+fn detect_reachable_rename_cycle(
+    rename_edges: &[(SnapshotKey, SnapshotKey)],
+    component: &HashSet<SnapshotKey>,
+) -> Result<(), ResolutionFailure> {
+    let mut forward: HashMap<SnapshotKey, Vec<SnapshotKey>> = HashMap::new();
+    for (prev, next) in rename_edges {
+        if component.contains(prev) && component.contains(next) {
+            forward.entry(prev.clone()).or_default().push(next.clone());
+        }
+    }
+
+    let mut visited = HashSet::new();
+    let mut visiting = HashSet::new();
+    for key in component {
+        visit_rename_chain(key, &forward, &mut visited, &mut visiting)?;
+    }
+    Ok(())
+}
+
+fn visit_rename_chain(
+    key: &SnapshotKey,
+    forward: &HashMap<SnapshotKey, Vec<SnapshotKey>>,
+    visited: &mut HashSet<SnapshotKey>,
+    visiting: &mut HashSet<SnapshotKey>,
+) -> Result<(), ResolutionFailure> {
+    if visiting.contains(key) {
+        return Err(ResolutionFailure::IndexCorrupt(format!(
+            "cycle in rename chain at `{}`@`{}`",
+            key.stable_symbol_id, key.commit
+        )));
+    }
+    if !visited.insert(key.clone()) {
+        return Ok(());
+    }
+
+    visiting.insert(key.clone());
+    if let Some(next_keys) = forward.get(key) {
+        for next in next_keys {
+            visit_rename_chain(next, forward, visited, visiting)?;
+        }
+    }
+    visiting.remove(key);
+
+    Ok(())
 }
 
 fn resolve_from_anchor_key(
