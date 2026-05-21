@@ -275,19 +275,19 @@
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",
+      "target_stable_symbol_id": null,
+      "target_label": "Helper",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8
+    },
+    {
+      "source_stable_symbol_id": "c5ed2ae8f633f186",
       "target_stable_symbol_id": "1e4b6ed218256711",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
       "confidence_score": 1.0
-    },
-    {
-      "source_stable_symbol_id": "c5ed2ae8f633f186",
-      "target_stable_symbol_id": "26f2a95cbbcbdcb6",
-      "target_label": "Helper",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8
     },
     {
       "source_stable_symbol_id": "c5ed2ae8f633f186",

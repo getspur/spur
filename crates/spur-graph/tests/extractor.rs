@@ -1077,24 +1077,16 @@ fn resolve_pending_edges_surfaces_ambiguous_labels() {
         .count();
     assert_eq!(process_nodes, 2, "fixture must contain ambiguous label");
 
-    let labels_by_id: std::collections::HashMap<_, _> = facts
-        .nodes
-        .iter()
-        .map(|node| (node.node_id, node.label.as_str()))
-        .collect();
-    let process_calls = facts
+    let process_calls: Vec<_> = facts
         .edges
         .iter()
         .filter(|edge| edge.relation == RelationKind::Calls)
-        .filter(|edge| {
-            edge.target_node_id
-                .and_then(|target_node_id| labels_by_id.get(&target_node_id).copied())
-                == Some("process")
-        })
-        .count();
-    assert!(
-        process_calls <= 1,
-        "calls to ambiguous `process` should resolve to at most one target"
+        .filter(|edge| edge.target_label.as_deref() == Some("process"))
+        .collect();
+    assert_eq!(process_calls.len(), 1);
+    assert_eq!(
+        process_calls[0].target_node_id, None,
+        "calls to ambiguous `process` should remain unresolved"
     );
 }
 
