@@ -40,3 +40,4 @@ marketing/marketingskills/skills/*/*
 !marketing/marketingskills/skills/*/SKILL.md
 !marketing/marketingskills/LICENSE
 !marketing/marketingskills/README.md
+.spur/analyst.duckdb*
