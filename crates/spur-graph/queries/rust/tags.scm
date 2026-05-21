@@ -13,6 +13,15 @@
 (trait_item
   name: (type_identifier) @name) @definition.trait
 
+(trait_item
+  body: (declaration_list
+    [
+      (function_signature_item
+        name: (identifier) @name) @definition.method
+      (function_item
+        name: (identifier) @name) @definition.method
+    ]))
+
 (impl_item
   trait: (_) @impl.trait
   type: ((_) @impl.self @name)) @definition.impl

@@ -183,6 +183,11 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
         entity_names(callers["callers"].as_array().expect("callers")),
         BTreeSet::from(["launch_order".to_string()])
     );
+    assert_eq!(callers["callers"][0]["edge_kind"], "calls");
+    assert_eq!(callers["include_unresolved"], false);
+    assert_eq!(callers["counts_by_kind"]["calls"], 1);
+    assert_eq!(callers["counts_by_kind"]["unresolved"], 0);
+    assert_eq!(callers["unresolved_sample"], json!([]));
     assert_eq!(callers["graph_content_hash"], artifact.graph_content_hash);
     assert_eq!(
         callers["graph_index_version"],
@@ -201,6 +206,14 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
         entity_names(callees["callees"].as_array().expect("callees")),
         BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
     );
+    assert!(callees["callees"]
+        .as_array()
+        .expect("callees")
+        .iter()
+        .all(|row| row["edge_kind"] == "calls"));
+    assert_eq!(callees["include_unresolved"], false);
+    assert_eq!(callees["counts_by_kind"]["calls"], 2);
+    assert_eq!(callees["counts_by_kind"]["unresolved"], 0);
 
     let selector_callees =
         tool_body(call_tool(&server, "code_callees", json!({ "selector": ROOT_SYMBOL })).await);
@@ -245,6 +258,12 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
             .len(),
         3
     );
+    assert!(radius_one["edges"]
+        .as_array()
+        .expect("radius one edges")
+        .iter()
+        .all(|edge| edge["edge_kind"] == "calls"));
+    assert_eq!(radius_one["include_unresolved"], false);
 
     let radius_zero = tool_body(
         call_tool(
