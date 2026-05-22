@@ -97,6 +97,26 @@ function notebookStoreActions(
         };
       }),
 
+    /** Insert a new cell after another cell, or at the end when omitted. */
+    insertCellAfter: (
+      cellId: string,
+      afterId: string | undefined,
+      type: CellType,
+      initialText: string,
+    ) =>
+      set((state) => {
+        const insertAt = afterId
+          ? state.cellIds.indexOf(afterId) + 1
+          : state.cellIds.length;
+        state.cellIds.splice(insertAt, 0, cellId);
+        state.cells[cellId] = {
+          type,
+          initialText,
+          source: initialText,
+          version: INITIAL_CELL_VERSION,
+        };
+      }),
+
     /** Set the type of a cell. */
     setCellType: (cellId: string, type: CellType) =>
       set((state) => {
@@ -111,6 +131,13 @@ function notebookStoreActions(
         if (state.cells[cellId].source === source) return;
         state.cells[cellId].source = source;
         state.cells[cellId].version += 1;
+      }),
+
+    /** Delete a cell from the notebook. */
+    deleteCell: (cellId: string) =>
+      set((state) => {
+        state.cellIds = state.cellIds.filter((id) => id !== cellId);
+        delete state.cells[cellId];
       }),
 
     /** Clear the result of a cell. */
@@ -404,6 +431,18 @@ export class Notebook {
     return cellId;
   }
 
+  insertCellAfter(afterId: string | undefined, type: CellType, initialText: string): string {
+    const cellId = uuidv4();
+    this.refs.set(cellId, {});
+    this.state.insertCellAfter(cellId, afterId, type, initialText);
+    return cellId;
+  }
+
+  deleteCell(cellId: string) {
+    this.refs.delete(cellId);
+    this.state.deleteCell(cellId);
+  }
+
   setCellType(cellId: string, type: CellType) {
     this.state.setCellType(cellId, type);
   }
@@ -440,6 +479,17 @@ export class Notebook {
       specName: this.state.kernelSpecName ?? "python3",
     });
     await this.setKernelSlotInfo(restartedKernelId);
+  }
+
+  async interruptKernel() {
+    if (!this.state.kernelId) {
+      await this.kernelStartPromise;
+    }
+    const kernelId = this.state.kernelId;
+    if (!kernelId) {
+      throw new Error("Kernel has not started");
+    }
+    await invoke("interrupt_kernel", { kernelId });
   }
 
   async execute(cellId: string) {
@@ -528,6 +578,13 @@ export class Notebook {
           } else {
             this.state.clearOutput(cellId);
           }
+        } else if (message.event === "started") {
+          status = "running";
+          update();
+        } else if (message.event === "finished") {
+          status = message.data.status === "ok" ? "success" : "error";
+          executionCount = message.data.exec_count ?? executionCount;
+          update();
         } else {
           console.warn("Skipping unhandled event", message);
         }

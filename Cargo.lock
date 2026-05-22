@@ -9333,6 +9333,7 @@ name = "spur-notebook"
 version = "1.1.20"
 dependencies = [
  "anyhow",
+ "async-channel",
  "blake3",
  "directories",
  "jute",

@@ -53,6 +53,7 @@ fn main() {
             jute::commands::restart_kernel,
             jute::commands::stop_kernel,
             jute::commands::run_cell,
+            jute::commands::interrupt_kernel,
             jute::commands::get_notebook,
             jute::commands::save_to_disk,
             jute::commands::venv::venv_list_python_versions,

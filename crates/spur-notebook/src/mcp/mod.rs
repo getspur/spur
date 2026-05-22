@@ -81,7 +81,7 @@ impl ServerHandler for NotebookMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         match request.name.as_ref() {
             "notebook.ping" => Ok(CallToolResult::structured(json!({
@@ -99,6 +99,35 @@ impl ServerHandler for NotebookMcpServer {
                 tools::read_cell::call(self.bridge.as_ref(), arguments).await
             }
             "notebook.kernel_info" => tools::kernel_info::call(self.bridge.as_ref()).await,
+            "notebook.insert_cell" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::insert_cell::call(self.bridge.as_ref(), arguments).await
+            }
+            "notebook.write_cell" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::write_cell::call(self.bridge.as_ref(), arguments).await
+            }
+            "notebook.delete_cell" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::delete_cell::call(self.bridge.as_ref(), arguments).await
+            }
+            "notebook.interrupt" => tools::interrupt::call(self.bridge.as_ref()).await,
+            "notebook.run_cell" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::run_cell::call(self.bridge.as_ref(), arguments, context).await
+            }
             name => Err(McpError::invalid_params(
                 format!("unknown notebook tool: {name}"),
                 Some(json!({ "tool": name })),

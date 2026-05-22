@@ -54,3 +54,16 @@ export type AgentKernelInfo = {
   cpu_pct: number;
   mem_mb: number;
 };
+
+export type AgentInsertCell = {
+  id: string;
+  version: number;
+};
+
+export type AgentWriteCell = {
+  version: number;
+};
+
+export type AgentDeleteCell = {
+  deleted: true;
+};

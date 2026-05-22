@@ -5,8 +5,9 @@ use ts_rs::TS;
 
 use super::{
     wire_protocol::{
-        ClearOutput, DisplayData, ErrorReply, ExecuteRequest, ExecuteResult, KernelInfoReply,
-        KernelInfoRequest, KernelMessage, KernelMessageType, KernelStatus, Reply, Status, Stream,
+        ClearOutput, DisplayData, ErrorReply, ExecuteReply, ExecuteRequest, ExecuteResult,
+        InterruptReply, InterruptRequest, KernelInfoReply, KernelInfoRequest, KernelMessage,
+        KernelMessageType, KernelStatus, Reply, Status, Stream,
     },
     KernelConnection,
 };
@@ -31,6 +32,9 @@ pub async fn kernel_info(conn: &KernelConnection) -> Result<KernelInfoReply, Err
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "snake_case", tag = "event", content = "data")]
 pub enum RunCellEvent {
+    /// Cell execution was submitted to the kernel.
+    Started,
+
     /// Standard output from the kernel.
     Stdout(String),
 
@@ -54,6 +58,14 @@ pub enum RunCellEvent {
 
     /// Special message indicating the kernel disconnected.
     Disconnect(String),
+
+    /// Cell execution reached a terminal shell reply.
+    Finished {
+        /// Kernel execution count when available.
+        exec_count: Option<u32>,
+        /// Terminal execution status.
+        status: String,
+    },
 }
 
 /// Run a code cell, returning the events received in the meantime.
@@ -61,32 +73,30 @@ pub async fn run_cell(
     conn: &KernelConnection,
     code: &str,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
-    // Clear out existing iopub messages before running the cell, in case there are
-    // any lingering messages from previous runs.
-    while conn.try_recv_iopub().is_some() {}
-
-    conn.call_shell(KernelMessage::new(
-        KernelMessageType::ExecuteRequest,
-        ExecuteRequest {
-            code: code.into(),
-            silent: false,
-            store_history: true,
-            user_expressions: Default::default(),
-            allow_stdin: false,
-            stop_on_error: true,
-        },
-    ))
-    .await?;
+    let mut iopub_rx = conn.subscribe_iopub();
+    let mut req = conn
+        .call_shell(KernelMessage::new(
+            KernelMessageType::ExecuteRequest,
+            ExecuteRequest {
+                code: code.into(),
+                silent: false,
+                store_history: true,
+                user_expressions: Default::default(),
+                allow_stdin: false,
+                stop_on_error: true,
+            },
+        ))
+        .await?;
 
     let (tx, rx) = async_channel::unbounded();
-    let conn = conn.clone();
+    _ = tx.send(RunCellEvent::Started).await;
 
     let tx2 = tx.clone();
     let stream_results_fut = async move {
         let mut status = KernelStatus::Busy;
 
         while status != KernelStatus::Idle {
-            let msg = conn.recv_iopub().await?;
+            let msg = iopub_rx.recv().await.map_err(|_| Error::KernelDisconnect)?;
             match msg.header.msg_type {
                 KernelMessageType::Status => {
                     let msg = msg.into_typed::<Status>()?;
@@ -126,6 +136,14 @@ pub async fn run_cell(
             }
         }
 
+        let reply = req.get_reply::<ExecuteReply>().await?;
+        let (exec_count, status) = match reply.content {
+            Reply::Ok(reply) => (u32::try_from(reply.execution_count).ok(), "ok".to_string()),
+            Reply::Error(_) => (None, "error".to_string()),
+            Reply::Abort => (None, "abort".to_string()),
+        };
+        _ = tx.send(RunCellEvent::Finished { exec_count, status }).await;
+
         Ok::<_, Error>(())
     };
 
@@ -137,4 +155,18 @@ pub async fn run_cell(
     });
 
     Ok(rx)
+}
+
+/// Interrupt the kernel's current operation.
+pub async fn interrupt(conn: &KernelConnection) -> Result<(), Error> {
+    let mut req = conn
+        .call_control(KernelMessage::new(
+            KernelMessageType::InterruptRequest,
+            InterruptRequest {},
+        ))
+        .await?;
+    match req.get_reply::<InterruptReply>().await?.content {
+        Reply::Ok(_) => Ok(()),
+        Reply::Error(_) | Reply::Abort => Err(Error::KernelDisconnect),
+    }
 }
