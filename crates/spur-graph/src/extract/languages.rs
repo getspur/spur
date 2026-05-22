@@ -106,6 +106,33 @@ pub(crate) fn tsx_config() -> LanguageConfig {
     typescript_config_for(tree_sitter_typescript::LANGUAGE_TSX.into())
 }
 
+pub(crate) fn cpp_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_cpp::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/cpp/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/cpp/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[
+            ("definition.module", NodeKind::Module),
+            ("definition.class", NodeKind::Class),
+            ("definition.struct", NodeKind::Struct),
+            ("definition.enum", NodeKind::Enum),
+            ("definition.function", NodeKind::Function),
+            ("definition.method", NodeKind::Method),
+            ("definition.type_alias", NodeKind::TypeAlias),
+            ("definition.macro", NodeKind::Macro),
+            ("definition.field", NodeKind::Field),
+        ],
+        relation_kind_map: None,
+        is_method: Some(has_cpp_class_ancestor),
+    }
+}
+
 pub(crate) fn markdown_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_md::LANGUAGE.into(),
@@ -157,6 +184,20 @@ fn tsx_matcher(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"))
 }
 
+const CPP_EXTENSIONS: &[&str] = &[
+    "cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp", "tpp", "h",
+];
+
+fn cpp_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            CPP_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
 pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     &[
         LanguageDescriptor {
@@ -182,6 +223,12 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             factory: tsx_config,
             label: "tsx",
             extensions: &["tsx"],
+        },
+        LanguageDescriptor {
+            matcher: cpp_matcher,
+            factory: cpp_config,
+            label: "cpp",
+            extensions: CPP_EXTENSIONS,
         },
         LanguageDescriptor {
             matcher: markdown_matcher,
@@ -555,6 +602,35 @@ fn has_impl_ancestor(node: Node<'_>) -> bool {
     };
 
     parent.kind() == "declaration_list" && grandparent.kind() == "impl_item"
+}
+
+fn has_cpp_class_ancestor(node: Node<'_>) -> bool {
+    // A C++ `function_definition` is a method when it appears inside a class
+    // or struct body (i.e. its enclosing `field_declaration_list` belongs to
+    // a `class_specifier` / `struct_specifier` / `union_specifier`).
+    // tree-sitter-cpp's `function_definition` for in-class methods nests
+    // inside `field_declaration_list`. Walk upwards looking for that pairing.
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "field_declaration_list" {
+            if let Some(grandparent) = parent.parent() {
+                return matches!(
+                    grandparent.kind(),
+                    "class_specifier" | "struct_specifier" | "union_specifier"
+                );
+            }
+            return false;
+        }
+        // Stop walking once we hit a containing definition that isn't a class body.
+        if matches!(
+            parent.kind(),
+            "namespace_definition" | "translation_unit" | "function_definition"
+        ) {
+            return false;
+        }
+        current = parent.parent();
+    }
+    false
 }
 
 fn has_class_definition_ancestor(node: Node<'_>) -> bool {

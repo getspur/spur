@@ -508,7 +508,10 @@ fn buckets_from_facts(
             | NodeKind::Trait
             | NodeKind::Enum
             | NodeKind::Method
+            | NodeKind::Field
+            | NodeKind::Constant
             | NodeKind::TypeAlias
+            | NodeKind::Macro
             | NodeKind::Section
             | NodeKind::McpTool => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
@@ -550,7 +553,6 @@ fn buckets_from_facts(
                 entry.symbol_node_ids.push(node.node_id);
                 entry.symbols.push(symbol);
             }
-            _ => {}
         }
     }
 
@@ -1209,21 +1211,7 @@ fn anchor_hash(root: &Path, file_path: &str, span: &SourceSpan) -> String {
 }
 
 fn symbol_kind(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Module => "module",
-        NodeKind::Function => "function",
-        NodeKind::Class => "class",
-        NodeKind::Interface => "interface",
-        NodeKind::Struct => "struct",
-        NodeKind::Impl => "impl",
-        NodeKind::Trait => "trait",
-        NodeKind::Enum => "enum",
-        NodeKind::Method => "method",
-        NodeKind::TypeAlias => "type_alias",
-        NodeKind::Section => "section",
-        NodeKind::McpTool => "mcp_tool",
-        _ => "symbol",
-    }
+    kind.discriminator()
 }
 
 fn symbol_entity_name(label: &str) -> String {
