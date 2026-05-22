@@ -7,7 +7,8 @@ use anyhow::Context;
 
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
-    resolve_worktree_root_from, write_artifact, BuildMode, GraphFacts, GraphIndexArtifact,
+    resolve_artifact_location, resolve_worktree_root_from, write_artifact, BuildMode, GraphFacts,
+    GraphIndexArtifact,
 };
 
 pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph-index.json";
@@ -39,71 +40,47 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     }
 
     let mut mode = BuildMode::Full;
-    let (artifact, file_counts, node_count, edge_count) = if output.is_file() {
-        let load_started = Instant::now();
-        let load_span = tracing::info_span!(
-            target: "spur_graph::build::load",
-            "load_artifact",
-            path = %output.display()
-        );
-        let load_result = {
-            let _entered = load_span.enter();
-            let result = load_artifact(&output);
-            match &result {
-                Ok(prev) => {
-                    tracing::info!(
-                        target: "spur_graph::build::load",
-                        files = prev.file_manifests.len(),
-                        symbols = prev.symbols.len(),
-                        edges = prev.edges.len(),
-                        elapsed_ms = elapsed_ms(load_started),
-                        "spur-graph build phase completed"
-                    );
-                }
+    let previous_artifact = match resolve_artifact_location(&root, Some(&output)) {
+        Ok(resolved) => {
+            tracing::debug!(
+                requested_path = %output.display(),
+                resolved_path = %resolved.path.display(),
+                format = ?resolved.format,
+                "spur-graph: resolved previous artifact for graph build"
+            );
+            match load_previous_artifact_for_graph_build(&resolved.path) {
+                Ok(prev) => Some(prev),
                 Err(error) => {
-                    tracing::info!(
-                        target: "spur_graph::build::load",
-                        error = %error,
-                        elapsed_ms = elapsed_ms(load_started),
-                        "spur-graph build phase failed"
-                    );
+                    tracing::info!(error = %error, "spur-graph: failed to load previous artifact; falling back to full");
+                    None
                 }
             }
-            result
-        };
-        match load_result {
-            Ok(prev) => match artifact_from_facts_incremental(&prev, &root) {
-                Ok((artifact, build_mode)) => {
-                    mode = build_mode;
-                    let language_counts = language_counts_from_artifact(&root, &artifact);
-                    (
-                        artifact.clone(),
-                        language_counts,
-                        artifact.symbols.len() + artifact.files.len(),
-                        artifact.edges.len(),
-                    )
-                }
-                Err(error) => {
-                    tracing::info!(error = %error, "spur-graph: incremental rebuild failed; falling back to full");
-                    let (facts, file_counts) = build_facts_for_graph_build(&root)?;
-                    let artifact = artifact_from_facts_for_graph_build(&facts, &root)?;
-                    let node_count = artifact.symbols.len() + artifact.files.len();
-                    (artifact, file_counts, node_count, facts.edges.len())
-                }
-            },
+        }
+        Err(error) => {
+            tracing::info!(error = %error, "spur-graph: no previous artifact resolved; falling back to full");
+            None
+        }
+    };
+
+    let (artifact, file_counts, node_count, edge_count) = if let Some(prev) = previous_artifact {
+        match artifact_from_facts_incremental(&prev, &root) {
+            Ok((artifact, build_mode)) => {
+                mode = build_mode;
+                let language_counts = language_counts_from_artifact(&root, &artifact);
+                (
+                    artifact.clone(),
+                    language_counts,
+                    artifact.symbols.len() + artifact.files.len(),
+                    artifact.edges.len(),
+                )
+            }
             Err(error) => {
-                tracing::info!(error = %error, "spur-graph: failed to load previous artifact; falling back to full");
-                let (facts, file_counts) = build_facts_for_graph_build(&root)?;
-                let artifact = artifact_from_facts_for_graph_build(&facts, &root)?;
-                let node_count = artifact.symbols.len() + artifact.files.len();
-                (artifact, file_counts, node_count, facts.edges.len())
+                tracing::info!(error = %error, "spur-graph: incremental rebuild failed; falling back to full");
+                build_full_artifact_for_graph_build(&root)?
             }
         }
     } else {
-        let (facts, file_counts) = build_facts_for_graph_build(&root)?;
-        let artifact = artifact_from_facts_for_graph_build(&facts, &root)?;
-        let node_count = artifact.symbols.len() + artifact.files.len();
-        (artifact, file_counts, node_count, facts.edges.len())
+        build_full_artifact_for_graph_build(&root)?
     };
     let canonical_output = if uses_output_override {
         let write_started = Instant::now();
@@ -230,6 +207,55 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         canonical_summary
     );
     Ok(())
+}
+
+fn load_previous_artifact_for_graph_build(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
+    let load_started = Instant::now();
+    let load_span = tracing::info_span!(
+        target: "spur_graph::build::load",
+        "load_artifact",
+        path = %path.display(),
+    );
+    let load_result = {
+        let _entered = load_span.enter();
+        let result = load_artifact(path);
+        match &result {
+            Ok(prev) => {
+                tracing::info!(
+                    target: "spur_graph::build::load",
+                    files = prev.file_manifests.len(),
+                    symbols = prev.symbols.len(),
+                    edges = prev.edges.len(),
+                    elapsed_ms = elapsed_ms(load_started),
+                    "spur-graph build phase completed"
+                );
+            }
+            Err(error) => {
+                tracing::info!(
+                    target: "spur_graph::build::load",
+                    error = %error,
+                    elapsed_ms = elapsed_ms(load_started),
+                    "spur-graph build phase failed"
+                );
+            }
+        }
+        result
+    };
+    load_result
+}
+
+fn build_full_artifact_for_graph_build(
+    root: &Path,
+) -> anyhow::Result<(
+    GraphIndexArtifact,
+    BTreeMap<&'static str, usize>,
+    usize,
+    usize,
+)> {
+    let (facts, file_counts) = build_facts_for_graph_build(root)?;
+    let artifact = artifact_from_facts_for_graph_build(&facts, root)?;
+    let node_count = artifact.symbols.len() + artifact.files.len();
+    Ok((artifact, file_counts, node_count, facts.edges.len()))
 }
 
 fn build_facts_for_graph_build(
