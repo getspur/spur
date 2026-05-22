@@ -34,6 +34,7 @@ pub type RunCellEventFuture<'a> = Pin<
 pub trait BridgeRequester: Send + Sync {
     fn listener_registered(&self) -> bool;
     fn window_alive(&self) -> bool;
+    fn notebook_open(&self) -> bool;
 
     fn request<'a>(
         &'a self,
@@ -64,6 +65,8 @@ pub enum BridgeResponse {
 
 #[derive(Debug, Clone, Error)]
 pub enum BridgeError {
+    #[error("no notebook is loaded")]
+    NotebookNotOpen,
     #[error("notebook window is closed")]
     WindowClosed,
     #[error("notebook app restarted")]
@@ -79,8 +82,9 @@ pub enum BridgeError {
 impl BridgeError {
     pub fn mcp_code(&self) -> &str {
         match self {
+            Self::NotebookNotOpen => "notebook_not_open",
             Self::WindowClosed | Self::AppRestarted => "app_restarted",
-            Self::NoListener => "service_starting",
+            Self::NoListener => "notebook_not_open",
             Self::Timeout => "bridge_timeout",
             Self::Handler { code, .. } => code.as_str(),
         }
@@ -88,6 +92,7 @@ impl BridgeError {
 
     pub fn into_mcp_error(self) -> McpError {
         let code = match self {
+            Self::NotebookNotOpen => -32060,
             Self::NoListener => -32061,
             Self::Timeout => -32062,
             Self::WindowClosed | Self::AppRestarted => -32063,
@@ -145,6 +150,7 @@ pub struct AgentBridge {
     pending: Mutex<HashMap<RequestId, oneshot::Sender<BridgeResponse>>>,
     listener_registered: AtomicBool,
     window_alive: AtomicBool,
+    notebook_open: AtomicBool,
 }
 
 pub struct TauriBridgeRequester {
@@ -174,6 +180,10 @@ impl BridgeRequester for TauriBridgeRequester {
         self.bridge.window_alive()
     }
 
+    fn notebook_open(&self) -> bool {
+        self.bridge.notebook_open()
+    }
+
     fn request<'a>(
         &'a self,
         method: &'static str,
@@ -184,11 +194,14 @@ impl BridgeRequester for TauriBridgeRequester {
             Some(app) => {
                 Box::pin(async move { self.bridge.request(app, method, params, timeout).await })
             }
-            None => Box::pin(async { Err(BridgeError::NoListener) }),
+            None => Box::pin(async { Err(BridgeError::NotebookNotOpen) }),
         }
     }
 
     fn run_cell_events<'a>(&'a self, kernel_id: &'a str, code: &'a str) -> RunCellEventFuture<'a> {
+        if !self.bridge.notebook_open() {
+            return Box::pin(async { Err(BridgeError::NotebookNotOpen) });
+        }
         match &self.app {
             Some(app) => Box::pin(async move {
                 let state = app.state::<jute::state::State>();
@@ -196,7 +209,7 @@ impl BridgeRequester for TauriBridgeRequester {
                     .await
                     .map_err(kernel_bridge_error)
             }),
-            None => Box::pin(async { Err(BridgeError::NoListener) }),
+            None => Box::pin(async { Err(BridgeError::NotebookNotOpen) }),
         }
     }
 }
@@ -213,6 +226,7 @@ impl AgentBridge {
             pending: Mutex::new(HashMap::new()),
             listener_registered: AtomicBool::new(false),
             window_alive: AtomicBool::new(true),
+            notebook_open: AtomicBool::new(false),
         }
     }
 
@@ -224,9 +238,17 @@ impl AgentBridge {
         self.window_alive.load(Ordering::SeqCst)
     }
 
+    pub fn notebook_open(&self) -> bool {
+        self.notebook_open.load(Ordering::SeqCst)
+    }
+
     pub fn mark_ready(&self) {
         self.window_alive.store(true, Ordering::SeqCst);
         self.listener_registered.store(true, Ordering::SeqCst);
+    }
+
+    pub fn set_notebook_open(&self, open: bool) {
+        self.notebook_open.store(open, Ordering::SeqCst);
     }
 
     pub async fn request<R: tauri::Runtime>(
@@ -236,6 +258,9 @@ impl AgentBridge {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, BridgeError> {
+        if !self.notebook_open() {
+            return Err(BridgeError::NotebookNotOpen);
+        }
         if !self.window_alive() {
             return Err(BridgeError::WindowClosed);
         }
@@ -289,12 +314,14 @@ impl AgentBridge {
     pub async fn mark_window_closed(&self) {
         self.listener_registered.store(false, Ordering::SeqCst);
         self.window_alive.store(false, Ordering::SeqCst);
+        self.notebook_open.store(false, Ordering::SeqCst);
         self.drain_pending(BridgeError::WindowClosed).await;
     }
 
     pub async fn drain_on_shutdown(&self) {
         self.listener_registered.store(false, Ordering::SeqCst);
         self.window_alive.store(false, Ordering::SeqCst);
+        self.notebook_open.store(false, Ordering::SeqCst);
         self.drain_pending(BridgeError::AppRestarted).await;
     }
 
@@ -309,6 +336,15 @@ impl AgentBridge {
 #[tauri::command]
 pub async fn bridge_ready(bridge: tauri::State<'_, Arc<AgentBridge>>) -> Result<(), String> {
     bridge.mark_ready();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn notebook_active_changed(
+    bridge: tauri::State<'_, Arc<AgentBridge>>,
+    open: bool,
+) -> Result<(), String> {
+    bridge.set_notebook_open(open);
     Ok(())
 }
 

@@ -33,6 +33,10 @@ impl BridgeRequester for MockNotebook {
         true
     }
 
+    fn notebook_open(&self) -> bool {
+        true
+    }
+
     fn request<'a>(
         &'a self,
         method: &'static str,

@@ -16,6 +16,7 @@ let registration: Promise<void> | undefined;
 
 export function setActiveAgentNotebook(notebook: Notebook | undefined) {
   activeNotebook = notebook;
+  void invoke("notebook_active_changed", { open: Boolean(notebook) });
 }
 
 export function registerAgentBridge(): Promise<void> {

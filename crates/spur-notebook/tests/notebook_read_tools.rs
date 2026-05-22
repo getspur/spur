@@ -33,6 +33,10 @@ impl BridgeRequester for MockBridge {
         true
     }
 
+    fn notebook_open(&self) -> bool {
+        true
+    }
+
     fn request<'a>(
         &'a self,
         method: &'static str,
@@ -157,6 +161,19 @@ async fn kernel_info_returns_slot_generation_and_usage() {
         bridge.calls().await,
         vec![("notebook.kernel_info".to_string(), json!({}))]
     );
+}
+
+#[tokio::test]
+async fn no_registered_notebook_reports_notebook_not_open() {
+    let bridge = spur_notebook::mcp::bridge::TauriBridgeRequester::without_app(
+        std::sync::Arc::new(spur_notebook::mcp::bridge::AgentBridge::new()),
+    );
+
+    let error = kernel_info::call(&bridge)
+        .await
+        .expect_err("missing active notebook should be a tool error");
+
+    assert_eq!(error.data.unwrap()["code"], "notebook_not_open");
 }
 
 #[tokio::test]
