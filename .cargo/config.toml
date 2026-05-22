@@ -17,3 +17,8 @@ spur-flamegraph = "flamegraph --profile profiling --bin spur"
 SPUR_TELEMETRY = "0"
 CI = "true"
 SPUR_POSTHOG_KEY = "loopback"
+# Jute's vendored Tauri config bundles a uv sidecar that is not present in
+# this repo checkout. The notebook host scaffold consumes Jute's public Rust API
+# but does not exercise venv sidecars, so workspace builds suppress that bundle
+# check until sidecar packaging is explicitly wired.
+TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
