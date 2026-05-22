@@ -40,8 +40,8 @@ For schema audits, doc reads, and "what does this field mean?" questions, skip t
 |---|---|---|
 | `code_search` | **PRIMARY** | Default discovery tool. Filter with `mode=exact|prefix|substring`, `symbol_kind`, `file`/`file_glob`. Cannot overflow (returns ranked candidates). |
 | `code_read_symbol` | **TERMINAL** | Best tool in the set. Narrow source by stable_symbol_id with optional `context_lines`. Use as the last step of every flow. |
-| `code_callers` | After counts-probe | Impact analysis. Always pass `include_unresolved=true`. Read `counts_by_kind` BEFORE the list. Bail on `counts.calls > ~30`. |
-| `code_callees` | After counts-probe | Behavior analysis. Same rules as `code_callers`. |
+| `code_callers` | After counts-probe | Impact analysis. **Default `include_unresolved=true`** — a silently-missed caller is the worst failure for refactor/rename scope. Read `counts_by_kind` BEFORE the list. Bail on `counts.calls > ~30`. |
+| `code_callees` | After counts-probe | Behavior analysis. **Default `include_unresolved=false`** — unresolved callee rows are usually std / `Option` / `Result` / iterator mechanics, not domain calls. Inspect `counts_by_kind.unresolved` + `unresolved_sample`; only re-run with `include_unresolved=true` when sample labels look behavior-relevant or the code is macro/dynamic/trait-heavy. |
 | `code_subgraph` | Sparingly | `radius=1 edge_kinds=["calls"]` by default. Never seed at a popular sink. `format=mermaid` for humans. |
 | `code_resolve` | Fast path | Only when you have an exact canonical bare name. Errors hard on near-misses (the error message implies the artifact is broken — it isn't, the name is wrong). Fall through to filtered `code_search` on miss. |
 | `code_file_symbols` | Small files only | Overflows on files > ~2k lines. For anything larger, use filtered `code_search`. |
@@ -63,23 +63,46 @@ Prefer (1) once you have it. Carry the `uri` from response to response instead o
 
 ## Counts-first rule (mandatory for callers/callees)
 
-Before reading the `callers` or `callees` list in a response, read `counts_by_kind`. The defaults can lie by omission.
+Before reading the `callers` or `callees` list in a response, read `counts_by_kind`. The defaults can lie by omission — but the direction matters.
+
+**Asymmetric defaults — these are not the same tool:**
+
+- **`code_callers` → default `include_unresolved=true`.** For impact / refactor / rename, a silently-omitted caller is the worst outcome. Pay the noise cost; missing a row is worse than reading one.
+- **`code_callees` → default `include_unresolved=false`.** For behavior analysis, unresolved callee rows are overwhelmingly std / `Option` / `Result` / iterator / serde method calls — pure noise that drowns the 5-10 real domain edges. Read `counts_by_kind.unresolved` and `unresolved_sample` to *meta-detect* missed domain calls without enumerating the rows.
+
+**Decision flow:**
 
 ```
-1. Call code_callers (or code_callees) with include_unresolved=true.
+1. Call code_callers with include_unresolved=true.
+   Call code_callees with include_unresolved=false.
 2. Read counts_by_kind in the response.
-3. If counts.unresolved > 0:
-     → ambiguity or name-collision is present. Trust target_label, not URIs.
-     → Re-check with code_search exact on the bare name; multiple hits
-       confirm a duplicate symbol.
-4. If counts.calls > ~30:
-     → POPULAR SINK. Stop. Treat as a boundary; reframe the question.
-     → Likely overflows the output budget if you push for the full list.
-5. If counts.calls == 0 and counts.unresolved == 0:
-     → done.
+3. For callees specifically: scan unresolved_sample.
+   → If sample labels look domain-y (project types, custom traits, async fns)
+     or the code is macro/dynamic/trait-heavy: re-run with include_unresolved=true.
+   → If sample is `get / map / clone / unwrap_or / as_str / iter / ...`:
+     skip. Those are std mechanics. The counts_by_kind value is enough signal.
+   → DO NOT use `unresolved > resolved` as the re-run trigger. In Rust handlers
+     std/iterator calls routinely outnumber domain calls; this fires constantly.
+4. For both directions: if counts.calls > ~30 → POPULAR SINK. Stop. Treat as
+   a boundary; reframe the question.
+5. If counts.calls == 0 and counts.unresolved == 0: done.
 ```
 
-`include_unresolved=true` is the new default for any target whose bare name might collide (test wrappers, macro-generated duplicates, common identifiers).
+## Resolved rows can lie too
+
+The graph resolves edges by parsing the call expression — when a bare method name (`take`, `filter`, `lock`, `new`, `send`, `format`) has multiple definitions across the workspace and the receiver type is generic / inferred / not in scope, the resolver can pick the **wrong one** and emit a `resolved: true` row pointing at an unrelated symbol.
+
+**Empirically reproduced.** `code_callees` on `handle_submit_plan` produced two resolved rows that were false positives:
+- `take` → `impl SpawnGuard::take` in `crates/spur-acp/tests/orphan_sweep_e2e.rs` (actually `Option::take`).
+- `filter` → `impl SessionPickerView::filter` in `crates/spur-tui/src/views/session_picker.rs` (actually `Iterator::filter` on a `chars()` chain).
+
+**Sanity-check resolved rows:**
+
+- Does the resolved symbol's `file_path` make sense for the caller's crate / module? Cross-crate jumps for a generic-named method are suspect.
+- Does the symbol's `enclosing_scope` make domain sense? A handler in `spur-mcp` calling into `spur-tui::SessionPickerView::filter` is almost certainly a misresolution.
+- When in doubt, `code_read_symbol` the resolved target — false positives become obvious in one read.
+
+**Why this matters:** any future "hide-noisy-rows" feature that only suppresses `resolved=false` would leave these wrong-resolved rows behind — *and* hide them under a "principled-looking" filter. Today, suspicious resolved rows are visible; treat them as a feature.
 
 ## Process flow
 
@@ -110,8 +133,8 @@ digraph code_explore {
     "Ambiguous?" -> "code_read_symbol" [label="no"];
     "code_read_symbol" -> "Need call graph?";
     "Need call graph?" -> "Answer assembled" [label="no (most schema/doc reads)"];
-    "Need call graph?" -> "code_callers/callees (include_unresolved=true)" [label="impact/trace"];
-    "code_callers/callees (include_unresolved=true)" -> "Read counts_by_kind";
+    "Need call graph?" -> "code_callers unresolved=true | code_callees unresolved=false" [label="impact/trace"];
+    "code_callers unresolved=true | code_callees unresolved=false" -> "Read counts_by_kind";
     "Read counts_by_kind" -> "Popular sink?";
     "Popular sink?" -> "Bail — boundary" [label="yes (calls > 30)"];
     "Popular sink?" -> "code_subgraph r=1" [label="no, want map"];
@@ -132,7 +155,9 @@ digraph code_explore {
 | "I'll trace this by reading each callsite." | Iterate `code_callees` depth-first by hand. `code_subgraph r=2` is for maps, not traces. |
 | "The macro hides the call so the graph won't help." | `code_search` is the documented fallback for opaque macro bodies. Bodies of `#[derive]`/attribute macros ARE parsed; only `use`-imported call resolution is sometimes incomplete. |
 | "`code_resolve` says 'not found in graph artifact', the graph must be broken." | The name is wrong, not the artifact. Re-run as `code_search substring` with `symbol_kind` + `file_glob` filters. |
-| "Callers returned empty — there are no callers." | Read `counts_by_kind`. If `unresolved > 0`, the default filter is hiding ambiguous-name rows. Re-run with `include_unresolved=true`. |
+| "Callers returned empty — there are no callers." | For `code_callers` the default *should be* `include_unresolved=true`. If you got an empty list with `counts.unresolved > 0`, you ran with the wrong flag. Re-run. |
+| "Callees include 29 unresolved rows like `get`, `map`, `clone` — I need to read them all." | No. Those are std/iterator mechanics. With `code_callees include_unresolved=false` (the recommended default), they disappear; `counts_by_kind.unresolved` still tells you how many were hidden. |
+| "A resolved row points at a symbol in a totally unrelated crate — must be a real edge." | Bare-method-name collision. Cross-crate resolution for `take` / `filter` / `lock` / `new` is suspect. Verify with `code_read_symbol` before trusting. |
 
 ## When `code_subgraph` is the wrong shape
 
@@ -178,7 +203,9 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 - **`radius=3` as the default.** Start at 1, go to 2 only when 1-hop is insufficient. Bigger radii return more nodes than you can usefully read.
 - **`code_subgraph radius=2` on a node with popular-sink callees.** BFS expands the sink outward and floods the budget with unrelated callers. Iterate `code_callees` instead.
 - **Using `code_subgraph` to trace.** Subgraph gives a *map* (breadth-first neighborhood). For *trace* (depth-first along one path), `code_callees` is the right tool.
-- **Trusting empty `callers`/`callees` without reading `counts_by_kind`.** The default `include_unresolved=false` hides ambiguous-name rows. Empty list + `unresolved > 0` = the tool is lying by omission.
+- **Trusting empty `callers` without reading `counts_by_kind`.** For `code_callers`, the noise/signal asymmetry inverts: the default *should* be `include_unresolved=true` because a hidden caller breaks refactor scope. Empty `callers` with `counts.unresolved > 0` = you ran with the wrong flag.
+- **Using `unresolved > resolved` as a re-run trigger for `code_callees`.** In Rust handlers, std/iterator/serde calls routinely outnumber domain calls. This heuristic fires constantly and re-introduces the noise the asymmetric default is meant to suppress. Use *sample inspection* (semantic) instead of *row counts* (statistical).
+- **Trusting resolved rows blindly when the bare name is common.** `take`, `filter`, `lock`, `new`, `send`, `format` collide across crates; the resolver can pick a wrong cross-crate symbol. Sanity-check that the resolved file_path and enclosing_scope make domain sense.
 - **Treating `code_resolve` as the primary discovery tool.** It errors on imperfect names with a misleading message. Filtered `code_search` is the primary; `code_resolve` is a fast path for canonical names.
 - **`code_file_symbols` on any file you haven't sized first.** If the file is > ~1k lines, go straight to filtered `code_search`.
 - **Trusting stale graph data silently.** Every response includes `indexed_head_oid` and `worktree_dirty`. If `worktree_dirty: true` and your question touches uncommitted code, say so before relying on the answer.
@@ -190,7 +217,8 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 - **`code_search` is primary, filtered.** Always pair with `symbol_kind` and `file`/`file_glob` to avoid noise (markdown sections, test duplicates) and overflow.
 - **Carry the uri.** Resolve once, use the `graph://symbol/<id>` across the rest of the investigation.
 - **Counts before list.** For `code_callers`/`code_callees`, read `counts_by_kind` first; bail on popular sinks.
-- **`include_unresolved=true` when collisions are possible.** Especially for symbols with test wrappers or macro-generated duplicates.
+- **Asymmetric unresolved defaults.** `code_callers` → on (missed-row is the worst failure). `code_callees` → off (std mechanics dominate). For callees, re-enable only when `unresolved_sample` looks domain-relevant.
+- **Suspect cross-crate bare-name resolutions.** `take` / `filter` / `lock` / `new` / `send` / `format` are common-name collision risks. Verify with `code_read_symbol` before treating as a real edge.
 - **Bound, don't enumerate.** Use `radius` and `edge_kinds` to shape the answer instead of trimming a huge result by hand.
 - **Read narrowly.** `code_read_symbol` with `context_lines` is almost always better than `Read` on the file.
 - **Surface staleness.** If `worktree_dirty` or `indexed_head_oid` lags `worktree_head_oid` and matters, flag it.
@@ -202,9 +230,13 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 1. Filtered code_search (substring + symbol_kind + file_glob) — DEFAULT discovery.
 2. code_read_symbol on the chosen URI — narrow body.
 3. If the question is about impact or behavior:
-     code_callers/code_callees with include_unresolved=true
+     code_callers with include_unresolved=true   (missed-row is worst failure)
+     code_callees with include_unresolved=false  (std mechanics are noise)
      → READ counts_by_kind FIRST
-     → bail if counts.calls > ~30 (popular sink boundary).
+     → For callees: scan unresolved_sample; re-run with unresolved=true only
+       if labels look domain-relevant. Never use unresolved>resolved as the rule.
+     → Bail if counts.calls > ~30 (popular sink boundary).
+     → Spot-check suspect cross-crate resolutions on common bare names.
 4. code_subgraph r=1 only for genuine "map this neighborhood" questions.
 5. code_resolve / code_file_symbols are fast paths for the happy case, not defaults.
 ```
