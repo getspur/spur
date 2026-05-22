@@ -50,5 +50,6 @@ Update this file's pin (commit SHA + date) on every successful pull. Conflicts a
 
 - `src-tauri/src/backend/notebook.rs`: added typed `metadata.spur.version` per-cell metadata so SPUR's optimistic cell version survives `.ipynb` parse/serialize.
 - `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: added the `save_to_disk` Tauri command, process-local save coalescing, and same-directory atomic temp-file rename for autosave.
+- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: replaced upstream's per-start local kernel ID map with stable notebook path-derived kernel slots and in-memory slot generations, while keeping the existing JS-facing command argument names compatible.
 - `src/stores/notebook.ts`, `src/ui/notebook/CellInput.tsx`: made Zustand track per-cell `source` and monotonic `version`, bumped versions on source/type edits, generated UUIDv4 cell ids on insert, and wired 5 second debounced autosave.
 - `src/bindings/CellMetadata.ts`, `src/bindings/SpurCellMetadata.ts`, `src/bindings/index.ts`: updated generated TypeScript bindings to match the Rust metadata schema until `ts-rs-export` can be rerun from a workspace that includes `jute`.
