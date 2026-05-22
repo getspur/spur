@@ -82,6 +82,9 @@ pub struct ReactTrace {
     /// `with_kind_compact`. Task 0.3 adds the render branch; this flag
     /// is currently a marker.
     pub(super) compact: bool,
+    /// Collapsed chat responses are clipped to this many chars. `None`
+    /// disables chat clipping for traces that are not the brain chat surface.
+    pub(super) chat_response_char_cap: Option<usize>,
     /// Generation counter bumped on every content mutation.
     pub(super) generation: u64,
     /// Index of the first entry needing row rebuild.
@@ -244,6 +247,7 @@ impl ReactTrace {
             current_mode: None,
             observe_collapsed: true,
             compact: false,
+            chat_response_char_cap: None,
             generation: 0,
             dirty_from: None,
             line_cache: None,
@@ -289,6 +293,14 @@ impl ReactTrace {
     /// True if this trace was constructed with `with_kind_compact`.
     pub fn is_compact(&self) -> bool {
         self.compact
+    }
+
+    pub fn set_chat_response_char_cap(&mut self, cap: Option<usize>) {
+        let cap = cap.filter(|cap| *cap > 0);
+        if self.chat_response_char_cap != cap {
+            self.chat_response_char_cap = cap;
+            self.invalidate_cache();
+        }
     }
 
     /// Store the current session mode id (e.g. "plan", "acceptEdits").
@@ -1127,6 +1139,15 @@ impl ReactTrace {
                 TraceKind::AgentMessage { agent } => {
                     lines.push(format!("{} 📨 {}", entry.timestamp, agent));
 
+                    if let Some(display_text) = self.collapsed_chat_display_text(entry) {
+                        for text_line in display_text.lines() {
+                            lines.push(format!("   {}", text_line));
+                        }
+                        lines.push(String::new());
+                        i += 1;
+                        continue;
+                    }
+
                     #[cfg(feature = "markdown")]
                     let used_markdown = if let Some(stream) = entry.markdown.as_ref() {
                         use crate::components::markdown_stream::StreamItem;
@@ -1416,6 +1437,34 @@ impl ReactTrace {
     }
 }
 
+impl ReactTrace {
+    pub(super) fn collapsed_chat_display_text(&self, entry: &TraceEntry) -> Option<String> {
+        if !self.observe_collapsed {
+            return None;
+        }
+        let cap = self.chat_response_char_cap?;
+        #[cfg(feature = "markdown")]
+        let source = entry
+            .markdown
+            .as_ref()
+            .map(|stream| stream.raw_text())
+            .unwrap_or(entry.text.as_str());
+        #[cfg(not(feature = "markdown"))]
+        let source = entry.text.as_str();
+
+        capped_chat_response(source, cap)
+    }
+}
+
+fn capped_chat_response(source: &str, cap: usize) -> Option<String> {
+    if source.chars().count() <= cap {
+        return None;
+    }
+    let mut preview: String = source.chars().take(cap).collect();
+    preview.push_str("… [expand: Ctrl+O]");
+    Some(preview)
+}
+
 #[cfg(all(test, feature = "markdown"))]
 mod markdown_integration_tests {
     use super::*;
@@ -1504,6 +1553,40 @@ mod markdown_integration_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn collapsed_agent_message_caps_body_and_shows_expand_affordance() {
+        let mut trace = ReactTrace::new();
+        trace.set_chat_response_char_cap(Some(240));
+        let prefix = "a".repeat(240);
+        let response = format!("{prefix}TAIL");
+        trace.append_message(&response, "claude", "10:00".to_string());
+
+        let joined = trace.render_lines_for_test(80).join("\n");
+        assert!(
+            joined.contains(&prefix),
+            "expected capped prefix in render output: {joined}"
+        );
+        assert!(
+            !joined.contains("TAIL"),
+            "collapsed render must hide text past the cap: {joined}"
+        );
+        assert!(
+            joined.contains("[expand: Ctrl+O]"),
+            "collapsed render must show the expand affordance: {joined}"
+        );
+
+        trace.toggle_observe_collapsed();
+        let expanded = trace.render_lines_for_test(80).join("\n");
+        assert!(
+            expanded.contains(&response),
+            "expanded render must show the full response: {expanded}"
+        );
+        assert!(
+            !expanded.contains("[expand: Ctrl+O]"),
+            "expanded render must hide the affordance: {expanded}"
+        );
     }
 }
 
