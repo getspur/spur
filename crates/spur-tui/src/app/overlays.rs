@@ -215,8 +215,6 @@ impl App {
         result: crate::components::palette::PaletteResult,
     ) -> Option<crate::action::Action> {
         use crate::action::{Action, ViewId};
-        use crate::commands::registry::CommandRegistry;
-        use crate::commands::submit_router::{route, SubmitDecision};
         use crate::components::palette::PalettePayload;
         match result.payload {
             PalettePayload::View { action } => Some(action),
@@ -224,51 +222,7 @@ impl App {
             PalettePayload::Worker { session_id } => {
                 Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))
             }
-            PalettePayload::Command { name } => {
-                // IMPORTANT — DO NOT "SIMPLIFY":
-                // `owned_fallback` is declared on its own line BEFORE the match so its
-                // storage outlives the `&owned_fallback` reference returned from the
-                // `None` arm. Rewriting this as `match ... { None => &CommandRegistry::new() }`
-                // will NOT compile: the temporary returned by `CommandRegistry::new()`
-                // would be dropped at the end of the arm, leaving a dangling reference.
-                // This idiom is intentionally identical to the one in `open_palette`
-                // (CommandRegistry is not Clone, so we can't sidestep with .clone()).
-                let owned_fallback;
-                let registry: &CommandRegistry = match self.session_detail.as_ref() {
-                    Some(view) => &view.command_registry,
-                    None => {
-                        owned_fallback = CommandRegistry::new();
-                        &owned_fallback
-                    }
-                };
-                match route(&format!("/{name}"), &[], &[], registry, false) {
-                    SubmitDecision::Local { action } => Some(action),
-                    SubmitDecision::Send { blocks, interrupt } => {
-                        let session = self.current_acp_session_id()?;
-                        Some(Action::SendMessage {
-                            session,
-                            blocks,
-                            interrupt,
-                        })
-                    }
-                    SubmitDecision::VendorExec { method, params } => {
-                        let session = self.current_acp_session_id()?;
-                        Some(Action::VendorExec {
-                            session,
-                            method,
-                            params,
-                        })
-                    }
-                    SubmitDecision::SetSessionConfigOption { config_id, value } => {
-                        Some(Action::SetSessionConfigOption { config_id, value })
-                    }
-                    SubmitDecision::SetSessionModel { value } => {
-                        let session_id = self.current_acp_session_id()?;
-                        Some(Action::SetSessionModel { session_id, value })
-                    }
-                    SubmitDecision::Empty => None,
-                }
-            }
+            PalettePayload::Command { name } => self.query_to_action(&format!("/{name}")),
             PalettePayload::Trace { entry_idx: _ } => {
                 // TODO(palette-trace-dispatch): wire when stable-id design lands.
                 // Unreachable in practice because TraceSource is omitted from
@@ -276,6 +230,54 @@ impl App {
                 // anchor and a forward-compat hook.
                 None
             }
+        }
+    }
+
+    pub(super) fn query_to_action(&self, query: &str) -> Option<crate::action::Action> {
+        use crate::action::Action;
+        use crate::commands::registry::CommandRegistry;
+        use crate::commands::submit_router::{route, SubmitDecision};
+
+        // IMPORTANT — DO NOT "SIMPLIFY":
+        // `owned_fallback` is declared on its own line BEFORE the match so its
+        // storage outlives the `&owned_fallback` reference returned from the
+        // `None` arm. Rewriting this as `match ... { None => &CommandRegistry::new() }`
+        // will NOT compile: the temporary returned by `CommandRegistry::new()`
+        // would be dropped at the end of the arm, leaving a dangling reference.
+        let owned_fallback;
+        let registry: &CommandRegistry = match self.session_detail.as_ref() {
+            Some(view) => &view.command_registry,
+            None => {
+                owned_fallback = CommandRegistry::new();
+                &owned_fallback
+            }
+        };
+        match route(query, &[], &[], registry, false) {
+            SubmitDecision::Local { action } => Some(action),
+            SubmitDecision::Send { blocks, interrupt } => {
+                let session = self.current_acp_session_id()?;
+                Some(Action::SendMessage {
+                    session,
+                    blocks,
+                    interrupt,
+                })
+            }
+            SubmitDecision::VendorExec { method, params } => {
+                let session = self.current_acp_session_id()?;
+                Some(Action::VendorExec {
+                    session,
+                    method,
+                    params,
+                })
+            }
+            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                Some(Action::SetSessionConfigOption { config_id, value })
+            }
+            SubmitDecision::SetSessionModel { value } => {
+                let session_id = self.current_acp_session_id()?;
+                Some(Action::SetSessionModel { session_id, value })
+            }
+            SubmitDecision::Empty => None,
         }
     }
 

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use zeromq::{Socket, SocketRecv, SocketSend, ZmqMessage};
@@ -72,14 +73,14 @@ pub async fn create_zeromq_connection(
 ) -> Result<KernelConnection, Error> {
     let (shell_tx, shell_rx) = async_channel::bounded(8);
     let (control_tx, control_rx) = async_channel::bounded(8);
-    let (iopub_tx, iopub_rx) = async_channel::bounded(64);
+    let (iopub_tx, _) = broadcast::channel(1024);
     let reply_tx_map = Arc::new(DashMap::new());
     let signal = CancellationToken::new();
 
     let conn = KernelConnection {
         shell_tx,
         control_tx,
-        iopub_rx,
+        iopub_tx: iopub_tx.clone(),
         reply_tx_map: reply_tx_map.clone(),
         signal: signal.clone(),
         _drop_guard: Arc::new(signal.clone().drop_guard()),
@@ -175,7 +176,7 @@ pub async fn create_zeromq_connection(
         // Receive iopub messages.
         while let Ok(payload) = iopub.recv().await {
             if let Some(msg) = from_zmq_payload(payload) {
-                _ = iopub_tx.send(msg).await;
+                _ = iopub_tx.send(msg);
             } else {
                 warn!("error converting zmq payload to iopub message");
             }

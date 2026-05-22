@@ -11,7 +11,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use time::OffsetDateTime;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -557,7 +557,7 @@ pub struct CommMessage {
 pub struct KernelConnection {
     shell_tx: async_channel::Sender<KernelMessage>,
     control_tx: async_channel::Sender<KernelMessage>,
-    iopub_rx: async_channel::Receiver<KernelMessage>,
+    iopub_tx: broadcast::Sender<KernelMessage>,
     reply_tx_map: Arc<DashMap<String, oneshot::Sender<KernelMessage>>>,
     signal: CancellationToken,
     _drop_guard: Arc<DropGuard>,
@@ -609,24 +609,20 @@ impl KernelConnection {
         })
     }
 
-    /// Receieve a message from the kernel over the iopub channel.
-    pub async fn recv_iopub(&self) -> Result<KernelMessage, Error> {
-        self.iopub_rx
-            .recv()
-            .await
-            .map_err(|_| Error::KernelDisconnect)
-    }
-
-    /// Receive an immediate message over the iopub channel without waiting.
-    pub fn try_recv_iopub(&self) -> Option<KernelMessage> {
-        self.iopub_rx.try_recv().ok()
+    /// Subscribe to kernel IOPub messages.
+    ///
+    /// This is the fan-out point for cell execution events. Broadcasting here,
+    /// directly at the `KernelConnection` event source, lets the existing Tauri
+    /// `Channel<RunCellEvent>` path and MCP progress streaming each receive the
+    /// same IOPub messages without racing to drain a single receiver.
+    pub fn subscribe_iopub(&self) -> broadcast::Receiver<KernelMessage> {
+        self.iopub_tx.subscribe()
     }
 
     /// Close the connection to the kernel, shutting down all channels.
     pub fn close(&self) {
         self.shell_tx.close();
         self.control_tx.close();
-        self.iopub_rx.close();
         self.signal.cancel(); // This is the only necessary line, but we close
                               // the channels for good measure regardless.
     }
@@ -655,5 +651,61 @@ impl Drop for PendingRequest {
     fn drop(&mut self) {
         // This ensures that we don't leak memory by leaving the channel in the map.
         self.reply_tx_map.remove(&self.msg_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    struct InProcessKernelHarness {
+        iopub_tx: broadcast::Sender<KernelMessage>,
+    }
+
+    impl InProcessKernelHarness {
+        fn publish_iopub(
+            &self,
+            message: KernelMessage,
+        ) -> Result<usize, broadcast::error::SendError<KernelMessage>> {
+            self.iopub_tx.send(message)
+        }
+    }
+
+    impl KernelConnection {
+        fn in_process_for_test() -> (Self, InProcessKernelHarness) {
+            let (shell_tx, _shell_rx) = async_channel::bounded(8);
+            let (control_tx, _control_rx) = async_channel::bounded(8);
+            let (iopub_tx, _) = broadcast::channel(64);
+            let signal = CancellationToken::new();
+            let conn = Self {
+                shell_tx,
+                control_tx,
+                iopub_tx: iopub_tx.clone(),
+                reply_tx_map: Arc::new(DashMap::new()),
+                signal: signal.clone(),
+                _drop_guard: Arc::new(signal.drop_guard()),
+            };
+            (conn, InProcessKernelHarness { iopub_tx })
+        }
+    }
+
+    #[tokio::test]
+    async fn iopub_subscribers_each_receive_every_message() {
+        let (conn, harness) = KernelConnection::in_process_for_test();
+        let mut js_channel = conn.subscribe_iopub();
+        let mut mcp_progress = conn.subscribe_iopub();
+        let message = KernelMessage::new(
+            KernelMessageType::Stream,
+            json!({ "name": "stdout", "text": "fanout\n" }),
+        )
+        .into_json();
+
+        harness.publish_iopub(message.clone()).unwrap();
+
+        assert_eq!(js_channel.recv().await.unwrap(), message);
+        assert_eq!(mcp_progress.recv().await.unwrap(), message);
     }
 }
