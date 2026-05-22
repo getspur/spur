@@ -6,6 +6,7 @@ use std::{env, path::PathBuf, sync::Arc};
 use jute::state::State;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
 use tauri::{AppHandle, Manager};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn handle_file_associations(
     app: &AppHandle,
@@ -21,16 +22,104 @@ fn slot_id() -> String {
     env::var("SPUR_NOTEBOOK_SLOT_ID").unwrap_or_else(|_| "default".into())
 }
 
+enum Mode {
+    App { headless: bool, files: Vec<PathBuf> },
+    McpProxy { socket_path: PathBuf },
+}
+
+fn parse_mode() -> Mode {
+    let mut headless = false;
+    let mut files = Vec::new();
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--headless" => headless = true,
+            "--mcp-proxy" => {
+                let socket_path = args
+                    .next()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| mcp::control_socket_path().expect("control socket path"));
+                return Mode::McpProxy { socket_path };
+            }
+            _ if arg.starts_with('-') => {}
+            _ => {
+                if let Ok(url) = url::Url::parse(&arg) {
+                    if url.scheme() == "file" {
+                        if let Ok(path) = url.to_file_path() {
+                            files.push(path);
+                        }
+                    }
+                } else {
+                    files.push(PathBuf::from(arg));
+                }
+            }
+        }
+    }
+    Mode::App { headless, files }
+}
+
+async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut socket_reader, mut socket_writer) = stream.into_split();
+
+    let stdin_to_socket = tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        while let Some(line) = lines.next_line().await? {
+            spur_notebook::mcp::transport::write_frame_bytes(&mut socket_writer, line.as_bytes())
+                .await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let socket_to_stdout = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        loop {
+            let bytes = spur_notebook::mcp::transport::read_frame_bytes(&mut socket_reader).await?;
+            stdout.write_all(&bytes).await?;
+            stdout.write_all(b"\n").await?;
+            stdout.flush().await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    });
+
+    tokio::select! {
+        result = stdin_to_socket => result??,
+        result = socket_to_stdout => result??,
+    }
+    Ok(())
+}
+
 fn main() {
     tracing_subscriber::fmt().init();
 
+    let (headless, files) = match parse_mode() {
+        Mode::App { headless, files } => (headless, files),
+        Mode::McpProxy { socket_path } => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime");
+            runtime
+                .block_on(run_mcp_proxy(socket_path))
+                .expect("notebook MCP proxy failed");
+            return;
+        }
+    };
+
     let slot_id = slot_id();
-    let socket_path =
-        mcp::socket_path_for_slot(&slot_id).expect("failed to resolve notebook socket path");
+    let socket_path = if headless {
+        mcp::control_socket_path().expect("failed to resolve notebook control socket path")
+    } else {
+        mcp::socket_path_for_slot(&slot_id).expect("failed to resolve notebook socket path")
+    };
     let bridge = Arc::new(AgentBridge::new());
     let bridge_for_state = Arc::clone(&bridge);
     let bridge_for_setup = Arc::clone(&bridge);
     let bridge_for_run = Arc::clone(&bridge);
+    let daemon_control = Arc::new(std::sync::OnceLock::new());
+    let daemon_control_for_setup = Arc::clone(&daemon_control);
+    let daemon_control_for_run = Arc::clone(&daemon_control);
 
     #[allow(unused_mut)]
     let mut app = tauri::Builder::default();
@@ -61,6 +150,7 @@ fn main() {
             jute::commands::venv::venv_list,
             jute::commands::venv::venv_delete,
             spur_notebook::mcp::bridge::bridge_ready,
+            spur_notebook::mcp::bridge::notebook_active_changed,
             spur_notebook::mcp::bridge::agent_response,
         ])
         .setup(move |app| {
@@ -68,37 +158,31 @@ fn main() {
             let server_socket_path = socket_path.clone();
             let server_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                match mcp::start_server_with_app_bridge(
-                    server_socket_path,
-                    server_bridge,
-                    server_app,
-                )
-                .await
-                {
+                let result = if headless {
+                    match mcp::start_daemon_server(server_socket_path, server_bridge, server_app)
+                        .await
+                    {
+                        Ok((handle, control)) => {
+                            let _ = daemon_control_for_setup.set(control);
+                            Ok(handle)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    mcp::start_server_with_app_bridge(server_socket_path, server_bridge, server_app)
+                        .await
+                };
+
+                match result {
                     Ok(_handle) => std::future::pending::<()>().await,
                     Err(error) => tracing::error!(%error, "failed to start notebook MCP server"),
                 }
             });
 
             if cfg!(any(windows, target_os = "linux")) {
-                let mut files = Vec::new();
-
-                for maybe_file in env::args().skip(1) {
-                    if maybe_file.starts_with('-') {
-                        continue;
-                    }
-                    if let Ok(url) = url::Url::parse(&maybe_file) {
-                        if url.scheme() == "file" {
-                            if let Ok(path) = url.to_file_path() {
-                                files.push(path);
-                            }
-                        }
-                    } else {
-                        files.push(PathBuf::from(maybe_file));
-                    }
-                }
-
-                if files.is_empty() {
+                if headless {
+                    return Ok(());
+                } else if files.is_empty() {
                     jute::window::open_home(app.handle())?;
                 } else {
                     handle_file_associations(app.handle(), &files)?;
@@ -121,6 +205,21 @@ fn main() {
                         bridge.drain_on_shutdown().await;
                     });
                 }
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::CloseRequested { api, .. },
+                    ..
+                } if headless => {
+                    api.prevent_close();
+                    if let Some(control) = daemon_control_for_run.get().cloned() {
+                        let label = label.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = control.hide_window_by_label(&label).await;
+                        });
+                    } else if let Some(window) = app.get_webview_window(&label) {
+                        let _ = window.hide();
+                    }
+                }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Opened { urls } => {
                     let files = urls
@@ -131,7 +230,7 @@ fn main() {
                 }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Ready => {
-                    if app.webview_windows().is_empty() {
+                    if !headless && app.webview_windows().is_empty() {
                         jute::window::open_home(app).unwrap();
                     }
                 }

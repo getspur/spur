@@ -7,7 +7,7 @@ use rmcp::{
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::UnixStream,
     sync::Mutex,
 };
@@ -30,6 +30,7 @@ where
 {
     reader: tokio::net::unix::OwnedReadHalf,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    pending: Option<RxJsonRpcMessage<Role>>,
     _role: PhantomData<fn() -> Role>,
 }
 
@@ -42,13 +43,65 @@ where
         Self {
             reader,
             writer: Arc::new(Mutex::new(writer)),
+            pending: None,
             _role: PhantomData,
         }
+    }
+
+    pub fn with_initial_message(stream: UnixStream, message: RxJsonRpcMessage<Role>) -> Self {
+        let mut transport = Self::new(stream);
+        transport.pending = Some(message);
+        transport
     }
 
     pub async fn connect(path: impl AsRef<Path>) -> std::io::Result<Self> {
         Ok(Self::new(UnixStream::connect(path).await?))
     }
+}
+
+pub async fn read_frame_bytes<R>(reader: &mut R) -> Result<Vec<u8>, TransportError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len = [0_u8; 4];
+    reader.read_exact(&mut len).await?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(TransportError::FrameTooLarge(len));
+    }
+    let mut bytes = vec![0_u8; len];
+    reader.read_exact(&mut bytes).await?;
+    Ok(bytes)
+}
+
+pub async fn read_frame_value<R>(reader: &mut R) -> Result<serde_json::Value, TransportError>
+where
+    R: AsyncRead + Unpin,
+{
+    Ok(serde_json::from_slice(&read_frame_bytes(reader).await?)?)
+}
+
+pub async fn write_frame_bytes<W>(writer: &mut W, bytes: &[u8]) -> Result<(), TransportError>
+where
+    W: AsyncWrite + Unpin,
+{
+    if bytes.len() > MAX_FRAME_BYTES {
+        return Err(TransportError::FrameTooLarge(bytes.len()));
+    }
+    writer
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await?;
+    writer.write_all(bytes).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+pub async fn write_frame_json<W, T>(writer: &mut W, value: &T) -> Result<(), TransportError>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    write_frame_bytes(writer, &serde_json::to_vec(value)?).await
 }
 
 impl<Role> Transport<Role> for LengthPrefixedJsonTransport<Role>
@@ -80,36 +133,30 @@ where
     }
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<Role>> {
-        let mut len = [0_u8; 4];
-        match self.reader.read_exact(&mut len).await {
-            Ok(_) => {}
+        if let Some(message) = self.pending.take() {
+            return Some(message);
+        }
+
+        let bytes = match read_frame_bytes(&mut self.reader).await {
+            Ok(bytes) => bytes,
             Err(error)
                 if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::BrokenPipe
+                    &error,
+                    TransportError::Io(io_error) if matches!(
+                        io_error.kind(),
+                        std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                    )
                 ) =>
             {
                 return None;
             }
             Err(error) => {
-                tracing::debug!(%error, "failed to read MCP frame length");
+                tracing::debug!(%error, "failed to read MCP frame");
                 return None;
             }
-        }
-
-        let len = u32::from_be_bytes(len) as usize;
-        if len > MAX_FRAME_BYTES {
-            tracing::debug!(len, "MCP frame exceeds maximum");
-            return None;
-        }
-
-        let mut bytes = vec![0_u8; len];
-        if let Err(error) = self.reader.read_exact(&mut bytes).await {
-            tracing::debug!(%error, "failed to read MCP frame body");
-            return None;
-        }
+        };
 
         match serde_json::from_slice(&bytes) {
             Ok(message) => Some(message),

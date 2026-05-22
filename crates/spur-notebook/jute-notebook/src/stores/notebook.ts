@@ -629,6 +629,14 @@ export class Notebook {
     }, AUTOSAVE_DEBOUNCE_MS);
   }
 
+  async saveNow() {
+    if (this.autosaveTimer) {
+      clearTimeout(this.autosaveTimer);
+      this.autosaveTimer = undefined;
+    }
+    await this.saveToDisk();
+  }
+
   private async saveToDisk() {
     const path = this.state.path;
     if (!path) return;
