@@ -19,6 +19,7 @@ pub struct GraphBuildOptions {
     pub workspace: bool,
     pub output: Option<PathBuf>,
     pub quiet: bool,
+    pub skip_analyst: bool,
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
@@ -201,6 +202,11 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         }
         None
     };
+    // ---- analyst DB sync (see Task 8 / spec) ----
+    if !should_skip_analyst(options.skip_analyst) {
+        crate::commands::analyst::build_default(&root, options.quiet)?;
+    }
+
     let language_summary = file_counts
         .iter()
         .map(|(language, count)| format!("{language}:{count}"))
@@ -222,6 +228,10 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         canonical_summary
     );
     Ok(())
+}
+
+fn should_skip_analyst(skip_analyst: bool) -> bool {
+    skip_analyst || matches!(std::env::var("SPUR_GRAPH_SKIP_ANALYST"), Ok(v) if v == "1")
 }
 
 fn reject_legacy_output_path(output: &Path) -> anyhow::Result<()> {
@@ -389,4 +399,51 @@ fn language_counts_from_artifact(
         *counts.entry(label).or_insert(0) += 1;
     }
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn should_skip_analyst_honors_option_and_env_flags() {
+        {
+            let _env = EnvGuard::remove("SPUR_GRAPH_SKIP_ANALYST");
+            assert!(super::should_skip_analyst(true));
+        }
+        {
+            let _env = EnvGuard::set("SPUR_GRAPH_SKIP_ANALYST", "1");
+            assert!(super::should_skip_analyst(false));
+        }
+        {
+            let _env = EnvGuard::set("SPUR_GRAPH_SKIP_ANALYST", "true");
+            assert!(!super::should_skip_analyst(false));
+        }
+    }
 }
