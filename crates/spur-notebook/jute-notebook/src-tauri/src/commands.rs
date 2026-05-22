@@ -9,8 +9,9 @@ use std::{
     sync::Arc,
 };
 
+use dashmap::mapref::entry::Entry;
 use sysinfo::{Pid, System};
-use tauri::ipc::Channel;
+use tauri::{ipc::Channel, WebviewWindow};
 use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
@@ -21,7 +22,7 @@ use crate::{
         local::{environment, KernelUsageInfo, LocalKernel},
         notebook::NotebookRoot,
     },
-    state::State,
+    state::{notebook_slot_id, window_slot_id, KernelSlot, State},
     Error,
 };
 
@@ -141,6 +142,99 @@ fn atomic_write_notebook_blocking(path: &Path, contents: &NotebookRoot) -> Resul
     fs::rename(&temp_path, path).map_err(Error::Filesystem)
 }
 
+fn slot_id_for_window(window: &WebviewWindow) -> String {
+    notebook_path_from_window(window)
+        .map(|path| notebook_slot_id(&path))
+        .unwrap_or_else(|| window_slot_id(window.label()))
+}
+
+fn notebook_path_from_window(window: &WebviewWindow) -> Option<String> {
+    let url = window.url().ok()?;
+    url.query_pairs()
+        .find_map(|(key, value)| (key == "path").then(|| value.into_owned()))
+        .filter(|path| !path.is_empty())
+}
+
+async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
+    // Temporary hack to just start a kernel locally with ZeroMQ.
+    let kernels = environment::list_kernels(None).await;
+    let mut kernel_spec = match kernels
+        .iter()
+        .find(|(path, _spec)| path.file_name().and_then(|s| s.to_str()) == Some(spec_name))
+    {
+        Some((_, kernel_spec)) => kernel_spec.clone(),
+        None => {
+            return Err(Error::KernelConnect(format!(
+                "no kernel named {spec_name:?} found"
+            )))
+        }
+    };
+
+    if let Some(command) = kernel_spec.argv.first_mut() {
+        if command == "python" {
+            if let Ok(python_path) = env::var("PYTHON_PATH") {
+                *command = python_path;
+            } else {
+                // Temporary hack
+                *command = "/opt/homebrew/bin/python3.11".into();
+            }
+        }
+    }
+
+    let kernel = LocalKernel::start(&kernel_spec).await?;
+
+    let info = commands::kernel_info(kernel.conn()).await?;
+    info!(banner = info.banner, "started new jute kernel");
+
+    Ok(kernel)
+}
+
+fn install_kernel_in_slot(
+    state: &State,
+    slot_id: &str,
+    spec_name: String,
+    kernel: LocalKernel,
+) -> (u64, Option<LocalKernel>) {
+    match state.kernels.entry(slot_id.to_string()) {
+        Entry::Occupied(mut entry) => {
+            let slot = entry.get_mut();
+            let previous_kernel = slot.kernel.take();
+            let generation = slot.replace_kernel(kernel, spec_name);
+            (generation, previous_kernel)
+        }
+        Entry::Vacant(entry) => {
+            let slot = KernelSlot::with_kernel(kernel, spec_name);
+            let generation = slot.generation();
+            entry.insert(slot);
+            (generation, None)
+        }
+    }
+}
+
+fn take_kernel_if_present(state: &State, slot_id: &str) -> Option<LocalKernel> {
+    let mut slot = state.kernels.get_mut(slot_id)?;
+    slot.kernel.take()
+}
+
+fn take_kernel_from_slot(state: &State, slot_id: &str) -> Result<LocalKernel, Error> {
+    let mut slot = state
+        .kernels
+        .get_mut(slot_id)
+        .ok_or(Error::KernelDisconnect)?;
+    slot.kernel.take().ok_or(Error::KernelDisconnect)
+}
+
+fn restore_kernel_to_slot(state: &State, slot_id: &str, kernel: LocalKernel) {
+    if let Some(mut slot) = state.kernels.get_mut(slot_id) {
+        slot.kernel = Some(kernel);
+    }
+}
+
+fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
+    let slot = state.kernels.get(slot_id).ok_or(Error::KernelDisconnect)?;
+    Ok(slot.spec_name().to_string())
+}
+
 /// Measure the kernel's CPU and memory usage as a percentage of total system
 /// resources.
 #[tauri::command]
@@ -148,10 +242,11 @@ pub async fn kernel_usage_info(
     kernel_id: &str,
     state: tauri::State<'_, State>,
 ) -> Result<KernelUsageInfo, Error> {
-    // find the pid from _state.kernels
-    let kernel = state.kernels.get(kernel_id).ok_or(Error::KernelNotFound)?;
-
-    let pid: Pid = Pid::from_u32(kernel.pid().ok_or(Error::KernelProcessNotFound)?);
+    let pid: Pid = {
+        let slot = state.kernels.get(kernel_id).ok_or(Error::KernelNotFound)?;
+        let kernel = slot.kernel.as_ref().ok_or(Error::KernelNotFound)?;
+        Pid::from_u32(kernel.pid().ok_or(Error::KernelProcessNotFound)?)
+    };
 
     let mut system = System::new_all();
     system.refresh_all();
@@ -180,53 +275,64 @@ pub async fn kernel_usage_info(
 #[tauri::command]
 pub async fn start_kernel(
     spec_name: &str,
+    window: WebviewWindow,
     state: tauri::State<'_, State>,
 ) -> Result<String, Error> {
     // TODO: Save the client in a better place.
     // let client = JupyterClient::new("", "")?;
 
-    // Temporary hack to just start a kernel locally with ZeroMQ.
-    let kernels = environment::list_kernels(None).await;
-    let mut kernel_spec = match kernels
-        .iter()
-        .find(|(path, _spec)| path.file_name().and_then(|s| s.to_str()) == Some(spec_name))
-    {
-        Some((_, kernel_spec)) => kernel_spec.clone(),
-        None => {
-            return Err(Error::KernelConnect(format!(
-                "no kernel named {spec_name:?} found"
-            )))
-        }
-    };
-
-    if kernel_spec.argv[0] == "python" {
-        if let Ok(python_path) = env::var("PYTHON_PATH") {
-            kernel_spec.argv[0] = python_path;
-        } else {
-            // Temporary hack
-            kernel_spec.argv[0] = "/opt/homebrew/bin/python3.11".into();
+    let slot_id = slot_id_for_window(&window);
+    if let Some(mut kernel) = take_kernel_if_present(&state, &slot_id) {
+        if let Err(error) = kernel.kill().await {
+            restore_kernel_to_slot(&state, &slot_id, kernel);
+            return Err(error);
         }
     }
 
-    let kernel = LocalKernel::start(&kernel_spec).await?;
+    let kernel = start_local_kernel(spec_name).await?;
+    let (generation, _previous_kernel) =
+        install_kernel_in_slot(&state, &slot_id, spec_name.to_string(), kernel);
+    info!(slot_id = %slot_id, generation, "started jute kernel slot");
 
-    let info = commands::kernel_info(kernel.conn()).await?;
-    info!(banner = info.banner, "started new jute kernel");
+    Ok(slot_id)
+}
 
-    let kernel_id = String::from(kernel.id());
-    state.kernels.insert(kernel_id.clone(), kernel);
-    Ok(kernel_id)
+/// Restart a Jupyter kernel in an existing stable slot.
+#[tauri::command]
+pub async fn restart_kernel(
+    slot_id: &str,
+    spec_name: Option<String>,
+    state: tauri::State<'_, State>,
+) -> Result<String, Error> {
+    info!("restarting jute kernel slot {slot_id}");
+    let next_spec_name = match spec_name {
+        Some(spec_name) => spec_name,
+        None => spec_name_for_slot(&state, slot_id)?,
+    };
+
+    let mut kernel = take_kernel_from_slot(&state, slot_id)?;
+    if let Err(error) = kernel.kill().await {
+        restore_kernel_to_slot(&state, slot_id, kernel);
+        return Err(error);
+    }
+
+    let kernel = start_local_kernel(&next_spec_name).await?;
+    let (generation, _previous_kernel) =
+        install_kernel_in_slot(&state, slot_id, next_spec_name, kernel);
+    info!(slot_id = %slot_id, generation, "restarted jute kernel slot");
+
+    Ok(slot_id.to_string())
 }
 
 /// Stop a Jupyter kernel.
 #[tauri::command]
 pub async fn stop_kernel(kernel_id: &str, state: tauri::State<'_, State>) -> Result<(), Error> {
-    info!("stopping jute kernel {kernel_id}");
-    let (_, mut kernel) = state
-        .kernels
-        .remove(kernel_id)
-        .ok_or(Error::KernelDisconnect)?;
-    kernel.kill().await?;
+    info!("stopping jute kernel slot {kernel_id}");
+    let mut kernel = take_kernel_from_slot(&state, kernel_id)?;
+    if let Err(error) = kernel.kill().await {
+        restore_kernel_to_slot(&state, kernel_id, kernel);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -263,12 +369,17 @@ pub async fn run_cell(
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, State>,
 ) -> Result<(), Error> {
-    let conn = state
-        .kernels
-        .get(kernel_id)
-        .ok_or(Error::KernelDisconnect)?
-        .conn()
-        .clone();
+    let conn = {
+        let slot = state
+            .kernels
+            .get(kernel_id)
+            .ok_or(Error::KernelDisconnect)?;
+        slot.kernel
+            .as_ref()
+            .ok_or(Error::KernelDisconnect)?
+            .conn()
+            .clone()
+    };
 
     let rx = commands::run_cell(&conn, code).await?;
     while let Ok(event) = rx.recv().await {

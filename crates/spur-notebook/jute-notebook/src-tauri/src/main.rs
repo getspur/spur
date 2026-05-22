@@ -54,6 +54,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             jute::commands::kernel_usage_info,
             jute::commands::start_kernel,
+            jute::commands::restart_kernel,
             jute::commands::stop_kernel,
             jute::commands::run_cell,
             jute::commands::get_notebook,
