@@ -10,6 +10,7 @@ use std::{
 };
 
 use dashmap::mapref::entry::Entry;
+use serde::Serialize;
 use sysinfo::{Pid, System};
 use tauri::{ipc::Channel, WebviewWindow};
 use tokio::sync::Mutex;
@@ -30,6 +31,23 @@ pub mod venv;
 
 type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
+
+/// Snapshot of a stable kernel slot for agent read-side tools.
+#[derive(Debug, Clone, Serialize)]
+pub struct KernelSlotInfo {
+    /// Stable slot ID used by the frontend and Tauri command layer.
+    pub kernel_id: String,
+    /// Kernel spec name used for the latest successful start.
+    pub spec_name: String,
+    /// Monotonic in-memory generation for this kernel slot.
+    pub generation: u64,
+    /// Coarse status for the slot.
+    pub status: String,
+    /// Kernel CPU usage normalized across available CPUs.
+    pub cpu_pct: f32,
+    /// Kernel resident memory in MiB.
+    pub mem_mb: f32,
+}
 
 /// Coordinates disk saves so only one notebook write runs at a time.
 #[derive(Clone)]
@@ -235,6 +253,27 @@ fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
     Ok(slot.spec_name().to_string())
 }
 
+struct KernelProcessUsage {
+    cpu_consumed: f32,
+    cpu_available: f32,
+    memory_consumed: f32,
+    memory_available: f32,
+}
+
+async fn kernel_process_usage(pid: Pid) -> Option<KernelProcessUsage> {
+    let mut system = System::new_all();
+    system.refresh_all();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    system.refresh_process(pid);
+
+    system.process(pid).map(|process| KernelProcessUsage {
+        cpu_consumed: process.cpu_usage(),
+        cpu_available: system.cpus().len() as f32,
+        memory_consumed: process.memory() as f32,
+        memory_available: system.total_memory() as f32,
+    })
+}
+
 /// Measure the kernel's CPU and memory usage as a percentage of total system
 /// resources.
 #[tauri::command]
@@ -248,27 +287,60 @@ pub async fn kernel_usage_info(
         Pid::from_u32(kernel.pid().ok_or(Error::KernelProcessNotFound)?)
     };
 
-    let mut system = System::new_all();
-    system.refresh_all();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    system.refresh_process(pid);
-
-    if let Some(process) = system.process(pid) {
-        let cpu_total = system.cpus().len();
-        let cpu_used = process.cpu_usage();
-
-        let total_memory_kb = system.total_memory();
-        let process_memory_kb = process.memory();
-
+    if let Some(usage) = kernel_process_usage(pid).await {
         Ok(KernelUsageInfo {
-            cpu_consumed: cpu_used,
-            cpu_available: cpu_total as f32,
-            memory_consumed: process_memory_kb as f32,
-            memory_available: total_memory_kb as f32,
+            cpu_consumed: usage.cpu_consumed,
+            cpu_available: usage.cpu_available,
+            memory_consumed: usage.memory_consumed,
+            memory_available: usage.memory_available,
         })
     } else {
         Err(Error::KernelProcessNotFound)
     }
+}
+
+/// Return read-side metadata for a stable kernel slot.
+#[tauri::command]
+pub async fn kernel_slot_info(
+    kernel_id: &str,
+    state: tauri::State<'_, State>,
+) -> Result<KernelSlotInfo, Error> {
+    let (spec_name, generation, pid) = {
+        let slot = state.kernels.get(kernel_id).ok_or(Error::KernelNotFound)?;
+        (
+            slot.spec_name().to_string(),
+            slot.generation(),
+            slot.kernel.as_ref().and_then(|kernel| kernel.pid()),
+        )
+    };
+
+    let (status, cpu_pct, mem_mb) = match pid {
+        Some(pid) => match kernel_process_usage(Pid::from_u32(pid)).await {
+            Some(usage) => {
+                let cpu_pct = if usage.cpu_available > 0.0 {
+                    (usage.cpu_consumed / usage.cpu_available) * 100.0
+                } else {
+                    0.0
+                };
+                (
+                    "idle".to_string(),
+                    cpu_pct,
+                    usage.memory_consumed / 1024.0 / 1024.0,
+                )
+            }
+            None => ("dead".to_string(), 0.0, 0.0),
+        },
+        None => ("dead".to_string(), 0.0, 0.0),
+    };
+
+    Ok(KernelSlotInfo {
+        kernel_id: kernel_id.to_string(),
+        spec_name,
+        generation,
+        status,
+        cpu_pct,
+        mem_mb,
+    })
 }
 
 /// Start a new Jupyter kernel.

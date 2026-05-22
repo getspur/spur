@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -19,6 +21,20 @@ use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
 pub type RequestId = Uuid;
+pub type BridgeRequestFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Value, BridgeError>> + Send + 'a>>;
+
+pub trait BridgeRequester: Send + Sync {
+    fn listener_registered(&self) -> bool;
+    fn window_alive(&self) -> bool;
+
+    fn request<'a>(
+        &'a self,
+        method: &'static str,
+        params: Value,
+        timeout: Duration,
+    ) -> BridgeRequestFuture<'a>;
+}
 
 #[derive(Debug, Clone)]
 pub enum BridgeResponse {
@@ -96,6 +112,48 @@ pub struct AgentBridge {
     pending: Mutex<HashMap<RequestId, oneshot::Sender<BridgeResponse>>>,
     listener_registered: AtomicBool,
     window_alive: AtomicBool,
+}
+
+pub struct TauriBridgeRequester {
+    bridge: Arc<AgentBridge>,
+    app: Option<tauri::AppHandle>,
+}
+
+impl TauriBridgeRequester {
+    pub fn without_app(bridge: Arc<AgentBridge>) -> Self {
+        Self { bridge, app: None }
+    }
+
+    pub fn with_app(bridge: Arc<AgentBridge>, app: tauri::AppHandle) -> Self {
+        Self {
+            bridge,
+            app: Some(app),
+        }
+    }
+}
+
+impl BridgeRequester for TauriBridgeRequester {
+    fn listener_registered(&self) -> bool {
+        self.bridge.listener_registered()
+    }
+
+    fn window_alive(&self) -> bool {
+        self.bridge.window_alive()
+    }
+
+    fn request<'a>(
+        &'a self,
+        method: &'static str,
+        params: Value,
+        timeout: Duration,
+    ) -> BridgeRequestFuture<'a> {
+        match &self.app {
+            Some(app) => {
+                Box::pin(async move { self.bridge.request(app, method, params, timeout).await })
+            }
+            None => Box::pin(async { Err(BridgeError::NoListener) }),
+        }
+    }
 }
 
 impl Default for AgentBridge {

@@ -50,6 +50,12 @@ export type NotebookStoreState = {
 
   /** ID of the running kernel, populated after the kernel is started. */
   kernelId?: string;
+
+  /** Spec name for the running kernel slot. */
+  kernelSpecName?: string;
+
+  /** In-memory generation of the running kernel slot. */
+  kernelGeneration?: number;
 };
 
 export type CellType = "code" | "markdown";
@@ -63,6 +69,15 @@ export type CellResult = {
   executionCount?: number;
   outputs?: Output[];
   displays?: Record<string, number>;
+};
+
+export type KernelSlotInfo = {
+  kernel_id: string;
+  spec_name: string;
+  generation: number;
+  status: string;
+  cpu_pct: number;
+  mem_mb: number;
 };
 
 function notebookStoreActions(
@@ -315,7 +330,7 @@ export class Notebook {
       const kernelId = await invoke<string>("start_kernel", {
         specName: "python3",
       });
-      store.setState({ kernelId });
+      await this.setKernelSlotInfo(kernelId);
     })();
   }
 
@@ -399,6 +414,32 @@ export class Notebook {
 
   clearResult(cellId: string) {
     this.state.clearResult(cellId);
+  }
+
+  async refreshKernelSlotInfo(): Promise<KernelSlotInfo> {
+    if (!this.state.kernelId) {
+      await this.kernelStartPromise;
+    }
+    const kernelId = this.state.kernelId;
+    if (!kernelId) {
+      throw new Error("Kernel has not started");
+    }
+    return this.setKernelSlotInfo(kernelId);
+  }
+
+  async restartKernel() {
+    if (!this.state.kernelId) {
+      await this.kernelStartPromise;
+    }
+    const kernelId = this.state.kernelId;
+    if (!kernelId) {
+      throw new Error("Kernel has not started");
+    }
+    const restartedKernelId = await invoke<string>("restart_kernel", {
+      slotId: kernelId,
+      specName: this.state.kernelSpecName ?? "python3",
+    });
+    await this.setKernelSlotInfo(restartedKernelId);
   }
 
   async execute(cellId: string) {
@@ -543,6 +584,16 @@ export class Notebook {
     } catch (error) {
       console.error("Failed to autosave notebook", error);
     }
+  }
+
+  private async setKernelSlotInfo(kernelId: string): Promise<KernelSlotInfo> {
+    const info = await invoke<KernelSlotInfo>("kernel_slot_info", { kernelId });
+    this.store.setState({
+      kernelId: info.kernel_id,
+      kernelSpecName: info.spec_name,
+      kernelGeneration: info.generation,
+    });
+    return info;
   }
 }
 

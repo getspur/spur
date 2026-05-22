@@ -13,26 +13,28 @@ use rmcp::{
     service::RequestContext,
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::{net::UnixListener, sync::oneshot, task::JoinHandle};
 
+use self::bridge::{BridgeRequester, TauriBridgeRequester};
 use self::{bridge::AgentBridge, transport::LengthPrefixedJsonTransport};
 
 pub mod bridge;
+pub mod tools;
 pub mod transport;
 
 #[derive(Clone)]
 pub struct NotebookMcpServer {
-    bridge: Arc<AgentBridge>,
+    bridge: Arc<dyn BridgeRequester>,
 }
 
 impl NotebookMcpServer {
-    pub fn new(bridge: Arc<AgentBridge>) -> Self {
+    pub fn new(bridge: Arc<dyn BridgeRequester>) -> Self {
         Self { bridge }
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool::new(
+        let mut all_tools = vec![Tool::new(
             "notebook.ping",
             "Smoke-test the SPUR notebook MCP socket.",
             rmcp_object(json!({
@@ -40,7 +42,9 @@ impl NotebookMcpServer {
                 "properties": {},
                 "additionalProperties": false
             })),
-        )]
+        )];
+        all_tools.extend(self::tools::tools());
+        all_tools
     }
 
     fn tool(&self, name: &str) -> Option<Tool> {
@@ -86,6 +90,15 @@ impl ServerHandler for NotebookMcpServer {
                 "listenerRegistered": self.bridge.listener_registered(),
                 "windowAlive": self.bridge.window_alive()
             }))),
+            "notebook.snapshot" => tools::snapshot::call(self.bridge.as_ref()).await,
+            "notebook.read_cell" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::read_cell::call(self.bridge.as_ref(), arguments).await
+            }
+            "notebook.kernel_info" => tools::kernel_info::call(self.bridge.as_ref()).await,
             name => Err(McpError::invalid_params(
                 format!("unknown notebook tool: {name}"),
                 Some(json!({ "tool": name })),
@@ -143,6 +156,29 @@ pub async fn start_server(socket_path: impl AsRef<Path>) -> Result<NotebookMcpSe
 pub async fn start_server_with_bridge(
     socket_path: impl AsRef<Path>,
     bridge: Arc<AgentBridge>,
+) -> Result<NotebookMcpServerHandle> {
+    start_server_with_bridge_requester(
+        socket_path,
+        Arc::new(TauriBridgeRequester::without_app(bridge)),
+    )
+    .await
+}
+
+pub async fn start_server_with_app_bridge(
+    socket_path: impl AsRef<Path>,
+    bridge: Arc<AgentBridge>,
+    app: tauri::AppHandle,
+) -> Result<NotebookMcpServerHandle> {
+    start_server_with_bridge_requester(
+        socket_path,
+        Arc::new(TauriBridgeRequester::with_app(bridge, app)),
+    )
+    .await
+}
+
+async fn start_server_with_bridge_requester(
+    socket_path: impl AsRef<Path>,
+    bridge: Arc<dyn BridgeRequester>,
 ) -> Result<NotebookMcpServerHandle> {
     let socket_path = socket_path.as_ref().to_path_buf();
     if let Some(parent) = socket_path.parent() {

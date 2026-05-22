@@ -48,6 +48,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             jute::commands::kernel_usage_info,
+            jute::commands::kernel_slot_info,
             jute::commands::start_kernel,
             jute::commands::restart_kernel,
             jute::commands::stop_kernel,
@@ -64,8 +65,15 @@ fn main() {
         .setup(move |app| {
             let server_bridge = Arc::clone(&bridge_for_setup);
             let server_socket_path = socket_path.clone();
+            let server_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                match mcp::start_server_with_bridge(server_socket_path, server_bridge).await {
+                match mcp::start_server_with_app_bridge(
+                    server_socket_path,
+                    server_bridge,
+                    server_app,
+                )
+                .await
+                {
                     Ok(_handle) => std::future::pending::<()>().await,
                     Err(error) => tracing::error!(%error, "failed to start notebook MCP server"),
                 }

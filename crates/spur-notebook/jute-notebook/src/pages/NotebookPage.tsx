@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useSearch } from "wouter";
 
+import { setActiveAgentNotebook } from "@/agent/bridge";
 import { Notebook, NotebookContext } from "@/stores/notebook";
 import NotebookCommandMenu from "@/ui/notebook/NotebookCommandMenu";
 import NotebookFooter from "@/ui/notebook/NotebookFooter";
@@ -14,11 +15,29 @@ export default function NotebookPage() {
   const notebook = useMemo(() => new Notebook(), []);
 
   useEffect(() => {
-    if (path) {
-      notebook.loadNotebookFromPath(path);
-    } else if (inline) {
-      notebook.loadNotebook(JSON.parse(inline));
+    let cancelled = false;
+    setActiveAgentNotebook(undefined);
+
+    async function loadNotebook() {
+      if (path) {
+        await notebook.loadNotebookFromPath(path);
+      } else if (inline) {
+        notebook.loadNotebook(JSON.parse(inline));
+      } else {
+        return;
+      }
+
+      if (!cancelled && !notebook.state.loadError) {
+        setActiveAgentNotebook(notebook);
+      }
     }
+
+    void loadNotebook();
+
+    return () => {
+      cancelled = true;
+      setActiveAgentNotebook(undefined);
+    };
   }, [notebook, path, inline]);
 
   return (
