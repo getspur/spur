@@ -2,13 +2,16 @@
 
 use dashmap::DashMap;
 
-use crate::backend::local::LocalKernel;
+use crate::{backend::local::LocalKernel, commands::SaveCoordinator};
 
 /// State for the running Tauri application.
 #[derive(Default)]
 pub struct State {
     /// Current kernels running in the application.
     pub kernels: DashMap<String, LocalKernel>,
+
+    /// Coordinator for debounced notebook saves.
+    pub(crate) save_coordinator: SaveCoordinator,
 }
 
 impl State {

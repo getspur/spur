@@ -45,3 +45,10 @@ Update this file's pin (commit SHA + date) on every successful pull. Conflicts a
 - **No SPUR dependencies.** This crate must not depend on any `spur-*` crate. Dependency direction is one-way: `spur-notebook` depends on `jute-notebook`, never the reverse.
 - **CI exclusions.** Jute's upstream `.github/` workflows are vendored along with the source. Treat them as documentation; they are not run in SPUR CI.
 - **The `experiment/` subdirectory** is upstream Python scratch (uv-managed venv for Jupyter wire-protocol R&D). Not built or run by SPUR CI; left in-tree for parity with upstream.
+
+## SPUR drift
+
+- `src-tauri/src/backend/notebook.rs`: added typed `metadata.spur.version` per-cell metadata so SPUR's optimistic cell version survives `.ipynb` parse/serialize.
+- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: added the `save_to_disk` Tauri command, process-local save coalescing, and same-directory atomic temp-file rename for autosave.
+- `src/stores/notebook.ts`, `src/ui/notebook/CellInput.tsx`: made Zustand track per-cell `source` and monotonic `version`, bumped versions on source/type edits, generated UUIDv4 cell ids on insert, and wired 5 second debounced autosave.
+- `src/bindings/CellMetadata.ts`, `src/bindings/SpurCellMetadata.ts`, `src/bindings/index.ts`: updated generated TypeScript bindings to match the Rust metadata schema until `ts-rs-export` can be rerun from a workspace that includes `jute`.

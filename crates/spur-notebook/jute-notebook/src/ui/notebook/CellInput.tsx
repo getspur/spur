@@ -166,6 +166,11 @@ export default function CellInput({ cellId }: Props) {
         indentUnit.of("    "),
         EditorState.tabSize.of(4),
         editorTheme,
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            notebook.updateCellSource(cellId, update.state.doc.toString());
+          }
+        }),
       ],
       doc: initialText,
       parent: containerEl.current!,
