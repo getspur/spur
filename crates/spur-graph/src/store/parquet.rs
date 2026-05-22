@@ -396,7 +396,9 @@ fn endpoint_id_map(
         );
     }
     for row in nodes {
-        if let Some(existing) = endpoint_ids.insert(row.symbol.stable_symbol_id.clone(), row.node_id) {
+        if let Some(existing) =
+            endpoint_ids.insert(row.symbol.stable_symbol_id.clone(), row.node_id)
+        {
             let prev = endpoint_metadata
                 .get(&row.symbol.stable_symbol_id)
                 .cloned()
