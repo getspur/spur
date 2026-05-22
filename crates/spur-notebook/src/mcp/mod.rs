@@ -188,15 +188,6 @@ pub fn socket_path_for_slot(slot_id: &str) -> Result<PathBuf> {
         .join(format!("{slot_id}.sock")))
 }
 
-pub fn control_socket_path() -> Result<PathBuf> {
-    let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
-    Ok(base_dirs
-        .home_dir()
-        .join(".spur")
-        .join("notebooks")
-        .join("control.sock"))
-}
-
 fn notebooks_dir() -> Result<PathBuf> {
     let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
     Ok(base_dirs.home_dir().join(".spur").join("notebooks"))
