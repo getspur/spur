@@ -44,8 +44,11 @@ impl SpurLocalSource {
     ///   ahead of the registry, but listing it here prevents collisions
     ///   if an agent ever advertises a `/theme` command and a future
     ///   route wires it through the registry path.
+    /// - `/notebook` — owned by the TUI daemon control path. It must never
+    ///   be forwarded to the brain because the brain's MCP config is fixed
+    ///   for the life of the session.
     pub fn exclusive_names() -> &'static [&'static str] {
-        &["clear", "theme"]
+        &["clear", "theme", "notebook"]
     }
 
     pub fn entries() -> Vec<CommandEntry> {
@@ -120,6 +123,14 @@ impl SpurLocalSource {
                 hint: Some("[name|reload]".into()),
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ThemeCommand { arg: String::new() }),
+                arg_picker_spec: None,
+            },
+            CommandEntry {
+                name: "notebook".into(),
+                description: "Open, create, or close the SPUR notebook".into(),
+                hint: Some("[path|new|close]".into()),
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::NotebookCommand { arg: String::new() }),
                 arg_picker_spec: None,
             },
             CommandEntry {
