@@ -361,8 +361,16 @@ fn is_top_context_line(trimmed: &str) -> bool {
     trimmed.starts_with("#![")
         || trimmed.starts_with("use ")
         || trimmed.starts_with("pub use ")
+        || trimmed.starts_with("pub(crate) use ")
+        || trimmed.starts_with("pub(super) use ")
+        || trimmed.starts_with("extern crate ")
+        || trimmed.starts_with("mod ")
+        || trimmed.starts_with("pub mod ")
         || trimmed.starts_with("import ")
         || trimmed.starts_with("from ")
+        || trimmed.starts_with("export ")
+        || trimmed.starts_with("declare ")
+        || trimmed.starts_with("/// <reference ")
 }
 
 fn enclosing_impl_or_trait_signature(content: &str, symbol_start: usize) -> Option<String> {
@@ -383,7 +391,6 @@ fn enclosing_impl_or_trait_signature(content: &str, symbol_start: usize) -> Opti
 
 fn is_impl_or_trait_opening(trimmed: &str) -> bool {
     (trimmed.starts_with("impl ")
-        || trimmed.starts_with("pub impl ")
         || trimmed.starts_with("trait ")
         || trimmed.starts_with("pub trait "))
         && trimmed.ends_with('{')
