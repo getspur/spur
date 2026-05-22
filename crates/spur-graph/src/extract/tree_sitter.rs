@@ -128,8 +128,14 @@ impl<'a> FactBuilder<'a> {
         self.next_span += 1;
         let range = node.range();
         let kind_discriminator = kind.discriminator();
+        // The stable_key hash is keyed on (path, fqn, kind, ordinal). For ordinal
+        // disambiguation to actually distinguish nodes that share (path, fqn, kind),
+        // the ordinal counter must also be keyed on fqn — not label. In C++,
+        // overloads or in-class vs out-of-line definitions can produce the same
+        // fqn with different labels (e.g. label="AssignValue" vs label="Class::AssignValue"),
+        // and the previous label-keyed counter let both reach ordinal=1 → hash collision.
         let ordinal = {
-            let key = (relative_path.to_string(), label.clone(), kind_discriminator);
+            let key = (relative_path.to_string(), fqn.clone(), kind_discriminator);
             let count = self.stable_key_ordinals.entry(key).or_insert(0);
             *count += 1;
             *count

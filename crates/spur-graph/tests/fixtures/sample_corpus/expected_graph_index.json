@@ -151,7 +151,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "1f994108068ce029",
+      "stable_symbol_id": "e7b1c579ded826a0",
       "file_path": "src/lib.rs",
       "byte_range": [
         218,
@@ -334,7 +334,7 @@
     },
     {
       "source_stable_symbol_id": "34e0c16cee0a189b",
-      "target_stable_symbol_id": "1f994108068ce029",
+      "target_stable_symbol_id": "e7b1c579ded826a0",
       "target_label": "Runner::run",
       "relation": "calls",
       "confidence": "heuristic",
@@ -388,7 +388,7 @@
     },
     {
       "source_stable_symbol_id": "98e9d54ac8d82589",
-      "target_stable_symbol_id": "1f994108068ce029",
+      "target_stable_symbol_id": "e7b1c579ded826a0",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
