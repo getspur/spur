@@ -3,12 +3,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use fs2::FileExt;
 
+use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::{write_artifact_parquet, write_current_pointer, WriteOptions};
 use crate::{git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
@@ -18,7 +17,6 @@ const LOCK_FILE_NAME: &str = ".lock";
 const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 #[cfg(test)]
 static LOCK_TIMEOUT_MS_OVERRIDE: AtomicU64 = AtomicU64::new(5_000);
@@ -86,31 +84,6 @@ fn canonical_base_dir(common_dir: &Path, manifest_version: &str) -> PathBuf {
 
 fn canonical_path(common_dir: &Path, manifest_version: &str, hash: &str) -> PathBuf {
     canonical_base_dir(common_dir, manifest_version).join(format!("{hash}.parquet"))
-}
-
-fn try_lock_exclusive_with_timeout(file: &File, timeout: Duration) -> Result<bool> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match file.try_lock_exclusive() {
-            Ok(()) => return Ok(true),
-            Err(err) if is_lock_contended(&err) => {
-                if Instant::now() >= deadline {
-                    return Ok(false);
-                }
-                thread::sleep(
-                    LOCK_RETRY_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-                );
-            }
-            Err(err) => return Err(err).context("failed to acquire graph cache lock"),
-        }
-    }
-}
-
-fn is_lock_contended(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
-    )
 }
 
 fn write_canonical_atomically(
