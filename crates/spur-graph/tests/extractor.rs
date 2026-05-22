@@ -7,10 +7,10 @@ use std::time::Duration;
 use pretty_assertions::assert_eq;
 use spur_graph::build_facts;
 use spur_graph::graph::petgraph_builder::build_petgraph;
-use spur_graph::store::json::{
-    artifact_from_facts, artifact_from_facts_incremental, write_artifact, BuildMode,
-};
-use spur_graph::{load_artifact, read_artifact_header};
+use spur_graph::load_artifact;
+use spur_graph::store::build::{artifact_from_facts, artifact_from_facts_incremental, BuildMode};
+use spur_graph::store::canonical_hash::*;
+use spur_graph::store::parquet::{write_artifact_parquet, WriteOptions};
 use spur_graph::{Confidence, GraphEdgeKind, NodeKind, RelationKind};
 
 fn fixture_root() -> PathBuf {
@@ -75,6 +75,8 @@ fn normalize_for_comparison(
     for entry in &mut artifact.file_manifests {
         entry.node_ids.clear();
     }
+    artifact.file_node_ids.clear();
+    artifact.symbol_node_ids.clear();
     artifact.tombstones.clear();
     artifact
 }
@@ -99,15 +101,8 @@ fn call_edge_target_for(
         .and_then(|edge| edge.target_stable_symbol_id.clone())
 }
 
-fn write_and_read_content_hash(
-    artifact: &spur_graph::GraphIndexArtifact,
-    path: &std::path::Path,
-) -> String {
-    write_artifact(artifact, path).expect("write artifact");
-    read_artifact_header(path)
-        .expect("read artifact header")
-        .content_hash_blake3
-        .expect("writer should stamp BLAKE3 content hash")
+fn content_hash(artifact: &spur_graph::GraphIndexArtifact) -> String {
+    artifact_content_hash_blake3_hex(artifact).expect("compute artifact content hash")
 }
 
 fn find_symbol_json<'a>(
@@ -134,7 +129,7 @@ fn find_symbol_json<'a>(
 #[test]
 fn graph_store_schema_version_is_v5() {
     assert_eq!(
-        spur_graph::store::json::SCHEMA_VERSION,
+        spur_graph::store::build::SCHEMA_VERSION,
         "spur-graph-schema-v5"
     );
 }
@@ -999,19 +994,24 @@ fn artifact_writer_round_trips_through_existing_reader() {
     let facts = build_facts(&root).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("graph_index.json");
+    let path = write_artifact_parquet(&artifact, dir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
 
-    write_artifact(&artifact, &path).expect("write artifact");
     let loaded = load_artifact(&path).expect("existing reader loads writer output");
 
-    assert_eq!(loaded.files, artifact.files);
-    assert_eq!(loaded.symbols, artifact.symbols);
-    assert_eq!(loaded.edges, artifact.edges);
-    let hash = loaded
-        .header
-        .content_hash_blake3
-        .as_deref()
-        .expect("writer should stamp BLAKE3 content hash");
+    assert_eq!(
+        sorted_files(loaded.files.clone()),
+        sorted_files(artifact.files.clone())
+    );
+    assert_eq!(
+        sorted_symbols(loaded.symbols.clone()),
+        sorted_symbols(artifact.symbols.clone())
+    );
+    assert_eq!(
+        sorted_edges(loaded.edges.clone()),
+        sorted_edges(artifact.edges.clone())
+    );
+    let hash = loaded.graph_content_hash.as_str();
     assert_eq!(hash.len(), 64, "blake3 hex hash should be 64 chars");
     assert!(
         hash.chars()
@@ -1025,25 +1025,50 @@ fn artifact_writer_round_trips_through_existing_reader() {
     }));
 }
 
+fn sorted_files(
+    mut files: Vec<spur_graph::GraphFileArtifact>,
+) -> Vec<spur_graph::GraphFileArtifact> {
+    files.sort_by(|left, right| left.stable_file_id.cmp(&right.stable_file_id));
+    files
+}
+
+fn sorted_symbols(
+    mut symbols: Vec<spur_graph::GraphSymbolArtifact>,
+) -> Vec<spur_graph::GraphSymbolArtifact> {
+    symbols.sort_by(|left, right| left.stable_symbol_id.cmp(&right.stable_symbol_id));
+    symbols
+}
+
+fn sorted_edges(
+    mut edges: Vec<spur_graph::GraphEdgeArtifact>,
+) -> Vec<spur_graph::GraphEdgeArtifact> {
+    edges.sort_by(|left, right| {
+        left.source_stable_symbol_id
+            .cmp(&right.source_stable_symbol_id)
+            .then(
+                left.target_stable_symbol_id
+                    .cmp(&right.target_stable_symbol_id),
+            )
+            .then(left.target_label.cmp(&right.target_label))
+            .then(format!("{:?}", left.relation).cmp(&format!("{:?}", right.relation)))
+    });
+    edges
+}
+
 #[test]
 fn artifact_writer_hash_is_deterministic_for_identical_content() {
     let root = fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
-    let dir = tempfile::tempdir().expect("tempdir");
-    let first_path = dir.path().join("graph_index.first.json");
-    let second_path = dir.path().join("graph_index.second.json");
 
-    write_artifact(&artifact, &first_path).expect("write first artifact");
-    write_artifact(&artifact, &second_path).expect("write second artifact");
+    let first = content_hash(&artifact);
+    let second = content_hash(&artifact);
 
-    let first = read_artifact_header(&first_path).expect("read first header");
-    let second = read_artifact_header(&second_path).expect("read second header");
     assert_eq!(
-        first.content_hash_blake3, second.content_hash_blake3,
+        first, second,
         "identical artifact content should produce identical BLAKE3 hashes"
     );
-    assert!(first.content_hash_blake3.is_some());
+    assert_eq!(first.len(), 64);
 }
 
 #[test]
@@ -1057,10 +1082,8 @@ fn artifact_writer_hash_changes_when_symbol_content_changes() {
         .first_mut()
         .expect("fixture should contain at least one symbol");
     symbol.entity_name.push_str("_mutated");
-    let dir = tempfile::tempdir().expect("tempdir");
-
-    let original_hash = write_and_read_content_hash(&artifact, &dir.path().join("original.json"));
-    let mutated_hash = write_and_read_content_hash(&mutated, &dir.path().join("mutated.json"));
+    let original_hash = content_hash(&artifact);
+    let mutated_hash = content_hash(&mutated);
 
     assert_ne!(
         original_hash, mutated_hash,
@@ -1082,10 +1105,8 @@ fn artifact_writer_hash_changes_when_edge_content_changes() {
         Some(label) => format!("{label}_mutated"),
         None => "mutated_target".to_string(),
     });
-    let dir = tempfile::tempdir().expect("tempdir");
-
-    let original_hash = write_and_read_content_hash(&artifact, &dir.path().join("original.json"));
-    let mutated_hash = write_and_read_content_hash(&mutated, &dir.path().join("mutated.json"));
+    let original_hash = content_hash(&artifact);
+    let mutated_hash = content_hash(&mutated);
 
     assert_ne!(
         original_hash, mutated_hash,
@@ -1109,6 +1130,34 @@ fn artifact_persists_in_file_contains_edges() {
         .iter()
         .find(|symbol| symbol.file_path == "src/lib.rs" && symbol.entity_name == "build_app")
         .expect("build_app symbol");
+    let file_index = artifact
+        .files
+        .iter()
+        .position(|candidate| candidate.stable_file_id == file.stable_file_id)
+        .expect("file node id index");
+    let symbol_index = artifact
+        .symbols
+        .iter()
+        .position(|candidate| candidate.stable_symbol_id == function.stable_symbol_id)
+        .expect("symbol node id index");
+    let expected_file_node_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.stable_key == file.stable_file_id)
+        .expect("file fact node")
+        .node_id;
+    let expected_symbol_node_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.stable_key == function.stable_symbol_id)
+        .expect("symbol fact node")
+        .node_id;
+
+    assert_eq!(artifact.file_node_ids[file_index], expected_file_node_id);
+    assert_eq!(
+        artifact.symbol_node_ids[symbol_index],
+        expected_symbol_node_id
+    );
 
     assert!(artifact.edges.iter().any(|edge| {
         edge.relation == RelationKind::Contains

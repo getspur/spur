@@ -83,7 +83,11 @@ pub struct GraphIndexArtifact {
     #[serde(default)]
     pub file_manifests: Vec<GraphFileManifestEntry>,
     pub files: Vec<GraphFileArtifact>,
+    #[serde(skip)]
+    pub file_node_ids: Vec<NodeId>,
     pub symbols: Vec<GraphSymbolArtifact>,
+    #[serde(skip)]
+    pub symbol_node_ids: Vec<NodeId>,
     #[serde(default)]
     pub edges: Vec<GraphEdgeArtifact>,
     #[serde(default)]
@@ -297,6 +301,32 @@ pub enum Confidence {
 }
 
 pub fn load_artifact(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
+    let metadata = fs::metadata(path).with_context(|| {
+        format!(
+            "failed to inspect graph index artifact `{}`",
+            path.display()
+        )
+    })?;
+
+    if metadata.is_dir() {
+        return crate::store::parquet::read_artifact_parquet(path);
+    }
+
+    if metadata.is_file() {
+        tracing::warn!(
+            path = %path.display(),
+            "spur-graph: loading legacy JSON graph artifact; JSON artifacts are deprecated and will be removed after the Parquet cutover"
+        );
+        return load_legacy_json(path);
+    }
+
+    Err(anyhow!(
+        "graph index artifact path `{}` is neither a file nor a directory",
+        path.display()
+    ))
+}
+
+fn load_legacy_json(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read graph index artifact `{}`", path.display()))?;
     let mut artifact: GraphIndexArtifact = serde_json::from_str(&content)
