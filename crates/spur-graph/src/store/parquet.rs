@@ -28,7 +28,7 @@ use crate::{
 
 pub const PARQUET_ROW_GROUP_SIZE: usize = 16_384;
 const ENCLOSING_SCOPE_DICTIONARY: bool = true;
-const EDGES_BY_DST_PRESENT: bool = false;
+const EDGES_BY_DST_PRESENT: bool = true;
 const STALE_PARQUET_TEMP_DIR_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
