@@ -9,6 +9,7 @@ use super::BRIDGE_TIMEOUT;
 use crate::mcp::bridge::BridgeRequester;
 
 const METHOD: &str = "notebook.write_cell";
+const LAST_EDITED_BY: &str = "brain";
 
 #[derive(Debug, Deserialize)]
 struct WriteCellParams {
@@ -68,7 +69,8 @@ pub async fn call(
             json!({
                 "id": params.id,
                 "source": params.source,
-                "expected_version": params.expected_version
+                "expected_version": params.expected_version,
+                "last_edited_by": LAST_EDITED_BY
             }),
             BRIDGE_TIMEOUT,
         )

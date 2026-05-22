@@ -1,10 +1,10 @@
 import type { CellType, Notebook } from "@/stores/notebook";
 
 import {
-  AgentHandlerError,
   type AgentBridgeRequest,
   type AgentCellStatus,
   type AgentDeleteCell,
+  AgentHandlerError,
   type AgentInsertCell,
   type AgentKernelInfo,
   type AgentReadCell,
@@ -95,12 +95,14 @@ function insertCell(notebook: Notebook, params: unknown): AgentInsertCell {
   const kind = readKind(params, "notebook.insert_cell");
   const source = readStringParam(params, "source", "notebook.insert_cell");
   const afterId = readOptionalStringParam(params, "after_id");
+  const lastEditedBy =
+    readOptionalStringParam(params, "last_edited_by") ?? "brain";
   const state = notebook.state;
   if (afterId && !state.cells[afterId]) {
     throw new AgentHandlerError("cell_not_found", `Cell not found: ${afterId}`);
   }
 
-  const id = notebook.insertCellAfter(afterId, kind, source);
+  const id = notebook.insertCellAfter(afterId, kind, source, lastEditedBy);
   return { id, version: notebook.state.cells[id].version };
 }
 
@@ -108,6 +110,8 @@ function writeCell(notebook: Notebook, params: unknown): AgentWriteCell {
   const id = readStringParam(params, "id", "notebook.write_cell");
   const source = readStringParam(params, "source", "notebook.write_cell");
   const expectedVersion = readExpectedVersion(params, "notebook.write_cell");
+  const lastEditedBy =
+    readOptionalStringParam(params, "last_edited_by") ?? "brain";
   const cell = notebook.state.cells[id];
   if (!cell) {
     throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
@@ -119,7 +123,7 @@ function writeCell(notebook: Notebook, params: unknown): AgentWriteCell {
     );
   }
 
-  notebook.updateCellSource(id, source);
+  notebook.updateCellSource(id, source, lastEditedBy);
   return { version: notebook.state.cells[id].version };
 }
 
@@ -165,7 +169,10 @@ function readStringParam(params: unknown, key: string, method: string): string {
   throw new AgentHandlerError("invalid_params", `${method} requires ${key}`);
 }
 
-function readOptionalStringParam(params: unknown, key: string): string | undefined {
+function readOptionalStringParam(
+  params: unknown,
+  key: string,
+): string | undefined {
   if (typeof params !== "object" || params === null || !(key in params)) {
     return undefined;
   }

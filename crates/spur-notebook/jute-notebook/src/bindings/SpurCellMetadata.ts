@@ -8,4 +8,8 @@ export type SpurCellMetadata = {
    * Per-cell monotonic content version.
    */
   version: number;
+  /**
+   * Agent that last edited the cell through notebook MCP tools.
+   */
+  last_edited_by?: string;
 };

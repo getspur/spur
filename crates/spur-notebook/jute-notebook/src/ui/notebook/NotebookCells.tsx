@@ -1,5 +1,6 @@
 import {
   BoltIcon,
+  BotIcon,
   CheckIcon,
   Code2Icon,
   LetterTextIcon,
@@ -45,6 +46,10 @@ function CellInputAside({ cellId }: { cellId: string }) {
     notebook.store,
     (state) => state.cells[cellId].result,
   );
+  const lastEditedBy = useStore(
+    notebook.store,
+    (state) => state.cells[cellId].lastEditedBy,
+  );
 
   const formatExecutionDuration = (durationMs: number) => {
     const seconds = durationMs / 1000;
@@ -59,6 +64,15 @@ function CellInputAside({ cellId }: { cellId: string }) {
   return (
     <Aside>
       <div className="mt-1 flex gap-0.5">
+        {lastEditedBy && (
+          <span
+            aria-label={`Agent-edited cell. Last edited by ${lastEditedBy}`}
+            className="inline-flex items-center rounded p-1 text-gray-500"
+            title={`last-edited-by: ${lastEditedBy}`}
+          >
+            <BotIcon size={16} />
+          </span>
+        )}
         <AsideIconButton
           Icon={type === "code" ? Code2Icon : LetterTextIcon}
           onClick={() => {

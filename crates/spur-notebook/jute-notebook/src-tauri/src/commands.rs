@@ -536,7 +536,10 @@ mod tests {
             cells: vec![Cell::Code(CodeCell {
                 id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
                 metadata: CellMetadata {
-                    spur: Some(SpurCellMetadata { version }),
+                    spur: Some(SpurCellMetadata {
+                        version,
+                        last_edited_by: None,
+                    }),
                     other: Default::default(),
                 },
                 source: MultilineString::Single(source.to_string()),

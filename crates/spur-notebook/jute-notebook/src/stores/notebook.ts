@@ -35,6 +35,7 @@ export type NotebookStoreState = {
       initialText: string;
       source: string;
       version: number;
+      lastEditedBy?: string;
       result?: CellResult;
     };
   };
@@ -86,7 +87,12 @@ function notebookStoreActions(
 ) {
   return {
     /** Add a new cell to the notebook. */
-    addCell: (cellId: string, type: CellType, initialText: string) =>
+    addCell: (
+      cellId: string,
+      type: CellType,
+      initialText: string,
+      lastEditedBy?: string,
+    ) =>
       set((state) => {
         state.cellIds.push(cellId);
         state.cells[cellId] = {
@@ -94,6 +100,7 @@ function notebookStoreActions(
           initialText,
           source: initialText,
           version: INITIAL_CELL_VERSION,
+          lastEditedBy,
         };
       }),
 
@@ -103,6 +110,7 @@ function notebookStoreActions(
       afterId: string | undefined,
       type: CellType,
       initialText: string,
+      lastEditedBy?: string,
     ) =>
       set((state) => {
         const insertAt = afterId
@@ -114,6 +122,7 @@ function notebookStoreActions(
           initialText,
           source: initialText,
           version: INITIAL_CELL_VERSION,
+          lastEditedBy,
         };
       }),
 
@@ -122,15 +131,19 @@ function notebookStoreActions(
       set((state) => {
         if (state.cells[cellId].type === type) return;
         state.cells[cellId].type = type;
+        state.cells[cellId].lastEditedBy = undefined;
         state.cells[cellId].version += 1;
       }),
 
     /** Set the source text of a cell. */
-    setCellSource: (cellId: string, source: string) =>
+    setCellSource: (cellId: string, source: string, lastEditedBy?: string) =>
       set((state) => {
-        if (state.cells[cellId].source === source) return;
-        state.cells[cellId].source = source;
-        state.cells[cellId].version += 1;
+        const cell = state.cells[cellId];
+        if (cell.source !== source) {
+          cell.source = source;
+          cell.version += 1;
+        }
+        cell.lastEditedBy = lastEditedBy;
       }),
 
     /** Delete a cell from the notebook. */
@@ -262,6 +275,7 @@ function notebookStoreActions(
               initialText: multiline(cell.source),
               source: multiline(cell.source),
               version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
+              lastEditedBy: cell.metadata.spur?.last_edited_by,
             };
 
             if (cell.cell_type === "code") {
@@ -380,14 +394,14 @@ export class Notebook {
           source: cell.source,
           execution_count: cell.result?.executionCount ?? null,
           outputs: cell.result?.outputs ?? [],
-          metadata: cellMetadata(cell.version),
+          metadata: cellMetadata(cell.version, cell.lastEditedBy),
         });
       } else if (cell.type === "markdown") {
         cells.push({
           cell_type: "markdown",
           id: cellId,
           source: cell.source,
-          metadata: cellMetadata(cell.version),
+          metadata: cellMetadata(cell.version, cell.lastEditedBy),
         });
       } else {
         throw new Error(`Unknown cell type: ${cell.type}`);
@@ -424,17 +438,28 @@ export class Notebook {
     }
   }
 
-  addCell(type: CellType, initialText: string): string {
+  addCell(type: CellType, initialText: string, lastEditedBy?: string): string {
     const cellId = uuidv4();
     this.refs.set(cellId, {});
-    this.state.addCell(cellId, type, initialText);
+    this.state.addCell(cellId, type, initialText, lastEditedBy);
     return cellId;
   }
 
-  insertCellAfter(afterId: string | undefined, type: CellType, initialText: string): string {
+  insertCellAfter(
+    afterId: string | undefined,
+    type: CellType,
+    initialText: string,
+    lastEditedBy?: string,
+  ): string {
     const cellId = uuidv4();
     this.refs.set(cellId, {});
-    this.state.insertCellAfter(cellId, afterId, type, initialText);
+    this.state.insertCellAfter(
+      cellId,
+      afterId,
+      type,
+      initialText,
+      lastEditedBy,
+    );
     return cellId;
   }
 
@@ -447,8 +472,8 @@ export class Notebook {
     this.state.setCellType(cellId, type);
   }
 
-  updateCellSource(cellId: string, source: string) {
-    this.state.setCellSource(cellId, source);
+  updateCellSource(cellId: string, source: string, lastEditedBy?: string) {
+    this.state.setCellSource(cellId, source, lastEditedBy);
   }
 
   clearResult(cellId: string) {
@@ -502,7 +527,9 @@ export class Notebook {
       throw new Error(`Cell ${cellId} not found`);
     }
     const code = editor.state.doc.toString();
-    this.updateCellSource(cellId, code);
+    const cell = this.state.cells[cellId];
+    const lastEditedBy = cell?.source === code ? cell.lastEditedBy : undefined;
+    this.updateCellSource(cellId, code, lastEditedBy);
 
     let status: CellResult["status"] = "running";
     let timings: CellResult["timings"] = { startedAt: Date.now() };
@@ -667,9 +694,9 @@ function multiline(string: string | string[]): string {
   return typeof string === "string" ? string : string.join("");
 }
 
-function cellMetadata(version: number): CellMetadata {
+function cellMetadata(version: number, lastEditedBy?: string): CellMetadata {
   return {
-    spur: { version },
+    spur: { version, last_edited_by: lastEditedBy },
   };
 }
 

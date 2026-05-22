@@ -211,6 +211,11 @@ pub struct CellMetadata {
 pub struct SpurCellMetadata {
     /// Per-cell monotonic content version.
     pub version: u64,
+
+    /// Agent that last edited the cell through notebook MCP tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_edited_by: Option<String>,
 }
 
 /// Attachments for a cell, represented as MIME bundles keyed by filenames.

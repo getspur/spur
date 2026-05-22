@@ -35,6 +35,7 @@ impl Orchestrator {
              - Do it yourself for quick tasks or when you need tight iterative control\n\
              - Always review worker output before approving\n\n",
         );
+        prompt.push_str(self.render_working_surface_section());
 
         // Issue context.
         if let Some(issue) = issue {
@@ -88,7 +89,14 @@ impl Orchestrator {
         "You are a brain coordinating a coding task. You have two kinds of tools:\n\
          \n\
          1. Your own tools (filesystem, bash, git) — for investigation and direct edits.\n\
-         2. SPUR delegation tools (delegate_to_worker, delegate_parallel, list_available_workers) — for handing work to worker agents that run in isolated worktrees.\n\n".into()
+         2. SPUR delegation tools (delegate_to_worker, delegate_parallel, list_available_workers) — for handing work to worker agents that run in isolated worktrees.\n\n"
+            .to_string()
+            + self.render_working_surface_section()
+    }
+
+    pub(super) fn render_working_surface_section(&self) -> &'static str {
+        "## WORKING SURFACE\n\n\
+         When a SPUR notebook is available, treat markdown cells = reasoning artifacts / working notes, code cells = computation, and cell outputs = shared memory with the user. Keep chat as a short control channel that points at the cells you wrote.\n\n"
     }
 
     pub(super) fn render_workers_block(&self) -> String {
@@ -177,5 +185,27 @@ impl Orchestrator {
             tracing::debug!(error = %e, path = %path.display(), "could not write prompt log");
         }
         enforce_log_cap(&dir, 50 * 1024 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn brain_prompt_header_contains_working_surface_guidance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let orchestrator = Orchestrator::new(
+            tmp.path().to_path_buf(),
+            spur_acp::config::SpurConfig::default(),
+            None,
+        )
+        .unwrap();
+
+        let header = orchestrator.render_header();
+
+        assert!(header.contains("## WORKING SURFACE"));
+        assert!(header.contains("markdown cells = reasoning artifacts"));
+        assert!(header.contains("code cells = computation"));
     }
 }
