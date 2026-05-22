@@ -367,37 +367,66 @@ fn endpoint_id_map(
     files: &[FileRow],
     nodes: &[NodeRow],
 ) -> anyhow::Result<HashMap<String, NodeId>> {
-    let mut endpoint_ids = HashMap::new();
+    let mut endpoint_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut endpoint_metadata: HashMap<String, (String, String, String, [usize; 2])> =
+        HashMap::new();
     for row in files {
-        insert_endpoint(
-            &mut endpoint_ids,
+        if let Some(existing) = endpoint_ids.insert(row.file.stable_file_id.clone(), row.node_id) {
+            let prev = endpoint_metadata
+                .get(&row.file.stable_file_id)
+                .cloned()
+                .unwrap_or_default();
+            bail!(
+                "stable endpoint id `{stable_id}` maps to both NodeId({prev_id}) (file path={prev_path}) and NodeId({new_id}) (file path={new_path})",
+                stable_id = row.file.stable_file_id,
+                prev_id = existing.get(),
+                prev_path = prev.2,
+                new_id = row.node_id.get(),
+                new_path = row.file.file_path,
+            );
+        }
+        endpoint_metadata.insert(
             row.file.stable_file_id.clone(),
-            row.node_id,
-        )?;
-    }
-    for row in nodes {
-        insert_endpoint(
-            &mut endpoint_ids,
-            row.symbol.stable_symbol_id.clone(),
-            row.node_id,
-        )?;
-    }
-    Ok(endpoint_ids)
-}
-
-fn insert_endpoint(
-    endpoint_ids: &mut HashMap<String, NodeId>,
-    stable_id: String,
-    node_id: NodeId,
-) -> anyhow::Result<()> {
-    if let Some(existing) = endpoint_ids.insert(stable_id.clone(), node_id) {
-        bail!(
-            "stable endpoint id `{stable_id}` maps to both NodeId({}) and NodeId({})",
-            existing.get(),
-            node_id.get()
+            (
+                "file".into(),
+                row.file.file_path.clone(),
+                row.file.file_path.clone(),
+                [0, 0],
+            ),
         );
     }
-    Ok(())
+    for row in nodes {
+        if let Some(existing) = endpoint_ids.insert(row.symbol.stable_symbol_id.clone(), row.node_id) {
+            let prev = endpoint_metadata
+                .get(&row.symbol.stable_symbol_id)
+                .cloned()
+                .unwrap_or_default();
+            bail!(
+                "stable endpoint id `{stable_id}` maps to both NodeId({prev_id}) (kind={prev_kind} qn={prev_qn:?} path={prev_path} range={prev_range:?}) and NodeId({new_id}) (kind={new_kind} qn={new_qn:?} path={new_path} range={new_range:?})",
+                stable_id = row.symbol.stable_symbol_id,
+                prev_id = existing.get(),
+                prev_kind = prev.0,
+                prev_qn = prev.1,
+                prev_path = prev.2,
+                prev_range = prev.3,
+                new_id = row.node_id.get(),
+                new_kind = row.symbol.symbol_kind,
+                new_qn = row.symbol.qualified_name,
+                new_path = row.symbol.file_path,
+                new_range = row.symbol.byte_range,
+            );
+        }
+        endpoint_metadata.insert(
+            row.symbol.stable_symbol_id.clone(),
+            (
+                row.symbol.symbol_kind.clone(),
+                row.symbol.qualified_name.clone(),
+                row.symbol.file_path.clone(),
+                row.symbol.byte_range,
+            ),
+        );
+    }
+    Ok(endpoint_ids)
 }
 
 fn edge_rows(
