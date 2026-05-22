@@ -26,11 +26,11 @@ fn read_artifact_header_parquet_returns_counts_and_hash_under_50ms() -> anyhow::
     let elapsed = started.elapsed();
 
     assert!(manifest.complete);
-    assert!(!manifest.edges_by_dst_present);
+    assert!(manifest.edges_by_dst_present);
     assert_eq!(manifest.graph_content_hash, artifact.graph_content_hash);
     assert_eq!(manifest.row_counts.nodes, 2);
     assert_eq!(manifest.row_counts.edges, 2);
-    assert_eq!(manifest.row_counts.edges_by_dst, None);
+    assert_eq!(manifest.row_counts.edges_by_dst, Some(2));
     assert_eq!(manifest.row_counts.edges_unresolved, 1);
     assert_eq!(manifest.row_counts.files, 2);
     assert_eq!(manifest.row_counts.file_manifests, 2);
@@ -97,9 +97,42 @@ fn family_2_6_endpoint_namespace_consistency() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn edges_by_dst_columns_match_edges_columns() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir().context("create tempdir")?;
+    let artifact = fixture_artifact();
+    let dir = write_fixture(&artifact, tempdir.path())?;
+
+    assert_eq!(
+        column_schema(&dir.join("edges_by_dst.parquet"))?,
+        column_schema(&dir.join("edges.parquet"))?
+    );
+
+    Ok(())
+}
+
 fn write_fixture(artifact: &GraphIndexArtifact, base_dir: &Path) -> anyhow::Result<PathBuf> {
     write_artifact_parquet(artifact, base_dir, WriteOptions::default())
         .context("write parquet artifact")
+}
+
+fn column_schema(path: &Path) -> anyhow::Result<Vec<(String, String, bool)>> {
+    let batches = read_batches(path)?;
+    let batch = batches
+        .first()
+        .ok_or_else(|| anyhow!("`{}` has no record batches", path.display()))?;
+    Ok(batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().clone(),
+                format!("{:?}", field.data_type()),
+                field.is_nullable(),
+            )
+        })
+        .collect())
 }
 
 fn read_i64_column(path: &Path, column_name: &str) -> anyhow::Result<Vec<i64>> {
