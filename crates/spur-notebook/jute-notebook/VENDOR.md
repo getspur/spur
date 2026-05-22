@@ -45,3 +45,17 @@ Update this file's pin (commit SHA + date) on every successful pull. Conflicts a
 - **No SPUR dependencies.** This crate must not depend on any `spur-*` crate. Dependency direction is one-way: `spur-notebook` depends on `jute-notebook`, never the reverse.
 - **CI exclusions.** Jute's upstream `.github/` workflows are vendored along with the source. Treat them as documentation; they are not run in SPUR CI.
 - **The `experiment/` subdirectory** is upstream Python scratch (uv-managed venv for Jupyter wire-protocol R&D). Not built or run by SPUR CI; left in-tree for parity with upstream.
+
+## SPUR drift
+
+- `src-tauri/src/backend/notebook.rs`: added typed `metadata.spur.version` per-cell metadata so SPUR's optimistic cell version survives `.ipynb` parse/serialize.
+- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: added the `save_to_disk` Tauri command, process-local save coalescing, and same-directory atomic temp-file rename for autosave.
+- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: replaced upstream's per-start local kernel ID map with stable notebook path-derived kernel slots and in-memory slot generations, while keeping the existing JS-facing command argument names compatible.
+- `src/stores/notebook.ts`, `src/ui/notebook/CellInput.tsx`: made Zustand track per-cell `source` and monotonic `version`, bumped versions on source/type edits, generated UUIDv4 cell ids on insert, and wired 5 second debounced autosave.
+- `src/bindings/CellMetadata.ts`, `src/bindings/SpurCellMetadata.ts`, `src/bindings/index.ts`: updated generated TypeScript bindings to match the Rust metadata schema until `ts-rs-export` can be rerun from a workspace that includes `jute`.
+
+## SPUR lifecycle notes
+
+- The daemon persists the last loaded notebook in `~/.spur/notebooks/last.json` and attempts to restore that single notebook on restart. `close` clears the record.
+- Multi-window remains deferred for v0.4. The daemon, stable MCP socket, kernel slot model, and `last.json` restore path all assume one active notebook window.
+- Autosave keeps Jute's 5 second JS debounce and Rust-side same-directory temp-file plus atomic rename. A JS panic during the debounce window can lose the pending edit, but the on-disk `.ipynb` remains a complete old or new notebook.

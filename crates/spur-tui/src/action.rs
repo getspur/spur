@@ -259,6 +259,12 @@ pub enum Action {
     ThemeCommand {
         arg: String,
     },
+    /// Spur-local `/notebook` command. `arg` is the raw rest after the token:
+    /// `""` reopens the current notebook, `"new"` creates a scratch notebook,
+    /// `"close"` closes the active notebook, and any other value is a path.
+    NotebookCommand {
+        arg: String,
+    },
 }
 
 /// Which permission option the user selected.

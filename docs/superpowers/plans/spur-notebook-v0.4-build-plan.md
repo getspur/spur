@@ -297,9 +297,9 @@ delegate_to_worker — this is analyst mode.
 ## 16. Open Questions
 
 - **Notebook autosave format on partial JS crash.** Atomic rename ensures the file is never half-written, but a JS crash mid-debounce loses ≤5 s of edits. Document; revisit only if users feel it.
-- **Multiple `spur-notebook` windows = multiple sockets.** v0.4 supports one window. Document; M8 polish (or v0.5) handles multi-window.
+- **Multiple `spur-notebook` windows = multiple sockets.** v0.4 supports one window. M8 explicitly defers multi-window and keeps `~/.spur/notebooks/last.json` as a single last-open notebook pointer; revisit in v0.5.
 - **Coarse snapshot includes `source_hash`?** Decided: yes, BLAKE3-16. Lets the brain detect content changes without full reads.
-- **Brain crash mid-tool-call.** Pending MCP request times out; JS handler completes harmlessly. Documented in bridge contract.
+- **Brain crash mid-tool-call.** Pending MCP request times out; app restart drains pending bridge requests as `app_restarted`; JS handler completion after restart is harmless. Documented in bridge contract.
 - **Should the brain be allowed to edit user-authored cells?** System prompt says no without explicit user request. Not enforced by the tool layer (open).
 - **Kernel auto-restart on death.** Out of scope for v0.4; relies on existing Jute behavior. Brain detects `kernel_info.status == "dead"` and asks user.
 

@@ -22,6 +22,10 @@ export default function NotebookHeader({ kernelName }: Props) {
   const notebook = useNotebook();
 
   const kernelId = useStore(notebook.store, (state) => state.kernelId);
+  const kernelGeneration = useStore(
+    notebook.store,
+    (state) => state.kernelGeneration,
+  );
 
   return (
     <Header>
@@ -33,18 +37,26 @@ export default function NotebookHeader({ kernelName }: Props) {
         <button className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110">
           <PlayIcon size={16} />
         </button>
-        <button className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110">
+        <button
+          className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110"
+          onClick={() => void notebook.restartKernel()}
+        >
           <RefreshCwIcon size={16} />
         </button>
 
-        <button className="mx-2 flex w-60 items-center justify-center rounded border border-gray-200 py-[3px] text-xs text-gray-900 transition-all hover:border-gray-400 hover:bg-gray-100 active:scale-105">
+        <button className="mx-2 flex w-60 min-w-0 items-center justify-center rounded border border-gray-200 px-2 py-[3px] text-xs text-gray-900 transition-all hover:border-gray-400 hover:bg-gray-100 active:scale-105">
           <div
             className={clsx(
-              "mr-2 h-2 w-2 rounded-full",
+              "mr-2 h-2 w-2 shrink-0 rounded-full",
               kernelId ? "bg-green-500" : "bg-orange-500",
             )}
           />
-          {kernelName}
+          <span className="truncate">{kernelName}</span>
+          {kernelGeneration !== undefined && (
+            <span className="ml-2 shrink-0 rounded bg-gray-100 px-1 py-px text-[10px] text-gray-500">
+              gen {kernelGeneration}
+            </span>
+          )}
         </button>
 
         <button className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110">
