@@ -53,3 +53,9 @@ Update this file's pin (commit SHA + date) on every successful pull. Conflicts a
 - `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: replaced upstream's per-start local kernel ID map with stable notebook path-derived kernel slots and in-memory slot generations, while keeping the existing JS-facing command argument names compatible.
 - `src/stores/notebook.ts`, `src/ui/notebook/CellInput.tsx`: made Zustand track per-cell `source` and monotonic `version`, bumped versions on source/type edits, generated UUIDv4 cell ids on insert, and wired 5 second debounced autosave.
 - `src/bindings/CellMetadata.ts`, `src/bindings/SpurCellMetadata.ts`, `src/bindings/index.ts`: updated generated TypeScript bindings to match the Rust metadata schema until `ts-rs-export` can be rerun from a workspace that includes `jute`.
+
+## SPUR lifecycle notes
+
+- The daemon persists the last loaded notebook in `~/.spur/notebooks/last.json` and attempts to restore that single notebook on restart. `close` clears the record.
+- Multi-window remains deferred for v0.4. The daemon, stable MCP socket, kernel slot model, and `last.json` restore path all assume one active notebook window.
+- Autosave keeps Jute's 5 second JS debounce and Rust-side same-directory temp-file plus atomic rename. A JS panic during the debounce window can lose the pending edit, but the on-disk `.ipynb` remains a complete old or new notebook.

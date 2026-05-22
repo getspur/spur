@@ -51,6 +51,16 @@ Commands:
 
 `open` requires `path`; the other commands ignore `path`.
 
+The daemon records the last successfully loaded notebook at:
+
+```text
+~/.spur/notebooks/last.json
+```
+
+On daemon startup, that file is read and the notebook is restored if the path
+still exists. `close` clears the record. This is intentionally a single
+notebook pointer; multi-window restore is deferred.
+
 ## Control responses
 
 Success:

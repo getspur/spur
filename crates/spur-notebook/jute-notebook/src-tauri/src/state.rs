@@ -117,4 +117,29 @@ mod tests {
             assert_eq!(slot.spec_name(), "python3-debug");
         }
     }
+
+    #[test]
+    fn kernel_slot_generation_resets_to_one_after_daemon_state_restart() {
+        let path = "/tmp/notebooks/restart.ipynb";
+        let slot_id = notebook_slot_id(path);
+        let state = State::new();
+        state
+            .kernels
+            .insert(slot_id.clone(), KernelSlot::new("python3".to_string()));
+
+        {
+            let mut slot = state.kernels.get_mut(&slot_id).unwrap();
+            assert_eq!(slot.record_start("python3".to_string()), 1);
+            assert_eq!(slot.record_start("python3".to_string()), 2);
+        }
+
+        let restarted_state = State::new();
+        restarted_state
+            .kernels
+            .insert(slot_id.clone(), KernelSlot::new("python3".to_string()));
+        let mut restarted_slot = restarted_state.kernels.get_mut(&slot_id).unwrap();
+
+        assert_eq!(restarted_slot.record_start("python3".to_string()), 1);
+        assert_eq!(restarted_slot.generation(), 1);
+    }
 }

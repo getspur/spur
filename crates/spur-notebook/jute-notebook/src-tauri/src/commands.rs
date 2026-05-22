@@ -129,6 +129,17 @@ async fn atomic_write_notebook(path: &Path, contents: &NotebookRoot) -> Result<(
 }
 
 fn atomic_write_notebook_blocking(path: &Path, contents: &NotebookRoot) -> Result<(), Error> {
+    atomic_write_notebook_blocking_with_hook(path, contents, |_| Ok(()))
+}
+
+fn atomic_write_notebook_blocking_with_hook<F>(
+    path: &Path,
+    contents: &NotebookRoot,
+    before_rename: F,
+) -> Result<(), Error>
+where
+    F: FnOnce(&Path) -> Result<(), Error>,
+{
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -153,6 +164,11 @@ fn atomic_write_notebook_blocking(path: &Path, contents: &NotebookRoot) -> Resul
     })();
 
     if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = before_rename(&temp_path) {
         let _ = fs::remove_file(&temp_path);
         return Err(error);
     }
@@ -625,6 +641,35 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
         assert_eq!(cell.metadata.spur.as_ref().unwrap().version, 9);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn autosave_panic_before_atomic_rename_leaves_ipynb_fully_old_or_new() {
+        let dir = std::env::temp_dir().join(format!("jute-save-panic-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notebook.ipynb");
+
+        atomic_write_notebook_blocking(&path, &notebook_with_source("old", 1)).unwrap();
+
+        let panic_result = std::panic::catch_unwind(|| {
+            atomic_write_notebook_blocking_with_hook(
+                &path,
+                &notebook_with_source("new", 2),
+                |_temp_path| panic!("simulated JS panic mid-debounce before atomic rename"),
+            )
+            .unwrap();
+        });
+        assert!(panic_result.is_err());
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: NotebookRoot = serde_json::from_str(&contents).unwrap();
+        let source = first_source(&parsed);
+        assert!(
+            source == "old" || source == "new",
+            "autosave target must be a complete old or new notebook, got {source:?}"
+        );
 
         std::fs::remove_dir_all(dir).unwrap();
     }
