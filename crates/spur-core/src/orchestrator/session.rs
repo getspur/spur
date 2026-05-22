@@ -1447,7 +1447,7 @@ impl Orchestrator {
             (brain_cfg, presub_notif_rx, session_response, brain_session_id, session_id),
             mcp_handle,
         ): McpGuarded<NewBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
-            let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
+            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url);
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1743,7 +1743,7 @@ impl Orchestrator {
             ),
             mcp_handle,
         ): McpGuarded<LoadedBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
-            let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
+            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url);
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
                 anyhow::anyhow!(

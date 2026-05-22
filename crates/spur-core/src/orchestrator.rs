@@ -25,8 +25,8 @@ use spur_acp::{
 use spur_pm::Issue;
 
 use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, McpServer, McpServerHttp, PromptRequest, ProtocolVersion,
-    SessionUpdate, SetSessionModeRequest, TextContent,
+    ContentBlock, InitializeRequest, McpServer, PromptRequest, ProtocolVersion, SessionUpdate,
+    SetSessionModeRequest, TextContent,
 };
 
 use spur_blob_store::{
