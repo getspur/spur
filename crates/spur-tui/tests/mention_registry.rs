@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_acp::SessionId;

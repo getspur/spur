@@ -9,13 +9,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 
-use crate::store::json::write_artifact;
+use crate::store::{write_artifact_parquet, write_current_pointer, WriteOptions};
 use crate::{git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
 const CACHE_DIR_NAME: &str = "spur-graph";
 const ARTIFACTS_DIR_NAME: &str = "artifacts";
 const LOCK_FILE_NAME: &str = ".lock";
-const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph-index.json";
+const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -28,15 +28,13 @@ pub fn write_with_dedup(
     worktree_root: &Path,
     ctx: &GitCtx,
 ) -> Result<()> {
+    let canonical_dir = canonical_base_dir(&ctx.git_common_dir, &artifact.manifest_version);
     let canonical = canonical_path(
         &ctx.git_common_dir,
         &artifact.manifest_version,
         &artifact.graph_content_hash,
     );
-    let canonical_dir = canonical
-        .parent()
-        .context("canonical graph artifact path has no parent")?;
-    fs::create_dir_all(canonical_dir)
+    fs::create_dir_all(&canonical_dir)
         .with_context(|| format!("failed to create `{}`", canonical_dir.display()))?;
 
     let lock_path = canonical_dir.join(LOCK_FILE_NAME);
@@ -53,23 +51,24 @@ pub fn write_with_dedup(
             lock_path = %lock_path.display(),
             "spur-graph: fs2 lock unavailable; writing worktree artifact without canonical pointer"
         );
-        write_artifact_to_worktree(artifact, worktree_root)?;
+        let written_dir = write_artifact_to_worktree(artifact, worktree_root)?;
+        write_current_pointer(worktree_root, &written_dir)?;
         // No canonical was written, so any prior pointer is stale; remove it.
         remove_if_exists(&worktree_root.join(POINTER_PATH))?;
         return Ok(());
     }
 
-    let write_result = if canonical.exists() {
-        Ok(())
+    let write_result = if canonical.join("manifest.json").is_file() {
+        Ok(canonical)
     } else {
-        write_canonical_atomically(artifact, &canonical)
+        write_canonical_atomically(artifact, &canonical_dir)
     };
     let unlock_result = fs2::FileExt::unlock(&lock).context("failed to unlock graph cache lock");
-    write_result?;
+    let written_dir = write_result?;
     unlock_result?;
 
-    install_worktree_artifact(&canonical, worktree_root)?;
-    write_pointer(artifact, worktree_root, ctx, &canonical)?;
+    write_current_pointer(worktree_root, &written_dir)?;
+    write_pointer(artifact, worktree_root, ctx, &written_dir)?;
     Ok(())
 }
 
@@ -78,12 +77,15 @@ pub fn lookup_canonical(common_dir: &Path, manifest_version: &str, hash: &str) -
     path.exists().then_some(path)
 }
 
-fn canonical_path(common_dir: &Path, manifest_version: &str, hash: &str) -> PathBuf {
+fn canonical_base_dir(common_dir: &Path, manifest_version: &str) -> PathBuf {
     common_dir
         .join(CACHE_DIR_NAME)
         .join(ARTIFACTS_DIR_NAME)
         .join(manifest_version)
-        .join(format!("{hash}.json"))
+}
+
+fn canonical_path(common_dir: &Path, manifest_version: &str, hash: &str) -> PathBuf {
+    canonical_base_dir(common_dir, manifest_version).join(format!("{hash}.parquet"))
 }
 
 fn try_lock_exclusive_with_timeout(file: &File, timeout: Duration) -> Result<bool> {
@@ -111,76 +113,19 @@ fn is_lock_contended(err: &io::Error) -> bool {
     )
 }
 
-fn write_canonical_atomically(artifact: &GraphIndexArtifact, canonical: &Path) -> Result<()> {
-    let parent = canonical
-        .parent()
-        .context("canonical graph artifact path has no parent")?;
-    let tmp = temp_path_for(canonical);
-    write_artifact(artifact, &tmp)?;
-    fs::rename(&tmp, canonical).with_context(|| {
-        format!(
-            "failed to atomically rename `{}` to `{}`",
-            tmp.display(),
-            canonical.display()
-        )
-    })?;
-    fsync_dir(parent);
-    Ok(())
+fn write_canonical_atomically(
+    artifact: &GraphIndexArtifact,
+    canonical_dir: &Path,
+) -> Result<PathBuf> {
+    write_artifact_parquet(artifact, canonical_dir, WriteOptions::default())
 }
 
-fn write_artifact_to_worktree(artifact: &GraphIndexArtifact, worktree_root: &Path) -> Result<()> {
-    let worktree_artifact = worktree_root.join(WORKTREE_ARTIFACT_PATH);
-    write_artifact(artifact, &worktree_artifact)
-}
-
-fn install_worktree_artifact(canonical: &Path, worktree_root: &Path) -> Result<()> {
-    let worktree_artifact = worktree_root.join(WORKTREE_ARTIFACT_PATH);
-    if let Some(parent) = worktree_artifact.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create `{}`", parent.display()))?;
-    }
-    if same_inode(canonical, &worktree_artifact).unwrap_or(false) {
-        return Ok(());
-    }
-    remove_if_exists(&worktree_artifact)?;
-    link_or_copy(canonical, &worktree_artifact)
-}
-
-fn link_or_copy(source: &Path, dest: &Path) -> Result<()> {
-    link_or_copy_with_hardlink(source, dest, |source, dest| fs::hard_link(source, dest))
-}
-
-fn link_or_copy_with_hardlink<F>(source: &Path, dest: &Path, hardlink: F) -> Result<()>
-where
-    F: FnOnce(&Path, &Path) -> io::Result<()>,
-{
-    match hardlink(source, dest) {
-        Ok(()) => Ok(()),
-        Err(err) if is_hardlink_fallback(&err) => {
-            fs::copy(source, dest).with_context(|| {
-                format!(
-                    "failed to copy canonical graph artifact `{}` to `{}`",
-                    source.display(),
-                    dest.display()
-                )
-            })?;
-            Ok(())
-        }
-        Err(err) => Err(err).with_context(|| {
-            format!(
-                "failed to hardlink canonical graph artifact `{}` to `{}`",
-                source.display(),
-                dest.display()
-            )
-        }),
-    }
-}
-
-fn is_hardlink_fallback(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::CrossesDevices | io::ErrorKind::Unsupported
-    )
+fn write_artifact_to_worktree(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+) -> Result<PathBuf> {
+    let worktree_artifact_base = worktree_root.join(WORKTREE_ARTIFACT_PATH);
+    write_artifact_parquet(artifact, &worktree_artifact_base, WriteOptions::default())
 }
 
 fn write_pointer(
@@ -201,7 +146,12 @@ fn write_pointer(
         manifest_version: artifact.manifest_version.clone(),
         source_kind: SourceKind::Git,
         indexed_commit_oid: Some(ctx.head_oid.clone()),
-        canonical_artifact_path: canonical.to_path_buf(),
+        canonical_artifact_path: canonical.canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize graph artifact `{}`",
+                canonical.display()
+            )
+        })?,
     };
     let json =
         serde_json::to_string_pretty(&pointer).context("failed to encode graph index pointer")?;
@@ -226,20 +176,6 @@ fn remove_if_exists(path: &Path) -> Result<()> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| format!("failed to remove `{}`", path.display())),
     }
-}
-
-#[cfg(unix)]
-fn same_inode(left: &Path, right: &Path) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-
-    let left = fs::metadata(left)?;
-    let right = fs::metadata(right)?;
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
-}
-
-#[cfg(not(unix))]
-fn same_inode(left: &Path, right: &Path) -> io::Result<bool> {
-    Ok(fs::canonicalize(left)? == fs::canonicalize(right)?)
 }
 
 fn temp_path_for(path: &Path) -> PathBuf {
@@ -276,19 +212,18 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use fs2::FileExt;
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
     use tempfile::TempDir;
 
     use super::{lookup_canonical, write_with_dedup};
     use crate::git::GitCtx;
+    use crate::store::{read_artifact_parquet, read_current_pointer};
     use crate::{
         GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
-        GraphIndexPointer, SourceKind,
+        GraphIndexPointer, NodeId, SourceKind,
     };
 
     #[test]
-    fn write_creates_canonical_and_worktree_hardlink() {
+    fn write_creates_canonical_parquet_and_current_pointer() {
         let env = CacheEnv::new();
         let artifact = artifact("hash-a", "src/lib.rs");
 
@@ -296,14 +231,25 @@ mod tests {
 
         let canonical =
             lookup_canonical(env.common.path(), "manifest-a", "hash-a").expect("canonical path");
-        assert!(canonical.exists());
-        let worktree_artifact = env.worktree.path().join(".spur/graph-index.json");
-        assert!(worktree_artifact.exists());
-
-        #[cfg(unix)]
+        let canonical = fs::canonicalize(canonical).expect("canonicalize artifact path");
+        assert!(canonical.is_dir());
         assert_eq!(
-            fs::metadata(&canonical).unwrap().ino(),
-            fs::metadata(&worktree_artifact).unwrap().ino()
+            canonical.extension().and_then(|ext| ext.to_str()),
+            Some("parquet")
+        );
+        assert!(canonical.join("nodes.parquet").is_file());
+        assert!(canonical.join("edges.parquet").is_file());
+        assert!(canonical.join("edges_unresolved.parquet").is_file());
+        assert!(canonical.join("files.parquet").is_file());
+        assert!(canonical.join("file_manifests.parquet").is_file());
+        assert!(canonical.join("tombstones.parquet").is_file());
+        assert!(canonical.join("manifest.json").is_file());
+
+        let current = read_current_pointer(env.worktree.path()).expect("read CURRENT");
+        assert_eq!(current, canonical);
+        assert!(
+            !env.worktree.path().join(".spur/graph-index.json").exists(),
+            "legacy worktree JSON should not be written after the cutover"
         );
 
         let pointer_path = env.worktree.path().join(".spur/graph-index.pointer.json");
@@ -327,29 +273,16 @@ mod tests {
         write_with_dedup(&second, env.worktree.path(), &env.ctx).unwrap();
 
         let canonical = lookup_canonical(env.common.path(), "manifest-a", "hash-a").unwrap();
-        let canonical_json = fs::read_to_string(&canonical).unwrap();
-        assert!(canonical_json.contains("src/lib.rs"));
-        assert!(!canonical_json.contains("src/mutated.rs"));
+        let canonical = fs::canonicalize(canonical).expect("canonicalize artifact path");
+        let canonical_artifact = read_artifact_parquet(&canonical).unwrap();
+        assert_eq!(canonical_artifact.files[0].file_path, "src/lib.rs");
+        assert!(canonical_artifact
+            .files
+            .iter()
+            .all(|file| file.file_path != "src/mutated.rs"));
 
-        let worktree_json =
-            fs::read_to_string(env.worktree.path().join(".spur/graph-index.json")).unwrap();
-        assert!(worktree_json.contains("src/lib.rs"));
-        assert!(!worktree_json.contains("src/mutated.rs"));
-    }
-
-    #[test]
-    fn cross_fs_hardlink_error_falls_back_to_copy() {
-        let env = CacheEnv::new();
-        let source = env.common.path().join("source.json");
-        let dest = env.worktree.path().join("dest.json");
-        fs::write(&source, r#"{"ok":true}"#).unwrap();
-
-        super::link_or_copy_with_hardlink(&source, &dest, |_source, _dest| {
-            Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
-        })
-        .unwrap();
-
-        assert_eq!(fs::read_to_string(dest).unwrap(), r#"{"ok":true}"#);
+        let current = read_current_pointer(env.worktree.path()).expect("read CURRENT");
+        assert_eq!(current, canonical);
     }
 
     #[test]
@@ -373,7 +306,18 @@ mod tests {
 
         write_with_dedup(&artifact, env.worktree.path(), &env.ctx).unwrap();
 
-        assert!(env.worktree.path().join(".spur/graph-index.json").exists());
+        let current = read_current_pointer(env.worktree.path()).expect("read CURRENT");
+        assert!(
+            current.is_dir(),
+            "fallback should write a worktree parquet dir"
+        );
+        assert_eq!(
+            current.extension().and_then(|ext| ext.to_str()),
+            Some("parquet")
+        );
+        let worktree_graph_dir =
+            fs::canonicalize(env.worktree.path().join(".spur/graph")).expect("graph dir");
+        assert!(current.starts_with(worktree_graph_dir));
         assert!(lookup_canonical(env.common.path(), "manifest-a", "hash-a").is_none());
         assert!(
             !pointer_path.exists(),
@@ -424,7 +368,7 @@ mod tests {
                 stable_file_id: format!("file:{file_path}"),
                 file_path: file_path.to_string(),
             }],
-            file_node_ids: Vec::new(),
+            file_node_ids: vec![NodeId(1)],
             symbols: Vec::new(),
             symbol_node_ids: Vec::new(),
             edges: Vec::new(),
