@@ -1,5 +1,7 @@
 use std::{
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
 };
 
@@ -371,6 +373,12 @@ pub struct NotebookDaemonControl {
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
 }
 
+type DaemonControlFuture<'a> = Pin<Box<dyn Future<Output = DaemonControlResponse> + Send + 'a>>;
+
+trait DaemonControlHandler: Clone + Send + 'static {
+    fn handle_control<'a>(&'a self, request: DaemonControlRequest) -> DaemonControlFuture<'a>;
+}
+
 #[derive(Default)]
 struct NotebookDaemonState {
     current_path: Option<PathBuf>,
@@ -594,6 +602,12 @@ impl NotebookDaemonControl {
     }
 }
 
+impl DaemonControlHandler for NotebookDaemonControl {
+    fn handle_control<'a>(&'a self, request: DaemonControlRequest) -> DaemonControlFuture<'a> {
+        Box::pin(async move { self.handle(request).await })
+    }
+}
+
 async fn create_scratch_notebook() -> anyhow::Result<PathBuf> {
     let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
     let dir = base_dirs.home_dir().join(".spur").join("scratch");
@@ -664,7 +678,7 @@ async fn start_multiplexed_server(
 async fn handle_daemon_connection(
     mut stream: UnixStream,
     bridge: Arc<dyn BridgeRequester>,
-    control: NotebookDaemonControl,
+    control: impl DaemonControlHandler,
 ) {
     let first = match read_frame_value(&mut stream).await {
         Ok(value) => value,
@@ -676,7 +690,7 @@ async fn handle_daemon_connection(
 
     if first.get("daemon").and_then(Value::as_str) == Some("notebook.v1") {
         let response = match serde_json::from_value::<DaemonControlRequest>(first) {
-            Ok(request) => control.handle(request).await,
+            Ok(request) => control.handle_control(request).await,
             Err(error) => DaemonControlResponse {
                 id: None,
                 ok: false,
@@ -688,6 +702,14 @@ async fn handle_daemon_connection(
             },
         };
         let _ = write_frame_json(&mut stream, &response).await;
+        return;
+    }
+
+    if let Some(daemon) = first.get("daemon") {
+        tracing::debug!(
+            daemon = %daemon,
+            "unknown notebook daemon discriminator; closing connection"
+        );
         return;
     }
 
@@ -732,6 +754,156 @@ async fn prepare_socket_path(socket_path: impl AsRef<Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+    use tokio::net::UnixStream;
+    use tokio::time::{timeout, Duration};
+
+    #[derive(Clone, Default)]
+    struct RecordingDaemonControl {
+        commands: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl RecordingDaemonControl {
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().expect("commands lock").clone()
+        }
+    }
+
+    impl DaemonControlHandler for RecordingDaemonControl {
+        fn handle_control<'a>(&'a self, request: DaemonControlRequest) -> DaemonControlFuture<'a> {
+            Box::pin(async move {
+                self.commands
+                    .lock()
+                    .expect("commands lock")
+                    .push(request.command);
+                DaemonControlResponse {
+                    id: request.id,
+                    ok: false,
+                    path: None,
+                    error: Some(DaemonControlError {
+                        code: "recorded_control_request".to_string(),
+                        message: "recorded control request".to_string(),
+                    }),
+                }
+            })
+        }
+    }
+
+    fn test_bridge_requester() -> Arc<dyn BridgeRequester> {
+        Arc::new(TauriBridgeRequester::without_app(Arc::new(
+            AgentBridge::new(),
+        )))
+    }
+
+    fn spawn_multiplexer(control: RecordingDaemonControl) -> (UnixStream, JoinHandle<()>) {
+        let (server, client) = UnixStream::pair().expect("in-memory stream pair");
+        let handler = tokio::spawn(async move {
+            handle_daemon_connection(server, test_bridge_requester(), control).await;
+        });
+        (client, handler)
+    }
+
+    fn initialize_frame() -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "multiplexer-test",
+                    "version": "0"
+                }
+            }
+        })
+    }
+
+    async fn assert_connection_closes_without_response(mut client: UnixStream) {
+        let read = timeout(Duration::from_millis(200), read_frame_value(&mut client))
+            .await
+            .expect("connection should close promptly");
+        assert!(
+            read.is_err(),
+            "connection returned an unexpected frame: {read:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiplexer_routes_v1_daemon_frame_to_control_plane() {
+        let control = RecordingDaemonControl::default();
+        let (mut client, handler) = spawn_multiplexer(control.clone());
+
+        write_frame_json(
+            &mut client,
+            &json!({
+                "daemon": "notebook.v1",
+                "command": "not-a-command"
+            }),
+        )
+        .await
+        .expect("control request writes");
+
+        let response = read_frame_value(&mut client)
+            .await
+            .expect("control response reads");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "recorded_control_request");
+        assert_eq!(control.commands(), vec!["not-a-command"]);
+
+        handler.await.expect("handler finishes");
+    }
+
+    #[tokio::test]
+    async fn multiplexer_routes_json_rpc_frame_to_mcp_handler() {
+        let control = RecordingDaemonControl::default();
+        let (mut client, handler) = spawn_multiplexer(control.clone());
+
+        write_frame_json(&mut client, &initialize_frame())
+            .await
+            .expect("initialize request writes");
+
+        let response = read_frame_value(&mut client)
+            .await
+            .expect("initialize response reads");
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["serverInfo"]["name"], "notebook");
+        assert!(control.commands().is_empty());
+
+        drop(client);
+        handler.await.expect("handler finishes");
+    }
+
+    #[tokio::test]
+    async fn multiplexer_closes_malformed_json_without_control_or_mcp_response() {
+        let control = RecordingDaemonControl::default();
+        let (mut client, handler) = spawn_multiplexer(control.clone());
+
+        transport::write_frame_bytes(&mut client, b"{not-json")
+            .await
+            .expect("malformed frame writes");
+
+        assert_connection_closes_without_response(client).await;
+        assert!(control.commands().is_empty());
+        handler.await.expect("handler finishes");
+    }
+
+    #[tokio::test]
+    async fn multiplexer_closes_unknown_daemon_version_without_mcp_fallthrough() {
+        let control = RecordingDaemonControl::default();
+        let (mut client, handler) = spawn_multiplexer(control.clone());
+        let mut frame = initialize_frame();
+        frame["daemon"] = json!("notebook.v2");
+
+        write_frame_json(&mut client, &frame)
+            .await
+            .expect("unknown daemon frame writes");
+
+        assert_connection_closes_without_response(client).await;
+        assert!(control.commands().is_empty());
+        handler.await.expect("handler finishes");
+    }
 
     #[tokio::test]
     async fn last_notebook_record_round_trips_and_clears() {
