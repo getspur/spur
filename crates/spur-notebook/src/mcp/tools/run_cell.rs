@@ -16,6 +16,7 @@ use crate::mcp::bridge::BridgeRequester;
 const METHOD: &str = "notebook.run_cell";
 const READ_CELL_METHOD: &str = "notebook.read_cell";
 const KERNEL_INFO_METHOD: &str = "notebook.kernel_info";
+const DISCONNECTED_STATUS: &str = "disconnected";
 
 #[derive(Debug, Deserialize)]
 struct RunCellParams {
@@ -27,6 +28,8 @@ struct BridgeCell {
     id: String,
     kind: String,
     source: String,
+    #[serde(default)]
+    kernel_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,22 +94,57 @@ async fn call_inner(
             Some(json!({ "id": cell.id, "kind": cell.kind })),
         ));
     }
-    let kernel = kernel_info(bridge).await?;
+    let kernel_id = active_kernel_id(bridge, cell.kernel_id).await?;
     let rx = bridge
-        .run_cell_events(&kernel.kernel_id, &cell.source)
+        .run_cell_events(&kernel_id, &cell.source)
         .await
         .map_err(|error| error.into_mcp_error())?;
 
     let mut event_count = 0_u64;
+    let mut events = Vec::new();
+    let mut terminal_status = DISCONNECTED_STATUS.to_string();
+    let mut finished = false;
     while let Ok(event) = rx.recv().await {
         event_count += 1;
+        let event_value = serde_json::to_value(&event).map_err(|error| {
+            McpError::internal_error(
+                "could not encode RunCellEvent result",
+                Some(json!({ "error": error.to_string() })),
+            )
+        })?;
+        match &event {
+            RunCellEvent::Finished { status, .. } => {
+                terminal_status = status.clone();
+                finished = true;
+            }
+            RunCellEvent::Disconnect(_) if !finished => {
+                terminal_status = DISCONNECTED_STATUS.to_string();
+            }
+            _ => {}
+        }
         progress.send(event_count, &event).await?;
+        events.push(event_value);
     }
 
     Ok(CallToolResult::structured(json!({
         "id": params.id,
-        "events": event_count
+        "events": events,
+        "terminal": {
+            "status": terminal_status
+        }
     })))
+}
+
+async fn active_kernel_id(
+    bridge: &dyn BridgeRequester,
+    cell_kernel_id: Option<String>,
+) -> Result<String, McpError> {
+    if let Some(kernel_id) = cell_kernel_id {
+        return Ok(kernel_id);
+    }
+
+    let kernel = kernel_info(bridge).await?;
+    Ok(kernel.kernel_id)
 }
 
 async fn read_cell(bridge: &dyn BridgeRequester, id: &str) -> Result<BridgeCell, McpError> {
@@ -209,5 +247,82 @@ impl RecordingProgress {
 
     pub fn events(&self) -> Vec<Value> {
         self.events.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::mcp::bridge::{BridgeRequestFuture, RunCellEventFuture};
+
+    use super::*;
+
+    struct FakeBridge;
+
+    impl BridgeRequester for FakeBridge {
+        fn listener_registered(&self) -> bool {
+            true
+        }
+
+        fn window_alive(&self) -> bool {
+            true
+        }
+
+        fn notebook_open(&self) -> bool {
+            true
+        }
+
+        fn request<'a>(
+            &'a self,
+            method: &'static str,
+            params: Value,
+            _timeout: Duration,
+        ) -> BridgeRequestFuture<'a> {
+            Box::pin(async move {
+                match method {
+                    READ_CELL_METHOD => Ok(json!({
+                        "id": params["id"],
+                        "kind": "code",
+                        "source": "2 + 2"
+                    })),
+                    KERNEL_INFO_METHOD => Ok(json!({ "kernel_id": "kernel-1" })),
+                    _ => unreachable!("unexpected bridge method {method}"),
+                }
+            })
+        }
+
+        fn run_cell_events<'a>(
+            &'a self,
+            _kernel_id: &'a str,
+            _code: &'a str,
+        ) -> RunCellEventFuture<'a> {
+            Box::pin(async move {
+                let (tx, rx) = async_channel::unbounded();
+                tx.send(RunCellEvent::Started).await.unwrap();
+                tx.send(RunCellEvent::Finished {
+                    exec_count: Some(1),
+                    status: "ok".to_string(),
+                })
+                .await
+                .unwrap();
+                drop(tx);
+                Ok(rx)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn call_returns_terminal_status_from_finished_event() {
+        let bridge = FakeBridge;
+        let mut progress = RecordingProgress::default();
+
+        let result = call_with_progress(&bridge, json!({ "id": "code-1" }), &mut progress)
+            .await
+            .expect("run cell succeeds");
+        let body = result.structured_content.expect("structured content");
+
+        assert_eq!(body["events"], json!(progress.events()));
+        assert_eq!(body["terminal"]["status"], "ok");
     }
 }
