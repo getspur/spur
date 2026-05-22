@@ -22,18 +22,42 @@ spur-graph (petgraph, hot)  ◄── code_callers / code_callees / code_subgrap
 No SPUR Rust crate links `libduckdb` in this POC. The brain talks to DuckDB
 only via an MCP subprocess.
 
-## Quick start
+## Building the analyst DuckDB
 
-```sh
-brew install duckdb           # one time
-scripts/spur-cargo run -p spur-cli -- graph build --workspace
+The analyst DB is rebuilt automatically as a post-step of `spur-cli graph build`.
+You should rarely need to invoke it manually.
+
+### Canonical entry points
+
+```bash
+# Recommended: build the graph; the analyst DB is refreshed automatically.
+spur-cli graph build --workspace
+
+# Manual: refresh the analyst DB against the current graph.
+spur-cli analyst build
+
+# Legacy entry point — forwards to `spur-cli analyst build`.
 ./crates/spur-context/poc/duckdb-analyst/setup.sh
-duckdb .spur/analyst.duckdb < crates/spur-context/poc/duckdb-analyst/examples.sql
 ```
 
-`setup.sh` is idempotent: drops `.spur/analyst.duckdb` and rebuilds. Override
-defaults with env vars: `SPUR_GRAPH_CURRENT`, `SPUR_GRAPH_ARTIFACT_DIR`,
-`SPUR_ANALYST_DB`.
+### Opting out
+
+Pass `--no-analyst` to `spur-cli graph build`, or set
+`SPUR_GRAPH_SKIP_ANALYST=1` in the environment. Useful in CI lanes that
+build the graph but don't need the analyst surface.
+
+### First-run cost
+
+`init.sql` installs the `duckpgq` and `onager` DuckDB community extensions.
+On a host with no cached community extensions, the first run downloads
+both (5-30s, network-dependent). Subsequent runs are sub-second.
+
+### Soft-fail behavior
+
+If the `duckdb` CLI is not on PATH, `analyst build` prints a warning and
+exits 0; the upstream `graph build` is unaffected. Install with
+`brew install duckdb` (or your platform's equivalent) to enable analyst
+refresh.
 
 ## What's in the DB
 
