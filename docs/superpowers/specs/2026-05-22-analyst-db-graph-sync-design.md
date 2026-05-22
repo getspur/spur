@@ -32,30 +32,49 @@ Responsibilities, in order:
 
 1. Resolve artifact directory: `--artifact-dir` flag → `SPUR_GRAPH_ARTIFACT_DIR` env → `.spur/graph/CURRENT` symlink → error.
 2. Verify required parquet files exist (same list as current `setup.sh`: `nodes.parquet`, `edges.parquet`, `edges_by_dst.parquet`, `edges_unresolved.parquet`, `files.parquet`, `file_manifests.parquet`, `tombstones.parquet`, `manifest.json`).
-3. Check `duckdb` on PATH. If absent, log warning and exit 0 (soft-fail).
-4. Acquire non-blocking `flock` on `.spur/analyst.duckdb.lock`. If held, log "another analyst build in progress, skipping" and exit 0.
-5. Read `crates/spur-context/poc/duckdb-analyst/init.sql`, substitute `__SPUR_GRAPH_ARTIFACT_DIR__` placeholder, pipe to `duckdb` writing to `.spur/analyst.duckdb.tmp-<pid>`.
-6. On `duckdb` success, `rename(2)` tmp file over `.spur/analyst.duckdb`.
-7. On `duckdb` failure, remove tmp file, log warning, exit 0 (previous DB stays intact).
-8. Release lock. Lock file is **not** deleted (avoids unlink race; relevant given the open flock-leak RCA at `docs/rca/2026-05-18-flock-leak-pid14282/`).
+3. **Schema-version gate.** Read `manifest.json` and verify `schema_version` matches a constant compiled into the Rust binary (`SUPPORTED_GRAPH_SCHEMA_VERSION`, currently `"spur-graph-schema-v5"`). On mismatch, return a hard error with the expected vs. observed schema version. This prevents silent miscompiles where `init.sql` view definitions still parse but produce wrong results against a newer parquet schema.
+4. Check `duckdb` on PATH. If absent, log warning and exit 0 (soft-fail).
+5. Acquire non-blocking `flock` on `.spur/analyst.duckdb.lock` using the shared helper (see Locking below). If held, log "another analyst build in progress, skipping" and exit 0.
+6. Read `crates/spur-context/poc/duckdb-analyst/init.sql`, substitute `__SPUR_GRAPH_ARTIFACT_DIR__` placeholder, pipe to `duckdb` writing to `.spur/analyst.duckdb.tmp-<pid>`.
+7. On `duckdb` success, `rename(2)` tmp file over `.spur/analyst.duckdb`.
+8. On `duckdb` failure, remove tmp file, log warning, exit 0 (previous DB stays intact).
+9. Release lock. Lock file is **not** deleted (avoids unlink race; relevant given the open flock-leak RCA at `docs/rca/2026-05-18-flock-leak-pid14282/`).
 
 `init.sql` remains the canonical source of view definitions. The Rust subcommand orchestrates path resolution, locking, atomic rename — it does not embed SQL.
 
+### Locking — reuse existing helper
+
+`crates/spur-graph/src/store/cache.rs:91-107` already implements `try_lock_exclusive_with_timeout` using `fs2::FileExt::try_lock_exclusive` + a private `is_lock_contended` predicate that correctly handles `WouldBlock` across platforms. Promote both to `pub(crate)` (or to a small public module like `spur_graph::locking`) and reuse them in `analyst::build`. This keeps all flock discipline consolidated in one place — important context given the open flock-leak RCA at `docs/rca/2026-05-18-flock-leak-pid14282/`.
+
+Do **not** re-implement `WouldBlock` detection in `analyst.rs`. macOS and Linux disagree on the underlying errno; the existing helper is the single source of truth.
+
+### DuckDB extension first-run cost (known operational gotcha)
+
+`init.sql:31-34` runs `INSTALL duckpgq FROM community` and `INSTALL onager FROM community`. On a host with no cached community extensions, **the first run downloads them and requires network access**. Realistic timings: 5-30s on first run, sub-second on subsequent runs. Implications:
+
+- The "Analyst DB ready" timing log will be large on first build per host — that's expected, not a bug.
+- A worker in an air-gapped sandbox or with no extension cache hits the soft-degrade path on every build until the cache is populated. The warning should be informative enough that the operator recognizes the network/cache root cause rather than treating it as a flaky test.
+- v1 does not attempt to pre-warm or vendor the extensions. If recurring soft-degrade in worker contexts becomes a problem, a follow-up can ship a pre-warmed extension cache or add an `INSTALL`-skip path that checks `duckdb_extensions()` first.
+
 ### Wiring into `graph build`
 
-At the end of `crates/spur-cli/src/commands/graph.rs::build`, after the pointer file is written and on the success path only:
+Insertion point is **between** the existing `result?;` (current `commands/graph.rs:200`) and the existing summary `println!` (current `commands/graph.rs:214-223`). This ordering matters:
+
+- After `result?;` — the parquet artifacts and `.spur/graph/CURRENT` pointer have been successfully written; safe to read them.
+- Before the summary `println!` — so the graph build summary always prints, and so the analyst step's own output is visually distinct from the graph build summary.
 
 ```rust
+// commands/graph.rs::build, immediately after `result?;` and before the
+// "[spur] Graph index built: …" println!:
 if !options.skip_analyst {
-    if let Err(e) = crate::commands::analyst::build_default(&root) {
-        // Hard-fail errors propagate; soft-fail/soft-degrade are already
-        // converted to Ok(()) inside analyst::build with a warning logged.
-        return Err(e);
-    }
+    // Hard-fail errors propagate; soft-fail and soft-degrade are converted
+    // to Ok(()) inside analyst::build with a warning logged. The summary
+    // println! below still runs in all non-hard-fail cases.
+    crate::commands::analyst::build_default(&root, options.quiet)?;
 }
 ```
 
-Skip when `options.skip_analyst == true` (set by `--no-analyst`) or when `SPUR_GRAPH_SKIP_ANALYST=1` is in the environment.
+Skip when `options.skip_analyst == true` (set by `--no-analyst`) or when `SPUR_GRAPH_SKIP_ANALYST=1` is in the environment. Honor `options.quiet` for output suppression to match `graph build --quiet` semantics.
 
 ### `setup.sh` becomes a shim
 
@@ -71,7 +90,7 @@ Kept as the documented entry point in the README; underlying logic lives in Rust
 
 ### Dependencies
 
-- File lock: prefer existing locking helper in spur-graph if available; otherwise `fs2::FileExt::try_lock_exclusive` (already in the dep graph) or `nix::fcntl::flock`. No new heavyweight dep.
+- File lock: **reuse** `try_lock_exclusive_with_timeout` from `crates/spur-graph/src/store/cache.rs:91-107` (promote to `pub(crate)` / shared module). `fs2 = "0.4"` is already a workspace dep (`crates/spur-graph/Cargo.toml:16`, `crates/spur-pm/Cargo.toml:14`). No new crate.
 - DuckDB: continue shelling out to the `duckdb` CLI via `std::process::Command`. **Do not** link `duckdb-rs`; keeps build times and binary size unaffected.
 
 ## CLI Surface
@@ -115,7 +134,7 @@ Soft-degrade (duckdb failed or lock held): warning printed, graph build exits 0.
 | Category | Triggers | Behavior |
 | --- | --- | --- |
 | Soft-fail (env) | `duckdb` not on PATH; `--no-analyst`; `SPUR_GRAPH_SKIP_ANALYST=1` | Warn (or silent for opt-out); exit 0; DB left as-is. |
-| Hard-fail (logic) | Required parquet missing; `init.sql` missing; non-recoverable lock error | Propagate non-zero exit; graph build fails. Indicates a bug. |
+| Hard-fail (logic) | Required parquet missing; `init.sql` missing; non-recoverable lock error; `manifest.json` `schema_version` does not match `SUPPORTED_GRAPH_SCHEMA_VERSION` | Propagate non-zero exit; graph build fails. Indicates a bug or a stale spur-cli vs. parquet schema. |
 | Soft-degrade (transient) | `duckdb` subprocess non-zero; lock already held | Warn; exit 0; previous DB preserved. |
 
 **Atomicity:** `.spur/analyst.duckdb` is always either the previous valid DB or the new valid DB. Achieved by tmp-file + `rename(2)`; the live file is never `rm`-ed.
@@ -140,6 +159,8 @@ Integration tests added to `crates/spur-cli/tests/` (new file `analyst_build_cli
 5. **`analyst_build_concurrent_skip`** — spawn two `analyst build` processes; exactly one acquires the lock; the other prints "skipping"; both exit 0; final DB is valid.
 6. **`graph_build_triggers_analyst`** — extension to existing `graph_build_cli.rs`: post-build assertion that DB exists and hash matches pointer.
 
+7. **`analyst_build_schema_version_mismatch`** — pre-populate a tmp artifact dir with a `manifest.json` whose `schema_version` is `"spur-graph-schema-vNEXT"` (anything other than the constant). Assert `analyst build` exits non-zero with an error mentioning both expected and observed versions, and that no DB file or tmp file is created. Run `graph build` separately with that same tampered manifest and assert graph build also fails (hard-fail propagates).
+
 Manual smoke (documented in plan, not automated):
 
 - `rm -rf .spur && spur-cli graph build --workspace` → DB present, `examples.sql` queries work.
@@ -154,11 +175,12 @@ Manual smoke (documented in plan, not automated):
 
 **Modified:**
 - `crates/spur-cli/src/commands/mod.rs` — register `analyst` module.
-- `crates/spur-cli/src/main.rs` — add `analyst build` subcommand parsing; add `--no-analyst` to `graph build`.
-- `crates/spur-cli/src/commands/graph.rs` — call `analyst::build_default` at end of `build()` success path.
+- `crates/spur-cli/src/main.rs` — add `analyst build` subcommand parsing; add `--no-analyst` and corresponding `skip_analyst: bool` field to `GraphCommands::Build` (around line 432); thread it into `GraphBuildOptions` at the dispatch site (line 854).
+- `crates/spur-cli/src/commands/graph.rs` — add `skip_analyst: bool` to `GraphBuildOptions`; call `analyst::build_default` between the current `result?;` (line 200) and the current summary `println!` (line 214).
+- `crates/spur-graph/src/store/cache.rs` — promote `try_lock_exclusive_with_timeout` and `is_lock_contended` to `pub(crate)` (or move to a small public `locking` module) so `spur-cli` can reuse them.
 - `crates/spur-cli/tests/graph_build_cli.rs` — add post-build analyst assertions.
 - `crates/spur-context/poc/duckdb-analyst/setup.sh` — reduced to thin shim invoking `spur-cli analyst build`.
-- `crates/spur-context/poc/duckdb-analyst/README.md` — point at the new subcommand; note that `graph build` is now the canonical entry point.
+- `crates/spur-context/poc/duckdb-analyst/README.md` — point at the new subcommand; note that `graph build` is now the canonical entry point; document the duckdb community-extension first-run download cost.
 
 **Unchanged:**
 - `crates/spur-context/poc/duckdb-analyst/init.sql` — remains the source of view definitions.
