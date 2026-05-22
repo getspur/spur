@@ -52,6 +52,15 @@ fn typescript_golden_path() -> PathBuf {
         .join("tests/fixtures/typescript_corpus/expected_graph_index.json")
 }
 
+fn cpp_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpp_corpus")
+}
+
+fn cpp_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cpp_corpus/expected_graph_index.json")
+}
+
 fn markdown_fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/markdown_corpus")
 }
@@ -418,6 +427,91 @@ fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
 
     let expected = fs::read_to_string(typescript_golden_path()).expect("read golden artifact");
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn cpp_extractor_matches_corpus_golden_artifact() {
+    let root = cpp_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(cpp_golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected = fs::read_to_string(cpp_golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn cpp_extractor_captures_duckdb_style_surface() {
+    let root = cpp_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+
+    let symbol_names: BTreeSet<String> = artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.clone())
+        .collect();
+
+    // Namespaces (Module)
+    assert!(symbol_names.iter().any(|n| n.contains("spurtest")));
+    assert!(symbol_names.iter().any(|n| n.contains("common")));
+
+    // Classes
+    assert!(symbol_names.iter().any(|n| n.ends_with("Catalog")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("CatalogEntry")));
+
+    // In-class methods
+    assert!(symbol_names.iter().any(|n| n.ends_with("Initialize")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("GetEntry")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("Make")));
+
+    // Operator overloads
+    assert!(symbol_names.iter().any(|n| n.contains("operator==")));
+
+    // Out-of-line method definitions retain their Class:: prefix in the qualified name
+    assert!(
+        symbol_names
+            .iter()
+            .any(|n| n.contains("Catalog::Initialize")
+                || n.contains("Catalog ::Initialize")),
+        "out-of-line Catalog::Initialize definition should be captured with its qualified prefix; got {symbol_names:?}"
+    );
+
+    // Preprocessor macros
+    assert!(symbol_names.iter().any(|n| n.ends_with("D_ASSERT")));
+
+    // Type aliases
+    assert!(symbol_names.iter().any(|n| n.ends_with("shared_ptr")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("CatalogPtr")));
+
+    // Edges: at least one #include, at least one using directive, and resolved calls.
+    let import_edges = artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Imports)
+        .count();
+    assert!(import_edges >= 2, "expected #include + using imports, got {import_edges}");
+
+    let call_edges = artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls)
+        .count();
+    assert!(call_edges >= 2, "expected resolved call edges, got {call_edges}");
+
+    // Methods should be tagged as Method, not Function, when defined inside a class body.
+    let initialize_is_method = artifact.symbols.iter().any(|symbol| {
+        symbol.entity_name == "Initialize" && symbol.symbol_kind == NodeKind::Method.discriminator()
+    });
+    assert!(
+        initialize_is_method,
+        "Initialize should be tagged as Method (symbol_kind=method)"
+    );
 }
 
 #[test]
