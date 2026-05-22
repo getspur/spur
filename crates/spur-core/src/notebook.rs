@@ -5,6 +5,7 @@ use agent_client_protocol::schema::{McpServer, McpServerHttp, McpServerStdio};
 pub fn control_socket_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
+        // If HOME is unset, keep brain/notebook wiring on the current-directory fallback.
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".spur").join("notebooks").join("control.sock")
 }
