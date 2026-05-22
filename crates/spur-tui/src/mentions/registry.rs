@@ -80,8 +80,9 @@ enum CodeGraphToken {
         manifest_version: String,
         indexed_commit_oid: Option<String>,
     },
-    Artifact {
+    Resolved {
         artifact_path: PathBuf,
+        cache_key: spur_graph::ArtifactCacheKey,
         modified: Option<SystemTime>,
         len: u64,
     },
@@ -89,7 +90,7 @@ enum CodeGraphToken {
 
 #[derive(Debug)]
 struct CodeGraphCandidate {
-    artifact_path: PathBuf,
+    explicit_override: Option<PathBuf>,
     token: CodeGraphToken,
 }
 
@@ -133,8 +134,10 @@ impl MentionRegistry {
 
     pub fn with_code_graph(mut self, artifact_path: impl Into<PathBuf>) -> Self {
         self.code_graph_auto_discovery = false;
+        let artifact_path = artifact_path.into();
         self.set_code_graph_source(
-            artifact_path.into(),
+            None,
+            Some(artifact_path),
             None,
             CodeGraphSourceUpdate::ClearAllCaches,
         );
@@ -146,9 +149,9 @@ impl MentionRegistry {
     ///
     /// Resolution order:
     /// 1. `SPUR_CODE_GRAPH_INDEX=<path>` env var, if set and non-empty.
-    /// 2. `<worktree_root>/.spur/graph-index.json` — the path `spur graph build`
-    ///    writes by default. This makes the TUI work out of the box once a
-    ///    user has built the index.
+    /// 2. `<worktree_root>/.spur/graph/CURRENT`.
+    /// 3. `<worktree_root>/.spur/graph-index.pointer.json`.
+    /// 4. `<worktree_root>/.spur/graph-index.json` legacy fallback.
     pub fn with_code_graph_from_env(mut self) -> Self {
         self.code_graph_auto_discovery = true;
         let worktree_root = spur_graph::resolve_worktree_root();
@@ -167,7 +170,8 @@ impl MentionRegistry {
                     || !self.has_code_graph_source()
                 {
                     self.set_code_graph_source(
-                        candidate.artifact_path,
+                        Some(worktree_root.clone()),
+                        candidate.explicit_override,
                         Some(candidate.token),
                         CodeGraphSourceUpdate::ClearCodeGraphCache,
                     );
@@ -184,11 +188,20 @@ impl MentionRegistry {
 
     fn set_code_graph_source(
         &mut self,
-        artifact_path: PathBuf,
+        worktree_root: Option<PathBuf>,
+        explicit_override: Option<PathBuf>,
         token: Option<CodeGraphToken>,
         cache_update: CodeGraphSourceUpdate,
     ) {
-        let source: Box<dyn MentionSource> = Box::new(CodeGraphMentionSource::new(artifact_path));
+        let source: Box<dyn MentionSource> = match worktree_root {
+            Some(worktree_root) => Box::new(CodeGraphMentionSource::for_worktree(
+                worktree_root,
+                explicit_override,
+            )),
+            None => Box::new(CodeGraphMentionSource::new(
+                explicit_override.expect("manual code graph source requires an artifact path"),
+            )),
+        };
         if let Some(index) = self
             .sources
             .iter()
@@ -309,12 +322,19 @@ impl MentionRegistry {
         let _span =
             tracing::debug_span!("mention_registry_query", query_len = query.len()).entered();
         self.refresh_code_graph_registration(cwd);
-        let pointer_token_unchanged = self.code_graph_auto_discovery
-            && matches!(self.code_graph_token, Some(CodeGraphToken::Pointer { .. }));
+        let resolver_token_unchanged = self.code_graph_auto_discovery
+            && matches!(
+                self.code_graph_token,
+                Some(CodeGraphToken::Pointer { .. })
+                    | Some(CodeGraphToken::Resolved {
+                        cache_key: spur_graph::ArtifactCacheKey::Parquet { .. },
+                        ..
+                    })
+            );
         for source in &mut self.sources {
             let source_name = source.name();
             let needs_rebuild = match self.cache.get(source_name) {
-                Some(_) if source_name == "code_graph" && pointer_token_unchanged => false,
+                Some(_) if source_name == "code_graph" && resolver_token_unchanged => false,
                 Some(cached) => cached.built_at.elapsed() > source_cache_ttl(source_name),
                 None => true,
             };
@@ -673,48 +693,99 @@ fn source_cache_ttl(name: &'static str) -> Duration {
 }
 
 fn discover_code_graph_candidate(worktree_root: &Path) -> Option<CodeGraphCandidate> {
+    debug_assert_eq!(CODE_GRAPH_LEGACY_INDEX_PATH, ".spur/graph-index.json");
+
     if let Some(path) = std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|v| !v.is_empty()) {
-        return artifact_candidate(PathBuf::from(path));
+        let explicit_override = PathBuf::from(path);
+        let resolved =
+            spur_graph::resolve_artifact_location(worktree_root, Some(&explicit_override)).ok()?;
+        let token = token_for_resolved(worktree_root, &resolved, Some(&explicit_override));
+        return Some(CodeGraphCandidate {
+            explicit_override: Some(explicit_override),
+            token,
+        });
     }
 
-    pointer_candidate(worktree_root)
-        .or_else(|| artifact_candidate(worktree_root.join(CODE_GRAPH_LEGACY_INDEX_PATH)))
+    let resolved = spur_graph::resolve_artifact_location(worktree_root, None).ok()?;
+    let token = token_for_resolved(worktree_root, &resolved, None);
+    Some(CodeGraphCandidate {
+        explicit_override: None,
+        token,
+    })
 }
 
-fn pointer_candidate(worktree_root: &Path) -> Option<CodeGraphCandidate> {
+fn token_for_resolved(
+    worktree_root: &Path,
+    resolved: &spur_graph::ResolvedArtifact,
+    explicit_override: Option<&Path>,
+) -> CodeGraphToken {
+    if explicit_override
+        .and_then(|path| canonical_artifact_path(worktree_root, path))
+        .as_ref()
+        == Some(&resolved.path)
+    {
+        return resolved_token(resolved);
+    }
+
+    if !current_pointer_selected(worktree_root, resolved) {
+        if let Some(pointer_token) = pointer_token(worktree_root, resolved) {
+            return pointer_token;
+        }
+    }
+
+    resolved_token(resolved)
+}
+
+fn resolved_token(resolved: &spur_graph::ResolvedArtifact) -> CodeGraphToken {
+    let metadata = fs::metadata(&resolved.path).ok();
+    CodeGraphToken::Resolved {
+        artifact_path: resolved.path.clone(),
+        cache_key: resolved.cache_key.clone(),
+        modified: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok()),
+        len: metadata.map(|metadata| metadata.len()).unwrap_or(0),
+    }
+}
+
+fn current_pointer_selected(worktree_root: &Path, resolved: &spur_graph::ResolvedArtifact) -> bool {
+    resolved.format == spur_graph::ArtifactFormat::Parquet
+        && spur_graph::read_current_pointer(worktree_root)
+            .ok()
+            .as_ref()
+            == Some(&resolved.path)
+}
+
+fn pointer_token(
+    worktree_root: &Path,
+    resolved: &spur_graph::ResolvedArtifact,
+) -> Option<CodeGraphToken> {
     let pointer_path = worktree_root.join(CODE_GRAPH_POINTER_PATH);
     let bytes = fs::read(&pointer_path).ok()?;
     let pointer: spur_graph::GraphIndexPointer = serde_json::from_slice(&bytes).ok()?;
     if pointer.schema != CODE_GRAPH_POINTER_SCHEMA {
         return None;
     }
-    if !pointer.canonical_artifact_path.is_file() {
+    let canonical_artifact_path =
+        canonical_artifact_path(worktree_root, &pointer.canonical_artifact_path)?;
+    if canonical_artifact_path != resolved.path {
         return None;
     }
-    Some(CodeGraphCandidate {
-        artifact_path: pointer.canonical_artifact_path.clone(),
-        token: CodeGraphToken::Pointer {
-            canonical_artifact_path: pointer.canonical_artifact_path,
-            graph_content_hash: pointer.graph_content_hash,
-            manifest_version: pointer.manifest_version,
-            indexed_commit_oid: pointer.indexed_commit_oid,
-        },
+    Some(CodeGraphToken::Pointer {
+        canonical_artifact_path,
+        graph_content_hash: pointer.graph_content_hash,
+        manifest_version: pointer.manifest_version,
+        indexed_commit_oid: pointer.indexed_commit_oid,
     })
 }
 
-fn artifact_candidate(path: PathBuf) -> Option<CodeGraphCandidate> {
-    let metadata = fs::metadata(&path).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    Some(CodeGraphCandidate {
-        artifact_path: path.clone(),
-        token: CodeGraphToken::Artifact {
-            artifact_path: path,
-            modified: metadata.modified().ok(),
-            len: metadata.len(),
-        },
-    })
+fn canonical_artifact_path(worktree_root: &Path, path: &Path) -> Option<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        worktree_root.join(path)
+    };
+    path.canonicalize().ok()
 }
 
 impl Default for MentionRegistry {
@@ -738,7 +809,10 @@ mod tests {
         WorkerMentionDescriptor, WorkerMentionSource,
     };
     use filetime::{set_file_mtime, FileTime};
-    use spur_graph::{GraphIndexPointer, SourceKind};
+    use spur_graph::{
+        write_artifact_parquet, write_current_pointer, GraphFileArtifact, GraphFileManifestEntry,
+        GraphIndexArtifact, GraphIndexHeader, GraphIndexPointer, NodeId, SourceKind, WriteOptions,
+    };
     use spur_pm::PmSource;
 
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -954,6 +1028,47 @@ mod tests {
             hits.iter()
                 .any(|hit| hit.kind == MentionKind::CodeFile && hit.display == "src/legacy.rs"),
             "expected legacy worktree artifact fallback, got {hits:?}"
+        );
+        assert_eq!(registry.code_graph_hint(), None);
+    }
+
+    #[test]
+    fn code_graph_auto_discovery_prefers_current_parquet_over_legacy_json() {
+        let _guard = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let _restore = ProcessEnvRestore::enter(root);
+
+        let legacy_artifact = root.join(".spur/graph-index.json");
+        write_graph_fixture(
+            &legacy_artifact,
+            "legacy-file",
+            "src/legacy.rs",
+            "legacy-hash",
+        );
+
+        let parquet_dir = write_artifact_parquet(
+            &graph_artifact("parquet-file", "src/parquet.rs", "parquet-hash"),
+            &root.join(".git/spur-graph/artifacts/test"),
+            WriteOptions::default(),
+        )
+        .expect("write parquet artifact");
+        write_current_pointer(root, &parquet_dir).expect("write CURRENT pointer");
+
+        let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
+        let hits = registry.query(CompletionScope::PreSession, root, "parquet", 10);
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.kind == MentionKind::CodeFile && hit.display == "src/parquet.rs"),
+            "expected resolver to prefer CURRENT parquet artifact, got {hits:?}"
+        );
+        assert!(
+            !hits.iter().any(|hit| hit.display == "src/legacy.rs"),
+            "legacy fallback should not win when CURRENT parquet is valid, got {hits:?}"
         );
         assert_eq!(registry.code_graph_hint(), None);
     }
@@ -1203,6 +1318,37 @@ mod tests {
             "symbols": []
         });
         fs::write(path, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
+    }
+
+    fn graph_artifact(
+        stable_file_id: &str,
+        file_path: &str,
+        content_hash: &str,
+    ) -> GraphIndexArtifact {
+        GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "registry-test".to_string(),
+                content_hash_blake3: Some(content_hash.to_string()),
+            },
+            manifest_version: "registry-test-manifest".to_string(),
+            graph_content_hash: content_hash.to_string(),
+            file_manifests: vec![GraphFileManifestEntry {
+                stable_file_id: stable_file_id.to_string(),
+                path: file_path.to_string(),
+                content_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                node_ids: Vec::new(),
+            }],
+            files: vec![GraphFileArtifact {
+                stable_file_id: stable_file_id.to_string(),
+                file_path: file_path.to_string(),
+            }],
+            file_node_ids: vec![NodeId(1)],
+            symbols: Vec::new(),
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        }
     }
 
     #[test]

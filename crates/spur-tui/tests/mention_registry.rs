@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_acp::SessionId;
 use spur_graph::validation::compute_anchor_hash;
-use spur_graph::{artifact_from_facts, build_facts, write_artifact};
+use spur_graph::{artifact_from_facts, build_facts, write_artifact_parquet, WriteOptions};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
 use spur_tui::mentions::{
@@ -104,10 +104,14 @@ fn extracted_graph_index_resolves_symbol_payload_through_registry() {
         "pub struct Engine;\n\npub fn run() -> Engine {\n    Engine\n}\n",
     )
     .unwrap();
-    let artifact_path = dir.path().join(".spur/graph-index.json");
     let facts = build_facts(dir.path()).expect("extract fixture worktree").0;
     let artifact = artifact_from_facts(&facts, dir.path()).expect("build artifact");
-    write_artifact(&artifact, &artifact_path).expect("write artifact");
+    let artifact_path = write_artifact_parquet(
+        &artifact,
+        &dir.path().join(".spur/graph"),
+        WriteOptions::default(),
+    )
+    .expect("write parquet artifact");
 
     let mut reg = MentionRegistry::for_direct_session().with_code_graph(&artifact_path);
     let sid = SessionId::new();

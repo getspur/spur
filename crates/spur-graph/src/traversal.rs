@@ -518,10 +518,12 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "caller_a", "caller_b", "callee_a", "isolated"]
                 .into_iter()
                 .map(symbol)
                 .collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("caller_a", "root", RelationKind::Calls),
                 edge("caller_b", "root", RelationKind::Calls),
@@ -554,7 +556,9 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols,
+            symbol_node_ids: Vec::new(),
             edges,
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
@@ -608,7 +612,9 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "callee"].into_iter().map(symbol).collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("root", "callee", RelationKind::Calls),
                 unresolved_call_edge("root", "into"),
@@ -743,7 +749,9 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "a", "b", "c"].into_iter().map(symbol).collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("root", "a", RelationKind::Calls),
                 edge("root", "b", RelationKind::Calls),
@@ -854,7 +862,9 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "callee"].into_iter().map(symbol).collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("root", "callee", RelationKind::Calls),
                 unresolved_call_edge("root", "as_ref"),
@@ -885,7 +895,9 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "callee"].into_iter().map(symbol).collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("root", "callee", RelationKind::Calls),
                 unresolved_call_edge("root", "as_ref"),
@@ -919,10 +931,12 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "caller", "unresolved_caller"]
                 .into_iter()
                 .map(symbol)
                 .collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("caller", "root", RelationKind::Calls),
                 unresolved_call_edge("unresolved_caller", "root"),
@@ -962,7 +976,9 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root"].into_iter().map(symbol).collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![unresolved_call_edge("root", "external")],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
@@ -987,7 +1003,9 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["caller", "target"].into_iter().map(symbol).collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![edge("caller", "target", RelationKind::References)],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
@@ -1011,10 +1029,12 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "direct", "dyn_trait", "hof"]
                 .into_iter()
                 .map(symbol)
                 .collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("root", "direct", RelationKind::Calls),
                 edge_with_kind(
@@ -1070,10 +1090,12 @@ mod tests {
             graph_content_hash: "test".to_string(),
             file_manifests: Vec::new(),
             files: Vec::new(),
+            file_node_ids: Vec::new(),
             symbols: ["root", "direct", "dyn_trait", "hof", "other"]
                 .into_iter()
                 .map(symbol)
                 .collect(),
+            symbol_node_ids: Vec::new(),
             edges: vec![
                 edge("root", "direct", RelationKind::Calls),
                 edge_with_kind(

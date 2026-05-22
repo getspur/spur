@@ -1,14 +1,13 @@
 use std::fs;
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use spur_graph::store::cache::{lookup_canonical, write_with_dedup};
 use spur_graph::{
-    artifact_from_facts, artifact_from_facts_incremental, build_facts, git, BuildMode,
-    GraphIndexArtifact, GraphIndexPointer, SourceKind,
+    artifact_from_facts, artifact_from_facts_incremental, build_facts, git,
+    read_artifact_header_parquet, read_current_pointer, BuildMode, GraphIndexArtifact,
+    GraphIndexPointer, SourceKind,
 };
 use tempfile::TempDir;
 
@@ -133,9 +132,9 @@ fn provenance_lives_in_pointer_not_artifact() {
     let artifact = build_full(repo.path());
     write_git_cache(repo.path(), &artifact);
 
-    let artifact_json =
-        fs::read_to_string(repo.path().join(".spur/graph-index.json")).expect("read artifact");
-    assert!(!artifact_json.contains("indexed_commit_oid"));
+    let current = read_current_pointer(repo.path()).expect("read CURRENT");
+    let manifest = read_artifact_header_parquet(&current).expect("read parquet manifest");
+    assert_eq!(manifest.indexed_commit_oid, None);
 
     let pointer = read_pointer(repo.path());
     assert_eq!(pointer.source_kind, SourceKind::Git);
@@ -148,7 +147,7 @@ fn provenance_lives_in_pointer_not_artifact() {
 
 #[test]
 #[cfg(unix)]
-fn worktree_artifact_hardlinked() {
+fn current_pointer_targets_canonical_parquet_directory() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn lib() {}\n");
     repo.git(&["add", "src/lib.rs"]);
@@ -157,12 +156,9 @@ fn worktree_artifact_hardlinked() {
     let artifact = build_full(repo.path());
     write_git_cache(repo.path(), &artifact);
     let canonical = canonical_artifact_path(repo.path(), &artifact);
-    let worktree = repo.path().join(".spur/graph-index.json");
+    let current = read_current_pointer(repo.path()).expect("read CURRENT");
 
-    assert_eq!(
-        fs::metadata(canonical).expect("canonical metadata").ino(),
-        fs::metadata(worktree).expect("worktree metadata").ino()
-    );
+    assert_eq!(current, canonical);
 }
 
 #[test]
