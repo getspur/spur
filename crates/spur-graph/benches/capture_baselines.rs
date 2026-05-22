@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::OsString;
@@ -10,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use spur_graph::{load_artifact, write_artifact};
+use spur_graph::{artifact_content_hash_blake3_hex, load_artifact, GraphIndexArtifact};
 
 const DEFAULT_FIXTURE_PATH: &str = "/Volumes/Projects/spur/.spur/graph-index.json";
 const DEFAULT_OUTPUT_PATH: &str = "crates/spur-graph/benches/baselines.json";
@@ -168,7 +166,7 @@ fn capture_baselines(options: &CaptureOptions) -> Result<()> {
         for sample_index in 0..options.samples {
             let output_path = temp_dir.join(format!("artifact-{sample_index:02}.json"));
             let started = Instant::now();
-            write_artifact(&artifact, &output_path).with_context(|| {
+            write_legacy_json_artifact(&artifact, &output_path).with_context(|| {
                 format!(
                     "failed to write sample artifact `{}`",
                     output_path.display()
@@ -253,6 +251,17 @@ fn sample_load_artifact(fixture_path: &Path) -> Result<(f64, u64)> {
     std::hint::black_box(&artifact);
     let peak_rss_kb = peak_rss_kb().context("failed to capture peak RSS")?;
     Ok((elapsed_ms, peak_rss_kb))
+}
+
+fn write_legacy_json_artifact(artifact: &GraphIndexArtifact, path: &Path) -> Result<()> {
+    let mut artifact_with_hash = artifact.clone();
+    artifact_with_hash.header.content_hash_blake3 = Some(
+        artifact_content_hash_blake3_hex(artifact)
+            .context("failed to compute graph artifact content hash")?,
+    );
+    let json =
+        serde_json::to_string_pretty(&artifact_with_hash).context("failed to encode artifact")?;
+    fs::write(path, json).with_context(|| format!("failed to write `{}`", path.display()))
 }
 
 fn duration_ms(duration: Duration) -> f64 {
