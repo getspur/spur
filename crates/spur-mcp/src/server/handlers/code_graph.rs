@@ -10,10 +10,11 @@ use serde_json::{json, Value};
 use spur_graph::git_blob_oid;
 use spur_graph::{
     bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
-    resolve_selector, resolve_worktree_root_from, search_symbols, CalleeRecord, CallerRecord,
-    CandidateRow, GraphEdgeArtifact, GraphEdgeKind, GraphFileManifestEntry, GraphIndexArtifact,
-    GraphIndexPointer, GraphSymbolArtifact, SearchFilters, SearchMode, SearchOptions,
-    SelectorResolution, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
+    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, search_symbols,
+    CalleeRecord, CallerRecord, CandidateRow, GraphEdgeArtifact, GraphEdgeKind,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexPointer, GraphSymbolArtifact,
+    SearchFilters, SearchMode, SearchOptions, SelectorResolution, SubgraphBudget,
+    CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -29,7 +30,6 @@ const DEFAULT_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 120;
 const MIN_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1;
 const MAX_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1200;
 const MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES: usize = 50;
-const GRAPH_ARTIFACT_RELATIVE_PATH: &str = ".spur/graph-index.json";
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -559,7 +559,9 @@ fn load_graph_artifact_for_request() -> Result<GraphIndexArtifact, McpHandlerErr
         McpHandlerError::Internal(format!("failed to read current directory: {error}"))
     })?;
     let worktree = resolve_worktree_root_from(current_dir);
-    let artifact_path = worktree.join(GRAPH_ARTIFACT_RELATIVE_PATH);
+    let resolved = resolve_artifact_location(&worktree, None)
+        .map_err(|_| graph_artifact_missing(&worktree))?;
+    let artifact_path = resolved.path;
 
     match load_artifact(&artifact_path) {
         Ok(artifact) => Ok(artifact),
@@ -1671,6 +1673,11 @@ mod tests {
     use super::super::*;
     use serde_json::{json, Value};
     use spur_acp::{BrainSessionId, SessionId};
+    use spur_graph::{
+        write_artifact_parquet, write_current_pointer, Confidence, GraphEdgeArtifact,
+        GraphEdgeKind, GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact,
+        GraphIndexHeader, GraphSymbolArtifact, NodeId, RelationKind, WriteOptions,
+    };
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -1806,6 +1813,69 @@ mod tests {
             .expect("encode artifact"),
         )
         .expect("write artifact");
+    }
+
+    fn write_current_parquet_fixture(dir: &TempDir) {
+        let artifact = GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "parquet-test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "parquet-test".to_string(),
+            graph_content_hash: "parquet-handler-test".to_string(),
+            file_manifests: vec![GraphFileManifestEntry {
+                stable_file_id: "file-src-parquet".to_string(),
+                path: "src/parquet.rs".to_string(),
+                content_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                node_ids: vec![NodeId(11), NodeId(12)],
+            }],
+            files: vec![GraphFileArtifact {
+                stable_file_id: "file-src-parquet".to_string(),
+                file_path: "src/parquet.rs".to_string(),
+            }],
+            file_node_ids: vec![NodeId(10)],
+            symbols: vec![
+                GraphSymbolArtifact {
+                    stable_symbol_id: "parquet-root".to_string(),
+                    file_path: "src/parquet.rs".to_string(),
+                    byte_range: [0, 10],
+                    line_range: [3, 5],
+                    entity_name: "parquet_root".to_string(),
+                    qualified_name: "parquet_root".to_string(),
+                    symbol_kind: "function".to_string(),
+                    anchor_hash: "hash-parquet-root".to_string(),
+                    enclosing_scope: None,
+                },
+                GraphSymbolArtifact {
+                    stable_symbol_id: "parquet-child".to_string(),
+                    file_path: "src/parquet.rs".to_string(),
+                    byte_range: [20, 30],
+                    line_range: [8, 9],
+                    entity_name: "parquet_child".to_string(),
+                    qualified_name: "parquet_child".to_string(),
+                    symbol_kind: "function".to_string(),
+                    anchor_hash: "hash-parquet-child".to_string(),
+                    enclosing_scope: None,
+                },
+            ],
+            symbol_node_ids: vec![NodeId(11), NodeId(12)],
+            edges: vec![GraphEdgeArtifact {
+                source_stable_symbol_id: "parquet-root".to_string(),
+                target_stable_symbol_id: Some("parquet-child".to_string()),
+                target_label: Some("parquet_child".to_string()),
+                relation: RelationKind::Calls,
+                confidence: Confidence::SyntaxExact,
+                confidence_score: 1.0,
+                edge_kind: Some(GraphEdgeKind::Calls),
+            }],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let artifact_base = dir.path().join(".git/spur-graph/artifacts/parquet-test");
+        let parquet_dir =
+            write_artifact_parquet(&artifact, &artifact_base, WriteOptions::default())
+                .expect("write parquet artifact");
+        write_current_pointer(dir.path(), &parquet_dir).expect("write CURRENT pointer");
     }
 
     fn symbol(
@@ -2017,6 +2087,30 @@ mod tests {
             assert_eq!(error.code, -32602);
             assert_unavailable_freshness_metadata(error.data.as_ref().expect("graph metadata"));
         }
+    }
+
+    #[tokio::test]
+    async fn code_file_symbols_reads_parquet_artifact_from_current_pointer() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_current_parquet_fixture(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_file_symbols(Value::from(1), json!({ "file": "src/parquet.rs" }))
+            .await;
+        let body = response_json(response);
+        let symbols = body["symbols"].as_array().expect("symbols");
+
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0]["selector"], "src/parquet.rs::parquet_root");
+        assert_eq!(symbols[0]["uri"], "graph://symbol/parquet-root");
+        assert_eq!(symbols[1]["selector"], "src/parquet.rs::parquet_child");
+        assert_eq!(symbols[1]["uri"], "graph://symbol/parquet-child");
+        assert_eq!(body["graph_content_hash"], "parquet-handler-test");
+        assert_eq!(body["graph_index_version"], "parquet-test");
+        assert_unavailable_freshness_metadata(&body);
     }
 
     #[tokio::test]
