@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::OsString;
