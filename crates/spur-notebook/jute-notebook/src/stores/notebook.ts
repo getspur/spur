@@ -8,6 +8,7 @@ import { immer } from "zustand/middleware/immer";
 
 import type {
   Cell,
+  CellMetadata,
   NotebookRoot,
   Output,
   OutputDisplayData,
@@ -19,6 +20,9 @@ type NotebookStore = NotebookStoreState & NotebookStoreActions;
 /** Actions are kept private, only to be used from the `Notebook` class. */
 type NotebookStoreActions = ReturnType<typeof notebookStoreActions>;
 
+const INITIAL_CELL_VERSION = 1;
+const AUTOSAVE_DEBOUNCE_MS = 5000;
+
 /** Zustand reactive data used by the UI to render notebooks. */
 export type NotebookStoreState = {
   /** A list of cell IDs in order. */
@@ -29,6 +33,8 @@ export type NotebookStoreState = {
     [cellId: string]: {
       type: CellType;
       initialText: string;
+      source: string;
+      version: number;
       result?: CellResult;
     };
   };
@@ -71,13 +77,25 @@ function notebookStoreActions(
         state.cells[cellId] = {
           type,
           initialText,
+          source: initialText,
+          version: INITIAL_CELL_VERSION,
         };
       }),
 
     /** Set the type of a cell. */
     setCellType: (cellId: string, type: CellType) =>
       set((state) => {
+        if (state.cells[cellId].type === type) return;
         state.cells[cellId].type = type;
+        state.cells[cellId].version += 1;
+      }),
+
+    /** Set the source text of a cell. */
+    setCellSource: (cellId: string, source: string) =>
+      set((state) => {
+        if (state.cells[cellId].source === source) return;
+        state.cells[cellId].source = source;
+        state.cells[cellId].version += 1;
       }),
 
     /** Clear the result of a cell. */
@@ -200,6 +218,8 @@ function notebookStoreActions(
             const imported: NotebookStoreState["cells"][string] = {
               type: cell.cell_type,
               initialText: multiline(cell.source),
+              source: multiline(cell.source),
+              version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
             };
 
             if (cell.cell_type === "code") {
@@ -282,10 +302,14 @@ export class Notebook {
   /** Direct handles to editors and other HTML elements after render. */
   refs: Map<string, CellHandle>;
 
+  private autosaveTimer?: ReturnType<typeof setTimeout>;
+
   constructor() {
     const store = createNotebookStore();
     this.store = store;
     this.refs = new Map();
+
+    store.subscribe(() => this.scheduleAutosave());
 
     this.kernelStartPromise = (async () => {
       const kernelId = await invoke<string>("start_kernel", {
@@ -307,22 +331,21 @@ export class Notebook {
 
     for (const cellId of state.cellIds) {
       const cell = state.cells[cellId];
-      const source = this.refs.get(cellId)?.editor?.state.doc.toString() ?? "";
       if (cell.type === "code") {
         cells.push({
           cell_type: "code",
           id: cellId,
-          source,
+          source: cell.source,
           execution_count: cell.result?.executionCount ?? null,
           outputs: cell.result?.outputs ?? [],
-          metadata: {},
+          metadata: cellMetadata(cell.version),
         });
       } else if (cell.type === "markdown") {
         cells.push({
           cell_type: "markdown",
           id: cellId,
-          source,
-          metadata: {},
+          source: cell.source,
+          metadata: cellMetadata(cell.version),
         });
       } else {
         throw new Error(`Unknown cell type: ${cell.type}`);
@@ -360,7 +383,7 @@ export class Notebook {
   }
 
   addCell(type: CellType, initialText: string): string {
-    const cellId = Math.random().toString(36).slice(2);
+    const cellId = uuidv4();
     this.refs.set(cellId, {});
     this.state.addCell(cellId, type, initialText);
     return cellId;
@@ -368,6 +391,10 @@ export class Notebook {
 
   setCellType(cellId: string, type: CellType) {
     this.state.setCellType(cellId, type);
+  }
+
+  updateCellSource(cellId: string, source: string) {
+    this.state.setCellSource(cellId, source);
   }
 
   clearResult(cellId: string) {
@@ -384,6 +411,7 @@ export class Notebook {
       throw new Error(`Cell ${cellId} not found`);
     }
     const code = editor.state.doc.toString();
+    this.updateCellSource(cellId, code);
 
     let status: CellResult["status"] = "running";
     let timings: CellResult["timings"] = { startedAt: Date.now() };
@@ -486,11 +514,47 @@ export class Notebook {
       update();
     }
   }
+
+  private scheduleAutosave() {
+    if (this.autosaveTimer) {
+      clearTimeout(this.autosaveTimer);
+      this.autosaveTimer = undefined;
+    }
+
+    if (!this.state.path || this.state.isLoading) {
+      return;
+    }
+
+    this.autosaveTimer = setTimeout(() => {
+      this.autosaveTimer = undefined;
+      void this.saveToDisk();
+    }, AUTOSAVE_DEBOUNCE_MS);
+  }
+
+  private async saveToDisk() {
+    const path = this.state.path;
+    if (!path) return;
+
+    try {
+      await invoke("save_to_disk", {
+        path,
+        contents: this.export(),
+      });
+    } catch (error) {
+      console.error("Failed to autosave notebook", error);
+    }
+  }
 }
 
 /** Helper function to convert a maybe-multiline string to a string. */
 function multiline(string: string | string[]): string {
   return typeof string === "string" ? string : string.join("");
+}
+
+function cellMetadata(version: number): CellMetadata {
+  return {
+    spur: { version },
+  };
 }
 
 export const NotebookContext = createContext<Notebook | undefined>(undefined);

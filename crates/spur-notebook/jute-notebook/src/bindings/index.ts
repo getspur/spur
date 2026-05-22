@@ -22,3 +22,4 @@ export * from "./NotebookRoot";
 export * from "./DisplayDataTransient";
 export * from "./NotebookMetadata";
 export * from "./CellMetadata";
+export * from "./SpurCellMetadata";

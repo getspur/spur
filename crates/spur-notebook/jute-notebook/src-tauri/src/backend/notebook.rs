@@ -196,10 +196,21 @@ pub struct CodeCell {
 /// Metadata for a cell.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct CellMetadata {
+    /// SPUR-managed cell metadata.
+    #[ts(optional)]
+    pub spur: Option<SpurCellMetadata>,
+
     /// Additional unrecognized attributes in cell metadata.
     #[serde(flatten)]
     #[ts(skip)]
     pub other: Map<String, Value>,
+}
+
+/// SPUR-managed metadata persisted under `cell.metadata.spur`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
+pub struct SpurCellMetadata {
+    /// Per-cell monotonic content version.
+    pub version: u64,
 }
 
 /// Attachments for a cell, represented as MIME bundles keyed by filenames.
@@ -435,6 +446,48 @@ mod tests {
         assert_eq!(notebook.nbformat_minor, 4);
         assert_eq!(notebook.nbformat, 4);
         assert_eq!(notebook.cells.len(), 1);
+    }
+
+    #[test]
+    fn cell_id_and_spur_version_survive_round_trip() {
+        let json = r#"
+            {
+                "metadata": {},
+                "nbformat_minor": 5,
+                "nbformat": 4,
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "metadata": {
+                            "spur": {
+                                "version": 7
+                            }
+                        },
+                        "source": "x = 1",
+                        "execution_count": null,
+                        "outputs": []
+                    }
+                ]
+            }
+        "#;
+
+        let notebook: NotebookRoot = serde_json::from_str(json).unwrap();
+        let Cell::Code(cell) = &notebook.cells[0] else {
+            panic!("expected a code cell");
+        };
+        assert_eq!(
+            cell.id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(cell.metadata.spur.as_ref().unwrap().version, 7);
+
+        let serialized = serde_json::to_value(&notebook).unwrap();
+        assert_eq!(
+            serialized["cells"][0]["id"],
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(serialized["cells"][0]["metadata"]["spur"]["version"], 7);
     }
 
     #[test]
