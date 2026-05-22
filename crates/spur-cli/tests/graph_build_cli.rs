@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use spur_graph::{read_artifact_parquet, read_current_pointer};
+
 fn spur_binary() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_spur"))
 }
@@ -66,13 +68,13 @@ fn graph_build_writes_default_index_and_prints_summary() {
     assert!(stdout.contains("nodes:"), "{stdout}");
     assert!(stdout.contains("edges:"), "{stdout}");
     assert!(
-        stdout.contains(".spur/graph-index.json"),
+        stdout.contains(".spur/graph"),
         "expected default output path in stdout, got: {stdout}"
     );
 
-    let artifact_path = dir.path().join(".spur/graph-index.json");
-    assert!(artifact_path.is_file(), "expected graph index artifact");
-    let artifact = spur_graph::load_artifact(&artifact_path).expect("load artifact");
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    assert!(artifact_path.is_dir(), "expected graph index artifact dir");
+    let artifact = read_artifact_parquet(&artifact_path).expect("load artifact");
     assert_eq!(artifact.files.len(), 1);
     assert!(artifact
         .symbols
@@ -81,9 +83,31 @@ fn graph_build_writes_default_index_and_prints_summary() {
 }
 
 #[test]
+fn graph_build_workspace_flag_uses_worktree_root() {
+    let dir = fixture_tree();
+    let nested = dir.path().join("src");
+
+    let output = Command::new(spur_binary())
+        .current_dir(&nested)
+        .args(["graph", "build", "--workspace"])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        output.status.success(),
+        "expected success; stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    assert!(artifact_path.is_dir(), "expected graph index artifact dir");
+}
+
+#[test]
 fn graph_build_quiet_suppresses_progress_and_honors_output() {
     let dir = fixture_tree();
-    let output_path = dir.path().join("custom-index.json");
+    let output_path = dir.path().join("custom-index");
 
     let output = Command::new(spur_binary())
         .current_dir(dir.path())
@@ -106,7 +130,8 @@ fn graph_build_quiet_suppresses_progress_and_honors_output() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("Building"), "{stdout}");
     assert!(stdout.contains("files: 1"), "{stdout}");
-    assert!(output_path.is_file(), "expected custom output artifact");
+    let artifacts = parquet_artifact_dirs(&output_path);
+    assert_eq!(artifacts.len(), 1, "expected one custom parquet artifact");
 }
 
 #[test]
@@ -127,8 +152,8 @@ fn graph_build_default_uses_canonical_cache_and_reports_it() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let artifact_path = dir.path().join(".spur/graph-index.json");
-    let artifact = spur_graph::load_artifact(&artifact_path).expect("load artifact");
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    let artifact = read_artifact_parquet(&artifact_path).expect("load artifact");
     let git_common_dir = dir.path().join(".git").canonicalize().expect("common dir");
     let canonical = spur_graph::store::cache::lookup_canonical(
         &git_common_dir,
@@ -137,32 +162,68 @@ fn graph_build_default_uses_canonical_cache_and_reports_it() {
     )
     .expect("canonical cache path");
 
-    assert!(canonical.is_file(), "expected canonical artifact");
+    assert!(canonical.is_dir(), "expected canonical artifact directory");
     assert!(
         stdout.contains(&format!("canonical: {}", canonical.display())),
         "expected canonical path in stdout, got: {stdout}"
     );
+    assert_eq!(artifact_path, canonical);
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
+#[test]
+fn graph_build_reads_pointer_artifact_when_default_json_is_missing() {
+    let dir = fixture_git_repo();
 
-        assert_eq!(
-            std::fs::metadata(&canonical)
-                .expect("canonical metadata")
-                .ino(),
-            std::fs::metadata(&artifact_path)
-                .expect("worktree artifact metadata")
-                .ino(),
-            "expected worktree artifact to be hardlinked to canonical"
-        );
-    }
+    let first = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["graph", "build"])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .output()
+        .expect("spawn initial spur graph build");
+
+    assert!(
+        first.status.success(),
+        "expected initial success; stderr = {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    assert!(artifact_path.is_dir(), "expected default worktree artifact");
+    std::fs::remove_file(dir.path().join(".spur/graph/CURRENT")).expect("remove CURRENT pointer");
+    assert!(
+        dir.path().join(".spur/graph-index.pointer.json").is_file(),
+        "expected pointer file to remain"
+    );
+
+    let second = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["graph", "build"])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .output()
+        .expect("spawn second spur graph build");
+
+    assert!(
+        second.status.success(),
+        "expected second success; stderr = {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        stdout.contains("mode: Incremental"),
+        "expected build to reuse pointer artifact, got: {stdout}"
+    );
+    assert!(
+        read_current_pointer(dir.path())
+            .expect("read rewritten CURRENT")
+            .is_dir(),
+        "expected default CURRENT rewrite"
+    );
 }
 
 #[test]
 fn graph_build_custom_output_bypasses_canonical_cache() {
     let dir = fixture_git_repo();
-    let output_path = dir.path().join("custom-index.json");
+    let output_path = dir.path().join("custom-index");
 
     let output = Command::new(spur_binary())
         .current_dir(dir.path())
@@ -183,9 +244,10 @@ fn graph_build_custom_output_bypasses_canonical_cache() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(output_path.is_file(), "expected custom output artifact");
+    let artifacts = parquet_artifact_dirs(&output_path);
+    assert_eq!(artifacts.len(), 1, "expected one custom parquet artifact");
     assert!(
-        !dir.path().join(".spur/graph-index.json").exists(),
+        !dir.path().join(".spur/graph").exists(),
         "custom output should not install the default worktree artifact"
     );
     assert!(
@@ -196,4 +258,44 @@ fn graph_build_custom_output_bypasses_canonical_cache() {
         !stdout.contains("canonical:"),
         "custom output should not report canonical cache path: {stdout}"
     );
+}
+
+#[test]
+fn graph_build_rejects_legacy_json_output_path() {
+    let dir = fixture_tree();
+    let output_path = dir.path().join("custom-index.json");
+
+    let output = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args([
+            "graph",
+            "build",
+            "--output",
+            output_path.to_str().expect("utf8 path"),
+        ])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        !output.status.success(),
+        "expected legacy file output to fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Parquet directory") && stderr.contains("--output"),
+        "expected clear directory-layout error, got: {stderr}"
+    );
+}
+
+fn parquet_artifact_dirs(base: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = std::fs::read_dir(base)
+        .unwrap_or_else(|err| panic!("read output base `{}`: {err}", base.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| {
+            path.is_dir() && path.extension().and_then(|ext| ext.to_str()) == Some("parquet")
+        })
+        .collect::<Vec<_>>();
+    dirs.sort();
+    dirs
 }

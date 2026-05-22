@@ -431,9 +431,12 @@ enum GraphCommands {
     /// Extract Rust symbols from a worktree and write a graph index artifact.
     Build {
         /// Worktree root to extract. Defaults to the current worktree root.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "workspace")]
         root: Option<PathBuf>,
-        /// Output artifact path. Defaults to SPUR_CODE_GRAPH_INDEX or .spur/graph-index.json.
+        /// Build from the resolved worktree root.
+        #[arg(long)]
+        workspace: bool,
+        /// Output artifact directory. Defaults to SPUR_CODE_GRAPH_INDEX or .spur/graph.
         #[arg(long)]
         output: Option<PathBuf>,
         /// Suppress progress output.
@@ -845,10 +848,12 @@ async fn run() -> Result<()> {
         Commands::Graph { command } => match command {
             GraphCommands::Build {
                 root,
+                workspace,
                 output,
                 quiet,
             } => commands::graph::build(commands::graph::GraphBuildOptions {
                 root,
+                workspace,
                 output,
                 quiet,
             }),
