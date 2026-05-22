@@ -12,7 +12,6 @@ use spur_graph::{
 };
 
 struct CodeGraphCacheKey {
-    path: PathBuf,
     mtime: SystemTime,
     len: u64,
     content_hash: Option<String>,
@@ -55,7 +54,6 @@ impl MentionSource for CodeGraphMentionSource {
             (&self.cache_key, modified, len),
             (
                 Some(CodeGraphCacheKey {
-                    path,
                     mtime: cached_mtime,
                     len: cached_len,
                     ..
@@ -63,9 +61,7 @@ impl MentionSource for CodeGraphMentionSource {
                 Some(current_mtime),
                 Some(current_len)
             )
-                if path == &self.artifact_path
-                    && *cached_mtime == current_mtime
-                    && *cached_len == current_len
+                if *cached_mtime == current_mtime && *cached_len == current_len
         );
         if cached_fast {
             let span = tracing::debug_span!(
@@ -86,7 +82,6 @@ impl MentionSource for CodeGraphMentionSource {
                     header.content_hash_blake3.as_deref(),
                 ) {
                     if cached_hash == current_hash {
-                        cache_key.path = self.artifact_path.clone();
                         cache_key.mtime = current_mtime;
                         cache_key.len = current_len;
                         let span = tracing::debug_span!(
@@ -161,7 +156,6 @@ impl MentionSource for CodeGraphMentionSource {
             "code graph mention source reloaded"
         );
         self.cache_key = modified.zip(len).map(|(mtime, len)| CodeGraphCacheKey {
-            path: self.artifact_path.clone(),
             mtime,
             len,
             content_hash,
