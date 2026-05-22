@@ -7,23 +7,24 @@ use anyhow::Context;
 
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
-    resolve_artifact_location, resolve_worktree_root_from, write_artifact, BuildMode, GraphFacts,
-    GraphIndexArtifact,
+    resolve_artifact_location, resolve_worktree_root_from, write_artifact_parquet, BuildMode,
+    GraphFacts, GraphIndexArtifact, WriteOptions,
 };
 
-pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph-index.json";
+pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph";
 
 #[derive(Debug, Clone)]
 pub struct GraphBuildOptions {
     pub root: Option<PathBuf>,
+    pub workspace: bool,
     pub output: Option<PathBuf>,
     pub quiet: bool,
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
-    let root = match options.root {
-        Some(path) => path,
-        None => resolve_worktree_root_from(std::env::current_dir()?),
+    let root = match (options.root, options.workspace) {
+        (Some(path), _) => path,
+        (None, _) => resolve_worktree_root_from(std::env::current_dir()?),
     };
     let root = root
         .canonicalize()
@@ -34,6 +35,9 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     let output = explicit_output
         .or(env_output)
         .unwrap_or_else(|| root.join(DEFAULT_GRAPH_INDEX_PATH));
+    if uses_output_override {
+        reject_legacy_output_path(&output)?;
+    }
 
     if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
@@ -86,7 +90,7 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         let write_started = Instant::now();
         let write_span = tracing::info_span!(
             target: "spur_graph::build::write",
-            "write_artifact",
+            "write_artifact_parquet",
             path = %output.display(),
             files = artifact.files.len(),
             symbols = artifact.symbols.len(),
@@ -94,9 +98,9 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         );
         {
             let _entered = write_span.enter();
-            let result = write_artifact(&artifact, &output);
+            let result = write_artifact_parquet(&artifact, &output, WriteOptions::default());
             match &result {
-                Ok(()) => {
+                Ok(_) => {
                     tracing::info!(
                         target: "spur_graph::build::write",
                         elapsed_ms = elapsed_ms(write_started),
@@ -112,7 +116,7 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                     );
                 }
             }
-            result?
+            result?;
         }
         None
     } else if let Some(ctx) = spur_graph::git::detect(&root) {
@@ -156,7 +160,7 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         let write_started = Instant::now();
         let write_span = tracing::info_span!(
             target: "spur_graph::build::write",
-            "write_artifact",
+            "write_artifact_parquet",
             path = %output.display(),
             files = artifact.files.len(),
             symbols = artifact.symbols.len(),
@@ -164,9 +168,20 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         );
         {
             let _entered = write_span.enter();
-            let result = write_artifact(&artifact, &output);
+            let result = write_artifact_parquet(&artifact, &output, WriteOptions::default());
             match &result {
-                Ok(()) => {
+                Ok(written_dir) => {
+                    if !uses_output_override {
+                        if let Err(error) = spur_graph::write_current_pointer(&root, written_dir) {
+                            tracing::info!(
+                                target: "spur_graph::build::write",
+                                error = %error,
+                                elapsed_ms = elapsed_ms(write_started),
+                                "spur-graph build phase failed"
+                            );
+                            return Err(error);
+                        }
+                    }
                     tracing::info!(
                         target: "spur_graph::build::write",
                         elapsed_ms = elapsed_ms(write_started),
@@ -182,7 +197,7 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                     );
                 }
             }
-            result?
+            result?;
         }
         None
     };
@@ -206,6 +221,22 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         output.display(),
         canonical_summary
     );
+    Ok(())
+}
+
+fn reject_legacy_output_path(output: &Path) -> anyhow::Result<()> {
+    if output.extension().and_then(|ext| ext.to_str()) == Some("json") {
+        anyhow::bail!(
+            "graph build now writes a Parquet directory layout; `{}` looks like a legacy JSON file path. Pass --output with a directory path such as `.spur/graph`.",
+            output.display()
+        );
+    }
+    if output.is_file() {
+        anyhow::bail!(
+            "graph build now writes a Parquet directory layout; `{}` is an existing file. Pass --output with a directory path.",
+            output.display()
+        );
+    }
     Ok(())
 }
 

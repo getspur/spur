@@ -1019,12 +1019,20 @@ fn rebuild_from_buckets(
     });
     manifests.sort_by(|a, b| a.path.cmp(&b.path));
     edges.sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
+    let mut next_synthetic_file_node_id = max_existing_node_id(&files, &symbols, &manifests)
+        .and_then(|id| id.checked_add(1))
+        .unwrap_or(1);
     let files = files
         .into_iter()
         .map(|(file, node_id)| {
-            if let Some(node_id) = node_id {
-                file_node_ids.push(node_id);
-            }
+            let node_id = node_id.unwrap_or_else(|| {
+                let synthetic = NodeId(next_synthetic_file_node_id);
+                next_synthetic_file_node_id = next_synthetic_file_node_id
+                    .checked_add(1)
+                    .expect("exhausted synthetic file NodeId space");
+                synthetic
+            });
+            file_node_ids.push(node_id);
             file
         })
         .collect();
@@ -1055,6 +1063,27 @@ fn rebuild_from_buckets(
         tombstones,
         diagnostics: Vec::new(),
     }
+}
+
+fn max_existing_node_id(
+    files: &[(GraphFileArtifact, Option<NodeId>)],
+    symbols: &[(GraphSymbolArtifact, Option<NodeId>)],
+    manifests: &[GraphFileManifestEntry],
+) -> Option<u64> {
+    files
+        .iter()
+        .filter_map(|(_, node_id)| node_id.map(NodeId::get))
+        .chain(
+            symbols
+                .iter()
+                .filter_map(|(_, node_id)| node_id.map(NodeId::get)),
+        )
+        .chain(
+            manifests
+                .iter()
+                .flat_map(|manifest| manifest.node_ids.iter().map(|id| id.get())),
+        )
+        .max()
 }
 
 fn sort_bucket_symbols(bucket: &mut FileBucket) {
@@ -1287,14 +1316,14 @@ mod tests {
 
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
-        manifest_version_from_query_bytes, BuildMode, ManifestQueryBytes,
-        PHASE1_GRAPH_INDEX_VERSION,
+        compose_artifact, empty_bucket, manifest_version_from_query_bytes, BuildMode,
+        CurrentFileEntry, ManifestQueryBytes, PHASE1_GRAPH_INDEX_VERSION,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::build_facts;
     use crate::{
         graph_edge_kind_or_default, Confidence, GraphEdgeArtifact, GraphFileArtifact,
-        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
+        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId,
         RelationKind,
     };
     use tracing::field::{Field, Visit};
@@ -1421,6 +1450,55 @@ mod tests {
             b_bucket.edges,
             vec![edge("sym:b1", Some("sym:a1"), RelationKind::References)]
         );
+    }
+
+    #[test]
+    fn compose_artifact_assigns_file_node_ids_for_manifest_only_files() {
+        let mut buckets = BTreeMap::new();
+        let mut lib_bucket = empty_bucket("src/lib.rs", "oid-lib");
+        lib_bucket.file_node_id = Some(NodeId(10));
+        buckets.insert("src/lib.rs".to_string(), lib_bucket);
+
+        let current_entries = BTreeMap::from([
+            (
+                "README.txt".to_string(),
+                CurrentFileEntry {
+                    path: "README.txt".to_string(),
+                    content_oid: "oid-readme".to_string(),
+                    extractable: false,
+                },
+            ),
+            (
+                "src/lib.rs".to_string(),
+                CurrentFileEntry {
+                    path: "src/lib.rs".to_string(),
+                    content_oid: "oid-lib".to_string(),
+                    extractable: true,
+                },
+            ),
+        ]);
+
+        let artifact = compose_artifact(
+            buckets,
+            &current_entries,
+            "test-manifest".to_string(),
+            Vec::new(),
+        );
+
+        assert_eq!(artifact.files.len(), 2);
+        assert_eq!(artifact.file_node_ids.len(), artifact.files.len());
+        let readme_index = artifact
+            .files
+            .iter()
+            .position(|file| file.file_path == "README.txt")
+            .expect("README file");
+        assert_ne!(artifact.file_node_ids[readme_index], NodeId(10));
+        let readme_manifest = artifact
+            .file_manifests
+            .iter()
+            .find(|entry| entry.path == "README.txt")
+            .expect("README manifest");
+        assert!(readme_manifest.node_ids.is_empty());
     }
 
     #[test]
