@@ -115,6 +115,7 @@ fn graph_build_quiet_suppresses_progress_and_honors_output() {
             "graph",
             "build",
             "--quiet",
+            "--no-analyst",
             "--output",
             output_path.to_str().expect("utf8 path"),
         ])
@@ -230,6 +231,7 @@ fn graph_build_custom_output_bypasses_canonical_cache() {
         .args([
             "graph",
             "build",
+            "--no-analyst",
             "--output",
             output_path.to_str().expect("utf8 path"),
         ])
@@ -286,6 +288,34 @@ fn graph_build_rejects_legacy_json_output_path() {
         stderr.contains("Parquet directory") && stderr.contains("--output"),
         "expected clear directory-layout error, got: {stderr}"
     );
+}
+
+#[test]
+fn graph_build_triggers_analyst_rebuild_when_duckdb_present() {
+    // Skip if duckdb isn't on PATH - soft-fail path is covered separately.
+    let duckdb_found = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join("duckdb").is_file()))
+        .unwrap_or(false);
+    if !duckdb_found {
+        eprintln!("skipping: duckdb CLI not on PATH");
+        return;
+    }
+
+    let dir = fixture_git_repo();
+    let out = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["graph", "build", "--workspace", "--quiet"])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let db = dir.path().join(".spur/analyst.duckdb");
+    assert!(db.is_file(), "analyst DB should exist at {}", db.display());
 }
 
 fn parquet_artifact_dirs(base: &std::path::Path) -> Vec<std::path::PathBuf> {
