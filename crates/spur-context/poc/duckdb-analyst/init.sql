@@ -8,16 +8,25 @@
 --   __SPUR_GRAPH_ARTIFACT_DIR__  — absolute resolved Parquet artifact directory
 --
 -- Produces:
---   nodes                      — view over nodes.parquet
---   edges                      — view over edges.parquet
---   edges_by_dst               — view over edges_by_dst.parquet
---   edges_unresolved           — view over edges_unresolved.parquet
+--   node_dense_id_map          — TABLE: (stable_symbol_id → dense_id) globally unique
+--   nodes                      — view over nodes.parquet, with node_id REPLACED by dense_id
+--   edges                      — view over edges.parquet, src_id/dst_id re-keyed via stable_symbol_id
+--   edges_by_dst               — same treatment as edges
+--   edges_unresolved           — src_id re-keyed (no dst — unresolved)
 --   files                      — view over files.parquet
 --   file_manifests             — view over file_manifests.parquet
 --   tombstones                 — view over tombstones.parquet
 --   _meta                      — manifest metadata and row counts
 --   PROPERTY GRAPH code        — DuckPGQ surface
---   onager_edges(src, dst)     — Onager surface (BIGINT-keyed)
+--   onager_edges(src, dst)     — Onager surface (BIGINT-keyed, globally unique)
+--
+-- Why the re-key: the upstream Parquet's `node_id` column is NOT globally unique —
+-- empirically (artifact 3744e65c…) 28543 rows have only 27868 distinct `node_id`s,
+-- with 675 collisions spread across multiple symbol kinds (sections, functions,
+-- methods, structs, …). Joining Onager / PageRank output back to `nodes` via
+-- node_id produced two rows per result. We rebuild the dense ID from the unique
+-- `stable_symbol_id` column and re-key edges accordingly so all downstream queries
+-- can rely on `node_id` being a primary key.
 
 INSTALL duckpgq FROM community;
 INSTALL onager  FROM community;
@@ -28,21 +37,70 @@ SET preserve_insertion_order = false;
 SET memory_limit = '6GB';
 SET threads = 4;
 
+-- Build the globally-unique dense ID mapping from the upstream stable_symbol_id
+-- (which IS guaranteed unique in the Parquet). Materialized as a TABLE because
+-- every nodes/edges view joins against it.
+--
+-- The map covers every stable_symbol_id that appears in any input: nodes OR any
+-- edge endpoint. This matters because the upstream edges Parquet references
+-- some stable_ids (mostly `references_other` to types in std/external crates)
+-- that are not present as rows in nodes.parquet — ~12k such danglers in the
+-- current artifact. Without the UNION, an INNER-JOIN re-keying would silently
+-- drop those edges. Including them in the map keeps edges intact; downstream
+-- queries joining edges→nodes naturally filter them when needed.
+CREATE OR REPLACE TABLE node_dense_id_map AS
+WITH referenced_ids AS (
+  SELECT stable_symbol_id FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/nodes.parquet')
+  UNION
+  SELECT source_stable_id AS stable_symbol_id FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges.parquet')
+  UNION
+  SELECT target_stable_id FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges.parquet')
+  UNION
+  SELECT source_stable_id FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges_by_dst.parquet')
+  UNION
+  SELECT target_stable_id FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges_by_dst.parquet')
+  UNION
+  SELECT source_stable_id FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges_unresolved.parquet')
+)
+SELECT
+  stable_symbol_id,
+  ROW_NUMBER() OVER (ORDER BY stable_symbol_id) AS dense_id
+FROM (
+  SELECT DISTINCT stable_symbol_id
+  FROM referenced_ids
+  WHERE stable_symbol_id IS NOT NULL
+);
+
 CREATE OR REPLACE VIEW nodes AS
-SELECT *
-FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/nodes.parquet');
+SELECT n.* REPLACE (m.dense_id AS node_id)
+FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/nodes.parquet') n
+JOIN node_dense_id_map m USING (stable_symbol_id);
 
 CREATE OR REPLACE VIEW edges AS
-SELECT *
-FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges.parquet');
+SELECT e.* REPLACE (
+  s.dense_id AS src_id,
+  d.dense_id AS dst_id
+)
+FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges.parquet') e
+JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id
+JOIN node_dense_id_map d ON d.stable_symbol_id = e.target_stable_id;
 
 CREATE OR REPLACE VIEW edges_by_dst AS
-SELECT *
-FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges_by_dst.parquet');
+SELECT e.* REPLACE (
+  s.dense_id AS src_id,
+  d.dense_id AS dst_id
+)
+FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges_by_dst.parquet') e
+JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id
+JOIN node_dense_id_map d ON d.stable_symbol_id = e.target_stable_id;
 
+-- Unresolved edges have no target_stable_id (that's why they're unresolved).
+-- Re-key only the src side; dst_id stays as the upstream Parquet's value
+-- (typically a placeholder / 0).
 CREATE OR REPLACE VIEW edges_unresolved AS
-SELECT *
-FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges_unresolved.parquet');
+SELECT e.* REPLACE (s.dense_id AS src_id)
+FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/edges_unresolved.parquet') e
+JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id;
 
 CREATE OR REPLACE VIEW files AS
 SELECT *
