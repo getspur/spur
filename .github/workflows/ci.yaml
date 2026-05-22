@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        # See https://github.com/actions/runner-images for available OS versions.
+        os: [ubuntu-22.04, macos-13, macos-14, windows-2022]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: python3 src-tauri/binaries/download.py
+
+      - name: Tauri dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri
+
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: ./src-tauri
+
+      - run: cargo test --all-targets
+        working-directory: ./src-tauri
+
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: "20.18.0"
+
+      # - run: npm ci
+
+      # TODO: Reenable later, it's kind of slow right now.
+      # - run: npx tauri build
+
+  format:
+    name: Format
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - run: cargo +nightly fmt --all -- --check
+        working-directory: ./src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.18.0"
+
+      - run: npm ci
+
+      - run: npm run format:check
+
+  frontend:
+    name: Frontend lint and build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.18.0"
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run build

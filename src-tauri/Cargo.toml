@@ -1,0 +1,70 @@
+[package]
+name = "jute"
+version = "0.0.0"
+description = "A native app for interactive computing in Jupyter Notebooks"
+authors = ["Eric Zhang <ekzhang1@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/ekzhang/jute.git"
+edition = "2021"
+
+[[bin]]
+name = "jute"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.95"
+async-channel = "2.2.1"
+bytes = "1.5.0"
+cfg-if = "1.0.0"
+dashmap = "5.5.3"
+futures-util = "0.3.30"
+hmac = "0.12.1"
+rand = "0.8.5"
+reqwest = { version = "0.12.4", features = ["json"] }
+rust-ini = "0.21.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_urlencoded = "0.7.1"
+serde_with = "3.12.0"
+sha2 = "0.10.8"
+strum = { version = "0.26.3", features = ["derive"] }
+sysinfo = "0.30.3"
+tauri = { version = "2.0.4", features = ["devtools", "macos-private-api"] }
+tauri-plugin-dialog = "2.2.0"
+tauri-plugin-fs = "2.2.0"
+tauri-plugin-opener = "2.2.3"
+tauri-plugin-shell = "2.2.0"
+thiserror = "1.0.57"
+time = { version = "0.3.36", features = ["serde", "serde-human-readable"] }
+tokio = { version = "1.35.1", features = ["full"] }
+tokio-tungstenite = { version = "0.21.0", features = ["native-tls"] }
+tokio-util = "0.7.11"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+ts-rs = { version = "10.1.0", features = [
+  "no-serde-warnings",
+  "serde-json-impl",
+] }
+url = "2.5.0"
+uuid = { version = "1.7.0", features = ["v4"] }
+zeromq = "0.3.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26.0"
+objc = "0.2.7"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58.0", features = [
+  "Win32_Graphics_Dwm",
+  "Win32_Foundation",
+  "Win32_UI_Controls",
+] }
+winver = "1.0.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# unused, workaround for https://github.com/SSheldon/rust-objc/issues/125
+cargo-clippy = []
+custom-protocol = ["tauri/custom-protocol"]

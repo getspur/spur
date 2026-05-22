@@ -1,0 +1,26 @@
+# Rust
+.xwin-cache/
+.cargo/
+target/
+
+# Tauri
+/src-tauri/gen/
+
+# Sidecar binaries
+/src-tauri/binaries/*
+!/src-tauri/binaries/download.py
+
+# JavaScript
+node_modules
+dist
+dist-ssr
+*.local
+
+# Python virtual environments
+.venv/
+venv/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
