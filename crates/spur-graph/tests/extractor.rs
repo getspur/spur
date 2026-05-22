@@ -495,14 +495,20 @@ fn cpp_extractor_captures_duckdb_style_surface() {
         .iter()
         .filter(|edge| edge.relation == RelationKind::Imports)
         .count();
-    assert!(import_edges >= 2, "expected #include + using imports, got {import_edges}");
+    assert!(
+        import_edges >= 2,
+        "expected #include + using imports, got {import_edges}"
+    );
 
     let call_edges = artifact
         .edges
         .iter()
         .filter(|edge| edge.relation == RelationKind::Calls)
         .count();
-    assert!(call_edges >= 2, "expected resolved call edges, got {call_edges}");
+    assert!(
+        call_edges >= 2,
+        "expected resolved call edges, got {call_edges}"
+    );
 
     // Methods should be tagged as Method, not Function, when defined inside a class body.
     let initialize_is_method = artifact.symbols.iter().any(|symbol| {
