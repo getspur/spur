@@ -160,6 +160,54 @@ fn graph_build_default_uses_canonical_cache_and_reports_it() {
 }
 
 #[test]
+fn graph_build_reads_pointer_artifact_when_default_json_is_missing() {
+    let dir = fixture_git_repo();
+
+    let first = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["graph", "build"])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .output()
+        .expect("spawn initial spur graph build");
+
+    assert!(
+        first.status.success(),
+        "expected initial success; stderr = {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let artifact_path = dir.path().join(".spur/graph-index.json");
+    assert!(
+        artifact_path.is_file(),
+        "expected default worktree artifact"
+    );
+    std::fs::remove_file(&artifact_path).expect("remove worktree artifact");
+    assert!(
+        dir.path().join(".spur/graph-index.pointer.json").is_file(),
+        "expected pointer file to remain"
+    );
+
+    let second = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["graph", "build"])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .output()
+        .expect("spawn second spur graph build");
+
+    assert!(
+        second.status.success(),
+        "expected second success; stderr = {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        stdout.contains("mode: Incremental"),
+        "expected build to reuse pointer artifact, got: {stdout}"
+    );
+    assert!(artifact_path.is_file(), "expected default artifact rewrite");
+}
+
+#[test]
 fn graph_build_custom_output_bypasses_canonical_cache() {
     let dir = fixture_git_repo();
     let output_path = dir.path().join("custom-index.json");
