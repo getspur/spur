@@ -53,6 +53,8 @@ impl Orchestrator {
             prompt.push_str(&format!("## Project Context\n\n{}\n\n", append));
         }
 
+        prompt.push_str(Self::notebook_availability_prompt());
+
         // Task.
         prompt.push_str(&format!("## Task\n\n{}\n", task));
 
@@ -76,6 +78,7 @@ impl Orchestrator {
         if let Some(guidance) = crate::skills::load_skill(&agent_skill, &self.repo_root) {
             prompt.push_str(&guidance);
         }
+        prompt.push_str(Self::notebook_availability_prompt());
         self.append_issue_and_task(&mut prompt, task, issue);
         self.log_prompt_once(&prompt, session_id);
         prompt
@@ -148,6 +151,13 @@ impl Orchestrator {
 
         // Task.
         prompt.push_str(&format!("## Task\n\n{}\n", task));
+    }
+
+    fn notebook_availability_prompt() -> &'static str {
+        "## NOTEBOOK AVAILABILITY\n\n\
+         The `notebook.*` MCP server is always reachable, but a notebook may not be loaded. \
+         If a notebook tool returns `notebook_not_open`, tell the user in chat: \
+         \"I need a notebook open to do that - try `/notebook <path>` or `/notebook new`.\"\n\n"
     }
 
     pub(super) fn log_prompt_once(&self, prompt: &str, session_id: &SessionId) {
