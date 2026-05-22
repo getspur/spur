@@ -4,15 +4,18 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread::ScopedJoinHandle;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context};
+use arrow_array::{
+    Array, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::{ByteArray, ByteArrayType, FloatType, Int32Type, Int64Type};
 use parquet::file::properties::WriterProperties;
-use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
-use parquet::record::{Field, ListAccessor, Row, RowAccessor};
 use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::ColumnPath;
 
@@ -133,7 +136,7 @@ pub fn write_artifact_parquet(
     sweep_stale_parquet_temp_dirs(base_dir);
 
     let final_dir = base_dir.join(format!("{artifact_hash}.parquet"));
-    let temp_dir = parquet_temp_dir(base_dir, &artifact_hash);
+    let temp_dir = parquet_temp_dir(base_dir, artifact_hash);
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)
             .with_context(|| format!("failed to remove stale temp dir `{}`", temp_dir.display()))?;
@@ -166,8 +169,7 @@ pub fn write_artifact_parquet(
     let mut tombstones = artifact.tombstones.clone();
     tombstones.sort_by(|a, b| a.path.cmp(&b.path));
 
-    write_nodes(&temp_dir.join("nodes.parquet"), &nodes)?;
-    write_edges(&temp_dir.join("edges.parquet"), &resolved_edges)?;
+    let mut edges_by_dst = None;
     if options.emit_edges_by_dst {
         let mut by_dst = resolved_edges.clone();
         by_dst.sort_by(|a, b| {
@@ -176,15 +178,41 @@ pub fn write_artifact_parquet(
                 .cmp(&b.dst_id.get())
                 .then(a.src_id.get().cmp(&b.src_id.get()))
         });
-        write_edges(&temp_dir.join("edges_by_dst.parquet"), &by_dst)?;
+        edges_by_dst = Some(by_dst);
     }
-    write_unresolved_edges(
-        &temp_dir.join("edges_unresolved.parquet"),
-        &unresolved_edges,
-    )?;
-    write_files(&temp_dir.join("files.parquet"), &files)?;
-    write_file_manifests(&temp_dir.join("file_manifests.parquet"), &file_manifests)?;
-    write_tombstones(&temp_dir.join("tombstones.parquet"), &tombstones)?;
+
+    let nodes_path = temp_dir.join("nodes.parquet");
+    let edges_path = temp_dir.join("edges.parquet");
+    let edges_by_dst_path = temp_dir.join("edges_by_dst.parquet");
+    let unresolved_edges_path = temp_dir.join("edges_unresolved.parquet");
+    let files_path = temp_dir.join("files.parquet");
+    let file_manifests_path = temp_dir.join("file_manifests.parquet");
+    let tombstones_path = temp_dir.join("tombstones.parquet");
+
+    std::thread::scope(|scope| {
+        let nodes_handle = scope.spawn(|| write_nodes(&nodes_path, &nodes));
+        let edges_handle = scope.spawn(|| write_edges(&edges_path, &resolved_edges));
+        let unresolved_edges_handle =
+            scope.spawn(|| write_unresolved_edges(&unresolved_edges_path, &unresolved_edges));
+        let files_handle = scope.spawn(|| write_files(&files_path, &files));
+        let file_manifests_handle =
+            scope.spawn(|| write_file_manifests(&file_manifests_path, &file_manifests));
+        let tombstones_handle = scope.spawn(|| write_tombstones(&tombstones_path, &tombstones));
+        let edges_by_dst_handle = edges_by_dst
+            .as_ref()
+            .map(|rows| scope.spawn(|| write_edges(&edges_by_dst_path, rows)));
+
+        join_scoped(nodes_handle, "write nodes.parquet")?;
+        join_scoped(edges_handle, "write edges.parquet")?;
+        join_scoped(unresolved_edges_handle, "write edges_unresolved.parquet")?;
+        join_scoped(files_handle, "write files.parquet")?;
+        join_scoped(file_manifests_handle, "write file_manifests.parquet")?;
+        join_scoped(tombstones_handle, "write tombstones.parquet")?;
+        if let Some(handle) = edges_by_dst_handle {
+            join_scoped(handle, "write edges_by_dst.parquet")?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })?;
 
     let manifest = GraphArtifactManifest {
         graph_index_version: artifact.header.graph_index_version.clone(),
@@ -247,23 +275,32 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
             dir.display()
         );
     }
-    validate_row_counts(dir, &manifest)?;
+    let nodes_path = dir.join("nodes.parquet");
+    let edges_path = dir.join("edges.parquet");
+    let unresolved_edges_path = dir.join("edges_unresolved.parquet");
+    let files_path = dir.join("files.parquet");
+    let file_manifests_path = dir.join("file_manifests.parquet");
+    let tombstones_path = dir.join("tombstones.parquet");
+    let row_counts = manifest.row_counts.clone();
 
-    let (mut files, mut file_node_ids) = read_files(&dir.join("files.parquet"))?;
-    sort_files_for_artifact(&mut files, &mut file_node_ids);
-    let (mut symbols, mut symbol_node_ids) = read_nodes(&dir.join("nodes.parquet"))?;
-    sort_symbols_for_artifact(&mut symbols, &mut symbol_node_ids);
+    let (files, file_node_ids) = read_files(&files_path, row_counts.files)?;
+    let file_manifests = read_file_manifests(&file_manifests_path, row_counts.file_manifests)?;
+    let tombstones = read_tombstones(&tombstones_path, row_counts.tombstones)?;
 
-    let mut edges = read_edges(&dir.join("edges.parquet"))?;
-    edges.extend(read_unresolved_edges(
-        &dir.join("edges_unresolved.parquet"),
-    )?);
-    edges.sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
+    let ((symbols, symbol_node_ids), mut edges, unresolved_edges) = std::thread::scope(|scope| {
+        let nodes = scope.spawn(|| read_nodes(&nodes_path, row_counts.nodes));
+        let edges = scope.spawn(|| read_edges(&edges_path, row_counts.edges));
+        let unresolved_edges = scope
+            .spawn(|| read_unresolved_edges(&unresolved_edges_path, row_counts.edges_unresolved));
 
-    let mut file_manifests = read_file_manifests(&dir.join("file_manifests.parquet"))?;
-    file_manifests.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut tombstones = read_tombstones(&dir.join("tombstones.parquet"))?;
-    tombstones.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok::<_, anyhow::Error>((
+            join_scoped(nodes, "read nodes.parquet")?,
+            join_scoped(edges, "read edges.parquet")?,
+            join_scoped(unresolved_edges, "read edges_unresolved.parquet")?,
+        ))
+    })?;
+
+    edges.extend(unresolved_edges);
 
     Ok(GraphIndexArtifact {
         header: GraphIndexHeader {
@@ -281,6 +318,15 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
         tombstones,
         diagnostics: Vec::new(),
     })
+}
+
+fn join_scoped<T>(
+    handle: ScopedJoinHandle<'_, anyhow::Result<T>>,
+    label: &str,
+) -> anyhow::Result<T> {
+    handle
+        .join()
+        .map_err(|_| anyhow!("Parquet worker thread panicked during {label}"))?
 }
 
 fn file_rows(artifact: &GraphIndexArtifact) -> anyhow::Result<Vec<FileRow>> {
@@ -934,238 +980,287 @@ fn write_column(
     Ok(())
 }
 
-fn read_nodes(path: &Path) -> anyhow::Result<(Vec<GraphSymbolArtifact>, Vec<NodeId>)> {
-    let mut symbols = Vec::new();
-    let mut node_ids = Vec::new();
-    for row in read_rows(path)? {
-        symbols.push(GraphSymbolArtifact {
-            stable_symbol_id: required_string(&row, 0, "stable_symbol_id")?,
-            file_path: required_string(&row, 2, "file_path")?,
-            byte_range: [
-                i64_to_usize(row.get_long(3)?, "byte_range_start")?,
-                i64_to_usize(row.get_long(4)?, "byte_range_end")?,
-            ],
-            line_range: [
-                i32_to_usize(row.get_int(5)?, "line_start")?,
-                i32_to_usize(row.get_int(6)?, "line_end")?,
-            ],
-            entity_name: required_string(&row, 7, "entity_name")?,
-            qualified_name: required_string(&row, 8, "qualified_name")?,
-            symbol_kind: required_string(&row, 9, "symbol_kind")?,
-            anchor_hash: required_string(&row, 10, "anchor_hash")?,
-            enclosing_scope: optional_string(&row, 11, "enclosing_scope")?,
-        });
-        node_ids.push(i64_to_node_id(row.get_long(1)?, "node_id")?);
+fn read_nodes(
+    path: &Path,
+    row_count: usize,
+) -> anyhow::Result<(Vec<GraphSymbolArtifact>, Vec<NodeId>)> {
+    let mut symbols = Vec::with_capacity(row_count);
+    let mut node_ids = Vec::with_capacity(symbols.capacity());
+    for batch in read_record_batches(path)? {
+        let stable_symbol_id = string_array(&batch, 0, "stable_symbol_id")?;
+        let node_id = i64_array(&batch, 1, "node_id")?;
+        let file_path = string_array(&batch, 2, "file_path")?;
+        let byte_range_start = i64_array(&batch, 3, "byte_range_start")?;
+        let byte_range_end = i64_array(&batch, 4, "byte_range_end")?;
+        let line_start = i32_array(&batch, 5, "line_start")?;
+        let line_end = i32_array(&batch, 6, "line_end")?;
+        let entity_name = string_array(&batch, 7, "entity_name")?;
+        let qualified_name = string_array(&batch, 8, "qualified_name")?;
+        let symbol_kind = string_array(&batch, 9, "symbol_kind")?;
+        let anchor_hash = string_array(&batch, 10, "anchor_hash")?;
+        let enclosing_scope = string_array(&batch, 11, "enclosing_scope")?;
+
+        for row in 0..batch.num_rows() {
+            symbols.push(GraphSymbolArtifact {
+                stable_symbol_id: required_string_value(stable_symbol_id, row, "stable_symbol_id")?,
+                file_path: required_string_value(file_path, row, "file_path")?,
+                byte_range: [
+                    i64_to_usize(byte_range_start.value(row), "byte_range_start")?,
+                    i64_to_usize(byte_range_end.value(row), "byte_range_end")?,
+                ],
+                line_range: [
+                    i32_to_usize(line_start.value(row), "line_start")?,
+                    i32_to_usize(line_end.value(row), "line_end")?,
+                ],
+                entity_name: required_string_value(entity_name, row, "entity_name")?,
+                qualified_name: required_string_value(qualified_name, row, "qualified_name")?,
+                symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?,
+                anchor_hash: required_string_value(anchor_hash, row, "anchor_hash")?,
+                enclosing_scope: optional_string_value(enclosing_scope, row),
+            });
+            node_ids.push(i64_to_node_id(node_id.value(row), "node_id")?);
+        }
     }
     Ok((symbols, node_ids))
 }
 
-fn read_edges(path: &Path) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-    read_rows(path)?
-        .into_iter()
-        .map(|row| {
-            Ok(GraphEdgeArtifact {
-                source_stable_symbol_id: required_string(&row, 0, "source_stable_id")?,
-                target_stable_symbol_id: Some(required_string(&row, 1, "target_stable_id")?),
-                target_label: optional_string(&row, 4, "target_label")?,
-                relation: relation_from_str(&required_string(&row, 5, "relation")?)?,
-                confidence: confidence_from_str(&required_string(&row, 6, "confidence")?)?,
-                confidence_score: row.get_float(7)?,
-                edge_kind: optional_string(&row, 8, "edge_kind")?
+fn read_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+    let mut edges = Vec::with_capacity(row_count);
+    for batch in read_record_batches(path)? {
+        let source_stable_id = string_array(&batch, 0, "source_stable_id")?;
+        let target_stable_id = string_array(&batch, 1, "target_stable_id")?;
+        let target_label = string_array(&batch, 4, "target_label")?;
+        let relation = string_array(&batch, 5, "relation")?;
+        let confidence = string_array(&batch, 6, "confidence")?;
+        let confidence_score = f32_array(&batch, 7, "confidence_score")?;
+        let edge_kind = string_array(&batch, 8, "edge_kind")?;
+
+        for row in 0..batch.num_rows() {
+            edges.push(GraphEdgeArtifact {
+                source_stable_symbol_id: required_string_value(
+                    source_stable_id,
+                    row,
+                    "source_stable_id",
+                )?,
+                target_stable_symbol_id: Some(required_string_value(
+                    target_stable_id,
+                    row,
+                    "target_stable_id",
+                )?),
+                target_label: optional_string_value(target_label, row),
+                relation: relation_from_str(&required_string_value(relation, row, "relation")?)?,
+                confidence: confidence_from_str(&required_string_value(
+                    confidence,
+                    row,
+                    "confidence",
+                )?)?,
+                confidence_score: confidence_score.value(row),
+                edge_kind: optional_string_value(edge_kind, row)
                     .as_deref()
                     .map(edge_kind_from_str)
                     .transpose()?,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(edges)
 }
 
-fn read_unresolved_edges(path: &Path) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
-    read_rows(path)?
-        .into_iter()
-        .map(|row| {
-            Ok(GraphEdgeArtifact {
-                source_stable_symbol_id: required_string(&row, 0, "source_stable_id")?,
+fn read_unresolved_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+    let mut edges = Vec::with_capacity(row_count);
+    for batch in read_record_batches(path)? {
+        let source_stable_id = string_array(&batch, 0, "source_stable_id")?;
+        let target_label = string_array(&batch, 2, "target_label")?;
+        let relation = string_array(&batch, 3, "relation")?;
+        let confidence = string_array(&batch, 4, "confidence")?;
+        let confidence_score = f32_array(&batch, 5, "confidence_score")?;
+        let edge_kind = string_array(&batch, 6, "edge_kind")?;
+
+        for row in 0..batch.num_rows() {
+            edges.push(GraphEdgeArtifact {
+                source_stable_symbol_id: required_string_value(
+                    source_stable_id,
+                    row,
+                    "source_stable_id",
+                )?,
                 target_stable_symbol_id: None,
-                target_label: optional_string(&row, 2, "target_label")?,
-                relation: relation_from_str(&required_string(&row, 3, "relation")?)?,
-                confidence: confidence_from_str(&required_string(&row, 4, "confidence")?)?,
-                confidence_score: row.get_float(5)?,
-                edge_kind: optional_string(&row, 6, "edge_kind")?
+                target_label: optional_string_value(target_label, row),
+                relation: relation_from_str(&required_string_value(relation, row, "relation")?)?,
+                confidence: confidence_from_str(&required_string_value(
+                    confidence,
+                    row,
+                    "confidence",
+                )?)?,
+                confidence_score: confidence_score.value(row),
+                edge_kind: optional_string_value(edge_kind, row)
                     .as_deref()
                     .map(edge_kind_from_str)
                     .transpose()?,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(edges)
 }
 
-fn read_files(path: &Path) -> anyhow::Result<(Vec<GraphFileArtifact>, Vec<NodeId>)> {
-    let mut files = Vec::new();
-    let mut node_ids = Vec::new();
-    for row in read_rows(path)? {
-        files.push(GraphFileArtifact {
-            stable_file_id: required_string(&row, 0, "stable_file_id")?,
-            file_path: required_string(&row, 2, "file_path")?,
-        });
-        node_ids.push(i64_to_node_id(row.get_long(1)?, "node_id")?);
+fn read_files(
+    path: &Path,
+    row_count: usize,
+) -> anyhow::Result<(Vec<GraphFileArtifact>, Vec<NodeId>)> {
+    let mut files = Vec::with_capacity(row_count);
+    let mut node_ids = Vec::with_capacity(files.capacity());
+    for batch in read_record_batches(path)? {
+        let stable_file_id = string_array(&batch, 0, "stable_file_id")?;
+        let node_id = i64_array(&batch, 1, "node_id")?;
+        let file_path = string_array(&batch, 2, "file_path")?;
+        for row in 0..batch.num_rows() {
+            files.push(GraphFileArtifact {
+                stable_file_id: required_string_value(stable_file_id, row, "stable_file_id")?,
+                file_path: required_string_value(file_path, row, "file_path")?,
+            });
+            node_ids.push(i64_to_node_id(node_id.value(row), "node_id")?);
+        }
     }
     Ok((files, node_ids))
 }
 
-fn read_file_manifests(path: &Path) -> anyhow::Result<Vec<GraphFileManifestEntry>> {
-    read_rows(path)?
-        .into_iter()
-        .map(|row| {
-            Ok(GraphFileManifestEntry {
-                stable_file_id: required_string(&row, 0, "stable_file_id")?,
-                path: required_string(&row, 1, "path")?,
-                content_oid: required_string(&row, 2, "content_oid")?,
-                node_ids: required_node_id_list(&row, 3, "node_ids")?,
-            })
-        })
-        .collect()
+fn read_file_manifests(
+    path: &Path,
+    row_count: usize,
+) -> anyhow::Result<Vec<GraphFileManifestEntry>> {
+    let mut manifests = Vec::with_capacity(row_count);
+    for batch in read_record_batches(path)? {
+        let stable_file_id = string_array(&batch, 0, "stable_file_id")?;
+        let path_col = string_array(&batch, 1, "path")?;
+        let content_oid = string_array(&batch, 2, "content_oid")?;
+        let node_ids = list_array(&batch, 3, "node_ids")?;
+        for row in 0..batch.num_rows() {
+            manifests.push(GraphFileManifestEntry {
+                stable_file_id: required_string_value(stable_file_id, row, "stable_file_id")?,
+                path: required_string_value(path_col, row, "path")?,
+                content_oid: required_string_value(content_oid, row, "content_oid")?,
+                node_ids: required_node_id_list_value(node_ids, row, "node_ids")?,
+            });
+        }
+    }
+    Ok(manifests)
 }
 
-fn read_tombstones(path: &Path) -> anyhow::Result<Vec<GraphTombstoneEntry>> {
-    read_rows(path)?
-        .into_iter()
-        .map(|row| {
-            Ok(GraphTombstoneEntry {
-                path: required_string(&row, 0, "path")?,
-                stable_file_id: required_string(&row, 1, "stable_file_id")?,
-            })
-        })
-        .collect()
+fn read_tombstones(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphTombstoneEntry>> {
+    if row_count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut tombstones = Vec::with_capacity(row_count);
+    for batch in read_record_batches(path)? {
+        let path_col = string_array(&batch, 0, "path")?;
+        let stable_file_id = string_array(&batch, 1, "stable_file_id")?;
+        for row in 0..batch.num_rows() {
+            tombstones.push(GraphTombstoneEntry {
+                path: required_string_value(path_col, row, "path")?,
+                stable_file_id: required_string_value(stable_file_id, row, "stable_file_id")?,
+            });
+        }
+    }
+    Ok(tombstones)
 }
 
-fn read_rows(path: &Path) -> anyhow::Result<Vec<Row>> {
+fn read_record_batches(path: &Path) -> anyhow::Result<Vec<RecordBatch>> {
     let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
-    let reader = SerializedFileReader::new(file)
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("failed to read `{}`", path.display()))?;
-    reader
-        .get_row_iter(None)
-        .with_context(|| format!("failed to iterate `{}`", path.display()))?
+    builder
+        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
+        .build()
+        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| format!("failed to decode `{}`", path.display()))
 }
 
-fn required_string(row: &Row, index: usize, name: &str) -> anyhow::Result<String> {
-    Ok(row
-        .get_string(index)
-        .with_context(|| format!("missing required string column `{name}`"))?
-        .clone())
+fn string_array<'a>(
+    batch: &'a RecordBatch,
+    index: usize,
+    name: &str,
+) -> anyhow::Result<&'a StringArray> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| anyhow!("expected string column `{name}`"))
 }
 
-fn optional_string(row: &Row, index: usize, name: &str) -> anyhow::Result<Option<String>> {
-    match row_field(row, index)? {
-        Field::Null => Ok(None),
-        Field::Str(value) => Ok(Some(value.clone())),
-        other => bail!("expected optional string column `{name}`, found {other:?}"),
+fn i64_array<'a>(
+    batch: &'a RecordBatch,
+    index: usize,
+    name: &str,
+) -> anyhow::Result<&'a Int64Array> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| anyhow!("expected int64 column `{name}`"))
+}
+
+fn i32_array<'a>(
+    batch: &'a RecordBatch,
+    index: usize,
+    name: &str,
+) -> anyhow::Result<&'a Int32Array> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or_else(|| anyhow!("expected int32 column `{name}`"))
+}
+
+fn f32_array<'a>(
+    batch: &'a RecordBatch,
+    index: usize,
+    name: &str,
+) -> anyhow::Result<&'a Float32Array> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| anyhow!("expected float32 column `{name}`"))
+}
+
+fn list_array<'a>(
+    batch: &'a RecordBatch,
+    index: usize,
+    name: &str,
+) -> anyhow::Result<&'a ListArray> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| anyhow!("expected list column `{name}`"))
+}
+
+fn required_string_value(values: &StringArray, index: usize, name: &str) -> anyhow::Result<String> {
+    if values.is_null(index) {
+        bail!("missing required string column `{name}`");
     }
+    Ok(values.value(index).to_string())
 }
 
-fn required_node_id_list(row: &Row, index: usize, name: &str) -> anyhow::Result<Vec<NodeId>> {
-    let list = row
-        .get_list(index)
-        .with_context(|| format!("missing required list column `{name}`"))?;
-    (0..list.len())
-        .map(|index| {
-            list.get_long(index)
-                .with_context(|| format!("invalid node id element in `{name}`"))
-                .and_then(|value| i64_to_node_id(value, name))
-        })
+fn optional_string_value(values: &StringArray, index: usize) -> Option<String> {
+    (!values.is_null(index)).then(|| values.value(index).to_string())
+}
+
+fn required_node_id_list_value(
+    values: &ListArray,
+    index: usize,
+    name: &str,
+) -> anyhow::Result<Vec<NodeId>> {
+    if values.is_null(index) {
+        return Ok(Vec::new());
+    }
+    let item_values = values.value(index);
+    let node_ids = item_values
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| anyhow!("expected int64 elements in list column `{name}`"))?;
+    (0..node_ids.len())
+        .map(|item_index| i64_to_node_id(node_ids.value(item_index), name))
         .collect()
-}
-
-fn row_field(row: &Row, index: usize) -> anyhow::Result<&Field> {
-    row.get_column_iter()
-        .nth(index)
-        .map(|(_, field)| field)
-        .ok_or_else(|| anyhow!("row missing column index {index}"))
-}
-
-fn validate_row_counts(dir: &Path, manifest: &GraphArtifactManifest) -> anyhow::Result<()> {
-    validate_row_count(dir, "nodes.parquet", manifest.row_counts.nodes)?;
-    validate_row_count(dir, "edges.parquet", manifest.row_counts.edges)?;
-    validate_row_count(
-        dir,
-        "edges_unresolved.parquet",
-        manifest.row_counts.edges_unresolved,
-    )?;
-    validate_row_count(dir, "files.parquet", manifest.row_counts.files)?;
-    validate_row_count(
-        dir,
-        "file_manifests.parquet",
-        manifest.row_counts.file_manifests,
-    )?;
-    validate_row_count(dir, "tombstones.parquet", manifest.row_counts.tombstones)?;
-    if manifest.edges_by_dst_present {
-        validate_row_count(
-            dir,
-            "edges_by_dst.parquet",
-            manifest
-                .row_counts
-                .edges_by_dst
-                .ok_or_else(|| anyhow!("manifest is missing edges_by_dst row count"))?,
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_row_count(dir: &Path, file_name: &str, expected: usize) -> anyhow::Result<()> {
-    let path = dir.join(file_name);
-    let actual = parquet_row_count(&path)?;
-    if actual != expected {
-        bail!(
-            "`{}` row count mismatch: manifest says {}, footer says {}",
-            path.display(),
-            expected,
-            actual
-        );
-    }
-    Ok(())
-}
-
-fn parquet_row_count(path: &Path) -> anyhow::Result<usize> {
-    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
-    let reader = SerializedFileReader::new(file)
-        .with_context(|| format!("failed to read `{}`", path.display()))?;
-    usize::try_from(reader.metadata().file_metadata().num_rows())
-        .with_context(|| format!("negative row count in `{}`", path.display()))
-}
-
-fn sort_files_for_artifact(files: &mut Vec<GraphFileArtifact>, node_ids: &mut Vec<NodeId>) {
-    let mut pairs: Vec<_> = files.drain(..).zip(node_ids.drain(..)).collect();
-    pairs.sort_by(|a, b| a.0.file_path.cmp(&b.0.file_path));
-    for (file, node_id) in pairs {
-        files.push(file);
-        node_ids.push(node_id);
-    }
-}
-
-fn sort_symbols_for_artifact(symbols: &mut Vec<GraphSymbolArtifact>, node_ids: &mut Vec<NodeId>) {
-    let mut pairs: Vec<_> = symbols.drain(..).zip(node_ids.drain(..)).collect();
-    pairs.sort_by(|a, b| {
-        a.0.file_path
-            .cmp(&b.0.file_path)
-            .then(a.0.byte_range.cmp(&b.0.byte_range))
-            .then(a.0.entity_name.cmp(&b.0.entity_name))
-            .then(a.0.stable_symbol_id.cmp(&b.0.stable_symbol_id))
-    });
-    for (symbol, node_id) in pairs {
-        symbols.push(symbol);
-        node_ids.push(node_id);
-    }
-}
-
-fn edge_sort_key(edge: &GraphEdgeArtifact) -> (&str, &str, &str, &str) {
-    (
-        edge.source_stable_symbol_id.as_str(),
-        edge.target_stable_symbol_id.as_deref().unwrap_or(""),
-        relation_to_str(edge.relation),
-        edge.target_label.as_deref().unwrap_or(""),
-    )
 }
 
 fn node_id_to_i64(node_id: NodeId) -> anyhow::Result<i64> {
