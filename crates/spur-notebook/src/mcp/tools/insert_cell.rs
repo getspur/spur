@@ -9,6 +9,7 @@ use super::BRIDGE_TIMEOUT;
 use crate::mcp::bridge::BridgeRequester;
 
 const METHOD: &str = "notebook.insert_cell";
+const LAST_EDITED_BY: &str = "brain";
 
 #[derive(Debug, Deserialize)]
 struct InsertCellParams {
@@ -60,7 +61,8 @@ pub async fn call(
 
     let mut request = json!({
         "kind": params.kind,
-        "source": params.source
+        "source": params.source,
+        "last_edited_by": LAST_EDITED_BY
     });
     if let Some(after_id) = params.after_id {
         request["after_id"] = json!(after_id);

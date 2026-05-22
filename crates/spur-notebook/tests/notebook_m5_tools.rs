@@ -14,6 +14,7 @@ struct MockCell {
     kind: String,
     source: String,
     version: u64,
+    last_edited_by: Option<String>,
 }
 
 #[derive(Default)]
@@ -58,6 +59,10 @@ impl BridgeRequester for MockNotebook {
                             kind,
                             source,
                             version: 1,
+                            last_edited_by: params
+                                .get("last_edited_by")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
                         },
                     );
                     let mut order = self.order.lock().await;
@@ -103,6 +108,10 @@ impl BridgeRequester for MockNotebook {
                     }
                     cell.source = source;
                     cell.version += 1;
+                    cell.last_edited_by = params
+                        .get("last_edited_by")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     Ok(json!({ "version": cell.version }))
                 }
                 "notebook.delete_cell" => {
@@ -217,6 +226,25 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
         .unwrap(),
     );
     assert_eq!(write["version"], 2);
+    {
+        let cells = notebook.cells.lock().await;
+        assert_eq!(
+            cells
+                .get(c1["id"].as_str().unwrap())
+                .unwrap()
+                .last_edited_by
+                .as_deref(),
+            Some("brain")
+        );
+        assert_eq!(
+            cells
+                .get(c2["id"].as_str().unwrap())
+                .unwrap()
+                .last_edited_by
+                .as_deref(),
+            Some("brain")
+        );
+    }
 
     structured(
         run_cell::call_with_progress(&notebook, json!({ "id": c2["id"] }), &mut progress)
