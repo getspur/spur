@@ -7281,6 +7281,7 @@ dependencies = [
  "fs2",
  "globset",
  "ignore",
+ "libc",
  "parquet",
  "petgraph",
  "pretty_assertions",
