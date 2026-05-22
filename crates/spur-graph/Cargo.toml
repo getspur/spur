@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 autobenches = false
 
+[features]
+perf-gates = []
+
 [dependencies]
 anyhow = { workspace = true }
 blake3 = "1"
@@ -15,7 +18,7 @@ globset = "0.4"
 ignore = "0.4.25"
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-parquet = { workspace = true }
+parquet = { workspace = true, features = ["arrow"] }
 petgraph = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,12 +34,17 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
+libc = "0.2"
 parquet = { workspace = true, features = ["arrow"] }
 pretty_assertions = "1"
 tempfile = "3"
 
 [[bench]]
 name = "incremental"
+harness = false
+
+[[bench]]
+name = "parquet"
 harness = false
 
 [[bin]]
