@@ -248,6 +248,19 @@ fn restore_kernel_to_slot(state: &State, slot_id: &str, kernel: LocalKernel) {
     }
 }
 
+fn kernel_connection_for_slot(
+    state: &State,
+    slot_id: &str,
+) -> Result<crate::backend::KernelConnection, Error> {
+    let slot = state.kernels.get(slot_id).ok_or(Error::KernelDisconnect)?;
+    Ok(slot
+        .kernel
+        .as_ref()
+        .ok_or(Error::KernelDisconnect)?
+        .conn()
+        .clone())
+}
+
 fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
     let slot = state.kernels.get(slot_id).ok_or(Error::KernelDisconnect)?;
     Ok(slot.spec_name().to_string())
@@ -434,6 +447,22 @@ pub async fn save_to_disk(
 }
 
 /// Run a code cell in a Jupyter kernel.
+pub async fn run_cell_events(
+    kernel_id: &str,
+    code: &str,
+    state: &State,
+) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
+    let conn = kernel_connection_for_slot(state, kernel_id)?;
+    commands::run_cell(&conn, code).await
+}
+
+/// Interrupt a Jupyter kernel slot.
+pub async fn interrupt_kernel_slot(kernel_id: &str, state: &State) -> Result<(), Error> {
+    let conn = kernel_connection_for_slot(state, kernel_id)?;
+    commands::interrupt(&conn).await
+}
+
+/// Run a code cell in a Jupyter kernel.
 #[tauri::command]
 pub async fn run_cell(
     kernel_id: &str,
@@ -441,25 +470,22 @@ pub async fn run_cell(
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, State>,
 ) -> Result<(), Error> {
-    let conn = {
-        let slot = state
-            .kernels
-            .get(kernel_id)
-            .ok_or(Error::KernelDisconnect)?;
-        slot.kernel
-            .as_ref()
-            .ok_or(Error::KernelDisconnect)?
-            .conn()
-            .clone()
-    };
-
-    let rx = commands::run_cell(&conn, code).await?;
+    let rx = run_cell_events(kernel_id, code, &state).await?;
     while let Ok(event) = rx.recv().await {
         if on_event.send(event).is_err() {
             break;
         }
     }
     Ok(())
+}
+
+/// Interrupt a running Jupyter kernel.
+#[tauri::command]
+pub async fn interrupt_kernel(
+    kernel_id: &str,
+    state: tauri::State<'_, State>,
+) -> Result<(), Error> {
+    interrupt_kernel_slot(kernel_id, &state).await
 }
 
 #[cfg(test)]

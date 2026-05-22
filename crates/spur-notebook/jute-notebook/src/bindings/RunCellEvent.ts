@@ -8,6 +8,7 @@ import type { ExecuteResult } from "./ExecuteResult";
  * Events that can be received while running a cell.
  */
 export type RunCellEvent =
+  | { event: "started" }
   | { event: "stdout"; data: string }
   | { event: "stderr"; data: string }
   | { event: "execute_result"; data: ExecuteResult }
@@ -15,4 +16,8 @@ export type RunCellEvent =
   | { event: "update_display_data"; data: DisplayData }
   | { event: "clear_output"; data: ClearOutput }
   | { event: "error"; data: ErrorReply }
-  | { event: "disconnect"; data: string };
+  | { event: "disconnect"; data: string }
+  | {
+      event: "finished";
+      data: { exec_count: number | null; status: string };
+    };

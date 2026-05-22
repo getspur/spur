@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use jute::backend::commands::RunCellEvent;
 use rmcp::{
     model::{ErrorCode, ErrorData as McpError},
     ErrorData,
@@ -16,6 +17,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::Emitter;
+use tauri::Manager;
 use thiserror::Error;
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
@@ -23,6 +25,11 @@ use uuid::Uuid;
 pub type RequestId = Uuid;
 pub type BridgeRequestFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Value, BridgeError>> + Send + 'a>>;
+pub type RunCellEventFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<async_channel::Receiver<RunCellEvent>, BridgeError>> + Send + 'a,
+    >,
+>;
 
 pub trait BridgeRequester: Send + Sync {
     fn listener_registered(&self) -> bool;
@@ -34,6 +41,19 @@ pub trait BridgeRequester: Send + Sync {
         params: Value,
         timeout: Duration,
     ) -> BridgeRequestFuture<'a>;
+
+    fn run_cell_events<'a>(
+        &'a self,
+        _kernel_id: &'a str,
+        _code: &'a str,
+    ) -> RunCellEventFuture<'a> {
+        Box::pin(async {
+            Err(BridgeError::Handler {
+                code: "kernel_unavailable".to_string(),
+                message: "notebook kernel access is unavailable".to_string(),
+            })
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +99,19 @@ impl BridgeError {
             self.to_string(),
             Some(json!({ "code": mcp_code })),
         )
+    }
+}
+
+fn kernel_bridge_error(error: jute::Error) -> BridgeError {
+    let code = match &error {
+        jute::Error::KernelDisconnect => "kernel_disconnected",
+        jute::Error::KernelNotFound => "kernel_not_found",
+        jute::Error::KernelProcessNotFound => "kernel_process_not_found",
+        _ => "kernel_error",
+    };
+    BridgeError::Handler {
+        code: code.to_string(),
+        message: error.to_string(),
     }
 }
 
@@ -151,6 +184,18 @@ impl BridgeRequester for TauriBridgeRequester {
             Some(app) => {
                 Box::pin(async move { self.bridge.request(app, method, params, timeout).await })
             }
+            None => Box::pin(async { Err(BridgeError::NoListener) }),
+        }
+    }
+
+    fn run_cell_events<'a>(&'a self, kernel_id: &'a str, code: &'a str) -> RunCellEventFuture<'a> {
+        match &self.app {
+            Some(app) => Box::pin(async move {
+                let state = app.state::<jute::state::State>();
+                jute::commands::run_cell_events(kernel_id, code, &state)
+                    .await
+                    .map_err(kernel_bridge_error)
+            }),
             None => Box::pin(async { Err(BridgeError::NoListener) }),
         }
     }
