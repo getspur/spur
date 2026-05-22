@@ -67,7 +67,7 @@ use fs2::FileExt;
 
 /// How long to sleep between flock retry attempts. Caller-visible default;
 /// individual call sites can pass their own deadline via `timeout`.
-pub const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+pub const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Try to take an exclusive flock on `file`, retrying until `timeout` elapses.
 ///
