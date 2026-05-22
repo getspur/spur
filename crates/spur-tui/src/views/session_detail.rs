@@ -27,6 +27,12 @@ use super::View;
 const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
 const CANCEL_HINT_TEXT: &str = "Esc cancelled the active turn. Press Esc again to go back.";
 
+fn brain_chat_trace(kind: spur_acp::AgentKind) -> ReactTrace {
+    let mut trace = ReactTrace::with_kind(kind);
+    trace.set_chat_response_char_cap(Some(crate::notebook_config::DEFAULT_CHAT_RESPONSE_CHAR_CAP));
+    trace
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusedSessionPanel {
     /// Inline workers list above the ReAct trace when visible.
@@ -256,7 +262,7 @@ impl SessionDetailView {
             agent_name,
             role,
             agent_cfg,
-            react_trace: ReactTrace::with_kind(agent_kind),
+            react_trace: brain_chat_trace(agent_kind),
             input_bar: InputBar::new(),
             cost: 0.0,
             started_at: Instant::now(),
@@ -341,9 +347,7 @@ impl SessionDetailView {
             agent_cfg: std::sync::Arc::new(spur_acp::AgentConfig::with_defaults(
                 "palette-test-agent",
             )),
-            react_trace: crate::components::react_trace::ReactTrace::with_kind(
-                spur_acp::AgentKind::Generic,
-            ),
+            react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: crate::components::input_bar::InputBar::new(),
             cost: 0.0,
             started_at: std::time::Instant::now(),
@@ -401,6 +405,10 @@ impl SessionDetailView {
             .set_issue_snapshot(descriptors);
     }
 
+    pub fn set_chat_response_char_cap(&mut self, cap: usize) {
+        self.react_trace.set_chat_response_char_cap(Some(cap));
+    }
+
     #[cfg(feature = "markdown")]
     fn bump_mermaid_registry_version(&mut self) {
         self.mermaid_registry_version = self.mermaid_registry_version.wrapping_add(1);
@@ -437,9 +445,7 @@ impl SessionDetailView {
             agent_name: String::new(),
             role: String::new(),
             agent_cfg,
-            react_trace: crate::components::react_trace::ReactTrace::with_kind(
-                spur_acp::AgentKind::Generic,
-            ),
+            react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: InputBar::new(),
             cost: 0.0,
             started_at: std::time::Instant::now(),
