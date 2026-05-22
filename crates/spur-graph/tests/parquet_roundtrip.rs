@@ -1,5 +1,8 @@
+use std::fs::File;
 use std::path::Path;
 
+use arrow_array::{Array, Int64Array, RecordBatch};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use spur_graph::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet, Confidence,
     GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
@@ -12,7 +15,7 @@ fn parquet_artifact_round_trips_all_tables_with_exact_node_ids() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = fixture_artifact();
 
-    assert!(!WriteOptions::default().emit_edges_by_dst);
+    assert!(WriteOptions::default().emit_edges_by_dst);
 
     let dir = write_artifact_parquet(
         &artifact,
@@ -40,6 +43,45 @@ fn parquet_artifact_round_trips_all_tables_with_exact_node_ids() {
 
     let actual = read_artifact_parquet(&dir).expect("read parquet artifact");
     assert_artifact_eq(&actual, &artifact);
+}
+
+#[test]
+fn default_write_emits_edges_by_dst_with_edges_schema_and_dst_src_order() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = fixture_artifact_with_unsorted_resolved_edges();
+    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let edges_path = dir.join("edges.parquet");
+    let edges_by_dst_path = dir.join("edges_by_dst.parquet");
+
+    assert!(
+        edges_by_dst_path.exists(),
+        "default write should emit edges_by_dst.parquet"
+    );
+
+    let edges = read_batches(&edges_path);
+    let edges_by_dst = read_batches(&edges_by_dst_path);
+    let resolved_edge_count = artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.target_stable_symbol_id.is_some())
+        .count();
+
+    assert_eq!(row_count(&edges_by_dst), row_count(&edges));
+    assert_eq!(row_count(&edges), resolved_edge_count);
+    assert_eq!(column_schema(&edges_by_dst), column_schema(&edges));
+
+    let endpoints = read_edge_endpoints(&edges_by_dst);
+    let mut sorted = endpoints.clone();
+    sorted.sort_by_key(|(src_id, dst_id)| (*dst_id, *src_id));
+    assert_eq!(
+        endpoints, sorted,
+        "edges_by_dst.parquet rows should be sorted by (dst_id, src_id)"
+    );
+
+    let manifest = read_artifact_header_parquet(&dir).expect("read manifest");
+    assert!(manifest.edges_by_dst_present);
+    assert_eq!(manifest.row_counts.edges_by_dst, Some(resolved_edge_count));
 }
 
 #[test]
@@ -104,7 +146,21 @@ fn write_replaces_existing_hash_directory_before_publish() {
         !stale.exists(),
         "existing hash directory should be removed before publication"
     );
-    assert!(!dir.join("edges_by_dst.parquet").exists());
+    assert!(dir.join("edges_by_dst.parquet").exists());
+}
+
+fn fixture_artifact_with_unsorted_resolved_edges() -> GraphIndexArtifact {
+    let mut artifact = fixture_artifact();
+    artifact.edges.push(GraphEdgeArtifact {
+        source_stable_symbol_id: "sym-b-fn".to_string(),
+        target_stable_symbol_id: Some("sym-a-fn".to_string()),
+        target_label: Some("a_fn".to_string()),
+        relation: RelationKind::Calls,
+        confidence: Confidence::SyntaxExact,
+        confidence_score: 0.75,
+        edge_kind: Some(GraphEdgeKind::Calls),
+    });
+    artifact
 }
 
 fn fixture_artifact() -> GraphIndexArtifact {
@@ -225,6 +281,66 @@ fn assert_parquet_files_exist(dir: &Path) {
     ] {
         assert!(dir.join(name).exists(), "{name} should exist");
     }
+}
+
+fn read_batches(path: &Path) -> Vec<RecordBatch> {
+    let file = File::open(path).unwrap_or_else(|err| panic!("open `{}`: {err}", path.display()));
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap_or_else(|err| panic!("create Arrow reader for `{}`: {err}", path.display()))
+        .build()
+        .unwrap_or_else(|err| panic!("build Arrow reader for `{}`: {err}", path.display()));
+    reader
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|err| panic!("read Arrow batches from `{}`: {err}", path.display()))
+}
+
+fn row_count(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(RecordBatch::num_rows).sum()
+}
+
+fn column_schema(batches: &[RecordBatch]) -> Vec<(String, String, bool)> {
+    batches
+        .first()
+        .expect("Parquet file should contain at least one batch")
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().clone(),
+                format!("{:?}", field.data_type()),
+                field.is_nullable(),
+            )
+        })
+        .collect()
+}
+
+fn read_edge_endpoints(batches: &[RecordBatch]) -> Vec<(i64, i64)> {
+    let mut endpoints = Vec::new();
+    for batch in batches {
+        let src_ids = int64_column(batch, "src_id");
+        let dst_ids = int64_column(batch, "dst_id");
+        for row_index in 0..batch.num_rows() {
+            assert!(
+                !src_ids.is_null(row_index) && !dst_ids.is_null(row_index),
+                "edge row {row_index} should have non-null endpoints"
+            );
+            endpoints.push((src_ids.value(row_index), dst_ids.value(row_index)));
+        }
+    }
+    endpoints
+}
+
+fn int64_column<'a>(batch: &'a RecordBatch, column_name: &str) -> &'a Int64Array {
+    let index = batch
+        .schema()
+        .index_of(column_name)
+        .unwrap_or_else(|err| panic!("find column `{column_name}`: {err}"));
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap_or_else(|| panic!("column `{column_name}` is not Int64"))
 }
 
 fn assert_artifact_eq(actual: &GraphIndexArtifact, expected: &GraphIndexArtifact) {
