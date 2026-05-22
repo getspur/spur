@@ -33,10 +33,10 @@ pub enum ReplacedWith {
 
 pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMention {
     match &payload.authoritative.validation {
-        CodeMentionValidationSpec::FileExists { path } => {
+        CodeMentionValidationSpec::FileExists { .. } => {
             let file_payload = GraphFileArtifact {
                 stable_file_id: file_id_from_uri(&payload.authoritative.uri),
-                file_path: path.clone(),
+                file_path: payload.authoritative.file_path.clone(),
             };
             match validate_file(&file_payload, worktree_root) {
                 ValidationOutcome::Pass => ExpandedMention::Body {
@@ -71,10 +71,6 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
                 *byte_range,
                 entity_name,
                 anchor_hash,
-            );
-            debug_assert_eq!(
-                symbol_payload.file_path, payload.authoritative.file_path,
-                "symbol validation payload must use authoritative.file_path"
             );
             let Ok(content) = fs::read_to_string(&path) else {
                 return warning_expansion(payload, FailureReason::FileMissing, worktree_root);
