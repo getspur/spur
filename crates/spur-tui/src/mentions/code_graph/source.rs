@@ -114,11 +114,6 @@ impl MentionSource for CodeGraphMentionSource {
             return Ok(Vec::new());
         }
 
-        #[cfg(test)]
-        {
-            self.reload_count += 1;
-        }
-
         let artifact = match tracing::debug_span!("load_artifact")
             .in_scope(|| load_artifact(&self.artifact_path))
         {
@@ -135,6 +130,12 @@ impl MentionSource for CodeGraphMentionSource {
                 return Ok(Vec::new());
             }
         };
+
+        #[cfg(test)]
+        {
+            self.reload_count += 1;
+        }
+
         let content_hash = artifact.header.content_hash_blake3.clone();
         for diagnostic in &artifact.diagnostics {
             tracing::warn!(
