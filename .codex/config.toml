@@ -1,4 +1,0 @@
-[mcp_servers.knowledge_graph]
-url = "http://localhost:27496/mcp"
-required = false
-startup_timeout_sec = 20
