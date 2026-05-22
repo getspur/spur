@@ -364,6 +364,53 @@ pub async fn agent_response(
 mod tests {
     use super::*;
 
+    #[test]
+    fn bridge_errors_map_to_expected_mcp_codes() {
+        let cases: &[(BridgeError, i32, &str)] = &[
+            (
+                BridgeError::NotebookNotOpen,
+                -32060,
+                "no notebook is loaded",
+            ),
+            (
+                BridgeError::WindowClosed,
+                -32063,
+                "notebook window is closed",
+            ),
+            (BridgeError::AppRestarted, -32063, "notebook app restarted"),
+            (
+                BridgeError::NoListener,
+                -32061,
+                "notebook bridge listener is not ready",
+            ),
+            (
+                BridgeError::Timeout,
+                -32062,
+                "notebook bridge request timed out",
+            ),
+            (
+                BridgeError::Handler {
+                    code: "handler_failed".to_string(),
+                    message: "boom".to_string(),
+                },
+                -32064,
+                "notebook handler error handler_failed: boom",
+            ),
+        ];
+
+        for (error, expected_code, expected_message_prefix) in cases {
+            let mcp_error = error.clone().into_mcp_error();
+
+            assert_eq!(mcp_error.code, ErrorCode(*expected_code));
+            assert!(
+                mcp_error.message.starts_with(expected_message_prefix),
+                "expected message {:?} to start with {:?}",
+                mcp_error.message,
+                expected_message_prefix
+            );
+        }
+    }
+
     #[tokio::test]
     async fn bridge_ready_drains_pending_requests_as_app_restarted() {
         let bridge = AgentBridge::new();
