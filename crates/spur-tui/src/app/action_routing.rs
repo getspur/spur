@@ -1075,6 +1075,34 @@ impl App {
             Action::ThemeCommand { arg } => {
                 self.handle_theme_command(arg);
             }
+            Action::NotebookCommand { arg } => {
+                let label = notebook_command_label(&arg);
+                self.flash_hint_short(format!("{label}..."));
+                tokio::spawn(async move {
+                    match crate::notebook_daemon::send_notebook_command(&arg).await {
+                        Ok(response) if response.ok => {
+                            tracing::info!(
+                                path = response.path.as_deref(),
+                                "notebook daemon command completed"
+                            );
+                        }
+                        Ok(response) => {
+                            if let Some(error) = response.error {
+                                tracing::warn!(
+                                    code = %error.code,
+                                    message = %error.message,
+                                    "notebook daemon command failed"
+                                );
+                            } else {
+                                tracing::warn!("notebook daemon command failed");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "notebook daemon command failed");
+                        }
+                    }
+                });
+            }
             Action::PrefillInput { text } => {
                 match &self.current_view {
                     ViewId::Dashboard => {
@@ -1296,6 +1324,15 @@ impl App {
         if let Some(ref mut detail) = self.session_detail {
             detail.resolve_pending_permissions();
         }
+    }
+}
+
+fn notebook_command_label(arg: &str) -> &'static str {
+    match arg.trim() {
+        "" => "Reopening notebook",
+        "new" => "Creating notebook",
+        "close" => "Closing notebook",
+        _ => "Opening notebook",
     }
 }
 
