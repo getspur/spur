@@ -119,6 +119,19 @@ pub fn route_with_caps(
         };
     }
 
+    if text == "/notebook" {
+        return SubmitDecision::Local {
+            action: Action::NotebookCommand { arg: String::new() },
+        };
+    }
+    if let Some(rest) = text.strip_prefix("/notebook ") {
+        return SubmitDecision::Local {
+            action: Action::NotebookCommand {
+                arg: rest.trim().to_string(),
+            },
+        };
+    }
+
     // /issue show <id> → issue ViewDetail action
     if let Some(rest) = text.strip_prefix("/issue show ") {
         let id = rest.trim().to_string();
@@ -851,6 +864,21 @@ mod sessions_slash_tests {
             } => assert_eq!(arg, "reload"),
             other => panic!(
                 "expected ThemeCommand {{ arg: \"reload\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn slash_notebook_with_path_routes_to_notebook_command_with_arg() {
+        let registry = build_registry_for_test();
+        let decision = route("/notebook foo.ipynb", &[], &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::NotebookCommand { arg },
+            } => assert_eq!(arg, "foo.ipynb"),
+            other => panic!(
+                "expected NotebookCommand {{ arg: \"foo.ipynb\" }}, got {:?}",
                 other
             ),
         }
