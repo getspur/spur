@@ -4,6 +4,7 @@
 use std::{env, path::PathBuf, sync::Arc};
 
 use jute::state::State;
+use spur_core::notebook::control_socket_path;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,10 +28,10 @@ enum Mode {
     McpProxy { socket_path: PathBuf },
 }
 
-fn parse_mode() -> Mode {
+fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
     let mut headless = false;
     let mut files = Vec::new();
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--headless" => headless = true,
@@ -38,7 +39,7 @@ fn parse_mode() -> Mode {
                 let socket_path = args
                     .next()
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| mcp::control_socket_path().expect("control socket path"));
+                    .unwrap_or_else(control_socket_path);
                 return Mode::McpProxy { socket_path };
             }
             _ if arg.starts_with('-') => {}
@@ -56,6 +57,10 @@ fn parse_mode() -> Mode {
         }
     }
     Mode::App { headless, files }
+}
+
+fn parse_mode() -> Mode {
+    parse_mode_from(env::args().skip(1))
 }
 
 async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
@@ -109,7 +114,7 @@ fn main() {
 
     let slot_id = slot_id();
     let socket_path = if headless {
-        mcp::control_socket_path().expect("failed to resolve notebook control socket path")
+        control_socket_path()
     } else {
         mcp::socket_path_for_slot(&slot_id).expect("failed to resolve notebook socket path")
     };
@@ -237,4 +242,53 @@ fn main() {
                 _ => {}
             },
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        ffi::OsString,
+        sync::{Mutex, OnceLock},
+    };
+
+    fn home_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct HomeGuard(Option<OsString>);
+
+    impl HomeGuard {
+        fn set(home: &str) -> Self {
+            let previous = env::var_os("HOME");
+            env::set_var("HOME", home);
+            Self(previous)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => env::set_var("HOME", home),
+                None => env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_proxy_default_socket_path_matches_core_for_fixed_home() {
+        let _lock = home_lock().lock().expect("home lock poisoned");
+        let _home = HomeGuard::set("/tmp/spur-notebook-home");
+
+        let Mode::McpProxy { socket_path } = parse_mode_from(["--mcp-proxy".to_string()]) else {
+            panic!("expected mcp proxy mode");
+        };
+
+        assert_eq!(socket_path, spur_core::notebook::control_socket_path());
+        assert_eq!(
+            socket_path,
+            PathBuf::from("/tmp/spur-notebook-home/.spur/notebooks/control.sock")
+        );
+    }
 }
