@@ -465,8 +465,10 @@ impl App {
                 // a pre-ready SessionDetailView so LoadState renders correctly
                 // while the resume pipeline is in flight (Tranche 2 Task 5).
                 let sid = SessionId(session_id.clone());
-                self.session_detail =
-                    Some(crate::views::session_detail::SessionDetailView::for_session(sid.clone()));
+                let mut view =
+                    crate::views::session_detail::SessionDetailView::for_session(sid.clone());
+                view.set_chat_response_char_cap(self.notebook_ui_config.chat_response_char_cap);
+                self.session_detail = Some(view);
                 self.navigate_to(ViewId::SessionDetail(sid));
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumeSession { session_id });
