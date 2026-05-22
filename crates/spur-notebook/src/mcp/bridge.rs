@@ -242,7 +242,8 @@ impl AgentBridge {
         self.notebook_open.load(Ordering::SeqCst)
     }
 
-    pub fn mark_ready(&self) {
+    pub async fn mark_ready(&self) {
+        self.drain_pending(BridgeError::AppRestarted).await;
         self.window_alive.store(true, Ordering::SeqCst);
         self.listener_registered.store(true, Ordering::SeqCst);
     }
@@ -335,7 +336,7 @@ impl AgentBridge {
 
 #[tauri::command]
 pub async fn bridge_ready(bridge: tauri::State<'_, Arc<AgentBridge>>) -> Result<(), String> {
-    bridge.mark_ready();
+    bridge.mark_ready().await;
     Ok(())
 }
 
@@ -357,4 +358,43 @@ pub async fn agent_response(
         .respond(payload)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bridge_ready_drains_pending_requests_as_app_restarted() {
+        let bridge = AgentBridge::new();
+        let (tx_a, rx_a) = oneshot::channel();
+        let (tx_b, rx_b) = oneshot::channel();
+
+        bridge
+            .pending
+            .lock()
+            .await
+            .insert(RequestId::new_v4(), tx_a);
+        bridge
+            .pending
+            .lock()
+            .await
+            .insert(RequestId::new_v4(), tx_b);
+
+        bridge.mark_ready().await;
+
+        for rx in [rx_a, rx_b] {
+            match rx.await.expect("pending request should resolve") {
+                BridgeResponse::Error(BridgeError::AppRestarted) => {}
+                other => panic!("expected AppRestarted, got {other:?}"),
+            }
+        }
+
+        assert!(bridge.pending.lock().await.is_empty());
+        assert!(bridge.listener_registered());
+        assert!(bridge.window_alive());
+
+        let error = BridgeError::AppRestarted.into_mcp_error();
+        assert_eq!(error.data.unwrap()["code"], "app_restarted");
+    }
 }

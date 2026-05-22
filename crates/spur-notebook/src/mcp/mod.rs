@@ -21,6 +21,7 @@ use tokio::{
     sync::oneshot,
     task::JoinHandle,
 };
+use tracing::warn;
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
 use self::{
@@ -194,6 +195,93 @@ pub fn control_socket_path() -> Result<PathBuf> {
         .join(".spur")
         .join("notebooks")
         .join("control.sock"))
+}
+
+fn notebooks_dir() -> Result<PathBuf> {
+    let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
+    Ok(base_dirs.home_dir().join(".spur").join("notebooks"))
+}
+
+fn last_notebook_record_path() -> Result<PathBuf> {
+    Ok(notebooks_dir()?.join("last.json"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LastNotebookRecord {
+    path: PathBuf,
+}
+
+async fn persist_last_notebook(path: &Path) -> Result<()> {
+    persist_last_notebook_at(&last_notebook_record_path()?, path).await
+}
+
+async fn persist_last_notebook_at(record_path: &Path, path: &Path) -> Result<()> {
+    if let Some(parent) = record_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let record = LastNotebookRecord {
+        path: path.to_path_buf(),
+    };
+    let bytes = serde_json::to_vec_pretty(&record)?;
+    let temp_path = record_path.with_file_name(format!(
+        ".{}.{}.tmp",
+        record_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("last.json"),
+        uuid::Uuid::new_v4()
+    ));
+    tokio::fs::write(&temp_path, bytes)
+        .await
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    tokio::fs::rename(&temp_path, record_path)
+        .await
+        .with_context(|| format!("failed to rename {}", record_path.display()))?;
+    Ok(())
+}
+
+async fn load_last_notebook() -> Result<Option<PathBuf>> {
+    load_last_notebook_at(&last_notebook_record_path()?).await
+}
+
+async fn load_last_notebook_at(record_path: &Path) -> Result<Option<PathBuf>> {
+    let bytes = match tokio::fs::read(record_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", record_path.display()))
+        }
+    };
+    let record: LastNotebookRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", record_path.display()))?;
+    Ok(Some(record.path))
+}
+
+async fn clear_last_notebook() -> Result<()> {
+    clear_last_notebook_at(&last_notebook_record_path()?).await
+}
+
+async fn clear_last_notebook_at(record_path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(record_path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to remove {}", record_path.display()))
+        }
+    }
+}
+
+fn resolve_notebook_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
 }
 
 pub async fn start_server(socket_path: impl AsRef<Path>) -> Result<NotebookMcpServerHandle> {
@@ -370,7 +458,7 @@ impl NotebookDaemonControl {
                     message: "open requires path".to_string(),
                 })?;
                 self.save_current().await?;
-                self.open_path(path).await.map(Some)
+                self.open_path(resolve_notebook_path(path)).await.map(Some)
             }
             "new" => {
                 self.save_current().await?;
@@ -391,6 +479,9 @@ impl NotebookDaemonControl {
                 let mut state = self.state.lock().await;
                 state.current_path = None;
                 state.window_label = None;
+                if let Err(error) = clear_last_notebook().await {
+                    warn!(%error, "failed to clear last notebook record");
+                }
                 Ok(None)
             }
             "shutdown" => {
@@ -434,6 +525,9 @@ impl NotebookDaemonControl {
         let mut state = self.state.lock().await;
         state.current_path = Some(path.clone());
         state.window_label = Some(label);
+        if let Err(error) = persist_last_notebook(&path).await {
+            warn!(%error, path = %path.display(), "failed to persist last notebook record");
+        }
         Ok(path)
     }
 
@@ -482,6 +576,31 @@ impl NotebookDaemonControl {
         }
         is_current
     }
+
+    pub async fn restore_last_open_notebook(&self) {
+        match load_last_notebook().await {
+            Ok(Some(path)) if path.exists() => {
+                if let Err(error) = self.open_path(path.clone()).await {
+                    warn!(
+                        %error,
+                        path = %path.display(),
+                        "failed to restore last notebook"
+                    );
+                }
+            }
+            Ok(Some(path)) => {
+                warn!(
+                    path = %path.display(),
+                    "last notebook no longer exists; clearing record"
+                );
+                if let Err(error) = clear_last_notebook().await {
+                    warn!(%error, "failed to clear stale last notebook record");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => warn!(%error, "failed to load last notebook record"),
+        }
+    }
 }
 
 async fn create_scratch_notebook() -> anyhow::Result<PathBuf> {
@@ -507,6 +626,7 @@ pub async fn start_daemon_server(
     let control = NotebookDaemonControl::new(Arc::clone(&bridge), app);
     let requester = Arc::new(TauriBridgeRequester::with_app(bridge, control.app.clone()));
     let handle = start_multiplexed_server(socket_path, requester, control.clone()).await?;
+    control.restore_last_open_notebook().await;
     Ok((handle, control))
 }
 
@@ -616,4 +736,38 @@ async fn prepare_socket_path(socket_path: impl AsRef<Path>) -> Result<PathBuf> {
         }
     }
     Ok(socket_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn last_notebook_record_round_trips_and_clears() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-last-")
+            .tempdir_in("/private/tmp")
+            .expect("temp dir");
+        let record_path = temp_dir.path().join("last.json");
+        let notebook_path = temp_dir.path().join("analysis.ipynb");
+
+        persist_last_notebook_at(&record_path, &notebook_path)
+            .await
+            .expect("record writes");
+
+        let loaded = load_last_notebook_at(&record_path)
+            .await
+            .expect("record reads");
+        assert_eq!(loaded.as_deref(), Some(notebook_path.as_path()));
+
+        clear_last_notebook_at(&record_path)
+            .await
+            .expect("record clears");
+        assert_eq!(
+            load_last_notebook_at(&record_path)
+                .await
+                .expect("missing record reads as none"),
+            None
+        );
+    }
 }
