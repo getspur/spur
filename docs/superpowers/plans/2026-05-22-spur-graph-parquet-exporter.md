@@ -56,14 +56,14 @@ Migration touch points (Tasks 8–11):
 
 **Steps:**
 
-- [ ] **Step 1: Run the full `spur-graph` test suite to capture green baseline**
+- [x] **Step 1: Run the full `spur-graph` test suite to capture green baseline**
 
 ```bash
 cargo test -p spur-graph
 ```
 Expected: all green. Note any pre-existing failures; they must remain in the same state at the end.
 
-- [ ] **Step 2: Identify the public surface that must survive**
+- [x] **Step 2: Identify the public surface that must survive**
 
 Re-exports in `store/mod.rs` today:
 
@@ -82,7 +82,7 @@ External callers (verify via `cargo check` after the move):
 
 The `store::json::*` import in the test file must keep working after the rename; either update the import there or re-export the moved symbols. Choose: update the test file's import path to `store::build::*` for the construction-only symbols.
 
-- [ ] **Step 3: Create `crates/spur-graph/src/store/build.rs` with the moved items**
+- [x] **Step 3: Create `crates/spur-graph/src/store/build.rs` with the moved items**
 
 Move these items from `json.rs` to `build.rs`, preserving function bodies exactly:
 
@@ -108,7 +108,7 @@ Keep these in `json.rs`:
 
 If any moved function references a private helper that stays in `json.rs`, move that helper to `build.rs` too (or make it `pub(super)` and import). Move, don't duplicate.
 
-- [ ] **Step 4: Update `store/mod.rs`**
+- [x] **Step 4: Update `store/mod.rs`**
 
 ```rust
 pub mod build;
@@ -123,11 +123,11 @@ pub use build::{
 pub use json::write_artifact;
 ```
 
-- [ ] **Step 5: Update the in-tree test import**
+- [x] **Step 5: Update the in-tree test import**
 
 In `crates/spur-graph/tests/extractor.rs`, change any `use spur_graph::store::json::{...}` import for construction-only symbols to `use spur_graph::store::build::{...}`. Leave `write_artifact` imports pointing at `store::json`.
 
-- [ ] **Step 6: `cargo check` workspace and `cargo test -p spur-graph`**
+- [x] **Step 6: `cargo check` workspace and `cargo test -p spur-graph`**
 
 ```bash
 cargo check --workspace
@@ -135,7 +135,7 @@ cargo test -p spur-graph
 ```
 Expected: workspace builds; spur-graph tests pass in the same state as Step 1.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/spur-graph/src/store/ crates/spur-graph/tests/
@@ -159,11 +159,11 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Build a representative fixture**
+- [x] **Step 1: Build a representative fixture**
 
 Use the live SPUR worktree's `.spur/graph-index.json` as the input. Load it via the existing JSON path; this is a 27.5k/47k/68k/1.5k artifact.
 
-- [ ] **Step 2: Write a throwaway bench that materializes Parquet at each candidate row-group size**
+- [x] **Step 2: Write a throwaway bench that materializes Parquet at each candidate row-group size**
 
 ```rust
 // crates/spur-graph/benches/pre_pr2_bench.rs (delete after Task 2 commit)
@@ -185,7 +185,7 @@ fn main() -> anyhow::Result<()> {
 
 Compile with `arrow-array`, `arrow-schema`, `parquet` (pure-Rust) added to `Cargo.toml`'s `[dev-dependencies]` temporarily.
 
-- [ ] **Step 3: Run and record the row-group + encoding numbers**
+- [x] **Step 3: Run and record the row-group + encoding numbers**
 
 ```bash
 cargo run --bin pre_pr2_bench --release -- /Volumes/Projects/spur/.spur/graph-index.json
@@ -193,7 +193,7 @@ cargo run --bin pre_pr2_bench --release -- /Volumes/Projects/spur/.spur/graph-in
 
 Capture for each `(row_group_size, enclosing_scope_encoding)` combination: on-disk byte size + write wall-clock.
 
-- [ ] **Step 4: Run cardinality probe on `enclosing_scope`**
+- [x] **Step 4: Run cardinality probe on `enclosing_scope`**
 
 ```bash
 duckdb -c "SELECT COUNT(DISTINCT s.enclosing_scope) * 1.0 / COUNT(*) AS dict_ratio FROM read_json('/Volumes/Projects/spur/.spur/graph-index.json', maximum_object_size=200000000), UNNEST(symbols) AS t(s)"
@@ -201,7 +201,7 @@ duckdb -c "SELECT COUNT(DISTINCT s.enclosing_scope) * 1.0 / COUNT(*) AS dict_rat
 
 If `dict_ratio > 0.5`, `enclosing_scope` should use PLAIN; otherwise DICTIONARY.
 
-- [ ] **Step 5: Bench `edges_by_dst.parquet` materialization vs lazy DuckDB dst-sort**
+- [x] **Step 5: Bench `edges_by_dst.parquet` materialization vs lazy DuckDB dst-sort**
 
 Write `edges.parquet` and `edges_by_dst.parquet`. Compare:
 1. `duckdb -c "SELECT * FROM read_parquet('edges_by_dst.parquet') WHERE dst_id = 42"` (materialized)
@@ -209,7 +209,7 @@ Write `edges.parquet` and `edges_by_dst.parquet`. Compare:
 
 Measure cold-query wall-clock for both. Pick a representative `dst_id` (use an actual existing one from the fixture).
 
-- [ ] **Step 6: Write `crates/spur-graph/benches/pre_pr2.md` with the decision summary**
+- [x] **Step 6: Write `crates/spur-graph/benches/pre_pr2.md` with the decision summary**
 
 ```markdown
 # Pre-PR2 Bench Results — 2026-05-22
@@ -235,14 +235,14 @@ Measure cold-query wall-clock for both. Pick a representative `dst_id` (use an a
 [1–2 paragraphs explaining the decision rule from §6.3 and §12 was met or not]
 ```
 
-- [ ] **Step 7: Delete the throwaway bench and revert `[dev-dependencies]` temporary additions**
+- [x] **Step 7: Delete the throwaway bench and revert `[dev-dependencies]` temporary additions**
 
 ```bash
 git rm crates/spur-graph/benches/pre_pr2_bench.rs
 # Revert Cargo.toml dev-deps
 ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/spur-graph/benches/pre_pr2.md crates/spur-graph/Cargo.toml
@@ -271,7 +271,7 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Add workspace deps**
+- [x] **Step 1: Add workspace deps**
 
 In the workspace root `Cargo.toml`:
 
@@ -295,7 +295,7 @@ arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 ```
 
-- [ ] **Step 2: Write failing round-trip test**
+- [x] **Step 2: Write failing round-trip test**
 
 ```rust
 // crates/spur-graph/tests/parquet_roundtrip.rs
@@ -346,7 +346,7 @@ cargo test -p spur-graph --test parquet_roundtrip -- --nocapture
 
 Expected: FAIL with "no such module / no such function" (write_artifact_parquet undefined).
 
-- [ ] **Step 3: Add module skeleton**
+- [x] **Step 3: Add module skeleton**
 
 Create `crates/spur-graph/src/store/parquet.rs`:
 
@@ -465,7 +465,7 @@ fn read_manifest(dir: &Path) -> Result<GraphArtifactManifest> {
 
 Add `pub mod parquet;` to `crates/spur-graph/src/store/mod.rs` (re-exports come after the API works).
 
-- [ ] **Step 4: Implement `write_nodes` and `read_nodes`**
+- [x] **Step 4: Implement `write_nodes` and `read_nodes`**
 
 Schema per spec §6.1 (mirror `GraphSymbolArtifact`; `node_id` is the extractor's `NodeId(u64).0`):
 
@@ -509,7 +509,7 @@ Override `set_dictionary_enabled(false)` per-column for `stable_symbol_id`, `anc
 
 `read_nodes` is the inverse: scan the file, decode each batch, reconstruct `GraphSymbolArtifact` records sorted as written.
 
-- [ ] **Step 5: Implement `write_files` and `read_files`**
+- [x] **Step 5: Implement `write_files` and `read_files`**
 
 Per §6.5:
 
@@ -527,7 +527,7 @@ Same parallel-vec problem as nodes: extend `compose_artifact` to attach `Vec<Nod
 
 The reader discards `node_id` (since `GraphFileArtifact` doesn't carry it) but reconstructs the lookup table so edges can validate `src_id`/`dst_id` against the union of node/file IDs at test time.
 
-- [ ] **Step 6: Implement `write_edges` and `read_edges`**
+- [x] **Step 6: Implement `write_edges` and `read_edges`**
 
 Per §6.2:
 
@@ -553,11 +553,11 @@ Filter to resolved edges only (`target_stable_symbol_id.is_some()`). Sort by `(s
 
 If `options.emit_edges_by_dst == true`, also write `edges_by_dst.parquet` with sort key `(dst_id ASC, src_id ASC)` — same row set, re-sorted.
 
-- [ ] **Step 7: Implement `write_edges_unresolved` and `read_edges_unresolved`**
+- [x] **Step 7: Implement `write_edges_unresolved` and `read_edges_unresolved`**
 
 Per §6.4. Filter to `target_stable_symbol_id.is_none()`. Sort by `src_id ASC`. Schema omits `target_stable_id` and `dst_id`.
 
-- [ ] **Step 8: Implement `write_file_manifests` and `read_file_manifests`**
+- [x] **Step 8: Implement `write_file_manifests` and `read_file_manifests`**
 
 Per §6.6 — `node_ids LIST<INT64>`:
 
@@ -578,15 +578,15 @@ fn file_manifests_schema() -> SchemaRef {
 
 Use `arrow_array::builder::ListBuilder<Int64Builder>` for the list column. Convert each `NodeId(u64)` to `i64` losslessly (NodeIds in practice fit). On read, convert back to `NodeId(u64)`.
 
-- [ ] **Step 9: Implement `write_tombstones` and `read_tombstones`**
+- [x] **Step 9: Implement `write_tombstones` and `read_tombstones`**
 
 Per §6.7. Two-column file. Sort by `path ASC`.
 
-- [ ] **Step 10: Implement `write_manifest`**
+- [x] **Step 10: Implement `write_manifest`**
 
 Write `manifest.json` LAST in the `write_artifact_parquet` sequence so its presence is the completion sentinel (preparation for Task 4's atomic dance). Set `complete: true`, `edges_by_dst_present` per options, and `row_counts` from the actual artifact.
 
-- [ ] **Step 11: Run the round-trip test**
+- [x] **Step 11: Run the round-trip test**
 
 ```bash
 cargo test -p spur-graph --test parquet_roundtrip -- --nocapture
@@ -594,7 +594,7 @@ cargo test -p spur-graph --test parquet_roundtrip -- --nocapture
 
 Expected: PASS. Iterate on schema/encoding details until green.
 
-- [ ] **Step 12: Add `pub use parquet::*` to `store/mod.rs`**
+- [x] **Step 12: Add `pub use parquet::*` to `store/mod.rs`**
 
 ```rust
 pub use parquet::{
@@ -603,7 +603,7 @@ pub use parquet::{
 };
 ```
 
-- [ ] **Step 13: Commit**
+- [x] **Step 13: Commit**
 
 ```bash
 git add crates/spur-graph/ Cargo.toml
@@ -629,7 +629,7 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Write failing test for partial-write rejection**
+- [x] **Step 1: Write failing test for partial-write rejection**
 
 ```rust
 #[test]
@@ -658,7 +658,7 @@ cargo test -p spur-graph --test parquet_roundtrip rejects_ -- --nocapture
 ```
 Expected: FAIL (current `read_artifact_parquet` may panic on missing files in unhelpful ways).
 
-- [ ] **Step 2: Implement the atomic write protocol**
+- [x] **Step 2: Implement the atomic write protocol**
 
 Restructure `write_artifact_parquet`:
 
@@ -715,11 +715,11 @@ pub fn write_artifact_parquet(
 }
 ```
 
-- [ ] **Step 3: Update `read_artifact_parquet` to validate completeness**
+- [x] **Step 3: Update `read_artifact_parquet` to validate completeness**
 
 Already in the stub from Task 3 Step 3 — verify the check is `if !manifest.complete { bail!(...) }` and that missing `manifest.json` returns a `context`-wrapped error mentioning "manifest.json".
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 cargo test -p spur-graph --test parquet_roundtrip
@@ -727,7 +727,7 @@ cargo test -p spur-graph --test parquet_roundtrip
 
 Expected: all four tests pass — original round-trip + two rejection tests + (if added) one rebuild-after-rename test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/spur-graph/src/store/parquet.rs crates/spur-graph/tests/parquet_roundtrip.rs
@@ -753,7 +753,7 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Write the header-read test**
+- [x] **Step 1: Write the header-read test**
 
 ```rust
 #[test]
@@ -773,7 +773,7 @@ fn header_read_is_subms() {
 }
 ```
 
-- [ ] **Step 2: Write endpoint-namespace consistency test (Family 2.6)**
+- [x] **Step 2: Write endpoint-namespace consistency test (Family 2.6)**
 
 ```rust
 #[test]
@@ -797,7 +797,7 @@ fn endpoint_namespace_is_consistent() {
 
 Fill in the arrow-rs iteration with the same pattern used by `read_nodes` / `read_edges` in Task 3.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 ```bash
 cargo test -p spur-graph --test parquet_schema_invariants
@@ -805,7 +805,7 @@ cargo test -p spur-graph --test parquet_schema_invariants
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/spur-graph/tests/parquet_schema_invariants.rs
@@ -830,7 +830,7 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Write the measurement harness**
+- [x] **Step 1: Write the measurement harness**
 
 ```rust
 // crates/spur-graph/benches/capture_baselines.rs
@@ -886,13 +886,13 @@ fn main() -> anyhow::Result<()> {
 
 Add a `[[bin]]` entry for `capture_baselines` in `Cargo.toml`'s `[package]` section (or use `[[bench]]` if Criterion is used).
 
-- [ ] **Step 2: Run against the live SPUR fixture**
+- [x] **Step 2: Run against the live SPUR fixture**
 
 ```bash
 GIT_COMMIT=$(git rev-parse HEAD) cargo run --release --bin capture_baselines -- /Volumes/Projects/spur/.spur/graph-index.json > crates/spur-graph/benches/baselines.json
 ```
 
-- [ ] **Step 3: Verify the file contents look sane**
+- [x] **Step 3: Verify the file contents look sane**
 
 ```bash
 cat crates/spur-graph/benches/baselines.json
@@ -900,7 +900,7 @@ cat crates/spur-graph/benches/baselines.json
 
 Expect a JSON object with `load_artifact_ms_median` in the 200–500 range, `write_artifact_ms_median` in the 100–300 range, and `load_artifact_rss_kb_median` in the 150_000–400_000 range.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/spur-graph/benches/capture_baselines.rs crates/spur-graph/benches/baselines.json crates/spur-graph/Cargo.toml
@@ -926,7 +926,7 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Write the failing test matrix**
+- [x] **Step 1: Write the failing test matrix**
 
 ```rust
 // crates/spur-graph/tests/resolver.rs
@@ -961,7 +961,7 @@ cargo test -p spur-graph --test resolver
 ```
 Expected: FAIL — module doesn't exist yet.
 
-- [ ] **Step 2: Implement `resolve_artifact_location`**
+- [x] **Step 2: Implement `resolve_artifact_location`**
 
 ```rust
 // crates/spur-graph/src/store/pointer.rs
@@ -1066,14 +1066,14 @@ struct ManifestPeek {
 
 Add `pub mod pointer;` and re-exports to `store/mod.rs`.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 ```bash
 cargo test -p spur-graph --test resolver
 ```
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/spur-graph/src/store/ crates/spur-graph/tests/resolver.rs
@@ -1098,7 +1098,7 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -1128,7 +1128,7 @@ cargo test -p spur-graph --test load_artifact_dispatch
 ```
 Expected: FAIL — current load_artifact only handles JSON.
 
-- [ ] **Step 2: Update `load_artifact`**
+- [x] **Step 2: Update `load_artifact`**
 
 ```rust
 // crates/spur-graph/src/schema.rs (replace existing function ~line 275)
@@ -1151,7 +1151,7 @@ Expose `resolve_path_as_public` from `pointer.rs` (rename the internal `resolve_
 
 The existing JSON load body (deduplicate_symbols, validate_ranges) moves into a private `load_legacy_json` function in `schema.rs`.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 ```bash
 cargo test -p spur-graph --test load_artifact_dispatch
@@ -1159,7 +1159,7 @@ cargo test -p spur-graph
 ```
 Expected: both new tests pass; existing tests still pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/spur-graph/src/schema.rs crates/spur-graph/src/store/pointer.rs crates/spur-graph/tests/load_artifact_dispatch.rs
@@ -1184,14 +1184,14 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Run the existing spur-mcp tests to capture green baseline**
+- [x] **Step 1: Run the existing spur-mcp tests to capture green baseline**
 
 ```bash
 cargo test -p spur-mcp
 ```
 Expected: all green.
 
-- [ ] **Step 2: Replace the hardcoded path with the resolver**
+- [x] **Step 2: Replace the hardcoded path with the resolver**
 
 Find the function around `:445` that currently does:
 
@@ -1213,7 +1213,7 @@ match load_artifact(&resolved.path) {
 
 Remove or deprecate `GRAPH_ARTIFACT_RELATIVE_PATH` (move to a `pub(crate) const`-only default constant kept for any other use sites). Audit the file for other reads of that constant.
 
-- [ ] **Step 3: Add a test that exercises the Parquet path**
+- [x] **Step 3: Add a test that exercises the Parquet path**
 
 ```rust
 #[test]
@@ -1224,14 +1224,14 @@ fn code_graph_handler_reads_parquet_artifact() {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 cargo test -p spur-mcp
 ```
 Expected: all green plus the new test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/spur-mcp/
@@ -1257,13 +1257,13 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Capture green baseline**
+- [x] **Step 1: Capture green baseline**
 
 ```bash
 cargo test -p spur-tui
 ```
 
-- [ ] **Step 2: Update `source.rs`**
+- [x] **Step 2: Update `source.rs`**
 
 Around line 127, the current code does:
 
@@ -1291,18 +1291,18 @@ let artifact = load_artifact(&resolved.path)?;
 
 `.into()` from `GraphArtifactManifest` to whatever shape the call site uses — define the conversion in `parquet.rs`.
 
-- [ ] **Step 3: Update `registry.rs`**
+- [x] **Step 3: Update `registry.rs`**
 
 Around line 26, `CODE_GRAPH_LEGACY_INDEX_PATH` stays as a fallback (the resolver handles it). Around line 942, the `legacy_artifact` check becomes resolver-driven.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 cargo test -p spur-tui
 ```
 Expected: all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/spur-tui/
@@ -1327,13 +1327,13 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Capture green baseline**
+- [x] **Step 1: Capture green baseline**
 
 ```bash
 cargo test -p spur-cli
 ```
 
-- [ ] **Step 2: Update load sites**
+- [x] **Step 2: Update load sites**
 
 The incremental-rebuild branch around line 75:
 ```rust
@@ -1342,18 +1342,18 @@ Ok(prev) => match artifact_from_facts_incremental(&prev, &root) {
 
 `prev` comes from a load call earlier; replace that load with `load_artifact(&resolved.path)` where `resolved` is from the resolver.
 
-- [ ] **Step 3: Leave the write site (still JSON) untouched in this task**
+- [x] **Step 3: Leave the write site (still JSON) untouched in this task**
 
 The write call (`write_artifact(&artifact, &output)`) stays on JSON for now. Task 12 flips it.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 cargo test -p spur-cli
 ```
 Expected: all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/spur-cli/
@@ -1379,13 +1379,13 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Capture green baseline**
+- [x] **Step 1: Capture green baseline**
 
 ```bash
 cargo test -p spur-graph -p spur-cli
 ```
 
-- [ ] **Step 2: Update `WORKTREE_ARTIFACT_PATH` semantics**
+- [x] **Step 2: Update `WORKTREE_ARTIFACT_PATH` semantics**
 
 `cache.rs:18` currently has:
 ```rust
@@ -1394,7 +1394,7 @@ const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph-index.json";
 
 Decide: either rename to a `.spur/graph/CURRENT` symlink target, or keep the legacy path and have `cache.rs` update both `.spur/graph/CURRENT` AND `.spur/graph-index.pointer.json`. Choose the latter — keeps the legacy reader-tolerance path simple.
 
-- [ ] **Step 3: Replace the write site**
+- [x] **Step 3: Replace the write site**
 
 `cache.rs:300, 335, 376` previously call `write_artifact(...)`. Replace with:
 
@@ -1410,7 +1410,7 @@ spur_graph::store::pointer::write_current_pointer(&worktree_root, &written_dir)?
 
 Add `write_current_pointer` to `pointer.rs` (writes the `.spur/graph/CURRENT` symlink or pointer file).
 
-- [ ] **Step 4: Mark `write_artifact` as `#[deprecated]`**
+- [x] **Step 4: Mark `write_artifact` as `#[deprecated]`**
 
 In `crates/spur-graph/src/store/json.rs`:
 ```rust
@@ -1422,18 +1422,18 @@ pub fn write_artifact(artifact: &GraphIndexArtifact, path: &Path) -> anyhow::Res
 
 Suppress the warning at call sites that legitimately still need it (e.g. legacy-JSON write tests). Compile-warning at other call sites is intended — surfaces stragglers.
 
-- [ ] **Step 5: Flip `spur-cli/commands/graph.rs` writes to Parquet**
+- [x] **Step 5: Flip `spur-cli/commands/graph.rs` writes to Parquet**
 
 The write site (~line 120 and 190) changes from `write_artifact(&artifact, &output)` to `write_artifact_parquet(&artifact, &output_base, opts)`. The output path argument becomes a directory, not a file. If `output` is a file path (user-specified, legacy), error out with a clear message recommending the new directory layout.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 cargo test --workspace
 ```
 Expected: workspace builds; existing tests pass. Expect compile warnings on remaining `write_artifact` call sites (allowed; flagged for Task 14 cleanup).
 
-- [ ] **Step 7: Manual smoke**
+- [x] **Step 7: Manual smoke**
 
 ```bash
 cargo run --bin spur -- graph build --workspace
@@ -1442,7 +1442,7 @@ ls .git/spur-graph/artifacts/
 ```
 Expected: `.spur/graph/CURRENT` points at the new `<hash>.parquet/` directory; the directory contains the seven Parquet files + manifest.json.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/spur-graph/src/store/ crates/spur-cli/src/commands/graph.rs
@@ -1468,7 +1468,7 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: Write the bench**
+- [x] **Step 1: Write the bench**
 
 ```rust
 // crates/spur-graph/benches/parquet.rs
@@ -1496,7 +1496,7 @@ criterion_group!(benches, bench_write, bench_read);
 criterion_main!(benches);
 ```
 
-- [ ] **Step 2: Write the gate assertion**
+- [x] **Step 2: Write the gate assertion**
 
 ```rust
 // crates/spur-graph/tests/perf_gates.rs
@@ -1531,21 +1531,21 @@ fn gate_3_2_read_artifact_parquet_under_half_baseline() {
 
 The perf gates run in a separate CI job behind a feature flag so noise doesn't gate unrelated work merges.
 
-- [ ] **Step 3: Wire perf-gates feature in `Cargo.toml`**
+- [x] **Step 3: Wire perf-gates feature in `Cargo.toml`**
 
 ```toml
 [features]
 perf-gates = []
 ```
 
-- [ ] **Step 4: Run gates locally**
+- [x] **Step 4: Run gates locally**
 
 ```bash
 cargo test -p spur-graph --features perf-gates --test perf_gates
 ```
 Expected: all gates pass on dev machine. If a gate fails, investigate before merging Task 12 to main.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/spur-graph/benches/parquet.rs crates/spur-graph/tests/perf_gates.rs crates/spur-graph/Cargo.toml
@@ -1572,20 +1572,20 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Steps:**
 
-- [ ] **Step 1: List straggler call sites**
+- [x] **Step 1: List straggler call sites**
 
 ```bash
 cargo build --workspace 2>&1 | grep "use of deprecated" || true
 ```
 Expected: a short list. Each must be removed or rewritten.
 
-- [ ] **Step 2: Migrate any test that still calls `write_artifact`**
+- [x] **Step 2: Migrate any test that still calls `write_artifact`**
 
 For each straggler:
 - If the test legitimately wants to create a JSON fixture for legacy-read testing, replace with a hand-written canonical JSON string.
 - Otherwise, rewrite to use `write_artifact_parquet`.
 
-- [ ] **Step 3: Create `canonical_hash.rs` containing what survives**
+- [x] **Step 3: Create `canonical_hash.rs` containing what survives**
 
 ```rust
 // crates/spur-graph/src/store/canonical_hash.rs
@@ -1620,7 +1620,7 @@ pub fn artifact_content_hash_blake3_hex(artifact: &GraphIndexArtifact) -> anyhow
 }
 ```
 
-- [ ] **Step 4: Delete `json.rs`; update `store/mod.rs`**
+- [x] **Step 4: Delete `json.rs`; update `store/mod.rs`**
 
 ```bash
 git rm crates/spur-graph/src/store/json.rs
@@ -1650,11 +1650,11 @@ pub use pointer::{
 };
 ```
 
-- [ ] **Step 5: Update Task 1's `extractor.rs` test import**
+- [x] **Step 5: Update Task 1's `extractor.rs` test import**
 
 `spur-graph/tests/extractor.rs` may still have `use spur_graph::store::json::*`. Update to `use spur_graph::store::canonical_hash::*`.
 
-- [ ] **Step 6: Run full workspace tests + the gates**
+- [x] **Step 6: Run full workspace tests + the gates**
 
 ```bash
 cargo test --workspace
@@ -1662,7 +1662,7 @@ cargo test -p spur-graph --features perf-gates --test perf_gates
 ```
 Expected: green workspace, all gates pass.
 
-- [ ] **Step 7: Add the field-order guard snapshot (Family 1.2 second half)**
+- [x] **Step 7: Add the field-order guard snapshot (Family 1.2 second half)**
 
 ```rust
 // in canonical_hash.rs or a sibling test file
@@ -1677,7 +1677,7 @@ fn canonical_bytes_snapshot_guard() {
 
 Commit the `insta` snapshot file. Any field-order change to `GraphArtifactBodyForHash` will fail this test before invalidating user pointers.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/spur-graph/
@@ -1713,3 +1713,19 @@ Refs: docs/superpowers/specs/2026-05-21-spur-graph-parquet-exporter-design.md §
 
 **Open gaps surfaced by self-review (none requiring spec changes):**
 - The `GraphIndexArtifact.symbol_node_ids` / `file_node_ids` parallel vecs (Task 3 Steps 4–5) are an implementation detail not in the spec. They're `#[serde(skip)]` so the content hash is unaffected; semantics preserved. Document this in the Task 3 PR description.
+
+---
+
+## Closure (2026-05-22, v1.1.17)
+
+All 14 tasks merged on `main` via merge commit `2661f84b` (plan b0df1bec, PR1 → PR3c). 187 commits since `v1.1.16`. Released as **v1.1.17**.
+
+**Verified at closure:**
+- 191 spur-graph tests green (including new `canonical_bytes_layout` insta snapshot)
+- Live index rebuild produced `8b05132f….parquet` (2.7 MB) and `CURRENT` symlink — 17× size reduction vs the 45 MB JSON it replaces
+- DuckDB read_parquet against the artifact: 30 ms cold for 5 analytics queries; header-only read 0.29 ms (~300× faster than JSON parse)
+
+**Deferred to follow-up issue `bd-1wsxo`** (not blocking closure):
+1. `edges_by_dst` secondary index (`edges_by_dst_present: false` in manifest)
+2. DuckDB POC `crates/spur-context/poc/duckdb-analyst/` — swap JSON ingestion for `read_parquet(...)` views (README's "promotion path step 1")
+3. Legacy-JSON code path removal — gated on telemetry showing zero priority-4 fallback hits in production
