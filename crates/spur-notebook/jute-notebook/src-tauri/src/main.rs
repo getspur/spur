@@ -53,6 +53,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             jute::commands::kernel_usage_info,
+            jute::commands::kernel_slot_info,
             jute::commands::start_kernel,
             jute::commands::restart_kernel,
             jute::commands::stop_kernel,
