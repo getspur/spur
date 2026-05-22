@@ -9340,6 +9340,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "spur-core",
  "tauri",
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
