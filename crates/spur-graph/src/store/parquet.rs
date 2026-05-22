@@ -17,7 +17,6 @@ use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::ColumnPath;
 
 use crate::store::build::{EXTRACTOR_VERSION, SCHEMA_VERSION};
-use crate::store::json::artifact_content_hash_blake3_hex;
 use crate::{
     Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact, GraphFileManifestEntry,
     GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, GraphTombstoneEntry, NodeId,
@@ -128,8 +127,7 @@ pub fn write_artifact_parquet(
     base_dir: &Path,
     options: WriteOptions,
 ) -> anyhow::Result<PathBuf> {
-    let artifact_hash = artifact_content_hash_blake3_hex(artifact)
-        .context("failed to compute graph artifact content hash")?;
+    let artifact_hash = &artifact.graph_content_hash;
     fs::create_dir_all(base_dir)
         .with_context(|| format!("failed to create `{}`", base_dir.display()))?;
     sweep_stale_parquet_temp_dirs(base_dir);

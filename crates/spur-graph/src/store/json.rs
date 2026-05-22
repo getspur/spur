@@ -19,6 +19,9 @@ struct GraphArtifactBodyForHash<'a> {
     tombstones: &'a [GraphTombstoneEntry],
 }
 
+#[deprecated(
+    note = "Use spur_graph::store::parquet::write_artifact_parquet. Removed in next release."
+)]
 pub fn write_artifact(artifact: &GraphIndexArtifact, path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
