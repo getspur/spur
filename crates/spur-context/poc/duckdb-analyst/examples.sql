@@ -2,6 +2,8 @@
 -- Safe to run against a persistent .duckdb file built by init.sql, but the
 -- extension state is per-connection so we LOAD here too.
 
+.timer on
+
 LOAD duckpgq;
 LOAD onager;
 
@@ -12,46 +14,42 @@ LOAD onager;
 .print ===  T1. Top 20 most-called functions (plain SQL, in-degree)  ===
 SELECT n.qualified_name, COUNT(*) AS callers
 FROM   edges e
-JOIN   nodes n ON e.dst = n.id
-WHERE  e.kind = 'calls'
+JOIN   nodes n ON e.target_stable_id = n.stable_symbol_id
+WHERE  e.edge_kind = 'calls'
 GROUP BY n.qualified_name
 ORDER BY callers DESC
 LIMIT 20;
 
 --------------------------------------------------------------------------
--- Tier 1 — Recursive CTE: 3-hop reverse reachability from a target.
---                          (i.e., "what depends on this transitively")
+-- Tier 1 — Plain SQL: direct reverse callers through edges_by_dst.
 --------------------------------------------------------------------------
 .print
-.print ===  T2. 3-hop reverse reachability into 'handle_submit_plan' (recursive SQL)  ===
-WITH RECURSIVE seed AS (
-  SELECT id FROM nodes WHERE entity_name = 'handle_submit_plan'
-),
-reach AS (
-  SELECT s.id AS frontier, 0 AS hops FROM seed s
-  UNION
-  SELECT e.src AS frontier, r.hops + 1 AS hops
-  FROM   reach r
-  JOIN   edges e ON e.dst = r.frontier AND e.kind = 'calls'
-  WHERE  r.hops < 3
-)
-SELECT DISTINCT n.qualified_name, MIN(r.hops) AS min_hops
-FROM   reach r
-JOIN   nodes n ON n.id = r.frontier
-WHERE  r.hops > 0
-GROUP BY n.qualified_name
-ORDER BY min_hops, n.qualified_name
-LIMIT 25;
+.print ===  T2. Reverse callers of 'impl JsonRpcResponse::success' via edges_by_dst  ===
+SET variable reverse_target_dst_id = (
+  SELECT node_id FROM nodes WHERE qualified_name = 'impl JsonRpcResponse::success'
+);
+
+SELECT target.qualified_name AS callee,
+       caller.qualified_name AS caller,
+       caller.file_path
+FROM   edges_by_dst e
+JOIN   nodes target ON target.node_id = getvariable('reverse_target_dst_id')
+JOIN   nodes caller ON caller.node_id = e.src_id
+-- edges_by_dst is sorted by (dst_id, src_id), so this WHERE dst_id = ? shape
+-- lets DuckDB prune row groups for reverse-edge lookups instead of scanning edges.
+WHERE  e.dst_id = getvariable('reverse_target_dst_id')
+  AND  e.edge_kind = 'calls'
+ORDER BY caller.qualified_name
+LIMIT 20;
 
 --------------------------------------------------------------------------
--- Tier 2 — DuckPGQ MATCH: variable-length path from main() to anything
---                          that touches 'WorkerRegistry'.
+-- Tier 2 — DuckPGQ MATCH: direct callees from main().
 --------------------------------------------------------------------------
 .print
 .print ===  T3. DuckPGQ MATCH: callees of 'main' (1 hop)  ===
 FROM GRAPH_TABLE (code
-  MATCH (a:nodes)-[e:edges]->(b:nodes)
-  WHERE a.entity_name = 'main' AND e.kind = 'calls'
+  MATCH (a:duckpgq_nodes)-[e:duckpgq_edges]->(b:duckpgq_nodes)
+  WHERE a.entity_name = 'main' AND e.edge_kind = 'calls'
   COLUMNS (a.qualified_name AS caller, b.qualified_name AS callee)
 ) LIMIT 20;
 
@@ -66,8 +64,7 @@ FROM   onager_par_pagerank(
          (SELECT src, dst FROM onager_edges),
          damping := 0.85, iterations := 50, directed := true
        ) p
-JOIN   node_ids m ON m.node_id = p.node_id
-JOIN   nodes    n ON n.id = m.id
+JOIN   nodes n ON n.node_id = p.node_id
 ORDER BY p.rank DESC
 LIMIT 20;
 
@@ -85,18 +82,4 @@ SELECT c.component AS component_id, COUNT(*) AS size
 FROM   components c
 GROUP BY c.component
 ORDER BY size DESC
-LIMIT 10;
-
---------------------------------------------------------------------------
--- Cross-domain sanity check: nodes-with-incoming-edges-but-not-outgoing
---                            i.e., "leaf consumers" in the call graph.
---------------------------------------------------------------------------
-.print
-.print ===  T6. Leaf consumers (called but never call others)  ===
-SELECT n.qualified_name, COUNT(e.src) AS callers
-FROM   nodes n
-JOIN   edges e ON e.dst = n.id AND e.kind = 'calls'
-WHERE  n.id NOT IN (SELECT DISTINCT src FROM edges WHERE kind = 'calls')
-GROUP BY n.qualified_name
-ORDER BY callers DESC
 LIMIT 10;
