@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::cmp::Ordering;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -9,9 +7,8 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use spur_graph::{
-    artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
-    read_artifact_parquet, write_artifact, write_artifact_parquet, GraphIndexArtifact,
-    WriteOptions,
+    artifact_from_facts, artifact_from_facts_incremental, build_facts, read_artifact_parquet,
+    write_artifact_parquet, GraphIndexArtifact, WriteOptions,
 };
 use tempfile::TempDir;
 
@@ -160,7 +157,7 @@ fn gate_3_4_full_incremental_build_under_80_percent_json_baseline() {
     }));
     let baseline_ms = baselines
         .incremental_build_ms_median
-        .unwrap_or_else(|| legacy_incremental_build_baseline_ms(fixture));
+        .expect("baselines.json should include pre-PR3b incremental_build_ms_median");
     let threshold_ms = baseline_ms * 0.8;
 
     assert!(
@@ -300,23 +297,6 @@ fn write_fixture_parquet(artifact: &GraphIndexArtifact) -> PathBuf {
     let dir = write_artifact_parquet(artifact, tempdir.path(), WriteOptions::default())
         .expect("write parquet artifact");
     persist_tempdir_path(tempdir, dir)
-}
-
-fn legacy_incremental_build_baseline_ms(fixture: &PerfFixture) -> f64 {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let prev_json = tempdir.path().join("prev-graph-index.json");
-    write_artifact(&fixture.artifact, &prev_json).expect("write legacy JSON baseline fixture");
-    let output_json = tempdir.path().join("next-graph-index.json");
-
-    median_f64(samples(SAMPLE_COUNT, || {
-        let started = Instant::now();
-        let prev = load_artifact(&prev_json).expect("load legacy JSON baseline fixture");
-        let (next, mode) = artifact_from_facts_incremental(&prev, &fixture.repo_root)
-            .expect("legacy full incremental build");
-        std::hint::black_box(mode);
-        write_artifact(&next, &output_json).expect("write legacy JSON incremental artifact");
-        duration_ms(started.elapsed())
-    }))
 }
 
 fn sample_parquet_incremental_build_ms(

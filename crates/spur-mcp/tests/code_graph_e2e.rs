@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
 use spur_graph::{
-    artifact_from_facts, build_facts, build_facts_for_paths, write_artifact, GraphIndexArtifact,
-    GraphSymbolArtifact,
+    artifact_from_facts, build_facts, build_facts_for_paths, write_artifact_parquet,
+    write_current_pointer, GraphIndexArtifact, GraphSymbolArtifact, WriteOptions,
 };
 use spur_mcp::server::{community_feature_gate, DetachedContinuationCtx};
 use spur_mcp::McpCallbackServer;
@@ -150,7 +148,7 @@ fn commit_fixture(worktree: &Path) {
 fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     let (facts, _file_counts) = build_facts(worktree).expect("build graph facts");
     let artifact = artifact_from_facts(&facts, worktree).expect("build graph artifact");
-    write_artifact(&artifact, &worktree.join(".spur/graph-index.json")).expect("write artifact");
+    write_graph_artifact(worktree, &artifact);
     artifact
 }
 
@@ -162,8 +160,15 @@ fn build_real_tools_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     ];
     let facts = build_facts_for_paths(&root, &files).expect("build graph facts for real tools");
     let artifact = artifact_from_facts(&facts, &root).expect("build graph artifact");
-    write_artifact(&artifact, &worktree.join(".spur/graph-index.json")).expect("write artifact");
+    write_graph_artifact(worktree, &artifact);
     artifact
+}
+
+fn write_graph_artifact(worktree: &Path, artifact: &GraphIndexArtifact) {
+    let artifact_base = worktree.join(".spur/graph");
+    let written = write_artifact_parquet(artifact, &artifact_base, WriteOptions::default())
+        .expect("write parquet artifact");
+    write_current_pointer(worktree, &written).expect("write CURRENT pointer");
 }
 
 fn symbol_id(artifact: &GraphIndexArtifact, entity_name: &str) -> String {
