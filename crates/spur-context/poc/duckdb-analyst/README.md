@@ -1,7 +1,8 @@
 # SPUR code-graph analyst — DuckDB POC
 
-Stands up a local **DuckDB** instance that ingests `.spur/graph-index.json`,
-loads **DuckPGQ** (SQL/PGQ pattern matching, SQL:2023) and **Onager** (graph
+Stands up a local **DuckDB** instance that reads the current spur-graph
+Parquet artifact via `.spur/graph/CURRENT`, loads **DuckPGQ** (SQL/PGQ pattern
+matching, SQL:2023) and **Onager** (graph
 algorithms — PageRank, Louvain, components, centralities), and is ready to be
 fronted by a DuckDB MCP server so the brain can issue arbitrary read-only
 analytic queries against the code graph.
@@ -11,7 +12,7 @@ Architecturally this is the warm tier from `bd-1rqxk`:
 ```
 spur-graph (petgraph, hot)  ◄── code_callers / code_callees / code_subgraph
        │
-       └─ artifact JSON  ─►  this POC: DuckDB + DuckPGQ + Onager (warm)
+       └─ artifact Parquet ─►  this POC: DuckDB + DuckPGQ + Onager (warm)
                                        │
                                        └─ DuckDB MCP server (separate process)
                                                                  │
@@ -25,40 +26,47 @@ only via an MCP subprocess.
 
 ```sh
 brew install duckdb           # one time
+scripts/spur-cargo run -p spur-cli -- graph build --workspace
 ./crates/spur-context/poc/duckdb-analyst/setup.sh
 duckdb .spur/analyst.duckdb < crates/spur-context/poc/duckdb-analyst/examples.sql
 ```
 
 `setup.sh` is idempotent: drops `.spur/analyst.duckdb` and rebuilds. Override
-defaults with env vars: `SPUR_GRAPH_ARTIFACT`, `SPUR_ANALYST_DB`.
+defaults with env vars: `SPUR_GRAPH_CURRENT`, `SPUR_GRAPH_ARTIFACT_DIR`,
+`SPUR_ANALYST_DB`.
 
 ## What's in the DB
 
 | Object              | Kind   | Notes                                                |
 |---------------------|--------|------------------------------------------------------|
-| `nodes`             | table  | 27.5k symbols (id, qualified_name, kind, file_path…) |
-| `node_ids`          | table  | dense BIGINT mapping for Onager                      |
-| `edges`             | table  | 47k resolved edges (src, dst, kind, confidence…)     |
-| `edges_unresolved`  | table  | 68k unresolved labels (dynamic dispatch / macros)    |
-| `files`             | table  | 1.5k worktree files                                  |
-| `onager_edges`      | view   | BIGINT (src, dst) over `kind = 'calls'` only         |
-| `_meta`             | table  | graph_content_hash + counts                          |
+| `nodes`             | view   | symbols with stable IDs and dense `node_id` values   |
+| `edges`             | view   | resolved edges with stable IDs and dense endpoints   |
+| `edges_by_dst`      | view   | same resolved edges, sorted by `(dst_id, src_id)`    |
+| `edges_unresolved`  | view   | unresolved labels (dynamic dispatch / macros)        |
+| `files`             | view   | worktree files                                       |
+| `file_manifests`    | view   | file content OIDs and per-file node IDs              |
+| `tombstones`        | view   | deleted-file markers from incremental builds         |
+| `onager_edges`      | view   | BIGINT (src, dst) over `edge_kind = 'calls'` only    |
+| `_meta`             | table  | manifest metadata, graph_content_hash + counts       |
+| `duckpgq_nodes`     | table  | DuckPGQ compatibility table sourced from `nodes`     |
+| `duckpgq_edges`     | table  | DuckPGQ compatibility table sourced from `edges`     |
 | `code`              | PG     | DuckPGQ property graph over nodes+edges              |
 
-Numbers above are for the SPUR worktree at content hash
-`751d5367987e71e5f029aa757218e13bef23f18eab9d1b522545efff357013ab`.
+The primary analytical substrate is the Parquet-backed view set. The DuckPGQ
+tables are compatibility copies because the current DuckPGQ extension rejects
+property graphs over DuckDB views.
 
 ## The three query tiers (all in `examples.sql`)
 
 | Tier | Tool         | Example query                                           |
 |------|--------------|---------------------------------------------------------|
 | 1    | Plain SQL    | T1 — top callees by in-degree                          |
-| 1    | Recursive CTE| T2 — 3-hop reverse reachability                        |
+| 1    | Plain SQL    | T2 — reverse callers via `edges_by_dst`                |
 | 2    | DuckPGQ MATCH| T3 — `GRAPH_TABLE(code MATCH (a)-[e]->(b) …)`           |
 | 3    | Onager       | T4 — `onager_par_pagerank((SELECT src,dst FROM …))`     |
 | 3    | Onager       | T5 — `onager_par_components(…)`                         |
 
-All five pass against the SPUR graph as of the hash above.
+All five are runnable against the current Parquet substrate.
 
 ## Wiring a DuckDB MCP server
 
@@ -105,7 +113,7 @@ over safety rails. For the POC, use Option A and accept the rough edges.
 DuckDB extensions are **installed** persistently (the `INSTALL …` survives in
 the DB file) but **must be `LOAD`-ed every connection**. The DuckPGQ property
 graph `code` is created in `init.sql` and stored in the DB; the underlying
-tables persist too. But:
+views and DuckPGQ compatibility tables persist too. But:
 
 - DuckPGQ `MATCH` queries fail in a fresh connection until `LOAD duckpgq;`
   runs.
@@ -139,23 +147,14 @@ A few things worth knowing before reading PageRank output:
 
 | File          | Purpose                                                |
 |---------------|--------------------------------------------------------|
-| `init.sql`    | extensions, tables, BIGINT mapping, property graph     |
-| `examples.sql`| 6 worked queries across all three tiers                |
+| `init.sql`    | extensions, Parquet views, property graph, Onager view |
+| `examples.sql`| 5 worked queries across all three tiers                |
 | `setup.sh`    | idempotent bootstrap                                   |
 | `README.md`   | this file                                              |
 
-## Promotion path to production
+## Completed (v1.1.17)
 
-When this POC graduates per `bd-1rqxk`:
-
-1. **Replace JSON ingestion with Parquet.** `spur-graph` writes
-   `nodes.parquet` + `edges.parquet` keyed on `graph_content_hash`. Init script
-   becomes `CREATE VIEW … AS SELECT * FROM read_parquet(…)`. No `_artifact`
-   staging view; no UNNEST. Faster, lower memory, no 42 MB JSON read.
-2. **Move SQL into `crates/spur-context/src/sql/`** as `schema_code_graph.sql`
-   alongside the existing `schema.sql` for agent events. One source of SQL
-   truth.
-3. **Cross-domain joins land here.** Once `all_events` (agent telemetry),
-   `blame`, `beads_issues` views coexist in the same DB, the analyst can ask
-   questions no single-substrate tool can answer.
-4. **Custom MCP server** (Option B) with proper safety rails replaces Option A.
+The JSON ingestion swap from the old promotion path has shipped under
+`bd-1wsxo`: `setup.sh` resolves `.spur/graph/CURRENT`, `init.sql` exposes the
+Parquet artifact through `read_parquet(...)` views, `_artifact`/UNNEST and
+`node_ids` are gone, and `edges_by_dst` is available for reverse-edge lookups.
