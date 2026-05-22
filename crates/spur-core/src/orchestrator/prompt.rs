@@ -157,7 +157,10 @@ impl Orchestrator {
         "## NOTEBOOK AVAILABILITY\n\n\
          The `notebook.*` MCP server is always reachable, but a notebook may not be loaded. \
          If a notebook tool returns `notebook_not_open`, tell the user in chat: \
-         \"I need a notebook open to do that - try `/notebook <path>` or `/notebook new`.\"\n\n"
+         \"I need a notebook open to do that - try `/notebook <path>` or `/notebook new`.\" \
+         Read `notebook.kernel_info.generation` before relying on prior executed state; \
+         if generation is lower than your last observed value or returns to 1 after a \
+         daemon restart, re-run dependency cells before using their variables.\n\n"
     }
 
     pub(super) fn log_prompt_once(&self, prompt: &str, session_id: &SessionId) {
