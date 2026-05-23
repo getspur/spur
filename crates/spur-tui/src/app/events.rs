@@ -372,6 +372,13 @@ impl App {
                     .set_acp_mapping(&session.0, acp_session_id, brain);
                 self.persist_metadata("AgentSessionReady metadata");
             }
+            SpurEventBody::NotebookSocketReady {
+                session,
+                socket_nonce,
+            } => {
+                self.notebook_socket_nonces
+                    .insert(session.0.clone(), socket_nonce.clone());
+            }
             SpurEventBody::SessionAttachRejected {
                 acp_session_id,
                 holder,
@@ -409,11 +416,12 @@ impl App {
                 self.brain_status = BrainStatus::Error(reason.clone());
                 self.pending_first_user_message = None;
             }
-            SpurEventBody::SessionCompleted { .. } => {
+            SpurEventBody::SessionCompleted { session, .. } => {
                 self.brain_status = BrainStatus::Idle;
                 self.pending_first_user_message = None;
+                self.notebook_socket_nonces.remove(&session.0);
             }
-            SpurEventBody::BrainRetired { reason, .. } => {
+            SpurEventBody::BrainRetired { session, reason } => {
                 // Null per-App state that was tied to the retired session.
                 // `brain_status` is intentionally NOT touched here:
                 //  - UserClear: already set to Idle by the ClearSession
@@ -423,6 +431,7 @@ impl App {
                 //    Idle would race that transition.
                 self.brain_name = None;
                 self.pending_first_user_message = None;
+                self.notebook_socket_nonces.remove(&session.0);
                 // Clear auto-resume pointers so /clear followed by a
                 // process quit before the next prompt does not cause
                 // spur-cli to auto-resume the just-retired session on
@@ -593,7 +602,6 @@ pub async fn run_tui_with_license(
     upgrade_rx: Option<tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>>,
 ) -> anyhow::Result<()> {
     let mut terminal = crate::tui::setup()?;
-    let notebook_daemon = crate::notebook_daemon::Daemon::spawn();
     let mut app = App::build_with_license_state(
         user_input_tx,
         start_in_picker_with_preselect,
@@ -822,7 +830,6 @@ pub async fn run_tui_with_license(
     // Restore terminal first so the user regains control immediately,
     // even if the best-effort analytics checkpoint hits its 2s timeout.
     crate::tui::teardown(&mut terminal)?;
-    notebook_daemon.shutdown().await;
     app.shutdown_analytics().await;
     Ok(())
 }

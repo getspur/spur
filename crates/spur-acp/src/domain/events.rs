@@ -526,6 +526,12 @@ pub enum SpurEventBody {
         #[serde(default, with = "option_arc_spur_agent_caps_serde")]
         caps: Option<Arc<crate::SpurAgentCaps>>,
     },
+    /// Emitted once the orchestrator has registered the per-brain-session
+    /// notebook socket nonce for a live brain session.
+    NotebookSocketReady {
+        session: SessionId,
+        socket_nonce: String,
+    },
     SessionAttachRejected {
         acp_session_id: String,
         holder: crate::session_lock::HolderInfo,

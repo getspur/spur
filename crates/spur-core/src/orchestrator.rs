@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -103,6 +104,7 @@ type NewBrainSessionBootstrap = (
     agent_client_protocol::schema::NewSessionResponse,
     spur_acp::BrainSessionId,
     SessionId,
+    String,
 );
 type LoadedBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
@@ -113,6 +115,7 @@ type LoadedBrainSessionBootstrap = (
     spur_acp::LoadOutcome,
     spur_acp::BrainSessionId,
     SessionId,
+    String,
 );
 
 const MAX_SESSION_LIST_PAGES: usize = 1000;
@@ -166,6 +169,7 @@ pub struct Orchestrator {
     /// [`Orchestrator::ensure_worker_mcp_server`]. Wiring into the
     /// dispatch path lands in a follow-up task.
     pub(crate) worker_mcp_servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
+    notebook_sockets: Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
     fault_injection_hooks: FaultInjectionHooks,
     /// Abort handle for the production peer-mailbox reconciler task spawned
     /// by `Orchestrator::new` when `peer_mailbox_enabled = true`. Stored
@@ -179,6 +183,12 @@ impl Drop for Orchestrator {
     fn drop(&mut self) {
         for handle in self.background_tasks.drain(..) {
             handle.abort();
+        }
+        if let Ok(mut sockets) = self.notebook_sockets.write() {
+            for (_, nonce) in sockets.drain() {
+                let path = crate::notebook::control_socket_path(&nonce);
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 }
@@ -264,6 +274,7 @@ impl Orchestrator {
             feature_gate,
             peer_mailbox: None,
             worker_mcp_servers: Arc::new(DashMap::new()),
+            notebook_sockets: Arc::new(RwLock::new(HashMap::new())),
             fault_injection_hooks: FaultInjectionHooks::default(),
             peer_mailbox_reconciler_abort: None,
         };
@@ -368,6 +379,55 @@ impl Orchestrator {
         orchestrator.background_tasks.push(periodic);
 
         Ok(orchestrator)
+    }
+
+    pub fn notebook_socket_for(
+        &self,
+        brain_session_id: &spur_acp::BrainSessionId,
+    ) -> Option<String> {
+        self.notebook_sockets
+            .read()
+            .expect("notebook socket registry lock poisoned")
+            .get(brain_session_id)
+            .cloned()
+    }
+
+    pub fn register_notebook_socket(
+        &self,
+        brain_session_id: spur_acp::BrainSessionId,
+        nonce: String,
+    ) {
+        let session = brain_session_id.as_session_id().clone();
+        self.notebook_sockets
+            .write()
+            .expect("notebook socket registry lock poisoned")
+            .insert(brain_session_id, nonce.clone());
+        self.emit(SpurEvent::now(SpurEventBody::NotebookSocketReady {
+            session,
+            socket_nonce: nonce,
+        }));
+    }
+
+    fn remove_notebook_socket(&self, brain_session_id: &spur_acp::BrainSessionId) {
+        let nonce = self
+            .notebook_sockets
+            .write()
+            .expect("notebook socket registry lock poisoned")
+            .remove(brain_session_id);
+        if let Some(nonce) = nonce {
+            let path = crate::notebook::control_socket_path(&nonce);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        path = %path.display(),
+                        "failed to remove notebook control socket"
+                    );
+                }
+            }
+        }
     }
 
     /// Attach a PM service. Must be called before `run_adhoc` or `run_interactive`.
