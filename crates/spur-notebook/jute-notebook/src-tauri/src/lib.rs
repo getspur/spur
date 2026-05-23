@@ -8,6 +8,7 @@ use std::io;
 pub mod backend;
 pub mod commands;
 pub mod entity;
+mod kernel_provision;
 pub mod menu;
 pub mod plugins;
 pub mod state;
@@ -23,6 +24,15 @@ pub enum Error {
     /// Could not connect to the kernel.
     #[error("could not connect to the kernel: {0}")]
     KernelConnect(String),
+
+    /// Could not provision the local Python kernel.
+    #[error("could not provision local Python kernel during {stage}: {cause}")]
+    KernelProvisionFailed {
+        /// Provisioning stage that failed.
+        stage: &'static str,
+        /// Underlying error text for the failed stage.
+        cause: String,
+    },
 
     /// Disconnected while communicating with a kernel.
     #[error("disconnected from the kernel")]

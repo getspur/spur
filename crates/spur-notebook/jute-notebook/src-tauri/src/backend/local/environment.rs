@@ -55,6 +55,9 @@ pub enum KernelInterruptMode {
 /// <https://docs.jupyter.org/en/latest/use/jupyter-directories.html#data-files>.
 async fn data_search_paths(interpreter_prefix: Option<&str>) -> Vec<String> {
     let mut dirs = Vec::new();
+    if let Some(path) = spur_jupyter_dir() {
+        dirs.push(path.to_string_lossy().into_owned());
+    }
     if let Ok(jupyter_path) = env::var("JUPYTER_PATH") {
         let pathsep = if cfg!(windows) { ";" } else { ":" };
         dirs.extend(jupyter_path.split(pathsep).map(String::from));
@@ -83,6 +86,34 @@ async fn data_search_paths(interpreter_prefix: Option<&str>) -> Vec<String> {
         String::from("/usr/local/share/jupyter"),
     ]);
     dirs
+}
+
+pub(crate) fn default_home_dir() -> Option<PathBuf> {
+    if let Some(home) = non_empty_var("HOME") {
+        return Some(PathBuf::from(home));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(home) = non_empty_var("USERPROFILE") {
+            return Some(PathBuf::from(home));
+        }
+        if let (Some(drive), Some(path)) = (non_empty_var("HOMEDRIVE"), non_empty_var("HOMEPATH")) {
+            let mut home = PathBuf::from(drive);
+            home.push(path);
+            return Some(home);
+        }
+    }
+
+    None
+}
+
+pub(crate) fn spur_jupyter_dir() -> Option<PathBuf> {
+    default_home_dir().map(|home| home.join(".spur").join("jupyter"))
+}
+
+fn non_empty_var(key: &str) -> Option<std::ffi::OsString> {
+    env::var_os(key).filter(|value| !value.is_empty())
 }
 
 /// List all available kernels from the environment, checking the search path.
@@ -118,20 +149,10 @@ pub fn data_dir() -> String {
         return jupyter_data_dir.trim_end_matches(SEP).into();
     }
 
-    cfg_if::cfg_if! {
-        if #[cfg(windows)] {
-            env::var("AppData").unwrap() + "\\jupyter"
-        } else if #[cfg(target_os = "macos")] {
-            env::var("HOME").unwrap() + "/Library/Jupyter"
-        } else if #[cfg(target_os = "linux")] {
-            match env::var("XDG_DATA_HOME") {
-                Ok(xdg_data_home) => xdg_data_home + "/jupyter",
-                Err(_) => env::var("HOME").unwrap() + "/.local/share/jupyter",
-            }
-        } else {
-            panic!("Unsupported platform, cannot determine data directory")
-        }
-    }
+    spur_jupyter_dir()
+        .expect("home directory is required to determine Jupyter data directory")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Get the configured directory where runtime connection files are stored.
@@ -139,5 +160,24 @@ pub fn runtime_dir() -> String {
     match env::var("JUPYTER_RUNTIME_DIR") {
         Ok(jupyter_runtime_dir) => jupyter_runtime_dir.trim_end_matches(SEP).into(),
         Err(_) => data_dir() + SEP + "runtime",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn data_search_paths_prepend_spur_jupyter_prefix() {
+        let home = default_home_dir().expect("test host should have a home directory");
+        let expected = home
+            .join(".spur")
+            .join("jupyter")
+            .to_string_lossy()
+            .into_owned();
+
+        let paths = data_search_paths(None).await;
+
+        assert_eq!(paths.first().map(String::as_str), Some(expected.as_str()));
     }
 }

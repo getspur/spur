@@ -54,6 +54,7 @@ async fn main() {
 
         while let Ok(event) = rx.recv().await {
             match event {
+                RunCellEvent::Started => {}
                 RunCellEvent::Stdout(text) => print!("{}", text),
                 RunCellEvent::Stderr(text) => eprint!("{}", text),
                 RunCellEvent::ExecuteResult(msg) => {
@@ -75,6 +76,7 @@ async fn main() {
                     eprintln!("Kernel disconnected abnormally: {}", msg);
                     break;
                 }
+                RunCellEvent::Finished { .. } => {}
             }
         }
     }

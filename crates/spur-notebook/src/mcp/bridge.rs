@@ -113,6 +113,7 @@ impl BridgeError {
 
 fn kernel_bridge_error(error: jute::Error) -> BridgeError {
     let code = match &error {
+        jute::Error::KernelProvisionFailed { .. } => "kernel_provision_failed",
         jute::Error::KernelDisconnect => "kernel_disconnected",
         jute::Error::KernelNotFound => "kernel_not_found",
         jute::Error::KernelProcessNotFound => "kernel_process_not_found",
@@ -417,6 +418,23 @@ mod tests {
                 mcp_error.message,
                 expected_message_prefix
             );
+        }
+    }
+
+    #[test]
+    fn kernel_provision_failure_maps_to_specific_handler_code() {
+        let error = kernel_bridge_error(jute::Error::KernelProvisionFailed {
+            stage: "venv_create",
+            cause: "uv failed".to_string(),
+        });
+
+        match error {
+            BridgeError::Handler { code, message } => {
+                assert_eq!(code, "kernel_provision_failed");
+                assert!(message.contains("venv_create"));
+                assert!(message.contains("uv failed"));
+            }
+            other => panic!("expected handler error, got {other:?}"),
         }
     }
 
