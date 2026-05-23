@@ -137,6 +137,14 @@ impl App {
                             }
                             self.dirty = true;
                         }
+                        Some(PaletteIntent::SubmitQuery(query)) => {
+                            self.palette_visible = false;
+                            self.palette_state.reset();
+                            if let Some(action) = self.query_to_action(&query) {
+                                self.process_action(action);
+                            }
+                            self.dirty = true;
+                        }
                         None => {
                             self.dirty = true;
                         }

@@ -125,9 +125,11 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     /// Publishes the resolved post-overlay worktree HEAD back to the reconciler.
     pub(crate) dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
     pub(crate) fault_injection_hooks: &'a FaultInjectionHooks,
-    /// Phase 5 / Task 26 — worker `mcp_servers` config. Empty unless the
-    /// delegation request set `enable_worker_mcp = Some(true)`. Resolved
-    /// once in `execute_delegation` so retries reuse the same token URL.
+    /// Phase 5 / Task 26 — worker `mcp_servers` config. Default-on:
+    /// populated for `enable_worker_mcp = None` (omitted) or `Some(true)`;
+    /// empty only when the delegation request explicitly set
+    /// `enable_worker_mcp = Some(false)`. Resolved once in
+    /// `execute_delegation` so retries reuse the same token URL.
     pub(crate) worker_mcp_servers: &'a [McpServer],
     pub(crate) pm_service: Option<&'a PmService>,
     pub(crate) feature_gate: &'a spur_license::FeatureGate,
@@ -443,10 +445,9 @@ pub(crate) async fn run_one_worker_attempt(
 
     // Phase 5 / Task 26 — worker MCP injection is gated on the delegation
     // request's `enable_worker_mcp` flag (resolved once in
-    // `execute_delegation`). When the flag is unset/false this slice is
-    // empty, preserving the historical "Workers get no MCP servers"
-    // contract. When set, it carries exactly one `spur-worker-mcp`
-    // entry whose URL embeds the per-delegation HMAC token.
+    // `execute_delegation`). Default-on: this slice carries exactly one
+    // `spur-worker-mcp` entry (whose URL embeds the per-delegation HMAC
+    // token) unless the flag is `Some(false)`, in which case it is empty.
     let session_response = match crate::skip_perm::new_session_with_bypass(
         &mut *connection,
         ctx.agent_config,

@@ -168,6 +168,7 @@ fn emit_markdown_links(
                         source: source_id,
                         target_name,
                         relation,
+                        edge_kind: None,
                     });
                 }
             }
@@ -208,6 +209,7 @@ fn emit_markdown_block_links(
                     source: source_id,
                     target_name,
                     relation,
+                    edge_kind: None,
                 });
             }
         }
