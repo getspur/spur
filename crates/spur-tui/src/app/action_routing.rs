@@ -1077,13 +1077,28 @@ impl App {
                 self.handle_theme_command(arg);
             }
             Action::NotebookCommand { arg } => {
+                let Some(session_id) = self
+                    .session_detail
+                    .as_ref()
+                    .map(|detail| detail.session_id().clone())
+                else {
+                    self.flash_hint_short("/notebook: no active brain session in focus");
+                    return;
+                };
+                let Some(socket_nonce) = self.notebook_socket_nonces.get(&session_id.0).cloned()
+                else {
+                    self.flash_hint_short("/notebook: notebook socket not ready");
+                    return;
+                };
+                let socket_path = spur_core::notebook::control_socket_path(&socket_nonce);
                 let label = notebook_command_label(&arg);
                 self.flash_hint_short(format!("{label}..."));
                 tokio::spawn(async move {
-                    match crate::notebook_daemon::send_notebook_command(&arg).await {
+                    match crate::notebook_daemon::send_notebook_command(&arg, &socket_path).await {
                         Ok(response) if response.ok => {
                             tracing::info!(
                                 path = response.path.as_deref(),
+                                socket = %socket_path.display(),
                                 "notebook daemon command completed"
                             );
                         }

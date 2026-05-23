@@ -1,14 +1,15 @@
 # Notebook daemon control protocol
 
-`spur-notebook` runs as a foreground Tauri app and keeps one stable Unix socket
-alive while the notebook app is running:
+`spur-notebook` runs as a foreground Tauri app and keeps one Unix socket alive
+for each brain session while the notebook app is running:
 
 ```text
-~/.spur/notebooks/control.sock
+~/.spur/notebooks/sessions/<nonce>.sock
 ```
 
-The socket is shared by daemon control messages and notebook MCP traffic. Every
-socket frame is:
+The nonce is minted before the brain process is spawned, so the MCP stdio config
+can point at a socket before the ACP session id exists. The socket is shared by
+daemon control messages and notebook MCP traffic. Every socket frame is:
 
 ```text
 u32_be_json_length || json_bytes
@@ -25,11 +26,12 @@ cargo xtask install
 ```
 
 On macOS this installs the CLI binary to `$CARGO_HOME/bin/spur` and builds the
-Tauri app bundle at `~/Applications/Jute.app`. The TUI daemon supervisor launches
-the bundled binary directly:
+Tauri app bundle at `~/Applications/Jute.app`. The MCP proxy lazily launches the
+bundled binary directly when its per-session socket is not already accepting
+connections:
 
 ```text
-~/Applications/Jute.app/Contents/MacOS/Jute
+~/Applications/Jute.app/Contents/MacOS/Jute --socket ~/.spur/notebooks/sessions/<nonce>.sock
 ```
 
 Launching from inside the `.app` gives AppKit and WKWebView the bundle context
@@ -112,10 +114,12 @@ The response `path` is present when a notebook remains loaded after the command.
 Brain sessions preconfigure the notebook MCP server as a stdio process:
 
 ```text
-~/Applications/Jute.app/Contents/MacOS/Jute --mcp-proxy ~/.spur/notebooks/control.sock
+~/Applications/Jute.app/Contents/MacOS/Jute --mcp-proxy ~/.spur/notebooks/sessions/<nonce>.sock
 ```
 
-The proxy translates newline-delimited stdio JSON-RPC messages into the daemon's
+The proxy launches `spur-notebook --socket <sock>` on first use when the socket
+is missing or refusing connections, waits for it to become connectable, then
+translates newline-delimited stdio JSON-RPC messages into the daemon's
 length-prefixed socket frames and writes daemon responses back to stdout as
 newline-delimited JSON.
 

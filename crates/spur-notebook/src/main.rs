@@ -1,13 +1,14 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use jute::state::State;
-use spur_core::notebook::control_socket_path;
+use spur_core::notebook::notebook_binary_path;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 
 fn handle_file_associations(
     app: &AppHandle,
@@ -20,12 +21,18 @@ fn handle_file_associations(
 }
 
 enum Mode {
-    App { files: Vec<PathBuf> },
-    McpProxy { socket_path: PathBuf },
+    App {
+        files: Vec<PathBuf>,
+        socket: Option<PathBuf>,
+    },
+    McpProxy {
+        socket_path: PathBuf,
+    },
 }
 
 fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
     let mut files = Vec::new();
+    let mut socket = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -33,8 +40,11 @@ fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
                 let socket_path = args
                     .next()
                     .map(PathBuf::from)
-                    .unwrap_or_else(control_socket_path);
+                    .expect("--mcp-proxy requires <path>");
                 return Mode::McpProxy { socket_path };
+            }
+            "--socket" => {
+                socket = args.next().map(PathBuf::from);
             }
             _ if arg.starts_with('-') => {}
             _ => {
@@ -50,7 +60,7 @@ fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
             }
         }
     }
-    Mode::App { files }
+    Mode::App { files, socket }
 }
 
 fn parse_mode() -> Mode {
@@ -58,7 +68,7 @@ fn parse_mode() -> Mode {
 }
 
 async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
-    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let stream = connect_or_spawn_daemon(&socket_path).await?;
     let (mut socket_reader, mut socket_writer) = stream.into_split();
 
     let stdin_to_socket = tokio::spawn(async move {
@@ -89,11 +99,84 @@ async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn connect_or_spawn_daemon(socket_path: &PathBuf) -> anyhow::Result<UnixStream> {
+    match UnixStream::connect(socket_path).await {
+        Ok(stream) => Ok(stream),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            spawn_notebook_app(socket_path)?;
+            wait_for_daemon_socket(socket_path).await
+        }
+        Err(error) => Err(error).map_err(Into::into),
+    }
+}
+
+fn spawn_notebook_app(socket_path: &PathBuf) -> anyhow::Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let log_path = socket_path
+        .parent()
+        .map(|parent| parent.join("daemon.log"))
+        .unwrap_or_else(|| PathBuf::from("spur-notebook-daemon.log"));
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
+    let program = std::env::current_exe().unwrap_or_else(|_| notebook_binary_path());
+    let mut command = std::process::Command::new(program);
+    command
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn()?;
+    Ok(())
+}
+
+async fn wait_for_daemon_socket(socket_path: &PathBuf) -> anyhow::Result<UnixStream> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let error = match UnixStream::connect(socket_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => error,
+        };
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "notebook daemon did not become ready at {} within 30s; last error: {}",
+                socket_path.display(),
+                error
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt().init();
 
-    let files = match parse_mode() {
-        Mode::App { files } => files,
+    let (files, socket_path) = match parse_mode() {
+        Mode::App {
+            files,
+            socket: Some(socket_path),
+        } => (files, socket_path),
+        Mode::App { socket: None, .. } => {
+            eprintln!("spur-notebook app mode requires --socket <path>");
+            std::process::exit(2);
+        }
         Mode::McpProxy { socket_path } => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -106,7 +189,6 @@ fn main() {
         }
     };
 
-    let socket_path = control_socket_path();
     let bridge = Arc::new(AgentBridge::new());
     let bridge_for_state = Arc::clone(&bridge);
     let bridge_for_setup = Arc::clone(&bridge);
@@ -206,57 +288,40 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        ffi::OsString,
-        sync::{Mutex, OnceLock},
-    };
-
-    fn home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct HomeGuard(Option<OsString>);
-
-    impl HomeGuard {
-        fn set(home: &str) -> Self {
-            let previous = env::var_os("HOME");
-            env::set_var("HOME", home);
-            Self(previous)
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(home) => env::set_var("HOME", home),
-                None => env::remove_var("HOME"),
-            }
-        }
-    }
 
     #[test]
-    fn mcp_proxy_default_socket_path_matches_core_for_fixed_home() {
-        let _lock = home_lock().lock().expect("home lock poisoned");
-        let _home = HomeGuard::set("/tmp/spur-notebook-home");
-
-        let Mode::McpProxy { socket_path } = parse_mode_from(["--mcp-proxy".to_string()]) else {
+    fn mcp_proxy_requires_explicit_socket_path() {
+        let Mode::McpProxy { socket_path } = parse_mode_from([
+            "--mcp-proxy".to_string(),
+            "/tmp/notebook-session.sock".to_string(),
+        ]) else {
             panic!("expected mcp proxy mode");
         };
 
-        assert_eq!(socket_path, spur_core::notebook::control_socket_path());
-        assert_eq!(
-            socket_path,
-            PathBuf::from("/tmp/spur-notebook-home/.spur/notebooks/control.sock")
-        );
+        assert_eq!(socket_path, PathBuf::from("/tmp/notebook-session.sock"));
+    }
+
+    #[test]
+    fn app_mode_accepts_explicit_socket_path() {
+        let Mode::App { files, socket } = parse_mode_from([
+            "--socket".to_string(),
+            "/tmp/notebook-session.sock".to_string(),
+            "something.ipynb".to_string(),
+        ]) else {
+            panic!("expected app mode");
+        };
+
+        assert_eq!(socket, Some(PathBuf::from("/tmp/notebook-session.sock")));
+        assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
     }
 
     #[test]
     fn app_mode_collects_file_args() {
-        let Mode::App { files } = parse_mode_from(["something.ipynb".to_string()]) else {
+        let Mode::App { files, socket } = parse_mode_from(["something.ipynb".to_string()]) else {
             panic!("expected app mode");
         };
 
+        assert_eq!(socket, None);
         assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
     }
 }
