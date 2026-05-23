@@ -7,6 +7,9 @@ set -euo pipefail
 
 : "${GCP_PROJECT:=wiilearn}"
 : "${GCP_ZONE:=us-central1-a}"
+# Force numpy-enabled python so rsync over IAP isn't capped at ~3.5 KB/s.
+: "${CLOUDSDK_PYTHON:=/opt/homebrew/bin/python3.13}"
+export CLOUDSDK_PYTHON
 
 host="$1"; shift
 
