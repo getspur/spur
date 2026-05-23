@@ -6,7 +6,7 @@ use std::{env, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use jute::state::State;
 use spur_core::notebook::notebook_binary_path;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -242,20 +242,18 @@ fn main() {
                 }
             });
 
-            if cfg!(any(windows, target_os = "linux")) {
-                if files.is_empty() {
-                    jute::window::open_home(app.handle())?;
-                } else {
-                    handle_file_associations(app.handle(), &files)?;
-                }
+            // Linux/Windows: only honor explicit file args. The no-file case is
+            // handled by `restore_last_open_notebook` (called from start_daemon_server)
+            // which opens last.json or creates a fresh Untitled — opening a "home"
+            // window here would race the restore (see RunEvent::Ready comment below).
+            if cfg!(any(windows, target_os = "linux")) && !files.is_empty() {
+                handle_file_associations(app.handle(), &files)?;
             }
 
             Ok(())
         })
         .menu(jute::menu::setup_menu)
-        .build(tauri::generate_context!(
-            "jute-notebook/src-tauri/tauri.conf.json"
-        ))
+        .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(
             #[allow(unused_variables)]
@@ -276,9 +274,14 @@ fn main() {
                 }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Ready => {
-                    if app.webview_windows().is_empty() {
-                        jute::window::open_home(app).unwrap();
-                    }
+                    // Do NOT open the home page here. `restore_last_open_notebook`
+                    // (spawned from `setup`) opens either the last notebook or a
+                    // fresh Untitled. Opening a second "home" window races the
+                    // restore: both webviews mount React, both run setActiveAgentNotebook,
+                    // and whichever runs last wins — the home page's
+                    // `setActiveAgentNotebook(undefined)` would clobber the
+                    // notebook page's set-to-active, leaving the bridge
+                    // permanently `notebook_open = false`.
                 }
                 _ => {}
             },
