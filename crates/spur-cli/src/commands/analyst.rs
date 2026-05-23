@@ -17,6 +17,8 @@ const INIT_TEMPORAL_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_temporal.sql");
 const INIT_DIAGNOSTICS_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_diagnostics.sql");
+const INIT_VIEWS_SQL: &str =
+    include_str!("../../../spur-context/poc/duckdb-analyst/init_views.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 
 /// Compiled-in parquet schema version this analyst build understands.
@@ -110,6 +112,9 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         INIT_SQL,
         if want_temporal { INIT_TEMPORAL_SQL } else { "" },
         if want_diag { INIT_DIAGNOSTICS_SQL } else { "" },
+        // Views depend on temporal_edges / symbol_snapshots; only install when
+        // the temporal layer is present.
+        if want_temporal { INIT_VIEWS_SQL } else { "" },
     ]
     .concat();
     let sql = sql_template.replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql);
