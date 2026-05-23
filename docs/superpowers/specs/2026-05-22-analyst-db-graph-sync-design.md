@@ -184,3 +184,15 @@ Manual smoke (documented in plan, not automated):
 
 **Unchanged:**
 - `crates/spur-context/poc/duckdb-analyst/init.sql` — remains the source of view definitions.
+
+## Appendix: Temporal collections (Phase 1.5)
+
+Phase 1.5 is an analyst DB surfacing layer over optional temporal and diagnostic parquet collections. Detection gates on file presence in `crates/spur-cli/src/commands/analyst.rs`, not on manifest `row_counts`: the temporal SQL fragment is appended when temporal parquet files are present, and the diagnostics SQL fragment is appended only when `diagnostics.parquet` is present. The optional manifest count keys are metadata, not build gates.
+
+The views are conditional. When temporal parquets are absent, `crates/spur-context/poc/duckdb-analyst/init_temporal.sql` is not concatenated, so the database has no `commits`, `symbol_snapshots`, or `temporal_edges` views. When `diagnostics.parquet` is absent, `crates/spur-context/poc/duckdb-analyst/init_diagnostics.sql` is not concatenated, so the database has no `diagnostics` view.
+
+The base `_meta` table remains available from `crates/spur-context/poc/duckdb-analyst/init.sql`. It exposes `commit_count`, `symbol_snapshot_count`, `temporal_edge_count`, and `diagnostic_count` with `TRY_CAST(json_extract(...)) AS BIGINT` against decoded `manifest.json` text, so missing optional `row_counts` keys read as `NULL` instead of causing struct binder errors against older or stripped manifest schemas.
+
+The real parquet writer entry points for these collections are `write_commits`, `write_symbol_snapshots`, `write_temporal_edges`, and `write_diagnostics` in `crates/spur-graph/src/store/parquet.rs` (verified via `code_search` / `code_symbol_info`). The back-compat invariant is covered by `back_compat_loads_artifact_without_temporal_tables` at `crates/spur-graph/src/store/parquet.rs:2606`: artifacts without `commits.parquet`, `symbol_snapshots.parquet`, `temporal_edges.parquet`, or `diagnostics.parquet`, and with those `row_counts` keys removed, must still load.
+
+Stage 2 is explicitly deferred: modeling temporal relationships as a DuckPGQ temporal graph is outside Phase 1.5. Stage 3 is also explicitly deferred: wiring `run_full_walk_into` from `crates/spur-graph/src/git_walk.rs` into `spur-cli graph build` to produce temporal parquets is separate work.
