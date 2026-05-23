@@ -26,6 +26,8 @@ use tokio::{
 };
 use tracing::warn;
 
+use crate::recents::{self, RecentEntry};
+
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
 use self::{
     bridge::{AgentBridge, BridgeError},
@@ -377,6 +379,8 @@ pub struct DaemonControlRequest {
     pub command: String,
     #[serde(default)]
     pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -388,6 +392,8 @@ pub struct DaemonControlResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<RecentEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DaemonControlError>,
 }
 
@@ -396,6 +402,34 @@ pub struct DaemonControlResponse {
 pub struct DaemonControlError {
     pub code: String,
     pub message: String,
+}
+
+struct DaemonControlSuccess {
+    path: Option<PathBuf>,
+    entries: Option<Vec<RecentEntry>>,
+}
+
+impl DaemonControlSuccess {
+    fn empty() -> Self {
+        Self {
+            path: None,
+            entries: None,
+        }
+    }
+
+    fn path(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            entries: None,
+        }
+    }
+
+    fn entries(entries: Vec<RecentEntry>) -> Self {
+        Self {
+            path: None,
+            entries: Some(entries),
+        }
+    }
 }
 
 impl NotebookDaemonControl {
@@ -410,16 +444,18 @@ impl NotebookDaemonControl {
     async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
         let id = request.id.clone();
         match self.handle_inner(request).await {
-            Ok(path) => DaemonControlResponse {
+            Ok(success) => DaemonControlResponse {
                 id,
                 ok: true,
-                path: path.map(|path| path.display().to_string()),
+                path: success.path.map(|path| path.display().to_string()),
+                entries: success.entries,
                 error: None,
             },
             Err(error) => DaemonControlResponse {
                 id,
                 ok: false,
                 path: None,
+                entries: None,
                 error: Some(DaemonControlError {
                     code: error.mcp_code().to_string(),
                     message: error.to_string(),
@@ -431,7 +467,7 @@ impl NotebookDaemonControl {
     async fn handle_inner(
         &self,
         request: DaemonControlRequest,
-    ) -> Result<Option<PathBuf>, BridgeError> {
+    ) -> Result<DaemonControlSuccess, BridgeError> {
         match request.command.as_str() {
             "open" => {
                 let path = request.path.ok_or_else(|| BridgeError::Handler {
@@ -439,7 +475,11 @@ impl NotebookDaemonControl {
                     message: "open requires path".to_string(),
                 })?;
                 self.save_current().await?;
-                self.open_path(resolve_notebook_path(path)).await.map(Some)
+                let path = self.open_path(resolve_notebook_path(path)).await?;
+                if let Err(error) = recents::record_open(&path).await {
+                    warn!(%error, path = %path.display(), "failed to record recent notebook");
+                }
+                Ok(DaemonControlSuccess::path(path))
             }
             "new" => {
                 self.save_current().await?;
@@ -450,9 +490,13 @@ impl NotebookDaemonControl {
                             code: "scratch_create_failed".to_string(),
                             message: error.to_string(),
                         })?;
-                self.open_path(path).await.map(Some)
+                let path = self.open_path(path).await?;
+                if let Err(error) = recents::record_open(&path).await {
+                    warn!(%error, path = %path.display(), "failed to record recent notebook");
+                }
+                Ok(DaemonControlSuccess::path(path))
             }
-            "reopen" => self.reopen().await.map(Some),
+            "reopen" => self.reopen().await.map(DaemonControlSuccess::path),
             "close" => {
                 self.save_current().await?;
                 self.close_current_window().await;
@@ -463,12 +507,49 @@ impl NotebookDaemonControl {
                 if let Err(error) = clear_last_notebook().await {
                     warn!(%error, "failed to clear last notebook record");
                 }
-                Ok(None)
+                Ok(DaemonControlSuccess::empty())
+            }
+            "list_recents" => recents::list_recents()
+                .await
+                .map(DaemonControlSuccess::entries)
+                .map_err(|error| BridgeError::Handler {
+                    code: "recents_failed".to_string(),
+                    message: error.to_string(),
+                }),
+            "remove_from_recents" => {
+                let path = request.path.ok_or_else(|| BridgeError::Handler {
+                    code: "invalid_params".to_string(),
+                    message: "remove_from_recents requires path".to_string(),
+                })?;
+                recents::remove_from_recents(&resolve_notebook_path(path))
+                    .await
+                    .map_err(|error| BridgeError::Handler {
+                        code: "recents_failed".to_string(),
+                        message: error.to_string(),
+                    })?;
+                Ok(DaemonControlSuccess::empty())
+            }
+            "set_pinned" => {
+                let path = request.path.ok_or_else(|| BridgeError::Handler {
+                    code: "invalid_params".to_string(),
+                    message: "set_pinned requires path".to_string(),
+                })?;
+                let pinned = request.pinned.ok_or_else(|| BridgeError::Handler {
+                    code: "invalid_params".to_string(),
+                    message: "set_pinned requires pinned".to_string(),
+                })?;
+                recents::set_pinned(&resolve_notebook_path(path), pinned)
+                    .await
+                    .map_err(|error| BridgeError::Handler {
+                        code: "recents_failed".to_string(),
+                        message: error.to_string(),
+                    })?;
+                Ok(DaemonControlSuccess::empty())
             }
             "shutdown" => {
                 self.save_current().await?;
                 self.app.exit(0);
-                Ok(None)
+                Ok(DaemonControlSuccess::empty())
             }
             command => Err(BridgeError::Handler {
                 code: "unknown_daemon_command".to_string(),
@@ -751,6 +832,7 @@ async fn handle_daemon_connection(
                 id: None,
                 ok: false,
                 path: None,
+                entries: None,
                 error: Some(DaemonControlError {
                     code: "invalid_control_message".to_string(),
                     message: error.to_string(),
@@ -836,6 +918,7 @@ mod tests {
                     id: request.id,
                     ok: false,
                     path: None,
+                    entries: None,
                     error: Some(DaemonControlError {
                         code: "recorded_control_request".to_string(),
                         message: "recorded control request".to_string(),

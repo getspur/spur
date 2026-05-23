@@ -114,9 +114,16 @@ Commands:
   response is an error.
 - `close`: save the current notebook if one is loaded, close the window, and
   clear daemon notebook state.
+- `list_recents`: list recently opened notebooks from the daemon-side recents
+  log.
+- `remove_from_recents`: remove `path` from the recents log without deleting the
+  notebook file.
+- `set_pinned`: set the recents pin state for `path`.
 - `shutdown`: save the current notebook if one is loaded, then exit the daemon.
 
-`open` requires `path`; the other commands ignore `path`.
+`open` and `remove_from_recents` require `path`. `set_pinned` requires `path`
+and `pinned`. `new`, `reopen`, `close`, `list_recents`, and `shutdown` ignore
+`path`.
 
 The daemon records the last successfully loaded notebook at:
 
@@ -128,6 +135,32 @@ On daemon startup, that file is read and the notebook is restored if the path
 still exists. `close` clears the record. This is intentionally a single
 notebook pointer; multi-window restore is deferred.
 
+The daemon also records explicitly opened and newly created notebooks at:
+
+```text
+~/.spur/notebooks/recents.json
+```
+
+That file stores:
+
+```json
+{
+  "entries": [
+    {
+      "path": "/path/to/notebook.ipynb",
+      "lastOpened": "2026-05-24T12:00:00Z",
+      "isScratch": false,
+      "pinned": false
+    }
+  ]
+}
+```
+
+`open` and `new` update the recents log after a successful load. `reopen` and
+`close` do not update it. `list_recents` returns pinned entries first, then
+unpinned entries by most recent open time, and prunes entries whose notebook file
+no longer exists.
+
 ## Control responses
 
 Success:
@@ -136,6 +169,22 @@ Success:
 {
   "ok": true,
   "path": "/path/to/current.ipynb"
+}
+```
+
+`list_recents` success:
+
+```json
+{
+  "ok": true,
+  "entries": [
+    {
+      "path": "/path/to/notebook.ipynb",
+      "lastOpened": "2026-05-24T12:00:00Z",
+      "isScratch": false,
+      "pinned": false
+    }
+  ]
 }
 ```
 
