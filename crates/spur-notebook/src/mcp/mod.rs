@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::Manager;
 use tokio::{
+    io::AsyncWriteExt,
     net::{UnixListener, UnixStream},
     sync::oneshot,
     task::JoinHandle,
@@ -193,6 +194,11 @@ pub fn socket_path_for_slot(slot_id: &str) -> Result<PathBuf> {
 fn notebooks_dir() -> Result<PathBuf> {
     let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
     Ok(base_dirs.home_dir().join(".spur").join("notebooks"))
+}
+
+fn scratch_dir() -> Result<PathBuf> {
+    let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
+    Ok(base_dirs.home_dir().join(".spur").join("scratch"))
 }
 
 fn last_notebook_record_path() -> Result<PathBuf> {
@@ -462,7 +468,7 @@ impl NotebookDaemonControl {
             "new" => {
                 self.save_current().await?;
                 let path =
-                    create_scratch_notebook()
+                    create_untitled_notebook()
                         .await
                         .map_err(|error| BridgeError::Handler {
                             code: "scratch_create_failed".to_string(),
@@ -577,27 +583,15 @@ impl NotebookDaemonControl {
     }
 
     pub async fn restore_last_open_notebook(&self) {
-        match load_last_notebook().await {
-            Ok(Some(path)) if path.exists() => {
-                if let Err(error) = self.open_path(path.clone()).await {
-                    warn!(
-                        %error,
-                        path = %path.display(),
-                        "failed to restore last notebook"
-                    );
-                }
-            }
-            Ok(Some(path)) => {
-                warn!(
-                    path = %path.display(),
-                    "last notebook no longer exists; clearing record"
-                );
-                if let Err(error) = clear_last_notebook().await {
-                    warn!(%error, "failed to clear stale last notebook record");
-                }
-            }
-            Ok(None) => {}
-            Err(error) => warn!(%error, "failed to load last notebook record"),
+        let Some(path) = notebook_path_for_daemon_start().await else {
+            return;
+        };
+        if let Err(error) = self.open_path(path.clone()).await {
+            warn!(
+                %error,
+                path = %path.display(),
+                "failed to open notebook on daemon start"
+            );
         }
     }
 }
@@ -608,19 +602,121 @@ impl DaemonControlHandler for NotebookDaemonControl {
     }
 }
 
-async fn create_scratch_notebook() -> anyhow::Result<PathBuf> {
-    let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
-    let dir = base_dirs.home_dir().join(".spur").join("scratch");
-    tokio::fs::create_dir_all(&dir).await?;
-    let path = dir.join(format!("{}.ipynb", uuid::Uuid::new_v4()));
-    let contents = json!({
+const UNTITLED_NOTEBOOK_MAX_SUFFIX: usize = 1000;
+
+async fn notebook_path_for_daemon_start() -> Option<PathBuf> {
+    notebook_path_for_daemon_start_with(None, None).await
+}
+
+#[cfg(test)]
+async fn notebook_path_for_daemon_start_at(
+    record_path: &Path,
+    untitled_dir: &Path,
+) -> Option<PathBuf> {
+    notebook_path_for_daemon_start_with(Some(record_path), Some(untitled_dir)).await
+}
+
+async fn notebook_path_for_daemon_start_with(
+    record_path: Option<&Path>,
+    untitled_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let target = match load_last_notebook_from(record_path).await {
+        Ok(Some(path)) if path.exists() => Some(path),
+        Ok(Some(stale)) => {
+            warn!(
+                path = %stale.display(),
+                "last notebook no longer exists; clearing record"
+            );
+            if let Err(error) = clear_last_notebook_from(record_path).await {
+                warn!(%error, "failed to clear stale last notebook record");
+            }
+            None
+        }
+        Ok(None) => None,
+        Err(error) => {
+            warn!(%error, "failed to load last notebook record");
+            None
+        }
+    };
+
+    match target {
+        Some(path) => Some(path),
+        None => match create_untitled_notebook_from(untitled_dir).await {
+            Ok(path) => Some(path),
+            Err(error) => {
+                warn!(%error, "failed to create fallback Untitled notebook");
+                None
+            }
+        },
+    }
+}
+
+async fn load_last_notebook_from(record_path: Option<&Path>) -> Result<Option<PathBuf>> {
+    match record_path {
+        Some(record_path) => load_last_notebook_at(record_path).await,
+        None => load_last_notebook().await,
+    }
+}
+
+async fn clear_last_notebook_from(record_path: Option<&Path>) -> Result<()> {
+    match record_path {
+        Some(record_path) => clear_last_notebook_at(record_path).await,
+        None => clear_last_notebook().await,
+    }
+}
+
+async fn create_untitled_notebook_from(untitled_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
+    match untitled_dir {
+        Some(untitled_dir) => create_untitled_notebook_in_dir(untitled_dir).await,
+        None => create_untitled_notebook().await,
+    }
+}
+
+async fn create_untitled_notebook() -> anyhow::Result<PathBuf> {
+    create_untitled_notebook_in_dir(&scratch_dir()?).await
+}
+
+async fn create_untitled_notebook_in_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    let contents = serde_json::to_vec_pretty(&json!({
         "cells": [],
         "metadata": {},
         "nbformat": 4,
         "nbformat_minor": 5
-    });
-    tokio::fs::write(&path, serde_json::to_vec_pretty(&contents)?).await?;
-    Ok(path)
+    }))?;
+
+    for suffix in 0..=UNTITLED_NOTEBOOK_MAX_SUFFIX {
+        let file_name = if suffix == 0 {
+            "Untitled.ipynb".to_string()
+        } else {
+            format!("Untitled{suffix}.ipynb")
+        };
+        let path = dir.join(file_name);
+        let mut file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", path.display()))
+            }
+        };
+        file.write_all(&contents)
+            .await
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        return Ok(path);
+    }
+
+    anyhow::bail!(
+        "failed to create an Untitled notebook in {} after trying suffixes 0 through {}",
+        dir.display(),
+        UNTITLED_NOTEBOOK_MAX_SUFFIX
+    );
 }
 
 pub async fn start_daemon_server(
@@ -932,5 +1028,110 @@ mod tests {
                 .expect("missing record reads as none"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn create_untitled_notebook_uses_jupyter_style_names_and_fills_gaps() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-untitled-")
+            .tempdir_in("/private/tmp")
+            .expect("temp dir");
+
+        let first = create_untitled_notebook_in_dir(temp_dir.path())
+            .await
+            .expect("first untitled notebook writes");
+        let second = create_untitled_notebook_in_dir(temp_dir.path())
+            .await
+            .expect("second untitled notebook writes");
+        let third = create_untitled_notebook_in_dir(temp_dir.path())
+            .await
+            .expect("third untitled notebook writes");
+
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("Untitled.ipynb")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("Untitled1.ipynb")
+        );
+        assert_eq!(
+            third.file_name().and_then(|name| name.to_str()),
+            Some("Untitled2.ipynb")
+        );
+
+        tokio::fs::remove_file(&first)
+            .await
+            .expect("remove first untitled notebook");
+
+        let fills_gap = create_untitled_notebook_in_dir(temp_dir.path())
+            .await
+            .expect("gap-filling untitled notebook writes");
+        assert_eq!(
+            fills_gap.file_name().and_then(|name| name.to_str()),
+            Some("Untitled.ipynb")
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_start_with_stale_last_record_clears_and_creates_untitled() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-start-stale-")
+            .tempdir_in("/private/tmp")
+            .expect("temp dir");
+        let record_path = temp_dir.path().join("last.json");
+        let stale_path = temp_dir.path().join("missing.ipynb");
+
+        persist_last_notebook_at(&record_path, &stale_path)
+            .await
+            .expect("stale record writes");
+
+        let path = notebook_path_for_daemon_start_at(&record_path, temp_dir.path())
+            .await
+            .expect("fallback notebook path");
+
+        assert_eq!(path, temp_dir.path().join("Untitled.ipynb"));
+        assert!(path.exists());
+        assert_eq!(
+            load_last_notebook_at(&record_path)
+                .await
+                .expect("cleared record reads as none"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_start_without_last_record_creates_untitled() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-start-absent-")
+            .tempdir_in("/private/tmp")
+            .expect("temp dir");
+        let record_path = temp_dir.path().join("last.json");
+
+        let path = notebook_path_for_daemon_start_at(&record_path, temp_dir.path())
+            .await
+            .expect("fallback notebook path");
+
+        assert_eq!(path, temp_dir.path().join("Untitled.ipynb"));
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn daemon_start_with_unreadable_last_record_creates_untitled() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-start-unreadable-")
+            .tempdir_in("/private/tmp")
+            .expect("temp dir");
+        let record_path = temp_dir.path().join("last.json");
+        tokio::fs::write(&record_path, b"{not-json")
+            .await
+            .expect("unreadable record writes");
+
+        let path = notebook_path_for_daemon_start_at(&record_path, temp_dir.path())
+            .await
+            .expect("fallback notebook path");
+
+        assert_eq!(path, temp_dir.path().join("Untitled.ipynb"));
+        assert!(path.exists());
     }
 }
