@@ -83,7 +83,8 @@ impl McpCallbackServer {
 
 pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let body = code_resolve_with_artifact(args, &artifact)?;
+    let body =
+        code_resolve_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
@@ -132,23 +133,97 @@ fn code_search_with_artifact(
 }
 
 async fn code_resolve_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| {
-        code_resolve_with_artifact(args, artifact).map_err(CodeGraphError::from)
-    })
-    .await
+    with_loaded_graph_artifact(|artifact| code_resolve_with_artifact(args, artifact)).await
 }
 
-fn code_resolve_with_artifact(
-    args: &Value,
-    artifact: &GraphIndexArtifact,
-) -> Result<Value, McpHandlerError> {
+fn code_resolve_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
     let selector = selector_arg(args)?;
-    let candidates = resolve_candidate_rows(artifact, selector)?
-        .into_iter()
-        .map(candidate_row)
-        .collect::<Vec<_>>();
+    let Some(as_of) = parse_as_of(args)? else {
+        let candidates = resolve_candidate_rows(artifact, selector)?
+            .into_iter()
+            .map(candidate_row)
+            .collect::<Vec<_>>();
 
-    Ok(json!({ "candidates": candidates }))
+        return Ok(json!({ "candidates": candidates }));
+    };
+
+    let resolved = match resolve_selector(artifact, selector) {
+        SelectorResolution::Resolved(resolved) => resolved,
+        SelectorResolution::Ambiguous { candidates } => {
+            let candidates = candidates
+                .into_iter()
+                .map(candidate_row)
+                .collect::<Vec<_>>();
+            return Ok(json!({ "candidates": candidates }));
+        }
+        SelectorResolution::NotFound => {
+            return Err(McpHandlerError::NotFound(format!(
+                "symbol {} not found in graph artifact",
+                missing_symbol_label(selector)
+            ))
+            .into());
+        }
+    };
+
+    let worktree = current_worktree()?;
+    let commits = load_commit_index_for_request(&worktree)?;
+    let resolution = resolve_symbol_as_of(artifact, &commits, &resolved.stable_symbol_id, &as_of)?;
+    code_resolve_temporal_response(artifact, &resolved.stable_symbol_id, &as_of, resolution)
+}
+
+fn code_resolve_temporal_response(
+    artifact: &GraphIndexArtifact,
+    requested_symbol_id: &str,
+    as_of: &str,
+    resolution: Resolution<String>,
+) -> CodeGraphResult {
+    match resolution {
+        Resolution::Found { value, chain } => {
+            let symbol = symbol_by_id(artifact, &value)?;
+            let kind = if value == requested_symbol_id {
+                "found"
+            } else {
+                "renamed"
+            };
+            Ok(json!({
+                "candidates": [candidate_row(candidate_row_for_symbol(symbol))],
+                "resolution": {
+                    "kind": kind,
+                    "as_of": as_of,
+                    "symbol": symbol_uri(&value),
+                    "chain": chain,
+                },
+            }))
+        }
+        Resolution::Deleted { last_seen } => Ok(json!({
+            "candidates": [],
+            "resolution": {
+                "kind": "deleted",
+                "as_of": as_of,
+                "last_seen": last_seen,
+            },
+        })),
+        Resolution::Ambiguous { candidates } => {
+            let candidate_rows = candidates
+                .iter()
+                .map(|candidate| symbol_by_id(artifact, candidate).map(candidate_row_for_symbol))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(candidate_row)
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "candidates": candidate_rows,
+                "resolution": {
+                    "kind": "ambiguous",
+                    "as_of": as_of,
+                    "candidates": candidates,
+                },
+            }))
+        }
+        Resolution::Unknown { reason } => {
+            Err(unknown_resolution_error(requested_symbol_id, as_of, reason))
+        }
+    }
 }
 
 pub(crate) async fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
@@ -284,6 +359,7 @@ fn code_read_symbol_with_artifact(
 }
 
 pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
+    selected_code_selector(args)?;
     let artifact = load_graph_artifact_for_request()?;
     let body =
         code_callers_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
@@ -441,16 +517,7 @@ pub(crate) async fn code_symbol_history(args: &Value) -> Result<Value, McpHandle
     let artifact = load_graph_artifact_for_worktree(&worktree)?;
     let commits = load_commit_index_for_request(&worktree)?;
     let symbol_id = symbol_id_arg(args)?;
-    let events = symbol_history(&artifact, &commits, &symbol_id)
-        .into_iter()
-        .map(|(sha, change_kind, key)| {
-            json!({
-                "commit": sha,
-                "change_kind": change_kind,
-                "snapshot": key,
-            })
-        })
-        .collect::<Vec<_>>();
+    let events = code_symbol_history_events(args, &artifact, &commits, &symbol_id)?;
     Ok(with_graph_metadata(
         &artifact,
         json!({
@@ -468,8 +535,35 @@ fn code_symbol_history_response(args: &Value) -> CodeGraphResult {
     let commits =
         load_commit_index_for_request(&worktree).map_err(CodeGraphError::without_metadata)?;
     let symbol_id = symbol_id_arg(args).map_err(CodeGraphError::without_metadata)?;
-    let events = symbol_history(&artifact, &commits, &symbol_id)
+    let events = code_symbol_history_events(args, &artifact, &commits, &symbol_id)
+        .map_err(CodeGraphError::without_metadata)?;
+
+    Ok(json!({
+        "symbol": symbol_uri(&symbol_id),
+        "events": events,
+    }))
+}
+
+fn code_symbol_history_events(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+    commits: &CommitIndexArtifact,
+    symbol_id: &str,
+) -> Result<Vec<Value>, McpHandlerError> {
+    let reachable = parse_as_of(args)?
+        .map(|as_of| reachable_commits(commits, &as_of))
+        .transpose()?;
+    if artifact.symbol_snapshots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(symbol_history(artifact, commits, symbol_id)
         .into_iter()
+        .filter(|(sha, _, _)| {
+            reachable
+                .as_ref()
+                .map_or(true, |reachable| reachable.contains(sha))
+        })
         .map(|(sha, change_kind, key)| {
             json!({
                 "commit": sha,
@@ -477,12 +571,7 @@ fn code_symbol_history_response(args: &Value) -> CodeGraphResult {
                 "snapshot": key,
             })
         })
-        .collect::<Vec<_>>();
-
-    Ok(json!({
-        "symbol": symbol_uri(&symbol_id),
-        "events": events,
-    }))
+        .collect::<Vec<_>>())
 }
 
 type CodeGraphResult = Result<Value, CodeGraphError>;
@@ -845,7 +934,11 @@ fn resolve_symbol_for_optional_as_of(
         return Ok(symbol_id.to_string());
     };
     let commits = load_commit_index_for_request(worktree)?;
-    resolve_symbol_as_of(artifact, &commits, symbol_id, &as_of)
+    temporal_resolution_symbol_id(
+        symbol_id,
+        &as_of,
+        resolve_symbol_as_of(artifact, &commits, symbol_id, &as_of)?,
+    )
 }
 
 fn resolve_symbol_for_optional_as_of_current_worktree(
@@ -873,12 +966,60 @@ fn parse_as_of(args: &Value) -> Result<Option<String>, McpHandlerError> {
     }
 }
 
+fn reachable_commits(
+    commits: &CommitIndexArtifact,
+    as_of: &str,
+) -> Result<HashSet<String>, McpHandlerError> {
+    if !commits.commits.iter().any(|commit| commit.sha == as_of) {
+        return Err(McpHandlerError::InvalidParams(format!(
+            "as_of commit `{as_of}` is not indexed"
+        )));
+    }
+
+    let mut reachable = HashSet::new();
+    let mut stack = vec![as_of.to_string()];
+    while let Some(sha) = stack.pop() {
+        if !reachable.insert(sha.clone()) {
+            continue;
+        }
+        let commit = commits
+            .commits
+            .iter()
+            .find(|commit| commit.sha == sha)
+            .ok_or_else(|| {
+                McpHandlerError::Internal(format!(
+                    "commit index references missing parent commit `{sha}`"
+                ))
+            })?;
+        stack.extend(commit.parents.iter().cloned());
+    }
+
+    Ok(reachable)
+}
+
+fn temporal_resolution_symbol_id(
+    symbol_id: &str,
+    as_of: &str,
+    resolution: Resolution<String>,
+) -> Result<String, CodeGraphError> {
+    match resolution {
+        Resolution::Found { value, .. } => Ok(value),
+        Resolution::Deleted { last_seen } => {
+            Err(deleted_resolution_error(symbol_id, as_of, last_seen))
+        }
+        Resolution::Ambiguous { candidates } => {
+            Err(ambiguous_resolution_error(symbol_id, as_of, candidates))
+        }
+        Resolution::Unknown { reason } => Err(unknown_resolution_error(symbol_id, as_of, reason)),
+    }
+}
+
 fn resolve_symbol_as_of(
     artifact: &GraphIndexArtifact,
     commits: &CommitIndexArtifact,
     symbol_id: &str,
     as_of: &str,
-) -> Result<String, CodeGraphError> {
+) -> Result<Resolution<String>, CodeGraphError> {
     if !commits.commits.iter().any(|commit| commit.sha == as_of) {
         return Err(McpHandlerError::InvalidParams(format!(
             "as_of commit `{as_of}` is not indexed"
@@ -897,12 +1038,10 @@ fn resolve_symbol_as_of(
     let mut last_unknown = None;
     for (_, _, key) in history {
         match resolve_symbol_at(artifact, commits, &key.stable_symbol_id, &key.commit, as_of) {
-            Resolution::Found { value, .. } => return Ok(value),
-            Resolution::Deleted { last_seen } => {
-                return Err(deleted_resolution_error(symbol_id, as_of, last_seen));
-            }
+            Resolution::Found { value, chain } => return Ok(Resolution::Found { value, chain }),
+            Resolution::Deleted { last_seen } => return Ok(Resolution::Deleted { last_seen }),
             Resolution::Ambiguous { candidates } => {
-                return Err(ambiguous_resolution_error(symbol_id, as_of, candidates));
+                return Ok(Resolution::Ambiguous { candidates });
             }
             Resolution::Unknown { reason } => {
                 last_unknown = Some(reason);
@@ -911,7 +1050,7 @@ fn resolve_symbol_as_of(
     }
 
     if let Some(reason) = last_unknown {
-        return Err(unknown_resolution_error(symbol_id, as_of, reason));
+        return Ok(Resolution::Unknown { reason });
     }
 
     Err(McpHandlerError::NotFound(format!(
@@ -2163,7 +2302,7 @@ mod tests {
             dir.path().join(".spur/graph-index.json"),
             serde_json::to_string_pretty(&json!({
                 "header": {
-                    "graph_index_version": "test"
+                    "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
                 },
                 "manifest_version": "test",
                 "graph_content_hash": "wide-test",
@@ -2515,7 +2654,7 @@ mod tests {
         assert_eq!(candidates[0]["symbol_kind"], "function");
         assert_eq!(candidates[1]["entity_name"], "submit_plan");
         assert_eq!(body["graph_content_hash"], "test");
-        assert_eq!(body["graph_index_version"], "test");
+        assert_eq!(body["graph_index_version"], GRAPH_INDEX_VERSION_TEMPORAL);
         assert_unavailable_freshness_metadata(&body);
     }
 
@@ -2588,7 +2727,7 @@ mod tests {
         );
         assert_eq!(body["unresolved_sample"], json!(["root"]));
         assert_eq!(body["graph_content_hash"], "test");
-        assert_eq!(body["graph_index_version"], "test");
+        assert_eq!(body["graph_index_version"], GRAPH_INDEX_VERSION_TEMPORAL);
         assert_unavailable_freshness_metadata(&body);
     }
 
@@ -2630,7 +2769,7 @@ mod tests {
             dir.path().join(".spur/graph-index.json"),
             serde_json::to_string_pretty(&json!({
                 "header": {
-                    "graph_index_version": "test"
+                    "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
                 },
                 "manifest_version": "test",
                 "graph_content_hash": "test",
@@ -2802,7 +2941,7 @@ mod tests {
         assert_eq!(callers["callers"].as_array().expect("callers").len(), 1);
         assert_eq!(callers["callers"][0]["uri"], "graph://symbol/cache-caller");
         assert_eq!(callers["graph_content_hash"], "test");
-        assert_eq!(callers["graph_index_version"], "test");
+        assert_eq!(callers["graph_index_version"], GRAPH_INDEX_VERSION_TEMPORAL);
         assert_unavailable_freshness_metadata(&callers);
 
         let callees = response_json(
@@ -2818,7 +2957,7 @@ mod tests {
         assert_eq!(callees["callees"][0]["edge_kind"], "calls");
         assert_eq!(callees["callees"][0]["uri"], "graph://symbol/cache-callee");
         assert_eq!(callees["graph_content_hash"], "test");
-        assert_eq!(callees["graph_index_version"], "test");
+        assert_eq!(callees["graph_index_version"], GRAPH_INDEX_VERSION_TEMPORAL);
         assert_unavailable_freshness_metadata(&callees);
     }
 
@@ -2869,7 +3008,7 @@ mod tests {
             "crates/other::Other::run"
         );
         assert_eq!(body["graph_content_hash"], "test");
-        assert_eq!(body["graph_index_version"], "test");
+        assert_eq!(body["graph_index_version"], GRAPH_INDEX_VERSION_TEMPORAL);
         assert_unavailable_freshness_metadata(&body);
     }
 
@@ -2897,7 +3036,7 @@ mod tests {
         );
         assert_eq!(
             error.data.as_ref().expect("graph metadata")["graph_index_version"],
-            "test"
+            GRAPH_INDEX_VERSION_TEMPORAL
         );
         assert_unavailable_freshness_metadata(error.data.as_ref().expect("graph metadata"));
     }
@@ -3190,7 +3329,7 @@ mod tests {
         assert!(mermaid.contains("root[\"root\"]"));
         assert!(mermaid.contains("root --> callee"));
         assert_eq!(body["graph_content_hash"], "test");
-        assert_eq!(body["graph_index_version"], "test");
+        assert_eq!(body["graph_index_version"], GRAPH_INDEX_VERSION_TEMPORAL);
         assert_unavailable_freshness_metadata(&body);
     }
 
