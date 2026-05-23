@@ -1,0 +1,10 @@
+{
+  "expected_renames": [
+    {
+      "from": "py_old_21",
+      "to": "py_new_21"
+    }
+  ],
+  "expected_added": [],
+  "expected_deleted": []
+}

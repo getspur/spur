@@ -140,6 +140,7 @@ impl McpCallbackServer {
             "code_callers" => self.handle_code_callers(id, arguments).await,
             "code_callees" => self.handle_code_callees(id, arguments).await,
             "code_subgraph" => self.handle_code_subgraph(id, arguments).await,
+            "code_symbol_history" => self.handle_code_symbol_history(id, arguments).await,
             "submit_plan" => self.handle_submit_plan(id, arguments).await,
             "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,

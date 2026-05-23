@@ -158,6 +158,8 @@ fn fixture_artifact_with_unsorted_resolved_edges() -> GraphIndexArtifact {
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 0.75,
+        change_kind: None,
+
         edge_kind: Some(GraphEdgeKind::Calls),
     });
     artifact
@@ -239,6 +241,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 relation: RelationKind::Contains,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 1.0,
+                change_kind: None,
+
                 edge_kind: Some(GraphEdgeKind::ReferencesOther),
             },
             GraphEdgeArtifact {
@@ -248,6 +252,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 0.875,
+                change_kind: None,
+
                 edge_kind: Some(GraphEdgeKind::Calls),
             },
             GraphEdgeArtifact {
@@ -257,6 +263,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 relation: RelationKind::Calls,
                 confidence: Confidence::Heuristic,
                 confidence_score: f32::from_bits(0x7fc0_1234),
+                change_kind: None,
+
                 edge_kind: Some(GraphEdgeKind::CallsDyn),
             },
         ],
@@ -265,6 +273,12 @@ fn fixture_artifact() -> GraphIndexArtifact {
             stable_file_id: "file-removed".to_string(),
         }],
         diagnostics: Vec::new(),
+
+        commits: Vec::new(),
+
+        symbol_snapshots: Vec::new(),
+
+        temporal_edges: Vec::new(),
     }
 }
 

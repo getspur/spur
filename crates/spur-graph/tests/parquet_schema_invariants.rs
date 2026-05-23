@@ -318,6 +318,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 relation: RelationKind::Contains,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 1.0,
+                change_kind: None,
+
                 edge_kind: Some(GraphEdgeKind::ReferencesOther),
             },
             GraphEdgeArtifact {
@@ -327,6 +329,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 0.875,
+                change_kind: None,
+
                 edge_kind: Some(GraphEdgeKind::Calls),
             },
             GraphEdgeArtifact {
@@ -336,10 +340,18 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 relation: RelationKind::Calls,
                 confidence: Confidence::Heuristic,
                 confidence_score: 0.5,
+                change_kind: None,
+
                 edge_kind: Some(GraphEdgeKind::CallsDyn),
             },
         ],
         tombstones: Vec::new(),
         diagnostics: Vec::new(),
+
+        commits: Vec::new(),
+
+        symbol_snapshots: Vec::new(),
+
+        temporal_edges: Vec::new(),
     }
 }
