@@ -308,7 +308,6 @@ impl App {
                         self.build_worker_snapshot(),
                         self.dashboard.tracked_issues().to_vec(),
                     );
-                    view.set_chat_response_char_cap(self.notebook_ui_config.chat_response_char_cap);
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
                     view.seed_input_history(self.metadata_store.metadata().input_history.clone());

@@ -6,7 +6,6 @@ pub mod components;
 pub mod input_history;
 pub mod landing;
 pub mod mentions;
-pub mod notebook_config;
 pub mod notebook_daemon;
 pub mod session_metadata;
 pub mod theme;
