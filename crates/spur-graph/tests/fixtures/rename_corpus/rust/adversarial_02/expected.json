@@ -1,0 +1,18 @@
+{
+  "class": "crossover",
+  "expected_renames": [],
+  "expected_added": [
+    "rust_crossover_alpha_new",
+    "rust_crossover_beta_new"
+  ],
+  "expected_deleted": [
+    "rust_crossover_left_old",
+    "rust_crossover_right_old"
+  ],
+  "expected_ambiguous_candidates": [
+    "rust_crossover_alpha_new",
+    "rust_crossover_beta_new",
+    "rust_crossover_left_old",
+    "rust_crossover_right_old"
+  ]
+}
