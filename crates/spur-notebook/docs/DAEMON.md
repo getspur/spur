@@ -39,6 +39,10 @@ and `CFBundleIdentifier` needed for the webview to render. Raw
 `spur-notebook` binaries remain a fallback for old installs and development
 workflows, but the macOS install path is the app bundle.
 
+TODO: The bundled `Contents/MacOS/Jute` executable is currently the outer
+`crates/spur-notebook` binary, not upstream jute. Long term, adopt `tauri-build`
+in the outer crate so install does not need to post-process the Tauri bundle.
+
 ## Multiplexing
 
 The daemon reads the first frame on each connection.

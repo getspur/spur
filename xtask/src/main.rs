@@ -133,6 +133,15 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
         return Err(format!("expected built bundle at {}", built_app.display()));
     }
 
+    build_outer_spur_notebook_binary(workspace_root)?;
+    // Tauri builds the vendored upstream Jute binary from
+    // crates/spur-notebook/jute-notebook/src-tauri, but that binary does not know
+    // about our MCP proxy, --socket, or lazy-spawn daemon flow. Keep Tauri's .app
+    // scaffolding and sidecars, then swap in the outer crates/spur-notebook binary
+    // as Contents/MacOS/Jute to match CFBundleExecutable.
+    replace_bundle_executable_with_outer_binary(workspace_root, &built_app)?;
+    resign_macos_bundle_ad_hoc(&built_app);
+
     let applications_dir = user_applications_dir()?;
     fs::create_dir_all(&applications_dir)
         .map_err(|err| format!("failed to create {}: {err}", applications_dir.display()))?;
@@ -157,6 +166,135 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
 
     eprintln!("installed Jute.app: {}", installed_app.display());
     Ok(installed_app)
+}
+
+fn build_outer_spur_notebook_binary(workspace_root: &Path) -> Result<PathBuf, String> {
+    let mut cmd = Command::new(cargo());
+    cmd.args([
+        "build",
+        "--release",
+        "-p",
+        "spur-notebook",
+        "--bin",
+        "spur-notebook",
+    ])
+    .current_dir(workspace_root)
+    .env_remove("RUSTC_WRAPPER");
+    run_status(
+        &mut cmd,
+        "cargo build --release -p spur-notebook --bin spur-notebook",
+    )?;
+
+    let outer_binary = outer_spur_notebook_binary(workspace_root);
+    if outer_binary.is_file() {
+        Ok(outer_binary)
+    } else {
+        Err(format!(
+            "expected outer spur-notebook binary at {}",
+            outer_binary.display()
+        ))
+    }
+}
+
+fn replace_bundle_executable_with_outer_binary(
+    workspace_root: &Path,
+    built_app: &Path,
+) -> Result<(), String> {
+    let outer_binary = outer_spur_notebook_binary(workspace_root);
+    if !outer_binary.is_file() {
+        return Err(format!(
+            "expected outer spur-notebook binary at {}",
+            outer_binary.display()
+        ));
+    }
+
+    let bundle_executable = jute_bundle_executable(built_app);
+    if !bundle_executable
+        .parent()
+        .is_some_and(|parent| parent.is_dir())
+    {
+        return Err(format!(
+            "expected bundle executable directory at {}",
+            bundle_executable.parent().unwrap_or(built_app).display()
+        ));
+    }
+
+    fs::copy(&outer_binary, &bundle_executable).map_err(|err| {
+        format!(
+            "failed to copy {} to {}: {err}",
+            outer_binary.display(),
+            bundle_executable.display()
+        )
+    })?;
+
+    let source_permissions = fs::metadata(&outer_binary)
+        .map_err(|err| format!("failed to stat {}: {err}", outer_binary.display()))?
+        .permissions();
+    fs::set_permissions(&bundle_executable, source_permissions).map_err(|err| {
+        format!(
+            "failed to set permissions on {}: {err}",
+            bundle_executable.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&bundle_executable)
+            .map_err(|err| format!("failed to stat {}: {err}", bundle_executable.display()))?
+            .permissions();
+        let mode = permissions.mode();
+        if mode & 0o111 == 0 {
+            permissions.set_mode(mode | 0o111);
+            fs::set_permissions(&bundle_executable, permissions).map_err(|err| {
+                format!(
+                    "failed to mark {} executable: {err}",
+                    bundle_executable.display()
+                )
+            })?;
+        }
+    }
+
+    eprintln!(
+        "replaced bundled Jute executable with {}",
+        outer_binary.display()
+    );
+    Ok(())
+}
+
+fn resign_macos_bundle_ad_hoc(built_app: &Path) {
+    eprintln!(
+        "==> codesign --force --deep --sign - {}",
+        built_app.display()
+    );
+    match Command::new("codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(built_app)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!(
+                "warning: ad-hoc codesign failed for {} ({status})",
+                built_app.display()
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: failed to spawn ad-hoc codesign for {}: {err}",
+                built_app.display()
+            );
+        }
+    }
+}
+
+fn outer_spur_notebook_binary(workspace_root: &Path) -> PathBuf {
+    workspace_root.join("target/release/spur-notebook")
+}
+
+fn jute_bundle_executable(app_path: &Path) -> PathBuf {
+    app_path.join("Contents/MacOS/Jute")
 }
 
 fn npm_install_needed(jute_dir: &Path) -> bool {
@@ -266,7 +404,7 @@ fn verify_sibling_install() {
 fn verify_macos_install(app_path: &Path) {
     let bin_dir = cargo_home_bin();
     let spur = bin_dir.join("spur");
-    let jute = app_path.join("Contents/MacOS/Jute");
+    let jute = jute_bundle_executable(app_path);
 
     eprintln!();
     eprintln!("installed:");
@@ -279,11 +417,37 @@ fn verify_macos_install(app_path: &Path) {
             "notebook lookup will resolve bundled binary: {}",
             jute.display()
         );
+        match binary_contains(&jute, b"--socket") {
+            Ok(true) => {
+                eprintln!("verified bundled Jute executable contains --socket marker");
+            }
+            Ok(false) => {
+                eprintln!();
+                eprintln!("WARNING: bundled Jute executable does not contain --socket");
+                eprintln!("WARNING: this likely means the upstream jute binary was installed");
+                eprintln!("WARNING: MCP proxy lazy-spawn will not work until the bundle is fixed");
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to scan {} for --socket marker: {err}",
+                    jute.display()
+                );
+            }
+        }
     } else {
         eprintln!("warning: expected install artifacts were not all present");
         eprintln!("  spur:  exists={}", spur.exists());
         eprintln!("  Jute:  exists={}", jute.exists());
     }
+}
+
+fn binary_contains(path: &Path, needle: &[u8]) -> io::Result<bool> {
+    if needle.is_empty() {
+        return Ok(true);
+    }
+
+    let bytes = fs::read(path)?;
+    Ok(bytes.windows(needle.len()).any(|window| window == needle))
 }
 
 fn user_applications_dir() -> Result<PathBuf, String> {
@@ -298,4 +462,52 @@ fn cargo_home_bin() -> PathBuf {
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
         .unwrap_or_else(|| PathBuf::from(".cargo"))
         .join("bin")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn swap_outer_spur_notebook_binary_copies_marker_binary_into_bundle() {
+        let root = make_temp_workspace("swap-outer-binary");
+        let outer_binary = root.join("target/release/spur-notebook");
+        let bundle_binary = root.join("target/release/bundle/macos/Jute.app/Contents/MacOS/Jute");
+
+        fs::create_dir_all(outer_binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(bundle_binary.parent().unwrap()).unwrap();
+        fs::write(&outer_binary, b"outer spur-notebook --socket --mcp-proxy").unwrap();
+        fs::write(&bundle_binary, b"upstream jute").unwrap();
+
+        replace_bundle_executable_with_outer_binary(
+            &root,
+            &root.join("target/release/bundle/macos/Jute.app"),
+        )
+        .unwrap();
+
+        let installed_bytes = fs::read(&bundle_binary).unwrap();
+        assert_eq!(installed_bytes, b"outer spur-notebook --socket --mcp-proxy");
+        assert!(binary_contains(&bundle_binary, b"--socket").unwrap());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&bundle_binary).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "bundle executable should be executable");
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn make_temp_workspace(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("spur-xtask-{name}-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
 }
