@@ -40,6 +40,9 @@ export type NotebookStoreState = {
     };
   };
 
+  /** ID of the currently focused cell, when any. */
+  selectedCellId: string | null;
+
   /** True when loading the notebook from disk. */
   isLoading: boolean;
 
@@ -135,6 +138,14 @@ function notebookStoreActions(
         state.cells[cellId].version += 1;
       }),
 
+    /** Set the currently focused cell. */
+    setSelectedCell: (cellId: string) =>
+      set((state) => {
+        if (state.cells[cellId]) {
+          state.selectedCellId = cellId;
+        }
+      }),
+
     /** Set the source text of a cell. */
     setCellSource: (cellId: string, source: string, lastEditedBy?: string) =>
       set((state) => {
@@ -151,6 +162,9 @@ function notebookStoreActions(
       set((state) => {
         state.cellIds = state.cellIds.filter((id) => id !== cellId);
         delete state.cells[cellId];
+        if (state.selectedCellId === cellId) {
+          state.selectedCellId = null;
+        }
       }),
 
     /** Clear the result of a cell. */
@@ -299,6 +313,7 @@ function notebookStoreActions(
             return [cellIds[i], imported];
           }),
         );
+        state.selectedCellId = null;
         state.isLoading = false;
         state.loadError = undefined;
       }),
@@ -326,6 +341,7 @@ function createNotebookStore(): StoreApi<NotebookStore> {
       const initialState: NotebookStoreState = {
         cellIds: [],
         cells: {},
+        selectedCellId: null,
         isLoading: false,
       };
       const actions: NotebookStoreActions = notebookStoreActions(set);
@@ -470,6 +486,10 @@ export class Notebook {
 
   setCellType(cellId: string, type: CellType) {
     this.state.setCellType(cellId, type);
+  }
+
+  setSelectedCell(cellId: string) {
+    this.state.setSelectedCell(cellId);
   }
 
   updateCellSource(cellId: string, source: string, lastEditedBy?: string) {
