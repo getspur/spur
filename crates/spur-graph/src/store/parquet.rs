@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Context};
 use arrow_array::{
     Array, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
 };
+use base64::Engine as _;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::{ByteArray, ByteArrayType, FloatType, Int32Type, Int64Type};
@@ -21,9 +22,9 @@ use parquet::schema::types::ColumnPath;
 
 use crate::store::build::{EXTRACTOR_VERSION, SCHEMA_VERSION};
 use crate::{
-    Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, GraphTombstoneEntry, NodeId,
-    RelationKind,
+    ChangeKind, Confidence, EdgeEndpoint, GitPath, GraphEdgeArtifact, GraphEdgeKind,
+    GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
+    GraphSymbolArtifact, GraphTombstoneEntry, NodeId, RelationKind, RenamePrev,
 };
 
 pub const PARQUET_ROW_GROUP_SIZE: usize = 16_384;
@@ -1389,5 +1390,176 @@ fn edge_kind_from_str(value: &str) -> anyhow::Result<GraphEdgeKind> {
         "references_hof" => Ok(GraphEdgeKind::ReferencesHof),
         "references_other" => Ok(GraphEdgeKind::ReferencesOther),
         _ => bail!("unknown edge kind `{value}`"),
+    }
+}
+
+#[allow(dead_code)]
+fn git_path_to_b64(path: &GitPath) -> String {
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(path.as_bytes())
+}
+
+#[allow(dead_code)]
+fn git_path_from_b64(value: &str) -> anyhow::Result<GitPath> {
+    let bytes = match base64::engine::general_purpose::STANDARD_NO_PAD.decode(value) {
+        Ok(bytes) => bytes,
+        Err(err) => bail!("invalid GitPath base64 `{value}`: {err}"),
+    };
+    Ok(GitPath::from_bytes(bytes))
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeEndpointKind {
+    File,
+    Symbol,
+    Snapshot,
+    Commit,
+}
+
+#[allow(dead_code)]
+fn endpoint_kind_to_str(endpoint: &EdgeEndpoint) -> &'static str {
+    match endpoint {
+        EdgeEndpoint::File { .. } => "file",
+        EdgeEndpoint::Symbol { .. } => "symbol",
+        EdgeEndpoint::Snapshot { .. } => "snapshot",
+        EdgeEndpoint::Commit { .. } => "commit",
+    }
+}
+
+#[allow(dead_code)]
+fn endpoint_kind_from_str(value: &str) -> anyhow::Result<EdgeEndpointKind> {
+    match value {
+        "file" => Ok(EdgeEndpointKind::File),
+        "symbol" => Ok(EdgeEndpointKind::Symbol),
+        "snapshot" => Ok(EdgeEndpointKind::Snapshot),
+        "commit" => Ok(EdgeEndpointKind::Commit),
+        _ => bail!("unknown endpoint kind `{value}`"),
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeKindBase {
+    Added,
+    Modified,
+    Deleted,
+    RenamedFromFile,
+    RenamedFromSymbol,
+}
+
+#[allow(dead_code)]
+fn change_kind_to_str(change: &ChangeKind) -> &'static str {
+    match change {
+        ChangeKind::Added => "added",
+        ChangeKind::Modified => "modified",
+        ChangeKind::Deleted => "deleted",
+        ChangeKind::RenamedFrom(RenamePrev::File(_)) => "renamed_from_file",
+        ChangeKind::RenamedFrom(RenamePrev::Symbol(_)) => "renamed_from_symbol",
+    }
+}
+
+#[allow(dead_code)]
+fn change_kind_base_from_str(value: &str) -> anyhow::Result<ChangeKindBase> {
+    match value {
+        "added" => Ok(ChangeKindBase::Added),
+        "modified" => Ok(ChangeKindBase::Modified),
+        "deleted" => Ok(ChangeKindBase::Deleted),
+        "renamed_from_file" => Ok(ChangeKindBase::RenamedFromFile),
+        "renamed_from_symbol" => Ok(ChangeKindBase::RenamedFromSymbol),
+        _ => bail!("unknown change kind `{value}`"),
+    }
+}
+
+#[cfg(test)]
+mod helpers_test {
+    use super::*;
+    use crate::{ChangeKind, EdgeEndpoint, GitPath, RenamePrev, SnapshotKey};
+
+    #[test]
+    fn git_path_b64_round_trips_path_bytes() {
+        let path = GitPath::from_bytes(b"src/non-utf8-\xff.rs".to_vec());
+
+        let encoded = git_path_to_b64(&path);
+        let decoded = git_path_from_b64(&encoded).expect("decode git path");
+
+        assert_eq!(decoded, path);
+    }
+
+    #[test]
+    fn endpoint_kind_round_trips_all_discriminators() {
+        let snapshot_key = SnapshotKey {
+            stable_symbol_id: "graph://symbol/sample".to_string(),
+            commit: "abc123".to_string(),
+        };
+        let endpoints = [
+            (
+                EdgeEndpoint::File {
+                    path: GitPath::from_bytes(b"src/lib.rs".to_vec()),
+                },
+                EdgeEndpointKind::File,
+            ),
+            (
+                EdgeEndpoint::Symbol {
+                    stable_symbol_id: "graph://symbol/sample".to_string(),
+                },
+                EdgeEndpointKind::Symbol,
+            ),
+            (
+                EdgeEndpoint::Snapshot { key: snapshot_key },
+                EdgeEndpointKind::Snapshot,
+            ),
+            (
+                EdgeEndpoint::Commit {
+                    sha: "abc123".to_string(),
+                },
+                EdgeEndpointKind::Commit,
+            ),
+        ];
+
+        for (endpoint, expected) in endpoints {
+            let encoded = endpoint_kind_to_str(&endpoint);
+            let decoded = endpoint_kind_from_str(encoded).expect("decode endpoint kind");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn change_kind_round_trips_simple_base_discriminators() {
+        let changes = [
+            (ChangeKind::Added, ChangeKindBase::Added),
+            (ChangeKind::Modified, ChangeKindBase::Modified),
+            (ChangeKind::Deleted, ChangeKindBase::Deleted),
+        ];
+
+        for (change, expected) in changes {
+            let encoded = change_kind_to_str(&change);
+            let decoded = change_kind_base_from_str(encoded).expect("decode change kind");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn change_kind_round_trips_renamed_from_file_base() {
+        let change = ChangeKind::RenamedFrom(RenamePrev::File(GitPath::from_bytes(
+            b"src/old.rs".to_vec(),
+        )));
+
+        let encoded = change_kind_to_str(&change);
+        let decoded = change_kind_base_from_str(encoded).expect("decode change kind");
+
+        assert_eq!(decoded, ChangeKindBase::RenamedFromFile);
+    }
+
+    #[test]
+    fn change_kind_round_trips_renamed_from_symbol_base() {
+        let change = ChangeKind::RenamedFrom(RenamePrev::Symbol(SnapshotKey {
+            stable_symbol_id: "graph://symbol/old".to_string(),
+            commit: "abc123".to_string(),
+        }));
+
+        let encoded = change_kind_to_str(&change);
+        let decoded = change_kind_base_from_str(encoded).expect("decode change kind");
+
+        assert_eq!(decoded, ChangeKindBase::RenamedFromSymbol);
     }
 }
