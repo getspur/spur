@@ -7,13 +7,14 @@ target/
 /src-tauri/gen/
 
 # Sidecar binaries
+/src-tauri/binaries/uv-*
 /src-tauri/binaries/*
 !/src-tauri/binaries/download.py
 
 # JavaScript
-node_modules
-dist
-dist-ssr
+node_modules/
+dist/
+dist-ssr/
 *.local
 
 # Python virtual environments

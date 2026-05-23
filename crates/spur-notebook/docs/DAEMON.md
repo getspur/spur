@@ -16,6 +16,27 @@ u32_be_json_length || json_bytes
 
 Frames larger than 16 MiB are rejected.
 
+## Installation on macOS
+
+Use the workspace install task:
+
+```text
+cargo xtask install
+```
+
+On macOS this installs the CLI binary to `$CARGO_HOME/bin/spur` and builds the
+Tauri app bundle at `~/Applications/Jute.app`. The TUI daemon supervisor launches
+the bundled binary directly:
+
+```text
+~/Applications/Jute.app/Contents/MacOS/Jute
+```
+
+Launching from inside the `.app` gives AppKit and WKWebView the bundle context
+and `CFBundleIdentifier` needed for the webview to render. Raw
+`spur-notebook` binaries remain a fallback for old installs and development
+workflows, but the macOS install path is the app bundle.
+
 ## Multiplexing
 
 The daemon reads the first frame on each connection.
@@ -91,12 +112,19 @@ The response `path` is present when a notebook remains loaded after the command.
 Brain sessions preconfigure the notebook MCP server as a stdio process:
 
 ```text
-spur-notebook --mcp-proxy ~/.spur/notebooks/control.sock
+~/Applications/Jute.app/Contents/MacOS/Jute --mcp-proxy ~/.spur/notebooks/control.sock
 ```
 
 The proxy translates newline-delimited stdio JSON-RPC messages into the daemon's
 length-prefixed socket frames and writes daemon responses back to stdout as
 newline-delimited JSON.
+
+Claude Code and other MCP-stdio clients use the same proxy path with their own
+socket path argument:
+
+```text
+~/Applications/Jute.app/Contents/MacOS/Jute --mcp-proxy <sock>
+```
 
 The brain MCP config is stable for the whole session. Opening, creating, closing,
 or reopening notebooks changes daemon state only; it does not restart the brain
