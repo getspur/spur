@@ -48,6 +48,7 @@ pub struct BrainSession {
     pub connection: Box<dyn AgentConnection>,
     pub acp_session_id: String,
     pub spur_session_id: SessionId,
+    pub notebook_socket_nonce: String,
     pub brain_name: String,
     pub delegation_handle: JoinHandle<()>,
     /// Phase 5: hold the server itself so retirement can invoke
@@ -115,6 +116,7 @@ impl BrainSession {
             connection,
             acp_session_id: acp_session_id.into(),
             spur_session_id,
+            notebook_socket_nonce: String::new(),
             brain_name: brain_name.into(),
             delegation_handle: tokio::spawn(async {}),
             mcp_server: None,
