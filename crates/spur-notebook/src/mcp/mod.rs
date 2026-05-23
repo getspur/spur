@@ -1005,7 +1005,7 @@ mod tests {
     async fn last_notebook_record_round_trips_and_clears() {
         let temp_dir = tempfile::Builder::new()
             .prefix("spur-notebook-last-")
-            .tempdir_in("/private/tmp")
+            .tempdir()
             .expect("temp dir");
         let record_path = temp_dir.path().join("last.json");
         let notebook_path = temp_dir.path().join("analysis.ipynb");
@@ -1034,7 +1034,7 @@ mod tests {
     async fn create_untitled_notebook_uses_jupyter_style_names_and_fills_gaps() {
         let temp_dir = tempfile::Builder::new()
             .prefix("spur-notebook-untitled-")
-            .tempdir_in("/private/tmp")
+            .tempdir()
             .expect("temp dir");
 
         let first = create_untitled_notebook_in_dir(temp_dir.path())
@@ -1077,7 +1077,7 @@ mod tests {
     async fn daemon_start_with_stale_last_record_clears_and_creates_untitled() {
         let temp_dir = tempfile::Builder::new()
             .prefix("spur-notebook-start-stale-")
-            .tempdir_in("/private/tmp")
+            .tempdir()
             .expect("temp dir");
         let record_path = temp_dir.path().join("last.json");
         let stale_path = temp_dir.path().join("missing.ipynb");
@@ -1104,7 +1104,7 @@ mod tests {
     async fn daemon_start_without_last_record_creates_untitled() {
         let temp_dir = tempfile::Builder::new()
             .prefix("spur-notebook-start-absent-")
-            .tempdir_in("/private/tmp")
+            .tempdir()
             .expect("temp dir");
         let record_path = temp_dir.path().join("last.json");
 
@@ -1120,7 +1120,7 @@ mod tests {
     async fn daemon_start_with_unreadable_last_record_creates_untitled() {
         let temp_dir = tempfile::Builder::new()
             .prefix("spur-notebook-start-unreadable-")
-            .tempdir_in("/private/tmp")
+            .tempdir()
             .expect("temp dir");
         let record_path = temp_dir.path().join("last.json");
         tokio::fs::write(&record_path, b"{not-json")
