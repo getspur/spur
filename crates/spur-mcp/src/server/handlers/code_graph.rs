@@ -94,7 +94,10 @@ pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> 
 }
 
 async fn code_search_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_search_with_artifact(args, artifact)).await
+    with_loaded_graph_artifact(|artifact| {
+        code_search_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    })
+    .await
 }
 
 fn code_search_with_artifact(
@@ -129,7 +132,10 @@ fn code_search_with_artifact(
 }
 
 async fn code_resolve_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_resolve_with_artifact(args, artifact)).await
+    with_loaded_graph_artifact(|artifact| {
+        code_resolve_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    })
+    .await
 }
 
 fn code_resolve_with_artifact(
@@ -152,7 +158,10 @@ pub(crate) async fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerE
 }
 
 async fn code_file_symbols_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_file_symbols_with_artifact(args, artifact)).await
+    with_loaded_graph_artifact(|artifact| {
+        code_file_symbols_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    })
+    .await
 }
 
 fn code_file_symbols_with_artifact(
@@ -187,7 +196,10 @@ pub(crate) async fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerEr
 }
 
 async fn code_symbol_info_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_symbol_info_with_artifact(args, artifact)).await
+    with_loaded_graph_artifact(|artifact| {
+        code_symbol_info_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    })
+    .await
 }
 
 fn code_symbol_info_with_artifact(
@@ -212,7 +224,10 @@ pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerEr
 }
 
 async fn code_read_symbol_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_read_symbol_with_artifact(args, artifact)).await
+    with_loaded_graph_artifact(|artifact| {
+        code_read_symbol_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    })
+    .await
 }
 
 fn code_read_symbol_with_artifact(
@@ -270,7 +285,8 @@ fn code_read_symbol_with_artifact(
 
 pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let body = code_callers_with_artifact(args, &artifact)?;
+    let body =
+        code_callers_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
@@ -278,10 +294,7 @@ async fn code_callers_response(args: &Value) -> CodeGraphResult {
     with_loaded_graph_artifact(|artifact| code_callers_with_artifact(args, artifact)).await
 }
 
-fn code_callers_with_artifact(
-    args: &Value,
-    artifact: &GraphIndexArtifact,
-) -> Result<Value, McpHandlerError> {
+fn code_callers_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
     let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
@@ -289,6 +302,7 @@ fn code_callers_with_artifact(
             return Ok(ambiguous_response(candidates));
         }
     };
+    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(artifact, &symbol_id, args)?;
 
     let records = find_caller_edges(artifact, &symbol_id);
     let summary = caller_summary(&records);
@@ -307,7 +321,8 @@ fn code_callers_with_artifact(
 
 pub(crate) async fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let body = code_callees_with_artifact(args, &artifact)?;
+    let body =
+        code_callees_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
@@ -315,10 +330,7 @@ async fn code_callees_response(args: &Value) -> CodeGraphResult {
     with_loaded_graph_artifact(|artifact| code_callees_with_artifact(args, artifact)).await
 }
 
-fn code_callees_with_artifact(
-    args: &Value,
-    artifact: &GraphIndexArtifact,
-) -> Result<Value, McpHandlerError> {
+fn code_callees_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
     let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
@@ -326,6 +338,7 @@ fn code_callees_with_artifact(
             return Ok(ambiguous_response(candidates));
         }
     };
+    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(artifact, &symbol_id, args)?;
 
     let records = find_callee_edges(artifact, &symbol_id);
     let summary = callee_summary(&records);
@@ -344,7 +357,8 @@ fn code_callees_with_artifact(
 
 pub(crate) async fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
     let artifact = load_graph_artifact_for_request()?;
-    let body = code_subgraph_with_artifact(args, &artifact)?;
+    let body =
+        code_subgraph_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
@@ -352,10 +366,7 @@ async fn code_subgraph_response(args: &Value) -> CodeGraphResult {
     with_loaded_graph_artifact(|artifact| code_subgraph_with_artifact(args, artifact)).await
 }
 
-fn code_subgraph_with_artifact(
-    args: &Value,
-    artifact: &GraphIndexArtifact,
-) -> Result<Value, McpHandlerError> {
+fn code_subgraph_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
     let request = code_traversal_request(args)?;
     let root_ids = match code_subgraph_root_ids(args, artifact)? {
         CodeSubgraphRoots::RootIds(root_ids) => root_ids,
@@ -496,15 +507,6 @@ impl CodeGraphError {
         }
     }
 
-    fn with_artifact(error: McpHandlerError, artifact: &GraphIndexArtifact) -> Self {
-        Self {
-            error,
-            metadata: Some(GraphMetadataSource::from_artifact(artifact)),
-            temporal_code: None,
-            temporal_data: None,
-        }
-    }
-
     fn with_temporal(code: i64, message: String, data: Value) -> Self {
         Self {
             error: McpHandlerError::Internal(message),
@@ -512,6 +514,17 @@ impl CodeGraphError {
             temporal_code: Some(code),
             temporal_data: Some(data),
         }
+    }
+
+    fn with_artifact_metadata(mut self, artifact: &GraphIndexArtifact) -> Self {
+        if self.metadata.is_none() && self.temporal_code.is_none() {
+            self.metadata = Some(GraphMetadataSource::from_artifact(artifact));
+        }
+        self
+    }
+
+    fn into_handler_error(self) -> McpHandlerError {
+        self.error
     }
 }
 
@@ -674,11 +687,10 @@ impl GraphResponseMetadata {
 }
 
 async fn with_loaded_graph_artifact(
-    handler: impl FnOnce(&GraphIndexArtifact) -> Result<Value, McpHandlerError>,
+    handler: impl FnOnce(&GraphIndexArtifact) -> CodeGraphResult,
 ) -> CodeGraphResult {
     let artifact = load_graph_artifact_for_request().map_err(CodeGraphError::without_metadata)?;
-    let body =
-        handler(&artifact).map_err(|error| CodeGraphError::with_artifact(error, &artifact))?;
+    let body = handler(&artifact).map_err(|error| error.with_artifact_metadata(&artifact))?;
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
@@ -721,11 +733,17 @@ async fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcR
         }
     };
     if let (Some(error), Some(metadata)) = (response.error.as_mut(), metadata) {
-        error.data = Some(
-            GraphResponseMetadata::from_source(metadata)
-                .await
-                .into_value(),
-        );
+        let metadata = GraphResponseMetadata::from_source(metadata)
+            .await
+            .into_value();
+        match (&mut error.data, metadata) {
+            (Some(Value::Object(data)), Value::Object(metadata)) => {
+                data.extend(metadata);
+            }
+            (_, metadata) => {
+                error.data = Some(metadata);
+            }
+        }
     }
     response
 }
@@ -828,6 +846,18 @@ fn resolve_symbol_for_optional_as_of(
     };
     let commits = load_commit_index_for_request(worktree)?;
     resolve_symbol_as_of(artifact, &commits, symbol_id, &as_of)
+}
+
+fn resolve_symbol_for_optional_as_of_current_worktree(
+    artifact: &GraphIndexArtifact,
+    symbol_id: &str,
+    args: &Value,
+) -> Result<String, CodeGraphError> {
+    if parse_as_of(args)?.is_none() {
+        return Ok(symbol_id.to_string());
+    }
+    let worktree = current_worktree()?;
+    resolve_symbol_for_optional_as_of(artifact, &worktree, symbol_id, args)
 }
 
 fn parse_as_of(args: &Value) -> Result<Option<String>, McpHandlerError> {
@@ -1109,12 +1139,13 @@ fn code_traversal_request(args: &Value) -> Result<CodeTraversalRequest, McpHandl
 fn code_subgraph_root_ids(
     args: &Value,
     artifact: &GraphIndexArtifact,
-) -> Result<CodeSubgraphRoots, McpHandlerError> {
+) -> Result<CodeSubgraphRoots, CodeGraphError> {
     if let Some(start_nodes) = start_nodes_arg(args)? {
         if string_arg(args, "selector")?.is_some() || string_arg(args, "symbol")?.is_some() {
             return Err(McpHandlerError::InvalidParams(
                 "field 'start_nodes' is mutually exclusive with 'selector' and 'symbol'".into(),
-            ));
+            )
+            .into());
         }
         for node_id in &start_nodes {
             ensure_symbol_id_exists(artifact, node_id)?;
@@ -1123,9 +1154,9 @@ fn code_subgraph_root_ids(
     }
 
     match resolve_code_selector(args, artifact)? {
-        CodeSelectorResolution::Resolved(symbol_id) => {
-            Ok(CodeSubgraphRoots::RootIds(vec![symbol_id]))
-        }
+        CodeSelectorResolution::Resolved(symbol_id) => Ok(CodeSubgraphRoots::RootIds(vec![
+            resolve_symbol_for_optional_as_of_current_worktree(artifact, &symbol_id, args)?,
+        ])),
         CodeSelectorResolution::Ambiguous(candidates) => {
             Ok(CodeSubgraphRoots::Ambiguous(candidates))
         }
