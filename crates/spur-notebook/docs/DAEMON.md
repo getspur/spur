@@ -1,7 +1,7 @@
 # Notebook daemon control protocol
 
-`spur-notebook --headless` runs the notebook daemon without creating an initial
-Tauri window. It keeps one stable Unix socket alive:
+`spur-notebook` runs as a foreground Tauri app and keeps one stable Unix socket
+alive while the notebook app is running:
 
 ```text
 ~/.spur/notebooks/control.sock

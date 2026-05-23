@@ -179,18 +179,6 @@ impl Drop for NotebookMcpServerHandle {
     }
 }
 
-pub fn socket_path_for_slot(slot_id: &str) -> Result<PathBuf> {
-    if slot_id.is_empty() || slot_id.contains('/') || slot_id.contains('\0') {
-        anyhow::bail!("invalid notebook slot id: {slot_id}");
-    }
-    let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
-    Ok(base_dirs
-        .home_dir()
-        .join(".spur")
-        .join("notebooks")
-        .join(format!("{slot_id}.sock")))
-}
-
 fn notebooks_dir() -> Result<PathBuf> {
     let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
     Ok(base_dirs.home_dir().join(".spur").join("notebooks"))
@@ -294,18 +282,6 @@ pub async fn start_server_with_bridge(
     start_server_with_bridge_requester(
         socket_path,
         Arc::new(TauriBridgeRequester::without_app(bridge)),
-    )
-    .await
-}
-
-pub async fn start_server_with_app_bridge(
-    socket_path: impl AsRef<Path>,
-    bridge: Arc<AgentBridge>,
-    app: tauri::AppHandle,
-) -> Result<NotebookMcpServerHandle> {
-    start_server_with_bridge_requester(
-        socket_path,
-        Arc::new(TauriBridgeRequester::with_app(bridge, app)),
     )
     .await
 }
@@ -564,22 +540,6 @@ impl NotebookDaemonControl {
                 let _ = window.destroy();
             }
         }
-    }
-
-    pub async fn hide_window_by_label(&self, label: &str) -> bool {
-        let is_current = self
-            .state
-            .lock()
-            .await
-            .window_label
-            .as_deref()
-            .is_some_and(|current| current == label);
-        if is_current {
-            if let Some(window) = self.app.get_webview_window(label) {
-                let _ = window.hide();
-            }
-        }
-        is_current
     }
 
     pub async fn restore_last_open_notebook(&self) {
