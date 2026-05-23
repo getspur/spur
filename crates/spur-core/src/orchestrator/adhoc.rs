@@ -106,7 +106,7 @@ impl Orchestrator {
             );
 
             // MCP callback server is now HTTP — pass URL directly.
-            let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
+            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url);
 
             let session_response = crate::skip_perm::new_session_with_bypass(
                 &mut *connection,

@@ -65,7 +65,7 @@ pub struct DelegateToWorkerInput {
     /// Optional explicit worker base. Omit for legacy behavior (RepoMain).
     /// Use WithOverlay to apply dependency cherry-picks.
     pub base: Option<crate::tools::BaseSpec>,
-    /// Opt in to exposing a curated worker MCP subset. Omit for the default no-MCP worker contract.
+    /// Worker MCP subset exposure. Default-on: omit (or pass `true`) to receive the curated worker MCP server. Pass `false` to opt out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_worker_mcp: Option<bool>,
     /// Opt in to worker progress events. Omit to preserve existing silent worker behavior.
@@ -88,7 +88,7 @@ pub struct DelegateParallelTaskInput {
     pub delegation_plan: Option<DelegationPlan>,
     /// Optional explicit worker base. Omit for legacy behavior (RepoMain).
     pub base: Option<crate::tools::BaseSpec>,
-    /// Opt in to exposing a curated worker MCP subset. Omit for the default no-MCP worker contract.
+    /// Worker MCP subset exposure. Default-on: omit (or pass `true`) to receive the curated worker MCP server. Pass `false` to opt out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_worker_mcp: Option<bool>,
     /// Opt in to worker progress events. Omit to preserve existing silent worker behavior.
@@ -168,7 +168,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delegate_input_default_enable_flags_false() {
+    fn delegate_input_omitted_enable_flags_deserialize_as_none() {
+        // Omitted flags deserialize as `None` at the schema layer.
+        // Downstream gating in `build_worker_mcp_servers_with` treats
+        // `None` as default-on for worker MCP (only `Some(false)` opts
+        // out); `enable_worker_progress` remains default-off.
         let json = r#"{"agent": "kimi", "task": "do work"}"#;
         let input: DelegateToWorkerInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.enable_worker_mcp, None);

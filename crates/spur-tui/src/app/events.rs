@@ -308,6 +308,7 @@ impl App {
                         self.build_worker_snapshot(),
                         self.dashboard.tracked_issues().to_vec(),
                     );
+                    view.set_chat_response_char_cap(self.notebook_ui_config.chat_response_char_cap);
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
                     view.seed_input_history(self.metadata_store.metadata().input_history.clone());
@@ -593,6 +594,7 @@ pub async fn run_tui_with_license(
     upgrade_rx: Option<tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>>,
 ) -> anyhow::Result<()> {
     let mut terminal = crate::tui::setup()?;
+    let notebook_daemon = crate::notebook_daemon::Daemon::spawn();
     let mut app = App::build_with_license_state(
         user_input_tx,
         start_in_picker_with_preselect,
@@ -821,6 +823,7 @@ pub async fn run_tui_with_license(
     // Restore terminal first so the user regains control immediately,
     // even if the best-effort analytics checkpoint hits its 2s timeout.
     crate::tui::teardown(&mut terminal)?;
+    notebook_daemon.shutdown().await;
     app.shutdown_analytics().await;
     Ok(())
 }

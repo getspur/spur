@@ -79,11 +79,11 @@ pub(crate) async fn execute_delegation(
     };
 
     // Phase 5 / Task 26 — resolve the worker `mcp_servers` vec ONCE per
-    // delegation. When `enable_worker_mcp` is unset/false the vec is
-    // empty (preserving the historical "Workers get no MCP servers"
-    // contract). When `Some(true)`, the per-`BrainSession` worker MCP
-    // server is ensured (lazy boot via `WorkerMcpFetcher::ensure`) and
-    // a 1-hour HMAC token is minted; the token rides ONLY in the
+    // delegation. The worker MCP server is default-on: only an explicit
+    // `enable_worker_mcp = Some(false)` returns an empty vec. For
+    // `None` (omitted) or `Some(true)`, the per-`BrainSession` worker
+    // MCP server is ensured (lazy boot via `WorkerMcpFetcher::ensure`)
+    // and a 1-hour HMAC token is minted; the token rides ONLY in the
     // structured `mcp_servers` URL — never in argv or env.
     let worker_mcp_dispatch_vec = match build_worker_mcp_servers_with(enable_worker_mcp, || {
         worker_mcp_fetcher.fetch_url_token(&brain_session_id, &request_id)
