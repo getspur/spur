@@ -9,7 +9,6 @@ import {
   PauseIcon,
   PlayIcon,
   RotateCcw,
-  SettingsIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -77,13 +76,6 @@ export default function NotebookCommandMenu() {
           <Command.Item>
             <FileTypeIcon />
             Change cell type
-          </Command.Item>
-        </Command.Group>
-
-        <Command.Group heading="Settings">
-          <Command.Item>
-            <SettingsIcon />
-            Open settings
           </Command.Item>
         </Command.Group>
       </Command.List>
