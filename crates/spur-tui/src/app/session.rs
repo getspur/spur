@@ -104,9 +104,6 @@ impl App {
             "active theme resolved"
         );
         let theme = std::sync::Arc::new(theme);
-        let notebook_ui_config =
-            crate::notebook_config::NotebookUiConfig::load_from_config_path(config_path.as_deref());
-
         let (current_view, session_picker) = if let Some(preselect) = start_in_picker_with_preselect
         {
             let mut picker = SessionPickerView::with_preselect(preselect);
@@ -192,7 +189,6 @@ impl App {
             tombstone_undo_replay: false,
             config,
             config_path,
-            notebook_ui_config,
             theme,
             active_theme_name,
             palette_visible: false,

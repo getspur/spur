@@ -36,15 +36,6 @@ pub(super) fn pad_bubble_line(line: Line<'static>, width: u16) -> Line<'static> 
     out
 }
 
-fn push_agent_plain_lines(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
-    for text_line in text.lines() {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(terminal_safe_text(text_line), style),
-        ]));
-    }
-}
-
 impl ReactTrace {
     /// Build the flat sequence of display lines produced by the trace,
     /// before wrapping. Shared between `render` and `build_virtual_rows`.
@@ -178,17 +169,6 @@ impl ReactTrace {
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
-
-                    if let Some(display_text) = self.collapsed_chat_display_text(entry) {
-                        push_agent_plain_lines(
-                            &mut lines,
-                            &display_text,
-                            Style::default().fg(message_body_color),
-                        );
-                        lines.push(Line::from(""));
-                        i += 1;
-                        continue;
-                    }
 
                     #[cfg(feature = "markdown")]
                     {
@@ -803,26 +783,6 @@ impl ReactTrace {
                             ),
                         ]),
                     );
-
-                    if let Some(display_text) = self.collapsed_chat_display_text(entry) {
-                        for text_line in display_text.lines() {
-                            push_wrapped(
-                                &mut rows,
-                                &mut byte_ranges,
-                                content_range.clone(),
-                                Line::from(vec![
-                                    Span::raw("   "),
-                                    Span::styled(
-                                        terminal_safe_text(text_line),
-                                        Style::default().fg(message_body_color),
-                                    ),
-                                ]),
-                            );
-                        }
-                        push_wrapped(&mut rows, &mut byte_ranges, None, Line::from(""));
-                        i += 1;
-                        continue;
-                    }
 
                     if let Some(stream) = entry.markdown.as_ref() {
                         // Collect body output into a staging area to avoid
