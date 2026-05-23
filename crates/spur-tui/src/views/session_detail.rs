@@ -28,9 +28,7 @@ const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts
 const CANCEL_HINT_TEXT: &str = "Esc cancelled the active turn. Press Esc again to go back.";
 
 fn brain_chat_trace(kind: spur_acp::AgentKind) -> ReactTrace {
-    let mut trace = ReactTrace::with_kind(kind);
-    trace.set_chat_response_char_cap(Some(crate::notebook_config::DEFAULT_CHAT_RESPONSE_CHAR_CAP));
-    trace
+    ReactTrace::with_kind(kind)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -403,10 +401,6 @@ impl SessionDetailView {
         self.mention_registry
             .borrow_mut()
             .set_issue_snapshot(descriptors);
-    }
-
-    pub fn set_chat_response_char_cap(&mut self, cap: usize) {
-        self.react_trace.set_chat_response_char_cap(Some(cap));
     }
 
     #[cfg(feature = "markdown")]
