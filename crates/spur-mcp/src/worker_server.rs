@@ -558,6 +558,9 @@ struct CodeSymbolParams {
     /// Include unresolved caller/callee rows. Defaults to false; counts_by_kind and unresolved_sample still summarize filtered rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     include_unresolved: Option<bool>,
+    /// Resolve the selector against a specific commit SHA (temporal time-travel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -609,6 +612,14 @@ struct CodeSubgraphParams {
     /// Include unresolved boundary edges. Defaults to false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     include_unresolved: Option<bool>,
+    /// Resolve the selector against a specific commit SHA (temporal time-travel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSymbolHistoryParams {
+    symbol: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -694,7 +705,7 @@ impl WorkerToolHandler {
         })
     }
 
-    async fn invoke_with_lifecycle<F, Fut>(
+    async fn invoke_with_lifecycle<F, Fut, E>(
         &self,
         tool_name: &'static str,
         context: RequestContext<RoleServer>,
@@ -703,7 +714,8 @@ impl WorkerToolHandler {
     ) -> Result<CallToolResult, McpError>
     where
         F: FnOnce(WorkerCallContext) -> Fut,
-        Fut: std::future::Future<Output = Result<Value, McpHandlerError>>,
+        Fut: std::future::Future<Output = Result<Value, E>>,
+        E: Into<McpError>,
     {
         let worker_ctx = self.context_from_request(&context)?;
         if worker_ctx.brain_session_id != self.brain_session_id {
@@ -727,9 +739,7 @@ impl WorkerToolHandler {
         let is_error = result.is_err();
         record_call(&self.deps, &delegation_id, tool_name, latency_ms, is_error);
 
-        result
-            .map(CallToolResult::structured)
-            .map_err(McpError::from)
+        result.map(CallToolResult::structured).map_err(Into::into)
     }
 
     #[tool(
@@ -1059,6 +1069,28 @@ impl WorkerToolHandler {
             Some(None),
             move |_worker_ctx| async move {
                 crate::server::handlers::code_graph::code_subgraph(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_symbol_history",
+        description = "Return the causal trace of a code symbol across commits, including ChangeKind and snapshot key for each touch. Requires a temporal commit index in the current worktree.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSymbolHistoryParams>()
+    )]
+    async fn code_symbol_history_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_symbol_history",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_symbol_history(&args).await
             },
         )
         .await

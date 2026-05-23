@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str;
 
 use anyhow::{anyhow, Context};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::discovery::discover_files;
 use crate::extract::languages::{
     all_supported_extensions, emit_definitions, emit_edges, emit_rust_dyn_trait_edges,
-    language_registry, LanguageConfig, LanguageDescriptor,
+    extracted_symbols, language_registry, Language, LanguageConfig, LanguageDescriptor,
 };
 use crate::extract::markdown::extract_markdown_file;
 use crate::extract::mcp_tools::emit_mcp_tools;
@@ -50,6 +52,7 @@ pub(crate) struct CaptureHit<'tree> {
 
 pub(crate) struct CompiledQueries {
     pub(crate) tags: Query,
+    pub(crate) symbols: Query,
     pub(crate) spur_edges: Option<Query>,
     pub(crate) inline_spur_edges: Option<Query>,
 }
@@ -57,11 +60,12 @@ pub(crate) struct CompiledQueries {
 #[derive(Debug)]
 pub(crate) struct LanguageFileGroup {
     pub(crate) label: &'static str,
+    pub(crate) language: Language,
     pub(crate) config: LanguageConfig,
     pub(crate) files: Vec<PathBuf>,
 }
 
-type GroupAccumulator = BTreeMap<&'static str, (fn() -> LanguageConfig, Vec<PathBuf>)>;
+type GroupAccumulator = BTreeMap<&'static str, (Language, fn() -> LanguageConfig, Vec<PathBuf>)>;
 type EdgeDedupKey = (
     NodeId,
     Option<NodeId>,
@@ -69,6 +73,119 @@ type EdgeDedupKey = (
     Option<String>,
     Option<GraphEdgeKind>,
 );
+
+#[derive(Debug, Error)]
+pub enum ExtractError {
+    #[error("invalid utf-8: {0}")]
+    InvalidUtf8(str::Utf8Error),
+    #[error("parser setup failed: {0}")]
+    Setup(String),
+    #[error("tree-sitter parse returned no tree")]
+    NoTree,
+    #[error("extraction failed: {0}")]
+    Extraction(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedSymbol {
+    pub entity_name: String,
+    pub symbol_kind: String,
+    pub enclosing_scope: Option<String>,
+    pub byte_range: [usize; 2],
+    pub line_range: [usize; 2],
+    pub anchor_hash: String,
+    pub tokens: Vec<String>,
+}
+
+pub struct BytesExtractor {
+    language: Language,
+    config: LanguageConfig,
+    parser: Parser,
+    queries: CompiledQueries,
+    markdown_inline_parser: Option<Parser>,
+}
+
+impl BytesExtractor {
+    pub fn for_language(language: Language) -> Result<Self, ExtractError> {
+        Self::new(language, language.config())
+    }
+
+    fn new(language: Language, config: LanguageConfig) -> Result<Self, ExtractError> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&config.language)
+            .map_err(|err| ExtractError::Setup(err.to_string()))?;
+        let queries = compile_queries(&config, language)
+            .map_err(|err| ExtractError::Setup(err.to_string()))?;
+        let markdown_inline_parser = if language == Language::Markdown {
+            let mut parser = Parser::new();
+            if let Some(inline_language) = config.inline_language.as_ref() {
+                parser
+                    .set_language(inline_language)
+                    .map_err(|err| ExtractError::Setup(err.to_string()))?;
+            }
+            Some(parser)
+        } else {
+            None
+        };
+        Ok(Self {
+            language,
+            config,
+            parser,
+            queries,
+            markdown_inline_parser,
+        })
+    }
+
+    pub fn extract(
+        &mut self,
+        _logical_path: &Path,
+        bytes: &[u8],
+    ) -> Result<Vec<ExtractedSymbol>, ExtractError> {
+        let source = str::from_utf8(bytes).map_err(ExtractError::InvalidUtf8)?;
+        let tree = self
+            .parser
+            .parse(source.as_bytes(), None)
+            .ok_or(ExtractError::NoTree)?;
+        let captures = run_query(&self.queries.symbols, tree.root_node(), source);
+        Ok(extracted_symbols(&self.config, source, &captures))
+    }
+
+    pub(crate) fn extract_graph_facts(
+        &mut self,
+        builder: &mut FactBuilder<'_>,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), ExtractError> {
+        let source = str::from_utf8(bytes).map_err(ExtractError::InvalidUtf8)?;
+        let tree = self
+            .parser
+            .parse(source.as_bytes(), None)
+            .ok_or(ExtractError::NoTree)?;
+        if self.language == Language::Markdown {
+            extract_markdown_file(
+                builder,
+                &self.config,
+                path,
+                source,
+                tree.root_node(),
+                &self.queries,
+                self.markdown_inline_parser.as_mut(),
+            )
+        } else {
+            extract_file_from_tree(
+                builder,
+                self.language.label(),
+                &self.config,
+                path,
+                source,
+                tree.root_node(),
+                &self.queries,
+            )
+        }
+        .map_err(|err| ExtractError::Extraction(err.to_string()))
+    }
+}
 
 impl<'a> FactBuilder<'a> {
     fn new(root: &'a Path) -> Self {
@@ -207,6 +324,7 @@ impl<'a> FactBuilder<'a> {
             edge_kind,
             evidence_id: EvidenceId(edge_id.get()),
             directed: true,
+            change_kind: None,
         });
     }
 
@@ -381,9 +499,9 @@ pub fn build_facts(root: &Path) -> anyhow::Result<(GraphFacts, BTreeMap<&'static
     let (groups, file_counts) = discover_language_groups(&root)?;
     let extract_groups: Vec<_> = groups
         .into_iter()
-        .map(|group| (group.label, group.config, group.files))
+        .map(|group| (group.language, group.label, group.config, group.files))
         .collect();
-    let facts = extract_files(&root, &extract_groups)?;
+    let facts = extract_files(&root, extract_groups)?;
     Ok((facts, file_counts))
 }
 
@@ -394,42 +512,23 @@ pub fn build_facts_for_paths(root: &Path, files: &[PathBuf]) -> anyhow::Result<G
     let groups = language_groups_for_paths(&root, files)?;
     let extract_groups: Vec<_> = groups
         .into_iter()
-        .map(|group| (group.label, group.config, group.files))
+        .map(|group| (group.language, group.label, group.config, group.files))
         .collect();
-    extract_files(&root, &extract_groups)
+    extract_files(&root, extract_groups)
 }
 
 fn extract_files(
     root: &Path,
-    groups: &[(&'static str, LanguageConfig, Vec<PathBuf>)],
+    groups: Vec<(Language, &'static str, LanguageConfig, Vec<PathBuf>)>,
 ) -> anyhow::Result<GraphFacts> {
-    let mut parser = Parser::new();
     let mut builder = FactBuilder::new(root);
-    let mut compiled_queries_cache: HashMap<&'static str, CompiledQueries> = HashMap::new();
 
-    for (label, config, files) in groups {
-        parser.set_language(&config.language).map_err(|err| {
+    for (language, label, config, files) in groups {
+        let mut extractor = BytesExtractor::new(language, config).map_err(|err| {
             anyhow!("failed to configure tree-sitter parser for `{label}`: {err}")
         })?;
-        if !compiled_queries_cache.contains_key(label) {
-            compiled_queries_cache.insert(*label, compile_queries(config, label)?);
-        }
-        let queries = compiled_queries_cache
-            .get(label)
-            .ok_or_else(|| anyhow!("missing compiled query cache entry for `{label}`"))?;
-        let mut markdown_inline_parser = if *label == "markdown" {
-            let mut parser = Parser::new();
-            if let Some(inline_language) = config.inline_language.as_ref() {
-                parser.set_language(inline_language).map_err(|err| {
-                    anyhow!("failed to configure markdown inline parser for `{label}`: {err}")
-                })?;
-            }
-            Some(parser)
-        } else {
-            None
-        };
         for path in files {
-            let source_bytes = match fs::read(path) {
+            let source_bytes = match fs::read(&path) {
                 Ok(source) => source,
                 Err(err) => {
                     tracing::warn!(
@@ -440,46 +539,7 @@ fn extract_files(
                     continue;
                 }
             };
-            let Some(tree) = parser.parse(&source_bytes, None) else {
-                tracing::warn!(
-                    path = %path.display(),
-                    "spur-graph: skipping file (tree-sitter parse failed)"
-                );
-                continue;
-            };
-            let source = match String::from_utf8(source_bytes) {
-                Ok(source) => source,
-                Err(err) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "spur-graph: skipping file (source is not valid UTF-8)"
-                    );
-                    continue;
-                }
-            };
-            let result = if *label == "markdown" {
-                extract_markdown_file(
-                    &mut builder,
-                    config,
-                    path,
-                    &source,
-                    tree.root_node(),
-                    queries,
-                    markdown_inline_parser.as_mut(),
-                )
-            } else {
-                extract_file(
-                    &mut builder,
-                    label,
-                    config,
-                    path,
-                    &source,
-                    tree.root_node(),
-                    queries,
-                )
-            };
-            if let Err(err) = result {
+            if let Err(err) = extractor.extract_graph_facts(&mut builder, &path, &source_bytes) {
                 tracing::warn!(
                     path = %path.display(),
                     error = %err,
@@ -492,7 +552,7 @@ fn extract_files(
     Ok(builder.facts)
 }
 
-fn extract_file(
+fn extract_file_from_tree(
     builder: &mut FactBuilder<'_>,
     language_label: &str,
     config: &crate::extract::languages::LanguageConfig,
@@ -543,10 +603,8 @@ fn extract_file(
     Ok(())
 }
 
-fn compile_queries(
-    config: &LanguageConfig,
-    language_label: &str,
-) -> anyhow::Result<CompiledQueries> {
+fn compile_queries(config: &LanguageConfig, language: Language) -> anyhow::Result<CompiledQueries> {
+    let language_label = language.label();
     let mut tags = None;
     let mut spur_edges = None;
     let mut inline_spur_edges = None;
@@ -582,8 +640,21 @@ fn compile_queries(
             }
         }
     }
+    let symbols_source = match language {
+        Language::Rust => include_str!("../../queries/rust/symbols.scm"),
+        Language::Python => include_str!("../../queries/python/symbols.scm"),
+        Language::TypeScript | Language::Tsx => {
+            include_str!("../../queries/typescript/symbols.scm")
+        }
+        Language::Markdown => include_str!("../../queries/markdown/symbols.scm"),
+        Language::Cpp => include_str!("../../queries/cpp/tags.scm"),
+    };
+    let symbols = Query::new(&config.language, symbols_source).with_context(|| {
+        format!("failed to compile tree-sitter query `symbols` for `{language_label}`")
+    })?;
     Ok(CompiledQueries {
         tags: tags.with_context(|| format!("missing `{language_label}` tags query"))?,
+        symbols,
         spur_edges,
         inline_spur_edges,
     })
@@ -602,20 +673,21 @@ fn discover_language_groups(
         };
         groups
             .entry(descriptor.label)
-            .or_insert_with(|| (descriptor.factory, Vec::new()))
-            .1
+            .or_insert_with(|| (descriptor.language, descriptor.factory, Vec::new()))
+            .2
             .push(path);
     }
 
     let file_counts = groups
         .iter()
-        .map(|(label, (_, files))| (*label, files.len()))
+        .map(|(label, (_, _, files))| (*label, files.len()))
         .collect();
 
     let language_groups = groups
         .into_iter()
-        .map(|(label, (factory, files))| LanguageFileGroup {
+        .map(|(label, (language, factory, files))| LanguageFileGroup {
             label,
+            language,
             config: factory(),
             files,
         })
@@ -644,15 +716,16 @@ fn language_groups_for_paths(
         };
         groups
             .entry(descriptor.label)
-            .or_insert_with(|| (descriptor.factory, Vec::new()))
-            .1
+            .or_insert_with(|| (descriptor.language, descriptor.factory, Vec::new()))
+            .2
             .push(full_path);
     }
 
     Ok(groups
         .into_iter()
-        .map(|(label, (factory, files))| LanguageFileGroup {
+        .map(|(label, (language, factory, files))| LanguageFileGroup {
             label,
+            language,
             config: factory(),
             files,
         })
@@ -709,10 +782,9 @@ fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, ordinal: u32) -> S
     hasher.update([0]);
     hasher.update(ordinal.to_le_bytes());
     let digest = hasher.finalize();
-    format!(
-        "{:016x}",
-        u64::from_be_bytes(digest[..8].try_into().unwrap())
-    )
+    let mut prefix = [0; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    format!("{:016x}", u64::from_be_bytes(prefix))
 }
 
 fn qualified_symbols_by_name(facts: &GraphFacts) -> HashMap<String, Vec<NodeId>> {

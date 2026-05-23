@@ -36,6 +36,7 @@ const EXPECTED: &[&str] = &[
     "code_callees",
     "code_search",
     "code_subgraph",
+    "code_symbol_history",
     "submit_plan",
     "execute_epic",
     "get_plan_status",

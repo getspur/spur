@@ -16,6 +16,7 @@ const ARTIFACTS_DIR_NAME: &str = "artifacts";
 const LOCK_FILE_NAME: &str = ".lock";
 const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
+pub const COMMIT_INDEX_POINTER_PATH: &str = ".spur/commit-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
 
 #[cfg(test)]
@@ -347,6 +348,9 @@ mod tests {
             edges: Vec::new(),
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         }
     }
 }

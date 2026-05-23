@@ -752,6 +752,10 @@ fn code_resolve_def() -> ToolDefinition {
                 "selector": {
                     "type": "string",
                     "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
+                "as_of": {
+                    "type": "string",
+                    "description": "Optional git commit SHA for point-in-time symbol resolution"
                 }
             },
             "required": ["selector"]
@@ -881,6 +885,10 @@ fn code_callees_def() -> ToolDefinition {
                     "type": "boolean",
                     "default": false,
                     "description": "When true, include unresolved callee rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
+                },
+                "as_of": {
+                    "type": "string",
+                    "description": "Optional git commit SHA for point-in-time symbol resolution"
                 }
             }
         }),
@@ -988,8 +996,29 @@ fn code_subgraph_def() -> ToolDefinition {
                     "type": "boolean",
                     "default": false,
                     "description": "When true, include unresolved boundary edges. Default false filters target_uri=null edges from the subgraph."
+                },
+                "as_of": {
+                    "type": "string",
+                    "description": "Optional git commit SHA for point-in-time symbol resolution"
                 }
             }
+        }),
+    }
+}
+
+fn code_symbol_history_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_symbol_history".into(),
+        description: "Return the causal trace of a code symbol across commits, including ChangeKind and snapshot key for each touch. Requires a temporal commit index in the current worktree.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                }
+            },
+            "required": ["symbol"]
         }),
     }
 }
@@ -1429,6 +1458,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_callees_def(),
         code_search_def(),
         code_subgraph_def(),
+        code_symbol_history_def(),
         submit_plan_def(),
         execute_epic_def(),
         get_plan_status_def(),
@@ -1470,6 +1500,7 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_callees_def(),
         code_search_def(),
         code_subgraph_def(),
+        code_symbol_history_def(),
         update_issue_def(),
         report_signal_def(),
         report_progress_def(),
@@ -1732,6 +1763,7 @@ mod worker_tools_subset_tests {
         "code_callees",
         "code_search",
         "code_subgraph",
+        "code_symbol_history",
         "update_issue",
         "report_signal",
         "report_progress",
