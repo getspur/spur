@@ -492,21 +492,127 @@ struct FetchOutcomeArtifactParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CodeAmbiguityMode {
+    Candidates,
+    Error,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CodeSearchMode {
+    Exact,
+    Prefix,
+    Substring,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeResolveParams {
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    selector: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeFileSymbolsParams {
+    /// Worktree-relative file path.
+    file: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSymbolInfoParams {
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+    /// deprecated; use selector. Accepts graph://symbol/<id> or bare hex id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeReadSymbolParams {
+    /// Stable symbol id from code_resolve/code_search/code_symbol_info. graph://symbol/<id> is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stable_symbol_id: Option<String>,
+    /// Worktree-relative file path. Required with name and mutually exclusive with stable_symbol_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    /// Symbol entity_name or qualified_name within path. Required with path and mutually exclusive with stable_symbol_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Lines of context to include before and after the symbol. Values outside 0..50 are clamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_lines: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSymbolParams {
-    symbol: String,
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+    /// deprecated; use selector. Accepts graph://symbol/<id> or bare hex id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+    /// Ambiguity handling. Defaults to candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on_ambiguous: Option<CodeAmbiguityMode>,
+    /// Include unresolved caller/callee rows. Defaults to false; counts_by_kind and unresolved_sample still summarize filtered rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_unresolved: Option<bool>,
+    /// Resolve the selector against a specific commit SHA (temporal time-travel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     as_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct CodeSearchParams {
+    /// Search term. Non-empty.
+    query: String,
+    /// Search mode. Defaults to substring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<CodeSearchMode>,
+    /// Optional exact symbol_kind filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol_kind: Option<String>,
+    /// Optional exact worktree-relative file path. Mutually exclusive with file_glob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    /// Optional glob over worktree-relative file_path. Mutually exclusive with file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_glob: Option<String>,
+    /// Result limit. Clamped to 1..=200 by the handler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSubgraphParams {
-    symbol: String,
+    /// Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+    /// Continuation roots from a prior truncated_frontier response. Mutually exclusive with selector and symbol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_nodes: Option<Vec<String>>,
+    /// deprecated; use selector. Accepts graph://symbol/<id> or bare hex id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+    /// Ambiguity handling. Defaults to candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on_ambiguous: Option<CodeAmbiguityMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     radius: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_nodes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_edges: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     format: Option<String>,
+    /// Optional public edge_kind filter: calls, calls_dyn, references_hof, references_other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     edge_kinds: Option<Vec<String>>,
+    /// Include unresolved boundary edges. Defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_unresolved: Option<bool>,
+    /// Resolve the selector against a specific commit SHA (temporal time-travel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     as_of: Option<String>,
 }
@@ -793,8 +899,96 @@ impl WorkerToolHandler {
     }
 
     #[tool(
+        name = "code_resolve",
+        description = "Resolve a code selector against the current worktree graph artifact and return only candidate rows. Use before code_subgraph when a selector may be ambiguous.",
+        input_schema = crate::tool_schemas::schema_object::<CodeResolveParams>()
+    )]
+    async fn code_resolve_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_resolve",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_resolve(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_file_symbols",
+        description = "List code symbols declared in one worktree-relative file from the current graph artifact. Rejects absolute paths and paths containing '..'.",
+        input_schema = crate::tool_schemas::schema_object::<CodeFileSymbolsParams>()
+    )]
+    async fn code_file_symbols_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_file_symbols",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_file_symbols(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_symbol_info",
+        description = "Resolve one code symbol and return metadata only. Ambiguous selectors return candidate rows.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSymbolInfoParams>()
+    )]
+    async fn code_symbol_info_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_symbol_info",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_symbol_info(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_read_symbol",
+        description = "Read the indexed source for one code symbol from the current graph artifact. Select by stable_symbol_id, or by the exact worktree-relative path plus symbol name. Source bytes are resolved through the artifact file content_oid; stale=true means the current worktree file differs but the returned source still matches the indexed graph.",
+        input_schema = crate::tool_schemas::schema_object::<CodeReadSymbolParams>()
+    )]
+    async fn code_read_symbol_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_read_symbol",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_read_symbol(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
         name = "code_callers",
-        description = "List symbols that call the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.",
+        description = "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other). Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample summarize filtered rows. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.",
         input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
     )]
     async fn code_callers_tool(
@@ -808,7 +1002,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_callers(&args)
+                crate::server::handlers::code_graph::code_callers(&args).await
             },
         )
         .await
@@ -816,7 +1010,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_callees",
-        description = "List symbols called by the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.",
+        description = "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other). Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample summarize filtered rows. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.",
         input_schema = crate::tool_schemas::schema_object::<CodeSymbolParams>()
     )]
     async fn code_callees_tool(
@@ -830,7 +1024,29 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_callees(&args)
+                crate::server::handlers::code_graph::code_callees(&args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "code_search",
+        description = "Search the worktree graph artifact for symbols by name. Lexical retrieval, not graph resolution — returns ranked candidates matching the query.",
+        input_schema = crate::tool_schemas::schema_object::<CodeSearchParams>()
+    )]
+    async fn code_search_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        self.invoke_with_lifecycle(
+            "code_search",
+            context,
+            Some(None),
+            move |_worker_ctx| async move {
+                crate::server::handlers::code_graph::code_search(&args).await
             },
         )
         .await
@@ -838,7 +1054,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "code_subgraph",
-        description = "Get a bounded code-symbol subgraph from the current worktree graph artifact. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
+        description = "Get a budgeted code-symbol subgraph from the current worktree graph artifact. Traversal is deterministic BFS: seed with selector (or start_nodes order for continuation), then expand each node by graph artifact edge order. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other), and unresolved edges are hidden by default (include_unresolved=false). max_nodes defaults to 40 and clamps to 1..400; max_edges defaults to 120 and clamps to 1..1200. When truncated, truncated_frontier lists next-hop node ids reachable through excluded nodes/edges; call again with start_nodes=truncated_frontier to resume statelessly. edge_kinds=[\"calls\"] is strict direct calls only; use calls_dyn separately for heuristic dyn Trait calls. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Use selector for graph://symbol/<id>, bare hex ids, qualified names, file-qualified names, or bare names. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.",
         input_schema = crate::tool_schemas::schema_object::<CodeSubgraphParams>()
     )]
     async fn code_subgraph_tool(
@@ -852,7 +1068,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_subgraph(&args)
+                crate::server::handlers::code_graph::code_subgraph(&args).await
             },
         )
         .await
@@ -874,7 +1090,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_symbol_history(&args)
+                crate::server::handlers::code_graph::code_symbol_history(&args).await
             },
         )
         .await

@@ -12,6 +12,7 @@ pub mod event_replay;
 pub mod event_sink;
 pub mod license_runtime;
 pub mod lineage;
+pub mod notebook;
 pub(crate) mod notification_drain;
 pub mod notification_pump;
 pub mod orchestrator;

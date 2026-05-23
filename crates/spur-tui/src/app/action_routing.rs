@@ -465,8 +465,10 @@ impl App {
                 // a pre-ready SessionDetailView so LoadState renders correctly
                 // while the resume pipeline is in flight (Tranche 2 Task 5).
                 let sid = SessionId(session_id.clone());
-                self.session_detail =
-                    Some(crate::views::session_detail::SessionDetailView::for_session(sid.clone()));
+                let mut view =
+                    crate::views::session_detail::SessionDetailView::for_session(sid.clone());
+                view.set_chat_response_char_cap(self.notebook_ui_config.chat_response_char_cap);
+                self.session_detail = Some(view);
                 self.navigate_to(ViewId::SessionDetail(sid));
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumeSession { session_id });
@@ -1075,6 +1077,34 @@ impl App {
             Action::ThemeCommand { arg } => {
                 self.handle_theme_command(arg);
             }
+            Action::NotebookCommand { arg } => {
+                let label = notebook_command_label(&arg);
+                self.flash_hint_short(format!("{label}..."));
+                tokio::spawn(async move {
+                    match crate::notebook_daemon::send_notebook_command(&arg).await {
+                        Ok(response) if response.ok => {
+                            tracing::info!(
+                                path = response.path.as_deref(),
+                                "notebook daemon command completed"
+                            );
+                        }
+                        Ok(response) => {
+                            if let Some(error) = response.error {
+                                tracing::warn!(
+                                    code = %error.code,
+                                    message = %error.message,
+                                    "notebook daemon command failed"
+                                );
+                            } else {
+                                tracing::warn!("notebook daemon command failed");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "notebook daemon command failed");
+                        }
+                    }
+                });
+            }
             Action::PrefillInput { text } => {
                 match &self.current_view {
                     ViewId::Dashboard => {
@@ -1296,6 +1326,15 @@ impl App {
         if let Some(ref mut detail) = self.session_detail {
             detail.resolve_pending_permissions();
         }
+    }
+}
+
+fn notebook_command_label(arg: &str) -> &'static str {
+    match arg.trim() {
+        "" => "Reopening notebook",
+        "new" => "Creating notebook",
+        "close" => "Closing notebook",
+        _ => "Opening notebook",
     }
 }
 

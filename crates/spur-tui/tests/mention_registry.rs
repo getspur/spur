@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_acp::SessionId;
 use spur_graph::validation::compute_anchor_hash;
-use spur_graph::{artifact_from_facts, build_facts, write_artifact};
+use spur_graph::{artifact_from_facts, build_facts, write_artifact_parquet, WriteOptions};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
 use spur_tui::mentions::{
@@ -104,10 +104,14 @@ fn extracted_graph_index_resolves_symbol_payload_through_registry() {
         "pub struct Engine;\n\npub fn run() -> Engine {\n    Engine\n}\n",
     )
     .unwrap();
-    let artifact_path = dir.path().join(".spur/graph-index.json");
     let facts = build_facts(dir.path()).expect("extract fixture worktree").0;
     let artifact = artifact_from_facts(&facts, dir.path()).expect("build artifact");
-    write_artifact(&artifact, &artifact_path).expect("write artifact");
+    let artifact_path = write_artifact_parquet(
+        &artifact,
+        &dir.path().join(".spur/graph"),
+        WriteOptions::default(),
+    )
+    .expect("write parquet artifact");
 
     let mut reg = MentionRegistry::for_direct_session().with_code_graph(&artifact_path);
     let sid = SessionId::new();
@@ -556,15 +560,93 @@ fn code_graph_accept_and_submit_expands_fixture_symbol_end_to_end() {
 
     assert!(prompt.contains("MENTION module config::Config"), "{prompt}");
     assert!(prompt.contains("context_header:"), "{prompt}");
+    assert!(!prompt.contains("qualified_name:"), "{prompt}");
     assert!(!prompt.contains("source:\n"), "{prompt}");
     assert!(
         prompt.contains(
-            "topology_available_via_mcp_for_above_symbols: pass each MENTION's `id` (graph://symbol/...) to code_callers / code_callees / code_subgraph(radius=1)"
+            "topology_available_via_mcp_for_above_symbols: pass each MENTION's qualified_name OR path:line to code_callers / code_callees / code_subgraph(radius=1); use code_resolve for ambiguous names"
         ),
         "{prompt}"
     );
     assert!(
         prompt.contains("id:      graph://symbol/symbol-config-struct"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn code_graph_submit_expansion_exposes_persisted_qualified_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = "impl App {\n    pub fn run(&self) {}\n}\n";
+    let source_path = tmp.path().join("src/app.rs");
+    std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    std::fs::write(&source_path, source).unwrap();
+    let start = source.find("pub fn run").expect("run function");
+    let slice = &source[start..source.len()];
+    let graph_path = write_graph_fixture(
+        tmp.path(),
+        serde_json::json!({
+            "header": { "graph_index_version": "qualified-fixture" },
+            "files": [
+                {
+                    "stable_file_id": "file-app",
+                    "file_path": "src/app.rs"
+                }
+            ],
+            "symbols": [
+                {
+                    "stable_symbol_id": "symbol-app-run",
+                    "file_path": "src/app.rs",
+                    "byte_range": [start, source.len()],
+                    "line_range": [2, 3],
+                    "entity_name": "run",
+                    "qualified_name": "impl App::run",
+                    "symbol_kind": "fn",
+                    "anchor_hash": compute_anchor_hash(slice).to_string(),
+                    "enclosing_scope": "App"
+                }
+            ]
+        }),
+    );
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let symbol = reg
+        .query(CompletionScope::Session(&sid), tmp.path(), "run", 10)
+        .into_iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-app-run")
+        .expect("run symbol row");
+
+    let payload = reg
+        .lookup_code_payload(&symbol.uri)
+        .expect("symbol payload");
+    assert_eq!(payload.authoritative.display, "run");
+    assert_eq!(payload.extraction_hints.qualified_name, "impl App::run");
+
+    let mut bar = InputBar::new();
+    let atom_text = symbol
+        .atom_text
+        .clone()
+        .unwrap_or_else(|| format!("@{}", symbol.display));
+    bar.insert_atom(atom_text, symbol.uri.clone(), symbol.display);
+
+    let blocks = assemble_blocks_with_code_mentions(
+        &bar.text(),
+        bar.protected_ranges(),
+        &[],
+        tmp.path(),
+        |uri| reg.lookup_code_payload(uri),
+    );
+    let prompt = blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(text) => text.text.as_str(),
+            other => panic!("expected text-only code expansion, got {other:?}"),
+        })
+        .collect::<String>();
+
+    assert!(prompt.contains("MENTION App::run\n"), "{prompt}");
+    assert!(
+        prompt.contains("qualified_name: impl App::run\n"),
         "{prompt}"
     );
 }

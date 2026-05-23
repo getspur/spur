@@ -210,6 +210,7 @@ mod tests {
             byte_range,
             line_range: [1, 1],
             entity_name: entity_name.to_string(),
+            qualified_name: entity_name.to_string(),
             symbol_kind: "fn".to_string(),
             anchor_hash: anchor_hash.to_string(),
             enclosing_scope: None,

@@ -1,0 +1,826 @@
+{
+  "header": {
+    "graph_index_version": "spur-graph-phase2"
+  },
+  "manifest_version": "<normalized>",
+  "graph_content_hash": "4aac4725d05649aac52d232337a8ea201bf065d80dba77af8fc52d8574e5cdb2",
+  "file_manifests": [
+    {
+      "stable_file_id": "6432d7057541b693",
+      "path": "src/catalog.cpp",
+      "content_oid": "e0eb17ea8d91f54914c344aeba9c242f1172e433",
+      "node_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "stable_file_id": "4b0d3dc55196128d",
+      "path": "src/include/catalog.hpp",
+      "content_oid": "1be5a9d252b8a5c59b2e8d753230da0f7b0684fc",
+      "node_ids": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22
+      ]
+    },
+    {
+      "stable_file_id": "05beb7c62763c52a",
+      "path": "src/main.cpp",
+      "content_oid": "66b897795dfdf6ae0eb62fafeccbb00ad575cadc",
+      "node_ids": [
+        23,
+        24,
+        25
+      ]
+    }
+  ],
+  "files": [
+    {
+      "stable_file_id": "6432d7057541b693",
+      "file_path": "src/catalog.cpp"
+    },
+    {
+      "stable_file_id": "4b0d3dc55196128d",
+      "file_path": "src/include/catalog.hpp"
+    },
+    {
+      "stable_file_id": "05beb7c62763c52a",
+      "file_path": "src/main.cpp"
+    }
+  ],
+  "symbols": [
+    {
+      "stable_symbol_id": "2b2f654575d1a792",
+      "file_path": "src/catalog.cpp",
+      "byte_range": [
+        52,
+        585
+      ],
+      "line_range": [
+        5,
+        29
+      ],
+      "entity_name": "spurtest",
+      "qualified_name": "spurtest",
+      "symbol_kind": "module",
+      "anchor_hash": "8867820931603250069",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "ebe42269a76170da",
+      "file_path": "src/catalog.cpp",
+      "byte_range": [
+        74,
+        103
+      ],
+      "line_range": [
+        7,
+        7
+      ],
+      "entity_name": "Catalog::Catalog",
+      "qualified_name": "spurtest::Catalog::Catalog",
+      "symbol_kind": "method",
+      "anchor_hash": "497270817043259078",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "24dc9a0e7618f67d",
+      "file_path": "src/catalog.cpp",
+      "byte_range": [
+        104,
+        134
+      ],
+      "line_range": [
+        8,
+        8
+      ],
+      "entity_name": "Catalog::~Catalog",
+      "qualified_name": "spurtest::Catalog::~Catalog",
+      "symbol_kind": "method",
+      "anchor_hash": "16895634098996668802",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "f5cb13210ae06a1b",
+      "file_path": "src/catalog.cpp",
+      "byte_range": [
+        136,
+        257
+      ],
+      "line_range": [
+        10,
+        14
+      ],
+      "entity_name": "Catalog::Initialize",
+      "qualified_name": "spurtest::Catalog::Initialize",
+      "symbol_kind": "method",
+      "anchor_hash": "3433496986150719354",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "73b40b84acd6e543",
+      "file_path": "src/catalog.cpp",
+      "byte_range": [
+        259,
+        471
+      ],
+      "line_range": [
+        16,
+        23
+      ],
+      "entity_name": "Catalog::GetEntry",
+      "qualified_name": "spurtest::Catalog::GetEntry",
+      "symbol_kind": "method",
+      "anchor_hash": "6445071079225447795",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "11ec26f73851835f",
+      "file_path": "src/catalog.cpp",
+      "byte_range": [
+        473,
+        582
+      ],
+      "line_range": [
+        25,
+        27
+      ],
+      "entity_name": "Catalog::operator==",
+      "qualified_name": "spurtest::Catalog::operator==",
+      "symbol_kind": "method",
+      "anchor_hash": "9429661460188682009",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "2d34f9a1d5b29c51",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        69,
+        99
+      ],
+      "line_range": [
+        7,
+        8
+      ],
+      "entity_name": "D_ASSERT",
+      "qualified_name": "D_ASSERT",
+      "symbol_kind": "macro",
+      "anchor_hash": "3825365222794108171",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "4fa2a884533c4b97",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        100,
+        838
+      ],
+      "line_range": [
+        9,
+        48
+      ],
+      "entity_name": "spurtest",
+      "qualified_name": "spurtest",
+      "symbol_kind": "module",
+      "anchor_hash": "8867820931603250069",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "5f98a4537db0514d",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        122,
+        140
+      ],
+      "line_range": [
+        11,
+        11
+      ],
+      "entity_name": "CatalogEntry",
+      "qualified_name": "spurtest::CatalogEntry",
+      "symbol_kind": "class",
+      "anchor_hash": "11735680355091945538",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "07e35e8e761f1871",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        143,
+        226
+      ],
+      "line_range": [
+        13,
+        18
+      ],
+      "entity_name": "common",
+      "qualified_name": "spurtest::common",
+      "symbol_kind": "module",
+      "anchor_hash": "5717815919288053692",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "5ce05ed20a6f1df3",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        185,
+        223
+      ],
+      "line_range": [
+        16,
+        16
+      ],
+      "entity_name": "shared_ptr",
+      "qualified_name": "spurtest::common::shared_ptr",
+      "symbol_kind": "type_alias",
+      "anchor_hash": "724252514592449009",
+      "enclosing_scope": "common"
+    },
+    {
+      "stable_symbol_id": "ad371fbd5f710247",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        249,
+        600
+      ],
+      "line_range": [
+        20,
+        35
+      ],
+      "entity_name": "Catalog",
+      "qualified_name": "spurtest::Catalog",
+      "symbol_kind": "class",
+      "anchor_hash": "12803307261993865391",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "8bbe53827bbd0eb3",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        310,
+        351
+      ],
+      "line_range": [
+        25,
+        25
+      ],
+      "entity_name": "Initialize",
+      "qualified_name": "spurtest::Catalog::Initialize",
+      "symbol_kind": "method",
+      "anchor_hash": "6066132599983716792",
+      "enclosing_scope": "Catalog"
+    },
+    {
+      "stable_symbol_id": "a9d385b3a1dc083c",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        416,
+        477
+      ],
+      "line_range": [
+        28,
+        29
+      ],
+      "entity_name": "Make",
+      "qualified_name": "spurtest::Catalog::Make",
+      "symbol_kind": "method",
+      "anchor_hash": "15470854481056975361",
+      "enclosing_scope": "Catalog"
+    },
+    {
+      "stable_symbol_id": "4f58735952c11fac",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        483,
+        527
+      ],
+      "line_range": [
+        31,
+        31
+      ],
+      "entity_name": "operator==",
+      "qualified_name": "spurtest::Catalog::operator==",
+      "symbol_kind": "method",
+      "anchor_hash": "9536417738071878151",
+      "enclosing_scope": "Catalog"
+    },
+    {
+      "stable_symbol_id": "8e6731dc6f5b8a6e",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        543,
+        598
+      ],
+      "line_range": [
+        34,
+        34
+      ],
+      "entity_name": "entries_",
+      "qualified_name": "spurtest::Catalog::entries_",
+      "symbol_kind": "field",
+      "anchor_hash": "5349590077366440906",
+      "enclosing_scope": "Catalog"
+    },
+    {
+      "stable_symbol_id": "aa73fc5117b0ba9b",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        603,
+        785
+      ],
+      "line_range": [
+        37,
+        44
+      ],
+      "entity_name": "CatalogEntry",
+      "qualified_name": "spurtest::CatalogEntry",
+      "symbol_kind": "class",
+      "anchor_hash": "9563992350155305286",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "47328da612e96d96",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        637,
+        695
+      ],
+      "line_range": [
+        39,
+        39
+      ],
+      "entity_name": "CatalogEntry",
+      "qualified_name": "spurtest::CatalogEntry::CatalogEntry",
+      "symbol_kind": "method",
+      "anchor_hash": "1961236056869709234",
+      "enclosing_scope": "CatalogEntry"
+    },
+    {
+      "stable_symbol_id": "3c395b170de38753",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        765,
+        783
+      ],
+      "line_range": [
+        43,
+        43
+      ],
+      "entity_name": "name_",
+      "qualified_name": "spurtest::CatalogEntry::name_",
+      "symbol_kind": "field",
+      "anchor_hash": "18118001910027761276",
+      "enclosing_scope": "CatalogEntry"
+    },
+    {
+      "stable_symbol_id": "d8e331a0f36814c1",
+      "file_path": "src/include/catalog.hpp",
+      "byte_range": [
+        788,
+        835
+      ],
+      "line_range": [
+        46,
+        46
+      ],
+      "entity_name": "CatalogPtr",
+      "qualified_name": "spurtest::CatalogPtr",
+      "symbol_kind": "type_alias",
+      "anchor_hash": "7870622487387957981",
+      "enclosing_scope": "spurtest"
+    },
+    {
+      "stable_symbol_id": "76df1e43793debd7",
+      "file_path": "src/main.cpp",
+      "byte_range": [
+        122,
+        320
+      ],
+      "line_range": [
+        10,
+        17
+      ],
+      "entity_name": "RunCatalog",
+      "qualified_name": "RunCatalog",
+      "symbol_kind": "function",
+      "anchor_hash": "3469762674443081264",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "4f973353d7e83aa1",
+      "file_path": "src/main.cpp",
+      "byte_range": [
+        339,
+        465
+      ],
+      "line_range": [
+        21,
+        24
+      ],
+      "entity_name": "main",
+      "qualified_name": "main",
+      "symbol_kind": "function",
+      "anchor_hash": "11524506353514322817",
+      "enclosing_scope": null
+    }
+  ],
+  "edges": [
+    {
+      "source_stable_symbol_id": "05beb7c62763c52a",
+      "target_stable_symbol_id": null,
+      "target_label": "<iostream>",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "05beb7c62763c52a",
+      "target_stable_symbol_id": null,
+      "target_label": "CatalogEntry",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "05beb7c62763c52a",
+      "target_stable_symbol_id": null,
+      "target_label": "spurtest::Catalog",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "05beb7c62763c52a",
+      "target_stable_symbol_id": null,
+      "target_label": "spurtest::CatalogEntry",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "05beb7c62763c52a",
+      "target_stable_symbol_id": "4f973353d7e83aa1",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "05beb7c62763c52a",
+      "target_stable_symbol_id": "76df1e43793debd7",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "05beb7c62763c52a",
+      "target_stable_symbol_id": "ad371fbd5f710247",
+      "target_label": "Catalog",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "07e35e8e761f1871",
+      "target_stable_symbol_id": "5ce05ed20a6f1df3",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "11ec26f73851835f",
+      "target_stable_symbol_id": null,
+      "target_label": "size",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "2b2f654575d1a792",
+      "target_stable_symbol_id": "11ec26f73851835f",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "2b2f654575d1a792",
+      "target_stable_symbol_id": "24dc9a0e7618f67d",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "2b2f654575d1a792",
+      "target_stable_symbol_id": "73b40b84acd6e543",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "2b2f654575d1a792",
+      "target_stable_symbol_id": "ebe42269a76170da",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "2b2f654575d1a792",
+      "target_stable_symbol_id": "f5cb13210ae06a1b",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "47328da612e96d96",
+      "target_stable_symbol_id": null,
+      "target_label": "move",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "target_stable_symbol_id": null,
+      "target_label": "#pragma",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "target_stable_symbol_id": null,
+      "target_label": "<memory>",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "target_stable_symbol_id": null,
+      "target_label": "<string>",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "target_stable_symbol_id": null,
+      "target_label": "<vector>",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "target_stable_symbol_id": "2d34f9a1d5b29c51",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "target_stable_symbol_id": "4fa2a884533c4b97",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4f973353d7e83aa1",
+      "target_stable_symbol_id": "76df1e43793debd7",
+      "target_label": "RunCatalog",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "4fa2a884533c4b97",
+      "target_stable_symbol_id": "07e35e8e761f1871",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4fa2a884533c4b97",
+      "target_stable_symbol_id": "5f98a4537db0514d",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4fa2a884533c4b97",
+      "target_stable_symbol_id": "aa73fc5117b0ba9b",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4fa2a884533c4b97",
+      "target_stable_symbol_id": "ad371fbd5f710247",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4fa2a884533c4b97",
+      "target_stable_symbol_id": "d8e331a0f36814c1",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "6432d7057541b693",
+      "target_stable_symbol_id": null,
+      "target_label": "<utility>",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "6432d7057541b693",
+      "target_stable_symbol_id": "2b2f654575d1a792",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "73b40b84acd6e543",
+      "target_stable_symbol_id": null,
+      "target_label": "get",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "73b40b84acd6e543",
+      "target_stable_symbol_id": null,
+      "target_label": "name",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "76df1e43793debd7",
+      "target_stable_symbol_id": null,
+      "target_label": "GetEntry",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "76df1e43793debd7",
+      "target_stable_symbol_id": "8bbe53827bbd0eb3",
+      "target_label": "Initialize",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "aa73fc5117b0ba9b",
+      "target_stable_symbol_id": "3c395b170de38753",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "aa73fc5117b0ba9b",
+      "target_stable_symbol_id": "47328da612e96d96",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ad371fbd5f710247",
+      "target_stable_symbol_id": "4f58735952c11fac",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ad371fbd5f710247",
+      "target_stable_symbol_id": "8bbe53827bbd0eb3",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ad371fbd5f710247",
+      "target_stable_symbol_id": "8e6731dc6f5b8a6e",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ad371fbd5f710247",
+      "target_stable_symbol_id": "a9d385b3a1dc083c",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "f5cb13210ae06a1b",
+      "target_stable_symbol_id": null,
+      "target_label": "clear",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "f5cb13210ae06a1b",
+      "target_stable_symbol_id": null,
+      "target_label": "empty",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "f5cb13210ae06a1b",
+      "target_stable_symbol_id": "2d34f9a1d5b29c51",
+      "target_label": "D_ASSERT",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    }
+  ],
+  "tombstones": []
+}
