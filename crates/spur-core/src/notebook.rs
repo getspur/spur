@@ -24,6 +24,16 @@ pub fn notebook_binary_path() -> PathBuf {
         }
     }
 
+    let cargo_bin = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+        .map(|root| root.join("bin").join("spur-notebook"));
+    if let Some(path) = cargo_bin {
+        if path.exists() {
+            return path;
+        }
+    }
+
     PathBuf::from("spur-notebook")
 }
 
