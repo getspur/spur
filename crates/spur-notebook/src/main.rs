@@ -211,6 +211,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             jute::commands::kernel_usage_info,
             jute::commands::kernel_slot_info,
+            jute::commands::list_recent_notebooks,
+            jute::commands::remove_notebook_from_recents,
+            jute::commands::set_notebook_pinned,
+            jute::commands::move_notebook_to_trash,
+            jute::commands::reveal_notebook_in_finder,
+            jute::commands::new_notebook_via_daemon,
+            jute::commands::discard_scratch_notebooks,
             jute::commands::start_kernel,
             jute::commands::restart_kernel,
             jute::commands::stop_kernel,

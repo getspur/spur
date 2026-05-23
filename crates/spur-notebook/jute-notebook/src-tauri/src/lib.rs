@@ -77,6 +77,10 @@ pub enum Error {
     /// Error while interacting with the shell plugin.
     #[error("shell plugin error: {0}")]
     PluginShell(#[from] tauri_plugin_shell::Error),
+
+    /// Error while interacting with the notebook daemon control protocol.
+    #[error("notebook daemon error: {0}")]
+    NotebookDaemon(String),
 }
 
 impl serde::Serialize for Error {

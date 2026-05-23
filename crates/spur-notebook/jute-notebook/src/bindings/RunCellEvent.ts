@@ -19,5 +19,14 @@ export type RunCellEvent =
   | { event: "disconnect"; data: string }
   | {
       event: "finished";
-      data: { exec_count: number | null; status: string };
+      data: {
+        /**
+         * Kernel execution count when available.
+         */
+        exec_count: number | null;
+        /**
+         * Terminal execution status.
+         */
+        status: string;
+      };
     };
