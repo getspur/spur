@@ -13,6 +13,12 @@ use anyhow::{anyhow, Context, Result};
 use spur_graph::locking::try_lock_exclusive_with_timeout;
 
 const INIT_SQL: &str = include_str!("../../../spur-context/poc/duckdb-analyst/init.sql");
+#[allow(dead_code)]
+const INIT_TEMPORAL_SQL: &str =
+    include_str!("../../../spur-context/poc/duckdb-analyst/init_temporal.sql");
+#[allow(dead_code)]
+const INIT_DIAGNOSTICS_SQL: &str =
+    include_str!("../../../spur-context/poc/duckdb-analyst/init_diagnostics.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 
 /// Compiled-in parquet schema version this analyst build understands.
@@ -242,6 +248,13 @@ const REQUIRED_PARQUETS: &[&str] = &[
     "manifest.json",
 ];
 
+#[allow(dead_code)]
+const TEMPORAL_PARQUETS: &[&str] = &[
+    "commits.parquet",
+    "symbol_snapshots.parquet",
+    "temporal_edges.parquet",
+];
+
 pub(crate) fn verify_required_files(artifact_dir: &Path) -> Result<()> {
     let missing: Vec<&str> = REQUIRED_PARQUETS
         .iter()
@@ -256,6 +269,18 @@ pub(crate) fn verify_required_files(artifact_dir: &Path) -> Result<()> {
         artifact_dir.display(),
         missing.join(", ")
     ))
+}
+
+#[allow(dead_code)]
+pub(crate) fn temporal_files_present(artifact_dir: &Path) -> bool {
+    TEMPORAL_PARQUETS
+        .iter()
+        .any(|name| artifact_dir.join(name).is_file())
+}
+
+#[allow(dead_code)]
+pub(crate) fn diagnostics_present(artifact_dir: &Path) -> bool {
+    artifact_dir.join("diagnostics.parquet").is_file()
 }
 
 pub(crate) fn duckdb_cli_present() -> bool {
@@ -436,6 +461,36 @@ mod tests {
             msg.contains("tombstones.parquet"),
             "missing tombstones in: {msg}"
         );
+    }
+
+    #[test]
+    fn temporal_files_present_true_when_any_temporal_parquet_exists() {
+        let dir = temp_root();
+        std::fs::write(dir.path().join("commits.parquet"), b"").unwrap();
+
+        assert!(temporal_files_present(dir.path()));
+    }
+
+    #[test]
+    fn temporal_files_present_false_on_empty_dir() {
+        let dir = temp_root();
+
+        assert!(!temporal_files_present(dir.path()));
+    }
+
+    #[test]
+    fn diagnostics_present_true() {
+        let dir = temp_root();
+        std::fs::write(dir.path().join("diagnostics.parquet"), b"").unwrap();
+
+        assert!(diagnostics_present(dir.path()));
+    }
+
+    #[test]
+    fn diagnostics_present_false_otherwise() {
+        let dir = temp_root();
+
+        assert!(!diagnostics_present(dir.path()));
     }
 
     #[test]
