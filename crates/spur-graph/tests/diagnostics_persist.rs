@@ -20,9 +20,7 @@ fn diagnostics_round_trip_through_json() {
 }
 
 #[test]
-#[ignore = "T-P5 write_artifact migration: parquet artifacts do not persist diagnostics yet"]
 fn diagnostics_round_trip_through_artifact_io() {
-    // TODO(T-P5): re-enable when parquet graph artifacts carry diagnostics.
     let mut artifact = minimal_artifact();
     artifact.diagnostics = vec!["parse_failed path=src/lib.rs sha=abc123".to_string()];
     let dir = tempfile::tempdir().expect("tempdir");

@@ -103,7 +103,7 @@ fn legacy_artifact_references_edges_without_edge_kind_count_as_references_other(
         &artifact_path,
         serde_json::to_string_pretty(&serde_json::json!({
             "header": {
-                "graph_index_version": "test"
+                "graph_index_version": "v1"
             },
             "manifest_version": "test",
             "graph_content_hash": "test",
