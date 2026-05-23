@@ -492,6 +492,7 @@ mod tests {
             relation,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
+            change_kind: None,
             edge_kind,
         }
     }
@@ -504,6 +505,7 @@ mod tests {
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
+            change_kind: None,
             edge_kind: None,
         }
     }
@@ -535,6 +537,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         }
     }
 
@@ -562,6 +567,9 @@ mod tests {
             edges,
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         }
     }
 
@@ -621,6 +629,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
         artifact
             .edges
@@ -760,6 +771,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let view = bounded_subgraph_with_budget(
@@ -872,6 +886,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let view = bounded_subgraph(&artifact, "root", 1, Some(&[GraphEdgeKind::Calls]), false);
@@ -905,6 +922,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let view = bounded_subgraph(&artifact, "root", 1, Some(&[GraphEdgeKind::Calls]), true);
@@ -943,6 +963,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let default_view =
@@ -982,6 +1005,9 @@ mod tests {
             edges: vec![unresolved_call_edge("root", "external")],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let r0 = bounded_subgraph(&artifact, "root", 0, None, true);
@@ -1009,6 +1035,9 @@ mod tests {
             edges: vec![edge("caller", "target", RelationKind::References)],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         assert_eq!(ids(&find_callers(&artifact, "target")), vec!["caller"]);
@@ -1052,6 +1081,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let static_calls =
@@ -1119,6 +1151,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let callee_kinds: Vec<_> = find_callee_edges(&artifact, "root")

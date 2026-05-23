@@ -1,0 +1,14 @@
+{
+  "class": "full_rewrite",
+  "expected_renames": [],
+  "expected_added": [
+    "py_full_rewrite_after"
+  ],
+  "expected_deleted": [
+    "py_full_rewrite_before"
+  ],
+  "expected_ambiguous_candidates": [
+    "py_full_rewrite_after",
+    "py_full_rewrite_before"
+  ]
+}

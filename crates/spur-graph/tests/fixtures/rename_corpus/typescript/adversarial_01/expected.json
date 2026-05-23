@@ -1,0 +1,14 @@
+{
+  "class": "full_rewrite",
+  "expected_renames": [],
+  "expected_added": [
+    "tsFullRewriteAfter"
+  ],
+  "expected_deleted": [
+    "tsFullRewriteBefore"
+  ],
+  "expected_ambiguous_candidates": [
+    "tsFullRewriteAfter",
+    "tsFullRewriteBefore"
+  ]
+}

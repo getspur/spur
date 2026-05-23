@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::Path;
 
 macro_rules! id_newtype {
     ($name:ident) => {
@@ -28,3 +30,15 @@ id_newtype!(FileId);
 id_newtype!(SpanId);
 id_newtype!(RunId);
 id_newtype!(EvidenceId);
+
+pub fn stable_symbol_id_for(path: &Path, entity_name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path.to_string_lossy().replace('\\', "/").as_bytes());
+    hasher.update([0]);
+    hasher.update(entity_name.as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "{:016x}",
+        u64::from_be_bytes(digest[..8].try_into().unwrap())
+    )
+}

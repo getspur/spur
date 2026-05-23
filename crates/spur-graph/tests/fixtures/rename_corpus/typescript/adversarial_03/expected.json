@@ -1,0 +1,14 @@
+{
+  "class": "params_only",
+  "expected_renames": [],
+  "expected_added": [
+    "tsParamsAfter"
+  ],
+  "expected_deleted": [
+    "tsParamsBefore"
+  ],
+  "expected_ambiguous_candidates": [
+    "tsParamsAfter",
+    "tsParamsBefore"
+  ]
+}

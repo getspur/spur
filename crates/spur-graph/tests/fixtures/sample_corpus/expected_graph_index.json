@@ -1,6 +1,6 @@
 {
   "header": {
-    "graph_index_version": "spur-graph-phase2"
+    "graph_index_version": "3"
   },
   "manifest_version": "<normalized>",
   "graph_content_hash": "36018835651609826cd76fe200f7a85f56ee68fc7eb83114ef98593d8d12e005",
