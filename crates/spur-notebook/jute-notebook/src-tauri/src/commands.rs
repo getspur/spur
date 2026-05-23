@@ -4,17 +4,19 @@ use std::{
     env, fs,
     future::Future,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
 
 use dashmap::mapref::entry::Entry;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sysinfo::{Pid, System};
 use tauri::{ipc::Channel, AppHandle, WebviewWindow};
 use tokio::sync::Mutex;
 use tracing::info;
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
@@ -47,6 +49,54 @@ pub struct KernelSlotInfo {
     pub cpu_pct: f32,
     /// Kernel resident memory in MiB.
     pub mem_mb: f32,
+}
+
+/// Recent notebook entry enriched for the Tauri webview.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct RecentNotebookEntry {
+    /// Absolute notebook path.
+    pub path: String,
+    /// Last opened time in RFC3339 format.
+    pub last_opened: String,
+    /// Whether the notebook lives under the scratch directory.
+    pub is_scratch: bool,
+    /// Whether the notebook is pinned in recents.
+    pub pinned: bool,
+    /// Whether the path-derived kernel slot has a live kernel.
+    pub kernel_alive: bool,
+    /// Whether this entry is the daemon's current notebook.
+    pub is_current: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonRecentEntry {
+    path: PathBuf,
+    last_opened: String,
+    is_scratch: bool,
+    pinned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonControlResponse {
+    ok: bool,
+    path: Option<String>,
+    entries: Option<Vec<DaemonRecentEntry>>,
+    error: Option<DaemonControlError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonControlError {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LastNotebookRecord {
+    path: PathBuf,
 }
 
 /// Coordinates disk saves so only one notebook write runs at a time.
@@ -187,6 +237,206 @@ fn notebook_path_from_window(window: &WebviewWindow) -> Option<String> {
     url.query_pairs()
         .find_map(|(key, value)| (key == "path").then(|| value.into_owned()))
         .filter(|path| !path.is_empty())
+}
+
+fn daemon_socket_path_from_args() -> Result<PathBuf, Error> {
+    let mut args = env::args();
+    while let Some(arg) = args.next() {
+        if arg == "--socket" {
+            return args.next().map(PathBuf::from).ok_or_else(|| {
+                Error::NotebookDaemon("--socket requires a notebook daemon path".to_string())
+            });
+        }
+    }
+    Err(Error::NotebookDaemon(
+        "notebook daemon socket path was not provided".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+async fn write_daemon_frame<W>(writer: &mut W, bytes: &[u8]) -> Result<(), Error>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+    if bytes.len() > MAX_FRAME_BYTES {
+        return Err(Error::NotebookDaemon(format!(
+            "daemon request frame is too large: {} bytes",
+            bytes.len()
+        )));
+    }
+    use tokio::io::AsyncWriteExt;
+    writer
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await
+        .map_err(Error::Filesystem)?;
+    writer.write_all(bytes).await.map_err(Error::Filesystem)?;
+    writer.flush().await.map_err(Error::Filesystem)
+}
+
+#[cfg(unix)]
+async fn read_daemon_frame<R>(reader: &mut R) -> Result<Vec<u8>, Error>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+    use tokio::io::AsyncReadExt;
+    let mut len = [0_u8; 4];
+    reader
+        .read_exact(&mut len)
+        .await
+        .map_err(Error::Filesystem)?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(Error::NotebookDaemon(format!(
+            "daemon response frame is too large: {len} bytes"
+        )));
+    }
+    let mut bytes = vec![0_u8; len];
+    reader
+        .read_exact(&mut bytes)
+        .await
+        .map_err(Error::Filesystem)?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+async fn send_daemon_control(
+    command: &str,
+    path: Option<&Path>,
+    pinned: Option<bool>,
+) -> Result<DaemonControlResponse, Error> {
+    use tokio::net::UnixStream;
+
+    let socket_path = daemon_socket_path_from_args()?;
+    let mut request = json!({
+        "daemon": "notebook.v1",
+        "command": command,
+    });
+    if let Some(path) = path {
+        request["path"] = Value::String(path.display().to_string());
+    }
+    if let Some(pinned) = pinned {
+        request["pinned"] = Value::Bool(pinned);
+    }
+
+    let mut stream = UnixStream::connect(&socket_path)
+        .await
+        .map_err(Error::Filesystem)?;
+    write_daemon_frame(&mut stream, &serde_json::to_vec(&request)?).await?;
+    let bytes = read_daemon_frame(&mut stream).await?;
+    let response: DaemonControlResponse = serde_json::from_slice(&bytes)?;
+    if response.ok {
+        Ok(response)
+    } else {
+        let message = response
+            .error
+            .map(|error| format!("{}: {}", error.code, error.message))
+            .unwrap_or_else(|| "daemon command failed without an error body".to_string());
+        Err(Error::NotebookDaemon(message))
+    }
+}
+
+#[cfg(not(unix))]
+async fn send_daemon_control(
+    _command: &str,
+    _path: Option<&Path>,
+    _pinned: Option<bool>,
+) -> Result<DaemonControlResponse, Error> {
+    Err(Error::NotebookDaemon(
+        "notebook daemon socket commands are only available on Unix platforms".to_string(),
+    ))
+}
+
+fn home_dir() -> Result<PathBuf, Error> {
+    if let Some(home) = env::var_os("HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    if let Some(home) = env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    if let (Some(drive), Some(path)) = (env::var_os("HOMEDRIVE"), env::var_os("HOMEPATH")) {
+        let mut home = PathBuf::from(drive);
+        home.push(path);
+        return Ok(home);
+    }
+    Err(Error::Filesystem(io::Error::new(
+        io::ErrorKind::NotFound,
+        "could not resolve home directory",
+    )))
+}
+
+fn notebooks_dir() -> Result<PathBuf, Error> {
+    Ok(home_dir()?.join(".spur").join("notebooks"))
+}
+
+fn scratch_dir() -> Result<PathBuf, Error> {
+    Ok(home_dir()?.join(".spur").join("scratch"))
+}
+
+fn last_notebook_record_path() -> Result<PathBuf, Error> {
+    Ok(notebooks_dir()?.join("last.json"))
+}
+
+async fn load_current_notebook_path() -> Result<Option<PathBuf>, Error> {
+    let record_path = last_notebook_record_path()?;
+    let bytes = match tokio::fs::read(&record_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::Filesystem(error)),
+    };
+    let record: LastNotebookRecord = serde_json::from_slice(&bytes)?;
+    Ok(Some(record.path))
+}
+
+async fn load_current_notebook_path_normalized() -> Result<Option<PathBuf>, Error> {
+    match load_current_notebook_path().await? {
+        Some(path) => normalize_path(&path).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+async fn normalize_path(path: &Path) -> Result<PathBuf, Error> {
+    match tokio::fs::canonicalize(path).await {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => lexical_normalize(path),
+        Err(error) => Err(Error::Filesystem(error)),
+    }
+}
+
+fn lexical_normalize(path: &Path) -> Result<PathBuf, Error> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir().map_err(Error::Filesystem)?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !is_root_or_prefix_only(&normalized) {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    Ok(normalized)
+}
+
+fn is_root_or_prefix_only(path: &Path) -> bool {
+    let mut saw_anchor = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => saw_anchor = true,
+            _ => return false,
+        }
+    }
+    saw_anchor
 }
 
 async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
@@ -334,6 +584,13 @@ pub async fn kernel_slot_info(
     kernel_id: &str,
     state: tauri::State<'_, State>,
 ) -> Result<KernelSlotInfo, Error> {
+    kernel_slot_info_for_state(kernel_id, &state).await
+}
+
+async fn kernel_slot_info_for_state(
+    kernel_id: &str,
+    state: &State,
+) -> Result<KernelSlotInfo, Error> {
     let (spec_name, generation, pid) = {
         let slot = state.kernels.get(kernel_id).ok_or(Error::KernelNotFound)?;
         (
@@ -370,6 +627,180 @@ pub async fn kernel_slot_info(
         cpu_pct,
         mem_mb,
     })
+}
+
+async fn kernel_alive_for_notebook(path: &str, state: &State) -> bool {
+    let slot_id = notebook_slot_id(path);
+    kernel_slot_info_for_state(&slot_id, state)
+        .await
+        .map(|info| info.status != "dead")
+        .unwrap_or(false)
+}
+
+/// List daemon recent notebooks with Tauri-side status metadata.
+#[tauri::command]
+pub async fn list_recent_notebooks(
+    state: tauri::State<'_, State>,
+) -> Result<Vec<RecentNotebookEntry>, Error> {
+    let response = send_daemon_control("list_recents", None, None).await?;
+    let current_path = load_current_notebook_path_normalized().await?;
+    let entries = response.entries.unwrap_or_default();
+    let mut recent_notebooks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let normalized_path = normalize_path(&entry.path).await?;
+        let path = normalized_path.display().to_string();
+        let kernel_alive = kernel_alive_for_notebook(&path, &state).await;
+        let is_current = current_path.as_ref() == Some(&normalized_path);
+        recent_notebooks.push(RecentNotebookEntry {
+            path,
+            last_opened: entry.last_opened,
+            is_scratch: entry.is_scratch,
+            pinned: entry.pinned,
+            kernel_alive,
+            is_current,
+        });
+    }
+    Ok(recent_notebooks)
+}
+
+/// Remove a notebook path from daemon recents.
+#[tauri::command]
+pub async fn remove_notebook_from_recents(path: String) -> Result<(), Error> {
+    send_daemon_control("remove_from_recents", Some(Path::new(&path)), None)
+        .await
+        .map(|_| ())
+}
+
+/// Set a notebook's daemon recents pin state.
+#[tauri::command]
+pub async fn set_notebook_pinned(path: String, pinned: bool) -> Result<(), Error> {
+    send_daemon_control("set_pinned", Some(Path::new(&path)), Some(pinned))
+        .await
+        .map(|_| ())
+}
+
+/// Create a new scratch notebook through the daemon and return its path.
+#[tauri::command]
+pub async fn new_notebook_via_daemon() -> Result<String, Error> {
+    send_daemon_control("new", None, None)
+        .await?
+        .path
+        .ok_or_else(|| Error::NotebookDaemon("daemon new response did not include path".into()))
+}
+
+/// Move a notebook file to the OS trash unless it is currently loaded.
+#[tauri::command]
+pub async fn move_notebook_to_trash(path: String) -> Result<(), Error> {
+    let path = normalize_path(Path::new(&path)).await?;
+    let current_path = load_current_notebook_path_normalized().await?;
+    move_notebook_to_trash_with_current_path(&path, current_path.as_deref(), trash_path)
+}
+
+fn move_notebook_to_trash_with_current_path<F>(
+    path: &Path,
+    current_path: Option<&Path>,
+    trasher: F,
+) -> Result<(), Error>
+where
+    F: FnOnce(&Path) -> Result<(), Error>,
+{
+    if current_path == Some(path) {
+        return Err(Error::NotebookDaemon(
+            "cannot move the currently loaded notebook to trash".to_string(),
+        ));
+    }
+    trasher(path)
+}
+
+fn trash_path(path: &Path) -> Result<(), Error> {
+    trash::delete(path)
+        .map_err(|error| Error::Filesystem(io::Error::new(io::ErrorKind::Other, error.to_string())))
+}
+
+/// Reveal a notebook in the platform file manager.
+#[tauri::command]
+pub async fn reveal_notebook_in_finder(path: String) -> Result<(), Error> {
+    reveal_notebook_path(Path::new(&path)).await
+}
+
+async fn reveal_notebook_path(path: &Path) -> Result<(), Error> {
+    let mut command = reveal_command(path)?;
+    let status = command.status().await.map_err(Error::Subprocess)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::Subprocess(io::Error::new(
+            io::ErrorKind::Other,
+            format!("file manager exited with status {status}"),
+        )))
+    }
+}
+
+fn reveal_command(path: &Path) -> Result<tokio::process::Command, Error> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = tokio::process::Command::new("open");
+        command.arg("-R").arg(path);
+        return Ok(command);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = tokio::process::Command::new("explorer");
+        command.arg(format!("/select,{}", path.display()));
+        return Ok(command);
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let parent = path.parent().ok_or_else(|| {
+            Error::Filesystem(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "notebook path must have a parent directory",
+            ))
+        })?;
+        let mut command = tokio::process::Command::new("xdg-open");
+        command.arg(parent);
+        Ok(command)
+    }
+}
+
+/// Move all inactive scratch notebooks to the OS trash.
+#[tauri::command]
+pub async fn discard_scratch_notebooks() -> Result<usize, Error> {
+    let scratch_dir = scratch_dir()?;
+    let current_path = load_current_notebook_path_normalized().await?;
+    discard_scratch_notebooks_in(&scratch_dir, current_path.as_deref(), trash_path).await
+}
+
+async fn discard_scratch_notebooks_in<F>(
+    scratch_dir: &Path,
+    current_path: Option<&Path>,
+    mut trasher: F,
+) -> Result<usize, Error>
+where
+    F: FnMut(&Path) -> Result<(), Error>,
+{
+    let mut entries = match tokio::fs::read_dir(scratch_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(Error::Filesystem(error)),
+    };
+
+    let mut trashed = 0;
+    while let Some(entry) = entries.next_entry().await.map_err(Error::Filesystem)? {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("ipynb") {
+            continue;
+        }
+        let path = normalize_path(&path).await?;
+        if current_path == Some(path.as_path()) {
+            continue;
+        }
+        trasher(&path)?;
+        trashed += 1;
+    }
+    Ok(trashed)
 }
 
 /// Start a new Jupyter kernel.
@@ -512,7 +943,7 @@ mod tests {
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex as StdMutex,
         },
     };
 
@@ -677,5 +1108,46 @@ mod tests {
         );
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn move_notebook_to_trash_refuses_current_notebook() {
+        let path = std::env::temp_dir()
+            .join(format!("jute-trash-current-{}", Uuid::new_v4()))
+            .join("active.ipynb");
+
+        let result = move_notebook_to_trash_with_current_path(&path, Some(path.as_path()), |_| {
+            panic!("active notebook must not be trashed");
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn discard_scratch_notebooks_skips_active_notebook() {
+        let scratch_dir = std::env::temp_dir().join(format!("jute-scratch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch_dir).unwrap();
+        let active = scratch_dir.join("active.ipynb");
+        let stale = scratch_dir.join("stale.ipynb");
+        let non_notebook = scratch_dir.join("note.txt");
+        std::fs::write(&active, b"{}").unwrap();
+        std::fs::write(&stale, b"{}").unwrap();
+        std::fs::write(&non_notebook, b"not a notebook").unwrap();
+
+        let trashed = Arc::new(StdMutex::new(Vec::<PathBuf>::new()));
+        let count = discard_scratch_notebooks_in(&scratch_dir, Some(active.as_path()), {
+            let trashed = Arc::clone(&trashed);
+            move |path: &Path| {
+                trashed.lock().unwrap().push(path.to_path_buf());
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(trashed.lock().unwrap().as_slice(), [stale]);
+
+        std::fs::remove_dir_all(scratch_dir).unwrap();
     }
 }
