@@ -78,7 +78,14 @@ fn cargo_install(
     cmd.arg("install")
         .arg("--path")
         .arg(&manifest_path)
-        .arg("--force");
+        .arg("--force")
+        // macOS Sequoia/Tahoe stamps every file with com.apple.provenance based on
+        // the creating process. When sccache (configured in ~/.cargo/config.toml as
+        // a global rustc-wrapper) writes intermediate artifacts, they carry sccache's
+        // provenance and subsequent rustc invocations fail to overwrite them with
+        // "Operation not permitted". Disable the wrapper inside install so users
+        // don't have to chase the cryptic error.
+        .env_remove("RUSTC_WRAPPER");
     if debug {
         cmd.arg("--debug");
     }
@@ -116,7 +123,9 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
     tauri_build
         .args(["run", "tauri", "build", "--", "--bundles", "app"])
         .current_dir(&jute_dir)
-        .env_remove("TAURI_CONFIG");
+        .env_remove("TAURI_CONFIG")
+        // See cargo_install: avoids the macOS provenance vs sccache collision.
+        .env_remove("RUSTC_WRAPPER");
     run_status(&mut tauri_build, "npm run tauri build -- --bundles app")?;
 
     let built_app = workspace_root.join("target/release/bundle/macos/Jute.app");
