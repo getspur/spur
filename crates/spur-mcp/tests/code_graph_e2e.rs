@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
 use spur_graph::{
-    artifact_from_facts, build_facts, build_facts_for_paths, write_artifact,
-    write_artifact_parquet, write_current_pointer, ChangeKind, CommitArtifact, CommitIndexArtifact,
-    Confidence, EdgeEndpoint, GraphEdgeArtifact, GraphIndexArtifact, GraphIndexHeader,
-    GraphSymbolArtifact, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
-    TemporalEdgeArtifact, WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
+    artifact_from_facts, build_facts, build_facts_for_paths, write_artifact_parquet,
+    write_current_pointer, ChangeKind, CommitArtifact, CommitIndexArtifact, Confidence,
+    EdgeEndpoint, GraphEdgeArtifact, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
+    NodeId, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
+    WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 use spur_mcp::server::{community_feature_gate, DetachedContinuationCtx};
 use spur_mcp::McpCallbackServer;
@@ -197,7 +197,7 @@ fn write_temporal_fixture_artifact(worktree: &Path) {
             graph_symbol(NEW_ROOT_ID, "bar"),
             graph_symbol(NEW_CALLEE_ID, "helper_bar"),
         ],
-        symbol_node_ids: Vec::new(),
+        symbol_node_ids: node_ids(6),
         edges: vec![
             graph_edge(OLD_CALLER_ID, OLD_ROOT_ID),
             graph_edge(OLD_ROOT_ID, OLD_CALLEE_ID),
@@ -231,8 +231,7 @@ fn write_temporal_fixture_artifact(worktree: &Path) {
             temporal_rename(old_root.key.clone(), new_root.key.clone()),
         ],
     };
-    write_artifact(&graph, &worktree.join(".spur/graph-index.json"))
-        .expect("write temporal graph artifact");
+    write_graph_artifact(worktree, &graph);
 
     let commits = CommitIndexArtifact {
         schema_version: GRAPH_INDEX_VERSION_TEMPORAL
@@ -323,7 +322,7 @@ fn write_temporal_resolution_fixture_artifact(worktree: &Path) {
             graph_symbol(AMBIGUOUS_RIGHT_ID, "ambiguous_right"),
             graph_symbol(UNKNOWN_ID, "unknown_symbol"),
         ],
-        symbol_node_ids: Vec::new(),
+        symbol_node_ids: node_ids(7),
         edges: Vec::new(),
         tombstones: Vec::new(),
         diagnostics: Vec::new(),
@@ -368,8 +367,7 @@ fn write_temporal_resolution_fixture_artifact(worktree: &Path) {
             temporal_touch(UNINDEXED_SHA, unknown.key.clone(), ChangeKind::Added),
         ],
     };
-    write_artifact(&graph, &worktree.join(".spur/graph-index.json"))
-        .expect("write temporal resolution graph artifact");
+    write_graph_artifact(worktree, &graph);
 
     let commit_index = CommitIndexArtifact {
         schema_version: GRAPH_INDEX_VERSION_TEMPORAL
@@ -413,7 +411,7 @@ fn write_graph_without_commit_index(worktree: &Path) {
         files: Vec::new(),
         file_node_ids: Vec::new(),
         symbols: vec![graph_symbol(NEW_ROOT_ID, "bar")],
-        symbol_node_ids: Vec::new(),
+        symbol_node_ids: node_ids(1),
         edges: Vec::new(),
         tombstones: Vec::new(),
         diagnostics: Vec::new(),
@@ -421,7 +419,7 @@ fn write_graph_without_commit_index(worktree: &Path) {
         symbol_snapshots: Vec::new(),
         temporal_edges: Vec::new(),
     };
-    write_artifact(&graph, &worktree.join(".spur/graph-index.json")).expect("write graph artifact");
+    write_graph_artifact(worktree, &graph);
 }
 
 fn graph_symbol(id: &str, entity_name: &str) -> GraphSymbolArtifact {
@@ -436,6 +434,10 @@ fn graph_symbol(id: &str, entity_name: &str) -> GraphSymbolArtifact {
         anchor_hash: format!("anchor-{id}"),
         enclosing_scope: None,
     }
+}
+
+fn node_ids(count: usize) -> Vec<NodeId> {
+    (1..=count).map(|id| NodeId(id as u64)).collect()
 }
 
 fn graph_edge(source: &str, target: &str) -> GraphEdgeArtifact {

@@ -24,9 +24,7 @@ use crate::schema::{
     GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
     TemporalEdgeArtifact, WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
 };
-use crate::store::commit_index;
-
-const WORKTREE_GRAPH_ARTIFACT_PATH: &str = ".spur/graph-index.json";
+use crate::store::{commit_index, resolve_artifact_location};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
@@ -303,21 +301,23 @@ fn load_incremental_base(
         return Ok(None);
     };
 
-    let graph_path = worktree.join(WORKTREE_GRAPH_ARTIFACT_PATH);
-    if !graph_path.exists() {
-        tracing::info!(
-            path = %graph_path.display(),
-            "spur-graph: commit-index pointer exists but prior graph artifact is missing; selecting cold temporal walk"
-        );
-        return Ok(None);
-    }
+    let graph_location = match resolve_artifact_location(worktree, None) {
+        Ok(location) => location,
+        Err(error) => {
+            tracing::info!(
+                error = %error,
+                "spur-graph: commit-index pointer exists but prior graph artifact is missing; selecting cold temporal walk"
+            );
+            return Ok(None);
+        }
+    };
 
-    let mut graph = crate::schema::load_artifact(&graph_path)?;
+    let mut graph = crate::schema::load_artifact(&graph_location.path)?;
     graph.header.content_hash_blake3 = None;
     if !graph.commits.iter().any(|commit| commit.sha == stored_tip) {
         tracing::info!(
             stored_tip,
-            path = %graph_path.display(),
+            path = %graph_location.path.display(),
             "spur-graph: prior graph artifact lacks stored tip; selecting cold temporal walk"
         );
         return Ok(None);

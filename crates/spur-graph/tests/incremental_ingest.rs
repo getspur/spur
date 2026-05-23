@@ -10,6 +10,7 @@ use std::process::Command;
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
+use spur_graph::store::{write_artifact_parquet, write_current_pointer, WriteOptions};
 use tempfile::TempDir;
 
 #[test]
@@ -59,8 +60,13 @@ fn save_temporal_artifacts(
     graph: &spur_graph::schema::GraphIndexArtifact,
     commits: &spur_graph::schema::CommitIndexArtifact,
 ) {
-    spur_graph::store::write_artifact(graph, &worktree.join(".spur/graph-index.json"))
-        .expect("save graph artifact");
+    let artifact_dir = write_artifact_parquet(
+        graph,
+        &worktree.join(".spur/graph"),
+        WriteOptions::default(),
+    )
+    .expect("save graph parquet artifact");
+    write_current_pointer(worktree, &artifact_dir).expect("save graph CURRENT pointer");
     save_artifact(worktree, ".spur/commit-index.json", commits).expect("save commit index");
     save_pointer(
         worktree,
