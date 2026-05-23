@@ -19,22 +19,16 @@ fn handle_file_associations(
     Ok(())
 }
 
-fn slot_id() -> String {
-    env::var("SPUR_NOTEBOOK_SLOT_ID").unwrap_or_else(|_| "default".into())
-}
-
 enum Mode {
-    App { headless: bool, files: Vec<PathBuf> },
+    App { files: Vec<PathBuf> },
     McpProxy { socket_path: PathBuf },
 }
 
 fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
-    let mut headless = false;
     let mut files = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--headless" => headless = true,
             "--mcp-proxy" => {
                 let socket_path = args
                     .next()
@@ -56,7 +50,7 @@ fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
             }
         }
     }
-    Mode::App { headless, files }
+    Mode::App { files }
 }
 
 fn parse_mode() -> Mode {
@@ -98,8 +92,8 @@ async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
 fn main() {
     tracing_subscriber::fmt().init();
 
-    let (headless, files) = match parse_mode() {
-        Mode::App { headless, files } => (headless, files),
+    let files = match parse_mode() {
+        Mode::App { files } => files,
         Mode::McpProxy { socket_path } => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -112,19 +106,11 @@ fn main() {
         }
     };
 
-    let slot_id = slot_id();
-    let socket_path = if headless {
-        control_socket_path()
-    } else {
-        mcp::socket_path_for_slot(&slot_id).expect("failed to resolve notebook socket path")
-    };
+    let socket_path = control_socket_path();
     let bridge = Arc::new(AgentBridge::new());
     let bridge_for_state = Arc::clone(&bridge);
     let bridge_for_setup = Arc::clone(&bridge);
     let bridge_for_run = Arc::clone(&bridge);
-    let daemon_control = Arc::new(std::sync::OnceLock::new());
-    let daemon_control_for_setup = Arc::clone(&daemon_control);
-    let daemon_control_for_run = Arc::clone(&daemon_control);
 
     #[allow(unused_mut)]
     let mut app = tauri::Builder::default();
@@ -163,20 +149,10 @@ fn main() {
             let server_socket_path = socket_path.clone();
             let server_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let result = if headless {
-                    match mcp::start_daemon_server(server_socket_path, server_bridge, server_app)
+                let result =
+                    mcp::start_daemon_server(server_socket_path, server_bridge, server_app)
                         .await
-                    {
-                        Ok((handle, control)) => {
-                            let _ = daemon_control_for_setup.set(control);
-                            Ok(handle)
-                        }
-                        Err(error) => Err(error),
-                    }
-                } else {
-                    mcp::start_server_with_app_bridge(server_socket_path, server_bridge, server_app)
-                        .await
-                };
+                        .map(|(handle, _control)| handle);
 
                 match result {
                     Ok(_handle) => std::future::pending::<()>().await,
@@ -185,9 +161,7 @@ fn main() {
             });
 
             if cfg!(any(windows, target_os = "linux")) {
-                if headless {
-                    return Ok(());
-                } else if files.is_empty() {
+                if files.is_empty() {
                     jute::window::open_home(app.handle())?;
                 } else {
                     handle_file_associations(app.handle(), &files)?;
@@ -210,21 +184,6 @@ fn main() {
                         bridge.drain_on_shutdown().await;
                     });
                 }
-                tauri::RunEvent::WindowEvent {
-                    label,
-                    event: tauri::WindowEvent::CloseRequested { api, .. },
-                    ..
-                } if headless => {
-                    api.prevent_close();
-                    if let Some(control) = daemon_control_for_run.get().cloned() {
-                        let label = label.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ = control.hide_window_by_label(&label).await;
-                        });
-                    } else if let Some(window) = app.get_webview_window(&label) {
-                        let _ = window.hide();
-                    }
-                }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Opened { urls } => {
                     let files = urls
@@ -235,7 +194,7 @@ fn main() {
                 }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Ready => {
-                    if !headless && app.webview_windows().is_empty() {
+                    if app.webview_windows().is_empty() {
                         jute::window::open_home(app).unwrap();
                     }
                 }
@@ -290,5 +249,14 @@ mod tests {
             socket_path,
             PathBuf::from("/tmp/spur-notebook-home/.spur/notebooks/control.sock")
         );
+    }
+
+    #[test]
+    fn app_mode_collects_file_args() {
+        let Mode::App { files } = parse_mode_from(["something.ipynb".to_string()]) else {
+            panic!("expected app mode");
+        };
+
+        assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
     }
 }
