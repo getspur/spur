@@ -43,6 +43,46 @@ TODO: The bundled `Contents/MacOS/Jute` executable is currently the outer
 `crates/spur-notebook` binary, not upstream jute. Long term, adopt `tauri-build`
 in the outer crate so install does not need to post-process the Tauri bundle.
 
+## Tauri JS↔Rust version pinning
+
+The webview's `@tauri-apps/api` package must stay on the same minor as the
+Rust `tauri` crate. The two halves negotiate a `Channel<T>` callback envelope
+that changes shape between Tauri 2.x minors; when JS is older than Rust the
+webview's `runCallback` throws `TypeError: undefined is not an object
+(evaluating 'i.toString')` for every channel event, the JS reducer never
+runs, and cells appear to succeed (green check, near-zero duration) while
+rendering no output.
+
+When bumping `tauri`/`tauri-build` in `Cargo.toml`, bump
+`crates/spur-notebook/jute-notebook/package.json` to a matching minor on all
+five Tauri packages (`@tauri-apps/api`, `@tauri-apps/plugin-dialog`,
+`@tauri-apps/plugin-fs`, `@tauri-apps/plugin-opener`, `@tauri-apps/cli`) in
+the same commit, then run `npm install` and `cargo xtask install`.
+
+## Python kernel auto-provision
+
+The first `start_kernel` (from the webview button, or any MCP call that
+needs a live kernel) calls `ensure_python3_kernelspec`, which is idempotent
+and only does work when `~/.spur/jupyter/kernels/python3/kernel.json` is
+missing or invalid:
+
+1. `uv venv --no-project --seed --python 3.12 ~/.spur/jupyter/venv`
+   (falls back to 3.11; both come from uv's managed Python).
+2. `uv pip install --python <venv>/bin/python ipykernel`.
+3. `<venv>/bin/python -m ipykernel install --prefix ~/.spur/jupyter
+   --name python3 --display-name "Python 3 (SPUR)"`. This writes the spec
+   to `~/.spur/jupyter/share/jupyter/kernels/python3/`.
+4. Relocate the produced kernelspec dir to
+   `~/.spur/jupyter/kernels/python3/` — the path
+   `backend::local::environment::list_kernels_from_path` walks for
+   discovery. Without this step `ipykernel install --prefix X` and the
+   validator at the end of `ensure_python3_kernelspec_in_dir` disagree
+   on where the spec should live, and every call re-runs the provisioner
+   and fails at `kernelspec_validate`.
+
+Wiping `~/.spur/jupyter` triggers a fresh provision on the next kernel
+start; the user does not need to run anything manually.
+
 ## Multiplexing
 
 The daemon reads the first frame on each connection.
