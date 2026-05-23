@@ -8,10 +8,38 @@ source "$SCRIPT_DIR/config.env"
 
 log() { echo "[spin] $*" >&2; }
 
-if gcloud compute instances describe "$VM_NAME" --zone="$GCP_ZONE" >/dev/null 2>&1; then
-    log "VM $VM_NAME already exists in $GCP_ZONE. Use teardown.sh first."
-    exit 0
-fi
+VM_STATUS=$(gcloud compute instances describe "$VM_NAME" \
+    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+    --format='value(status)' 2>/dev/null || echo "MISSING")
+
+case "$VM_STATUS" in
+    RUNNING)
+        log "VM $VM_NAME already RUNNING in $GCP_ZONE. Nothing to do."
+        exit 0
+        ;;
+    TERMINATED|STOPPED|SUSPENDED|STOPPING|SUSPENDING)
+        log "VM $VM_NAME is $VM_STATUS — starting (cache disk stays attached)..."
+        gcloud compute instances start "$VM_NAME" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet
+        log "Waiting for SSH..."
+        for _ in $(seq 1 30); do
+            if gcloud compute ssh "$VM_NAME" \
+                    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+                    --tunnel-through-iap --quiet --command='true' >/dev/null 2>&1; then
+                log "VM ready."
+                exit 0
+            fi
+            sleep 5
+        done
+        log "SSH never came up after start"; exit 1
+        ;;
+    MISSING)
+        : ;;  # fall through to fresh create
+    *)
+        log "VM $VM_NAME in unexpected state: $VM_STATUS"
+        exit 1
+        ;;
+esac
 
 log "Creating spot VM $VM_NAME ($VM_MACHINE_TYPE) in $GCP_ZONE..."
 gcloud compute instances create "$VM_NAME" \
