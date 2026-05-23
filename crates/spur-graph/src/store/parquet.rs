@@ -77,6 +77,8 @@ pub struct GraphArtifactRowCounts {
     pub symbol_snapshots: usize,
     #[serde(default)]
     pub temporal_edges: usize,
+    #[serde(default)]
+    pub diagnostics: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -243,6 +245,7 @@ pub fn write_artifact_parquet(
     let commits_path = temp_dir.join("commits.parquet");
     let symbol_snapshots_path = temp_dir.join("symbol_snapshots.parquet");
     let temporal_edges_path = temp_dir.join("temporal_edges.parquet");
+    let diagnostics_path = temp_dir.join("diagnostics.parquet");
 
     std::thread::scope(|scope| {
         let nodes_handle = scope.spawn(|| write_nodes(&nodes_path, &nodes));
@@ -265,6 +268,8 @@ pub fn write_artifact_parquet(
                 write_temporal_edges(&temporal_edges_path, &artifact.temporal_edges, &options)
             })
         });
+        let diagnostics_handle = (!artifact.diagnostics.is_empty())
+            .then(|| scope.spawn(|| write_diagnostics(&diagnostics_path, &artifact.diagnostics)));
         let edges_by_dst_handle = edges_by_dst
             .as_ref()
             .map(|rows| scope.spawn(|| write_edges(&edges_by_dst_path, rows)));
@@ -283,6 +288,9 @@ pub fn write_artifact_parquet(
         }
         if let Some(handle) = temporal_edges_handle {
             join_scoped(handle, "write temporal_edges.parquet")?;
+        }
+        if let Some(handle) = diagnostics_handle {
+            join_scoped(handle, "write diagnostics.parquet")?;
         }
         if let Some(handle) = edges_by_dst_handle {
             join_scoped(handle, "write edges_by_dst.parquet")?;
@@ -309,6 +317,7 @@ pub fn write_artifact_parquet(
             commits: artifact.commits.len(),
             symbol_snapshots: artifact.symbol_snapshots.len(),
             temporal_edges: artifact.temporal_edges.len(),
+            diagnostics: artifact.diagnostics.len(),
         },
         parquet_writer: GraphArtifactParquetWriter {
             compression: "zstd-3".to_string(),
@@ -363,6 +372,7 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
     let commits_path = dir.join("commits.parquet");
     let symbol_snapshots_path = dir.join("symbol_snapshots.parquet");
     let temporal_edges_path = dir.join("temporal_edges.parquet");
+    let diagnostics_path = dir.join("diagnostics.parquet");
     let row_counts = manifest.row_counts.clone();
 
     let (files, file_node_ids) = read_files(&files_path, row_counts.files)?;
@@ -376,6 +386,7 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
         commits,
         symbol_snapshots,
         temporal_edges,
+        diagnostics,
     ) = std::thread::scope(|scope| {
         let nodes = scope.spawn(|| read_nodes(&nodes_path, row_counts.nodes));
         let edges = scope.spawn(|| read_edges(&edges_path, row_counts.edges));
@@ -386,6 +397,8 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
             .spawn(|| read_symbol_snapshots(&symbol_snapshots_path, row_counts.symbol_snapshots));
         let temporal_edges =
             scope.spawn(|| read_temporal_edges(&temporal_edges_path, row_counts.temporal_edges));
+        let diagnostics =
+            scope.spawn(|| read_diagnostics(&diagnostics_path, row_counts.diagnostics));
 
         Ok::<_, anyhow::Error>((
             join_scoped(nodes, "read nodes.parquet")?,
@@ -394,6 +407,7 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
             join_scoped(commits, "read commits.parquet")?,
             join_scoped(symbol_snapshots, "read symbol_snapshots.parquet")?,
             join_scoped(temporal_edges, "read temporal_edges.parquet")?,
+            join_scoped(diagnostics, "read diagnostics.parquet")?,
         ))
     })?;
 
@@ -413,7 +427,7 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
         symbol_node_ids,
         edges,
         tombstones,
-        diagnostics: Vec::new(),
+        diagnostics,
         commits,
         symbol_snapshots,
         temporal_edges,
@@ -1089,6 +1103,20 @@ fn write_temporal_edges(
     Ok(rows.len())
 }
 
+fn write_diagnostics(path: &Path, rows: &[String]) -> anyhow::Result<usize> {
+    write_table(
+        path,
+        r#"
+        message schema {
+          required binary message (STRING);
+        }
+        "#,
+        &["message"],
+        vec![ColumnData::RequiredString(rows.to_vec())],
+    )?;
+    Ok(rows.len())
+}
+
 fn write_table(
     path: &Path,
     schema: &str,
@@ -1673,6 +1701,20 @@ fn read_temporal_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<Temp
         }
     }
     Ok(edges)
+}
+
+fn read_diagnostics(path: &Path, row_count: usize) -> anyhow::Result<Vec<String>> {
+    if row_count == 0 || !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut diagnostics = Vec::with_capacity(row_count);
+    for batch in read_record_batches(path)? {
+        let message = string_array(&batch, 0, "message")?;
+        for row in 0..batch.num_rows() {
+            diagnostics.push(required_string_value(message, row, "message")?);
+        }
+    }
+    Ok(diagnostics)
 }
 
 fn read_record_batches(path: &Path) -> anyhow::Result<Vec<RecordBatch>> {
@@ -2542,6 +2584,25 @@ mod parquet_temporal_test {
     }
 
     #[test]
+    fn diagnostics_round_trip() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut artifact = empty_artifact("diagnostics-round-trip");
+        artifact.diagnostics = vec![
+            "parse_failed path=src/lib.rs sha=abc123".to_string(),
+            "tree_sitter_error path=src/main.rs line=42".to_string(),
+            "ambiguous_rename stable_symbol_id=sym-main".to_string(),
+        ];
+
+        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        let manifest = read_artifact_header_parquet(&dir)?;
+        let decoded = read_artifact_parquet(&dir)?;
+
+        assert_eq!(manifest.row_counts.diagnostics, artifact.diagnostics.len());
+        assert_eq!(decoded.diagnostics, artifact.diagnostics);
+        Ok(())
+    }
+
+    #[test]
     fn back_compat_loads_artifact_without_temporal_tables() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let dir = write_artifact_parquet(
@@ -2553,6 +2614,7 @@ mod parquet_temporal_test {
         assert!(!dir.join("commits.parquet").exists());
         assert!(!dir.join("symbol_snapshots.parquet").exists());
         assert!(!dir.join("temporal_edges.parquet").exists());
+        assert!(!dir.join("diagnostics.parquet").exists());
 
         let manifest_path = dir.join("manifest.json");
         let mut manifest: serde_json::Value =
@@ -2564,6 +2626,7 @@ mod parquet_temporal_test {
         row_counts.remove("commits");
         row_counts.remove("symbol_snapshots");
         row_counts.remove("temporal_edges");
+        row_counts.remove("diagnostics");
         fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
 
         let manifest = read_artifact_header_parquet(&dir)?;
@@ -2572,9 +2635,11 @@ mod parquet_temporal_test {
         assert_eq!(manifest.row_counts.commits, 0);
         assert_eq!(manifest.row_counts.symbol_snapshots, 0);
         assert_eq!(manifest.row_counts.temporal_edges, 0);
+        assert_eq!(manifest.row_counts.diagnostics, 0);
         assert!(decoded.commits.is_empty());
         assert!(decoded.symbol_snapshots.is_empty());
         assert!(decoded.temporal_edges.is_empty());
+        assert!(decoded.diagnostics.is_empty());
         Ok(())
     }
 
