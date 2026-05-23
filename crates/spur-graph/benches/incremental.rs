@@ -13,7 +13,7 @@ use spur_graph::{
     build_facts_for_paths, compute_graph_content_hash, current_manifest_version, ChangeKind,
     CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GitPath, GraphIndexArtifact,
     GraphIndexHeader, RelationKind, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
-    WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
+    WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 use tempfile::TempDir;
 
@@ -106,19 +106,19 @@ struct FullWalkMeasurement {
     symbol_snapshots: usize,
     temporal_edges: usize,
     commits: usize,
-    artifact_json_bytes: u64,
+    artifact_bytes: u64,
     peak_rss_bytes: Option<u64>,
 }
 
 impl FullWalkMeasurement {
     #[allow(dead_code)]
-    fn for_test(peak_rss_bytes: u64, artifact_json_bytes: u64) -> Self {
+    fn for_test(peak_rss_bytes: u64, artifact_bytes: u64) -> Self {
         Self {
             elapsed: Duration::ZERO,
             symbol_snapshots: 0,
             temporal_edges: 0,
             commits: 0,
-            artifact_json_bytes,
+            artifact_bytes,
             peak_rss_bytes: Some(peak_rss_bytes),
         }
     }
@@ -608,19 +608,19 @@ fn bench_full_walk_20k_merges(c: &mut Criterion) {
     eprintln!("{BENCH_NAME} synthetic commits={commit_count}");
     let shas = build_synthetic_repo(dir.path(), commit_count, 0.30);
     let artifact_dir = tempfile::TempDir::new().unwrap();
-    let artifact_path = artifact_dir.path().join("graph-index.json");
+    let artifact_base = artifact_dir.path().join("graph");
     let latest_measurement = Arc::new(Mutex::new(None::<FullWalkMeasurement>));
     c.bench_function(BENCH_NAME, |b| {
         let latest_measurement = latest_measurement.clone();
         b.iter(|| {
-            let metrics = measure_full_walk_once(dir.path(), &artifact_path).unwrap();
+            let metrics = measure_full_walk_once(dir.path(), &artifact_base).unwrap();
             assert_full_walk_20k_budget(&metrics);
             black_box((
                 metrics.symbol_snapshots,
                 metrics.temporal_edges,
                 metrics.commits,
                 shas.len(),
-                metrics.artifact_json_bytes,
+                metrics.artifact_bytes,
                 metrics.peak_rss_bytes,
             ));
             *latest_measurement.lock().expect("full walk measurement") = Some(metrics);
@@ -690,7 +690,7 @@ fn assert_history_walk_budget() {
 
 fn measure_full_walk_once(
     worktree: &Path,
-    artifact_path: &Path,
+    artifact_base: &Path,
 ) -> anyhow::Result<FullWalkMeasurement> {
     let rss_before = peak_rss_bytes();
     let start = Instant::now();
@@ -698,8 +698,10 @@ fn measure_full_walk_once(
         worktree,
         &spur_graph::git_walk::GitWalkConfig::default(),
     )?;
-    spur_graph::store::write_artifact(&graph, artifact_path)?;
-    let artifact_json_bytes = fs::metadata(artifact_path)?.len();
+    let artifact_dir =
+        spur_graph::store::write_artifact_parquet(&graph, artifact_base, WriteOptions::default())?;
+    spur_graph::store::write_current_pointer(worktree, &artifact_dir)?;
+    let artifact_bytes = artifact_dir_size(&artifact_dir)?;
     let peak_rss_bytes = [rss_before, peak_rss_bytes()].into_iter().flatten().max();
 
     Ok(FullWalkMeasurement {
@@ -707,9 +709,23 @@ fn measure_full_walk_once(
         symbol_snapshots: graph.symbol_snapshots.len(),
         temporal_edges: graph.temporal_edges.len(),
         commits: commits.commits.len(),
-        artifact_json_bytes,
+        artifact_bytes,
         peak_rss_bytes,
     })
+}
+
+fn artifact_dir_size(path: &Path) -> anyhow::Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            total = total.saturating_add(artifact_dir_size(&entry.path())?);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 fn assert_full_walk_20k_budget(metrics: &FullWalkMeasurement) {
@@ -737,10 +753,10 @@ fn full_walk_20k_budget_violations(metrics: &FullWalkMeasurement) -> Vec<String>
         None => violations.push("peak RSS unavailable on this platform".to_string()),
     }
 
-    if metrics.artifact_json_bytes > artifact_limit {
+    if metrics.artifact_bytes > artifact_limit {
         violations.push(format!(
-            "artifact JSON {} > 1.2x baseline {} (limit {})",
-            fmt_bytes(metrics.artifact_json_bytes),
+            "artifact {} > 1.2x JSON baseline {} (limit {})",
+            fmt_bytes(metrics.artifact_bytes),
             fmt_bytes(FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES),
             fmt_bytes(artifact_limit)
         ));
@@ -755,12 +771,12 @@ fn budget_limit_bytes(baseline_bytes: u64) -> u64 {
 
 fn print_full_walk_measurement(bench_name: &str, metrics: &FullWalkMeasurement) {
     eprintln!(
-        "{bench_name} metrics: elapsed={} commits={} snapshots={} temporal_edges={} artifact_json={} peak_rss={}",
+        "{bench_name} metrics: elapsed={} commits={} snapshots={} temporal_edges={} artifact={} peak_rss={}",
         fmt_duration(metrics.elapsed),
         metrics.commits,
         metrics.symbol_snapshots,
         metrics.temporal_edges,
-        fmt_bytes(metrics.artifact_json_bytes),
+        fmt_bytes(metrics.artifact_bytes),
         metrics
             .peak_rss_bytes
             .map(fmt_bytes)
@@ -1320,26 +1336,27 @@ mod tests {
         );
 
         metrics.peak_rss_bytes = Some(FULL_WALK_20K_PEAK_RSS_BASELINE_BYTES);
-        metrics.artifact_json_bytes = FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES * 12 / 10 + 1;
+        metrics.artifact_bytes = FULL_WALK_20K_ARTIFACT_SIZE_BASELINE_BYTES * 12 / 10 + 1;
         let violations = full_walk_20k_budget_violations(&metrics);
         assert!(
             violations
                 .iter()
-                .any(|violation| violation.contains("artifact JSON")),
-            "expected artifact JSON violation, got {violations:?}"
+                .any(|violation| violation.contains("artifact")),
+            "expected artifact violation, got {violations:?}"
         );
     }
 
     #[test]
-    fn full_walk_measurement_reports_artifact_json_size_and_peak_rss() {
+    fn full_walk_measurement_reports_artifact_size_and_peak_rss() {
         let dir = tempfile::TempDir::new().unwrap();
         build_synthetic_repo(dir.path(), 12, 0.30);
-        let artifact_path = dir.path().join(".spur/bench-artifacts/full-walk.json");
+        let artifact_base = dir.path().join(".spur/bench-artifacts");
 
-        let metrics = measure_full_walk_once(dir.path(), &artifact_path).unwrap();
+        let metrics = measure_full_walk_once(dir.path(), &artifact_base).unwrap();
 
-        assert!(metrics.artifact_json_bytes > 0);
-        assert!(artifact_path.exists());
+        assert!(metrics.artifact_bytes > 0);
+        assert!(artifact_base.exists());
+        assert!(dir.path().join(".spur/graph/CURRENT").exists());
         assert!(
             metrics.peak_rss_bytes.is_some_and(|bytes| bytes > 0),
             "expected RSS measurement on supported benchmark platforms"

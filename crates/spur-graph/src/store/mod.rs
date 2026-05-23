@@ -12,7 +12,6 @@ pub use build::{
     EXTRACTOR_VERSION, SCHEMA_VERSION,
 };
 pub use canonical_hash::artifact_content_hash_blake3_hex;
-pub use json::write_artifact;
 pub use parquet::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
     GraphArtifactManifest, WriteOptions,
