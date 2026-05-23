@@ -13,6 +13,10 @@ use anyhow::{anyhow, Context, Result};
 use spur_graph::locking::try_lock_exclusive_with_timeout;
 
 const INIT_SQL: &str = include_str!("../../../spur-context/poc/duckdb-analyst/init.sql");
+const INIT_TEMPORAL_SQL: &str =
+    include_str!("../../../spur-context/poc/duckdb-analyst/init_temporal.sql");
+const INIT_DIAGNOSTICS_SQL: &str =
+    include_str!("../../../spur-context/poc/duckdb-analyst/init_diagnostics.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 
 /// Compiled-in parquet schema version this analyst build understands.
@@ -49,6 +53,8 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let artifact_dir = resolve_artifact_dir(root, &options)?;
     verify_schema_version(&artifact_dir)?;
     verify_required_files(&artifact_dir)?;
+    let want_temporal = temporal_files_present(&artifact_dir);
+    let want_diag = diagnostics_present(&artifact_dir);
 
     if !duckdb_cli_present() {
         if !quiet {
@@ -78,6 +84,7 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     }
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -99,7 +106,13 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let _ = std::fs::remove_file(&tmp_db);
 
     let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
-    let sql = INIT_SQL.replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql);
+    let sql_template = [
+        INIT_SQL,
+        if want_temporal { INIT_TEMPORAL_SQL } else { "" },
+        if want_diag { INIT_DIAGNOSTICS_SQL } else { "" },
+    ]
+    .concat();
+    let sql = sql_template.replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql);
 
     let mut child = Command::new("duckdb")
         .arg(&tmp_db)
@@ -242,6 +255,12 @@ const REQUIRED_PARQUETS: &[&str] = &[
     "manifest.json",
 ];
 
+const TEMPORAL_PARQUETS: &[&str] = &[
+    "commits.parquet",
+    "symbol_snapshots.parquet",
+    "temporal_edges.parquet",
+];
+
 pub(crate) fn verify_required_files(artifact_dir: &Path) -> Result<()> {
     let missing: Vec<&str> = REQUIRED_PARQUETS
         .iter()
@@ -256,6 +275,16 @@ pub(crate) fn verify_required_files(artifact_dir: &Path) -> Result<()> {
         artifact_dir.display(),
         missing.join(", ")
     ))
+}
+
+pub(crate) fn temporal_files_present(artifact_dir: &Path) -> bool {
+    TEMPORAL_PARQUETS
+        .iter()
+        .any(|name| artifact_dir.join(name).is_file())
+}
+
+pub(crate) fn diagnostics_present(artifact_dir: &Path) -> bool {
+    artifact_dir.join("diagnostics.parquet").is_file()
 }
 
 pub(crate) fn duckdb_cli_present() -> bool {
@@ -436,6 +465,36 @@ mod tests {
             msg.contains("tombstones.parquet"),
             "missing tombstones in: {msg}"
         );
+    }
+
+    #[test]
+    fn temporal_files_present_true_when_any_temporal_parquet_exists() {
+        let dir = temp_root();
+        std::fs::write(dir.path().join("commits.parquet"), b"").unwrap();
+
+        assert!(temporal_files_present(dir.path()));
+    }
+
+    #[test]
+    fn temporal_files_present_false_on_empty_dir() {
+        let dir = temp_root();
+
+        assert!(!temporal_files_present(dir.path()));
+    }
+
+    #[test]
+    fn diagnostics_present_true() {
+        let dir = temp_root();
+        std::fs::write(dir.path().join("diagnostics.parquet"), b"").unwrap();
+
+        assert!(diagnostics_present(dir.path()));
+    }
+
+    #[test]
+    fn diagnostics_present_false_otherwise() {
+        let dir = temp_root();
+
+        assert!(!diagnostics_present(dir.path()));
     }
 
     #[test]
