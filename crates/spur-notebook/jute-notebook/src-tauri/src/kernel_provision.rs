@@ -120,6 +120,18 @@ where
             cause,
         })?;
 
+    // `ipykernel install --prefix X` writes to `X/share/jupyter/kernels/<name>/`,
+    // but kernel discovery in this crate (`environment::list_kernels`) walks
+    // `<data_dir>/kernels/<name>/` directly. Relocate the produced kernelspec
+    // so it lands at the validated path.
+    let installed = spur_jupyter
+        .join("share")
+        .join("jupyter")
+        .join("kernels")
+        .join("python3");
+    let destination = spur_jupyter.join("kernels").join("python3");
+    relocate_kernelspec(&installed, &destination).await?;
+
     if kernelspec_is_valid(&kernelspec).await {
         Ok(())
     } else {
@@ -131,6 +143,61 @@ where
             ),
         })
     }
+}
+
+async fn relocate_kernelspec(
+    installed: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), Error> {
+    if !installed.exists() {
+        return Err(Error::KernelProvisionFailed {
+            stage: "kernelspec_relocate",
+            cause: format!(
+                "ipykernel did not produce a kernelspec at {}",
+                installed.display()
+            ),
+        });
+    }
+
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| Error::KernelProvisionFailed {
+                stage: "kernelspec_relocate",
+                cause: error.to_string(),
+            })?;
+    }
+
+    if destination.exists() {
+        tokio::fs::remove_dir_all(destination)
+            .await
+            .map_err(|error| Error::KernelProvisionFailed {
+                stage: "kernelspec_relocate",
+                cause: error.to_string(),
+            })?;
+    }
+
+    copy_dir_recursive(installed, destination)
+        .await
+        .map_err(|error| Error::KernelProvisionFailed {
+            stage: "kernelspec_relocate",
+            cause: error.to_string(),
+        })
+}
+
+async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(dst).await?;
+    let mut entries = tokio::fs::read_dir(src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        let target = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            Box::pin(copy_dir_recursive(&entry.path(), &target)).await?;
+        } else {
+            tokio::fs::copy(entry.path(), target).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn create_venv_with_fallback<R>(
@@ -338,5 +405,73 @@ mod tests {
             .unwrap();
 
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn relocate_moves_share_jupyter_kernels_to_discovered_path() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let installed = root
+            .join("share")
+            .join("jupyter")
+            .join("kernels")
+            .join("python3");
+        let destination = root.join("kernels").join("python3");
+
+        tokio::fs::create_dir_all(&installed).await.unwrap();
+        let spec_payload = serde_json::json!({
+            "argv": ["/usr/bin/python3", "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+            "display_name": "Python 3 (SPUR)",
+            "language": "python"
+        })
+        .to_string();
+        tokio::fs::write(installed.join("kernel.json"), &spec_payload)
+            .await
+            .unwrap();
+        tokio::fs::write(installed.join("logo-32x32.png"), b"png-bytes")
+            .await
+            .unwrap();
+
+        relocate_kernelspec(&installed, &destination).await.unwrap();
+
+        let copied_spec = tokio::fs::read(destination.join("kernel.json"))
+            .await
+            .unwrap();
+        assert_eq!(copied_spec, spec_payload.as_bytes());
+        let copied_logo = tokio::fs::read(destination.join("logo-32x32.png"))
+            .await
+            .unwrap();
+        assert_eq!(copied_logo, b"png-bytes");
+
+        // Idempotent: relocating again overwrites a stale destination.
+        tokio::fs::write(destination.join("kernel.json"), b"stale")
+            .await
+            .unwrap();
+        relocate_kernelspec(&installed, &destination).await.unwrap();
+        let refreshed = tokio::fs::read(destination.join("kernel.json"))
+            .await
+            .unwrap();
+        assert_eq!(refreshed, spec_payload.as_bytes());
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn relocate_errors_when_ipykernel_did_not_produce_spec() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let installed = root
+            .join("share")
+            .join("jupyter")
+            .join("kernels")
+            .join("python3");
+        let destination = root.join("kernels").join("python3");
+
+        let result = relocate_kernelspec(&installed, &destination).await;
+        assert!(matches!(
+            result,
+            Err(Error::KernelProvisionFailed {
+                stage: "kernelspec_relocate",
+                ..
+            })
+        ));
     }
 }
