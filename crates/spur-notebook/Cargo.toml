@@ -33,3 +33,19 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+# Required for `tauri::generate_context!()` to embed the frontend dist into the
+# binary at compile time. Without this, the .app webview navigates to
+# tauri://localhost/index.html and gets nothing back → blank page.
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Tauri 2.0.4 (per tauri/src/lib.rs:338) gates "production mode" on this Cargo
+# feature: `!cfg!(feature = "custom-protocol")` means dev. With this feature
+# OFF, the runtime tries to load `devUrl` (http://localhost:1420) which doesn't
+# exist in the installed bundle → blank page. The `tauri build` CLI sets it
+# automatically; we drive `cargo build` directly from xtask, so we must set it
+# ourselves. Despite the v2 migration guide claiming this feature is ignored,
+# 2.0.4 source clearly checks it (`cfg!(feature = "custom-protocol")`).
+custom-protocol = ["tauri/custom-protocol"]
