@@ -20,6 +20,7 @@ pub struct GraphBuildOptions {
     pub output: Option<PathBuf>,
     pub quiet: bool,
     pub skip_analyst: bool,
+    pub with_temporal: bool,
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
@@ -43,6 +44,12 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
     }
+    let use_temporal = should_use_temporal(options.with_temporal);
+    tracing::debug!(
+        with_temporal = options.with_temporal,
+        use_temporal,
+        "spur-graph: temporal walk option evaluated"
+    );
 
     let mut mode = BuildMode::Full;
     let previous_artifact = match resolve_artifact_location(&root, Some(&output)) {
@@ -232,6 +239,10 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
 
 fn should_skip_analyst(skip_analyst: bool) -> bool {
     skip_analyst || matches!(std::env::var("SPUR_GRAPH_SKIP_ANALYST"), Ok(v) if v == "1")
+}
+
+fn should_use_temporal(with_temporal: bool) -> bool {
+    with_temporal || matches!(std::env::var("SPUR_GRAPH_WITH_TEMPORAL"), Ok(v) if v == "1")
 }
 
 fn reject_legacy_output_path(output: &Path) -> anyhow::Result<()> {
@@ -444,6 +455,22 @@ mod tests {
         {
             let _env = EnvGuard::set("SPUR_GRAPH_SKIP_ANALYST", "true");
             assert!(!super::should_skip_analyst(false));
+        }
+    }
+
+    #[test]
+    fn should_use_temporal_honors_option_and_env_flags() {
+        {
+            let _env = EnvGuard::remove("SPUR_GRAPH_WITH_TEMPORAL");
+            assert!(super::should_use_temporal(true));
+        }
+        {
+            let _env = EnvGuard::set("SPUR_GRAPH_WITH_TEMPORAL", "1");
+            assert!(super::should_use_temporal(false));
+        }
+        {
+            let _env = EnvGuard::set("SPUR_GRAPH_WITH_TEMPORAL", "true");
+            assert!(!super::should_use_temporal(false));
         }
     }
 }
