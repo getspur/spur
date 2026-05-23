@@ -177,12 +177,20 @@ fn build_outer_spur_notebook_binary(workspace_root: &Path) -> Result<PathBuf, St
         "spur-notebook",
         "--bin",
         "spur-notebook",
+        // Tauri 2.0.4 gates production mode on this feature
+        // (`tauri/src/lib.rs:338`). The `tauri build` CLI sets it
+        // automatically; we drive cargo build directly, so we must set it
+        // ourselves to get embedded-asset behavior. Without it, the runtime
+        // tries to load `devUrl` and the webview shows a blank page in the
+        // installed bundle.
+        "--features",
+        "custom-protocol",
     ])
     .current_dir(workspace_root)
     .env_remove("RUSTC_WRAPPER");
     run_status(
         &mut cmd,
-        "cargo build --release -p spur-notebook --bin spur-notebook",
+        "cargo build --release -p spur-notebook --bin spur-notebook --features custom-protocol",
     )?;
 
     let outer_binary = outer_spur_notebook_binary(workspace_root);
