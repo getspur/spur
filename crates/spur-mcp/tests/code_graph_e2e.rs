@@ -422,6 +422,64 @@ fn write_graph_without_commit_index(worktree: &Path) {
     write_graph_artifact(worktree, &graph);
 }
 
+fn write_graph_with_empty_snapshots(worktree: &Path) {
+    std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
+    let commits = vec![CommitArtifact {
+        sha: OLD_SHA.to_string(),
+        parents: Vec::new(),
+        author_time: 1,
+        summary: "empty snapshots".to_string(),
+    }];
+    let graph = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            content_hash_blake3: None,
+        },
+        manifest_version: "empty-snapshots-fixture".to_string(),
+        graph_content_hash: "empty-snapshots-fixture".to_string(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: vec![graph_symbol(NEW_ROOT_ID, "bar")],
+        symbol_node_ids: node_ids(1),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: commits.clone(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    };
+    write_graph_artifact(worktree, &graph);
+
+    let commit_index = CommitIndexArtifact {
+        schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+            .parse()
+            .expect("temporal graph index version is numeric"),
+        commits,
+        refs: [("HEAD".to_string(), OLD_SHA.to_string())].into(),
+        indexed_at: "2026-05-20T12:00:00Z".to_string(),
+        walk_strategy: WalkStrategy::Reachable,
+    };
+    spur_graph::store::commit_index::save_artifact(
+        worktree,
+        ".spur/commit-index.json",
+        &commit_index,
+    )
+    .expect("write commit index artifact");
+    spur_graph::store::commit_index::save_pointer(
+        worktree,
+        &spur_graph::store::commit_index::CommitIndexPointer {
+            schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+                .parse()
+                .expect("temporal graph index version is numeric"),
+            artifact_relative_path: ".spur/commit-index.json".to_string(),
+            indexed_at: commit_index.indexed_at.clone(),
+            refs: commit_index.refs.clone(),
+        },
+    )
+    .expect("write commit index pointer");
+}
+
 fn graph_symbol(id: &str, entity_name: &str) -> GraphSymbolArtifact {
     GraphSymbolArtifact {
         stable_symbol_id: id.to_string(),
@@ -1024,7 +1082,7 @@ async fn code_file_symbols_uses_symbol_uri_selector_for_legacy_empty_qualified_n
         worktree.path().join(".spur/graph-index.json"),
         serde_json::to_string_pretty(&json!({
             "header": {
-                "graph_index_version": "v4"
+                "graph_index_version": "fixture-2026-05-11"
             },
             "manifest_version": "v4",
             "graph_content_hash": "legacy-empty-qualified-name",
@@ -1460,6 +1518,21 @@ async fn code_graph_tools_resolve_requested_symbol_as_of_historical_commit() {
     );
     assert!(!historical_names.contains("bar"));
 
+    let historical_resolve = tool_body(
+        call_tool(
+            &server,
+            "code_resolve",
+            json!({ "selector": current_root_uri.clone(), "as_of": OLD_SHA }),
+        )
+        .await,
+    );
+    assert_eq!(historical_resolve["resolution"]["kind"], "renamed");
+    let historical_candidates = historical_resolve["candidates"]
+        .as_array()
+        .expect("historical resolve candidates");
+    assert_eq!(historical_candidates.len(), 1);
+    assert_eq!(historical_candidates[0]["id"], OLD_ROOT_ID);
+
     let callers = tool_body(
         call_tool(
             &server,
@@ -1484,6 +1557,24 @@ async fn code_graph_tools_resolve_requested_symbol_as_of_historical_commit() {
     assert_eq!(
         entity_names(callees["callees"].as_array().expect("callees")),
         BTreeSet::from(["helper_foo".to_string()])
+    );
+
+    let historical_history = tool_body(
+        call_tool(
+            &server,
+            "code_symbol_history",
+            json!({ "symbol": current_root_uri.clone(), "as_of": OLD_SHA }),
+        )
+        .await,
+    );
+    let historical_events = historical_history["events"]
+        .as_array()
+        .expect("historical history events");
+    assert_eq!(historical_events.len(), 1);
+    assert_eq!(historical_events[0]["commit"], OLD_SHA);
+    assert_eq!(
+        historical_events[0]["snapshot"]["stable_symbol_id"],
+        OLD_ROOT_ID
     );
 
     let current_subgraph = tool_body(
@@ -1545,6 +1636,34 @@ async fn code_subgraph_returns_deleted_with_last_seen() {
     assert_eq!(deleted_data["kind"], "deleted");
     assert_eq!(deleted_data["last_seen"]["stable_symbol_id"], DELETED_ID);
     assert_eq!(deleted_data["last_seen"]["commit"], DELETE_SHA);
+
+    let deleted_resolve = tool_body(
+        call_tool(
+            &server,
+            "code_resolve",
+            json!({
+                "selector": format!("graph://symbol/{DELETED_ID}"),
+                "as_of": DELETE_SHA
+            }),
+        )
+        .await,
+    );
+    assert_eq!(deleted_resolve["resolution"]["kind"], "deleted");
+    assert_eq!(
+        deleted_resolve["resolution"]["last_seen"]["stable_symbol_id"],
+        DELETED_ID
+    );
+    assert_eq!(
+        deleted_resolve["resolution"]["last_seen"]["commit"],
+        DELETE_SHA
+    );
+    assert_eq!(
+        deleted_resolve["candidates"]
+            .as_array()
+            .expect("deleted candidates")
+            .len(),
+        0
+    );
 
     let not_found = call_tool(
         &server,
@@ -1641,4 +1760,25 @@ async fn code_symbol_history_reports_missing_commit_index_cleanly() {
         .as_str()
         .expect("error message")
         .contains("commit index not found"));
+}
+
+#[tokio::test]
+async fn code_symbol_history_returns_empty_when_no_snapshots() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    write_graph_with_empty_snapshots(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_symbol_history",
+            json!({ "symbol": NEW_ROOT_ID, "as_of": OLD_SHA }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["symbol"], format!("graph://symbol/{NEW_ROOT_ID}"));
+    assert_eq!(body["events"].as_array().expect("history events").len(), 0);
 }

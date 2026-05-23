@@ -22,6 +22,7 @@ use rmcp::{
 };
 use serde_json::Value;
 use spur_acp::SpurEventBody;
+use spur_graph::GRAPH_INDEX_VERSION_TEMPORAL;
 use spur_license::policy::PolicyResolver;
 use spur_license::FeatureGate;
 use spur_mcp::events::McpEventSink;
@@ -320,7 +321,7 @@ async fn tools_call_code_graph_metadata_tools_are_reachable() {
         dir.path().join(".spur/graph-index.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "header": {
-                "graph_index_version": "worker-test"
+                "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
             },
             "manifest_version": "worker-test",
             "graph_content_hash": "worker-hash",
