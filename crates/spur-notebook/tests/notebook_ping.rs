@@ -6,7 +6,7 @@ use tokio::net::UnixStream;
 async fn notebook_ping_round_trips_over_unix_socket() {
     let temp_dir = tempfile::Builder::new()
         .prefix("spur-notebook-")
-        .tempdir_in("/private/tmp")
+        .tempdir()
         .expect("temp dir");
     let socket_path = temp_dir.path().join("notebook.sock");
     let _server = start_server(&socket_path).await.expect("server starts");
