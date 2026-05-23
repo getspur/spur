@@ -50,16 +50,57 @@ log "Worktree: $WORKTREE_KEY  (local=$GIT_TOPLEVEL)"
 log "Remote:   ~/$REMOTE_DIR   target=$REMOTE_TARGET   -j$JOBS"
 
 # ---- ensure VM is up -------------------------------------------------------
-if ! gcloud compute instances describe "$VM_NAME" \
-        --project="$GCP_PROJECT" --zone="$GCP_ZONE" >/dev/null 2>&1; then
-    if [[ $AUTO_SPIN -eq 1 ]]; then
-        log "VM $VM_NAME not running — auto-spinning..."
-        "$SCRIPT_DIR/spin.sh" || { log "spin.sh failed"; exit 1; }
-    else
-        log "VM $VM_NAME not running. Run ./spin.sh first (or pass --auto-spin)."
+# Distinguish three states:
+#   RUNNING                       — proceed
+#   TERMINATED / STOPPED / etc.   — `instances start` (cheap, ~30s)
+#   MISSING                       — `spin.sh` (creates from scratch)
+VM_STATUS=$(gcloud compute instances describe "$VM_NAME" \
+    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+    --format='value(status)' 2>/dev/null || echo "MISSING")
+
+wait_for_ssh() {
+    log "Waiting for SSH on $VM_NAME..."
+    for _ in $(seq 1 30); do
+        if gcloud compute ssh "$VM_NAME" \
+                --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+                --tunnel-through-iap --quiet \
+                --command='true' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 5
+    done
+    return 1
+}
+
+case "$VM_STATUS" in
+    RUNNING)
+        ;;
+    TERMINATED|STOPPED|STOPPING|SUSPENDED|SUSPENDING)
+        if [[ $AUTO_SPIN -eq 1 ]]; then
+            log "VM $VM_NAME is $VM_STATUS — starting..."
+            gcloud compute instances start "$VM_NAME" \
+                --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+                --quiet || { log "start failed"; exit 1; }
+            wait_for_ssh || { log "SSH never came up"; exit 1; }
+        else
+            log "VM $VM_NAME is $VM_STATUS. Pass --auto-spin to start it."
+            exit 1
+        fi
+        ;;
+    MISSING)
+        if [[ $AUTO_SPIN -eq 1 ]]; then
+            log "VM $VM_NAME missing — spinning a fresh one..."
+            "$SCRIPT_DIR/spin.sh" || { log "spin.sh failed"; exit 1; }
+        else
+            log "VM $VM_NAME missing. Pass --auto-spin to create it."
+            exit 1
+        fi
+        ;;
+    *)
+        log "VM $VM_NAME in unexpected state: $VM_STATUS"
         exit 1
-    fi
-fi
+        ;;
+esac
 
 TRANSPORT="$SCRIPT_DIR/_gcloud-ssh.sh"
 export GCP_PROJECT GCP_ZONE
