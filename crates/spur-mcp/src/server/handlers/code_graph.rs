@@ -562,7 +562,7 @@ fn code_symbol_history_events(
         .filter(|(sha, _, _)| {
             reachable
                 .as_ref()
-                .map_or(true, |reachable| reachable.contains(sha))
+                .is_none_or(|reachable| reachable.contains(sha))
         })
         .map(|(sha, change_kind, key)| {
             json!({
@@ -579,11 +579,11 @@ type CodeGraphResult = Result<Value, CodeGraphError>;
 #[derive(Debug)]
 struct CodeGraphError {
     error: McpHandlerError,
-    metadata: Option<GraphMetadataSource>,
+    metadata: Option<Box<GraphMetadataSource>>,
     /// For temporal resolution failures, carries the JSON-RPC error code (e.g. -32005 for Deleted).
     temporal_code: Option<i64>,
     /// For temporal resolution failures, carries the structured error data payload.
-    temporal_data: Option<Value>,
+    temporal_data: Option<Box<Value>>,
 }
 
 impl CodeGraphError {
@@ -601,13 +601,13 @@ impl CodeGraphError {
             error: McpHandlerError::Internal(message),
             metadata: None,
             temporal_code: Some(code),
-            temporal_data: Some(data),
+            temporal_data: Some(Box::new(data)),
         }
     }
 
     fn with_artifact_metadata(mut self, artifact: &GraphIndexArtifact) -> Self {
         if self.metadata.is_none() && self.temporal_code.is_none() {
-            self.metadata = Some(GraphMetadataSource::from_artifact(artifact));
+            self.metadata = Some(Box::new(GraphMetadataSource::from_artifact(artifact)));
         }
         self
     }
@@ -806,7 +806,7 @@ async fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcR
             McpHandlerError::Unauthorized(msg) => msg.clone(),
             McpHandlerError::UpstreamPm(msg) => msg.clone(),
         };
-        return JsonRpcResponse::error_with_data(id, code, message, data);
+        return JsonRpcResponse::error_with_data(id, code, message, *data);
     }
     let mut response = match error {
         McpHandlerError::InvalidParams(message) => JsonRpcResponse::invalid_params(id, message),
@@ -822,7 +822,7 @@ async fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcR
         }
     };
     if let (Some(error), Some(metadata)) = (response.error.as_mut(), metadata) {
-        let metadata = GraphResponseMetadata::from_source(metadata)
+        let metadata = GraphResponseMetadata::from_source(*metadata)
             .await
             .into_value();
         match (&mut error.data, metadata) {
