@@ -61,6 +61,39 @@ fn load_artifact_defaults_missing_content_hash_to_none() {
 }
 
 #[test]
+fn load_artifact_defaults_missing_qualified_name_to_empty_string() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy_no_qualified_name.json");
+    fs::write(
+        &path,
+        r#"{
+          "header": {"graph_index_version": "v1"},
+          "files": [
+            {"stable_file_id": "file-a", "file_path": "src/a.rs"}
+          ],
+          "symbols": [
+            {
+              "stable_symbol_id": "sym-a",
+              "file_path": "src/a.rs",
+              "byte_range": [0, 10],
+              "line_range": [1, 2],
+              "entity_name": "run",
+              "symbol_kind": "function",
+              "anchor_hash": "hash-run",
+              "enclosing_scope": null
+            }
+          ]
+        }"#,
+    )
+    .expect("write fixture");
+
+    let artifact = load_artifact(&path).expect("legacy artifact should load");
+    let symbol_json = serde_json::to_value(&artifact.symbols[0]).expect("symbol json");
+
+    assert_eq!(symbol_json["qualified_name"], "");
+}
+
+#[test]
 fn read_artifact_header_extracts_content_hash_when_present() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("with_hash.json");
@@ -330,6 +363,7 @@ fn symbol_payload(
         byte_range,
         line_range: [1, 1],
         entity_name: entity_name.to_string(),
+        qualified_name: entity_name.to_string(),
         symbol_kind: "fn".to_string(),
         anchor_hash: anchor_hash.to_string(),
         enclosing_scope: None,

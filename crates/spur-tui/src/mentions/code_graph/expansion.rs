@@ -33,10 +33,10 @@ pub enum ReplacedWith {
 
 pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMention {
     match &payload.authoritative.validation {
-        CodeMentionValidationSpec::FileExists { path } => {
+        CodeMentionValidationSpec::FileExists { .. } => {
             let file_payload = GraphFileArtifact {
                 stable_file_id: file_id_from_uri(&payload.authoritative.uri),
-                file_path: path.clone(),
+                file_path: payload.authoritative.file_path.clone(),
             };
             match validate_file(&file_payload, worktree_root) {
                 ValidationOutcome::Pass => ExpandedMention::Body {
@@ -72,10 +72,6 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
                 entity_name,
                 anchor_hash,
             );
-            debug_assert_eq!(
-                symbol_payload.file_path, payload.authoritative.file_path,
-                "symbol validation payload must use authoritative.file_path"
-            );
             let Ok(content) = fs::read_to_string(&path) else {
                 return warning_expansion(payload, FailureReason::FileMissing, worktree_root);
             };
@@ -108,6 +104,7 @@ fn symbol_validation_payload(
         byte_range,
         line_range,
         entity_name: entity_name.to_string(),
+        qualified_name: payload.extraction_hints.qualified_name.clone(),
         symbol_kind: payload
             .extraction_hints
             .symbol_kind
@@ -137,19 +134,30 @@ fn symbol_expansion(
     let signature_line = signature
         .map(|signature| format!("signature: {signature}\n"))
         .unwrap_or_default();
+    let qualified_name_line =
+        qualified_name_line(&payload.extraction_hints.qualified_name, &display_name);
 
     format!(
-        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\n{}graph_index_version: {}\n\ncontext_header:\n{}",
+        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\n{}{}graph_index_version: {}\n\ncontext_header:\n{}",
         display_name,
         symbol_kind,
         payload.authoritative.uri,
         payload.authoritative.file_path,
         line_range[0],
         line_range[1],
+        qualified_name_line,
         signature_line,
         payload.display_meta.graph_index_version,
         context_header,
     )
+}
+
+fn qualified_name_line(qualified_name: &str, display_name: &str) -> String {
+    if qualified_name.is_empty() || qualified_name == display_name {
+        String::new()
+    } else {
+        format!("qualified_name: {qualified_name}\n")
+    }
 }
 
 fn file_expansion(payload: &CodeMentionPayload) -> String {
@@ -202,6 +210,7 @@ fn file_replacement_payload(payload: &CodeMentionPayload) -> CodeMentionPayload 
     file_payload.extraction_hints.byte_range = None;
     file_payload.extraction_hints.symbol_kind = None;
     file_payload.extraction_hints.entity_name = None;
+    file_payload.extraction_hints.qualified_name.clear();
     file_payload
 }
 
@@ -352,8 +361,16 @@ fn is_top_context_line(trimmed: &str) -> bool {
     trimmed.starts_with("#![")
         || trimmed.starts_with("use ")
         || trimmed.starts_with("pub use ")
+        || trimmed.starts_with("pub(crate) use ")
+        || trimmed.starts_with("pub(super) use ")
+        || trimmed.starts_with("extern crate ")
+        || trimmed.starts_with("mod ")
+        || trimmed.starts_with("pub mod ")
         || trimmed.starts_with("import ")
         || trimmed.starts_with("from ")
+        || trimmed.starts_with("export ")
+        || trimmed.starts_with("declare ")
+        || trimmed.starts_with("/// <reference ")
 }
 
 fn enclosing_impl_or_trait_signature(content: &str, symbol_start: usize) -> Option<String> {
@@ -374,7 +391,6 @@ fn enclosing_impl_or_trait_signature(content: &str, symbol_start: usize) -> Opti
 
 fn is_impl_or_trait_opening(trimmed: &str) -> bool {
     (trimmed.starts_with("impl ")
-        || trimmed.starts_with("pub impl ")
         || trimmed.starts_with("trait ")
         || trimmed.starts_with("pub trait "))
         && trimmed.ends_with('{')
@@ -762,6 +778,7 @@ mod tests {
                 byte_range: Some(byte_range),
                 symbol_kind: Some(symbol_kind.to_string()),
                 entity_name: Some(entity_name.to_string()),
+                qualified_name: String::new(),
             },
             display_meta: CodeMentionDisplayMeta {
                 enclosing_scope: None,

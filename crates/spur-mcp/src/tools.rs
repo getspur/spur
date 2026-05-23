@@ -172,11 +172,12 @@ pub struct DelegationRequest {
     /// retries advance so detached continuations can report the final
     /// 1-based worker attempt that produced the result.
     pub attempt_tracker: Arc<AtomicU32>,
-    /// Phase 5 / Task 26 — opt-in to the curated worker MCP subset.
-    /// `None` or `Some(false)` preserves the historical "Workers get no
-    /// MCP servers" contract; `Some(true)` triggers the orchestrator's
-    /// per-`BrainSession` `WorkerMcpServer` boot and a 1-hour HMAC
-    /// token URL injection into the worker's `mcp_servers` config.
+    /// Default-on curated worker MCP subset. `None` (omitted) or
+    /// `Some(true)` triggers the orchestrator's per-`BrainSession`
+    /// `WorkerMcpServer` boot and a 1-hour HMAC token URL injection
+    /// into the worker's `mcp_servers` config. Only `Some(false)`
+    /// opts out and preserves the legacy "Workers get no MCP servers"
+    /// behavior.
     pub enable_worker_mcp: Option<bool>,
 }
 
@@ -368,7 +369,7 @@ pub struct ToolDefinition {
 fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Optional `enable_worker_mcp` and `enable_worker_progress` booleans default to false/omitted; workers receive no MCP or progress channel unless explicitly opted in. Use `list_available_workers` when routing is ambiguous.".into(),
+        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. `enable_worker_mcp` defaults to on — the worker receives the curated worker MCP server unless you pass `false`. `enable_worker_progress` defaults to off; opt in for progress events. Use `list_available_workers` when routing is ambiguous.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateToWorkerInput>(),
     }
 }
@@ -376,7 +377,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
 fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
-        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Per-task optional `enable_worker_mcp` and `enable_worker_progress` booleans default to false/omitted; workers receive no MCP or progress channel unless explicitly opted in. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
+        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Per-task `enable_worker_mcp` defaults to on — each worker receives the curated worker MCP server unless explicitly set to `false`. `enable_worker_progress` defaults to off; opt in per task for progress events. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
     }
 }
@@ -629,7 +630,7 @@ fn fetch_outcome_artifact_def() -> ToolDefinition {
                     "type": "string",
                     "enum": ["status_only", "summary", "diff_only", "full"],
                     "default": "full",
-                    "description": "Which section to fetch. Phase 3."
+                    "description": "Which section to fetch."
                 }
             },
             "required": ["delegation_id"]
@@ -728,7 +729,7 @@ fn graph_subgraph_def() -> ToolDefinition {
                 },
                 "depth": {
                     "type": "integer",
-                    "description": "Max traversal depth (0 = unlimited, default)"
+                    "description": "Traversal depth in hops. Defaults to 2 when omitted. Larger values fan out further; `0` returns only the seed node."
                 },
                 "format": {
                     "type": "string",
@@ -741,23 +742,121 @@ fn graph_subgraph_def() -> ToolDefinition {
     }
 }
 
-fn code_callers_def() -> ToolDefinition {
+fn code_resolve_def() -> ToolDefinition {
     ToolDefinition {
-        name: "code_callers".into(),
-        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.".into(),
+        name: "code_resolve".into(),
+        description: "Resolve a code selector against the current worktree graph artifact and return only candidate rows. Use before code_subgraph when a selector may be ambiguous.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "symbol": {
+                "selector": {
                     "type": "string",
-                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
                 },
                 "as_of": {
                     "type": "string",
                     "description": "Optional git commit SHA for point-in-time symbol resolution"
                 }
             },
-            "required": ["symbol"]
+            "required": ["selector"]
+        }),
+    }
+}
+
+fn code_file_symbols_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_file_symbols".into(),
+        description: "List code symbols declared in one worktree-relative file from the current graph artifact. Rejects absolute paths and paths containing '..'.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": "Worktree-relative file path, e.g. crates/spur-mcp/src/tools.rs"
+                }
+            },
+            "required": ["file"]
+        }),
+    }
+}
+
+fn code_symbol_info_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_symbol_info".into(),
+        description: "Resolve one code symbol and return metadata only: qualified_name, file_path, line_range, symbol_kind, enclosing_scope, uri, and id. Ambiguous selectors return candidate rows.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                }
+            }
+        }),
+    }
+}
+
+fn code_read_symbol_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_read_symbol".into(),
+        description: "Read the indexed source for one code symbol from the current graph artifact. Select by stable_symbol_id, or by the exact worktree-relative path plus symbol name. Source bytes are resolved through the artifact file content_oid; stale=true means the current worktree file differs but the returned source still matches the indexed graph.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "stable_symbol_id": {
+                    "type": "string",
+                    "description": "Stable symbol id from code_resolve/code_search/code_symbol_info. graph://symbol/<id> is accepted."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Worktree-relative file path. Required with name and mutually exclusive with stable_symbol_id."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Symbol entity_name or qualified_name within path. Required with path and mutually exclusive with stable_symbol_id."
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 50,
+                    "default": 0,
+                    "description": "Lines of context to include before and after the symbol. Values outside 0..50 are clamped and echoed as requested_context_lines."
+                }
+            }
+        }),
+    }
+}
+
+fn code_callers_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_callers".into(),
+        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                },
+                "on_ambiguous": {
+                    "type": "string",
+                    "enum": ["candidates", "error"],
+                    "description": "Ambiguity handling (default: candidates)"
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved caller rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
+                }
+            }
         }),
     }
 }
@@ -765,20 +864,74 @@ fn code_callers_def() -> ToolDefinition {
 fn code_callees_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callees".into(),
-        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Accepts graph://symbol/<id> URIs or bare stable symbol ids.".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
                 "symbol": {
                     "type": "string",
-                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                },
+                "on_ambiguous": {
+                    "type": "string",
+                    "enum": ["candidates", "error"],
+                    "description": "Ambiguity handling (default: candidates)"
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved callee rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
                 },
                 "as_of": {
                     "type": "string",
                     "description": "Optional git commit SHA for point-in-time symbol resolution"
                 }
+            }
+        }),
+    }
+}
+
+fn code_search_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "code_search".into(),
+        description: "Search the worktree graph artifact for symbols by name. Lexical retrieval, not graph resolution — returns ranked candidates matching the query. Use after `code_callees` returns empty (e.g., on macro-bodied functions whose bodies are opaque to the graph) to recover candidate identifiers from the symbol index.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Search term. Non-empty."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["exact", "prefix", "substring"],
+                    "default": "substring"
+                },
+                "symbol_kind": {
+                    "type": "string",
+                    "description": "Optional filter on the artifact's symbol_kind, e.g. function, method, struct, enum, mcp_tool."
+                },
+                "file": {
+                    "type": "string",
+                    "description": "Optional exact worktree-relative file path. Mutually exclusive with file_glob."
+                },
+                "file_glob": {
+                    "type": "string",
+                    "description": "Optional glob over worktree-relative file_path (e.g. 'crates/spur-mcp/**/*.rs'). Mutually exclusive with file."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 20
+                }
             },
-            "required": ["symbol"]
+            "required": ["query"]
         }),
     }
 }
@@ -786,17 +939,45 @@ fn code_callees_def() -> ToolDefinition {
 fn code_subgraph_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_subgraph".into(),
-        description: "Get a bounded code-symbol subgraph from the current worktree graph artifact. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
+        description: "Get a budgeted code-symbol subgraph from the current worktree graph artifact. Traversal is deterministic BFS for a given artifact: seed with selector (or start_nodes order for continuation), then expand each node by graph artifact edge order. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other). Responses cap output with max_nodes (default 40, range 1..400) and max_edges (default 120, range 1..1200); out-of-range budgets are clamped and echoed in metadata. When truncated, truncated_frontier lists next-hop node ids reachable through excluded nodes/edges; call again with start_nodes=truncated_frontier to resume statelessly. For continuations from radius > 1 traversals, use radius one less than the original radius so frontier nodes expand the remaining hop budget. Unresolved edges are hidden by default (include_unresolved=false); when include_unresolved=true, unresolved edges count toward max_edges. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "Code selector: graph://symbol/<id>, bare hex id, qualified name, file-qualified name, or bare symbol name"
+                },
+                "start_nodes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Continuation roots from a prior truncated_frontier response. Values are bare node ids or graph://symbol/<id> URIs. Mutually exclusive with selector and symbol."
+                },
                 "symbol": {
                     "type": "string",
-                    "description": "Code symbol URI (graph://symbol/<id>) or bare stable symbol id"
+                    "description": "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."
+                },
+                "on_ambiguous": {
+                    "type": "string",
+                    "enum": ["candidates", "error"],
+                    "description": "Ambiguity handling (default: candidates)"
                 },
                 "radius": {
                     "type": "integer",
                     "description": "Traversal radius (default: 1, max: 3; larger values are clamped)"
+                },
+                "max_nodes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 400,
+                    "default": 40,
+                    "description": "Maximum node rows to return. Values outside 1..400 are clamped and echoed as metadata.requested_max_nodes."
+                },
+                "max_edges": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1200,
+                    "default": 120,
+                    "description": "Maximum edge rows to return, including unresolved edges when include_unresolved=true. Values outside 1..1200 are clamped and echoed as metadata.requested_max_edges."
                 },
                 "format": {
                     "type": "string",
@@ -805,15 +986,22 @@ fn code_subgraph_def() -> ToolDefinition {
                 },
                 "edge_kinds": {
                     "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional relation kind filter, e.g. [\"calls\", \"references\"]"
+                    "items": {
+                        "type": "string",
+                        "enum": ["calls", "calls_dyn", "references_hof", "references_other"]
+                    },
+                    "description": "Optional public edge_kind filter. edge_kinds=[\"calls\"] is strict direct calls only; use calls_dyn separately for heuristic dyn Trait calls."
+                },
+                "include_unresolved": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, include unresolved boundary edges. Default false filters target_uri=null edges from the subgraph."
                 },
                 "as_of": {
                     "type": "string",
                     "description": "Optional git commit SHA for point-in-time symbol resolution"
                 }
-            },
-            "required": ["symbol"]
+            }
         }),
     }
 }
@@ -1104,14 +1292,14 @@ pub fn review_task_def() -> ToolDefinition {
                 },
                 "feedback": {
                     "type": "string",
-                    "description": "Review notes. Required for all decisions — used as rationale for approve/reject and as retry instruction for request_changes."
+                    "description": "Optional feedback. Recommended when decision is `request_changes` so the worker has context for the next attempt."
                 },
                 "reuse_prior_worktree": {
                     "type": "boolean",
                     "description": "When request_changes is the decision, opt in to having the prior rejected attempt's diff pre-applied as uncommitted changes in the next attempt's worktree."
                 }
             },
-            "required": ["plan_id", "task_id", "decision", "feedback"]
+            "required": ["plan_id", "task_id", "decision"]
         }),
     }
 }
@@ -1262,8 +1450,13 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         graph_insights_def(),
         graph_alerts_def(),
         graph_subgraph_def(),
+        code_resolve_def(),
+        code_file_symbols_def(),
+        code_symbol_info_def(),
+        code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
+        code_search_def(),
         code_subgraph_def(),
         code_symbol_history_def(),
         submit_plan_def(),
@@ -1299,8 +1492,13 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         get_task_diff_def(),
         get_plan_status_def(),
         fetch_outcome_artifact_def(),
+        code_resolve_def(),
+        code_file_symbols_def(),
+        code_symbol_info_def(),
+        code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
+        code_search_def(),
         code_subgraph_def(),
         code_symbol_history_def(),
         update_issue_def(),
@@ -1312,6 +1510,25 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
 #[cfg(test)]
 mod schema_truthfulness_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CwdGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    fn enter_dir(path: &std::path::Path) -> CwdGuard {
+        let original = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set current dir");
+        CwdGuard { original }
+    }
 
     fn props_of(def: &ToolDefinition) -> Vec<String> {
         def.input_schema
@@ -1369,6 +1586,132 @@ mod schema_truthfulness_tests {
         );
     }
 
+    #[tokio::test]
+    async fn code_graph_schemas_advertise_selector_legacy_symbol_and_ambiguity_mode() {
+        for def in [
+            code_symbol_info_def(),
+            code_callers_def(),
+            code_callees_def(),
+            code_subgraph_def(),
+        ] {
+            let props = def
+                .input_schema
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("{} properties", def.name));
+            assert!(props.contains_key("selector"), "{} selector", def.name);
+            assert!(props.contains_key("symbol"), "{} legacy symbol", def.name);
+            assert!(
+                props
+                    .get("symbol")
+                    .and_then(|v| v.get("description"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|description| description
+                        == "deprecated; use selector. Accepts graph://symbol/<id> or bare hex id."),
+                "{} symbol deprecation description",
+                def.name
+            );
+            assert!(
+                def.input_schema.get("anyOf").is_none(),
+                "{} must not advertise top-level anyOf",
+                def.name
+            );
+            if def.name == "code_symbol_info" {
+                continue;
+            }
+            assert_eq!(
+                props.get("on_ambiguous").and_then(|v| v.get("enum")),
+                Some(&json!(["candidates", "error"])),
+                "{} on_ambiguous enum",
+                def.name
+            );
+        }
+
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
+        std::fs::write(
+            dir.path().join(".spur/graph-index.json"),
+            serde_json::to_string_pretty(&json!({
+                "header": { "graph_index_version": "test" },
+                "manifest_version": "test",
+                "graph_content_hash": "test",
+                "files": [],
+                "symbols": [],
+                "edges": [],
+                "tombstones": []
+            }))
+            .expect("encode graph fixture"),
+        )
+        .expect("write graph fixture");
+        let _cwd = enter_dir(dir.path());
+
+        let error = crate::server::handlers::code_graph::code_callers(&json!({}))
+            .await
+            .expect_err("handler must reject calls without selector or symbol");
+        assert_eq!(error.json_rpc_code(), -32602);
+        assert!(
+            error
+                .to_string()
+                .contains("Missing required field 'selector' (or deprecated 'symbol')"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn code_search_schema_uses_query_not_selector_or_legacy_symbol() {
+        let def = code_search_def();
+        let props = def
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("properties");
+
+        assert!(props.contains_key("query"), "code_search query");
+        assert!(props.contains_key("mode"), "code_search mode");
+        assert!(props.contains_key("symbol_kind"), "code_search symbol_kind");
+        assert!(props.contains_key("file"), "code_search file");
+        assert!(props.contains_key("file_glob"), "code_search file_glob");
+        assert!(props.contains_key("limit"), "code_search limit");
+        assert!(
+            !props.contains_key("selector"),
+            "code_search must not advertise selector"
+        );
+        assert!(
+            !props.contains_key("symbol"),
+            "code_search must not advertise legacy symbol"
+        );
+        assert!(
+            !props.contains_key("on_ambiguous"),
+            "code_search must not advertise graph-resolution ambiguity controls"
+        );
+        assert_eq!(
+            props.get("query").and_then(|v| v.get("minLength")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            props.get("mode").and_then(|v| v.get("enum")),
+            Some(&json!(["exact", "prefix", "substring"]))
+        );
+        assert_eq!(
+            props.get("mode").and_then(|v| v.get("default")),
+            Some(&json!("substring"))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("minimum")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("maximum")),
+            Some(&json!(200))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("default")),
+            Some(&json!(20))
+        );
+        assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
+    }
+
     #[test]
     fn fetch_outcome_artifact_schema_advertises_phase3_sections() {
         let def = fetch_outcome_artifact_def();
@@ -1412,8 +1755,13 @@ mod worker_tools_subset_tests {
         "get_task_diff",
         "get_plan_status",
         "fetch_outcome_artifact",
+        "code_resolve",
+        "code_file_symbols",
+        "code_symbol_info",
+        "code_read_symbol",
         "code_callers",
         "code_callees",
+        "code_search",
         "code_subgraph",
         "code_symbol_history",
         "update_issue",
@@ -1461,6 +1809,10 @@ mod worker_tools_subset_tests {
             "graph_alerts",
             "graph_subgraph",
         ];
+        assert!(
+            !forbidden.contains(&"code_search"),
+            "code_search is read-only and worker-facing, not brain-only",
+        );
         for tool in &forbidden {
             assert!(
                 !actual.iter().any(|n| n == tool),

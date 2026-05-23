@@ -253,6 +253,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug)]
 pub enum PaletteIntent {
     Accept(PaletteResult),
+    SubmitQuery(String),
     Dismiss,
 }
 
@@ -268,6 +269,9 @@ impl PaletteState {
 
         match ev.code {
             KeyCode::Esc => Some(PaletteIntent::Dismiss),
+            KeyCode::Enter | KeyCode::Tab if self.query.starts_with('/') => {
+                Some(PaletteIntent::SubmitQuery(self.query.clone()))
+            }
             KeyCode::Enter | KeyCode::Tab => self.selected().cloned().map(PaletteIntent::Accept),
             KeyCode::Up => {
                 self.cursor_up();
