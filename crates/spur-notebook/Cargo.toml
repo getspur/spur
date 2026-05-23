@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 async-channel = "2"
 blake3 = "1"
+chrono.workspace = true
 directories.workspace = true
 jute = { path = "jute-notebook/src-tauri" }
 rmcp.workspace = true
@@ -28,6 +29,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ts-rs = { version = "10.1.0", features = ["chrono-impl", "no-serde-warnings"] }
 url = "2.5.0"
 uuid.workspace = true
 
