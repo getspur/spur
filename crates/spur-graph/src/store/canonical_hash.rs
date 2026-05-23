@@ -19,6 +19,7 @@ pub(crate) struct GraphArtifactBodyForHash<'a> {
     pub commits: &'a [CommitArtifact],
     pub symbol_snapshots: &'a [SymbolSnapshotArtifact],
     pub temporal_edges: &'a [TemporalEdgeArtifact],
+    pub diagnostics: &'a [String],
 }
 
 pub fn artifact_content_hash_blake3_hex(artifact: &GraphIndexArtifact) -> anyhow::Result<String> {
@@ -33,6 +34,7 @@ pub fn artifact_content_hash_blake3_hex(artifact: &GraphIndexArtifact) -> anyhow
         commits: &artifact.commits,
         symbol_snapshots: &artifact.symbol_snapshots,
         temporal_edges: &artifact.temporal_edges,
+        diagnostics: &artifact.diagnostics,
     };
     let canonical_json = serde_json::to_vec(&body)
         .context("failed to encode graph artifact body for content hash")?;
@@ -93,7 +95,7 @@ mod tests {
                 path: "src/old.rs".to_string(),
                 stable_file_id: "file:src/old.rs".to_string(),
             }],
-            diagnostics: vec!["not part of canonical hash body".to_string()],
+            diagnostics: Vec::new(),
             commits: Vec::new(),
             symbol_snapshots: Vec::new(),
             temporal_edges: Vec::new(),
@@ -109,6 +111,7 @@ mod tests {
             commits: &artifact.commits,
             symbol_snapshots: &artifact.symbol_snapshots,
             temporal_edges: &artifact.temporal_edges,
+            diagnostics: &artifact.diagnostics,
         };
         let bytes = serde_json::to_vec(&body).expect("canonical JSON should serialize");
 
@@ -157,6 +160,17 @@ mod tests {
         assert_hash_changes(&artifact, &mutated);
     }
 
+    #[test]
+    fn artifact_hash_changes_when_diagnostics_change() {
+        let artifact = minimal_hash_artifact();
+        let mut mutated = artifact.clone();
+        mutated
+            .diagnostics
+            .push("parse_failed path=src/lib.rs sha=abc123".to_string());
+
+        assert_hash_changes(&artifact, &mutated);
+    }
+
     fn assert_hash_changes(original: &GraphIndexArtifact, mutated: &GraphIndexArtifact) {
         let original_hash =
             artifact_content_hash_blake3_hex(original).expect("original hash should compute");
@@ -165,7 +179,7 @@ mod tests {
 
         assert_ne!(
             original_hash, mutated_hash,
-            "canonical content hash should include temporal collections"
+            "canonical content hash should include persisted artifact collections"
         );
     }
 
