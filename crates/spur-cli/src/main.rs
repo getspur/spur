@@ -394,6 +394,13 @@ mod cli_parse_tests {
             .try_get_matches_from(["spur", "graph", "build", "--workspace", "--no-analyst"])
             .expect("graph build --no-analyst should parse");
     }
+
+    #[test]
+    fn cli_accepts_graph_build_with_temporal_flag() {
+        Cli::command()
+            .try_get_matches_from(["spur", "graph", "build", "--workspace", "--with-temporal"])
+            .expect("graph build --with-temporal should parse");
+    }
 }
 
 #[derive(Subcommand)]
@@ -507,6 +514,10 @@ enum GraphCommands {
         /// Also honored via SPUR_GRAPH_SKIP_ANALYST=1.
         #[arg(long)]
         no_analyst: bool,
+        /// Enable temporal git walk preparation for graph build.
+        /// Also honored via SPUR_GRAPH_WITH_TEMPORAL=1.
+        #[arg(long)]
+        with_temporal: bool,
     },
 }
 
@@ -941,12 +952,14 @@ async fn run() -> Result<()> {
                 output,
                 quiet,
                 no_analyst,
+                with_temporal,
             } => commands::graph::build(commands::graph::GraphBuildOptions {
                 root,
                 workspace,
                 output,
                 quiet,
                 skip_analyst: no_analyst,
+                with_temporal,
             }),
         },
         Commands::Gc {
