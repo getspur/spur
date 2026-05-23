@@ -23,7 +23,7 @@ impl DaemonCommandSpec {
             program: spur_core::notebook::notebook_binary_path()
                 .display()
                 .to_string(),
-            args: vec!["--headless".to_string()],
+            args: vec![],
         }
     }
 }
