@@ -115,6 +115,14 @@ SELECT *
 FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/tombstones.parquet');
 
 CREATE OR REPLACE TABLE _meta AS
+WITH manifest_json AS (
+  SELECT decode(content) AS content
+  FROM read_blob('__SPUR_GRAPH_ARTIFACT_DIR__/manifest.json')
+),
+manifest AS (
+  SELECT *
+  FROM read_json_auto('__SPUR_GRAPH_ARTIFACT_DIR__/manifest.json')
+)
 SELECT '__SPUR_GRAPH_ARTIFACT_DIR__'        AS artifact_dir,
        graph_index_version,
        schema_version,
@@ -129,10 +137,16 @@ SELECT '__SPUR_GRAPH_ARTIFACT_DIR__'        AS artifact_dir,
        row_counts.files                    AS file_count,
        row_counts.file_manifests           AS file_manifest_count,
        row_counts.tombstones               AS tombstone_count,
+       -- read_json_auto omits stripped temporal row_count keys; decode(read_blob) JSON avoids struct binder errors.
+       TRY_CAST(json_extract(manifest_json.content, '$.row_counts.commits') AS BIGINT) AS commit_count,
+       TRY_CAST(json_extract(manifest_json.content, '$.row_counts.symbol_snapshots') AS BIGINT) AS symbol_snapshot_count,
+       TRY_CAST(json_extract(manifest_json.content, '$.row_counts.temporal_edges') AS BIGINT) AS temporal_edge_count,
+       TRY_CAST(json_extract(manifest_json.content, '$.row_counts.diagnostics') AS BIGINT) AS diagnostic_count,
        edges_by_dst_present,
        parquet_writer.compression          AS parquet_compression,
        parquet_writer.row_group_size       AS parquet_row_group_size
-FROM read_json_auto('__SPUR_GRAPH_ARTIFACT_DIR__/manifest.json');
+FROM manifest
+CROSS JOIN manifest_json;
 
 -- DuckPGQ currently rejects property graphs over views, so keep a small
 -- compatibility surface sourced from the Parquet views. Analytical SQL and
