@@ -106,7 +106,8 @@ impl Orchestrator {
             );
 
             // MCP callback server is now HTTP — pass URL directly.
-            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url);
+            let socket_nonce = uuid::Uuid::new_v4().simple().to_string();
+            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url, &socket_nonce);
 
             let session_response = crate::skip_perm::new_session_with_bypass(
                 &mut *connection,
@@ -123,6 +124,7 @@ impl Orchestrator {
             mcp_server
                 .set_brain_session_id(brain_session_id.clone())
                 .expect("set once");
+            self.register_notebook_socket(brain_session_id.clone(), socket_nonce);
             brain_session_id_cell
                 .set(brain_session_id.as_session_id().clone())
                 .expect("set once");
@@ -251,6 +253,7 @@ impl Orchestrator {
         let _ = connection.shutdown().await;
         delegation_handle.abort();
         abort_mcp_handle(mcp_handle).await;
+        self.remove_notebook_socket(&spur_acp::BrainSessionId::from(session_id.clone()));
 
         let duration = start.elapsed();
 
