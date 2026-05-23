@@ -2,12 +2,15 @@ use std::path::PathBuf;
 
 use agent_client_protocol::schema::{McpServer, McpServerHttp, McpServerStdio};
 
-pub fn control_socket_path() -> PathBuf {
+pub fn control_socket_path(socket_nonce: &str) -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         // If HOME is unset, keep brain/notebook wiring on the current-directory fallback.
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".spur").join("notebooks").join("control.sock")
+    home.join(".spur")
+        .join("notebooks")
+        .join("sessions")
+        .join(format!("{socket_nonce}.sock"))
 }
 
 pub fn notebook_binary_path() -> PathBuf {
@@ -101,19 +104,19 @@ fn cargo_home_bin() -> Option<PathBuf> {
         .map(|cargo_home| cargo_home.join("bin"))
 }
 
-pub fn notebook_mcp_server() -> McpServer {
+pub fn notebook_mcp_server(socket_nonce: &str) -> McpServer {
     McpServer::Stdio(
         McpServerStdio::new("notebook", notebook_binary_path()).args(vec![
             "--mcp-proxy".to_string(),
-            control_socket_path().display().to_string(),
+            control_socket_path(socket_nonce).display().to_string(),
         ]),
     )
 }
 
-pub fn brain_mcp_servers(spur_mcp_url: &str) -> Vec<McpServer> {
+pub fn brain_mcp_servers(spur_mcp_url: &str, socket_nonce: &str) -> Vec<McpServer> {
     vec![
         McpServer::Http(McpServerHttp::new("spur-mcp", spur_mcp_url)),
-        notebook_mcp_server(),
+        notebook_mcp_server(socket_nonce),
     ]
 }
 

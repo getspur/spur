@@ -163,6 +163,7 @@ mod session_attach_guard_transfer_tests {
             connection: Box::new(NoopConnection),
             acp_session_id: "retire-transfer-test".to_string(),
             spur_session_id: SessionId("spur-session".to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
             delegation_handle: tokio::spawn(async {}),
             mcp_server: None,
@@ -218,6 +219,7 @@ mod session_attach_guard_transfer_tests {
             }),
             acp_session_id: "acp-retired-session".to_string(),
             spur_session_id: SessionId("spur-retired-session".to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
             delegation_handle: tokio::spawn(async {}),
             mcp_server: None,
@@ -279,6 +281,7 @@ mod session_attach_guard_transfer_tests {
             }),
             acp_session_id: "acp-retired-session".to_string(),
             spur_session_id: SessionId("spur-retired-session".to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
             delegation_handle: tokio::spawn(async {}),
             mcp_server: None,
@@ -341,6 +344,7 @@ mod session_attach_guard_transfer_tests {
             }),
             acp_session_id: "acp-retired-session".to_string(),
             spur_session_id: SessionId("spur-retired-session".to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
             delegation_handle: tokio::spawn(async {}),
             mcp_server: None,
@@ -469,6 +473,7 @@ mod session_attach_guard_transfer_tests {
             connection: Box::new(NoopConnection),
             acp_session_id: format!("acp-{session_id}"),
             spur_session_id: SessionId(session_id.to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
             delegation_handle: tokio::spawn(async {}),
             mcp_server: None,
@@ -829,6 +834,7 @@ mod session_attach_guard_transfer_tests {
             connection: Box::new(conn),
             acp_session_id: "acp-x".to_string(),
             spur_session_id: SessionId("spur-x".to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
             brain_name: "test-brain".to_string(),
             delegation_handle: tokio::spawn(async {}),
             mcp_server: None,
@@ -1178,6 +1184,7 @@ impl Orchestrator {
         // gap if the lockfile persists in ActiveConnection beyond this point.
         self.self_held
             .remove(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()));
+        self.remove_notebook_socket(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()));
 
         // 1. Emit BrainRetired BEFORE aborting handles. Broadcast emit is
         //    synchronous into the channel, so any post-abort stragglers
@@ -1444,10 +1451,18 @@ impl Orchestrator {
             .context("Failed to start MCP callback server")?;
 
         let (
-            (brain_cfg, presub_notif_rx, session_response, brain_session_id, session_id),
+            (
+                brain_cfg,
+                presub_notif_rx,
+                session_response,
+                brain_session_id,
+                session_id,
+                socket_nonce,
+            ),
             mcp_handle,
         ): McpGuarded<NewBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
-            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url);
+            let socket_nonce = uuid::Uuid::new_v4().simple().to_string();
+            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url, &socket_nonce);
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1493,9 +1508,12 @@ impl Orchestrator {
                 session_response,
                 brain_session_id,
                 session_id,
+                socket_nonce,
             ))
         })
         .await?;
+
+        self.register_notebook_socket(brain_session_id.clone(), socket_nonce.clone());
 
         info!(brain = %brain_name, session = %session_id, "Creating brain session");
         self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
@@ -1635,6 +1653,7 @@ impl Orchestrator {
             connection,
             acp_session_id: session_response.session_id.to_string(),
             spur_session_id: session_id,
+            notebook_socket_nonce: socket_nonce,
             brain_name,
             delegation_handle,
             notification_pump_handle,
@@ -1740,10 +1759,12 @@ impl Orchestrator {
                 load_outcome,
                 brain_session_id,
                 session_id,
+                socket_nonce,
             ),
             mcp_handle,
         ): McpGuarded<LoadedBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
-            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url);
+            let socket_nonce = uuid::Uuid::new_v4().simple().to_string();
+            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url, &socket_nonce);
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1847,9 +1868,12 @@ impl Orchestrator {
                 load_outcome,
                 brain_session_id,
                 session_id,
+                socket_nonce,
             ))
         })
         .await?;
+
+        self.register_notebook_socket(brain_session_id.clone(), socket_nonce.clone());
 
         if final_acp_session_id != requested_acp_session_id {
             drop(attach_guard.take());
@@ -1963,6 +1987,7 @@ impl Orchestrator {
             connection,
             acp_session_id: final_acp_session_id,
             spur_session_id: session_id,
+            notebook_socket_nonce: socket_nonce,
             brain_name,
             delegation_handle,
             notification_pump_handle,
