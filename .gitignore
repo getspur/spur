@@ -21,6 +21,10 @@ __pycache__/
 **/.spur/logs/**
 /.spur/graph-index.json
 **/.spur/graph-index.json
+.spur/graph/
+.spur/commit-index.json
+.spur/commit-index.pointer.json
+.spur/graph-index.pointer.json
 **/.spur/pgids/**
 .spur/session_metadata.json
 **/.spur/session_metadata.json
