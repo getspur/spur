@@ -97,12 +97,11 @@ impl WorkerMcpFetcher {
 
 /// Phase 5 / Task 26 — pure decision helper for the worker dispatch site.
 ///
-/// Returns `Vec::new()` when `enable_worker_mcp` is `None` or
-/// `Some(false)` (preserves the historical "Workers get no MCP servers"
-/// contract). When the flag is `Some(true)`, awaits `fetch` to obtain
-/// `(url, token)`, assembles the `?token=` URL, and returns a single
-/// `McpServer::Http` entry named `spur-worker-mcp`. Any error from
-/// `fetch` is propagated.
+/// Returns `Vec::new()` only when `enable_worker_mcp` is `Some(false)`
+/// (explicit opt-out). When `None` (omitted) or `Some(true)`, awaits
+/// `fetch` to obtain `(url, token)`, assembles the `?token=` URL, and
+/// returns a single `McpServer::Http` entry named `spur-worker-mcp`.
+/// Any error from `fetch` is propagated.
 pub(super) async fn build_worker_mcp_servers_with<F, Fut>(
     enable_worker_mcp: Option<bool>,
     fetch: F,
@@ -111,7 +110,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<(String, String), DelegationDispatchError>>,
 {
-    if !enable_worker_mcp.unwrap_or(false) {
+    if !enable_worker_mcp.unwrap_or(true) {
         return Ok(Vec::new());
     }
     let (url, token) = fetch().await?;
@@ -371,20 +370,27 @@ mod worker_mcp_dispatch_tests {
     use spur_acp::DelegationDispatchError;
 
     #[tokio::test]
-    async fn flag_none_emits_zero_entries_and_skips_fetch() {
+    async fn flag_none_defaults_on_and_runs_fetch() {
         let mut fetch_called = false;
         let result = build_worker_mcp_servers_with(None, || {
             fetch_called = true;
             async {
-                Ok::<_, DelegationDispatchError>(("http://127.0.0.1:1/mcp".into(), "tok".into()))
+                Ok::<_, DelegationDispatchError>((
+                    "http://127.0.0.1:54321/mcp".into(),
+                    "tok-default".into(),
+                ))
             }
         })
         .await
         .expect("None flag must succeed");
-        assert!(result.is_empty(), "None flag must produce zero entries");
+        assert_eq!(
+            result.len(),
+            1,
+            "None flag must default-on and produce exactly 1 entry"
+        );
         assert!(
-            !fetch_called,
-            "fetch closure must NOT run when flag is None (no accidental boot)"
+            fetch_called,
+            "fetch closure MUST run when flag is None (default-on)"
         );
     }
 

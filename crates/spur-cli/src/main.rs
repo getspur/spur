@@ -282,6 +282,11 @@ enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
+    /// Manage the .spur/analyst.duckdb (DuckDB-backed query surface over the graph).
+    Analyst {
+        #[command(subcommand)]
+        command: AnalystCommands,
+    },
     /// Build and inspect the code graph index
     Graph {
         #[command(subcommand)]
@@ -352,6 +357,43 @@ enum PmCommands {
         #[command(subcommand)]
         source: IngestSource,
     },
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_accepts_analyst_build_subcommand() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "spur",
+                "analyst",
+                "build",
+                "--quiet",
+                "--root",
+                ".",
+                "--artifact-dir",
+                ".spur/graph/CURRENT",
+                "--db-path",
+                ".spur/analyst.duckdb",
+            ])
+            .expect("analyst build should parse");
+
+        assert_eq!(
+            matches.subcommand_name(),
+            Some("analyst"),
+            "expected top-level analyst subcommand"
+        );
+    }
+
+    #[test]
+    fn cli_accepts_graph_build_no_analyst_flag() {
+        Cli::command()
+            .try_get_matches_from(["spur", "graph", "build", "--workspace", "--no-analyst"])
+            .expect("graph build --no-analyst should parse");
+    }
 }
 
 #[derive(Subcommand)]
@@ -426,19 +468,45 @@ enum ConfigCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum AnalystCommands {
+    /// Rebuild .spur/analyst.duckdb from the current spur-graph parquet artifact.
+    Build {
+        /// Worktree root. Defaults to the current worktree root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Override the parquet artifact directory (matches SPUR_GRAPH_ARTIFACT_DIR).
+        #[arg(long)]
+        artifact_dir: Option<PathBuf>,
+        /// Override the analyst DuckDB path (matches SPUR_ANALYST_DB).
+        #[arg(long)]
+        db_path: Option<PathBuf>,
+        /// Suppress non-error output.
+        #[arg(long)]
+        quiet: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum GraphCommands {
     /// Extract Rust symbols from a worktree and write a graph index artifact.
     Build {
         /// Worktree root to extract. Defaults to the current worktree root.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "workspace")]
         root: Option<PathBuf>,
-        /// Output artifact path. Defaults to SPUR_CODE_GRAPH_INDEX or .spur/graph-index.json.
+        /// Build from the resolved worktree root.
+        #[arg(long)]
+        workspace: bool,
+        /// Output artifact directory. Defaults to SPUR_CODE_GRAPH_INDEX or .spur/graph.
         #[arg(long)]
         output: Option<PathBuf>,
         /// Suppress progress output.
         #[arg(long)]
         quiet: bool,
+        /// Skip the analyst DuckDB rebuild that normally follows a successful graph build.
+        /// Also honored via SPUR_GRAPH_SKIP_ANALYST=1.
+        #[arg(long)]
+        no_analyst: bool,
     },
 }
 
@@ -842,15 +910,43 @@ async fn run() -> Result<()> {
         },
         Commands::Flags { command } => commands::flags::run(command).await,
         Commands::Telemetry { command } => commands::telemetry::run(command),
+        Commands::Analyst { command } => match command {
+            AnalystCommands::Build {
+                root,
+                artifact_dir,
+                db_path,
+                quiet,
+            } => {
+                let resolved_root = match root {
+                    Some(path) => path,
+                    None => spur_graph::resolve_worktree_root_from(std::env::current_dir()?),
+                };
+                let resolved_root = resolved_root.canonicalize().with_context(|| {
+                    format!("failed to canonicalize root `{}`", resolved_root.display())
+                })?;
+                commands::analyst::build(
+                    &resolved_root,
+                    commands::analyst::AnalystBuildOptions {
+                        artifact_dir,
+                        db_path,
+                        quiet,
+                    },
+                )
+            }
+        },
         Commands::Graph { command } => match command {
             GraphCommands::Build {
                 root,
+                workspace,
                 output,
                 quiet,
+                no_analyst,
             } => commands::graph::build(commands::graph::GraphBuildOptions {
                 root,
+                workspace,
                 output,
                 quiet,
+                skip_analyst: no_analyst,
             }),
         },
         Commands::Gc {

@@ -63,6 +63,8 @@ pub struct CodeMentionExtractionHints {
     pub byte_range: Option<SourceRange>,
     pub symbol_kind: Option<String>,
     pub entity_name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub qualified_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +85,11 @@ pub struct GraphIndexArtifact {
     #[serde(default)]
     pub file_manifests: Vec<GraphFileManifestEntry>,
     pub files: Vec<GraphFileArtifact>,
+    #[serde(skip)]
+    pub file_node_ids: Vec<NodeId>,
     pub symbols: Vec<GraphSymbolArtifact>,
+    #[serde(skip)]
+    pub symbol_node_ids: Vec<NodeId>,
     #[serde(default)]
     pub edges: Vec<GraphEdgeArtifact>,
     #[serde(default)]
@@ -155,6 +161,8 @@ pub struct GraphSymbolArtifact {
     pub byte_range: SourceRange,
     pub line_range: SourceRange,
     pub entity_name: String,
+    #[serde(default)]
+    pub qualified_name: String,
     pub symbol_kind: String,
     pub anchor_hash: String,
     pub enclosing_scope: Option<String>,
@@ -173,6 +181,8 @@ pub struct GraphEdgeArtifact {
     pub confidence_score: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_kind: Option<ChangeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_kind: Option<GraphEdgeKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +207,8 @@ pub struct GraphEdge {
     pub target_label: Option<String>,
     pub confidence: Confidence,
     pub confidence_score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_kind: Option<GraphEdgeKind>,
     pub evidence_id: EvidenceId,
     pub directed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,6 +245,7 @@ pub enum NodeKind {
     Macro,
     Section,
     Commit,
+    McpTool,
 }
 
 impl NodeKind {
@@ -254,6 +267,7 @@ impl NodeKind {
             NodeKind::Macro => "macro",
             NodeKind::Section => "section",
             NodeKind::Commit => "commit",
+            NodeKind::McpTool => "mcp_tool",
         }
     }
 }
@@ -271,6 +285,26 @@ pub enum RelationKind {
     Extends,
     Links,
     Touches,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphEdgeKind {
+    Calls,
+    CallsDyn,
+    ReferencesHof,
+    ReferencesOther,
+}
+
+pub fn graph_edge_kind_or_default(
+    relation: RelationKind,
+    edge_kind: Option<GraphEdgeKind>,
+) -> GraphEdgeKind {
+    edge_kind.unwrap_or(match relation {
+        RelationKind::Calls => GraphEdgeKind::Calls,
+        RelationKind::References => GraphEdgeKind::ReferencesOther,
+        _ => GraphEdgeKind::ReferencesOther,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -682,6 +716,32 @@ pub struct TemporalEdgeArtifact {
 }
 
 pub fn load_artifact(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
+    let metadata = fs::metadata(path).with_context(|| {
+        format!(
+            "failed to inspect graph index artifact `{}`",
+            path.display()
+        )
+    })?;
+
+    if metadata.is_dir() {
+        return crate::store::parquet::read_artifact_parquet(path);
+    }
+
+    if metadata.is_file() {
+        tracing::warn!(
+            path = %path.display(),
+            "spur-graph: loading legacy JSON graph artifact; JSON artifacts are deprecated and will be removed after the Parquet cutover"
+        );
+        return load_legacy_json(path);
+    }
+
+    Err(anyhow!(
+        "graph index artifact path `{}` is neither a file nor a directory",
+        path.display()
+    ))
+}
+
+fn load_legacy_json(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read graph index artifact `{}`", path.display()))?;
     let mut artifact: GraphIndexArtifact = serde_json::from_str(&content)

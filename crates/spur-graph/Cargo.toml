@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+autobenches = false
+
+[features]
+perf-gates = []
 
 [lib]
 bench = false
@@ -14,7 +18,11 @@ anyhow = { workspace = true }
 blake3 = "1"
 chrono = { workspace = true }
 fs2 = "0.4"
+globset = "0.4"
 ignore = "0.4.25"
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+parquet = { workspace = true, features = ["arrow"] }
 petgraph = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,6 +30,7 @@ sha1 = "0.10"
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tree-sitter = "0.25"
+tree-sitter-cpp = "0.23"
 tree-sitter-md = "0.5.3"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
@@ -30,9 +39,20 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
+insta = { workspace = true }
+libc = "0.2"
+parquet = { workspace = true, features = ["arrow"] }
 pretty_assertions = "1"
 tempfile = "3"
 
 [[bench]]
 name = "incremental"
 harness = false
+
+[[bench]]
+name = "parquet"
+harness = false
+
+[[bin]]
+name = "capture-baselines"
+path = "benches/capture_baselines.rs"

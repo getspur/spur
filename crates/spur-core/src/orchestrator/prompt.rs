@@ -35,6 +35,7 @@ impl Orchestrator {
              - Do it yourself for quick tasks or when you need tight iterative control\n\
              - Always review worker output before approving\n\n",
         );
+        prompt.push_str(self.render_working_surface_section());
 
         // Issue context.
         if let Some(issue) = issue {
@@ -52,6 +53,8 @@ impl Orchestrator {
         if let Some(ref append) = self.config.brain.prompt.append {
             prompt.push_str(&format!("## Project Context\n\n{}\n\n", append));
         }
+
+        prompt.push_str(Self::notebook_availability_prompt());
 
         // Task.
         prompt.push_str(&format!("## Task\n\n{}\n", task));
@@ -76,6 +79,7 @@ impl Orchestrator {
         if let Some(guidance) = crate::skills::load_skill(&agent_skill, &self.repo_root) {
             prompt.push_str(&guidance);
         }
+        prompt.push_str(Self::notebook_availability_prompt());
         self.append_issue_and_task(&mut prompt, task, issue);
         self.log_prompt_once(&prompt, session_id);
         prompt
@@ -85,7 +89,14 @@ impl Orchestrator {
         "You are a brain coordinating a coding task. You have two kinds of tools:\n\
          \n\
          1. Your own tools (filesystem, bash, git) — for investigation and direct edits.\n\
-         2. SPUR delegation tools (delegate_to_worker, delegate_parallel, list_available_workers) — for handing work to worker agents that run in isolated worktrees.\n\n".into()
+         2. SPUR delegation tools (delegate_to_worker, delegate_parallel, list_available_workers) — for handing work to worker agents that run in isolated worktrees.\n\n"
+            .to_string()
+            + self.render_working_surface_section()
+    }
+
+    pub(super) fn render_working_surface_section(&self) -> &'static str {
+        "## WORKING SURFACE\n\n\
+         When a SPUR notebook is available, treat markdown cells = reasoning artifacts / working notes, code cells = computation, and cell outputs = shared memory with the user. Keep chat as a short control channel that points at the cells you wrote.\n\n"
     }
 
     pub(super) fn render_workers_block(&self) -> String {
@@ -150,6 +161,16 @@ impl Orchestrator {
         prompt.push_str(&format!("## Task\n\n{}\n", task));
     }
 
+    fn notebook_availability_prompt() -> &'static str {
+        "## NOTEBOOK AVAILABILITY\n\n\
+         The `notebook.*` MCP server is always reachable, but a notebook may not be loaded. \
+         If a notebook tool returns `notebook_not_open`, tell the user in chat: \
+         \"I need a notebook open to do that - try `/notebook <path>` or `/notebook new`.\" \
+         Read `notebook.kernel_info.generation` before relying on prior executed state; \
+         if generation is lower than your last observed value or returns to 1 after a \
+         daemon restart, re-run dependency cells before using their variables.\n\n"
+    }
+
     pub(super) fn log_prompt_once(&self, prompt: &str, session_id: &SessionId) {
         let dir = self.repo_root.join(".spur/logs/brain-prompts");
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -164,5 +185,27 @@ impl Orchestrator {
             tracing::debug!(error = %e, path = %path.display(), "could not write prompt log");
         }
         enforce_log_cap(&dir, 50 * 1024 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn brain_prompt_header_contains_working_surface_guidance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let orchestrator = Orchestrator::new(
+            tmp.path().to_path_buf(),
+            spur_acp::config::SpurConfig::default(),
+            None,
+        )
+        .unwrap();
+
+        let header = orchestrator.render_header();
+
+        assert!(header.contains("## WORKING SURFACE"));
+        assert!(header.contains("markdown cells = reasoning artifacts"));
+        assert!(header.contains("code cells = computation"));
     }
 }
