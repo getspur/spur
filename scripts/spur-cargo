@@ -1,23 +1,68 @@
 #!/usr/bin/env bash
 # spur-cargo — project-standard cargo wrapper.
 #
-# Injects scripts/sccache-worktree.sh as RUSTC_WRAPPER unless the caller already
-# set RUSTC_WRAPPER. Keeping this out of .cargo/config.toml prevents cargo-dist
-# and Windows CI from inheriting a Unix shell wrapper.
+# Two modes:
+#   1. Remote (default when <main_repo>/.spur/remote-cargo.enabled exists, or
+#      SPUR_REMOTE=1): for compile-heavy subcommands (build/check/test/clippy/doc)
+#      dispatch to scripts/gcp-build/build.sh which runs cargo on the GCP VM with
+#      the GCS-backed sccache. Falls back to local cargo if the VM is missing and
+#      auto-spin fails.
+#   2. Local: original behavior — injects scripts/sccache-worktree.sh as
+#      RUSTC_WRAPPER and execs cargo.
+#
+# Per-invocation overrides:
+#   SPUR_REMOTE=0   → force local (e.g. fmt, run, debugging)
+#   SPUR_REMOTE=1   → force remote (e.g. CI)
 #
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
+#      scripts/gcp-build/ — remote build pipeline
 set -euo pipefail
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_DIR="${SCRIPT_PATH%/*}"
-if [[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]]; then
-    SCRIPT_DIR="."
-fi
+[[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]] && SCRIPT_DIR="."
 SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd -P)
 WRAPPER="$SCRIPT_DIR/sccache-worktree.sh"
+REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"
 
+# ---- resolve main repo (where the marker file lives) -----------------------
+MAIN_REPO=""
+if GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null); then
+    # In a worktree, --git-common-dir points to the main repo's .git directory.
+    if [[ -d "$GIT_COMMON_DIR" ]]; then
+        MAIN_REPO=$(cd "$GIT_COMMON_DIR/.." && pwd -P)
+    fi
+fi
+
+# ---- decide local vs remote ------------------------------------------------
+REMOTE_ENABLED=0
+if [[ "${SPUR_REMOTE:-}" == "1" ]]; then
+    REMOTE_ENABLED=1
+elif [[ "${SPUR_REMOTE:-}" == "0" ]]; then
+    REMOTE_ENABLED=0
+elif [[ -n "$MAIN_REPO" && -f "$MAIN_REPO/.spur/remote-cargo.enabled" ]]; then
+    REMOTE_ENABLED=1
+fi
+
+SUBCOMMAND="${1:-}"
+case "$SUBCOMMAND" in
+    build|check|test|clippy|doc)
+        REMOTE_CAPABLE=1 ;;
+    *)
+        REMOTE_CAPABLE=0 ;;
+esac
+
+# ---- remote dispatch -------------------------------------------------------
+if [[ $REMOTE_ENABLED -eq 1 && $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
+    echo "[spur-cargo] remote ($SUBCOMMAND) → GCP VM" >&2
+    if "$REMOTE_BUILD_SH" --auto-spin -- "$@"; then
+        exit 0
+    fi
+    echo "[spur-cargo] remote dispatch failed — falling back to local cargo" >&2
+fi
+
+# ---- local fallback (original behavior) ------------------------------------
 if [[ -z "${RUSTC_WRAPPER+x}" ]]; then
     export RUSTC_WRAPPER="$WRAPPER"
 fi
-
 exec cargo "$@"
