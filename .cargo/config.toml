@@ -12,6 +12,8 @@ rustflags = ["-C", "force-frame-pointers=yes"]
 spur-profile = "build --profile profiling"
 # One-step flamegraph for the main spur binary
 spur-flamegraph = "flamegraph --profile profiling --bin spur"
+# Install `spur` + `spur-notebook` to $CARGO_HOME/bin as siblings.
+xtask = "run --package xtask --quiet --"
 
 [env]
 SPUR_TELEMETRY = "0"
