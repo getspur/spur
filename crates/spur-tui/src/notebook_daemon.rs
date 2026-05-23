@@ -118,12 +118,25 @@ async fn supervise(spec: DaemonCommandSpec, mut shutdown_rx: oneshot::Receiver<(
 }
 
 fn spawn_child(spec: &DaemonCommandSpec) -> std::io::Result<Child> {
+    let log_path = spur_core::notebook::control_socket_path()
+        .parent()
+        .map(|dir| dir.join("daemon.log"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/spur-notebook-daemon.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .kill_on_drop(true);
     command.spawn()
 }

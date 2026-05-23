@@ -55,6 +55,10 @@ pub trait BridgeRequester: Send + Sync {
             })
         })
     }
+
+    fn drain_on_shutdown<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +215,11 @@ impl BridgeRequester for TauriBridgeRequester {
             }),
             None => Box::pin(async { Err(BridgeError::NotebookNotOpen) }),
         }
+    }
+
+    fn drain_on_shutdown<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let bridge = Arc::clone(&self.bridge);
+        Box::pin(async move { bridge.drain_on_shutdown().await })
     }
 }
 
