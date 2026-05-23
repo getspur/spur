@@ -9369,6 +9369,7 @@ dependencies = [
  "serde_json",
  "spur-core",
  "tauri",
+ "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-opener",
