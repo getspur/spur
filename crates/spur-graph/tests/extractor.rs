@@ -7,11 +7,11 @@ use std::time::Duration;
 use pretty_assertions::assert_eq;
 use spur_graph::build_facts;
 use spur_graph::graph::petgraph_builder::build_petgraph;
-use spur_graph::store::json::{
-    artifact_from_facts, artifact_from_facts_incremental, write_artifact, BuildMode,
-};
-use spur_graph::{load_artifact, read_artifact_header};
-use spur_graph::{Confidence, NodeKind, RelationKind};
+use spur_graph::load_artifact;
+use spur_graph::store::build::{artifact_from_facts, artifact_from_facts_incremental, BuildMode};
+use spur_graph::store::canonical_hash::*;
+use spur_graph::store::parquet::{write_artifact_parquet, WriteOptions};
+use spur_graph::{Confidence, GraphEdgeKind, NodeKind, RelationKind};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_corpus")
@@ -52,6 +52,15 @@ fn typescript_golden_path() -> PathBuf {
         .join("tests/fixtures/typescript_corpus/expected_graph_index.json")
 }
 
+fn cpp_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpp_corpus")
+}
+
+fn cpp_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cpp_corpus/expected_graph_index.json")
+}
+
 fn markdown_fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/markdown_corpus")
 }
@@ -75,6 +84,8 @@ fn normalize_for_comparison(
     for entry in &mut artifact.file_manifests {
         entry.node_ids.clear();
     }
+    artifact.file_node_ids.clear();
+    artifact.symbol_node_ids.clear();
     artifact.tombstones.clear();
     artifact
 }
@@ -99,15 +110,269 @@ fn call_edge_target_for(
         .and_then(|edge| edge.target_stable_symbol_id.clone())
 }
 
-fn write_and_read_content_hash(
-    artifact: &spur_graph::GraphIndexArtifact,
-    path: &std::path::Path,
-) -> String {
-    write_artifact(artifact, path).expect("write artifact");
-    read_artifact_header(path)
-        .expect("read artifact header")
-        .content_hash_blake3
-        .expect("writer should stamp BLAKE3 content hash")
+fn content_hash(artifact: &spur_graph::GraphIndexArtifact) -> String {
+    artifact_content_hash_blake3_hex(artifact).expect("compute artifact content hash")
+}
+
+fn find_symbol_json<'a>(
+    symbols: &'a [serde_json::Value],
+    kind: &str,
+    entity_name: &str,
+    enclosing_scope: Option<&str>,
+) -> &'a serde_json::Value {
+    symbols
+        .iter()
+        .find(|symbol| {
+            symbol["symbol_kind"] == kind
+                && symbol["entity_name"] == entity_name
+                && symbol
+                    .get("enclosing_scope")
+                    .and_then(serde_json::Value::as_str)
+                    == enclosing_scope
+        })
+        .unwrap_or_else(|| {
+            panic!("missing symbol kind={kind} entity_name={entity_name} scope={enclosing_scope:?}")
+        })
+}
+
+#[test]
+fn graph_store_schema_version_is_v5() {
+    assert_eq!(
+        spur_graph::store::build::SCHEMA_VERSION,
+        "spur-graph-schema-v5"
+    );
+}
+
+#[test]
+fn artifact_symbols_persist_qualified_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+pub fn top() {}
+
+mod a {
+    pub fn f() {}
+
+    pub mod b {
+        pub fn f() {}
+    }
+}
+
+struct Cache;
+
+impl Cache {
+    pub fn run(&self) {}
+}
+
+trait Service {
+    fn service(&self);
+}
+
+struct Store;
+
+impl Service for Store {
+    fn method(&self) {}
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let artifact_json = serde_json::to_value(&artifact).expect("artifact json");
+    let symbols = artifact_json["symbols"]
+        .as_array()
+        .expect("symbols should serialize as array");
+
+    assert_eq!(
+        find_symbol_json(symbols, "function", "top", None)["qualified_name"],
+        "top"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "function", "f", Some("a"))["qualified_name"],
+        "a::f"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "function", "f", Some("b"))["qualified_name"],
+        "a::b::f"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "method", "run", Some("impl Cache"))["qualified_name"],
+        "impl Cache::run"
+    );
+    assert!(
+        symbols.iter().any(|symbol| {
+            symbol["symbol_kind"] == "impl" && symbol["entity_name"] == "Service for Store"
+        }),
+        "expected trait impl symbol to preserve trait and type in entity_name"
+    );
+    assert_eq!(
+        find_symbol_json(symbols, "method", "method", Some("impl Service for Store"))
+            ["qualified_name"],
+        "impl Service for Store::method"
+    );
+}
+
+#[test]
+fn artifact_distinguishes_struct_and_inherent_impl_qualified_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+struct App;
+
+impl App {
+    fn run(&self) {}
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+    let app_struct = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "struct" && symbol.entity_name == "App")
+        .expect("struct App symbol");
+    let app_impl = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "impl" && symbol.entity_name == "App")
+        .expect("impl App symbol");
+    let run_method = artifact
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.symbol_kind == "method"
+                && symbol.entity_name == "run"
+                && symbol.enclosing_scope.as_deref() == Some("impl App")
+        })
+        .expect("impl App::run method symbol");
+
+    assert_ne!(
+        app_struct.stable_symbol_id, app_impl.stable_symbol_id,
+        "struct App and impl App should remain distinct symbols"
+    );
+    assert_eq!(app_struct.qualified_name, "App");
+    assert_eq!(app_impl.qualified_name, "impl App");
+    assert_eq!(run_method.qualified_name, "impl App::run");
+}
+
+#[test]
+fn rust_extractor_emits_mcp_tool_symbol_for_tool_definition_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+struct ToolDefinition {
+    name: String,
+}
+
+fn submit_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan".into(),
+        description: "".into(),
+        input_schema: json!({}),
+    }
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let submit_plan_def = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "function" && symbol.entity_name == "submit_plan_def")
+        .expect("submit_plan_def function symbol");
+    let mcp_tool = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "mcp_tool" && symbol.entity_name == "submit_plan")
+        .expect("submit_plan MCP tool symbol");
+
+    assert_eq!(mcp_tool.qualified_name, "submit_plan");
+    assert_eq!(mcp_tool.file_path, "src/lib.rs");
+    assert_eq!(mcp_tool.enclosing_scope.as_deref(), Some("submit_plan_def"));
+    assert_ne!(
+        mcp_tool.stable_symbol_id, submit_plan_def.stable_symbol_id,
+        "MCP tool registration should be a distinct symbol from its factory function"
+    );
+    assert!(
+        artifact.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Contains
+                && edge.source_stable_symbol_id == submit_plan_def.stable_symbol_id
+                && edge.target_stable_symbol_id.as_deref() == Some(&mcp_tool.stable_symbol_id)
+        }),
+        "submit_plan_def should contain the submit_plan MCP tool symbol"
+    );
+}
+
+#[test]
+fn trait_impl_qualified_name_includes_trait_for_type() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+trait Service {
+    fn handle(&self);
+}
+
+struct Store;
+
+impl Service for Store {
+    fn handle(&self) {}
+}
+
+impl Store {}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+    let trait_impl = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "impl" && symbol.entity_name == "Service for Store")
+        .expect("impl Service for Store symbol");
+    let inherent_impl = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.symbol_kind == "impl" && symbol.entity_name == "Store")
+        .expect("impl Store symbol");
+    let handle_method = artifact
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.symbol_kind == "method"
+                && symbol.entity_name == "handle"
+                && symbol.enclosing_scope.as_deref() == Some("impl Service for Store")
+        })
+        .expect("impl Service for Store::handle method symbol");
+
+    assert_eq!(trait_impl.qualified_name, "impl Service for Store");
+    assert_eq!(
+        handle_method.qualified_name,
+        "impl Service for Store::handle"
+    );
+    assert_ne!(
+        trait_impl.stable_symbol_id, inherent_impl.stable_symbol_id,
+        "trait impl and inherent impl should remain distinct symbols"
+    );
 }
 
 enum EditStep {
@@ -162,6 +427,97 @@ fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
 
     let expected = fs::read_to_string(typescript_golden_path()).expect("read golden artifact");
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn cpp_extractor_matches_corpus_golden_artifact() {
+    let root = cpp_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(cpp_golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected = fs::read_to_string(cpp_golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn cpp_extractor_captures_duckdb_style_surface() {
+    let root = cpp_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+
+    let symbol_names: BTreeSet<String> = artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.clone())
+        .collect();
+
+    // Namespaces (Module)
+    assert!(symbol_names.iter().any(|n| n.contains("spurtest")));
+    assert!(symbol_names.iter().any(|n| n.contains("common")));
+
+    // Classes
+    assert!(symbol_names.iter().any(|n| n.ends_with("Catalog")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("CatalogEntry")));
+
+    // In-class methods
+    assert!(symbol_names.iter().any(|n| n.ends_with("Initialize")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("GetEntry")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("Make")));
+
+    // Operator overloads
+    assert!(symbol_names.iter().any(|n| n.contains("operator==")));
+
+    // Out-of-line method definitions retain their Class:: prefix in the qualified name
+    assert!(
+        symbol_names
+            .iter()
+            .any(|n| n.contains("Catalog::Initialize")
+                || n.contains("Catalog ::Initialize")),
+        "out-of-line Catalog::Initialize definition should be captured with its qualified prefix; got {symbol_names:?}"
+    );
+
+    // Preprocessor macros
+    assert!(symbol_names.iter().any(|n| n.ends_with("D_ASSERT")));
+
+    // Type aliases
+    assert!(symbol_names.iter().any(|n| n.ends_with("shared_ptr")));
+    assert!(symbol_names.iter().any(|n| n.ends_with("CatalogPtr")));
+
+    // Edges: at least one #include, at least one using directive, and resolved calls.
+    let import_edges = artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Imports)
+        .count();
+    assert!(
+        import_edges >= 2,
+        "expected #include + using imports, got {import_edges}"
+    );
+
+    let call_edges = artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls)
+        .count();
+    assert!(
+        call_edges >= 2,
+        "expected resolved call edges, got {call_edges}"
+    );
+
+    // Methods should be tagged as Method, not Function, when defined inside a class body.
+    let initialize_is_method = artifact.symbols.iter().any(|symbol| {
+        symbol.entity_name == "Initialize" && symbol.symbol_kind == NodeKind::Method.discriminator()
+    });
+    assert!(
+        initialize_is_method,
+        "Initialize should be tagged as Method (symbol_kind=method)"
+    );
 }
 
 #[test]
@@ -580,15 +936,59 @@ fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
     let calls_edge = facts
         .edges
         .iter()
-        .find(|edge| edge.relation == RelationKind::Calls)
+        .find(|edge| {
+            edge.relation == RelationKind::Calls && edge.edge_kind != Some(GraphEdgeKind::CallsDyn)
+        })
         .expect("fixture has calls edge");
 
     assert_eq!(contains_edge.confidence, Confidence::SyntaxExact);
     assert_eq!(contains_edge.confidence_score, 1.0);
     assert_eq!(imports_edge.confidence, Confidence::Heuristic);
     assert_eq!(imports_edge.confidence_score, 0.8);
-    assert_eq!(calls_edge.confidence, Confidence::Heuristic);
-    assert_eq!(calls_edge.confidence_score, 0.8);
+    assert_eq!(calls_edge.confidence, Confidence::SyntaxExact);
+    assert_eq!(calls_edge.confidence_score, 1.0);
+}
+
+#[test]
+fn rust_extractor_keeps_methods_in_their_nearest_impl_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+pub struct McpCallbackServer;
+
+impl McpCallbackServer {
+    pub fn start(&self) {}
+}
+
+impl McpCallbackServer {
+    pub fn stop(&self) {}
+}
+
+impl Drop for McpCallbackServer {
+    fn drop(&mut self) {}
+}
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+    let scope_for = |name: &str| {
+        artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.entity_name == name && symbol.symbol_kind == "method")
+            .and_then(|symbol| symbol.enclosing_scope.as_deref())
+    };
+
+    assert_eq!(scope_for("start"), Some("impl McpCallbackServer"));
+    assert_eq!(scope_for("stop"), Some("impl McpCallbackServer"));
+    assert_eq!(scope_for("drop"), Some("impl Drop for McpCallbackServer"));
 }
 
 #[test]
@@ -694,19 +1094,24 @@ fn artifact_writer_round_trips_through_existing_reader() {
     let facts = build_facts(&root).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("graph_index.json");
+    let path = write_artifact_parquet(&artifact, dir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
 
-    write_artifact(&artifact, &path).expect("write artifact");
     let loaded = load_artifact(&path).expect("existing reader loads writer output");
 
-    assert_eq!(loaded.files, artifact.files);
-    assert_eq!(loaded.symbols, artifact.symbols);
-    assert_eq!(loaded.edges, artifact.edges);
-    let hash = loaded
-        .header
-        .content_hash_blake3
-        .as_deref()
-        .expect("writer should stamp BLAKE3 content hash");
+    assert_eq!(
+        sorted_files(loaded.files.clone()),
+        sorted_files(artifact.files.clone())
+    );
+    assert_eq!(
+        sorted_symbols(loaded.symbols.clone()),
+        sorted_symbols(artifact.symbols.clone())
+    );
+    assert_eq!(
+        sorted_edges(loaded.edges.clone()),
+        sorted_edges(artifact.edges.clone())
+    );
+    let hash = loaded.graph_content_hash.as_str();
     assert_eq!(hash.len(), 64, "blake3 hex hash should be 64 chars");
     assert!(
         hash.chars()
@@ -720,25 +1125,50 @@ fn artifact_writer_round_trips_through_existing_reader() {
     }));
 }
 
+fn sorted_files(
+    mut files: Vec<spur_graph::GraphFileArtifact>,
+) -> Vec<spur_graph::GraphFileArtifact> {
+    files.sort_by(|left, right| left.stable_file_id.cmp(&right.stable_file_id));
+    files
+}
+
+fn sorted_symbols(
+    mut symbols: Vec<spur_graph::GraphSymbolArtifact>,
+) -> Vec<spur_graph::GraphSymbolArtifact> {
+    symbols.sort_by(|left, right| left.stable_symbol_id.cmp(&right.stable_symbol_id));
+    symbols
+}
+
+fn sorted_edges(
+    mut edges: Vec<spur_graph::GraphEdgeArtifact>,
+) -> Vec<spur_graph::GraphEdgeArtifact> {
+    edges.sort_by(|left, right| {
+        left.source_stable_symbol_id
+            .cmp(&right.source_stable_symbol_id)
+            .then(
+                left.target_stable_symbol_id
+                    .cmp(&right.target_stable_symbol_id),
+            )
+            .then(left.target_label.cmp(&right.target_label))
+            .then(format!("{:?}", left.relation).cmp(&format!("{:?}", right.relation)))
+    });
+    edges
+}
+
 #[test]
 fn artifact_writer_hash_is_deterministic_for_identical_content() {
     let root = fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
-    let dir = tempfile::tempdir().expect("tempdir");
-    let first_path = dir.path().join("graph_index.first.json");
-    let second_path = dir.path().join("graph_index.second.json");
 
-    write_artifact(&artifact, &first_path).expect("write first artifact");
-    write_artifact(&artifact, &second_path).expect("write second artifact");
+    let first = content_hash(&artifact);
+    let second = content_hash(&artifact);
 
-    let first = read_artifact_header(&first_path).expect("read first header");
-    let second = read_artifact_header(&second_path).expect("read second header");
     assert_eq!(
-        first.content_hash_blake3, second.content_hash_blake3,
+        first, second,
         "identical artifact content should produce identical BLAKE3 hashes"
     );
-    assert!(first.content_hash_blake3.is_some());
+    assert_eq!(first.len(), 64);
 }
 
 #[test]
@@ -752,10 +1182,8 @@ fn artifact_writer_hash_changes_when_symbol_content_changes() {
         .first_mut()
         .expect("fixture should contain at least one symbol");
     symbol.entity_name.push_str("_mutated");
-    let dir = tempfile::tempdir().expect("tempdir");
-
-    let original_hash = write_and_read_content_hash(&artifact, &dir.path().join("original.json"));
-    let mutated_hash = write_and_read_content_hash(&mutated, &dir.path().join("mutated.json"));
+    let original_hash = content_hash(&artifact);
+    let mutated_hash = content_hash(&mutated);
 
     assert_ne!(
         original_hash, mutated_hash,
@@ -777,10 +1205,8 @@ fn artifact_writer_hash_changes_when_edge_content_changes() {
         Some(label) => format!("{label}_mutated"),
         None => "mutated_target".to_string(),
     });
-    let dir = tempfile::tempdir().expect("tempdir");
-
-    let original_hash = write_and_read_content_hash(&artifact, &dir.path().join("original.json"));
-    let mutated_hash = write_and_read_content_hash(&mutated, &dir.path().join("mutated.json"));
+    let original_hash = content_hash(&artifact);
+    let mutated_hash = content_hash(&mutated);
 
     assert_ne!(
         original_hash, mutated_hash,
@@ -804,6 +1230,34 @@ fn artifact_persists_in_file_contains_edges() {
         .iter()
         .find(|symbol| symbol.file_path == "src/lib.rs" && symbol.entity_name == "build_app")
         .expect("build_app symbol");
+    let file_index = artifact
+        .files
+        .iter()
+        .position(|candidate| candidate.stable_file_id == file.stable_file_id)
+        .expect("file node id index");
+    let symbol_index = artifact
+        .symbols
+        .iter()
+        .position(|candidate| candidate.stable_symbol_id == function.stable_symbol_id)
+        .expect("symbol node id index");
+    let expected_file_node_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.stable_key == file.stable_file_id)
+        .expect("file fact node")
+        .node_id;
+    let expected_symbol_node_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.stable_key == function.stable_symbol_id)
+        .expect("symbol fact node")
+        .node_id;
+
+    assert_eq!(artifact.file_node_ids[file_index], expected_file_node_id);
+    assert_eq!(
+        artifact.symbol_node_ids[symbol_index],
+        expected_symbol_node_id
+    );
 
     assert!(artifact.edges.iter().any(|edge| {
         edge.relation == RelationKind::Contains
@@ -869,24 +1323,245 @@ fn resolve_pending_edges_surfaces_ambiguous_labels() {
         .count();
     assert_eq!(process_nodes, 2, "fixture must contain ambiguous label");
 
+    let process_calls: Vec<_> = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls)
+        .filter(|edge| edge.target_label.as_deref() == Some("process"))
+        .collect();
+    assert_eq!(process_calls.len(), 1);
+    assert_eq!(
+        process_calls[0].target_node_id, None,
+        "calls to ambiguous `process` should remain unresolved"
+    );
+}
+
+#[test]
+fn rust_extractor_emits_resolved_references_for_hof_function_values() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn edge_row(value: i32) -> i32 { value }\n\
+         pub fn count_fn(acc: usize, _value: i32) -> usize { acc + 1 }\n\
+         pub fn caller(items: Vec<i32>) -> (Vec<i32>, usize) {\n\
+             let mapped = items.iter().copied().map(edge_row).collect();\n\
+             let counted = items.into_iter().fold(0, count_fn);\n\
+             (mapped, counted)\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
     let labels_by_id: std::collections::HashMap<_, _> = facts
         .nodes
         .iter()
         .map(|node| (node.node_id, node.label.as_str()))
         .collect();
-    let process_calls = facts
+    let caller = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "caller" && node.kind == NodeKind::Function)
+        .expect("caller function");
+
+    let reference_targets: BTreeSet<_> = facts
         .edges
         .iter()
-        .filter(|edge| edge.relation == RelationKind::Calls)
-        .filter(|edge| {
-            edge.target_node_id
-                .and_then(|target_node_id| labels_by_id.get(&target_node_id).copied())
-                == Some("process")
+        .filter(|edge| edge.relation == RelationKind::References)
+        .filter(|edge| edge.source_node_id == caller.node_id)
+        .map(|edge| {
+            let target = edge.target_node_id.expect("resolved reference target");
+            (
+                edge.target_label.as_deref().expect("target label"),
+                *labels_by_id.get(&target).expect("target node label"),
+            )
         })
+        .collect();
+
+    assert_eq!(
+        reference_targets,
+        BTreeSet::from([("count_fn", "count_fn"), ("edge_row", "edge_row")])
+    );
+}
+
+#[test]
+fn rust_extractor_drops_unresolved_hof_function_value_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn caller(items: Vec<i32>) {\n\
+             items.into_iter().map(local_var);\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+
+    assert!(!facts.edges.iter().any(|edge| {
+        edge.relation == RelationKind::References
+            && edge.target_label.as_deref() == Some("local_var")
+    }));
+}
+
+#[test]
+fn rust_extractor_drops_references_resolved_to_non_callable_symbols() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub struct EdgeRow;\n\
+         pub fn caller(items: Vec<i32>) {\n\
+             items.into_iter().map(EdgeRow);\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.label == "EdgeRow" && node.kind == NodeKind::Struct));
+
+    assert!(!facts.edges.iter().any(|edge| {
+        edge.relation == RelationKind::References && edge.target_label.as_deref() == Some("EdgeRow")
+    }));
+}
+
+#[test]
+fn rust_extractor_drops_ambiguous_hof_function_value_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn helper(value: i32) -> i32 { value }\n\
+         pub mod inner {\n\
+             pub fn helper(value: i32) -> i32 { value }\n\
+         }\n\
+         pub fn caller(items: Vec<i32>) {\n\
+             items.into_iter().map(helper);\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let helper_nodes = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "helper")
         .count();
+    assert_eq!(helper_nodes, 2, "fixture must contain ambiguous label");
+
+    assert!(!facts.edges.iter().any(|edge| {
+        edge.relation == RelationKind::References && edge.target_label.as_deref() == Some("helper")
+    }));
+}
+
+#[test]
+fn rust_extractor_ignores_identifier_shaped_strings_when_resolving_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn submit_plan() {}\n\
+         pub fn submit_plan_def() {\n\
+             let _name = \"submit_plan\".into();\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let submit_plan_def = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "submit_plan_def")
+        .expect("submit_plan_def symbol");
+    let submit_plan = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "submit_plan")
+        .expect("submit_plan symbol");
+
+    assert!(!artifact.edges.iter().any(|edge| {
+        edge.source_stable_symbol_id == submit_plan_def.stable_symbol_id
+            && edge.target_stable_symbol_id.as_deref()
+                == Some(submit_plan.stable_symbol_id.as_str())
+            && edge.target_label.as_deref() == Some("submit_plan")
+    }));
+    assert!(!artifact.edges.iter().any(|edge| {
+        edge.source_stable_symbol_id == submit_plan_def.stable_symbol_id
+            && edge.target_stable_symbol_id.is_none()
+            && edge.target_label.as_deref() == Some("submit_plan")
+    }));
+}
+
+#[test]
+fn rust_extractor_resolves_explicit_dyn_trait_receiver_calls_to_trait_methods() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "use std::rc::Rc;\n\
+         use std::sync::Arc;\n\
+         pub trait Worker {\n\
+             fn run(&self);\n\
+         }\n\
+         pub fn by_ref(by_ref: &dyn Worker) {\n\
+             by_ref.run();\n\
+         }\n\
+         pub fn by_mut(by_mut: &mut dyn Worker) {\n\
+             by_mut.run();\n\
+         }\n\
+         pub fn boxed(boxed: Box<dyn Worker>) {\n\
+             boxed.run();\n\
+         }\n\
+         pub fn arced(arced: Arc<dyn Worker>) {\n\
+             arced.run();\n\
+         }\n\
+         pub fn rced(rced: Rc<dyn Worker>) {\n\
+             rced.run();\n\
+         }\n\
+         pub fn generic<T: Worker>(value: T) {\n\
+             value.run();\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, root).expect("artifact");
+    let worker_run = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == "Worker::run" && symbol.symbol_kind == "method")
+        .expect("Worker::run method symbol");
+
+    let dyn_edges: Vec<_> = artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_kind == Some(GraphEdgeKind::CallsDyn))
+        .collect();
+
+    assert_eq!(dyn_edges.len(), 5);
     assert!(
-        process_calls <= 1,
-        "calls to ambiguous `process` should resolve to at most one target"
+        dyn_edges.iter().all(|edge| {
+            edge.target_stable_symbol_id.as_deref() == Some(worker_run.stable_symbol_id.as_str())
+                && edge.target_label.as_deref() == Some("Worker::run")
+                && edge.confidence == Confidence::Heuristic
+        }),
+        "dyn edges: {dyn_edges:#?}; worker_run: {worker_run:#?}"
     );
 }
 

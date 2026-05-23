@@ -17,9 +17,11 @@ members = [
     "crates/spur-telemetry",
     "crates/spur-context",
     "crates/spur-graph",
+    "crates/spur-notebook",
+    "crates/spur-notebook/jute-notebook/src-tauri",
 ]
 [workspace.package]
-version = "1.1.16"
+version = "1.1.20"
 edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0-only"
@@ -37,6 +39,9 @@ pin-project-lite = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+parquet = { version = "55", default-features = false, features = ["zstd"] }
+arrow-array = "55"
+arrow-schema = "55"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -81,6 +86,7 @@ regex = "1"
 semver = "1"
 sha2 = "0.10"
 proptest = "1"
+insta = "=1.41.1"
 petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }
 
 # ACP SDK
@@ -101,6 +107,7 @@ spur-interactive = { path = "crates/spur-interactive" }
 spur-bot = { path = "crates/spur-bot" }
 spur-context = { path = "crates/spur-context" }
 spur-graph = { path = "crates/spur-graph" }
+
 
 # The profile that 'dist' will build with
 [profile.dist]

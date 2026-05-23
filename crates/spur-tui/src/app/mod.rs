@@ -420,6 +420,7 @@ pub struct App {
     /// file via `update_config`. `None` in test fixtures and when the TUI
     /// is launched without a discoverable repo-local config.
     config_path: Option<std::path::PathBuf>,
+    notebook_ui_config: crate::notebook_config::NotebookUiConfig,
     /// Active theme resolved at startup from `config.tui.theme` via the
     /// project → user → built-in cascade. Surfaces read tokens off this
     /// reference; the dark built-in is a pixel-perfect reproduction of

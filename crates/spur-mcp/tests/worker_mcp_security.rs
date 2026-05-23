@@ -10,9 +10,11 @@
 //!      unstored outcome, `fetch_outcome_artifact` also fails closed
 //!      (NotFound→Unauthorized).
 //!
-//!   2. `enable_worker_mcp = false` (and `None`) strictly preserves an
-//!      empty `mcp_servers` vec — the historical "Workers get no MCP
-//!      servers" contract. The fetch closure must not be invoked.
+//!   2. Default-on worker MCP gating: only an explicit
+//!      `enable_worker_mcp = Some(false)` preserves an empty
+//!      `mcp_servers` vec (and skips the fetch closure). `None`
+//!      (omitted) and `Some(true)` both inject the single
+//!      `spur-worker-mcp` entry.
 //!
 //!   3. Cross-`BrainSession` `fetch_outcome_artifact` returns
 //!      Unauthorized (-32001). `OutcomeKey.brain_session_id` is taken
@@ -248,6 +250,14 @@ async fn post_with_session_id(
     request.send().await.expect("session request must complete")
 }
 
+fn json_rpc_payload_from_sse(body: &str, id: i64) -> Value {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|payload| payload.get("id").and_then(Value::as_i64) == Some(id))
+        .unwrap_or_else(|| panic!("SSE body did not include JSON-RPC id {id}: {body}"))
+}
+
 async fn wait_for_read_aggregate(
     pm: &PmService,
     issue_id: &str,
@@ -378,28 +388,30 @@ async fn t30_cross_delegation_spoof_rejected() {
     worker.shutdown(Duration::from_secs(5)).await;
 }
 
-// ─────────────── Test 31: enable_worker_mcp = false → vec![] ───────────────
+// ─────────────── Test 31: enable_worker_mcp default-on contract ──────────
 
-/// Locks the historical "Workers get no MCP servers" contract.
+/// Locks the default-on "Workers get the curated MCP server unless they
+/// explicitly opt out" contract.
 ///
 /// `build_worker_mcp_servers_with` (private to spur-core) is the single
 /// helper the orchestrator's dispatch path runs to assemble the worker
-/// `mcp_servers` slice. Its contract is: when `enable_worker_mcp` is
-/// `None` or `Some(false)`, return `Vec::new()` AND skip the fetch
-/// closure (so no `WorkerMcpServer` is booted as a side effect).
+/// `mcp_servers` slice. Its contract is: only `Some(false)` returns
+/// `Vec::new()` AND skips the fetch closure; `None` (omitted) and
+/// `Some(true)` both run the fetch and inject a single
+/// `spur-worker-mcp` entry.
 ///
 /// Reproduce the helper logic here (identical to the orchestrator's
-/// source at `crates/spur-core/src/orchestrator.rs:2585-2594`) and
-/// assert the contract on both `None` and `Some(false)`. Cross-checked
-/// by the live unit tests in
-/// `crates/spur-core/src/orchestrator.rs::worker_mcp_dispatch_tests`.
+/// source at `crates/spur-core/src/orchestrator/worker_mcp.rs`) and
+/// assert the contract on `None`, `Some(false)`, and `Some(true)`.
+/// Cross-checked by the live unit tests in
+/// `crates/spur-core/src/orchestrator/worker_mcp.rs::worker_mcp_cache_tests`.
 #[tokio::test]
-async fn t31_enable_worker_mcp_false_preserves_empty_vec() {
+async fn t31_enable_worker_mcp_default_on_contract() {
     fn simulate_dispatch<F>(flag: Option<bool>, mut fetch: F) -> Vec<McpServer>
     where
         F: FnMut() -> (String, String),
     {
-        if !flag.unwrap_or(false) {
+        if !flag.unwrap_or(true) {
             return Vec::new();
         }
         let (url, token) = fetch();
@@ -409,26 +421,43 @@ async fn t31_enable_worker_mcp_false_preserves_empty_vec() {
         ))]
     }
 
-    for flag in [None, Some(false)] {
+    // Some(false) → opt-out: zero entries, fetch must not run.
+    let mut fetch_called = false;
+    let result = simulate_dispatch(Some(false), || {
+        fetch_called = true;
+        ("http://127.0.0.1:1/mcp".into(), "tok".into())
+    });
+    assert_eq!(
+        result.len(),
+        0,
+        "Some(false) must produce zero entries (got len={})",
+        result.len()
+    );
+    assert!(
+        !fetch_called,
+        "fetch closure must NOT run when enable_worker_mcp = Some(false)"
+    );
+
+    // None (omitted) and Some(true) → default-on: one entry, fetch runs.
+    for flag in [None, Some(true)] {
         let mut fetch_called = false;
         let result = simulate_dispatch(flag, || {
             fetch_called = true;
-            ("http://127.0.0.1:1/mcp".into(), "tok".into())
+            ("http://127.0.0.1:54321/mcp".into(), "tok-xyz".into())
         });
         assert_eq!(
             result.len(),
-            0,
-            "enable_worker_mcp = {flag:?} must produce zero entries (got len={})",
-            result.len()
+            1,
+            "enable_worker_mcp = {flag:?} must produce exactly one entry",
         );
         assert!(
-            !fetch_called,
-            "fetch closure must NOT run when enable_worker_mcp = {flag:?}"
+            fetch_called,
+            "fetch closure must run when enable_worker_mcp = {flag:?}"
         );
     }
 
-    // Sanity: with Some(true), exactly one entry, no other accidental
-    // additions, name pinned to "spur-worker-mcp".
+    // Sanity: with Some(true), entry name pinned to "spur-worker-mcp"
+    // and URL carries the token.
     let result = simulate_dispatch(Some(true), || {
         ("http://127.0.0.1:54321/mcp".into(), "tok-xyz".into())
     });
@@ -704,13 +733,14 @@ async fn post_initialize_request_without_token_succeeds_with_valid_session_id() 
         "valid server-issued session id should authorize post-initialize requests without token"
     );
     let body = response.text().await.expect("tools/list body");
+    let payload = json_rpc_payload_from_sse(&body, 2);
     assert!(
-        body.contains("\"result\""),
-        "expected successful JSON-RPC result payload, got: {body}"
+        payload.get("result").is_some(),
+        "expected successful JSON-RPC result payload, got: {payload}"
     );
     assert!(
-        !body.contains("\"error\""),
-        "valid session-id request must not return unauthorized error: {body}"
+        payload.get("error").is_none(),
+        "valid session-id request must not return unauthorized error: {payload}"
     );
 
     worker.shutdown(Duration::from_secs(5)).await;

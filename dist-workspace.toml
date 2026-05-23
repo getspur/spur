@@ -38,6 +38,17 @@ pr-run-mode = "plan"
 allow-dirty = ["ci"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
+
+# GitHub Actions removed ubuntu-22.04 from the hosted runner pool on
+# 2026-05-22; jobs that requested it sat in "waiting for a hosted runner"
+# until they timed out 3 seconds later with no step logs. Pin Linux jobs
+# to ubuntu-24.04 (which the matrix-driven build-local-artifacts jobs
+# also inherit via dist plan output).
+[dist.github-custom-runners.x86_64-unknown-linux-gnu]
+runner = "ubuntu-24.04"
+
+[dist.github-custom-runners.aarch64-unknown-linux-gnu]
+runner = "ubuntu-24.04-arm"
 # Whether to install an updater program
 install-updater = false
 

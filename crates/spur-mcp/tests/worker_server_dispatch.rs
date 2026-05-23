@@ -34,6 +34,24 @@ use tokio::sync::Mutex;
 
 mod common;
 
+struct CwdGuard {
+    original: std::path::PathBuf,
+}
+
+impl CwdGuard {
+    fn enter(path: &Path) -> Self {
+        let original = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set current dir");
+        Self { original }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
+
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
@@ -265,6 +283,11 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "get_task_diff",
         "get_plan_status",
         "fetch_outcome_artifact",
+        "code_search",
+        "code_resolve",
+        "code_file_symbols",
+        "code_symbol_info",
+        "code_read_symbol",
         "code_callers",
         "code_callees",
         "code_subgraph",
@@ -286,6 +309,76 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
             "missing curated tool: {expected}"
         );
     }
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn tools_call_code_graph_metadata_tools_are_reachable() {
+    let (dir, server) = test_server_with_real_pm().await;
+    std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
+    std::fs::write(
+        dir.path().join(".spur/graph-index.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "header": {
+                "graph_index_version": "worker-test"
+            },
+            "manifest_version": "worker-test",
+            "graph_content_hash": "worker-hash",
+            "files": [
+                { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
+            ],
+            "symbols": [
+                {
+                    "stable_symbol_id": "symbol-launch",
+                    "file_path": "src/lib.rs",
+                    "byte_range": [0, 8],
+                    "line_range": [1, 3],
+                    "entity_name": "launch_order",
+                    "qualified_name": "launch_order",
+                    "symbol_kind": "function",
+                    "anchor_hash": "hash-symbol-launch",
+                    "enclosing_scope": null
+                }
+            ],
+            "edges": [],
+            "tombstones": []
+        }))
+        .expect("encode graph fixture"),
+    )
+    .expect("write graph fixture");
+    let _cwd = CwdGuard::enter(dir.path());
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+
+    for (tool, arguments, expected_key) in [
+        (
+            "code_resolve",
+            serde_json::json!({ "selector": "launch_order" }),
+            "candidates",
+        ),
+        (
+            "code_file_symbols",
+            serde_json::json!({ "file": "src/lib.rs" }),
+            "symbols",
+        ),
+        (
+            "code_symbol_info",
+            serde_json::json!({ "selector": "launch_order" }),
+            "symbol",
+        ),
+    ] {
+        let body = call_jsonrpc(
+            &server,
+            &token,
+            "tools/call",
+            serde_json::json!({"name": tool, "arguments": arguments}),
+        )
+        .await;
+        assert!(
+            body["result"].get(expected_key).is_some(),
+            "{tool} should return result.{expected_key}, got: {body}"
+        );
+    }
+
     server.shutdown(Duration::from_secs(5)).await;
 }
 

@@ -248,12 +248,14 @@ fn buckets_from_facts(
                     continue;
                 }
                 let anchor_hash = anchor_hash(worktree_root, &file_path, span);
+                let entity_name = symbol_entity_name(&node.label);
                 let symbol = GraphSymbolArtifact {
                     stable_symbol_id: node.stable_key.clone(),
                     file_path: file_path.clone(),
                     byte_range: [span.start_byte as usize, span.end_byte as usize],
                     line_range: [span.start_line as usize, span.end_line as usize],
-                    entity_name: symbol_entity_name(&node.label),
+                    qualified_name: entity_name.clone(),
+                    entity_name,
                     symbol_kind: symbol_kind(node.kind).to_string(),
                     anchor_hash,
                     enclosing_scope: enclosing_scope(facts, &nodes_by_id, node),
@@ -331,6 +333,7 @@ fn buckets_from_facts(
             confidence: edge.confidence,
             confidence_score: edge.confidence_score,
             change_kind: edge.change_kind.clone(),
+            edge_kind: None,
         });
     }
 
@@ -675,7 +678,9 @@ fn rebuild_from_buckets(
         graph_content_hash,
         file_manifests: manifests,
         files,
+        file_node_ids: Vec::new(),
         symbols,
+        symbol_node_ids: Vec::new(),
         edges,
         tombstones,
         diagnostics: Vec::new(),

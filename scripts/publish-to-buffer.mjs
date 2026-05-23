@@ -34,6 +34,7 @@ function parseArgs(argv) {
     artifact: `resource/growth-loop/${formatLocalDate(new Date())}.md`,
     channelId: '',
     dryRun: false,
+    service: 'twitter',
   };
 
   for (let index = 2; index < argv.length; index += 1) {
@@ -57,6 +58,18 @@ function parseArgs(argv) {
         fatal('--channel-id requires an id.', 1);
       }
       args.channelId = value;
+      index += 1;
+      continue;
+    }
+    if (arg === '--service') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) {
+        fatal('--service requires a value (twitter|threads).', 1);
+      }
+      if (value !== 'twitter' && value !== 'threads') {
+        fatal(`--service must be 'twitter' or 'threads' (got '${value}').`, 1);
+      }
+      args.service = value;
       index += 1;
       continue;
     }
@@ -242,7 +255,8 @@ function buildSingleDraftInput(text, channelId, imageUrls) {
   };
 }
 
-function buildThreadDraftInput(threadPosts, channelId, imageUrls) {
+function buildThreadDraftInput(threadPosts, channelId, imageUrls, service) {
+  const tail = threadPosts.slice(1).map((text) => ({ text, assets: [] }));
   return {
     text: threadPosts[0],
     channelId,
@@ -251,12 +265,7 @@ function buildThreadDraftInput(threadPosts, channelId, imageUrls) {
     saveToDraft: true, // HARDCODED: never queue/schedule. Drafts only.
     assets: assetsForUrls(imageUrls),
     metadata: {
-      twitter: {
-        thread: threadPosts.slice(1).map((text) => ({
-          text,
-          assets: [],
-        })),
-      },
+      [service]: { thread: tail },
     },
   };
 }
@@ -283,21 +292,21 @@ mutation CreateBufferDraft($input: CreatePostInput!) {
   };
 }
 
-function buildDraftRequests(parsed, channelId, imageUrls) {
+function buildDraftRequests(parsed, channelId, imageUrls, service) {
   const requests = [];
 
   if (parsed.singlePost) {
     requests.push({
-      kind: 'single post',
+      kind: `single post (${service})`,
       request: buildCreatePostRequest(buildSingleDraftInput(parsed.singlePost, channelId, imageUrls)),
     });
   }
 
   if (parsed.threadPosts.length > 0) {
     requests.push({
-      kind: 'thread',
+      kind: `thread (${service})`,
       threadDocUrl: BUFFER_THREAD_DOC_URL,
-      request: buildCreatePostRequest(buildThreadDraftInput(parsed.threadPosts, channelId, imageUrls)),
+      request: buildCreatePostRequest(buildThreadDraftInput(parsed.threadPosts, channelId, imageUrls, service)),
     });
   }
 
@@ -338,6 +347,7 @@ async function uploadImage(upload, r2Bucket) {
       `${r2Bucket}/${upload.key}`,
       `--file=${localPath}`,
       `--content-type=${upload.contentType}`,
+      '--remote',
     ]);
   } catch (error) {
     fatal(`R2 upload failed for ${upload.localPath}:\n${error.message}`, 2);
@@ -483,7 +493,7 @@ async function main() {
   }
 
   const plannedImageUrls = uploads.map((upload) => upload.publicUrl);
-  const draftRequests = buildDraftRequests(parsed, args.channelId, plannedImageUrls);
+  const draftRequests = buildDraftRequests(parsed, args.channelId, plannedImageUrls, args.service);
 
   if (args.dryRun) {
     printDryRunPlan(args, env, parsed, uploads, draftRequests);
@@ -495,7 +505,7 @@ async function main() {
     imageUrls.push(await uploadImage(upload, env.r2Bucket));
   }
 
-  const finalDraftRequests = buildDraftRequests(parsed, args.channelId, imageUrls);
+  const finalDraftRequests = buildDraftRequests(parsed, args.channelId, imageUrls, args.service);
   const drafts = [];
   for (const draftRequest of finalDraftRequests) {
     drafts.push(await createBufferDraft(draftRequest));
