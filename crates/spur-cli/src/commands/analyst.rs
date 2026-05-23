@@ -13,10 +13,8 @@ use anyhow::{anyhow, Context, Result};
 use spur_graph::locking::try_lock_exclusive_with_timeout;
 
 const INIT_SQL: &str = include_str!("../../../spur-context/poc/duckdb-analyst/init.sql");
-#[allow(dead_code)]
 const INIT_TEMPORAL_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_temporal.sql");
-#[allow(dead_code)]
 const INIT_DIAGNOSTICS_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_diagnostics.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
@@ -55,6 +53,8 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let artifact_dir = resolve_artifact_dir(root, &options)?;
     verify_schema_version(&artifact_dir)?;
     verify_required_files(&artifact_dir)?;
+    let want_temporal = temporal_files_present(&artifact_dir);
+    let want_diag = diagnostics_present(&artifact_dir);
 
     if !duckdb_cli_present() {
         if !quiet {
@@ -105,7 +105,13 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let _ = std::fs::remove_file(&tmp_db);
 
     let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
-    let sql = INIT_SQL.replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql);
+    let sql_template = [
+        INIT_SQL,
+        if want_temporal { INIT_TEMPORAL_SQL } else { "" },
+        if want_diag { INIT_DIAGNOSTICS_SQL } else { "" },
+    ]
+    .concat();
+    let sql = sql_template.replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql);
 
     let mut child = Command::new("duckdb")
         .arg(&tmp_db)
@@ -248,7 +254,6 @@ const REQUIRED_PARQUETS: &[&str] = &[
     "manifest.json",
 ];
 
-#[allow(dead_code)]
 const TEMPORAL_PARQUETS: &[&str] = &[
     "commits.parquet",
     "symbol_snapshots.parquet",
@@ -271,14 +276,12 @@ pub(crate) fn verify_required_files(artifact_dir: &Path) -> Result<()> {
     ))
 }
 
-#[allow(dead_code)]
 pub(crate) fn temporal_files_present(artifact_dir: &Path) -> bool {
     TEMPORAL_PARQUETS
         .iter()
         .any(|name| artifact_dir.join(name).is_file())
 }
 
-#[allow(dead_code)]
 pub(crate) fn diagnostics_present(artifact_dir: &Path) -> bool {
     artifact_dir.join("diagnostics.parquet").is_file()
 }
