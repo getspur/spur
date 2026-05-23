@@ -300,6 +300,25 @@ impl JsonRpcResponse {
             }),
         }
     }
+
+    pub(crate) fn error_with_data(
+        id: Value,
+        code: i64,
+        message: impl Into<String>,
+        data: Value,
+    ) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: Some(data),
+            }),
+        }
+    }
+
     pub(crate) fn invalid_params(id: Value, msg: impl Into<String>) -> Self {
         Self::error(id, -32602, msg)
     }

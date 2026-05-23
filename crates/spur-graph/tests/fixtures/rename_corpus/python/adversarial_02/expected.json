@@ -1,0 +1,18 @@
+{
+  "class": "crossover",
+  "expected_renames": [],
+  "expected_added": [
+    "py_crossover_alpha_new",
+    "py_crossover_beta_new"
+  ],
+  "expected_deleted": [
+    "py_crossover_left_old",
+    "py_crossover_right_old"
+  ],
+  "expected_ambiguous_candidates": [
+    "py_crossover_alpha_new",
+    "py_crossover_beta_new",
+    "py_crossover_left_old",
+    "py_crossover_right_old"
+  ]
+}

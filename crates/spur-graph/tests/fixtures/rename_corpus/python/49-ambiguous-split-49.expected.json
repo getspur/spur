@@ -1,0 +1,10 @@
+{
+  "expected_renames": [],
+  "expected_added": [
+    "py_candidate_a_49",
+    "py_candidate_b_49"
+  ],
+  "expected_deleted": [
+    "py_legacy_49"
+  ]
+}

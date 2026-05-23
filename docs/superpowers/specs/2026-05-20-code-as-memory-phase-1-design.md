@@ -412,6 +412,18 @@ available for repos that explicitly want linearized history.
 Diff against the empty tree. All files and symbols are `Added`; one
 `SymbolSnapshot` per symbol at that commit.
 
+## Phase 1 known limitations
+
+- **Total rewrite with rename:** if a symbol is renamed and its body is
+  rewritten enough to fall below the calibrated token-bag threshold,
+  Phase 1 emits `Added` + `Deleted` with `ambiguous_rename`
+  diagnostics instead of claiming a low-confidence `RenamedFrom`.
+- **Parameter-only rename:** Tier 2 token bags intentionally include
+  leaf identifiers other than the symbol's own name. Renaming every
+  parameter can therefore drive Jaccard below threshold even when the
+  body shape is otherwise identical; Phase 1 records this as `Added` +
+  `Deleted` with diagnostics rather than guessing.
+
 ### Incremental ingest
 
 Store temporal checkpoints in a **new** file
@@ -667,3 +679,21 @@ For continuity, the intended Phase 2 adds:
 Phase 2 depends on Phase 1's `SymbolSnapshot` model and `RenamedFrom`
 chains. Without snapshots, a mention "at the commit it was authored"
 would have no node to point at.
+
+## Phase 1.5 hardening
+
+Phase 1.5 keeps the same public surface but tightens the persisted graph
+schema and temporal semantics:
+
+- `stable_symbol_id` no longer includes `anchor_hash`. Identity is based
+  on path plus entity name; `anchor_hash` remains snapshot metadata so
+  pure modifications preserve symbol continuity.
+- The temporal graph schema version is bumped to `"3"`. Older artifacts
+  are rejected at load time instead of being interpreted with newer
+  identity or rename semantics.
+- Merge commits are diffed against each parent. Commit-to-snapshot edges
+  retain the parent SHA, so merge-only changes and branch-specific symbol
+  additions are represented without collapsing to a single parent.
+- `SymbolSnapshot --RenamedFrom--> SymbolSnapshot` edges are authoritative
+  for rename traversal. Commit-to-snapshot `RenamedFrom` change kinds are
+  event metadata and are not used as the rename-chain fallback.
