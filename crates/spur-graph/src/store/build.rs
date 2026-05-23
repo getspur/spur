@@ -12,6 +12,7 @@ use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
 use crate::discovery::discover_files;
 use crate::extract::GraphFacts;
 use crate::extract::{build_facts_for_paths, languages::all_supported_extensions};
+use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::validation::compute_anchor_hash;
 use crate::{
     git, graph_edge_kind_or_default, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphEdgeKind,
@@ -19,7 +20,6 @@ use crate::{
     GraphSymbolArtifact, GraphTombstoneEntry, NodeId, NodeKind, RelationKind, SourceSpan,
 };
 
-pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 
@@ -553,6 +553,10 @@ fn buckets_from_facts(
                 entry.symbol_node_ids.push(node.node_id);
                 entry.symbols.push(symbol);
             }
+            NodeKind::Commit => {
+                // Commit nodes belong in artifact.commits, not artifact.symbols.
+                continue;
+            }
         }
     }
 
@@ -606,6 +610,7 @@ fn buckets_from_facts(
             relation: edge.relation,
             confidence: edge.confidence,
             confidence_score: edge.confidence_score,
+            change_kind: None,
             edge_kind: Some(graph_edge_kind_or_default(edge.relation, edge.edge_kind)),
         });
     }
@@ -1050,7 +1055,7 @@ fn rebuild_from_buckets(
 
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: PHASE1_GRAPH_INDEX_VERSION.to_string(),
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
             // Content hash is stamped at write time, after body serialization input is finalized.
             content_hash_blake3: None,
         },
@@ -1064,6 +1069,9 @@ fn rebuild_from_buckets(
         edges,
         tombstones,
         diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
     }
 }
 
@@ -1135,6 +1143,7 @@ fn relation_discriminator(relation: RelationKind) -> &'static str {
         RelationKind::Uses => "uses",
         RelationKind::Extends => "extends",
         RelationKind::Links => "links",
+        RelationKind::Touches => "touches",
     }
 }
 
@@ -1297,7 +1306,7 @@ fn enclosing_scope(
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1305,14 +1314,14 @@ mod tests {
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
         compose_artifact, empty_bucket, manifest_version_from_query_bytes, BuildMode,
-        CurrentFileEntry, ManifestQueryBytes, PHASE1_GRAPH_INDEX_VERSION,
+        CurrentFileEntry, ManifestQueryBytes, GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
-    use crate::extract::build_facts;
+    use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
     use crate::{
-        graph_edge_kind_or_default, Confidence, GraphEdgeArtifact, GraphFileArtifact,
-        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId,
-        RelationKind,
+        graph_edge_kind_or_default, Confidence, FileId, GraphEdgeArtifact, GraphFileArtifact,
+        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
+        GraphSymbolArtifact, NodeId, NodeKind, RelationKind, RunId, SourceSpan, SpanId,
     };
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
@@ -1382,7 +1391,7 @@ mod tests {
     fn buckets_from_artifact_rebuckets_edges_by_file_or_symbol_source() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: PHASE1_GRAPH_INDEX_VERSION.to_string(),
+                graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
                 content_hash_blake3: None,
             },
             manifest_version: "test-manifest".to_string(),
@@ -1407,6 +1416,9 @@ mod tests {
             ],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         };
 
         let actual = buckets_from_artifact(&artifact);
@@ -1487,6 +1499,90 @@ mod tests {
             .find(|entry| entry.path == "README.txt")
             .expect("README manifest");
         assert!(readme_manifest.node_ids.is_empty());
+    }
+
+    #[test]
+    fn mcp_tool_symbols_persist_through_artifact_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+struct ToolDefinition {
+    name: String,
+}
+
+fn submit_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan".into(),
+        description: "".into(),
+        input_schema: json!({}),
+    }
+}
+"#,
+        )
+        .expect("write lib.rs");
+
+        let facts = build_facts_for_paths(root, &[PathBuf::from("src/lib.rs")]).expect("extract");
+        let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+        assert!(
+            artifact
+                .symbols
+                .iter()
+                .any(|symbol| symbol.symbol_kind == "mcp_tool"),
+            "artifact should contain at least one persisted MCP tool symbol"
+        );
+    }
+
+    #[test]
+    fn commit_nodes_do_not_persist_as_symbols() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write lib.rs");
+        let facts = GraphFacts {
+            nodes: vec![
+                GraphNode {
+                    node_id: NodeId(1),
+                    stable_key: "file:src/lib.rs".to_string(),
+                    label: "src/lib.rs".to_string(),
+                    kind: NodeKind::File,
+                    file_id: Some(FileId(1)),
+                    source_span_id: Some(SpanId(1)),
+                    first_seen_run_id: RunId(1),
+                },
+                GraphNode {
+                    node_id: NodeId(2),
+                    stable_key: "commit:abc123".to_string(),
+                    label: "abc123".to_string(),
+                    kind: NodeKind::Commit,
+                    file_id: None,
+                    source_span_id: Some(SpanId(1)),
+                    first_seen_run_id: RunId(1),
+                },
+            ],
+            edges: Vec::new(),
+            spans: vec![SourceSpan {
+                span_id: SpanId(1),
+                file_id: FileId(1),
+                start_byte: 0,
+                end_byte: 0,
+                start_line: 0,
+                end_line: 0,
+            }],
+        };
+
+        let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+        assert!(
+            !artifact
+                .symbols
+                .iter()
+                .any(|symbol| symbol.symbol_kind == "commit"),
+            "commit nodes belong in artifact.commits, not artifact.symbols"
+        );
     }
 
     #[test]
@@ -1835,6 +1931,7 @@ mod tests {
             relation,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
+            change_kind: None,
             edge_kind: Some(graph_edge_kind_or_default(relation, None)),
         }
     }

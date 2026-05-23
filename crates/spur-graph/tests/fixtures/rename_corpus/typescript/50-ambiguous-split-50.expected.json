@@ -1,0 +1,10 @@
+{
+  "expected_renames": [],
+  "expected_added": [
+    "ts_candidate_a_50",
+    "ts_candidate_b_50"
+  ],
+  "expected_deleted": [
+    "ts_legacy_50"
+  ]
+}

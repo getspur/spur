@@ -24,6 +24,7 @@ fn graph_facts_round_trip_through_json() {
         target_label: Some("callee".to_string()),
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
+        change_kind: None,
         edge_kind: None,
         evidence_id: EvidenceId(13),
         directed: true,
@@ -69,6 +70,8 @@ fn graph_edge_kind_round_trips_all_public_values_and_legacy_omission() {
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
+            change_kind: None,
+
             edge_kind: Some(edge_kind),
         };
         let encoded = serde_json::to_string(&edge).unwrap();
@@ -100,7 +103,7 @@ fn legacy_artifact_references_edges_without_edge_kind_count_as_references_other(
         &artifact_path,
         serde_json::to_string_pretty(&serde_json::json!({
             "header": {
-                "graph_index_version": "test"
+                "graph_index_version": "v1"
             },
             "manifest_version": "test",
             "graph_content_hash": "test",
@@ -192,4 +195,5 @@ fn node_kind_discriminators_are_stable_contracts() {
     assert_eq!(NodeKind::Constant.discriminator(), "constant");
     assert_eq!(NodeKind::TypeAlias.discriminator(), "type_alias");
     assert_eq!(NodeKind::Macro.discriminator(), "macro");
+    assert_eq!(NodeKind::Commit.discriminator(), "commit");
 }

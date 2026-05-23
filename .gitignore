@@ -41,3 +41,9 @@ marketing/marketingskills/skills/*/*
 !marketing/marketingskills/LICENSE
 !marketing/marketingskills/README.md
 .spur/analyst.duckdb*
+
+# spur pm (beads) — derived files; commit issues.jsonl
+.beads/beads.db
+.beads/beads.db-*
+.beads/.write.lock
+.beads/issues.jsonl.*.tmp

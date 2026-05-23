@@ -1,0 +1,14 @@
+{
+  "class": "params_only",
+  "expected_renames": [],
+  "expected_added": [
+    "py_params_after"
+  ],
+  "expected_deleted": [
+    "py_params_before"
+  ],
+  "expected_ambiguous_candidates": [
+    "py_params_after",
+    "py_params_before"
+  ]
+}

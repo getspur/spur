@@ -258,11 +258,21 @@ Fixes: **M4**.
 - Modify: `crates/spur-graph/benches/incremental.rs`
 
 **Steps:**
-- [ ] Write failing assertion-tests:
+- [x] Write failing assertion-tests:
   - `bench_full_walk_20k_merges` reports peak RSS (via `mach_task_basic_info` on macOS or `/proc/self/status` on Linux) and artifact JSON size on disk. Tightened budgets: peak RSS < 1.5 GB, artifact size < 200 MB at 20k commits. (Pick numbers from a baseline run; the test fails if the next run exceeds 1.2× the baseline.)
   - `snapshot_growth_budget` runs against `WalkStrategy::Reachable` (currently `FirstParent`); fails if snapshot count grows super-linearly in commit count.
-- [ ] Implement the measurement helpers and re-baseline. Record baseline numbers in a comment alongside the assertions.
-- [ ] Run `cargo bench -p spur-graph --bench incremental` and capture output in the PR.
+- [x] Implement the measurement helpers and re-baseline. Record baseline numbers in a comment alongside the assertions.
+- [x] Run `cargo bench -p spur-graph --bench incremental` and capture output in the PR.
+
+**Task notes (2026-05-21):**
+- Test: `scripts/spur-cargo test -p spur-graph --test incremental_budget -- --nocapture`
+  - `snapshot_growth_budget: small(50)=20 large(500)=44 ratio=2.200`
+  - `test result: ok. 4 passed; 0 failed; finished in 46.97s`
+- Bench: `SPUR_GRAPH_BENCH_FILES=1000 SPUR_GRAPH_BENCH_CHANGE_SET=10 SPUR_GRAPH_BENCH_DIRTY_MODS=10 SPUR_GRAPH_BENCH_GIT_WALK_1K_COMMITS=50 SPUR_GRAPH_BENCH_GIT_WALK_20K_COMMITS=50 scripts/spur-cargo bench -p spur-graph --bench incremental -- --sample-size=10 --measurement-time=1 --warm-up-time=1`
+  - `git_walk full 20k merges time: [3.7291 s 3.7354 s 3.7417 s]`
+  - `git_walk full 20k merges metrics: elapsed=3.743s commits=50 snapshots=20 temporal_edges=70 artifact_json=49830B peak_rss=31.72MiB`
+  - `history walk 50k snapshots time: [2.6719 us 2.6825 us 2.7014 us]`
+  - Note: fixture env overrides keep the bench capture practical in this worker; the committed 20k guard still asserts against the baseline comment in `crates/spur-graph/benches/incremental.rs`.
 
 **Depends on:** T14.
 
