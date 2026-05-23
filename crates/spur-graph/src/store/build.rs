@@ -12,6 +12,7 @@ use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
 use crate::discovery::discover_files;
 use crate::extract::GraphFacts;
 use crate::extract::{build_facts_for_paths, languages::all_supported_extensions};
+use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::validation::compute_anchor_hash;
 use crate::{
     git, graph_edge_kind_or_default, DirtyEntry, GitCtx, GraphEdgeArtifact, GraphEdgeKind,
@@ -19,7 +20,6 @@ use crate::{
     GraphSymbolArtifact, GraphTombstoneEntry, NodeId, NodeKind, RelationKind, SourceSpan,
 };
 
-pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 
@@ -1055,7 +1055,7 @@ fn rebuild_from_buckets(
 
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: PHASE1_GRAPH_INDEX_VERSION.to_string(),
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
             // Content hash is stamped at write time, after body serialization input is finalized.
             content_hash_blake3: None,
         },
@@ -1314,7 +1314,7 @@ mod tests {
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
         compose_artifact, empty_bucket, manifest_version_from_query_bytes, BuildMode,
-        CurrentFileEntry, ManifestQueryBytes, PHASE1_GRAPH_INDEX_VERSION,
+        CurrentFileEntry, ManifestQueryBytes, GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
@@ -1391,7 +1391,7 @@ mod tests {
     fn buckets_from_artifact_rebuckets_edges_by_file_or_symbol_source() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: PHASE1_GRAPH_INDEX_VERSION.to_string(),
+                graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
                 content_hash_blake3: None,
             },
             manifest_version: "test-manifest".to_string(),
