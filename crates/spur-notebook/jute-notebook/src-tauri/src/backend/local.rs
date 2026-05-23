@@ -69,6 +69,9 @@ impl LocalKernel {
 
         let kernel_id = Uuid::new_v4().to_string();
         let runtime_dir = environment::runtime_dir();
+        fs::create_dir_all(&runtime_dir)
+            .await
+            .map_err(|err| Error::KernelConnect(format!("could not create runtime dir: {err}")))?;
         let connection_filename = runtime_dir + &format!("jute-{kernel_id}.json");
         fs::write(&connection_filename, connection_file.to_string())
             .await

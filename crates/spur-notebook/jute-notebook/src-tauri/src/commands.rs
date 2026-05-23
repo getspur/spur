@@ -12,7 +12,7 @@ use std::{
 use dashmap::mapref::entry::Entry;
 use serde::Serialize;
 use sysinfo::{Pid, System};
-use tauri::{ipc::Channel, WebviewWindow};
+use tauri::{ipc::Channel, AppHandle, WebviewWindow};
 use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
@@ -375,6 +375,7 @@ pub async fn kernel_slot_info(
 /// Start a new Jupyter kernel.
 #[tauri::command]
 pub async fn start_kernel(
+    app: AppHandle,
     spec_name: &str,
     window: WebviewWindow,
     state: tauri::State<'_, State>,
@@ -390,6 +391,7 @@ pub async fn start_kernel(
         }
     }
 
+    crate::kernel_provision::ensure_python3_kernelspec(&app).await?;
     let kernel = start_local_kernel(spec_name).await?;
     let (generation, _previous_kernel) =
         install_kernel_in_slot(&state, &slot_id, spec_name.to_string(), kernel);
