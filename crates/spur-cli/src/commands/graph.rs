@@ -5,13 +5,16 @@ use std::time::Instant;
 
 use anyhow::Context;
 
+use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
+use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
     resolve_artifact_location, resolve_worktree_root_from, write_artifact_parquet, BuildMode,
-    GraphFacts, GraphIndexArtifact, WriteOptions,
+    CommitIndexArtifact, GraphFacts, GraphIndexArtifact, WalkStrategy, WriteOptions,
 };
 
 pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph";
+const COMMIT_INDEX_ARTIFACT_PATH: &str = ".spur/commit-index.json";
 
 #[derive(Debug, Clone)]
 pub struct GraphBuildOptions {
@@ -20,6 +23,7 @@ pub struct GraphBuildOptions {
     pub output: Option<PathBuf>,
     pub quiet: bool,
     pub skip_analyst: bool,
+    pub with_temporal: bool,
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
@@ -43,6 +47,12 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
     }
+    let use_temporal = should_use_temporal(options.with_temporal);
+    tracing::debug!(
+        with_temporal = options.with_temporal,
+        use_temporal,
+        "spur-graph: temporal walk option evaluated"
+    );
 
     let mut mode = BuildMode::Full;
     let previous_artifact = match resolve_artifact_location(&root, Some(&output)) {
@@ -67,8 +77,8 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         }
     };
 
-    let (artifact, file_counts, node_count, edge_count) = if let Some(prev) = previous_artifact {
-        match artifact_from_facts_incremental(&prev, &root) {
+    let (mut artifact, file_counts, node_count, edge_count) = match previous_artifact {
+        Some(prev) => match artifact_from_facts_incremental(&prev, &root) {
             Ok((artifact, build_mode)) => {
                 mode = build_mode;
                 let language_counts = language_counts_from_artifact(&root, &artifact);
@@ -83,10 +93,31 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                 tracing::info!(error = %error, "spur-graph: incremental rebuild failed; falling back to full");
                 build_full_artifact_for_graph_build(&root)?
             }
-        }
-    } else {
-        build_full_artifact_for_graph_build(&root)?
+        },
+        None => build_full_artifact_for_graph_build(&root)?,
     };
+
+    if use_temporal {
+        let config = temporal_walk_config();
+        match run_full_walk_into(&root, &config) {
+            Ok((temporal_artifact, commit_index)) => {
+                persist_commit_index_for_graph_build(&root, &commit_index)?;
+                merge_temporal_artifact(&mut artifact, temporal_artifact);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "spur-graph: temporal walk failed; writing structural-only artifact"
+                );
+                if !options.quiet {
+                    eprintln!(
+                        "[spur] Temporal graph walk failed; writing structural-only artifact: {error}"
+                    );
+                }
+            }
+        }
+    }
+
     let canonical_output = if uses_output_override {
         let write_started = Instant::now();
         let write_span = tracing::info_span!(
@@ -232,6 +263,43 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
 
 fn should_skip_analyst(skip_analyst: bool) -> bool {
     skip_analyst || matches!(std::env::var("SPUR_GRAPH_SKIP_ANALYST"), Ok(v) if v == "1")
+}
+
+fn should_use_temporal(with_temporal: bool) -> bool {
+    with_temporal || matches!(std::env::var("SPUR_GRAPH_WITH_TEMPORAL"), Ok(v) if v == "1")
+}
+
+fn temporal_walk_config() -> GitWalkConfig {
+    GitWalkConfig {
+        target_refs: vec!["HEAD".to_string()],
+        walk_strategy: WalkStrategy::FirstParent,
+        allow_replace_refs: false,
+    }
+}
+
+fn merge_temporal_artifact(artifact: &mut GraphIndexArtifact, temporal: GraphIndexArtifact) {
+    artifact.commits = temporal.commits;
+    artifact.symbol_snapshots = temporal.symbol_snapshots;
+    artifact.temporal_edges = temporal.temporal_edges;
+    artifact.diagnostics.extend(temporal.diagnostics);
+}
+
+fn persist_commit_index_for_graph_build(
+    root: &Path,
+    commit_index: &CommitIndexArtifact,
+) -> anyhow::Result<()> {
+    save_artifact(root, COMMIT_INDEX_ARTIFACT_PATH, commit_index)
+        .with_context(|| format!("write commit-index artifact at {COMMIT_INDEX_ARTIFACT_PATH}"))?;
+    save_pointer(
+        root,
+        &CommitIndexPointer {
+            schema_version: commit_index.schema_version,
+            artifact_relative_path: COMMIT_INDEX_ARTIFACT_PATH.to_string(),
+            indexed_at: commit_index.indexed_at.clone(),
+            refs: commit_index.refs.clone(),
+        },
+    )
+    .context("write commit-index pointer")
 }
 
 fn reject_legacy_output_path(output: &Path) -> anyhow::Result<()> {
@@ -444,6 +512,22 @@ mod tests {
         {
             let _env = EnvGuard::set("SPUR_GRAPH_SKIP_ANALYST", "true");
             assert!(!super::should_skip_analyst(false));
+        }
+    }
+
+    #[test]
+    fn should_use_temporal_honors_option_and_env_flags() {
+        {
+            let _env = EnvGuard::remove("SPUR_GRAPH_WITH_TEMPORAL");
+            assert!(super::should_use_temporal(true));
+        }
+        {
+            let _env = EnvGuard::set("SPUR_GRAPH_WITH_TEMPORAL", "1");
+            assert!(super::should_use_temporal(false));
+        }
+        {
+            let _env = EnvGuard::set("SPUR_GRAPH_WITH_TEMPORAL", "true");
+            assert!(!super::should_use_temporal(false));
         }
     }
 }

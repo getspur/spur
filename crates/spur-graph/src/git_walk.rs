@@ -48,11 +48,16 @@ pub fn snapshot_refs(worktree: &Path, refs: &[&str]) -> Result<BTreeMap<String, 
     let mut snapshot = BTreeMap::new();
 
     for target_ref in refs {
-        let ref_name = format!("refs/heads/{target_ref}");
-        let stdout =
-            run_git(worktree, &["rev-parse", "--verify", &ref_name]).with_context(|| {
-                format!("target ref `{target_ref}` does not exist; refusing to fall back")
-            })?;
+        let ref_name;
+        let rev = if *target_ref == "HEAD" {
+            "HEAD^{commit}"
+        } else {
+            ref_name = format!("refs/heads/{target_ref}");
+            &ref_name
+        };
+        let stdout = run_git(worktree, &["rev-parse", "--verify", rev]).with_context(|| {
+            format!("target ref `{target_ref}` does not exist; refusing to fall back")
+        })?;
         snapshot.insert((*target_ref).to_string(), stdout.trim().to_string());
     }
 
@@ -1457,6 +1462,18 @@ mod tests {
         let snap = snapshot_refs(dir.path(), &["main"]).unwrap();
 
         assert_eq!(snap.get("main"), Some(&sha));
+    }
+
+    #[test]
+    fn snapshot_refs_returns_head_tip_when_detached() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        let sha = commit(dir.path(), "init");
+        run_git(dir.path(), &["checkout", "--detach", "-q", &sha]).unwrap();
+
+        let snap = snapshot_refs(dir.path(), &["HEAD"]).unwrap();
+
+        assert_eq!(snap.get("HEAD"), Some(&sha));
     }
 
     #[test]
