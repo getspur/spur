@@ -22,6 +22,7 @@ globset = "0.4"
 ignore = "0.4.25"
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+base64 = "0.22"
 parquet = { workspace = true, features = ["arrow"] }
 petgraph = { workspace = true }
 serde = { workspace = true }
