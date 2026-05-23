@@ -513,8 +513,7 @@ fn buckets_from_facts(
             | NodeKind::TypeAlias
             | NodeKind::Macro
             | NodeKind::Section
-            | NodeKind::McpTool
-            | NodeKind::Commit => {
+            | NodeKind::McpTool => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
                 if !current_entries.contains_key(&file_path) {
                     continue;
@@ -553,6 +552,10 @@ fn buckets_from_facts(
                 entry.manifest.node_ids.push(node.node_id);
                 entry.symbol_node_ids.push(node.node_id);
                 entry.symbols.push(symbol);
+            }
+            NodeKind::Commit => {
+                // Commit nodes belong in artifact.commits, not artifact.symbols.
+                continue;
             }
         }
     }
@@ -1303,7 +1306,7 @@ fn enclosing_scope(
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1314,11 +1317,11 @@ mod tests {
         CurrentFileEntry, ManifestQueryBytes, PHASE1_GRAPH_INDEX_VERSION,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
-    use crate::extract::build_facts;
+    use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
     use crate::{
-        graph_edge_kind_or_default, Confidence, GraphEdgeArtifact, GraphFileArtifact,
-        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId,
-        RelationKind,
+        graph_edge_kind_or_default, Confidence, FileId, GraphEdgeArtifact, GraphFileArtifact,
+        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
+        GraphSymbolArtifact, NodeId, NodeKind, RelationKind, RunId, SourceSpan, SpanId,
     };
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
@@ -1496,6 +1499,90 @@ mod tests {
             .find(|entry| entry.path == "README.txt")
             .expect("README manifest");
         assert!(readme_manifest.node_ids.is_empty());
+    }
+
+    #[test]
+    fn mcp_tool_symbols_persist_through_artifact_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+struct ToolDefinition {
+    name: String,
+}
+
+fn submit_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan".into(),
+        description: "".into(),
+        input_schema: json!({}),
+    }
+}
+"#,
+        )
+        .expect("write lib.rs");
+
+        let facts = build_facts_for_paths(root, &[PathBuf::from("src/lib.rs")]).expect("extract");
+        let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+        assert!(
+            artifact
+                .symbols
+                .iter()
+                .any(|symbol| symbol.symbol_kind == "mcp_tool"),
+            "artifact should contain at least one persisted MCP tool symbol"
+        );
+    }
+
+    #[test]
+    fn commit_nodes_do_not_persist_as_symbols() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write lib.rs");
+        let facts = GraphFacts {
+            nodes: vec![
+                GraphNode {
+                    node_id: NodeId(1),
+                    stable_key: "file:src/lib.rs".to_string(),
+                    label: "src/lib.rs".to_string(),
+                    kind: NodeKind::File,
+                    file_id: Some(FileId(1)),
+                    source_span_id: Some(SpanId(1)),
+                    first_seen_run_id: RunId(1),
+                },
+                GraphNode {
+                    node_id: NodeId(2),
+                    stable_key: "commit:abc123".to_string(),
+                    label: "abc123".to_string(),
+                    kind: NodeKind::Commit,
+                    file_id: None,
+                    source_span_id: Some(SpanId(1)),
+                    first_seen_run_id: RunId(1),
+                },
+            ],
+            edges: Vec::new(),
+            spans: vec![SourceSpan {
+                span_id: SpanId(1),
+                file_id: FileId(1),
+                start_byte: 0,
+                end_byte: 0,
+                start_line: 0,
+                end_line: 0,
+            }],
+        };
+
+        let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+        assert!(
+            !artifact
+                .symbols
+                .iter()
+                .any(|symbol| symbol.symbol_kind == "commit"),
+            "commit nodes belong in artifact.commits, not artifact.symbols"
+        );
     }
 
     #[test]
