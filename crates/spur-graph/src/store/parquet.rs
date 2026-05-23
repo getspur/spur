@@ -253,13 +253,17 @@ pub fn write_artifact_parquet(
         let file_manifests_handle =
             scope.spawn(|| write_file_manifests(&file_manifests_path, &file_manifests));
         let tombstones_handle = scope.spawn(|| write_tombstones(&tombstones_path, &tombstones));
-        let commits_handle =
-            scope.spawn(|| write_commits(&commits_path, &artifact.commits, &options));
-        let symbol_snapshots_handle = scope.spawn(|| {
-            write_symbol_snapshots(&symbol_snapshots_path, &artifact.symbol_snapshots, &options)
+        let commits_handle = (!artifact.commits.is_empty())
+            .then(|| scope.spawn(|| write_commits(&commits_path, &artifact.commits, &options)));
+        let symbol_snapshots_handle = (!artifact.symbol_snapshots.is_empty()).then(|| {
+            scope.spawn(|| {
+                write_symbol_snapshots(&symbol_snapshots_path, &artifact.symbol_snapshots, &options)
+            })
         });
-        let temporal_edges_handle = scope.spawn(|| {
-            write_temporal_edges(&temporal_edges_path, &artifact.temporal_edges, &options)
+        let temporal_edges_handle = (!artifact.temporal_edges.is_empty()).then(|| {
+            scope.spawn(|| {
+                write_temporal_edges(&temporal_edges_path, &artifact.temporal_edges, &options)
+            })
         });
         let edges_by_dst_handle = edges_by_dst
             .as_ref()
@@ -271,9 +275,15 @@ pub fn write_artifact_parquet(
         join_scoped(files_handle, "write files.parquet")?;
         join_scoped(file_manifests_handle, "write file_manifests.parquet")?;
         join_scoped(tombstones_handle, "write tombstones.parquet")?;
-        join_scoped(commits_handle, "write commits.parquet")?;
-        join_scoped(symbol_snapshots_handle, "write symbol_snapshots.parquet")?;
-        join_scoped(temporal_edges_handle, "write temporal_edges.parquet")?;
+        if let Some(handle) = commits_handle {
+            join_scoped(handle, "write commits.parquet")?;
+        }
+        if let Some(handle) = symbol_snapshots_handle {
+            join_scoped(handle, "write symbol_snapshots.parquet")?;
+        }
+        if let Some(handle) = temporal_edges_handle {
+            join_scoped(handle, "write temporal_edges.parquet")?;
+        }
         if let Some(handle) = edges_by_dst_handle {
             join_scoped(handle, "write edges_by_dst.parquet")?;
         }
@@ -1531,7 +1541,7 @@ fn read_tombstones(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphTom
 }
 
 fn read_commits(path: &Path, row_count: usize) -> anyhow::Result<Vec<CommitArtifact>> {
-    if row_count == 0 {
+    if row_count == 0 || !path.exists() {
         return Ok(Vec::new());
     }
     let mut commits = Vec::with_capacity(row_count);
@@ -1556,7 +1566,7 @@ fn read_symbol_snapshots(
     path: &Path,
     row_count: usize,
 ) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
-    if row_count == 0 {
+    if row_count == 0 || !path.exists() {
         return Ok(Vec::new());
     }
     let mut snapshots = Vec::with_capacity(row_count);
@@ -1607,7 +1617,7 @@ fn read_symbol_snapshots(
 }
 
 fn read_temporal_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
-    if row_count == 0 {
+    if row_count == 0 || !path.exists() {
         return Ok(Vec::new());
     }
     let mut edges = Vec::with_capacity(row_count);
@@ -2442,10 +2452,158 @@ mod parquet_temporal_test {
         Ok(())
     }
 
+    #[test]
+    fn temporal_collections_round_trip() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut artifact = empty_artifact("temporal-collections-round-trip");
+        let old_symbol = snapshot_key("sym-old", "c1");
+        let new_symbol = snapshot_key("sym-new", "c2");
+
+        artifact.commits = vec![
+            CommitArtifact {
+                sha: "c1".to_string(),
+                parents: Vec::new(),
+                author_time: 1_700_000_001,
+                summary: "initial import".to_string(),
+            },
+            CommitArtifact {
+                sha: "c2".to_string(),
+                parents: vec!["c1".to_string()],
+                author_time: 1_700_000_123,
+                summary: "rename alpha to beta".to_string(),
+            },
+        ];
+        artifact.symbol_snapshots = vec![
+            SymbolSnapshotArtifact {
+                key: old_symbol.clone(),
+                file_path: GitPath::from_bytes(b"src/old.rs".to_vec()),
+                entity_name: "alpha".to_string(),
+                symbol_kind: "function".to_string(),
+                enclosing_scope: Some("mod root".to_string()),
+                byte_range: [10, 42],
+                line_range: [2, 5],
+                anchor_hash: "anchor-old".to_string(),
+                tokens: vec!["alpha".to_string(), "body".to_string()],
+            },
+            SymbolSnapshotArtifact {
+                key: new_symbol.clone(),
+                file_path: GitPath::from_bytes(b"src/new.rs".to_vec()),
+                entity_name: "beta".to_string(),
+                symbol_kind: "function".to_string(),
+                enclosing_scope: Some("mod root".to_string()),
+                byte_range: [100, 150],
+                line_range: [9, 14],
+                anchor_hash: "anchor-new".to_string(),
+                tokens: vec!["beta".to_string(), "body".to_string()],
+            },
+        ];
+        artifact.temporal_edges = vec![
+            TemporalEdgeArtifact {
+                source: EdgeEndpoint::Commit {
+                    sha: "c2".to_string(),
+                },
+                target: EdgeEndpoint::Snapshot {
+                    key: new_symbol.clone(),
+                },
+                relation: RelationKind::Touches,
+                parent: Some("c1".to_string()),
+                change_kind: Some(ChangeKind::Added),
+            },
+            TemporalEdgeArtifact {
+                source: EdgeEndpoint::Snapshot {
+                    key: old_symbol.clone(),
+                },
+                target: EdgeEndpoint::Snapshot {
+                    key: new_symbol.clone(),
+                },
+                relation: RelationKind::Touches,
+                parent: Some("c1".to_string()),
+                change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_symbol))),
+            },
+        ];
+
+        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        let manifest = read_artifact_header_parquet(&dir)?;
+        let decoded = read_artifact_parquet(&dir)?;
+
+        assert_eq!(manifest.row_counts.commits, artifact.commits.len());
+        assert_eq!(
+            manifest.row_counts.symbol_snapshots,
+            artifact.symbol_snapshots.len()
+        );
+        assert_eq!(
+            manifest.row_counts.temporal_edges,
+            artifact.temporal_edges.len()
+        );
+        assert_eq!(decoded.commits, artifact.commits);
+        assert_eq!(decoded.symbol_snapshots, artifact.symbol_snapshots);
+        assert_eq!(decoded.temporal_edges, artifact.temporal_edges);
+        Ok(())
+    }
+
+    #[test]
+    fn back_compat_loads_artifact_without_temporal_tables() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let dir = write_artifact_parquet(
+            &empty_artifact("back-compat-without-temporal-tables"),
+            tempdir.path(),
+            WriteOptions::default(),
+        )?;
+
+        assert!(!dir.join("commits.parquet").exists());
+        assert!(!dir.join("symbol_snapshots.parquet").exists());
+        assert!(!dir.join("temporal_edges.parquet").exists());
+
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+        let row_counts = manifest
+            .get_mut("row_counts")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("row_counts must be an object");
+        row_counts.remove("commits");
+        row_counts.remove("symbol_snapshots");
+        row_counts.remove("temporal_edges");
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+
+        let manifest = read_artifact_header_parquet(&dir)?;
+        let decoded = read_artifact_parquet(&dir)?;
+
+        assert_eq!(manifest.row_counts.commits, 0);
+        assert_eq!(manifest.row_counts.symbol_snapshots, 0);
+        assert_eq!(manifest.row_counts.temporal_edges, 0);
+        assert!(decoded.commits.is_empty());
+        assert!(decoded.symbol_snapshots.is_empty());
+        assert!(decoded.temporal_edges.is_empty());
+        Ok(())
+    }
+
     fn snapshot_key(stable_symbol_id: &str, commit: &str) -> SnapshotKey {
         SnapshotKey {
             stable_symbol_id: stable_symbol_id.to_string(),
             commit: commit.to_string(),
+        }
+    }
+
+    fn empty_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
+        GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "3".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test-manifest".to_string(),
+            graph_content_hash: graph_content_hash.to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            file_node_ids: Vec::new(),
+            symbols: Vec::new(),
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
         }
     }
 }
