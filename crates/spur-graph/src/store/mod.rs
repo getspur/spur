@@ -2,7 +2,6 @@ pub mod build;
 pub mod cache;
 pub mod canonical_hash;
 pub mod commit_index;
-pub mod json;
 pub mod parquet;
 pub mod pointer;
 pub mod snapshot;
