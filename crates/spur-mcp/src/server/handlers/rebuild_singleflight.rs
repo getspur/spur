@@ -8,7 +8,7 @@ use spur_graph::schema::GraphIndexArtifact;
 use tokio::sync::{Mutex, OnceCell};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct RebuildKey {
+pub(crate) struct RebuildKey {
     head_oid: String,
     dirty_oid_set_hash: u64,
 }
@@ -27,7 +27,7 @@ impl RebuildKey {
 
 type RebuildCell = OnceCell<Arc<GraphIndexArtifact>>;
 
-pub(super) struct RebuildCoordinator {
+pub(crate) struct RebuildCoordinator {
     cells: Mutex<HashMap<RebuildKey, Weak<RebuildCell>>>,
 }
 
