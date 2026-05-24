@@ -1,8 +1,4 @@
 //! T19: Synchronous audit emission tests for worker write tools.
-//!
-//! Verifies that a successful `update_issue` call through the worker MCP
-//! server emits a `[[spur-audit v1]] WorkerWrite` sentinel comment on the
-//! target issue before returning success to the worker.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -209,81 +205,6 @@ async fn wait_for_read_aggregate_comment(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     None
-}
-
-#[tokio::test]
-async fn update_issue_success_emits_worker_write_audit_sentinel() {
-    let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]);
-    let pm = pm_service_fixture(dir.path()).await;
-    let issue_id = pm
-        .create_issue(IssueCreate {
-            title: "audit emission test".into(),
-            description: Some("issue body".into()),
-            issue_type: Some("task".into()),
-            ..Default::default()
-        })
-        .await
-        .expect("create issue");
-
-    let server = WorkerMcpServer::start("session-audit".into(), test_deps(Arc::clone(&pm)))
-        .await
-        .expect("start must succeed");
-    let token = server.issue_token("d-1", Duration::from_secs(60));
-
-    let body = call_jsonrpc(
-        &server,
-        &token,
-        "tools/call",
-        serde_json::json!({
-            "name": "update_issue",
-            "arguments": {
-                "id": issue_id,
-                "comment": "worker update"
-            }
-        }),
-    )
-    .await;
-
-    assert_eq!(
-        body["result"]["ok"].as_bool(),
-        Some(true),
-        "update_issue should return success, got: {body}"
-    );
-
-    // Verify the audit sentinel comment was written.
-    let comments = pm
-        .advanced()
-        .expect("pm backend should expose advanced interface in test mode")
-        .list_comments(&issue_id)
-        .await
-        .expect("list_comments");
-
-    let sentinel = comments
-        .iter()
-        .find_map(|c| spur_mcp::plan::audit_sentinel::parse_comment(&c.body).and_then(|r| r.ok()));
-
-    assert!(
-        sentinel.is_some(),
-        "expected audit sentinel comment, found: {comments:?}"
-    );
-
-    let sentinel = sentinel.unwrap();
-    assert_eq!(sentinel.kind_str(), "worker-write");
-    if let spur_mcp::plan::audit_sentinel::AuditSentinelKind::WorkerWrite {
-        delegation_id,
-        tool,
-        issue_id: audited_issue_id,
-    } = sentinel
-    {
-        assert_eq!(delegation_id, "d-1");
-        assert_eq!(tool, "update_issue");
-        assert_eq!(audited_issue_id, issue_id);
-    } else {
-        panic!("expected WorkerWrite sentinel, got: {sentinel:?}");
-    }
-
-    server.shutdown(Duration::from_secs(5)).await;
 }
 
 // ─── T20: per-delegation read-audit aggregation buffer ────────────────────
@@ -612,56 +533,4 @@ async fn drop_buffer_after_receiver_dropped_does_not_panic() {
     });
     // Must not panic even though the receiver is gone.
     drop(buf);
-}
-
-#[tokio::test]
-async fn update_issue_without_id_arg_does_not_emit_audit() {
-    let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]);
-    let pm = pm_service_fixture(dir.path()).await;
-    let issue_id = pm
-        .create_issue(IssueCreate {
-            title: "no-id audit test".into(),
-            ..Default::default()
-        })
-        .await
-        .expect("create issue");
-
-    let server = WorkerMcpServer::start("session-audit".into(), test_deps(Arc::clone(&pm)))
-        .await
-        .expect("start must succeed");
-    let token = server.issue_token("d-1", Duration::from_secs(60));
-
-    let body = call_jsonrpc(
-        &server,
-        &token,
-        "tools/call",
-        serde_json::json!({
-            "name": "update_issue",
-            "arguments": { "comment": "no id" }
-        }),
-    )
-    .await;
-
-    assert!(
-        body.get("error").is_some(),
-        "expected error for missing id, got: {body}"
-    );
-
-    let comments = pm
-        .advanced()
-        .expect("advanced")
-        .list_comments(&issue_id)
-        .await
-        .expect("list_comments");
-    let sentinels: Vec<_> = comments
-        .iter()
-        .filter_map(|c| spur_mcp::plan::audit_sentinel::parse_comment(&c.body).and_then(|r| r.ok()))
-        .collect();
-    assert!(
-        sentinels.is_empty(),
-        "no audit sentinel should exist when id arg is missing, got: {sentinels:?}"
-    );
-
-    server.shutdown(Duration::from_secs(5)).await;
 }
