@@ -31,7 +31,8 @@
         12,
         13,
         14,
-        15
+        15,
+        16
       ]
     }
   ],
@@ -183,6 +184,23 @@
       "enclosing_scope": null
     },
     {
+      "stable_symbol_id": "7587b91618ca909a",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        28,
+        39
+      ],
+      "line_range": [
+        2,
+        2
+      ],
+      "entity_name": "run",
+      "qualified_name": "Runner::run",
+      "symbol_kind": "method",
+      "anchor_hash": "12328839964882696488",
+      "enclosing_scope": "Runner"
+    },
+    {
       "stable_symbol_id": "4d1dc1688628bd43",
       "file_path": "src/helpers.ts",
       "byte_range": [
@@ -271,8 +289,8 @@
   "edges": [
     {
       "source_stable_symbol_id": "552287194f6a520d",
-      "target_stable_symbol_id": "4edfa70794ae6da4",
-      "target_label": "renderThing",
+      "target_stable_symbol_id": null,
+      "target_label": "run",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
@@ -280,8 +298,8 @@
     },
     {
       "source_stable_symbol_id": "552287194f6a520d",
-      "target_stable_symbol_id": "90e88e128d21c9dd",
-      "target_label": "run",
+      "target_stable_symbol_id": "4edfa70794ae6da4",
+      "target_label": "renderThing",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
@@ -313,6 +331,15 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "aa5590284609af88",
+      "target_stable_symbol_id": "7587b91618ca909a",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "c0a4422c47da8073",
