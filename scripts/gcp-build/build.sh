@@ -144,11 +144,6 @@ gcloud compute ssh "$VM_NAME" \
         export CARGO_TARGET_DIR=$REMOTE_TARGET
         export SCCACHE_BASEDIRS=$REMOTE_ABS
         export CARGO_BUILD_JOBS=$JOBS
-        # Remap the per-worktree absolute path to a stable string so the rustc
-        # command-line hash that sccache computes is identical across worktrees.
-        # Without this, every worktree (different UUID in the path) produces a
-        # unique hash and never hits the GCS cache populated by other worktrees.
-        export RUSTFLAGS="\${RUSTFLAGS:-} --remap-path-prefix=$REMOTE_ABS=/spur-src"
         sccache --start-server >/dev/null 2>&1 || true
         cargo $CARGO_ARGS
         echo
