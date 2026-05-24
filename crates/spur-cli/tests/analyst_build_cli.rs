@@ -234,6 +234,26 @@ fn analyst_build_concurrent_skip() {
         eprintln!("skipping: duckdb CLI not on PATH");
         return;
     }
+    let probe_db = dir.path().join(".spur/analyst.probe.duckdb");
+    let probe = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["analyst", "build", "--db-path"])
+        .arg(&probe_db)
+        .output()
+        .expect("spawn probe");
+    assert!(
+        probe.status.success(),
+        "probe stderr: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    if !probe_db.is_file() {
+        eprintln!(
+            "skipping: duckdb CLI present but analyst init SQL did not produce a DB: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        return;
+    }
+    let _ = std::fs::remove_file(&probe_db);
 
     // Launch two `analyst build` invocations close enough in time that one
     // should observe the other's flock.

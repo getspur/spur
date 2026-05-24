@@ -11,6 +11,7 @@ use spur_tui::mentions::{
 use spur_tui::views::{session_detail::SessionDetailView, View};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+const TEST_GRAPH_INDEX_VERSION: &str = "fixture-2026-05-11";
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
     static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
@@ -96,7 +97,7 @@ fn empty_at_shows_sectioned_picker() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "mentions-v2" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [
                 {"stable_file_id": "code-file-00", "file_path": "src/code_file_00.rs"}
             ],
@@ -235,7 +236,7 @@ fn typed_query_prefers_files_within_window() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "mentions-v2-ranking" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [],
             "symbols": [
                 {"stable_symbol_id": "symbol-needle", "file_path": "src/needle.rs", "byte_range": [0, 6], "line_range": [1, 1], "entity_name": "needle", "symbol_kind": "struct", "anchor_hash": "999", "enclosing_scope": "module needle"}
