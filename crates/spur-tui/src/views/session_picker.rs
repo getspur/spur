@@ -1529,6 +1529,8 @@ impl View for SessionPickerView {
                         match key.code {
                             KeyCode::Esc => {
                                 *search_focused = false;
+                                filter.clear();
+                                *cursor = 0;
                                 None
                             }
                             KeyCode::Enter => {
@@ -2017,6 +2019,37 @@ mod current_session_shortcut_tests {
             before_cursor, after_cursor,
             "picker ignored input — resuming flag likely still present"
         );
+    }
+
+    #[test]
+    fn session_picker_esc_from_search_clears_filter() {
+        let mut picker = SessionPickerView::new();
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("A"), make_session("B")],
+            test_ctx().synopsis,
+        );
+
+        // Enter search mode and type "foo".
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        assert!(picker.is_search_focused());
+        for c in ['f', 'o', 'o'] {
+            picker.handle_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &test_ctx(),
+            );
+        }
+        assert_eq!(picker.filter(), "foo");
+
+        // Esc should both exit search focus and discard the filter string,
+        // matching IssueBrowser's filter_mode Esc convention.
+        picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
+        assert!(!picker.is_search_focused());
+        assert_eq!(picker.filter(), "");
+        assert_eq!(picker.cursor(), 0);
     }
 }
 
