@@ -363,6 +363,8 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
             dir.display()
         );
     }
+    let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
+        || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
     let nodes_path = dir.join("nodes.parquet");
     let edges_path = dir.join("edges.parquet");
     let unresolved_edges_path = dir.join("edges_unresolved.parquet");
@@ -413,7 +415,7 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
 
     edges.extend(unresolved_edges);
 
-    Ok(GraphIndexArtifact {
+    let mut artifact = GraphIndexArtifact {
         header: GraphIndexHeader {
             graph_index_version: manifest.graph_index_version,
             content_hash_blake3: None,
@@ -431,7 +433,11 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
         commits,
         symbol_snapshots,
         temporal_edges,
-    })
+    };
+    if legacy_snapshot_ids {
+        crate::schema::rehash_legacy_snapshot_ids(&mut artifact);
+    }
+    Ok(artifact)
 }
 
 fn join_scoped<T>(
@@ -2662,7 +2668,7 @@ mod parquet_temporal_test {
     fn empty_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "3".to_string(),
+                graph_index_version: crate::schema::GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
                 content_hash_blake3: None,
             },
             manifest_version: "test-manifest".to_string(),

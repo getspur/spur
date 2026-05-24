@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::BufReader;
@@ -12,7 +12,7 @@ use crate::{EdgeId, EvidenceId, FileId, NodeId, RunId, SpanId};
 
 pub const CODE_FILE_URI_PREFIX: &str = "graph://file/";
 pub const CODE_SYMBOL_URI_PREFIX: &str = "graph://symbol/";
-pub const GRAPH_INDEX_VERSION_TEMPORAL: &str = "3";
+pub const GRAPH_INDEX_VERSION_TEMPORAL: &str = "4";
 
 pub type SourceRange = [usize; 2];
 
@@ -747,6 +747,9 @@ fn load_legacy_json(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
     let mut artifact: GraphIndexArtifact = serde_json::from_str(&content)
         .map_err(|err| anyhow!("invalid graph index JSON in `{}`: {err}", path.display()))?;
     validate_graph_index_version(&artifact.header.graph_index_version)?;
+    if artifact.header.graph_index_version != GRAPH_INDEX_VERSION_TEMPORAL {
+        rehash_legacy_snapshot_ids(&mut artifact);
+    }
 
     deduplicate_symbols(&mut artifact);
     validate_ranges(&artifact)?;
@@ -785,8 +788,149 @@ fn validate_graph_index_version(version: &str) -> anyhow::Result<()> {
 fn is_supported_graph_index_version(version: &str) -> bool {
     matches!(
         version,
-        GRAPH_INDEX_VERSION_TEMPORAL | "1" | "v1" | "spur-graph-phase2" | "fixture-2026-05-11"
+        GRAPH_INDEX_VERSION_TEMPORAL
+            | "3"
+            | "1"
+            | "v1"
+            | "spur-graph-phase2"
+            | "fixture-2026-05-11"
     )
+}
+
+pub(crate) fn rehash_legacy_snapshot_ids(artifact: &mut GraphIndexArtifact) {
+    let mut rewritten_keys = HashMap::new();
+    let legacy_fqns = legacy_snapshot_fqns(&artifact.symbol_snapshots);
+    for (snapshot, fqn) in artifact.symbol_snapshots.iter_mut().zip(legacy_fqns) {
+        let old_key = snapshot.key.clone();
+        snapshot.key.stable_symbol_id = canonical_snapshot_stable_symbol_id(snapshot, &fqn);
+        rewritten_keys.insert(old_key, snapshot.key.clone());
+    }
+
+    for edge in &mut artifact.temporal_edges {
+        rewrite_snapshot_endpoint(&mut edge.source, &rewritten_keys);
+        rewrite_snapshot_endpoint(&mut edge.target, &rewritten_keys);
+        if let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous))) = &mut edge.change_kind {
+            if let Some(rewritten) = rewritten_keys.get(previous) {
+                *previous = rewritten.clone();
+            }
+        }
+    }
+}
+
+fn canonical_snapshot_stable_symbol_id(snapshot: &SymbolSnapshotArtifact, fqn: &str) -> String {
+    crate::identity::stable_symbol_id_for_discriminator(
+        snapshot.file_path.to_string_lossy().as_ref(),
+        fqn,
+        &snapshot.symbol_kind,
+        snapshot.byte_range[0] as u64,
+    )
+}
+
+fn rewrite_snapshot_endpoint(
+    endpoint: &mut EdgeEndpoint,
+    rewritten_keys: &HashMap<SnapshotKey, SnapshotKey>,
+) {
+    if let EdgeEndpoint::Snapshot { key } = endpoint {
+        if let Some(rewritten) = rewritten_keys.get(key) {
+            *key = rewritten.clone();
+        }
+    }
+}
+
+fn legacy_snapshot_fqns(snapshots: &[SymbolSnapshotArtifact]) -> Vec<String> {
+    let mut memo = vec![None; snapshots.len()];
+    (0..snapshots.len())
+        .map(|index| legacy_snapshot_fqn(index, snapshots, &mut memo))
+        .collect()
+}
+
+fn legacy_snapshot_fqn(
+    index: usize,
+    snapshots: &[SymbolSnapshotArtifact],
+    memo: &mut [Option<String>],
+) -> String {
+    if let Some(fqn) = &memo[index] {
+        return fqn.clone();
+    }
+
+    let segment = legacy_snapshot_identity_segment(&snapshots[index]);
+    let fqn = if let Some(parent) = nearest_legacy_snapshot_parent(index, snapshots) {
+        format!(
+            "{}::{segment}",
+            legacy_snapshot_scope_fqn(parent, snapshots, memo)
+        )
+    } else if let Some(scope) = snapshots[index].enclosing_scope.as_deref() {
+        format!("{scope}::{segment}")
+    } else {
+        segment
+    };
+    memo[index] = Some(fqn.clone());
+    fqn
+}
+
+fn nearest_legacy_snapshot_parent(
+    index: usize,
+    snapshots: &[SymbolSnapshotArtifact],
+) -> Option<usize> {
+    let child = &snapshots[index];
+    snapshots
+        .iter()
+        .enumerate()
+        .filter(|(candidate_index, candidate)| {
+            *candidate_index != index
+                && candidate.key.commit == child.key.commit
+                && candidate.file_path == child.file_path
+                && candidate.byte_range[0] <= child.byte_range[0]
+                && candidate.byte_range[1] >= child.byte_range[1]
+                && candidate.byte_range != child.byte_range
+        })
+        .min_by_key(|(_, candidate)| {
+            candidate.byte_range[1].saturating_sub(candidate.byte_range[0])
+        })
+        .map(|(candidate_index, _)| candidate_index)
+}
+
+fn legacy_snapshot_scope_fqn(
+    index: usize,
+    snapshots: &[SymbolSnapshotArtifact],
+    memo: &mut [Option<String>],
+) -> String {
+    let scope_segment = legacy_snapshot_scope_segment(&snapshots[index]);
+    if let Some(parent) = nearest_legacy_snapshot_parent(index, snapshots) {
+        format!(
+            "{}::{scope_segment}",
+            legacy_snapshot_scope_fqn(parent, snapshots, memo)
+        )
+    } else if snapshots[index].symbol_kind == "impl" {
+        scope_segment
+    } else {
+        legacy_snapshot_fqn(index, snapshots, memo)
+    }
+}
+
+fn legacy_snapshot_identity_segment(snapshot: &SymbolSnapshotArtifact) -> String {
+    snapshot
+        .entity_name
+        .strip_prefix("impl ")
+        .unwrap_or(&snapshot.entity_name)
+        .to_string()
+}
+
+fn legacy_snapshot_scope_segment(snapshot: &SymbolSnapshotArtifact) -> String {
+    match snapshot.symbol_kind.as_str() {
+        "impl" => format!(
+            "impl {}",
+            snapshot
+                .entity_name
+                .strip_prefix("impl ")
+                .unwrap_or(&snapshot.entity_name)
+        ),
+        _ => snapshot
+            .entity_name
+            .strip_prefix("impl ")
+            .unwrap_or(&snapshot.entity_name)
+            .to_string(),
+    }
 }
 
 pub fn file_id_from_uri(uri: &str) -> String {
@@ -932,8 +1076,8 @@ mod temporal_artifact_tests {
     }
 
     #[test]
-    fn temporal_graph_index_version_is_v3() {
-        assert_eq!(GRAPH_INDEX_VERSION_TEMPORAL, "3");
+    fn temporal_graph_index_version_is_v4() {
+        assert_eq!(GRAPH_INDEX_VERSION_TEMPORAL, "4");
     }
 
     #[test]

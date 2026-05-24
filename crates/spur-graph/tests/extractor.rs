@@ -136,10 +136,10 @@ fn find_symbol_json<'a>(
 }
 
 #[test]
-fn graph_store_schema_version_is_v5() {
+fn graph_store_schema_version_is_v6() {
     assert_eq!(
         spur_graph::store::build::SCHEMA_VERSION,
-        "spur-graph-schema-v5"
+        "spur-graph-schema-v6"
     );
 }
 
@@ -810,7 +810,7 @@ fn rust_extractor_stable_keys_are_deterministic_across_runs() {
 }
 
 #[test]
-fn stable_key_is_stable_under_leading_whitespace_insertion() {
+fn stable_key_changes_when_byte_start_changes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -827,6 +827,7 @@ impl Bar { fn b(&self) {} }
     let base_keys: Vec<_> = base_facts
         .nodes
         .iter()
+        .filter(|node| node.kind != NodeKind::File)
         .map(|node| (node.kind, node.label.clone(), node.stable_key.clone()))
         .collect();
 
@@ -835,13 +836,26 @@ impl Bar { fn b(&self) {} }
     let shifted_keys: Vec<_> = shifted_facts
         .nodes
         .iter()
+        .filter(|node| node.kind != NodeKind::File)
         .map(|node| (node.kind, node.label.clone(), node.stable_key.clone()))
         .collect();
 
-    assert_eq!(
-        base_keys, shifted_keys,
-        "leading whitespace insertion should not perturb stable keys"
-    );
+    let base_symbols: Vec<_> = base_keys
+        .iter()
+        .map(|(kind, label, _)| (*kind, label.clone()))
+        .collect();
+    let shifted_symbols: Vec<_> = shifted_keys
+        .iter()
+        .map(|(kind, label, _)| (*kind, label.clone()))
+        .collect();
+
+    assert_eq!(base_symbols, shifted_symbols);
+    for ((kind, label, base_key), (_, _, shifted_key)) in base_keys.iter().zip(&shifted_keys) {
+        assert_ne!(
+            base_key, shifted_key,
+            "stable key for {kind:?} `{label}` should include byte start"
+        );
+    }
 }
 
 #[test]

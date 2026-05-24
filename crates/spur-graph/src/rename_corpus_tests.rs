@@ -6,7 +6,7 @@ use serde::Deserialize;
 use super::{try_rename_match, FileChange, FileChangeKind, SymbolChange};
 use crate::extract::languages::Language;
 use crate::extract::tree_sitter::{BytesExtractor, ExtractedSymbol};
-use crate::identity::stable_symbol_id_for;
+use crate::identity::stable_symbol_id_for_discriminator;
 use crate::schema::{ChangeKind, GitPath, RenamePrev, SnapshotKey, SymbolSnapshotArtifact};
 
 const MIN_CASES_PER_LANGUAGE: u32 = 50;
@@ -283,9 +283,19 @@ fn predicted_names(
 }
 
 fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
+    let relative_path = path.to_string_lossy();
+    let fqn = match symbol.enclosing_scope.as_deref() {
+        Some(scope) => format!("{scope}::{}", symbol.entity_name),
+        None => symbol.entity_name.clone(),
+    };
     SymbolSnapshotArtifact {
         key: SnapshotKey {
-            stable_symbol_id: stable_symbol_id_for(path, &symbol.entity_name),
+            stable_symbol_id: stable_symbol_id_for_discriminator(
+                relative_path.as_ref(),
+                &fqn,
+                &symbol.symbol_kind,
+                symbol.byte_range[0] as u64,
+            ),
             commit: commit.to_string(),
         },
         file_path: GitPath::from(path),
