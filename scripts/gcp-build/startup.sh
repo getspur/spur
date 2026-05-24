@@ -114,6 +114,18 @@ if [[ -d "$TARGETS" ]] && find "$TARGETS" -mmin -"$IDLE_MIN" -type f -print -qui
 fi
 
 echo "idle for $IDLE_MIN+ min — shutting down"
+
+# Pre-shutdown cleanup: per-delegation worktree target dirs are not reused
+# across reboots and were observed filling /mnt/cargo to 99%, causing ld
+# bus errors on the next boot. The shared targets/main cache is preserved.
+WORKTREES=/mnt/cargo/targets/worktrees
+if [[ -d "$WORKTREES" ]]; then
+    BEFORE=$(df -h /mnt/cargo | awk 'NR==2 {print $3"/"$2" ("$5")"}')
+    rm -rf "$WORKTREES"/*
+    AFTER=$(df -h /mnt/cargo | awk 'NR==2 {print $3"/"$2" ("$5")"}')
+    echo "pruned $WORKTREES: $BEFORE -> $AFTER"
+fi
+
 /sbin/shutdown -h now "SPUR autoshutdown: idle $IDLE_MIN+ min"
 exit 0
 SCRIPT
