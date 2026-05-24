@@ -110,7 +110,7 @@ log "Enumerating git-tracked files..."
 cd "$GIT_TOPLEVEL"
 FILE_LIST=$(mktemp)
 trap 'rm -f "$FILE_LIST"' EXIT
-git ls-files -z >"$FILE_LIST"
+git ls-files -z --cached --others --exclude-standard >"$FILE_LIST"
 COUNT=$(tr -cd '\0' <"$FILE_LIST" | wc -c | tr -d ' ')
 log "  $COUNT files"
 
