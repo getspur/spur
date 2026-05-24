@@ -293,7 +293,6 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "code_callees",
         "code_subgraph",
         "code_symbol_history",
-        "update_issue",
         "report_signal",
         "report_progress",
     ];
@@ -430,24 +429,20 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
         "get_issue should succeed, got: {body}"
     );
 
-    // One write tool call (update_issue) — also emits an audit
+    // A second tool call so summary event reports two distinct tools.
     let body = call_jsonrpc(
         &server,
         &token,
         "tools/call",
         serde_json::json!({
-            "name": "update_issue",
-            "arguments": {
-                "id": &issue_id,
-                "comment": "summary audit"
-            }
+            "name": "list_issues",
+            "arguments": {}
         }),
     )
     .await;
-    assert_eq!(
-        body["result"]["ok"].as_bool(),
-        Some(true),
-        "update_issue should succeed, got: {body}"
+    assert!(
+        body.get("result").is_some(),
+        "list_issues should succeed, got: {body}"
     );
 
     // Complete the delegation
@@ -478,10 +473,10 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
             assert_eq!(brain_session_id, "session-summary");
             assert_eq!(
                 *calls_total, 2,
-                "expected 2 tool calls (get_issue + update_issue)"
+                "expected 2 tool calls (get_issue + list_issues)"
             );
             assert_eq!(calls_by_tool.get("get_issue"), Some(&1));
-            assert_eq!(calls_by_tool.get("update_issue"), Some(&1));
+            assert_eq!(calls_by_tool.get("list_issues"), Some(&1));
             assert_eq!(*errors, 0, "no calls returned errors");
         } else {
             panic!(
@@ -773,22 +768,6 @@ async fn curated_tool_calls_route_and_deserialize_params() {
             Some(-32004) | Some(-32001)
         ),
         "fetch_outcome_artifact should route and return domain error, got: {fetch_outcome}"
-    );
-
-    let update_issue = call_jsonrpc(
-        &server,
-        &token,
-        "tools/call",
-        serde_json::json!({
-            "name": "update_issue",
-            "arguments": {"id": &issue_id, "comment": "dispatch routing check"}
-        }),
-    )
-    .await;
-    assert_eq!(
-        update_issue["result"]["ok"].as_bool(),
-        Some(true),
-        "update_issue should deserialize + route, got: {update_issue}"
     );
 
     let report_signal = call_jsonrpc(
