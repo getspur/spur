@@ -12,6 +12,7 @@ use spur_tui::mentions::{
 use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+const TEST_GRAPH_INDEX_VERSION: &str = "fixture-2026-05-11";
 
 #[test]
 fn file_mentions_index_and_fuzzy_match() {
@@ -277,7 +278,7 @@ fn ranking_fuzzy_symbol_outranks_fuzzy_path() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "ranking-fixture" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [
                 {
                     "stable_file_id": "file-graph-engine",
@@ -370,7 +371,7 @@ fn empty_query_bounds_code_graph_rows() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "large-empty-fixture" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": files,
             "symbols": symbols
         }),
@@ -464,7 +465,7 @@ fn code_graph_symbol_atom_text_qualifies_scoped_symbols_only() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "test-version" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [
                 {
                     "stable_file_id": "file-cache",
@@ -586,7 +587,7 @@ fn code_graph_submit_expansion_exposes_persisted_qualified_name() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "qualified-fixture" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [
                 {
                     "stable_file_id": "file-app",
@@ -844,7 +845,7 @@ fn duplicate_symbol_ids_keep_first_row_and_payload() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "duplicate-fixture" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [],
             "symbols": [
                 {
@@ -894,7 +895,7 @@ fn reversed_byte_range_artifact_disables_code_graph_rows() {
     let graph_path = write_graph_fixture(
         tmp.path(),
         serde_json::json!({
-            "header": { "graph_index_version": "reversed-fixture" },
+            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [],
             "symbols": [
                 {

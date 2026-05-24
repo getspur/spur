@@ -816,6 +816,7 @@ mod tests {
     use spur_pm::PmSource;
 
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+    const TEST_GRAPH_INDEX_VERSION: &str = "fixture-2026-05-11";
 
     fn issue(id: &str, title: &str, assignee: Option<&str>) -> IssueMentionDescriptor {
         IssueMentionDescriptor {
@@ -1304,7 +1305,7 @@ mod tests {
         }
         let artifact = serde_json::json!({
             "header": {
-                "graph_index_version": "registry-test",
+                "graph_index_version": TEST_GRAPH_INDEX_VERSION,
                 "content_hash_blake3": content_hash
             },
             "manifest_version": "registry-test-manifest",
@@ -1327,7 +1328,7 @@ mod tests {
     ) -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "registry-test".to_string(),
+                graph_index_version: TEST_GRAPH_INDEX_VERSION.to_string(),
                 content_hash_blake3: Some(content_hash.to_string()),
             },
             manifest_version: "registry-test-manifest".to_string(),
