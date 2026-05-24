@@ -2,6 +2,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use spur_graph::schema::GraphIndexArtifact;
@@ -29,12 +31,16 @@ type RebuildCell = OnceCell<Arc<GraphIndexArtifact>>;
 
 pub(crate) struct RebuildCoordinator {
     cells: Mutex<HashMap<RebuildKey, Weak<RebuildCell>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    build_invocations: AtomicUsize,
 }
 
 impl RebuildCoordinator {
     pub fn new() -> Self {
         Self {
             cells: Mutex::new(HashMap::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            build_invocations: AtomicUsize::new(0),
         }
     }
 
@@ -65,8 +71,21 @@ impl RebuildCoordinator {
             }
         };
 
+        #[cfg(any(test, feature = "test-support"))]
+        let artifact = cell
+            .get_or_try_init(|| {
+                self.build_invocations.fetch_add(1, Ordering::SeqCst);
+                build()
+            })
+            .await?;
+        #[cfg(not(any(test, feature = "test-support")))]
         let artifact = cell.get_or_try_init(build).await?;
         Ok(Arc::clone(artifact))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn build_invocation_count(&self) -> usize {
+        self.build_invocations.load(Ordering::SeqCst)
     }
 }
 
