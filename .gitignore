@@ -51,3 +51,19 @@ marketing/marketingskills/skills/*/*
 .beads/beads.db-*
 .beads/.write.lock
 .beads/issues.jsonl.*.tmp
+
+# tool & IDE caches
+.antigravitycli/
+.wrangler/
+.zed/
+.claude/skills/
+.codex/
+
+# loose logs and patches at repo root
+/*.log
+spur.log.*
+/*.patch
+/resources/
+
+# growth-loop artifacts
+/resource/growth-loop/
