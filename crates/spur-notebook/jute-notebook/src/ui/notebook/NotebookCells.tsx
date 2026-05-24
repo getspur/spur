@@ -1,12 +1,10 @@
 import {
-  BoltIcon,
   BotIcon,
   CheckIcon,
   Code2Icon,
   LetterTextIcon,
   LucideIcon,
   PlusIcon,
-  RouteOffIcon,
   XIcon,
   XSquareIcon,
 } from "lucide-react";
@@ -79,8 +77,6 @@ function CellInputAside({ cellId }: { cellId: string }) {
             notebook.setCellType(cellId, type === "code" ? "markdown" : "code");
           }}
         />
-        {type === "code" && <AsideIconButton Icon={RouteOffIcon} />}
-        <AsideIconButton Icon={BoltIcon} />
       </div>
       {output?.timings?.finishedAt && (
         <div className="mt-0.5 flex items-center">
@@ -134,7 +130,6 @@ export default function NotebookCells() {
                     Icon={XSquareIcon}
                     onClick={() => notebook.clearResult(id)}
                   />
-                  <AsideIconButton Icon={BoltIcon} />
                 </div>
               </Aside>
               <div className="max-h-[680px] overflow-y-auto">

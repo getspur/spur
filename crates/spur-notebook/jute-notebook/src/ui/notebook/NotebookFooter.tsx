@@ -1,29 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { LucideIcon, RouteIcon, SparklesIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ErrorBoundary } from "react-error-boundary";
 import { useStore } from "zustand";
 
 import { KernelUsageInfo } from "@/bindings";
 import { useNotebook } from "@/stores/notebook";
-
-const FeatureButton = ({
-  title,
-  Icon,
-  onClick,
-}: {
-  title: string;
-  Icon: LucideIcon;
-  onClick?: () => void;
-}) => (
-  <button
-    className="flex items-center rounded px-1.5 py-0.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-black"
-    onClick={onClick}
-  >
-    <Icon size={16} className="mr-1.5" />
-    <span className="text-sm">{title}</span>
-  </button>
-);
 
 const round = (n: number, precision: number = 0) => {
   const factor = Math.pow(10, precision);
@@ -112,12 +93,6 @@ export default function NotebookFooter() {
   return (
     <div className="absolute inset-x-0 bottom-0 z-10 flex h-16 flex-col justify-end bg-gradient-to-t from-white/85 from-40% to-white/0">
       <footer className="flex items-end gap-6 px-2 py-1">
-        <div className="flex items-center gap-1">
-          <FeatureButton title="AI Copilot" Icon={SparklesIcon} />
-          <div className="h-1 w-1 rounded-full bg-gray-300" />
-          <FeatureButton title="Reactivity" Icon={RouteIcon} />
-        </div>
-
         <ErrorBoundary fallback={undefined}>
           <KernelUsage />
         </ErrorBoundary>
