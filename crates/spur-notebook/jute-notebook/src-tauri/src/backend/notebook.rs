@@ -210,6 +210,7 @@ pub struct CellMetadata {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct SpurCellMetadata {
     /// Per-cell monotonic content version.
+    #[ts(type = "number")]
     pub version: u64,
 
     /// Agent that last edited the cell through notebook MCP tools.
