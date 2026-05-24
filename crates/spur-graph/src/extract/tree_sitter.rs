@@ -57,6 +57,35 @@ pub(crate) struct CompiledQueries {
     pub(crate) inline_spur_edges: Option<Query>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolQueryPolicy {
+    ReuseTags,
+    Dedicated(&'static str),
+}
+
+impl SymbolQueryPolicy {
+    fn source(self, tags_source: &'static str) -> &'static str {
+        match self {
+            Self::ReuseTags => tags_source,
+            Self::Dedicated(source) => source,
+        }
+    }
+}
+
+fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
+    match language {
+        Language::Rust | Language::TypeScript | Language::Tsx | Language::Cpp => {
+            SymbolQueryPolicy::ReuseTags
+        }
+        Language::Python => {
+            SymbolQueryPolicy::Dedicated(include_str!("../../queries/python/symbols.scm"))
+        }
+        Language::Markdown => {
+            SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct LanguageFileGroup {
     pub(crate) label: &'static str,
@@ -606,11 +635,13 @@ fn extract_file_from_tree(
 fn compile_queries(config: &LanguageConfig, language: Language) -> anyhow::Result<CompiledQueries> {
     let language_label = language.label();
     let mut tags = None;
+    let mut tags_source = None;
     let mut spur_edges = None;
     let mut inline_spur_edges = None;
     for (name, source) in config.queries {
         match *name {
             "tags" => {
+                tags_source = Some(source);
                 tags = Some(Query::new(&config.language, source).with_context(|| {
                     format!("failed to compile tree-sitter query `{name}` for `{language_label}`")
                 })?);
@@ -640,15 +671,9 @@ fn compile_queries(config: &LanguageConfig, language: Language) -> anyhow::Resul
             }
         }
     }
-    let symbols_source = match language {
-        Language::Rust => include_str!("../../queries/rust/symbols.scm"),
-        Language::Python => include_str!("../../queries/python/symbols.scm"),
-        Language::TypeScript | Language::Tsx => {
-            include_str!("../../queries/typescript/symbols.scm")
-        }
-        Language::Markdown => include_str!("../../queries/markdown/symbols.scm"),
-        Language::Cpp => include_str!("../../queries/cpp/tags.scm"),
-    };
+    let tags_source =
+        tags_source.with_context(|| format!("missing `{language_label}` tags query"))?;
+    let symbols_source = symbol_query_policy(language).source(tags_source);
     let symbols = Query::new(&config.language, symbols_source).with_context(|| {
         format!("failed to compile tree-sitter query `symbols` for `{language_label}`")
     })?;
@@ -904,6 +929,34 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbol_query_policy_documents_shared_and_dedicated_sources() {
+        assert_eq!(
+            symbol_query_policy(Language::Rust),
+            SymbolQueryPolicy::ReuseTags
+        );
+        assert_eq!(
+            symbol_query_policy(Language::TypeScript),
+            SymbolQueryPolicy::ReuseTags
+        );
+        assert_eq!(
+            symbol_query_policy(Language::Tsx),
+            SymbolQueryPolicy::ReuseTags
+        );
+        assert_eq!(
+            symbol_query_policy(Language::Cpp),
+            SymbolQueryPolicy::ReuseTags
+        );
+        assert!(matches!(
+            symbol_query_policy(Language::Python),
+            SymbolQueryPolicy::Dedicated(_)
+        ));
+        assert!(matches!(
+            symbol_query_policy(Language::Markdown),
+            SymbolQueryPolicy::Dedicated(_)
+        ));
+    }
 
     #[test]
     fn ambiguous_pending_bare_name_edge_remains_unresolved() {

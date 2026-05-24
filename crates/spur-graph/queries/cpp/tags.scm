@@ -1,4 +1,6 @@
 ; C++ symbol tags. Follows the tree-sitter @definition.* / @name convention.
+; Snapshot extraction intentionally reuses this tags query; do not add a
+; separate cpp/symbols.scm unless structural-vs-snapshot behavior must diverge.
 ;
 ; Tuned for production C++ codebases like DuckDB:
 ;   - templated and non-templated forms share patterns (template_declaration
