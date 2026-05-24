@@ -503,6 +503,25 @@ mod tests {
     }
 
     #[test]
+    fn init_views_sql_guards_direct_symbol_snapshot_coverage_without_bridge() {
+        let bridge_view_name = ["v", "symbol", "id", "bridge"].join("_");
+
+        assert!(
+            !INIT_VIEWS_SQL.contains(&bridge_view_name),
+            "init_views.sql must not define the transitional bridge view"
+        );
+        assert!(
+            INIT_VIEWS_SQL
+                .contains("COUNT(*) FROM nodes n JOIN symbol_snapshots s USING (stable_symbol_id)"),
+            "init_views.sql must assert direct stable_symbol_id join coverage"
+        );
+        assert!(
+            INIT_VIEWS_SQL.contains("direct_join_count * 100 >= node_count * 99"),
+            "direct join coverage must be at least 99% of node_count"
+        );
+    }
+
+    #[test]
     fn duckdb_cli_present_returns_some_when_on_path() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();
