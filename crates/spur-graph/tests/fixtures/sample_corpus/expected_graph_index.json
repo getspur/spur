@@ -312,7 +312,8 @@
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
-      "edge_kind": "calls"
+      "edge_kind": "calls",
+      "bind_method": "singleton"
     },
     {
       "source_stable_symbol_id": "3c12493bdaca1457",
