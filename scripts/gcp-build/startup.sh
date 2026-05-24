@@ -45,6 +45,18 @@ if ! command -v sccache >/dev/null 2>&1; then
     install -m 0755 "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
 fi
 
+# DuckDB CLI (system-wide). Needed by analyst tests that shell out to `duckdb`;
+# without it those tests silently skip on the build VM.
+DUCKDB_VERSION=v1.5.3
+if ! command -v duckdb >/dev/null 2>&1; then
+    curl -fsSL "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip" \
+        -o /tmp/duckdb_cli.zip
+    apt-get install -y --no-install-recommends unzip
+    unzip -o /tmp/duckdb_cli.zip -d /tmp
+    install -m 0755 /tmp/duckdb /usr/local/bin/duckdb
+    rm -f /tmp/duckdb_cli.zip /tmp/duckdb
+fi
+
 # Drop a profile.d snippet so every login shell sees the right env.
 # Note: CARGO_TARGET_DIR and SCCACHE_BASEDIRS are NOT set here — build.sh sets
 # them per-invocation so each worktree gets an isolated target/ and so sccache
