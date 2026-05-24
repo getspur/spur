@@ -12,6 +12,7 @@ use spur_graph::{
     GitPath, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
     GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
     GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey, SymbolSnapshotArtifact, WriteOptions,
+    GRAPH_INDEX_VERSION_TEMPORAL,
 };
 
 #[test]
@@ -272,7 +273,7 @@ fn fixture_artifact_with_unsorted_resolved_edges() -> GraphIndexArtifact {
 fn fixture_artifact() -> GraphIndexArtifact {
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: "spur-graph-phase2".to_string(),
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
             content_hash_blake3: None,
         },
         manifest_version: "test-manifest-version".to_string(),
