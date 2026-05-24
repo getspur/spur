@@ -342,6 +342,24 @@ impl IssueBrowserView {
         self.filter_mode
     }
 
+    pub fn is_text_modal_active(&self) -> bool {
+        self.add_comment_modal.is_some() || self.execute_modal.is_some()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn open_add_comment_modal_for_test(&mut self, issue_id: &str) {
+        self.add_comment_modal = Some(AddCommentModal {
+            issue_id: issue_id.to_string(),
+            body: String::new(),
+            restore_scroll_offset: 0,
+        });
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn add_comment_modal_body_for_test(&self) -> Option<&str> {
+        self.add_comment_modal.as_ref().map(|m| m.body.as_str())
+    }
+
     fn prefetch_selected_graph(&mut self) {
         if self.tracked_issues.len() < 2 {
             self.pending_prefetch = None;
