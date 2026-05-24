@@ -19,6 +19,11 @@ source "$SCRIPT_DIR/config.env"
 
 log() { echo "[build] $*" >&2; }
 
+# Exit code reserved for "VM/infrastructure unavailable" — distinct from any
+# cargo exit code (cargo uses 1/100/101). spur-cargo uses this to decide
+# whether to fall back to local cargo. Anything else is propagated as-is.
+INFRA_UNAVAILABLE=200
+
 AUTO_SPIN=0
 if [[ "${1:-}" == "--auto-spin" ]]; then
     AUTO_SPIN=1; shift
@@ -80,25 +85,25 @@ case "$VM_STATUS" in
             log "VM $VM_NAME is $VM_STATUS — starting..."
             gcloud compute instances start "$VM_NAME" \
                 --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-                --quiet || { log "start failed"; exit 1; }
-            wait_for_ssh || { log "SSH never came up"; exit 1; }
+                --quiet || { log "start failed"; exit $INFRA_UNAVAILABLE; }
+            wait_for_ssh || { log "SSH never came up"; exit $INFRA_UNAVAILABLE; }
         else
             log "VM $VM_NAME is $VM_STATUS. Pass --auto-spin to start it."
-            exit 1
+            exit $INFRA_UNAVAILABLE
         fi
         ;;
     MISSING)
         if [[ $AUTO_SPIN -eq 1 ]]; then
             log "VM $VM_NAME missing — spinning a fresh one..."
-            "$SCRIPT_DIR/spin.sh" || { log "spin.sh failed"; exit 1; }
+            "$SCRIPT_DIR/spin.sh" || { log "spin.sh failed"; exit $INFRA_UNAVAILABLE; }
         else
             log "VM $VM_NAME missing. Pass --auto-spin to create it."
-            exit 1
+            exit $INFRA_UNAVAILABLE
         fi
         ;;
     *)
         log "VM $VM_NAME in unexpected state: $VM_STATUS"
-        exit 1
+        exit $INFRA_UNAVAILABLE
         ;;
 esac
 
