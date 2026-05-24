@@ -363,6 +363,8 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
             dir.display()
         );
     }
+    let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
+        || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
     let nodes_path = dir.join("nodes.parquet");
     let edges_path = dir.join("edges.parquet");
     let unresolved_edges_path = dir.join("edges_unresolved.parquet");
@@ -413,7 +415,7 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
 
     edges.extend(unresolved_edges);
 
-    Ok(GraphIndexArtifact {
+    let mut artifact = GraphIndexArtifact {
         header: GraphIndexHeader {
             graph_index_version: manifest.graph_index_version,
             content_hash_blake3: None,
@@ -431,7 +433,11 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
         commits,
         symbol_snapshots,
         temporal_edges,
-    })
+    };
+    if legacy_snapshot_ids {
+        crate::schema::rehash_legacy_snapshot_ids(&mut artifact);
+    }
+    Ok(artifact)
 }
 
 fn join_scoped<T>(
@@ -683,6 +689,7 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
           required binary confidence (STRING);
           required float confidence_score;
           optional binary edge_kind (STRING);
+          optional binary bind_method (STRING);
         }
         "#,
         &[
@@ -692,6 +699,7 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
             "relation",
             "confidence",
             "edge_kind",
+            "bind_method",
         ],
         vec![
             ColumnData::RequiredString(
@@ -740,6 +748,11 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
                     .map(|row| row.edge.edge_kind.map(edge_kind_to_str).map(str::to_string))
                     .collect(),
             ),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| row.edge.bind_method.clone())
+                    .collect(),
+            ),
         ],
     )
 }
@@ -756,6 +769,7 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
           required binary confidence (STRING);
           required float confidence_score;
           optional binary edge_kind (STRING);
+          optional binary bind_method (STRING);
         }
         "#,
         &[
@@ -764,6 +778,7 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
             "relation",
             "confidence",
             "edge_kind",
+            "bind_method",
         ],
         vec![
             ColumnData::RequiredString(
@@ -795,6 +810,11 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
             ColumnData::OptionalString(
                 rows.iter()
                     .map(|row| row.edge.edge_kind.map(edge_kind_to_str).map(str::to_string))
+                    .collect(),
+            ),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| row.edge.bind_method.clone())
                     .collect(),
             ),
         ],
@@ -1438,6 +1458,7 @@ fn read_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArti
         let confidence = string_array(&batch, 6, "confidence")?;
         let confidence_score = f32_array(&batch, 7, "confidence_score")?;
         let edge_kind = string_array(&batch, 8, "edge_kind")?;
+        let bind_method = optional_string_array_by_name(&batch, "bind_method")?;
 
         for row in 0..batch.num_rows() {
             edges.push(GraphEdgeArtifact {
@@ -1464,6 +1485,7 @@ fn read_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArti
                     .as_deref()
                     .map(edge_kind_from_str)
                     .transpose()?,
+                bind_method: bind_method.and_then(|values| optional_string_value(values, row)),
             });
         }
     }
@@ -1479,6 +1501,7 @@ fn read_unresolved_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<Gr
         let confidence = string_array(&batch, 4, "confidence")?;
         let confidence_score = f32_array(&batch, 5, "confidence_score")?;
         let edge_kind = string_array(&batch, 6, "edge_kind")?;
+        let bind_method = optional_string_array_by_name(&batch, "bind_method")?;
 
         for row in 0..batch.num_rows() {
             edges.push(GraphEdgeArtifact {
@@ -1501,6 +1524,7 @@ fn read_unresolved_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<Gr
                     .as_deref()
                     .map(edge_kind_from_str)
                     .transpose()?,
+                bind_method: bind_method.and_then(|values| optional_string_value(values, row)),
             });
         }
     }
@@ -1739,6 +1763,17 @@ fn string_array<'a>(
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| anyhow!("expected string column `{name}`"))
+}
+
+fn optional_string_array_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> anyhow::Result<Option<&'a StringArray>> {
+    let schema = batch.schema();
+    let Ok(index) = schema.index_of(name) else {
+        return Ok(None);
+    };
+    string_array(batch, index, name).map(Some)
 }
 
 fn i64_array<'a>(
@@ -2662,7 +2697,7 @@ mod parquet_temporal_test {
     fn empty_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "3".to_string(),
+                graph_index_version: crate::schema::GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
                 content_hash_blake3: None,
             },
             manifest_version: "test-manifest".to_string(),

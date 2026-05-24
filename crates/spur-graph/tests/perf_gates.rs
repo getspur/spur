@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, read_artifact_parquet,
-    write_artifact_parquet, GraphIndexArtifact, WriteOptions,
+    write_artifact_parquet, GraphEdgeKind, GraphIndexArtifact, WriteOptions,
 };
 use tempfile::TempDir;
 
@@ -216,6 +216,53 @@ fn gate_3_6_duckdb_peak_rss_under_500_mb() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "perf-gates"), ignore)]
+fn gate_t5_git_path_as_ref_inbound_calls_under_20() {
+    let _guard = perf_gate_guard();
+    let repo_root = workspace_root();
+    let (facts, _counts) = build_facts(&repo_root).unwrap_or_else(|err| {
+        panic!(
+            "failed to build facts for `{}`: {err:#}",
+            repo_root.display()
+        )
+    });
+    let artifact = artifact_from_facts(&facts, &repo_root).unwrap_or_else(|err| {
+        panic!(
+            "failed to build artifact for `{}`: {err:#}",
+            repo_root.display()
+        )
+    });
+    let target = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == "impl AsRef<[u8]> for GitPath::as_ref")
+        .expect("GitPath AsRef::as_ref symbol");
+    let inbound_calls = artifact
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.edge_kind == Some(GraphEdgeKind::Calls)
+                && edge.target_stable_symbol_id.as_deref() == Some(target.stable_symbol_id.as_str())
+        })
+        .count();
+    let call_edges = artifact
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.edge_kind == Some(GraphEdgeKind::Calls) && edge.target_stable_symbol_id.is_some()
+        })
+        .count();
+
+    eprintln!(
+        "SPUR_GRAPH_PHANTOM_GATE resolved_call_edges={call_edges} git_path_as_ref_inbound={inbound_calls}"
+    );
+    assert!(
+        inbound_calls <= 20,
+        "GitPath::as_ref inbound calls {inbound_calls} should stay <= 20"
+    );
+}
+
+#[test]
 #[ignore]
 fn perf_helper_sample() {
     let Some(mode) = env::var_os(HELPER_ENV) else {
@@ -324,6 +371,14 @@ fn persist_tempdir_path(tempdir: TempDir, dir: PathBuf) -> PathBuf {
         root.display()
     );
     dir
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .expect("crate should live under <workspace>/crates/spur-graph")
 }
 
 fn helper_samples(mode: &str, parquet_dir: &Path) -> Vec<HelperSample> {
