@@ -241,6 +241,10 @@ mod file_oid_cache {
     }
 }
 
+#[allow(dead_code)]
+#[path = "rebuild_singleflight.rs"]
+mod rebuild_singleflight;
+
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
 const DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 40;
 const MIN_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 1;
