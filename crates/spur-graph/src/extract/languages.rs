@@ -324,7 +324,7 @@ pub(crate) fn emit_definitions<'tree>(
             continue;
         };
         let parent = nearest_parent(file_node_id, &bindings, node);
-        let fqn = scoped_name(parent.fqn.unwrap_or(""), &label);
+        let fqn = scoped_name(parent.fqn.unwrap_or(""), &fqn_segment(kind, &label));
         let node_id = builder.add_node(relative_path, label, fqn.clone(), kind, file_id, node);
         builder.add_edge(parent.node_id, Some(node_id), RelationKind::Contains, None);
         bindings.push(DefinitionBinding { node, node_id, fqn });
@@ -346,10 +346,10 @@ pub(crate) fn extracted_symbols<'tree>(
             continue;
         };
         let parent = nearest_extracted_parent(&bindings, node);
-        let enclosing_scope = parent.map(extracted_enclosing_scope);
+        let enclosing_scope = parent.map(|parent| parent.fqn.clone());
         let fqn = scoped_name(
             parent.map(|parent| parent.fqn.as_str()).unwrap_or(""),
-            &label,
+            &fqn_segment(kind, &label),
         );
         let range = node.range();
         let symbol_text = child_text(node, source);
@@ -362,12 +362,7 @@ pub(crate) fn extracted_symbols<'tree>(
             anchor_hash: compute_anchor_hash(symbol_text).to_string(),
             tokens: symbol_tokens(node, source, &label),
         });
-        bindings.push(ExtractedDefinitionBinding {
-            node,
-            label,
-            kind,
-            fqn,
-        });
+        bindings.push(ExtractedDefinitionBinding { node, fqn });
     }
 
     symbols
@@ -784,8 +779,6 @@ fn definition_rank(kind: NodeKind) -> u8 {
 #[derive(Debug, Clone)]
 struct ExtractedDefinitionBinding<'tree> {
     node: Node<'tree>,
-    label: String,
-    kind: NodeKind,
     fqn: String,
 }
 
@@ -797,13 +790,6 @@ fn nearest_extracted_parent<'a, 'tree>(
         .iter()
         .rev()
         .find(|definition| contains(definition.node, node))
-}
-
-fn extracted_enclosing_scope(parent: &ExtractedDefinitionBinding<'_>) -> String {
-    match parent.kind {
-        NodeKind::Impl => format!("impl {}", parent.label),
-        _ => parent.label.clone(),
-    }
 }
 
 fn symbol_kind(kind: NodeKind) -> &'static str {
@@ -825,6 +811,13 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
 
 fn symbol_entity_name(label: &str) -> String {
     label.strip_prefix("impl ").unwrap_or(label).to_string()
+}
+
+fn fqn_segment(kind: NodeKind, label: &str) -> String {
+    match kind {
+        NodeKind::Impl => format!("impl {}", symbol_entity_name(label)),
+        _ => symbol_entity_name(label),
+    }
 }
 
 fn symbol_tokens(node: Node<'_>, source: &str, own_name: &str) -> Vec<String> {

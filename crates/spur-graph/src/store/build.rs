@@ -20,7 +20,7 @@ use crate::{
     GraphSymbolArtifact, GraphTombstoneEntry, NodeId, NodeKind, RelationKind, SourceSpan,
 };
 
-pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
+pub const SCHEMA_VERSION: &str = "spur-graph-schema-v6";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 
 #[derive(Debug, Clone, Copy)]
