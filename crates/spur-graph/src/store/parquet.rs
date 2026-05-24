@@ -689,6 +689,7 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
           required binary confidence (STRING);
           required float confidence_score;
           optional binary edge_kind (STRING);
+          optional binary bind_method (STRING);
         }
         "#,
         &[
@@ -698,6 +699,7 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
             "relation",
             "confidence",
             "edge_kind",
+            "bind_method",
         ],
         vec![
             ColumnData::RequiredString(
@@ -746,6 +748,11 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
                     .map(|row| row.edge.edge_kind.map(edge_kind_to_str).map(str::to_string))
                     .collect(),
             ),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| row.edge.bind_method.clone())
+                    .collect(),
+            ),
         ],
     )
 }
@@ -762,6 +769,7 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
           required binary confidence (STRING);
           required float confidence_score;
           optional binary edge_kind (STRING);
+          optional binary bind_method (STRING);
         }
         "#,
         &[
@@ -770,6 +778,7 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
             "relation",
             "confidence",
             "edge_kind",
+            "bind_method",
         ],
         vec![
             ColumnData::RequiredString(
@@ -801,6 +810,11 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
             ColumnData::OptionalString(
                 rows.iter()
                     .map(|row| row.edge.edge_kind.map(edge_kind_to_str).map(str::to_string))
+                    .collect(),
+            ),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| row.edge.bind_method.clone())
                     .collect(),
             ),
         ],
@@ -1444,6 +1458,7 @@ fn read_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArti
         let confidence = string_array(&batch, 6, "confidence")?;
         let confidence_score = f32_array(&batch, 7, "confidence_score")?;
         let edge_kind = string_array(&batch, 8, "edge_kind")?;
+        let bind_method = optional_string_array_by_name(&batch, "bind_method")?;
 
         for row in 0..batch.num_rows() {
             edges.push(GraphEdgeArtifact {
@@ -1470,6 +1485,7 @@ fn read_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArti
                     .as_deref()
                     .map(edge_kind_from_str)
                     .transpose()?,
+                bind_method: bind_method.and_then(|values| optional_string_value(values, row)),
             });
         }
     }
@@ -1485,6 +1501,7 @@ fn read_unresolved_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<Gr
         let confidence = string_array(&batch, 4, "confidence")?;
         let confidence_score = f32_array(&batch, 5, "confidence_score")?;
         let edge_kind = string_array(&batch, 6, "edge_kind")?;
+        let bind_method = optional_string_array_by_name(&batch, "bind_method")?;
 
         for row in 0..batch.num_rows() {
             edges.push(GraphEdgeArtifact {
@@ -1507,6 +1524,7 @@ fn read_unresolved_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<Gr
                     .as_deref()
                     .map(edge_kind_from_str)
                     .transpose()?,
+                bind_method: bind_method.and_then(|values| optional_string_value(values, row)),
             });
         }
     }
@@ -1745,6 +1763,17 @@ fn string_array<'a>(
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| anyhow!("expected string column `{name}`"))
+}
+
+fn optional_string_array_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> anyhow::Result<Option<&'a StringArray>> {
+    let schema = batch.schema();
+    let Ok(index) = schema.index_of(name) else {
+        return Ok(None);
+    };
+    string_array(batch, index, name).map(Some)
 }
 
 fn i64_array<'a>(

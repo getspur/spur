@@ -56,12 +56,12 @@
 ; block (`else { 1 }`) false positives while keeping real call shapes.
 ; Verified by crates/spur-graph/tests/rust_macro_token_tree_query.rs.
 (token_tree
-  (identifier) @call.name
+  (identifier) @macro_call.name
   .
-  (token_tree "(" ")")) @call
+  (token_tree "(" ")")) @macro_call
 
 (token_tree
   (scoped_identifier
-    name: (identifier) @call.name)
+    name: (identifier) @macro_call.name)
   .
-  (token_tree "(" ")")) @call
+  (token_tree "(" ")")) @macro_call
