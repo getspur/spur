@@ -1685,6 +1685,9 @@ impl View for SessionPickerView {
                                 None
                             }
                             KeyCode::Char('y') => hl_session_id.clone().map(Action::CopySessionId),
+                            KeyCode::Char('?') if key.modifiers.is_empty() => {
+                                Some(Action::ShowHelp)
+                            }
                             _ => None,
                         }
                     }
@@ -1915,6 +1918,58 @@ mod current_session_shortcut_tests {
         assert!(text.contains("Last: Build fix"));
         assert!(text.contains("5m ago"));
         assert!(text.contains("[Enter] resume"));
+    }
+
+    #[test]
+    fn question_mark_unfocused_emits_show_help() {
+        let mut picker = SessionPickerView::new();
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("A")],
+            test_ctx().synopsis,
+        );
+
+        let action = picker.handle_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        assert!(
+            matches!(action, Some(Action::ShowHelp)),
+            "expected ShowHelp, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn question_mark_in_search_focused_appends_to_filter() {
+        let mut picker = SessionPickerView::new();
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("A")],
+            test_ctx().synopsis,
+        );
+        // Focus the search box.
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &test_ctx(),
+        );
+
+        let action = picker.handle_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        assert!(
+            action.is_none(),
+            "?-while-searching must not emit an action, got {:?}",
+            action
+        );
+        // Filter should now contain '?'.
+        match &picker.state {
+            PickerState::Populated { filter, .. } => {
+                assert_eq!(filter, "?", "filter should be '?' after typing");
+            }
+            _ => panic!("expected Populated state"),
+        }
     }
 
     #[test]
