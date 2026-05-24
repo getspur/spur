@@ -387,6 +387,7 @@ pub(crate) fn emit_edges(
                         target_name: imported,
                         relation,
                         edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: None,
                         scope_text: None,
                     });
@@ -407,8 +408,23 @@ pub(crate) fn emit_edges(
                         target_name: callee,
                         relation: RelationKind::Calls,
                         edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: receiver_text.clone(),
                         scope_text: scope_text.clone(),
+                    });
+                }
+            }
+            "macro_call" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                for callee in contained_capture_text(capture, source, captures, "macro_call.name") {
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: callee,
+                        relation: RelationKind::Calls,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::MacroBody,
+                        receiver_text: None,
+                        scope_text: None,
                     });
                 }
             }
@@ -422,6 +438,7 @@ pub(crate) fn emit_edges(
                     target_name: target_name.to_string(),
                     relation: RelationKind::References,
                     edge_kind: Some(GraphEdgeKind::ReferencesHof),
+                    origin: crate::extract::tree_sitter::CallOrigin::Expression,
                     receiver_text: None,
                     scope_text: None,
                 });
@@ -465,6 +482,7 @@ pub(crate) fn emit_rust_dyn_trait_edges(
             target_name: format!("{trait_name}::{method}"),
             relation: RelationKind::Calls,
             edge_kind: Some(GraphEdgeKind::CallsDyn),
+            origin: crate::extract::tree_sitter::CallOrigin::Expression,
             receiver_text: Some(receiver),
             scope_text: None,
         });

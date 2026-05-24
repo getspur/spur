@@ -665,6 +665,7 @@ fn buckets_from_facts(
             confidence_score: edge.confidence_score,
             change_kind: None,
             edge_kind: Some(graph_edge_kind_or_default(edge.relation, edge.edge_kind)),
+            bind_method: edge.bind_method.clone(),
         });
     }
 
@@ -2006,6 +2007,7 @@ fn submit_plan_def() -> ToolDefinition {
             confidence_score: 1.0,
             change_kind: None,
             edge_kind: Some(graph_edge_kind_or_default(relation, None)),
+            bind_method: None,
         }
     }
 

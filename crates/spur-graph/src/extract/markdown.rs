@@ -167,6 +167,7 @@ fn emit_markdown_links(
                         target_name,
                         relation,
                         edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: None,
                         scope_text: None,
                     });
@@ -210,6 +211,7 @@ fn emit_markdown_block_links(
                     target_name,
                     relation,
                     edge_kind: None,
+                    origin: crate::extract::tree_sitter::CallOrigin::Expression,
                     receiver_text: None,
                     scope_text: None,
                 });

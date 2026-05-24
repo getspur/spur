@@ -183,6 +183,8 @@ pub struct GraphEdgeArtifact {
     pub change_kind: Option<ChangeKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_kind: Option<GraphEdgeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_method: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,6 +211,8 @@ pub struct GraphEdge {
     pub confidence_score: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_kind: Option<GraphEdgeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_method: Option<String>,
     pub evidence_id: EvidenceId,
     pub directed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
