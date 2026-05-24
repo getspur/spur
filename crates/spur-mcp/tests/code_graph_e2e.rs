@@ -145,6 +145,19 @@ fn write_wide_fixture_crate(worktree: &Path, helper_count: usize) {
     std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
 }
 
+fn write_multi_file_fixture_crate(worktree: &Path) {
+    copy_fixture_crate(worktree);
+    std::fs::write(
+        worktree.join("src/support.rs"),
+        "pub fn unrelated_support_symbol() -> bool {\n    true\n}\n",
+    )
+    .expect("write support source");
+    let lib_path = worktree.join("src/lib.rs");
+    let mut lib = std::fs::read_to_string(&lib_path).expect("read fixture source");
+    lib.push_str("\npub mod support;\n");
+    std::fs::write(lib_path, lib).expect("write fixture source with support module");
+}
+
 fn git(worktree: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
@@ -669,6 +682,10 @@ fn node_entity_names(body: &Value) -> BTreeSet<String> {
     entity_names(body["nodes"].as_array().expect("nodes"))
 }
 
+fn candidate_entity_names(body: &Value) -> BTreeSet<String> {
+    entity_names(body["candidates"].as_array().expect("candidates"))
+}
+
 fn qualified_names(rows: &[Value]) -> BTreeSet<String> {
     rows.iter()
         .map(|row| {
@@ -678,6 +695,147 @@ fn qualified_names(rows: &[Value]) -> BTreeSet<String> {
                 .to_string()
         })
         .collect()
+}
+
+#[tokio::test]
+async fn code_search_reflects_unsaved_edit_after_rebuild() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    let mut source =
+        std::fs::read_to_string(worktree.path().join("src/lib.rs")).expect("read fixture source");
+    source.push_str("\npub fn freshly_indexed_unsaved_symbol() -> bool {\n    true\n}\n");
+    std::fs::write(worktree.path().join("src/lib.rs"), source).expect("write unsaved fixture edit");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "freshly_indexed_unsaved_symbol",
+                "mode": "exact",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+
+    assert!(candidate_entity_names(&body).contains("freshly_indexed_unsaved_symbol"));
+    assert_eq!(body["worktree_dirty"], false);
+    assert_eq!(body["rebuild_status"], "fresh");
+}
+
+#[tokio::test]
+async fn code_search_unrelated_edit_does_not_rebuild() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    write_multi_file_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    std::fs::write(
+        worktree.path().join("src/support.rs"),
+        "pub fn unrelated_support_symbol() -> bool {\n    false\n}\n",
+    )
+    .expect("write unrelated fixture edit");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "orchestrate_order",
+                "mode": "exact",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        candidate_entity_names(&body),
+        BTreeSet::from(["orchestrate_order".to_string()])
+    );
+    assert_eq!(body["rebuild_status"], "not_needed");
+    assert_eq!(body["response_file_oids_match"], true);
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn code_search_concurrent_dirty_requests_dedupe_rebuild() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    let mut source =
+        std::fs::read_to_string(worktree.path().join("src/lib.rs")).expect("read fixture source");
+    source.push_str("\npub fn concurrent_unsaved_symbol() -> bool {\n    true\n}\n");
+    std::fs::write(worktree.path().join("src/lib.rs"), source).expect("write unsaved fixture edit");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+    let _delay = server.__test_set_code_graph_rebuild_delay(std::time::Duration::from_millis(50));
+
+    let search_args = json!({
+        "query": "concurrent_unsaved_symbol",
+        "mode": "exact",
+        "limit": 20
+    });
+    let (first, second, third, fourth) = tokio::join!(
+        call_tool(&server, "code_search", search_args.clone()),
+        call_tool(&server, "code_search", search_args.clone()),
+        call_tool(&server, "code_search", search_args.clone()),
+        call_tool(&server, "code_search", search_args),
+    );
+
+    for response in [first, second, third, fourth] {
+        let body = tool_body(response);
+        assert!(candidate_entity_names(&body).contains("concurrent_unsaved_symbol"));
+        assert_eq!(body["rebuild_status"], "fresh");
+    }
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 1);
+}
+
+#[tokio::test]
+async fn code_search_rebuild_budget_exceeded_serves_stale() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    let mut source =
+        std::fs::read_to_string(worktree.path().join("src/lib.rs")).expect("read fixture source");
+    source.push_str("\npub fn budget_exceeded_unsaved_symbol() -> bool {\n    true\n}\n");
+    std::fs::write(worktree.path().join("src/lib.rs"), source).expect("write unsaved fixture edit");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+    let _budget = server.__test_set_code_graph_rebuild_budget(std::time::Duration::from_millis(0));
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "budget_exceeded_unsaved_symbol",
+                "mode": "exact",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["rebuild_status"], "stale_budget_exceeded");
+    assert_eq!(body["worktree_dirty"], true);
+    assert_eq!(body["total_matches"], 0);
+    assert!(body["candidates"]
+        .as_array()
+        .expect("stale candidates")
+        .is_empty());
 }
 
 #[tokio::test]
