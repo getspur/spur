@@ -3,6 +3,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -361,7 +363,14 @@ const MAX_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1200;
 const MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES: usize = 50;
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
-const GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
+const DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
+#[cfg(any(test, feature = "test-support"))]
+const GRAPH_REBUILD_LATENCY_BUDGET_UNSET_MS: u64 = u64::MAX;
+#[cfg(any(test, feature = "test-support"))]
+static GRAPH_REBUILD_LATENCY_BUDGET_OVERRIDE_MS: AtomicU64 =
+    AtomicU64::new(GRAPH_REBUILD_LATENCY_BUDGET_UNSET_MS);
+#[cfg(any(test, feature = "test-support"))]
+static GRAPH_REBUILD_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 // Temporal resolution error codes (T3 / Phase 1.5 hardening)
 const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
 const CODE_GRAPH_DELETED_ERROR_CODE: i64 = -32005;
@@ -1010,6 +1019,7 @@ impl GraphResponsePayload {
     fn files_for_metadata(&self, artifact: &GraphIndexArtifact) -> Vec<(String, String)> {
         self.files
             .clone()
+            .or_else(|| empty_code_search_file_set(artifact, &self.body))
             .unwrap_or_else(|| response_file_set_from_body(artifact, &self.body))
     }
 }
@@ -1422,6 +1432,72 @@ enum RebuildAttempt {
     StaleRebuildFailed,
 }
 
+fn graph_rebuild_latency_budget() -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let override_ms = GRAPH_REBUILD_LATENCY_BUDGET_OVERRIDE_MS.load(Ordering::SeqCst);
+        if override_ms != GRAPH_REBUILD_LATENCY_BUDGET_UNSET_MS {
+            return Duration::from_millis(override_ms);
+        }
+    }
+    DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn duration_millis_for_test(duration: Duration) -> u64 {
+    duration
+        .as_millis()
+        .min(u128::from(GRAPH_REBUILD_LATENCY_BUDGET_UNSET_MS - 1)) as u64
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct GraphRebuildBudgetGuard {
+    previous_ms: u64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for GraphRebuildBudgetGuard {
+    fn drop(&mut self) {
+        GRAPH_REBUILD_LATENCY_BUDGET_OVERRIDE_MS.store(self.previous_ms, Ordering::SeqCst);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn set_graph_rebuild_latency_budget_for_test(
+    budget: Duration,
+) -> GraphRebuildBudgetGuard {
+    let previous_ms = GRAPH_REBUILD_LATENCY_BUDGET_OVERRIDE_MS
+        .swap(duration_millis_for_test(budget), Ordering::SeqCst);
+    GraphRebuildBudgetGuard { previous_ms }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct GraphRebuildDelayGuard {
+    previous_ms: u64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for GraphRebuildDelayGuard {
+    fn drop(&mut self) {
+        GRAPH_REBUILD_DELAY_MS.store(self.previous_ms, Ordering::SeqCst);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn set_graph_rebuild_delay_for_test(delay: Duration) -> GraphRebuildDelayGuard {
+    let previous_ms =
+        GRAPH_REBUILD_DELAY_MS.swap(duration_millis_for_test(delay), Ordering::SeqCst);
+    GraphRebuildDelayGuard { previous_ms }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn apply_graph_rebuild_delay_for_test() {
+    let delay_ms = GRAPH_REBUILD_DELAY_MS.load(Ordering::SeqCst);
+    if delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+}
+
 async fn try_rebuild_artifact(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     previous_artifact: Arc<GraphIndexArtifact>,
@@ -1434,6 +1510,8 @@ async fn try_rebuild_artifact(
                 let previous_artifact = Arc::clone(&previous_artifact);
                 let worktree = worktree.clone();
                 async move {
+                    #[cfg(any(test, feature = "test-support"))]
+                    apply_graph_rebuild_delay_for_test().await;
                     tokio::task::spawn_blocking(move || {
                         let (artifact, _mode) =
                             spur_graph::store::build::artifact_from_facts_incremental(
@@ -1451,7 +1529,7 @@ async fn try_rebuild_artifact(
             .await
     });
 
-    match tokio::time::timeout(GRAPH_REBUILD_LATENCY_BUDGET, &mut task).await {
+    match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
         Ok(Ok(Ok(artifact))) => RebuildAttempt::Fresh(artifact),
         Ok(Ok(Err(error))) => {
             tracing::warn!(
@@ -2580,6 +2658,31 @@ fn response_file_set_from_body(
     response_file_set_for_paths(artifact, paths)
 }
 
+fn empty_code_search_file_set(
+    artifact: &GraphIndexArtifact,
+    body: &Value,
+) -> Option<Vec<(String, String)>> {
+    let candidates = body.get("candidates")?.as_array()?;
+    if !candidates.is_empty() || body.get("query").is_none() || body.get("total_matches").is_none()
+    {
+        return None;
+    }
+
+    if let Some(file) = body.get("file").and_then(Value::as_str) {
+        return Some(response_file_set_for_paths(artifact, [file]));
+    }
+
+    Some(all_indexed_file_set(artifact))
+}
+
+fn all_indexed_file_set(artifact: &GraphIndexArtifact) -> Vec<(String, String)> {
+    artifact
+        .file_manifests
+        .iter()
+        .map(|entry| (entry.path.clone(), entry.content_oid.clone()))
+        .collect()
+}
+
 fn response_file_set_for_symbol_ids<'a>(
     artifact: &GraphIndexArtifact,
     symbol_ids: impl IntoIterator<Item = &'a str>,
@@ -3595,6 +3698,9 @@ mod tests {
         let _lock = CWD_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _budget = (!expected).then(|| {
+            super::set_graph_rebuild_latency_budget_for_test(std::time::Duration::from_millis(0))
+        });
         let (dir, indexed_head_oid) = setup_file_oid_metadata_fixture();
         mutate(&dir);
         let _cwd = enter_dir(dir.path());

@@ -137,6 +137,24 @@ impl McpCallbackServer {
         serde_json::to_value(&response).expect("serialize JsonRpcResponse")
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_code_graph_rebuild_invocation_count(&self) -> usize {
+        self.graph_rebuild_coordinator.build_invocation_count()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_set_code_graph_rebuild_budget(&self, budget: std::time::Duration) -> impl Drop {
+        handlers::code_graph::set_graph_rebuild_latency_budget_for_test(budget)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_set_code_graph_rebuild_delay(&self, delay: std::time::Duration) -> impl Drop {
+        handlers::code_graph::set_graph_rebuild_delay_for_test(delay)
+    }
+
     /// Test-only: install a plan state directly into the in-memory cache.
     #[doc(hidden)]
     pub async fn __test_install_plan(&self, state: crate::plan::PlanState) {
