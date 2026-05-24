@@ -521,6 +521,7 @@ fn graph_edge(source: &str, target: &str) -> GraphEdgeArtifact {
         confidence_score: 1.0,
         change_kind: None,
         edge_kind: None,
+        bind_method: None,
     }
 }
 

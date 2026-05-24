@@ -1,12 +1,12 @@
 {
   "header": {
-    "graph_index_version": "3"
+    "graph_index_version": "4"
   },
   "manifest_version": "<normalized>",
   "graph_content_hash": "9ea20754498b67c44f3aeb5da8c0f780288828cf712588f3f6033c8982b9954f",
   "file_manifests": [
     {
-      "stable_file_id": "fa1b8fd6988afb15",
+      "stable_file_id": "1e095ba8c60223fe",
       "path": "src/helpers.py",
       "content_oid": "a6aeb60ac53e4c57b17b90b85cd158ac5a86c617",
       "node_ids": [
@@ -15,7 +15,7 @@
       ]
     },
     {
-      "stable_file_id": "7637220ca411355c",
+      "stable_file_id": "7633513f745a26ce",
       "path": "src/main.py",
       "content_oid": "db42304b57f00ee6ed29c9deb0fa264c65fca6ad",
       "node_ids": [
@@ -25,7 +25,7 @@
       ]
     },
     {
-      "stable_file_id": "88080f65b93577ff",
+      "stable_file_id": "528488002bf97df3",
       "path": "src/models.py",
       "content_oid": "06ab8ebd70675319942d021707cd7dcd121910fe",
       "node_ids": [
@@ -37,7 +37,7 @@
       ]
     },
     {
-      "stable_file_id": "438512d0ff1861c0",
+      "stable_file_id": "233e90d5343e886c",
       "path": "src/pkg.py",
       "content_oid": "e1db523c1d482ea9cf95381f71efa23e24c72170",
       "node_ids": [
@@ -49,25 +49,25 @@
   ],
   "files": [
     {
-      "stable_file_id": "fa1b8fd6988afb15",
+      "stable_file_id": "1e095ba8c60223fe",
       "file_path": "src/helpers.py"
     },
     {
-      "stable_file_id": "7637220ca411355c",
+      "stable_file_id": "7633513f745a26ce",
       "file_path": "src/main.py"
     },
     {
-      "stable_file_id": "88080f65b93577ff",
+      "stable_file_id": "528488002bf97df3",
       "file_path": "src/models.py"
     },
     {
-      "stable_file_id": "438512d0ff1861c0",
+      "stable_file_id": "233e90d5343e886c",
       "file_path": "src/pkg.py"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "b3e8dd9e203796dc",
+      "stable_symbol_id": "ed9abdbb09704c78",
       "file_path": "src/helpers.py",
       "byte_range": [
         0,
@@ -84,7 +84,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "0008680ec500f0cc",
+      "stable_symbol_id": "74ec69dd6e04be1b",
       "file_path": "src/main.py",
       "byte_range": [
         117,
@@ -101,7 +101,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "d1aad177c35dee30",
+      "stable_symbol_id": "22875f8c16d9b97b",
       "file_path": "src/main.py",
       "byte_range": [
         283,
@@ -118,7 +118,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "98acc27597535ad6",
+      "stable_symbol_id": "23f3dd6a1c0267b5",
       "file_path": "src/models.py",
       "byte_range": [
         0,
@@ -135,7 +135,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "a4d8c8baaefff024",
+      "stable_symbol_id": "3df01b68f42059d5",
       "file_path": "src/models.py",
       "byte_range": [
         16,
@@ -152,7 +152,7 @@
       "enclosing_scope": "User"
     },
     {
-      "stable_symbol_id": "bc1353884526a3fb",
+      "stable_symbol_id": "81fdbe50fb39044f",
       "file_path": "src/models.py",
       "byte_range": [
         72,
@@ -169,7 +169,7 @@
       "enclosing_scope": "User"
     },
     {
-      "stable_symbol_id": "a73c0d6fc25dad8b",
+      "stable_symbol_id": "65b7728fe805305b",
       "file_path": "src/models.py",
       "byte_range": [
         150,
@@ -186,7 +186,7 @@
       "enclosing_scope": "User"
     },
     {
-      "stable_symbol_id": "7f8a5ff1eb1843de",
+      "stable_symbol_id": "711fe77e5e26d211",
       "file_path": "src/pkg.py",
       "byte_range": [
         0,
@@ -203,7 +203,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "b137eda51a24b90d",
+      "stable_symbol_id": "8725ca36d1c96bdc",
       "file_path": "src/pkg.py",
       "byte_range": [
         18,
@@ -222,62 +222,8 @@
   ],
   "edges": [
     {
-      "source_stable_symbol_id": "0008680ec500f0cc",
-      "target_stable_symbol_id": null,
-      "target_label": "APIClient",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "0008680ec500f0cc",
-      "target_stable_symbol_id": null,
-      "target_label": "log",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "0008680ec500f0cc",
-      "target_stable_symbol_id": "98acc27597535ad6",
-      "target_label": "User",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "0008680ec500f0cc",
-      "target_stable_symbol_id": "b137eda51a24b90d",
-      "target_label": "send",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "0008680ec500f0cc",
-      "target_stable_symbol_id": "b3e8dd9e203796dc",
-      "target_label": "greet",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "0008680ec500f0cc",
-      "target_stable_symbol_id": "d1aad177c35dee30",
-      "target_label": "make_message",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "438512d0ff1861c0",
-      "target_stable_symbol_id": "7f8a5ff1eb1843de",
+      "source_stable_symbol_id": "1e095ba8c60223fe",
+      "target_stable_symbol_id": "ed9abdbb09704c78",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -285,142 +231,7 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "7637220ca411355c",
-      "target_stable_symbol_id": null,
-      "target_label": "pkg",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "7637220ca411355c",
-      "target_stable_symbol_id": null,
-      "target_label": "util",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "7637220ca411355c",
-      "target_stable_symbol_id": "0008680ec500f0cc",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "7637220ca411355c",
-      "target_stable_symbol_id": "7f8a5ff1eb1843de",
-      "target_label": "Client",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "7637220ca411355c",
-      "target_stable_symbol_id": "98acc27597535ad6",
-      "target_label": "User",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "7637220ca411355c",
-      "target_stable_symbol_id": "b3e8dd9e203796dc",
-      "target_label": "greet",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "7637220ca411355c",
-      "target_stable_symbol_id": "d1aad177c35dee30",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "7f8a5ff1eb1843de",
-      "target_stable_symbol_id": "b137eda51a24b90d",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "88080f65b93577ff",
-      "target_stable_symbol_id": "98acc27597535ad6",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "98acc27597535ad6",
-      "target_stable_symbol_id": "a4d8c8baaefff024",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "98acc27597535ad6",
-      "target_stable_symbol_id": "a73c0d6fc25dad8b",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "98acc27597535ad6",
-      "target_stable_symbol_id": "bc1353884526a3fb",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "b137eda51a24b90d",
-      "target_stable_symbol_id": "bc1353884526a3fb",
-      "target_label": "normalized",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "b3e8dd9e203796dc",
-      "target_stable_symbol_id": null,
-      "target_label": "print",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "bc1353884526a3fb",
-      "target_stable_symbol_id": null,
-      "target_label": "lower",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "d1aad177c35dee30",
+      "source_stable_symbol_id": "22875f8c16d9b97b",
       "target_stable_symbol_id": null,
       "target_label": "strip",
       "relation": "calls",
@@ -429,13 +240,204 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "fa1b8fd6988afb15",
-      "target_stable_symbol_id": "b3e8dd9e203796dc",
+      "source_stable_symbol_id": "233e90d5343e886c",
+      "target_stable_symbol_id": "711fe77e5e26d211",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_stable_symbol_id": "3df01b68f42059d5",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_stable_symbol_id": "65b7728fe805305b",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_stable_symbol_id": "81fdbe50fb39044f",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "528488002bf97df3",
+      "target_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "711fe77e5e26d211",
+      "target_stable_symbol_id": "8725ca36d1c96bdc",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "74ec69dd6e04be1b",
+      "target_stable_symbol_id": null,
+      "target_label": "APIClient",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "74ec69dd6e04be1b",
+      "target_stable_symbol_id": null,
+      "target_label": "log",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "74ec69dd6e04be1b",
+      "target_stable_symbol_id": "22875f8c16d9b97b",
+      "target_label": "make_message",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
+      "source_stable_symbol_id": "74ec69dd6e04be1b",
+      "target_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_label": "User",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "74ec69dd6e04be1b",
+      "target_stable_symbol_id": "8725ca36d1c96bdc",
+      "target_label": "send",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "74ec69dd6e04be1b",
+      "target_stable_symbol_id": "ed9abdbb09704c78",
+      "target_label": "greet",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
+      "source_stable_symbol_id": "7633513f745a26ce",
+      "target_stable_symbol_id": null,
+      "target_label": "pkg",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7633513f745a26ce",
+      "target_stable_symbol_id": null,
+      "target_label": "util",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7633513f745a26ce",
+      "target_stable_symbol_id": "22875f8c16d9b97b",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7633513f745a26ce",
+      "target_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_label": "User",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7633513f745a26ce",
+      "target_stable_symbol_id": "711fe77e5e26d211",
+      "target_label": "Client",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7633513f745a26ce",
+      "target_stable_symbol_id": "74ec69dd6e04be1b",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7633513f745a26ce",
+      "target_stable_symbol_id": "ed9abdbb09704c78",
+      "target_label": "greet",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "81fdbe50fb39044f",
+      "target_stable_symbol_id": null,
+      "target_label": "lower",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "8725ca36d1c96bdc",
+      "target_stable_symbol_id": "81fdbe50fb39044f",
+      "target_label": "normalized",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "ed9abdbb09704c78",
+      "target_stable_symbol_id": null,
+      "target_label": "print",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
     }
   ],
   "tombstones": []

@@ -20,36 +20,81 @@ use crate::{
     GraphSymbolArtifact, GraphTombstoneEntry, NodeId, NodeKind, RelationKind, SourceSpan,
 };
 
-pub const SCHEMA_VERSION: &str = "spur-graph-schema-v5";
+pub const SCHEMA_VERSION: &str = "spur-graph-schema-v6";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
     language: &'a str,
-    tags: &'a [u8],
-    spur_edges: &'a [u8],
+    query: &'a str,
+    bytes: &'a [u8],
 }
 
 const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
     ManifestQueryBytes {
+        language: "cpp",
+        query: "tags",
+        bytes: include_bytes!("../../queries/cpp/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "cpp",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/cpp/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
         language: "markdown",
-        tags: include_bytes!("../../queries/markdown/tags.scm"),
-        spur_edges: include_bytes!("../../queries/markdown/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/markdown/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "markdown",
+        query: "symbols",
+        bytes: include_bytes!("../../queries/markdown/symbols.scm"),
+    },
+    ManifestQueryBytes {
+        language: "markdown",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/markdown/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "markdown",
+        query: "inline-spur-edges",
+        bytes: include_bytes!("../../queries/markdown/inline-spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "python",
-        tags: include_bytes!("../../queries/python/tags.scm"),
-        spur_edges: include_bytes!("../../queries/python/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/python/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "python",
+        query: "symbols",
+        bytes: include_bytes!("../../queries/python/symbols.scm"),
+    },
+    ManifestQueryBytes {
+        language: "python",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/python/spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "rust",
-        tags: include_bytes!("../../queries/rust/tags.scm"),
-        spur_edges: include_bytes!("../../queries/rust/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/rust/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "rust",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/rust/spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "typescript",
-        tags: include_bytes!("../../queries/typescript/tags.scm"),
-        spur_edges: include_bytes!("../../queries/typescript/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/typescript/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "typescript",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/typescript/spur-edges.scm"),
     },
 ];
 
@@ -89,13 +134,11 @@ fn manifest_version_from_query_bytes(
     update_manifest_hash_field(&mut hasher, schema_version.as_bytes());
     update_manifest_hash_field(&mut hasher, extractor_version.as_bytes());
     let mut query_bytes_by_language = query_bytes.iter().collect::<Vec<_>>();
-    query_bytes_by_language.sort_by_key(|query| query.language);
+    query_bytes_by_language.sort_by_key(|query| (query.language, query.query));
     for query in query_bytes_by_language {
         update_manifest_hash_field(&mut hasher, query.language.as_bytes());
-        update_manifest_hash_field(&mut hasher, b"tags");
-        update_manifest_hash_field(&mut hasher, query.tags);
-        update_manifest_hash_field(&mut hasher, b"spur-edges");
-        update_manifest_hash_field(&mut hasher, query.spur_edges);
+        update_manifest_hash_field(&mut hasher, query.query.as_bytes());
+        update_manifest_hash_field(&mut hasher, query.bytes);
     }
     format!("{:x}", hasher.finalize())
 }
@@ -612,6 +655,7 @@ fn buckets_from_facts(
             confidence_score: edge.confidence_score,
             change_kind: None,
             edge_kind: Some(graph_edge_kind_or_default(edge.relation, edge.edge_kind)),
+            bind_method: edge.bind_method.clone(),
         });
     }
 
@@ -931,24 +975,41 @@ fn compose_artifact(
 }
 
 fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
-    let mut symbols_by_entity_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    #[derive(Clone)]
+    struct RebindTarget {
+        stable_symbol_id: String,
+        file_path: String,
+        symbol_kind: String,
+    }
+
+    let mut symbols_by_entity_name: BTreeMap<String, Vec<RebindTarget>> = BTreeMap::new();
     for bucket in buckets.values() {
         for symbol in &bucket.symbols {
             symbols_by_entity_name
                 .entry(symbol.entity_name.clone())
                 .or_default()
-                .push(symbol.stable_symbol_id.clone());
+                .push(RebindTarget {
+                    stable_symbol_id: symbol.stable_symbol_id.clone(),
+                    file_path: symbol.file_path.clone(),
+                    symbol_kind: symbol.symbol_kind.clone(),
+                });
         }
     }
 
     let mut ambiguous_unresolved = 0usize;
     for bucket in buckets.values_mut() {
+        let source_file_path = bucket.file.file_path.as_str();
         for edge in &mut bucket.edges {
             let Some(target_label) = edge.target_label.as_deref() else {
                 continue;
             };
-            let skip_rebind =
-                edge.edge_kind == Some(GraphEdgeKind::CallsDyn) || target_label.contains("::");
+            let resolution_is_stamped = matches!(
+                edge.bind_method.as_deref(),
+                Some("fqn" | "scope_match" | "singleton" | "macro_body_singleton")
+            );
+            let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
+                || target_label.contains("::")
+                || resolution_is_stamped;
             if edge.target_stable_symbol_id.is_some() && skip_rebind {
                 continue;
             }
@@ -969,7 +1030,18 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 edge.target_stable_symbol_id = None;
             } else {
                 let resolved = matches.first().expect("matches is non-empty");
-                edge.target_stable_symbol_id = Some(resolved.clone());
+                if edge.relation == RelationKind::Calls
+                    && resolved.symbol_kind == "method"
+                    && !same_directory_path(&resolved.file_path, source_file_path)
+                {
+                    edge.target_stable_symbol_id = None;
+                } else {
+                    edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+                    if edge.relation == RelationKind::Calls && resolved.symbol_kind == "function" {
+                        edge.bind_method
+                            .get_or_insert_with(|| "singleton".to_string());
+                    }
+                }
             }
         }
     }
@@ -979,6 +1051,16 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             "spur-graph: left ambiguous cross-file edges unresolved"
         );
     }
+}
+
+fn same_directory_path(left: &str, right: &str) -> bool {
+    parent_path(left) == parent_path(right)
+}
+
+fn parent_path(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
 }
 
 fn rebuild_from_buckets(
@@ -1332,25 +1414,45 @@ mod tests {
         let base = [
             ManifestQueryBytes {
                 language: "rust",
-                tags: b"rust tags",
-                spur_edges: b"rust edges v1",
+                query: "tags",
+                bytes: b"rust tags",
+            },
+            ManifestQueryBytes {
+                language: "rust",
+                query: "spur-edges",
+                bytes: b"rust edges v1",
             },
             ManifestQueryBytes {
                 language: "typescript",
-                tags: b"typescript tags",
-                spur_edges: b"typescript edges",
+                query: "tags",
+                bytes: b"typescript tags",
+            },
+            ManifestQueryBytes {
+                language: "typescript",
+                query: "spur-edges",
+                bytes: b"typescript edges",
             },
         ];
         let changed = [
             ManifestQueryBytes {
                 language: "rust",
-                tags: b"rust tags",
-                spur_edges: b"rust edges v2",
+                query: "tags",
+                bytes: b"rust tags",
+            },
+            ManifestQueryBytes {
+                language: "rust",
+                query: "spur-edges",
+                bytes: b"rust edges v2",
             },
             ManifestQueryBytes {
                 language: "typescript",
-                tags: b"typescript tags",
-                spur_edges: b"typescript edges",
+                query: "tags",
+                bytes: b"typescript tags",
+            },
+            ManifestQueryBytes {
+                language: "typescript",
+                query: "spur-edges",
+                bytes: b"typescript edges",
             },
         ];
 
@@ -1365,13 +1467,13 @@ mod tests {
         let inputs = [
             ManifestQueryBytes {
                 language: "typescript",
-                tags: b"typescript tags",
-                spur_edges: b"typescript edges",
+                query: "spur-edges",
+                bytes: b"typescript edges",
             },
             ManifestQueryBytes {
                 language: "rust",
-                tags: b"rust tags",
-                spur_edges: b"rust edges",
+                query: "tags",
+                bytes: b"rust tags",
             },
         ];
 
@@ -1933,6 +2035,7 @@ fn submit_plan_def() -> ToolDefinition {
             confidence_score: 1.0,
             change_kind: None,
             edge_kind: Some(graph_edge_kind_or_default(relation, None)),
+            bind_method: None,
         }
     }
 

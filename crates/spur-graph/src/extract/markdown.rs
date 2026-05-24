@@ -67,7 +67,7 @@ fn emit_sections<'tree>(
         .iter()
         .filter(|capture| capture.name == *definition_capture)
         .filter_map(|capture| {
-            let name = definition_name(capture.node, source, captures)?;
+            let name = definition_name(capture, source, captures)?;
             let level = heading_level(capture.node)?;
             Some((capture.node, name, level))
         })
@@ -160,15 +160,16 @@ fn emit_markdown_links(
             .iter()
             .filter(|capture| capture.name == "import")
         {
-            for target in
-                contained_capture_text(capture.node, text, &inline_captures, "import.name")
-            {
+            for target in contained_capture_text(capture, text, &inline_captures, "import.name") {
                 if let Some(target_name) = normalize_link_target(&target, relative_path) {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name,
                         relation,
                         edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
                     });
                 }
             }
@@ -203,13 +204,16 @@ fn emit_markdown_block_links(
 
     for capture in captures.iter().filter(|capture| capture.name == "import") {
         let source_id = source_section_for_inline(file_node_id, sections, capture.node);
-        for target in contained_capture_text(capture.node, source, &captures, "import.name") {
+        for target in contained_capture_text(capture, source, &captures, "import.name") {
             if let Some(target_name) = normalize_link_target(&target, relative_path) {
                 builder.pending_edges.push(PendingEdge {
                     source: source_id,
                     target_name,
                     relation,
                     edge_kind: None,
+                    origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                    receiver_text: None,
+                    scope_text: None,
                 });
             }
         }
@@ -276,11 +280,11 @@ fn normalize_link_target(target: &str, relative_path: &str) -> Option<String> {
 }
 
 fn definition_name(
-    definition_node: Node<'_>,
+    definition: &CaptureHit<'_>,
     source: &str,
     captures: &[CaptureHit<'_>],
 ) -> Option<String> {
-    contained_capture_text(definition_node, source, captures, "name")
+    contained_capture_text(definition, source, captures, "name")
         .into_iter()
         .next()
 }
@@ -323,10 +327,6 @@ fn heading_level(node: Node<'_>) -> Option<usize> {
     None
 }
 
-fn contains(parent: Node<'_>, child: Node<'_>) -> bool {
-    parent.start_byte() <= child.start_byte() && child.end_byte() <= parent.end_byte()
-}
-
 fn scoped_name(prefix: &str, label: &str) -> String {
     if prefix.is_empty() {
         label.to_string()
@@ -336,14 +336,18 @@ fn scoped_name(prefix: &str, label: &str) -> String {
 }
 
 fn contained_capture_text(
-    parent: Node<'_>,
+    parent: &CaptureHit<'_>,
     source: &str,
     captures: &[CaptureHit<'_>],
     capture_name: &str,
 ) -> Vec<String> {
     captures
         .iter()
-        .filter(|capture| capture.name == capture_name && contains(parent, capture.node))
+        .filter(|capture| {
+            capture.name == capture_name
+                && capture.pattern_index == parent.pattern_index
+                && capture.match_index == parent.match_index
+        })
         .map(|capture| child_text(capture.node, source).trim().to_string())
         .filter(|text| !text.is_empty())
         .collect()
