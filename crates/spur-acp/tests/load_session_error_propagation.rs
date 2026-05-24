@@ -9,10 +9,10 @@ use spur_acp::{connection::native::NativeAcpConnection, AgentConnection, LoadSes
 #[tokio::test(flavor = "multi_thread")]
 async fn load_session_propagates_agent_error() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let stub = format!("{manifest_dir}/tests/fixtures/load_error_stub.mjs");
+    let stub = format!("{manifest_dir}/tests/fixtures/load_error_stub.py");
 
     // NativeAcpConnection::new(agent_name, command, extra_args, permission_tx)
-    let mut conn = NativeAcpConnection::new("load-error-stub", "node", vec![stub], None);
+    let mut conn = NativeAcpConnection::new("load-error-stub", "python3", vec![stub], None);
 
     conn.initialize(InitializeRequest::new(ProtocolVersion::LATEST))
         .await
