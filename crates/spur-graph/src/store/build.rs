@@ -985,24 +985,41 @@ fn compose_artifact(
 }
 
 fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
-    let mut symbols_by_entity_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    #[derive(Clone)]
+    struct RebindTarget {
+        stable_symbol_id: String,
+        file_path: String,
+        symbol_kind: String,
+    }
+
+    let mut symbols_by_entity_name: BTreeMap<String, Vec<RebindTarget>> = BTreeMap::new();
     for bucket in buckets.values() {
         for symbol in &bucket.symbols {
             symbols_by_entity_name
                 .entry(symbol.entity_name.clone())
                 .or_default()
-                .push(symbol.stable_symbol_id.clone());
+                .push(RebindTarget {
+                    stable_symbol_id: symbol.stable_symbol_id.clone(),
+                    file_path: symbol.file_path.clone(),
+                    symbol_kind: symbol.symbol_kind.clone(),
+                });
         }
     }
 
     let mut ambiguous_unresolved = 0usize;
     for bucket in buckets.values_mut() {
+        let source_file_path = bucket.file.file_path.as_str();
         for edge in &mut bucket.edges {
             let Some(target_label) = edge.target_label.as_deref() else {
                 continue;
             };
-            let skip_rebind =
-                edge.edge_kind == Some(GraphEdgeKind::CallsDyn) || target_label.contains("::");
+            let resolution_is_stamped = matches!(
+                edge.bind_method.as_deref(),
+                Some("fqn" | "scope_match" | "singleton" | "macro_body_singleton")
+            );
+            let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
+                || target_label.contains("::")
+                || resolution_is_stamped;
             if edge.target_stable_symbol_id.is_some() && skip_rebind {
                 continue;
             }
@@ -1023,7 +1040,18 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 edge.target_stable_symbol_id = None;
             } else {
                 let resolved = matches.first().expect("matches is non-empty");
-                edge.target_stable_symbol_id = Some(resolved.clone());
+                if edge.relation == RelationKind::Calls
+                    && resolved.symbol_kind == "method"
+                    && !same_directory_path(&resolved.file_path, source_file_path)
+                {
+                    edge.target_stable_symbol_id = None;
+                } else {
+                    edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+                    if edge.relation == RelationKind::Calls && resolved.symbol_kind == "function" {
+                        edge.bind_method
+                            .get_or_insert_with(|| "singleton".to_string());
+                    }
+                }
             }
         }
     }
@@ -1033,6 +1061,16 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             "spur-graph: left ambiguous cross-file edges unresolved"
         );
     }
+}
+
+fn same_directory_path(left: &str, right: &str) -> bool {
+    parent_path(left) == parent_path(right)
+}
+
+fn parent_path(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
 }
 
 fn rebuild_from_buckets(
