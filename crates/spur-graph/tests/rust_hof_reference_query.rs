@@ -57,6 +57,58 @@ fn caller(items: Vec<i32>) -> usize {
 }
 
 #[test]
+fn rust_hof_reference_query_captures_additional_iterator_methods() {
+    let source = r#"
+fn caller(mut rows: Vec<Row>, items: Vec<Item>) {
+    let _ = items.iter().all(all_ready);
+    let _ = items.iter().find(find_match);
+    let _ = items.iter().position(find_position);
+    let _ = items.iter().skip_while(skip_pending);
+    let _ = items.iter().take_while(take_prefix);
+    let _ = items.iter().scan(seed, scan_step);
+    let _ = items.iter().partition(partition_open);
+    let _ = items.iter().try_fold(init, try_accumulate);
+    let _ = items.iter().try_for_each(write_item);
+    rows.sort_by_key(row_key);
+    rows.sort_unstable_by(compare_rows);
+    rows.sort_unstable_by_key(row_key_unstable);
+    rows.retain(keep_row);
+    let _ = rows.iter().max_by(compare_high);
+    let _ = rows.iter().min_by(compare_low);
+    let _ = rows.iter().max_by_key(score_row);
+    let _ = rows.iter().min_by_key(rank_row);
+}
+"#;
+
+    let names = reference_names(source);
+
+    assert_eq!(
+        names,
+        vec![
+            "all_ready",
+            "find_match",
+            "find_position",
+            "skip_pending",
+            "take_prefix",
+            "scan_step",
+            "partition_open",
+            "try_accumulate",
+            "write_item",
+            "row_key",
+            "compare_rows",
+            "row_key_unstable",
+            "keep_row",
+            "compare_high",
+            "compare_low",
+            "score_row",
+            "rank_row",
+        ]
+    );
+    assert!(!names.contains(&"seed".to_string()));
+    assert!(!names.contains(&"init".to_string()));
+}
+
+#[test]
 fn rust_hof_reference_query_ignores_plain_function_first_argument() {
     let source = r#"
 fn caller(local_var: i32) {
