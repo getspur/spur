@@ -23,6 +23,184 @@ use crate::handlers::McpHandlerError;
 use super::McpCallbackServer;
 use super::*;
 
+#[allow(dead_code)]
+mod file_oid_cache {
+    use std::collections::{HashMap, VecDeque};
+    use std::fs::{self, Metadata};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    use super::current_file_oid;
+
+    const FILE_OID_CACHE_CAPACITY: usize = 4096;
+
+    static FILE_OID_CACHE: OnceLock<Mutex<FileOidCache>> = OnceLock::new();
+
+    pub(super) fn file_oid_match(
+        worktree: &Path,
+        worktree_head_oid: &str,
+        graph_content_hash: &str,
+        rel_path: &str,
+        indexed_oid: &str,
+    ) -> Option<bool> {
+        let path = worktree.join(rel_path);
+        let before = FileMetadataKey::from_path(&path)?;
+        let key = FileOidCacheKey {
+            worktree_root: worktree.to_path_buf(),
+            worktree_head_oid: worktree_head_oid.to_string(),
+            graph_content_hash: graph_content_hash.to_string(),
+            rel_path: rel_path.to_string(),
+            metadata: before.clone(),
+        };
+
+        if let Some(cached_oid) = cache().lock().ok()?.get(&key) {
+            let after = FileMetadataKey::from_path(&path)?;
+            return (before == after).then_some(cached_oid == indexed_oid);
+        }
+
+        let current_oid = current_file_oid(worktree, rel_path).ok().flatten()?;
+        let after = FileMetadataKey::from_path(&path)?;
+        if before != after {
+            return None;
+        }
+
+        cache().lock().ok()?.insert(key, current_oid.clone());
+        Some(current_oid == indexed_oid)
+    }
+
+    pub(super) fn aggregate_file_oids_match(
+        worktree: &Path,
+        worktree_head_oid: &str,
+        graph_content_hash: &str,
+        files: &[(&str, &str)],
+    ) -> Option<bool> {
+        let mut saw_unknown = false;
+        for (rel_path, indexed_oid) in files {
+            match file_oid_match(
+                worktree,
+                worktree_head_oid,
+                graph_content_hash,
+                rel_path,
+                indexed_oid,
+            ) {
+                Some(true) => {}
+                Some(false) => return Some(false),
+                None => saw_unknown = true,
+            }
+        }
+
+        if saw_unknown {
+            None
+        } else {
+            Some(true)
+        }
+    }
+
+    fn cache() -> &'static Mutex<FileOidCache> {
+        FILE_OID_CACHE.get_or_init(|| Mutex::new(FileOidCache::new(FILE_OID_CACHE_CAPACITY)))
+    }
+
+    #[derive(Debug)]
+    struct FileOidCache {
+        entries: HashMap<FileOidCacheKey, String>,
+        lru: VecDeque<FileOidCacheKey>,
+        capacity: usize,
+    }
+
+    impl FileOidCache {
+        fn new(capacity: usize) -> Self {
+            Self {
+                entries: HashMap::new(),
+                lru: VecDeque::new(),
+                capacity,
+            }
+        }
+
+        fn get(&mut self, key: &FileOidCacheKey) -> Option<String> {
+            let value = self.entries.get(key).cloned()?;
+            self.touch(key);
+            Some(value)
+        }
+
+        fn insert(&mut self, key: FileOidCacheKey, value: String) {
+            self.entries.insert(key.clone(), value);
+            self.touch(&key);
+            while self.entries.len() > self.capacity {
+                let Some(expired) = self.lru.pop_front() else {
+                    break;
+                };
+                self.entries.remove(&expired);
+            }
+        }
+
+        fn touch(&mut self, key: &FileOidCacheKey) {
+            self.lru.retain(|candidate| candidate != key);
+            self.lru.push_back(key.clone());
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct FileOidCacheKey {
+        worktree_root: PathBuf,
+        worktree_head_oid: String,
+        graph_content_hash: String,
+        rel_path: String,
+        metadata: FileMetadataKey,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct FileMetadataKey {
+        dev: u64,
+        ino: u64,
+        size: u64,
+        mtime_ns: i128,
+    }
+
+    impl FileMetadataKey {
+        fn from_path(path: &Path) -> Option<Self> {
+            let metadata = fs::symlink_metadata(path).ok()?;
+            Some(Self::from_metadata(&metadata))
+        }
+    }
+
+    #[cfg(unix)]
+    impl FileMetadataKey {
+        fn from_metadata(metadata: &Metadata) -> Self {
+            use std::os::unix::fs::MetadataExt;
+
+            let mtime_ns = i128::from(metadata.mtime())
+                .saturating_mul(1_000_000_000)
+                .saturating_add(i128::from(metadata.mtime_nsec()));
+
+            Self {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+                size: metadata.size(),
+                mtime_ns,
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    impl FileMetadataKey {
+        fn from_metadata(metadata: &Metadata) -> Self {
+            let mtime_ns = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos() as i128)
+                .unwrap_or_default();
+
+            Self {
+                dev: 0,
+                ino: 0,
+                size: metadata.len(),
+                mtime_ns,
+            }
+        }
+    }
+}
+
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
 const DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 40;
 const MIN_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 1;
@@ -716,6 +894,7 @@ struct GraphResponseMetadata {
     indexed_head_oid: Option<String>,
     worktree_head_oid: Option<String>,
     worktree_dirty: Option<bool>,
+    response_file_oids_match: Option<bool>,
 }
 
 impl GraphResponseMetadata {
@@ -751,6 +930,7 @@ impl GraphResponseMetadata {
             indexed_head_oid,
             worktree_head_oid,
             worktree_dirty,
+            response_file_oids_match: None,
         }
     }
 
@@ -762,6 +942,7 @@ impl GraphResponseMetadata {
             "indexed_head_oid": self.indexed_head_oid,
             "worktree_head_oid": self.worktree_head_oid,
             "worktree_dirty": self.worktree_dirty,
+            "response_file_oids_match": self.response_file_oids_match,
         })
     }
 
@@ -2464,6 +2645,96 @@ mod tests {
         assert_eq!(body.get("indexed_head_oid"), Some(&Value::Null));
         assert_eq!(body.get("worktree_head_oid"), Some(&Value::Null));
         assert_eq!(body.get("worktree_dirty"), Some(&Value::Null));
+        assert_eq!(body.get("response_file_oids_match"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn file_oid_match_reports_true_false_and_unknown() {
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("src/lib.rs"), "fn demo() {}\n").expect("write source");
+        let indexed_oid = super::current_file_oid(dir.path(), "src/lib.rs")
+            .expect("read current oid")
+            .expect("current oid");
+
+        assert_eq!(
+            super::file_oid_cache::file_oid_match(
+                dir.path(),
+                "head-a",
+                "graph-a",
+                "src/lib.rs",
+                &indexed_oid,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            super::file_oid_cache::file_oid_match(
+                dir.path(),
+                "head-a",
+                "graph-a",
+                "src/lib.rs",
+                "0000000000000000000000000000000000000000",
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            super::file_oid_cache::file_oid_match(
+                dir.path(),
+                "head-a",
+                "graph-a",
+                "src/missing.rs",
+                &indexed_oid,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn aggregate_file_oids_match_combines_file_results() {
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("src/a.rs"), "fn a() {}\n").expect("write a");
+        std::fs::write(dir.path().join("src/b.rs"), "fn b() {}\n").expect("write b");
+        let a_oid = super::current_file_oid(dir.path(), "src/a.rs")
+            .expect("read a oid")
+            .expect("a oid");
+        let b_oid = super::current_file_oid(dir.path(), "src/b.rs")
+            .expect("read b oid")
+            .expect("b oid");
+
+        assert_eq!(
+            super::file_oid_cache::aggregate_file_oids_match(
+                dir.path(),
+                "head-b",
+                "graph-b",
+                &[("src/a.rs", a_oid.as_str()), ("src/b.rs", b_oid.as_str())],
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            super::file_oid_cache::aggregate_file_oids_match(
+                dir.path(),
+                "head-b",
+                "graph-b",
+                &[
+                    ("src/a.rs", a_oid.as_str()),
+                    ("src/b.rs", "1111111111111111111111111111111111111111"),
+                ],
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            super::file_oid_cache::aggregate_file_oids_match(
+                dir.path(),
+                "head-b",
+                "graph-b",
+                &[
+                    ("src/a.rs", a_oid.as_str()),
+                    ("src/missing.rs", b_oid.as_str())
+                ],
+            ),
+            None
+        );
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
