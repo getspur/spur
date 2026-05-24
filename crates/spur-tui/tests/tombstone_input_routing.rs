@@ -188,6 +188,23 @@ fn upgrade_modal_swallows_u() {
 }
 
 #[test]
+fn add_comment_modal_swallows_u() {
+    let mut app = App::new_for_tests();
+    let view = ViewId::IssueBrowser;
+    install_tombstone(&mut app, view.clone());
+    app.open_issue_browser_add_comment_modal_for_test("bd-1");
+
+    dispatch_key(&mut app, key('u'));
+
+    let body = app
+        .issue_browser_for_test()
+        .and_then(|v| v.add_comment_modal_body_for_test())
+        .expect("add_comment_modal should remain open");
+    assert_eq!(body, "u");
+    assert!(app.tombstones_for_test().has(&view));
+}
+
+#[test]
 fn help_open_u_flashes_close_help_to_undo() {
     let mut app = App::new_for_tests();
     let view = ViewId::Dashboard;
