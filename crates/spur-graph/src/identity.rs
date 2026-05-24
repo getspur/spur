@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+
+use crate::schema::NodeKind;
 
 macro_rules! id_newtype {
     ($name:ident) => {
@@ -31,11 +32,29 @@ id_newtype!(SpanId);
 id_newtype!(RunId);
 id_newtype!(EvidenceId);
 
-pub fn stable_symbol_id_for(path: &Path, entity_name: &str) -> String {
+pub fn stable_symbol_id_for(
+    relative_path: &str,
+    fqn: &str,
+    kind: NodeKind,
+    byte_range_start: u64,
+) -> String {
+    stable_symbol_id_for_discriminator(relative_path, fqn, kind.discriminator(), byte_range_start)
+}
+
+pub(crate) fn stable_symbol_id_for_discriminator(
+    relative_path: &str,
+    fqn: &str,
+    kind_discriminator: &str,
+    byte_range_start: u64,
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(path.to_string_lossy().replace('\\', "/").as_bytes());
+    hasher.update(relative_path.as_bytes());
     hasher.update([0]);
-    hasher.update(entity_name.as_bytes());
+    hasher.update(fqn.as_bytes());
+    hasher.update([0]);
+    hasher.update(kind_discriminator.as_bytes());
+    hasher.update([0]);
+    hasher.update(byte_range_start.to_le_bytes());
     let digest = hasher.finalize();
     format!(
         "{:016x}",

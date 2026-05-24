@@ -90,6 +90,7 @@ mod tests {
                 confidence_score: 0.875,
                 change_kind: None,
                 edge_kind: Some(GraphEdgeKind::Calls),
+                bind_method: None,
             }],
             tombstones: vec![GraphTombstoneEntry {
                 path: "src/old.rs".to_string(),

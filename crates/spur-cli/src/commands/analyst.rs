@@ -26,7 +26,7 @@ const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 /// Must match `manifest.json::schema_version` in the artifact dir. Hard-fail
 /// on mismatch to prevent silent miscompiles where `init.sql` view definitions
 /// parse but produce wrong results against a newer parquet schema.
-pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v5";
+pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v6";
 
 /// Default relative path to the analyst DuckDB inside a worktree.
 pub const DEFAULT_ANALYST_DB_REL: &str = ".spur/analyst.duckdb";
@@ -500,6 +500,25 @@ mod tests {
         let dir = temp_root();
 
         assert!(!diagnostics_present(dir.path()));
+    }
+
+    #[test]
+    fn init_views_sql_guards_direct_symbol_snapshot_coverage_without_bridge() {
+        let bridge_view_name = ["v", "symbol", "id", "bridge"].join("_");
+
+        assert!(
+            !INIT_VIEWS_SQL.contains(&bridge_view_name),
+            "init_views.sql must not define the transitional bridge view"
+        );
+        assert!(
+            INIT_VIEWS_SQL
+                .contains("COUNT(*) FROM nodes n JOIN symbol_snapshots s USING (stable_symbol_id)"),
+            "init_views.sql must assert direct stable_symbol_id join coverage"
+        );
+        assert!(
+            INIT_VIEWS_SQL.contains("direct_join_count * 100 >= node_count * 99"),
+            "direct join coverage must be at least 99% of node_count"
+        );
     }
 
     #[test]
