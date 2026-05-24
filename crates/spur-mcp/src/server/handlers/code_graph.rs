@@ -2994,7 +2994,13 @@ fn add_edge_metadata(
     if let Some(target_label) = unresolved_target_label {
         map.insert("target_label".to_string(), Value::String(target_label));
     }
-    if kind == GraphEdgeKind::CallsDyn {
+    if let Some(bind_method) = &edge.bind_method {
+        map.insert(
+            "bind_method".to_string(),
+            Value::String(bind_method.clone()),
+        );
+        map.insert("confidence".to_string(), json!(edge.confidence));
+    } else if kind == GraphEdgeKind::CallsDyn {
         map.insert("confidence".to_string(), json!(edge.confidence));
     }
 }
@@ -3009,6 +3015,7 @@ fn edge_row(edge: &GraphEdgeArtifact) -> Value {
         "edge_kind": edge_kind_str(edge_kind(edge)),
         "confidence": edge.confidence,
         "confidence_score": edge.confidence_score,
+        "bind_method": edge.bind_method.clone(),
     })
 }
 
@@ -3272,6 +3279,7 @@ mod tests {
                 confidence_score: 1.0,
                 change_kind: None,
                 edge_kind: Some(GraphEdgeKind::Calls),
+                bind_method: None,
             }],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
