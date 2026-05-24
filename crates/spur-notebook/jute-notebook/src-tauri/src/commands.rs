@@ -688,6 +688,21 @@ pub async fn new_notebook_via_daemon() -> Result<String, Error> {
         .ok_or_else(|| Error::NotebookDaemon("daemon new response did not include path".into()))
 }
 
+/// Reopen the daemon's current notebook window and return its path.
+#[tauri::command]
+pub async fn reopen_notebook_via_daemon() -> Result<String, Error> {
+    send_daemon_control("reopen", None, None)
+        .await?
+        .path
+        .ok_or_else(|| Error::NotebookDaemon("daemon reopen response did not include path".into()))
+}
+
+/// Close the daemon's current notebook window.
+#[tauri::command]
+pub async fn close_notebook_via_daemon() -> Result<(), Error> {
+    send_daemon_control("close", None, None).await.map(|_| ())
+}
+
 /// Move a notebook file to the OS trash unless it is currently loaded.
 #[tauri::command]
 pub async fn move_notebook_to_trash(path: String) -> Result<(), Error> {
