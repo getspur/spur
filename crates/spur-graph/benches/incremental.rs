@@ -645,7 +645,7 @@ fn bench_history_walk_50k_snapshots(c: &mut Criterion) {
 
     let (graph, commits, target_symbol) =
         synthetic_history_artifact(HISTORY_WALK_SNAPSHOT_COUNT, HISTORY_WALK_TARGET_CHAIN);
-    let index = TemporalIndex::new(&graph);
+    let index = TemporalIndex::new(Arc::new(graph));
     c.bench_function(BENCH_NAME, |b| {
         b.iter(|| {
             black_box(symbol_history(
@@ -665,7 +665,7 @@ fn assert_history_walk_budget() {
     let max_ms = env_usize(HISTORY_WALK_ASSERT_MS_ENV, HISTORY_WALK_ASSERT_MS);
     let (graph, commits, target_symbol) =
         synthetic_history_artifact(HISTORY_WALK_SNAPSHOT_COUNT, HISTORY_WALK_TARGET_CHAIN);
-    let index = TemporalIndex::new(&graph);
+    let index = TemporalIndex::new(Arc::new(graph));
 
     let start = Instant::now();
     let mut total_events = 0usize;

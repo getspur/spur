@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::schema::{
     ChangeKind, CommitIndexArtifact, EdgeEndpoint, GraphIndexArtifact, RelationKind, RenamePrev,
@@ -23,30 +24,28 @@ pub enum ResolutionFailure {
 pub type GitSha = String;
 
 #[derive(Debug)]
-pub struct TemporalIndex<'a> {
-    code: &'a GraphIndexArtifact,
-    edges_by_stable_symbol_id: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>>,
-    edges_by_commit_sha: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>>,
-    commit_positions: HashMap<&'a str, usize>,
-    snapshot_keys_by_stable_symbol_id: HashMap<&'a str, Vec<SnapshotKey>>,
+pub struct TemporalIndex {
+    code: Arc<GraphIndexArtifact>,
+    edges_by_stable_symbol_id: HashMap<String, Vec<usize>>,
+    edges_by_commit_sha: HashMap<String, Vec<usize>>,
+    commit_positions: HashMap<String, usize>,
+    snapshot_keys_by_stable_symbol_id: HashMap<String, Vec<SnapshotKey>>,
     rename_edges: Vec<(SnapshotKey, SnapshotKey)>,
     rename_neighbors_by_snapshot: HashMap<SnapshotKey, Vec<SnapshotKey>>,
     referenced_snapshot_count: usize,
 }
 
-impl<'a> TemporalIndex<'a> {
-    pub fn new(code: &'a GraphIndexArtifact) -> Self {
-        let mut edges_by_stable_symbol_id: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>> =
-            HashMap::new();
-        let mut edges_by_commit_sha: HashMap<&'a str, Vec<&'a TemporalEdgeArtifact>> =
-            HashMap::new();
+impl TemporalIndex {
+    pub fn new(code: Arc<GraphIndexArtifact>) -> Self {
+        let mut edges_by_stable_symbol_id: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut edges_by_commit_sha: HashMap<String, Vec<usize>> = HashMap::new();
         let commit_positions = code
             .commits
             .iter()
             .enumerate()
-            .map(|(index, commit)| (commit.sha.as_str(), index))
+            .map(|(index, commit)| (commit.sha.clone(), index))
             .collect();
-        let mut snapshot_key_sets: HashMap<&'a str, HashSet<SnapshotKey>> = HashMap::new();
+        let mut snapshot_key_sets: HashMap<String, HashSet<SnapshotKey>> = HashMap::new();
         let mut referenced_snapshot_count = 0;
         let mut rename_edges = Vec::new();
 
@@ -59,7 +58,7 @@ impl<'a> TemporalIndex<'a> {
             );
         }
 
-        for edge in &code.temporal_edges {
+        for (edge_index, edge) in code.temporal_edges.iter().enumerate() {
             let mut stable_symbol_ids = Vec::new();
             index_endpoint(
                 &edge.source,
@@ -89,15 +88,21 @@ impl<'a> TemporalIndex<'a> {
 
             for stable_symbol_id in stable_symbol_ids {
                 edges_by_stable_symbol_id
-                    .entry(stable_symbol_id)
+                    .entry(stable_symbol_id.to_owned())
                     .or_default()
-                    .push(edge);
+                    .push(edge_index);
             }
             if let EdgeEndpoint::Commit { sha } = &edge.source {
-                edges_by_commit_sha.entry(sha).or_default().push(edge);
+                edges_by_commit_sha
+                    .entry(sha.clone())
+                    .or_default()
+                    .push(edge_index);
             }
             if let EdgeEndpoint::Commit { sha } = &edge.target {
-                edges_by_commit_sha.entry(sha).or_default().push(edge);
+                edges_by_commit_sha
+                    .entry(sha.clone())
+                    .or_default()
+                    .push(edge_index);
             }
         }
 
@@ -137,25 +142,36 @@ impl<'a> TemporalIndex<'a> {
         }
     }
 
-    pub fn artifact(&self) -> &'a GraphIndexArtifact {
-        self.code
+    pub fn artifact(&self) -> &GraphIndexArtifact {
+        self.code.as_ref()
     }
 
     pub fn edges_for_stable_symbol_id(
         &self,
         stable_symbol_id: &str,
-    ) -> &[&'a TemporalEdgeArtifact] {
+    ) -> impl Iterator<Item = &TemporalEdgeArtifact> + '_ {
         self.edges_by_stable_symbol_id
             .get(stable_symbol_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+            .into_iter()
+            .flat_map(|edge_indices| {
+                edge_indices
+                    .iter()
+                    .map(|&edge_index| &self.code.temporal_edges[edge_index])
+            })
     }
 
-    pub fn edges_for_commit_sha(&self, commit_sha: &str) -> &[&'a TemporalEdgeArtifact] {
+    pub fn edges_for_commit_sha(
+        &self,
+        commit_sha: &str,
+    ) -> impl Iterator<Item = &TemporalEdgeArtifact> + '_ {
         self.edges_by_commit_sha
             .get(commit_sha)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+            .into_iter()
+            .flat_map(|edge_indices| {
+                edge_indices
+                    .iter()
+                    .map(|&edge_index| &self.code.temporal_edges[edge_index])
+            })
     }
 
     fn has_commit_positions(&self) -> bool {
@@ -172,7 +188,7 @@ impl<'a> TemporalIndex<'a> {
 
 pub enum TemporalHistorySource<'a> {
     Artifact(&'a GraphIndexArtifact),
-    Index(&'a TemporalIndex<'a>),
+    Index(&'a TemporalIndex),
 }
 
 impl<'a> From<&'a GraphIndexArtifact> for TemporalHistorySource<'a> {
@@ -181,8 +197,8 @@ impl<'a> From<&'a GraphIndexArtifact> for TemporalHistorySource<'a> {
     }
 }
 
-impl<'a> From<&'a TemporalIndex<'a>> for TemporalHistorySource<'a> {
-    fn from(value: &'a TemporalIndex<'a>) -> Self {
+impl<'a> From<&'a TemporalIndex> for TemporalHistorySource<'a> {
+    fn from(value: &'a TemporalIndex) -> Self {
         Self::Index(value)
     }
 }
@@ -197,7 +213,7 @@ where
 {
     match source.into() {
         TemporalHistorySource::Artifact(code) => {
-            let index = TemporalIndex::new(code);
+            let index = TemporalIndex::new(Arc::new(code.clone()));
             symbol_history_indexed(&index, commits, symbol)
         }
         TemporalHistorySource::Index(index) => symbol_history_indexed(index, commits, symbol),
@@ -205,7 +221,7 @@ where
 }
 
 fn symbol_history_indexed(
-    index: &TemporalIndex<'_>,
+    index: &TemporalIndex,
     commits: &CommitIndexArtifact,
     symbol: &str,
 ) -> Vec<(GitSha, ChangeKind, SnapshotKey)> {
@@ -257,14 +273,14 @@ fn sort_history_events(
     });
 }
 
-fn insert_snapshot_key<'a>(
-    snapshot_key_sets: &mut HashMap<&'a str, HashSet<SnapshotKey>>,
-    stable_symbol_id: &'a str,
+fn insert_snapshot_key(
+    snapshot_key_sets: &mut HashMap<String, HashSet<SnapshotKey>>,
+    stable_symbol_id: &str,
     key: SnapshotKey,
     referenced_snapshot_count: &mut usize,
 ) {
     if snapshot_key_sets
-        .entry(stable_symbol_id)
+        .entry(stable_symbol_id.to_owned())
         .or_default()
         .insert(key)
     {
@@ -275,7 +291,7 @@ fn insert_snapshot_key<'a>(
 fn index_endpoint<'a>(
     endpoint: &'a EdgeEndpoint,
     stable_symbol_ids: &mut Vec<&'a str>,
-    snapshot_key_sets: &mut HashMap<&'a str, HashSet<SnapshotKey>>,
+    snapshot_key_sets: &mut HashMap<String, HashSet<SnapshotKey>>,
     referenced_snapshot_count: &mut usize,
 ) {
     match endpoint {
@@ -357,14 +373,14 @@ pub fn resolve_symbol_at(
     resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_key)
 }
 
-fn seed_symbol_history_keys(index: &TemporalIndex<'_>, symbol: &str) -> HashSet<SnapshotKey> {
+fn seed_symbol_history_keys(index: &TemporalIndex, symbol: &str) -> HashSet<SnapshotKey> {
     snapshot_keys_for_symbol_indexed(index, symbol)
         .into_iter()
         .collect()
 }
 
 fn close_symbol_history_chain(
-    index: &TemporalIndex<'_>,
+    index: &TemporalIndex,
     chain_keys: &mut HashSet<SnapshotKey>,
 ) -> Result<(), ResolutionFailure> {
     loop {
@@ -381,10 +397,7 @@ fn close_symbol_history_chain(
     Ok(())
 }
 
-fn expand_stable_symbol_snapshots(
-    index: &TemporalIndex<'_>,
-    chain_keys: &mut HashSet<SnapshotKey>,
-) {
+fn expand_stable_symbol_snapshots(index: &TemporalIndex, chain_keys: &mut HashSet<SnapshotKey>) {
     let stable_symbol_ids: HashSet<_> = chain_keys
         .iter()
         .map(|key| key.stable_symbol_id.clone())
@@ -396,7 +409,7 @@ fn expand_stable_symbol_snapshots(
 }
 
 fn close_rename_chain_indexed(
-    index: &TemporalIndex<'_>,
+    index: &TemporalIndex,
     chain_keys: &mut HashSet<SnapshotKey>,
 ) -> Result<(), ResolutionFailure> {
     if index.rename_edges.is_empty() {
@@ -805,7 +818,7 @@ fn snapshot_keys_for_symbol(code: &GraphIndexArtifact, stable_symbol_id: &str) -
 }
 
 fn snapshot_keys_for_symbol_indexed(
-    index: &TemporalIndex<'_>,
+    index: &TemporalIndex,
     stable_symbol_id: &str,
 ) -> Vec<SnapshotKey> {
     index
@@ -923,6 +936,7 @@ impl<'a> CommitGraph<'a> {
 mod tests {
     use super::*;
     use crate::schema::*;
+    use std::sync::Arc;
 
     #[test]
     fn rename_target_uses_t7_snapshot_edge_not_commit_edge() {
@@ -1114,5 +1128,20 @@ mod tests {
         assert_eq!(hist.len(), 2);
         assert_eq!(hist[0].2.stable_symbol_id, "old");
         assert_eq!(hist[1].2.stable_symbol_id, "new");
+    }
+
+    #[test]
+    fn temporal_index_is_arc_owned_and_preserves_symbol_history_api() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        let (graph, commits) = fixture();
+        let artifact = Arc::new(graph);
+        let expected = symbol_history(artifact.as_ref(), &commits, "old");
+        let index = TemporalIndex::new(Arc::clone(&artifact));
+
+        drop(artifact);
+
+        assert_send_sync::<TemporalIndex>();
+        assert_eq!(symbol_history(&index, &commits, "old"), expected);
     }
 }
