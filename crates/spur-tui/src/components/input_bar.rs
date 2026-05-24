@@ -259,12 +259,18 @@ fn try_paste_clipboard_image() -> anyhow::Result<ImageAttachment> {
     })
 }
 
-fn try_as_image_path(text: &str) -> Option<(PathBuf, (u32, u32))> {
+fn try_as_image_path(text: &str) -> Option<(PathBuf, (u32, u32), image::ImageFormat)> {
     let path = PathBuf::from(text.trim());
     if !path.exists() {
         return None;
     }
-    image::image_dimensions(&path).ok().map(|dims| (path, dims))
+    let reader = image::ImageReader::open(&path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let format = reader.format()?;
+    let dimensions = reader.into_dimensions().ok()?;
+    Some((path, dimensions, format))
 }
 
 #[cfg(test)]
@@ -1679,14 +1685,14 @@ impl InputBar {
                 self.delete_range(idx);
             }
         }
-        if let Some((img_path, dims)) = try_as_image_path(text) {
+        if let Some((img_path, dims, format)) = try_as_image_path(text) {
             let byte_size = std::fs::metadata(&img_path)
                 .map(|metadata| metadata.len() as usize)
                 .unwrap_or(0);
             let attachment = ImageAttachment {
                 id: 0,
                 source_path: img_path,
-                mime_type: "image/png".into(),
+                mime_type: format.to_mime_type().to_string(),
                 dimensions: dims,
                 byte_size,
                 owned_temp: None,
@@ -2588,9 +2594,10 @@ mod image_tests {
         let result = try_as_image_path(&path_str);
 
         assert!(result.is_some());
-        let (path, dims) = result.unwrap();
+        let (path, dims, format) = result.unwrap();
         assert_eq!(path, tmp.path());
         assert_eq!(dims, (1, 1));
+        assert_eq!(format, image::ImageFormat::Png);
     }
 
     #[test]
@@ -2615,6 +2622,24 @@ mod image_tests {
         assert_eq!(bar.images[&0].dimensions, (1, 1));
         assert_eq!(bar.images[&0].byte_size, png_bytes.len());
         assert_eq!(bar.protected_ranges[0].kind, RangeKind::ImageRef(0));
+    }
+
+    #[test]
+    fn insert_paste_uses_detected_jpeg_mime_type_for_image_path() {
+        let tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
+        let img = image::RgbImage::from_raw(1, 1, vec![255u8, 0, 0]).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .unwrap();
+        std::fs::write(tmp.path(), cursor.into_inner()).unwrap();
+
+        let mut bar = InputBar::new();
+        bar.insert_paste(tmp.path().to_str().unwrap());
+
+        assert_eq!(bar.images.len(), 1);
+        assert_eq!(bar.images[&0].mime_type, "image/jpeg");
     }
 }
 
