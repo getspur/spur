@@ -114,6 +114,21 @@ type EdgeDedupKey = (
     Option<GraphEdgeKind>,
 );
 
+#[derive(Debug, Clone, Copy)]
+struct EdgeMetadata {
+    confidence: Confidence,
+    confidence_score: f32,
+    bind_method: Option<&'static str>,
+}
+
+struct PendingResolutionIndexes<'a> {
+    singleton_symbols_by_label: &'a HashMap<String, NodeId>,
+    ambiguous_symbols_by_label: &'a HashMap<String, usize>,
+    files_by_label: &'a HashMap<String, NodeId>,
+    node_kind_by_id: &'a HashMap<NodeId, NodeKind>,
+    enclosing_scope_by_id: &'a HashMap<NodeId, String>,
+}
+
 #[derive(Debug, Error)]
 pub enum ExtractError {
     #[error("invalid utf-8: {0}")]
@@ -349,23 +364,32 @@ impl<'a> FactBuilder<'a> {
             relation,
             target_label,
             edge_kind,
-            confidence,
-            confidence_score,
-            None,
+            EdgeMetadata {
+                confidence,
+                confidence_score,
+                bind_method: None,
+            },
         );
     }
 
     fn add_pending_edge(&mut self, edge: &PendingEdge, target: Option<NodeId>) {
-        let (confidence, confidence_score, bind_method) = metadata_for_pending_edge(edge, target);
+        self.add_pending_edge_with_bind_method(edge, target, None);
+    }
+
+    fn add_pending_edge_with_bind_method(
+        &mut self,
+        edge: &PendingEdge,
+        target: Option<NodeId>,
+        bind_method: Option<&'static str>,
+    ) {
+        let metadata = metadata_for_pending_edge(edge, target, bind_method);
         self.add_edge_with_metadata(
             edge.source,
             target,
             edge.relation,
             Some(edge.target_name.clone()),
             edge.edge_kind,
-            confidence,
-            confidence_score,
-            bind_method,
+            metadata,
         );
     }
 
@@ -376,9 +400,7 @@ impl<'a> FactBuilder<'a> {
         relation: RelationKind,
         target_label: Option<String>,
         edge_kind: Option<GraphEdgeKind>,
-        confidence: Confidence,
-        confidence_score: f32,
-        bind_method: Option<&'static str>,
+        metadata: EdgeMetadata,
     ) {
         if !self
             .edge_index
@@ -394,10 +416,10 @@ impl<'a> FactBuilder<'a> {
             target_node_id: target,
             relation,
             target_label,
-            confidence,
-            confidence_score,
+            confidence: metadata.confidence,
+            confidence_score: metadata.confidence_score,
             edge_kind,
-            bind_method: bind_method.map(str::to_string),
+            bind_method: metadata.bind_method.map(str::to_string),
             evidence_id: EvidenceId(edge_id.get()),
             directed: true,
             change_kind: None,
@@ -432,8 +454,27 @@ impl<'a> FactBuilder<'a> {
             .iter()
             .map(|node| (node.node_id, node.kind))
             .collect();
-        let qualified_symbols_by_name = qualified_symbols_by_name(&self.facts);
+        let (qualified_symbols_by_name, enclosing_scope_by_id) = {
+            let nodes_by_id: HashMap<_, _> = self
+                .facts
+                .nodes
+                .iter()
+                .map(|node| (node.node_id, node))
+                .collect();
+            let parent_by_target = parent_by_target(&self.facts);
+            (
+                qualified_symbols_by_name_from_maps(&self.facts, &nodes_by_id, &parent_by_target),
+                enclosing_scope_by_id(&self.facts, &nodes_by_id, &parent_by_target),
+            )
+        };
         let pending = std::mem::take(&mut self.pending_edges);
+        let indexes = PendingResolutionIndexes {
+            singleton_symbols_by_label: &singleton_symbols_by_label,
+            ambiguous_symbols_by_label: &ambiguous_symbols_by_label,
+            files_by_label: &files_by_label,
+            node_kind_by_id: &node_kind_by_id,
+            enclosing_scope_by_id: &enclosing_scope_by_id,
+        };
         let mut ambiguous_unresolved = 0usize;
         for edge in pending {
             if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
@@ -481,6 +522,30 @@ impl<'a> FactBuilder<'a> {
                         self.add_pending_edge(&edge, Some(target));
                     }
                 }
+            } else if edge.relation == RelationKind::Calls {
+                let candidates = qualified_edge_candidates(&edge, &qualified_symbols_by_name);
+                match candidates.as_slice() {
+                    [target] if *target != edge.source => {
+                        self.add_pending_edge_with_bind_method(&edge, Some(*target), Some("fqn"));
+                    }
+                    candidates if candidates.len() > 1 => {
+                        ambiguous_unresolved += 1;
+                        tracing::debug!(
+                            target_label = %edge.target_name,
+                            candidates = candidates.len(),
+                            "spur-graph: ambiguous qualified pending edge target; leaving unresolved"
+                        );
+                        self.add_pending_edge(&edge, None);
+                    }
+                    _ => {
+                        resolve_call_edge_after_qualified_miss(
+                            self,
+                            &edge,
+                            &indexes,
+                            &mut ambiguous_unresolved,
+                        );
+                    }
+                }
             } else if let Some(candidates) =
                 ambiguous_symbols_by_label.get(&edge.target_name).copied()
             {
@@ -491,16 +556,8 @@ impl<'a> FactBuilder<'a> {
                     "spur-graph: ambiguous pending edge target; leaving unresolved"
                 );
                 self.add_pending_edge(&edge, None);
-            } else if let Some(target) = singleton_symbols_by_label
-                .get(&edge.target_name)
-                .copied()
-                .or_else(|| files_by_label.get(&edge.target_name).copied())
-            {
-                if target != edge.source {
-                    self.add_pending_edge(&edge, Some(target));
-                }
             } else {
-                self.add_pending_edge(&edge, None);
+                resolve_bare_pending_edge(self, &edge, &indexes, &mut ambiguous_unresolved);
             }
         }
         if ambiguous_unresolved > 0 {
@@ -512,19 +569,243 @@ impl<'a> FactBuilder<'a> {
     }
 }
 
+fn resolve_call_edge_after_qualified_miss(
+    builder: &mut FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+    ambiguous_unresolved: &mut usize,
+) {
+    let candidates = method_scope_candidates(
+        edge,
+        builder.symbol_index.get(&edge.target_name),
+        indexes.node_kind_by_id,
+        indexes.enclosing_scope_by_id,
+    );
+    match candidates.as_slice() {
+        [target] => {
+            builder.add_pending_edge_with_bind_method(edge, Some(*target), Some("scope_match"));
+        }
+        candidates if candidates.len() > 1 => {
+            *ambiguous_unresolved += 1;
+            tracing::debug!(
+                target_label = %edge.target_name,
+                candidates = candidates.len(),
+                "spur-graph: ambiguous scoped method pending edge target; leaving unresolved"
+            );
+            builder.add_pending_edge(edge, None);
+        }
+        _ => {
+            resolve_bare_pending_edge(builder, edge, indexes, ambiguous_unresolved);
+        }
+    }
+}
+
+fn resolve_bare_pending_edge(
+    builder: &mut FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+    ambiguous_unresolved: &mut usize,
+) {
+    if let Some(candidates) = indexes
+        .ambiguous_symbols_by_label
+        .get(&edge.target_name)
+        .copied()
+    {
+        *ambiguous_unresolved += 1;
+        tracing::debug!(
+            target_label = %edge.target_name,
+            candidates,
+            "spur-graph: ambiguous pending edge target; leaving unresolved"
+        );
+        builder.add_pending_edge(edge, None);
+        return;
+    }
+
+    let Some(target) = indexes
+        .singleton_symbols_by_label
+        .get(&edge.target_name)
+        .copied()
+        .or_else(|| indexes.files_by_label.get(&edge.target_name).copied())
+    else {
+        builder.add_pending_edge(edge, None);
+        return;
+    };
+
+    if target == edge.source {
+        return;
+    }
+
+    match indexes.node_kind_by_id.get(&target).copied() {
+        Some(NodeKind::Method) => {
+            if edge.relation == RelationKind::Calls
+                && method_scope_matches(edge, target, indexes.enclosing_scope_by_id)
+            {
+                builder.add_pending_edge_with_bind_method(edge, Some(target), Some("scope_match"));
+            } else if edge.relation == RelationKind::Calls {
+                builder.add_pending_edge(edge, None);
+            } else {
+                builder.add_pending_edge(edge, Some(target));
+            }
+        }
+        Some(NodeKind::Function) if edge.relation == RelationKind::Calls => {
+            builder.add_pending_edge_with_bind_method(edge, Some(target), Some("singleton"));
+        }
+        _ => {
+            builder.add_pending_edge(edge, Some(target));
+        }
+    }
+}
+
+fn method_scope_candidates(
+    edge: &PendingEdge,
+    candidates: Option<&Vec<NodeId>>,
+    node_kind_by_id: &HashMap<NodeId, NodeKind>,
+    enclosing_scope_by_id: &HashMap<NodeId, String>,
+) -> Vec<NodeId> {
+    if edge.scope_text.is_none() {
+        return Vec::new();
+    }
+    let Some(candidates) = candidates else {
+        return Vec::new();
+    };
+
+    let mut matches = candidates
+        .iter()
+        .copied()
+        .filter(|target| *target != edge.source)
+        .filter(|target| matches!(node_kind_by_id.get(target).copied(), Some(NodeKind::Method)))
+        .filter(|target| method_scope_matches(edge, *target, enclosing_scope_by_id))
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|id| id.get());
+    matches.dedup();
+    matches
+}
+
+fn qualified_edge_candidates(
+    edge: &PendingEdge,
+    qualified_symbols_by_name: &HashMap<String, Vec<NodeId>>,
+) -> Vec<NodeId> {
+    let mut candidates = Vec::new();
+    if edge.target_name.contains("::") {
+        if let Some(indexed) = qualified_symbols_by_name.get(&edge.target_name) {
+            candidates.extend(indexed.iter().copied());
+        }
+    }
+    if let Some(scope_text) = edge.scope_text.as_deref() {
+        let qualified_name = format!("{}::{}", scope_text.trim(), edge.target_name);
+        if let Some(indexed) = qualified_symbols_by_name.get(&qualified_name) {
+            candidates.extend(indexed.iter().copied());
+        }
+    }
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+fn method_scope_matches(
+    edge: &PendingEdge,
+    target: NodeId,
+    enclosing_scope_by_id: &HashMap<NodeId, String>,
+) -> bool {
+    let Some(scope_text) = edge.scope_text.as_deref() else {
+        return false;
+    };
+    let Some(enclosing_scope) = enclosing_scope_by_id.get(&target) else {
+        return false;
+    };
+    let matched_scope = if scope_text.trim() == "Self" {
+        enclosing_scope_by_id
+            .get(&edge.source)
+            .cloned()
+            .unwrap_or_else(|| canonical_method_scope_text(scope_text))
+    } else {
+        canonical_method_scope_text(scope_text)
+    };
+    method_scope_text_matches(&matched_scope, enclosing_scope)
+}
+
+fn method_scope_text_matches(matched_scope: &str, enclosing_scope: &str) -> bool {
+    if matched_scope == enclosing_scope {
+        return true;
+    }
+    let Some(receiver_type) = matched_scope.strip_prefix("impl ") else {
+        return false;
+    };
+    let Some((_, impl_self_type)) = enclosing_scope
+        .strip_prefix("impl ")
+        .and_then(|scope| scope.rsplit_once(" for "))
+    else {
+        return false;
+    };
+    receiver_type == impl_self_type
+}
+
+fn canonical_method_scope_text(scope_text: &str) -> String {
+    let trimmed = scope_text.trim();
+    if trimmed.starts_with("impl ") {
+        return trimmed.to_string();
+    }
+    if let Some((self_ty, trait_ty)) = qualified_trait_scope(trimmed) {
+        return format!("impl {trait_ty} for {self_ty}");
+    }
+    format!("impl {trimmed}")
+}
+
+fn qualified_trait_scope(scope_text: &str) -> Option<(&str, &str)> {
+    let inner = scope_text.strip_prefix('<')?.strip_suffix('>')?.trim();
+    let (self_ty, trait_ty) = inner.split_once(" as ")?;
+    Some((self_ty.trim(), trait_ty.trim()))
+}
+
+fn enclosing_scope_by_id(
+    facts: &GraphFacts,
+    nodes_by_id: &HashMap<NodeId, &GraphNode>,
+    parent_by_target: &HashMap<NodeId, NodeId>,
+) -> HashMap<NodeId, String> {
+    facts
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let parent = parent_by_target
+                .get(&node.node_id)
+                .and_then(|id| nodes_by_id.get(id).copied())?;
+            match parent.kind {
+                NodeKind::File => None,
+                NodeKind::Impl => Some((
+                    node.node_id,
+                    format!(
+                        "impl {}",
+                        parent.label.strip_prefix("impl ").unwrap_or(&parent.label)
+                    ),
+                )),
+                _ => Some((node.node_id, parent.label.clone())),
+            }
+        })
+        .collect()
+}
+
 fn metadata_for_pending_edge(
     edge: &PendingEdge,
     target: Option<NodeId>,
-) -> (Confidence, f32, Option<&'static str>) {
+    bind_method: Option<&'static str>,
+) -> EdgeMetadata {
     if edge.origin == CallOrigin::MacroBody
         && edge.relation == RelationKind::Calls
         && target.is_some()
     {
-        return (Confidence::Heuristic, 0.8, Some("macro_body_singleton"));
+        return EdgeMetadata {
+            confidence: Confidence::Heuristic,
+            confidence_score: 0.8,
+            bind_method: Some("macro_body_singleton"),
+        };
     }
 
     let (confidence, confidence_score) = confidence_for_edge(edge.relation, edge.edge_kind);
-    (confidence, confidence_score, None)
+    EdgeMetadata {
+        confidence,
+        confidence_score,
+        bind_method,
+    }
 }
 
 fn confidence_for_edge(
@@ -832,12 +1113,23 @@ fn impl_identity_fqn(fqn: &str) -> String {
     fqn.strip_prefix("impl ").unwrap_or(fqn).to_string()
 }
 
-fn qualified_symbols_by_name(facts: &GraphFacts) -> HashMap<String, Vec<NodeId>> {
-    let nodes_by_id: HashMap<_, _> = facts
-        .nodes
-        .iter()
-        .map(|node| (node.node_id, node))
-        .collect();
+fn qualified_symbols_by_name_from_maps(
+    facts: &GraphFacts,
+    nodes_by_id: &HashMap<NodeId, &GraphNode>,
+    parent_by_target: &HashMap<NodeId, NodeId>,
+) -> HashMap<String, Vec<NodeId>> {
+    let mut index: HashMap<String, Vec<NodeId>> = HashMap::new();
+    for node in &facts.nodes {
+        if matches!(node.kind, NodeKind::File | NodeKind::McpTool) {
+            continue;
+        }
+        let qualified_name = qualified_node_name(node, nodes_by_id, parent_by_target);
+        index.entry(qualified_name).or_default().push(node.node_id);
+    }
+    index
+}
+
+fn parent_by_target(facts: &GraphFacts) -> HashMap<NodeId, NodeId> {
     let mut parent_by_target = HashMap::new();
     for edge in &facts.edges {
         if edge.relation != RelationKind::Contains {
@@ -850,16 +1142,7 @@ fn qualified_symbols_by_name(facts: &GraphFacts) -> HashMap<String, Vec<NodeId>>
             .entry(target)
             .or_insert(edge.source_node_id);
     }
-
-    let mut index: HashMap<String, Vec<NodeId>> = HashMap::new();
-    for node in &facts.nodes {
-        if matches!(node.kind, NodeKind::File | NodeKind::McpTool) {
-            continue;
-        }
-        let qualified_name = qualified_node_name(node, &nodes_by_id, &parent_by_target);
-        index.entry(qualified_name).or_default().push(node.node_id);
-    }
-    index
+    parent_by_target
 }
 
 fn qualified_node_name(
@@ -910,18 +1193,7 @@ fn trait_method_candidates(facts: &GraphFacts, target_name: &str) -> Vec<NodeId>
         .iter()
         .map(|node| (node.node_id, node))
         .collect();
-    let mut parent_by_target = HashMap::new();
-    for edge in &facts.edges {
-        if edge.relation != RelationKind::Contains {
-            continue;
-        }
-        let Some(target) = edge.target_node_id else {
-            continue;
-        };
-        parent_by_target
-            .entry(target)
-            .or_insert(edge.source_node_id);
-    }
+    let parent_by_target = parent_by_target(facts);
 
     facts
         .nodes

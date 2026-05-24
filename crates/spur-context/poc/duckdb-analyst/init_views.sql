@@ -196,6 +196,7 @@ WITH caller_edges AS (
     e.source_stable_id AS caller_stable_id
   FROM edges e
   WHERE e.edge_kind IN ('calls', 'calls_dyn')
+    AND COALESCE(e.bind_method, '') != 'macro_body_singleton'
 ),
 caller_churn AS (
   SELECT
