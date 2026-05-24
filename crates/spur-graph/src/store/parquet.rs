@@ -2217,11 +2217,20 @@ fn git_path_to_b64(path: &GitPath) -> String {
 
 #[allow(dead_code)]
 fn git_path_from_b64(value: &str) -> anyhow::Result<GitPath> {
-    let bytes = match base64::engine::general_purpose::STANDARD_NO_PAD.decode(value) {
+    let bytes = match b64_decode_lenient(value) {
         Ok(bytes) => bytes,
         Err(err) => bail!("invalid GitPath base64 `{value}`: {err}"),
     };
     Ok(GitPath::from_bytes(bytes))
+}
+
+fn b64_decode_lenient(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    let standard = value.replace('-', "+").replace('_', "/");
+    let padding = (4 - standard.len() % 4) % 4;
+    let mut padded = String::with_capacity(standard.len() + padding);
+    padded.push_str(&standard);
+    padded.extend(std::iter::repeat_n('=', padding));
+    base64::engine::general_purpose::STANDARD.decode(padded)
 }
 
 #[allow(dead_code)]
