@@ -34,14 +34,15 @@
    function: (field_expression
      field: (field_identifier) @hof_method)
    arguments: (arguments . (identifier) @reference.name))
- (#match? @hof_method "^(map|filter|for_each|and_then|or_else|unwrap_or_else|inspect|filter_map|flat_map|reduce|find_map|then|map_err|any|sort_by)$"))
+ (#match? @hof_method "^(map|filter|for_each|and_then|or_else|unwrap_or_else|inspect|filter_map|flat_map|reduce|find_map|then|map_err|any|sort_by|all|find|position|sort_by_key|sort_unstable_by|sort_unstable_by_key|take_while|skip_while|partition|try_for_each|retain|max_by|min_by|max_by_key|min_by_key)$"))
 
-; `fold(init, fn)` places the callable in the SECOND argument position.
+; `fold(init, fn)`, `scan(init, fn)`, and `try_fold(init, fn)` place the callable
+; in the SECOND argument position.
 ((call_expression
    function: (field_expression
      field: (field_identifier) @hof_method)
    arguments: (arguments (_) . (identifier) @reference.name))
- (#match? @hof_method "^(fold)$"))
+ (#match? @hof_method "^(fold|scan|try_fold)$"))
 
 ; Macro-body call sites. tree-sitter-rust parses macro arguments as
 ; flat `token_tree` (see tree-sitter-rust node-types.json: token_tree
