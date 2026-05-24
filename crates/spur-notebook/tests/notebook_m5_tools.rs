@@ -1,10 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 
-use jute::backend::commands::RunCellEvent;
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 use spur_notebook::mcp::{
-    bridge::{BridgeError, BridgeRequestFuture, BridgeRequester, RunCellEventFuture},
+    bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
     tools::{delete_cell, insert_cell, run_cell, write_cell},
 };
 use tokio::sync::Mutex;
@@ -94,6 +93,43 @@ impl BridgeRequester for MockNotebook {
                     "cpu_pct": 0.0,
                     "mem_mb": 0.0
                 })),
+                "notebook.run_cell" => {
+                    let id = params["id"].as_str().unwrap();
+                    let cells = self.cells.lock().await;
+                    let cell = cells.get(id).unwrap();
+                    self.run_sources.lock().await.push(cell.source.clone());
+                    let (exec_count, outputs) = match cell.source.as_str() {
+                        "x = 2 + 2" => (1, json!([])),
+                        "print(x)" => (
+                            2,
+                            json!([
+                                {
+                                    "output_type": "stream",
+                                    "name": "stdout",
+                                    "text": "4\n"
+                                }
+                            ]),
+                        ),
+                        "print(x + 1)" => (
+                            3,
+                            json!([
+                                {
+                                    "output_type": "stream",
+                                    "name": "stdout",
+                                    "text": "5\n"
+                                }
+                            ]),
+                        ),
+                        _ => (0, json!([])),
+                    };
+                    Ok(json!({
+                        "id": id,
+                        "status": "success",
+                        "exec_count": exec_count,
+                        "outputs": outputs,
+                        "events": []
+                    }))
+                }
                 "notebook.write_cell" => {
                     let id = params["id"].as_str().unwrap();
                     let expected_version = params["expected_version"].as_u64().unwrap();
@@ -131,42 +167,6 @@ impl BridgeRequester for MockNotebook {
                 }
                 _ => unreachable!("unexpected method {method}"),
             }
-        })
-    }
-
-    fn run_cell_events<'a>(&'a self, _kernel_id: &'a str, code: &'a str) -> RunCellEventFuture<'a> {
-        Box::pin(async move {
-            self.run_sources.lock().await.push(code.to_string());
-            let (tx, rx) = async_channel::unbounded();
-            let events = match code {
-                "x = 2 + 2" => vec![
-                    RunCellEvent::Started,
-                    RunCellEvent::Finished {
-                        exec_count: Some(1),
-                        status: "ok".to_string(),
-                    },
-                ],
-                "print(x)" => vec![
-                    RunCellEvent::Stdout("4\n".to_string()),
-                    RunCellEvent::Finished {
-                        exec_count: Some(2),
-                        status: "ok".to_string(),
-                    },
-                ],
-                "print(x + 1)" => vec![
-                    RunCellEvent::Stdout("5\n".to_string()),
-                    RunCellEvent::Finished {
-                        exec_count: Some(3),
-                        status: "ok".to_string(),
-                    },
-                ],
-                _ => Vec::new(),
-            };
-            for event in events {
-                tx.send(event).await.unwrap();
-            }
-            drop(tx);
-            Ok(rx)
         })
     }
 }
@@ -252,10 +252,15 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
             .unwrap(),
     );
 
-    let events = progress.events();
-    assert!(events.contains(&json!({ "event": "started" })));
-    assert!(events.contains(&json!({ "event": "stdout", "data": "4\n" })));
-    assert!(events.contains(&json!({ "event": "stdout", "data": "5\n" })));
+    assert!(progress.events().is_empty());
+    assert_eq!(
+        *notebook.run_sources.lock().await,
+        vec![
+            "x = 2 + 2".to_string(),
+            "print(x)".to_string(),
+            "print(x + 1)".to_string()
+        ]
+    );
 
     let stale = write_cell::call(
         &notebook,

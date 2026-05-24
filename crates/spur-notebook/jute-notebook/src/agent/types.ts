@@ -46,6 +46,14 @@ export type AgentReadCell = AgentSnapshotCell & {
   outputs: Output[];
 };
 
+export type AgentRunCell = {
+  id: string;
+  status: AgentCellStatus;
+  exec_count: number | null;
+  outputs: Output[];
+  events: [];
+};
+
 export type AgentKernelInfo = {
   kernel_id: string;
   spec_name: string;
