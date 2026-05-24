@@ -91,23 +91,93 @@ SELECT DISTINCT
 FROM symbol_snapshots;
 
 CREATE OR REPLACE VIEW v_symbol_churn_90d AS
+WITH structural_symbols AS (
+  SELECT
+    stable_symbol_id AS structural_stable_symbol_id,
+    file_path,
+    entity_name,
+    symbol_kind,
+    enclosing_scope
+  FROM nodes
+  WHERE file_path IS NOT NULL
+    AND entity_name IS NOT NULL
+    AND symbol_kind IS NOT NULL
+),
+structural_unique AS (
+  SELECT
+    file_path,
+    entity_name,
+    symbol_kind,
+    enclosing_scope,
+    MIN(structural_stable_symbol_id) AS structural_stable_symbol_id
+  FROM structural_symbols
+  GROUP BY file_path, entity_name, symbol_kind, enclosing_scope
+  HAVING COUNT(*) = 1
+     AND COUNT(DISTINCT structural_stable_symbol_id) = 1
+),
+snapshot_symbols AS (
+  SELECT DISTINCT
+    stable_symbol_id AS snapshot_stable_symbol_id,
+    file_path,
+    entity_name,
+    symbol_kind,
+    enclosing_scope
+  FROM symbol_snapshots
+  WHERE stable_symbol_id IS NOT NULL
+    AND file_path IS NOT NULL
+    AND entity_name IS NOT NULL
+    AND symbol_kind IS NOT NULL
+),
+snapshot_unique AS (
+  SELECT
+    file_path,
+    entity_name,
+    symbol_kind,
+    enclosing_scope,
+    MIN(snapshot_stable_symbol_id) AS snapshot_stable_symbol_id
+  FROM snapshot_symbols
+  GROUP BY file_path, entity_name, symbol_kind, enclosing_scope
+  HAVING COUNT(*) = 1
+     AND COUNT(DISTINCT snapshot_stable_symbol_id) = 1
+),
+snapshot_churn AS (
+  SELECT
+    s.snapshot_stable_symbol_id,
+    count(*) AS events,
+    count(DISTINCT t.source_commit) AS commits,
+    sum(CASE WHEN t.change_kind = 'added' THEN 1 ELSE 0 END) AS added,
+    sum(CASE WHEN t.change_kind = 'modified' THEN 1 ELSE 0 END) AS modified,
+    sum(CASE WHEN t.change_kind = 'deleted' THEN 1 ELSE 0 END) AS deleted,
+    sum(CASE WHEN t.change_kind = 'renamed_from_symbol' THEN 1 ELSE 0 END) AS renamed,
+    max(c.author_ts) AS last_touched
+  FROM (
+    SELECT DISTINCT snapshot_stable_symbol_id
+    FROM snapshot_symbols
+  ) s
+  JOIN temporal_edges t
+    ON t.target_stable_symbol_id = s.snapshot_stable_symbol_id
+  JOIN commits c
+    ON c.sha = t.source_commit
+  WHERE c.author_ts > (now() - INTERVAL '90 day')
+  GROUP BY s.snapshot_stable_symbol_id
+)
 SELECT
-  b.structural_stable_symbol_id AS stable_symbol_id,
-  count(*) AS events,
-  count(DISTINCT t.source_commit) AS commits,
-  sum(CASE WHEN t.change_kind = 'added' THEN 1 ELSE 0 END) AS added,
-  sum(CASE WHEN t.change_kind = 'modified' THEN 1 ELSE 0 END) AS modified,
-  sum(CASE WHEN t.change_kind = 'deleted' THEN 1 ELSE 0 END) AS deleted,
-  sum(CASE WHEN t.change_kind = 'renamed_from_symbol' THEN 1 ELSE 0 END) AS renamed,
-  max(c.author_ts) AS last_touched
-FROM temporal_edges t
-JOIN v_symbol_id_bridge b
-  ON b.snapshot_stable_symbol_id = t.target_stable_symbol_id
-JOIN commits c
-  ON c.sha = t.source_commit
-WHERE c.author_ts > (now() - INTERVAL '90 day')
-  AND t.target_stable_symbol_id IS NOT NULL
-GROUP BY b.structural_stable_symbol_id;
+  su.structural_stable_symbol_id AS stable_symbol_id,
+  sc.events,
+  sc.commits,
+  sc.added,
+  sc.modified,
+  sc.deleted,
+  sc.renamed,
+  sc.last_touched
+FROM snapshot_churn sc
+JOIN snapshot_unique sku
+  ON sku.snapshot_stable_symbol_id = sc.snapshot_stable_symbol_id
+JOIN structural_unique su
+  ON su.file_path = sku.file_path
+ AND su.entity_name = sku.entity_name
+ AND su.symbol_kind = sku.symbol_kind
+ AND su.enclosing_scope IS NOT DISTINCT FROM sku.enclosing_scope;
 
 CREATE OR REPLACE VIEW v_symbol_inbound AS
 SELECT
