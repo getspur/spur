@@ -321,6 +321,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::ReferencesOther),
+                bind_method: None,
             },
             GraphEdgeArtifact {
                 source_stable_symbol_id: "sym-a-fn".to_string(),
@@ -332,6 +333,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::Calls),
+                bind_method: Some("macro_body_singleton".to_string()),
             },
             GraphEdgeArtifact {
                 source_stable_symbol_id: "sym-b-fn".to_string(),
@@ -343,6 +345,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::CallsDyn),
+                bind_method: None,
             },
         ],
         tombstones: Vec::new(),

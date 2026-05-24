@@ -28,6 +28,7 @@ fn graph_facts_round_trip_through_json() {
         confidence_score: 1.0,
         change_kind: None,
         edge_kind: None,
+        bind_method: None,
         evidence_id: EvidenceId(13),
         directed: true,
     };
@@ -75,6 +76,7 @@ fn graph_edge_kind_round_trips_all_public_values_and_legacy_omission() {
             change_kind: None,
 
             edge_kind: Some(edge_kind),
+            bind_method: None,
         };
         let encoded = serde_json::to_string(&edge).unwrap();
         assert!(
@@ -95,6 +97,23 @@ fn graph_edge_kind_round_trips_all_public_values_and_legacy_omission() {
     }"#;
     let decoded: GraphEdgeArtifact = serde_json::from_str(legacy).unwrap();
     assert_eq!(decoded.edge_kind, None);
+}
+
+#[test]
+fn graph_edge_artifact_bind_method_defaults_to_none_for_legacy_json() {
+    let legacy = r#"{
+        "source_stable_symbol_id":"source",
+        "target_stable_symbol_id":"target",
+        "target_label":"target",
+        "relation":"calls",
+        "confidence":"syntax_exact",
+        "confidence_score":1.0,
+        "edge_kind":"calls"
+    }"#;
+
+    let decoded: GraphEdgeArtifact = serde_json::from_str(legacy).unwrap();
+
+    assert_eq!(decoded.bind_method, None);
 }
 
 #[test]

@@ -109,6 +109,33 @@ fn reads_symbol_snapshot_file_path_b64_with_padding_and_url_safe_alphabet() {
 }
 
 #[test]
+fn reads_v5_edge_tables_without_bind_method_column_as_none() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut artifact = fixture_artifact();
+    artifact
+        .edges
+        .iter_mut()
+        .for_each(|edge| edge.bind_method = Some("macro_body_singleton".to_string()));
+    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+
+    rewrite_manifest_schema_version(&dir, "spur-graph-schema-v5")
+        .expect("rewrite manifest schema version");
+    for file_name in [
+        "edges.parquet",
+        "edges_by_dst.parquet",
+        "edges_unresolved.parquet",
+    ] {
+        rewrite_without_column(&dir.join(file_name), "bind_method")
+            .expect("drop bind_method column");
+    }
+
+    let actual = read_artifact_parquet(&dir).expect("read v5 parquet artifact");
+
+    assert!(actual.edges.iter().all(|edge| edge.bind_method.is_none()));
+}
+
+#[test]
 fn rejects_directory_without_manifest() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let dir = write_artifact_parquet(&fixture_artifact(), tempdir.path(), WriteOptions::default())
@@ -254,6 +281,52 @@ fn rewrite_symbol_snapshot_b64_values(dir: &Path, encoded_paths: &[&str]) -> any
     Ok(())
 }
 
+fn rewrite_manifest_schema_version(dir: &Path, schema_version: &str) -> anyhow::Result<()> {
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    manifest["schema_version"] = serde_json::Value::String(schema_version.to_string());
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    Ok(())
+}
+
+fn rewrite_without_column(path: &Path, column_name: &str) -> anyhow::Result<()> {
+    let batches = read_batches(path);
+    let first_batch = batches
+        .first()
+        .unwrap_or_else(|| panic!("`{}` must have at least one batch", path.display()));
+    let original_schema = first_batch.schema();
+    let indices = original_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| (field.name() != column_name).then_some(index))
+        .collect::<Vec<_>>();
+    assert!(
+        indices.len() < original_schema.fields().len(),
+        "`{}` should contain column `{column_name}`",
+        path.display()
+    );
+    let rewritten_schema = Arc::new(Schema::new(
+        indices
+            .iter()
+            .map(|index| original_schema.field(*index).clone())
+            .collect::<Vec<_>>(),
+    ));
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, Arc::clone(&rewritten_schema), None)?;
+    for batch in batches {
+        let columns = indices
+            .iter()
+            .map(|index| Arc::clone(batch.column(*index)))
+            .collect::<Vec<_>>();
+        let rewritten = RecordBatch::try_new(Arc::clone(&rewritten_schema), columns)?;
+        writer.write(&rewritten)?;
+    }
+    writer.close()?;
+    Ok(())
+}
+
 fn fixture_artifact_with_unsorted_resolved_edges() -> GraphIndexArtifact {
     let mut artifact = fixture_artifact();
     artifact.edges.push(GraphEdgeArtifact {
@@ -266,6 +339,7 @@ fn fixture_artifact_with_unsorted_resolved_edges() -> GraphIndexArtifact {
         change_kind: None,
 
         edge_kind: Some(GraphEdgeKind::Calls),
+        bind_method: None,
     });
     artifact
 }
@@ -349,6 +423,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::ReferencesOther),
+                bind_method: None,
             },
             GraphEdgeArtifact {
                 source_stable_symbol_id: "sym-a-fn".to_string(),
@@ -360,6 +435,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::Calls),
+                bind_method: Some("macro_body_singleton".to_string()),
             },
             GraphEdgeArtifact {
                 source_stable_symbol_id: "sym-b-fn".to_string(),
@@ -371,6 +447,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::CallsDyn),
+                bind_method: None,
             },
         ],
         tombstones: vec![GraphTombstoneEntry {
@@ -491,5 +568,6 @@ fn assert_artifact_eq(actual: &GraphIndexArtifact, expected: &GraphIndexArtifact
             expected.confidence_score.to_bits()
         );
         assert_eq!(actual.edge_kind, expected.edge_kind);
+        assert_eq!(actual.bind_method, expected.bind_method);
     }
 }
