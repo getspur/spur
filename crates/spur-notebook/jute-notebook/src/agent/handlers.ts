@@ -8,6 +8,7 @@ import {
   type AgentInsertCell,
   type AgentKernelInfo,
   type AgentReadCell,
+  type AgentRunCell,
   type AgentSnapshotCell,
   type AgentWriteCell,
 } from "./types";
@@ -26,6 +27,8 @@ export async function dispatchAgentRequest(
       return snapshot(requireNotebook(notebook));
     case "notebook.read_cell":
       return readCell(requireNotebook(notebook), request.params);
+    case "notebook.run_cell":
+      return runCell(requireNotebook(notebook), request.params);
     case "notebook.kernel_info":
       return kernelInfo(requireNotebook(notebook));
     case "notebook.insert_cell":
@@ -84,6 +87,43 @@ function readCell(notebook: Notebook, params: unknown): AgentReadCell {
     status: cellStatus(cell.result?.status),
     source: cell.source,
     outputs: cell.result?.outputs ?? [],
+  };
+}
+
+async function runCell(
+  notebook: Notebook,
+  params: unknown,
+): Promise<AgentRunCell> {
+  const id = readStringParam(params, "id", "notebook.run_cell");
+  const cell = notebook.state.cells[id];
+  if (!cell) {
+    throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
+  }
+  if (cell.type !== "code") {
+    throw new AgentHandlerError(
+      "invalid_params",
+      "notebook.run_cell can only run code cells",
+    );
+  }
+  if (cell.result?.status === "running") {
+    throw new AgentHandlerError(
+      "cell_running",
+      `Cell is already running: ${id}`,
+    );
+  }
+
+  await notebook.execute(id);
+  const updated = notebook.state.cells[id];
+  if (!updated) {
+    throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
+  }
+
+  return {
+    id,
+    status: cellStatus(updated.result?.status),
+    exec_count: updated.result?.executionCount ?? null,
+    outputs: updated.result?.outputs ?? [],
+    events: [],
   };
 }
 

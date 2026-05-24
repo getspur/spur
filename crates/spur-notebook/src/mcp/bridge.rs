@@ -9,7 +9,6 @@ use std::{
     time::Duration,
 };
 
-use jute::backend::commands::RunCellEvent;
 use rmcp::{
     model::{ErrorCode, ErrorData as McpError},
     ErrorData,
@@ -17,7 +16,6 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::Emitter;
-use tauri::Manager;
 use thiserror::Error;
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
@@ -25,11 +23,6 @@ use uuid::Uuid;
 pub type RequestId = Uuid;
 pub type BridgeRequestFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Value, BridgeError>> + Send + 'a>>;
-pub type RunCellEventFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<async_channel::Receiver<RunCellEvent>, BridgeError>> + Send + 'a,
-    >,
->;
 
 pub trait BridgeRequester: Send + Sync {
     fn listener_registered(&self) -> bool;
@@ -43,17 +36,12 @@ pub trait BridgeRequester: Send + Sync {
         timeout: Duration,
     ) -> BridgeRequestFuture<'a>;
 
-    fn run_cell_events<'a>(
+    fn request_no_timeout<'a>(
         &'a self,
-        _kernel_id: &'a str,
-        _code: &'a str,
-    ) -> RunCellEventFuture<'a> {
-        Box::pin(async {
-            Err(BridgeError::Handler {
-                code: "kernel_unavailable".to_string(),
-                message: "notebook kernel access is unavailable".to_string(),
-            })
-        })
+        method: &'static str,
+        params: Value,
+    ) -> BridgeRequestFuture<'a> {
+        self.request(method, params, Duration::MAX)
     }
 
     fn drain_on_shutdown<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
@@ -108,20 +96,6 @@ impl BridgeError {
             self.to_string(),
             Some(json!({ "code": mcp_code })),
         )
-    }
-}
-
-fn kernel_bridge_error(error: jute::Error) -> BridgeError {
-    let code = match &error {
-        jute::Error::KernelProvisionFailed { .. } => "kernel_provision_failed",
-        jute::Error::KernelDisconnect => "kernel_disconnected",
-        jute::Error::KernelNotFound => "kernel_not_found",
-        jute::Error::KernelProcessNotFound => "kernel_process_not_found",
-        _ => "kernel_error",
-    };
-    BridgeError::Handler {
-        code: code.to_string(),
-        message: error.to_string(),
     }
 }
 
@@ -203,16 +177,16 @@ impl BridgeRequester for TauriBridgeRequester {
         }
     }
 
-    fn run_cell_events<'a>(&'a self, kernel_id: &'a str, code: &'a str) -> RunCellEventFuture<'a> {
-        if !self.bridge.notebook_open() {
-            return Box::pin(async { Err(BridgeError::NotebookNotOpen) });
-        }
+    fn request_no_timeout<'a>(
+        &'a self,
+        method: &'static str,
+        params: Value,
+    ) -> BridgeRequestFuture<'a> {
         match &self.app {
             Some(app) => Box::pin(async move {
-                let state = app.state::<jute::state::State>();
-                jute::commands::run_cell_events(kernel_id, code, &state)
+                self.bridge
+                    .request_with_timeout(app, method, params, None)
                     .await
-                    .map_err(kernel_bridge_error)
             }),
             None => Box::pin(async { Err(BridgeError::NotebookNotOpen) }),
         }
@@ -269,6 +243,17 @@ impl AgentBridge {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, BridgeError> {
+        self.request_with_timeout(app, method, params, Some(timeout))
+            .await
+    }
+
+    pub async fn request_with_timeout<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        method: impl Into<String>,
+        params: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value, BridgeError> {
         if !self.notebook_open() {
             return Err(BridgeError::NotebookNotOpen);
         }
@@ -294,14 +279,21 @@ impl AgentBridge {
             return Err(BridgeError::WindowClosed);
         }
 
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(BridgeResponse::Success(value))) => Ok(value),
-            Ok(Ok(BridgeResponse::Error(error))) => Err(error),
-            Ok(Err(_closed)) => Err(BridgeError::AppRestarted),
-            Err(_elapsed) => {
-                self.pending.lock().await.remove(&request_id);
-                Err(BridgeError::Timeout)
-            }
+        match timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(BridgeResponse::Success(value))) => Ok(value),
+                Ok(Ok(BridgeResponse::Error(error))) => Err(error),
+                Ok(Err(_closed)) => Err(BridgeError::AppRestarted),
+                Err(_elapsed) => {
+                    self.pending.lock().await.remove(&request_id);
+                    Err(BridgeError::Timeout)
+                }
+            },
+            None => match rx.await {
+                Ok(BridgeResponse::Success(value)) => Ok(value),
+                Ok(BridgeResponse::Error(error)) => Err(error),
+                Err(_closed) => Err(BridgeError::AppRestarted),
+            },
         }
     }
 
@@ -418,23 +410,6 @@ mod tests {
                 mcp_error.message,
                 expected_message_prefix
             );
-        }
-    }
-
-    #[test]
-    fn kernel_provision_failure_maps_to_specific_handler_code() {
-        let error = kernel_bridge_error(jute::Error::KernelProvisionFailed {
-            stage: "venv_create",
-            cause: "uv failed".to_string(),
-        });
-
-        match error {
-            BridgeError::Handler { code, message } => {
-                assert_eq!(code, "kernel_provision_failed");
-                assert!(message.contains("venv_create"));
-                assert!(message.contains("uv failed"));
-            }
-            other => panic!("expected handler error, got {other:?}"),
         }
     }
 
