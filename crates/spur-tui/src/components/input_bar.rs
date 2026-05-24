@@ -2209,7 +2209,7 @@ impl InputBar {
 
         // Place the cursor cell if it is within the visible window.
         if cursor_vr >= view_top && cursor_vr < last_vr {
-            let cx = inner.x + cursor_vc as u16;
+            let cx = (inner.x + cursor_vc as u16).min(inner.x + inner.width.saturating_sub(1));
             let cy = inner.y + (cursor_vr - view_top) as u16;
             frame.set_cursor_position((cx, cy));
         }
@@ -3173,6 +3173,25 @@ mod required_height_tests {
             .draw(|f| bar.render(f, Rect::new(0, 0, 20, 3)))
             .unwrap();
         assert_eq!(bar.last_inner_width_for_test(), 20);
+    }
+
+    #[test]
+    fn render_clamps_width_filled_eol_cursor_to_last_cell() {
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::{Position, Rect};
+        use ratatui::Terminal;
+
+        let mut bar = InputBar::new();
+        bar.set_text("abcdefghij".to_string(), 10);
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| bar.render(f, Rect::new(0, 0, 10, 3)))
+            .unwrap();
+
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position { x: 9, y: 1 });
     }
 
     #[test]
