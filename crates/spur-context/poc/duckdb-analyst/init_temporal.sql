@@ -1,3 +1,7 @@
+CREATE OR REPLACE MACRO b64_decode_lenient(s) AS (
+  from_base64(replace(replace(s, '-', '+'), '_', '/') || repeat('=', (4 - length(s) % 4) % 4))
+);
+
 INSERT INTO node_dense_id_map (stable_symbol_id, dense_id)
 WITH referenced_ids AS (
   SELECT key_stable_symbol_id AS stable_symbol_id
@@ -46,7 +50,7 @@ SELECT
   s.key_stable_symbol_id AS stable_symbol_id,
   s.key_commit AS commit_sha,
   m.dense_id AS node_id,
-  TRY_CAST(decode(from_base64(s.file_path_b64)) AS VARCHAR) AS file_path,
+  TRY_CAST(decode(b64_decode_lenient(s.file_path_b64)) AS VARCHAR) AS file_path,
   s.file_path_b64,
   s.entity_name,
   s.symbol_kind,
