@@ -376,6 +376,7 @@ pub(crate) fn emit_edges(
     definitions: &[DefinitionBinding<'_>],
     captures: &[CaptureHit<'_>],
 ) {
+    let typed_bindings_by_scope = typed_bindings_by_scope(definitions, source);
     for capture in captures {
         match capture.name.as_str() {
             "import" => {
@@ -402,6 +403,10 @@ pub(crate) fn emit_edges(
                 let scope_text = contained_capture_text(capture, source, captures, "call.scope")
                     .into_iter()
                     .next();
+                let inferred_scope_text = receiver_text.as_deref().and_then(|receiver| {
+                    receiver_scope_text(source_id, receiver, &typed_bindings_by_scope)
+                });
+                let scope_text = scope_text.or(inferred_scope_text);
                 for callee in contained_capture_text(capture, source, captures, "call.name") {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
@@ -446,6 +451,95 @@ pub(crate) fn emit_edges(
             _ => {}
         }
     }
+}
+
+fn typed_bindings_by_scope(
+    definitions: &[DefinitionBinding<'_>],
+    source: &str,
+) -> HashMap<NodeId, HashMap<String, String>> {
+    let mut bindings_by_scope = HashMap::new();
+    for definition in definitions {
+        let mut bindings = HashMap::new();
+        collect_typed_bindings(definition.node, definition.node, source, &mut bindings);
+        if !bindings.is_empty() {
+            bindings_by_scope.insert(definition.node_id, bindings);
+        }
+    }
+    bindings_by_scope
+}
+
+fn collect_typed_bindings(
+    root: Node<'_>,
+    node: Node<'_>,
+    source: &str,
+    bindings: &mut HashMap<String, String>,
+) {
+    if node != root && is_definition_node(node) {
+        return;
+    }
+
+    if matches!(node.kind(), "parameter" | "let_declaration") {
+        if let Some((name, type_text)) = typed_binding(node, source) {
+            bindings.insert(name, receiver_type_scope_text(&type_text));
+        }
+    }
+
+    for index in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(index) {
+            collect_typed_bindings(root, child, source, bindings);
+        }
+    }
+}
+
+fn typed_binding(node: Node<'_>, source: &str) -> Option<(String, String)> {
+    let pattern = node.child_by_field_name("pattern")?;
+    let name = single_identifier_text(pattern, source)?;
+    let type_node = node.child_by_field_name("type")?;
+    Some((name, child_text(type_node, source).trim().to_string()))
+}
+
+fn receiver_scope_text(
+    source_id: NodeId,
+    receiver: &str,
+    typed_bindings_by_scope: &HashMap<NodeId, HashMap<String, String>>,
+) -> Option<String> {
+    let receiver = receiver.trim();
+    if receiver == "self" {
+        return Some("Self".to_string());
+    }
+    typed_bindings_by_scope
+        .get(&source_id)
+        .and_then(|bindings| bindings.get(receiver))
+        .cloned()
+}
+
+fn receiver_type_scope_text(type_text: &str) -> String {
+    let mut ty = type_text.trim();
+    loop {
+        let Some(rest) = ty.strip_prefix('&') else {
+            break;
+        };
+        ty = rest.trim_start();
+        if let Some(rest) = ty.strip_prefix("mut ") {
+            ty = rest.trim_start();
+        }
+        if let Some(rest) = strip_lifetime_prefix(ty) {
+            ty = rest.trim_start();
+            if let Some(rest) = ty.strip_prefix("mut ") {
+                ty = rest.trim_start();
+            }
+        }
+    }
+    ty.to_string()
+}
+
+fn strip_lifetime_prefix(type_text: &str) -> Option<&str> {
+    let rest = type_text.strip_prefix('\'')?;
+    let end = rest
+        .find(char::is_whitespace)
+        .map(|index| index + 1)
+        .unwrap_or(type_text.len());
+    Some(&type_text[end..])
 }
 
 pub(crate) fn emit_rust_dyn_trait_edges(
