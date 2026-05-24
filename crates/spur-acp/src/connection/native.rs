@@ -461,20 +461,29 @@ impl NativeAcpConnection {
     }
 }
 
-/// Send `signal` (e.g. `"TERM"`, `"KILL"`) to the process group `pgid` via the
-/// `kill(1)` CLI. Mirrors the existing terminal-cleanup pattern in this file;
-/// keeps us off of a `libc` dependency.
+/// Send `signal` (e.g. `"TERM"`, `"KILL"`) to the process group `pgid`.
 ///
-/// stdout/stderr are redirected to `/dev/null` so benign races (ESRCH on a
-/// already-reaped group, EPERM on a recycled pgid) don't leak to the user's
-/// terminal after TUI teardown.
+/// Benign races (ESRCH on an already-reaped group, EPERM on a recycled pgid)
+/// are intentionally ignored; shutdown and Drop paths are best-effort cleanup.
 fn killpg(pgid: i32, signal: &str) {
-    let _ = std::process::Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(format!("-{pgid}"))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    #[cfg(unix)]
+    {
+        if pgid <= 0 {
+            return;
+        }
+        let signal = match signal {
+            "TERM" => libc::SIGTERM,
+            "KILL" => libc::SIGKILL,
+            _ => return,
+        };
+        // Negative pid targets the process group whose id is `pgid`.
+        let _ = unsafe { libc::kill(-pgid, signal) };
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (pgid, signal);
+    }
 }
 
 impl Drop for NativeAcpConnection {
