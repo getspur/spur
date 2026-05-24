@@ -468,7 +468,7 @@ impl App {
             ViewId::IssueBrowser => self
                 .issue_browser
                 .as_ref()
-                .is_some_and(IssueBrowserView::is_filter_mode),
+                .is_some_and(|v| v.is_filter_mode() || v.is_text_modal_active()),
             _ => false,
         }
     }
