@@ -973,7 +973,7 @@ fn code_symbol_history_events(
     commits: &CommitIndexArtifact,
     symbol_id: &str,
 ) -> Result<Vec<Value>, McpHandlerError> {
-    let index = TemporalIndex::new(artifact);
+    let index = TemporalIndex::new(Arc::new(artifact.clone()));
     let reachable = parse_as_of(args)?
         .map(|as_of| reachable_commits(commits, &as_of))
         .transpose()?;
@@ -1812,7 +1812,7 @@ fn resolve_symbol_as_of(
     symbol_id: &str,
     as_of: &str,
 ) -> Result<Resolution<String>, CodeGraphError> {
-    let index = TemporalIndex::new(artifact);
+    let index = TemporalIndex::new(Arc::new(artifact.clone()));
     if !commits.commits.iter().any(|commit| commit.sha == as_of) {
         return Err(McpHandlerError::InvalidParams(format!(
             "as_of commit `{as_of}` is not indexed"
