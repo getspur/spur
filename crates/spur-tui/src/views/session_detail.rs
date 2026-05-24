@@ -1490,6 +1490,8 @@ impl SessionDetailView {
                         // View-owned scroll/nav keys — no rescue block needed.
                         if self.input_bar.is_empty()
                             && (matches!(key.code, KeyCode::Char('j' | 'k' | 'g' | 'G'))
+                                || (matches!(key.code, KeyCode::Char('?'))
+                                    && key.modifiers.is_empty())
                                 || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc))
                         {
                             KeyOwner::View
@@ -1735,6 +1737,9 @@ impl SessionDetailView {
                         KeyCode::Char('G') => {
                             self.react_trace.scroll_to_bottom();
                             return Some(Action::ScrollToBottom);
+                        }
+                        KeyCode::Char('?') if key.modifiers.is_empty() => {
+                            return Some(Action::ShowHelp);
                         }
                         KeyCode::Up => {
                             self.react_trace.scroll_up();
@@ -4200,6 +4205,43 @@ mod composer_routing_tests {
             "Alt+V must not insert a literal when render_picker is None"
         );
         assert!(act.is_none(), "composer no-op must not emit action");
+    }
+
+    #[test]
+    fn question_mark_with_empty_bar_emits_show_help() {
+        let mut v = make_view();
+        assert!(v.input_bar_text_for_test().is_empty());
+
+        let act = press(&mut v, KeyCode::Char('?'));
+
+        assert!(
+            v.input_bar_text_for_test().is_empty(),
+            "empty bar must not type '?'"
+        );
+        assert!(
+            matches!(act, Some(Action::ShowHelp)),
+            "expected ShowHelp, got {:?}",
+            act
+        );
+    }
+
+    #[test]
+    fn question_mark_with_non_empty_bar_appends_to_message() {
+        let mut v = make_view();
+        v.input_bar_mut_for_test().set_text("hello".into(), 5);
+
+        let act = press(&mut v, KeyCode::Char('?'));
+
+        assert_eq!(
+            v.input_bar_text_for_test(),
+            "hello?",
+            "? must be typed into a non-empty composer"
+        );
+        assert!(
+            act.is_none(),
+            "composer typing must not emit an action, got {:?}",
+            act
+        );
     }
 
     #[test]
