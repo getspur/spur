@@ -271,7 +271,7 @@ fn write_parquet_manifest(path: &Path, graph_content_hash: &str) {
         format!(
             r#"{{
   "graph_index_version": "spur-graph-phase2",
-  "schema_version": "spur-graph-schema-v5",
+  "schema_version": "spur-graph-schema-v6",
   "manifest_version": "manifest-test",
   "graph_content_hash": "{graph_content_hash}",
   "indexed_commit_oid": null,

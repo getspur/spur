@@ -1,12 +1,12 @@
 {
   "header": {
-    "graph_index_version": "3"
+    "graph_index_version": "4"
   },
   "manifest_version": "<normalized>",
   "graph_content_hash": "4aac4725d05649aac52d232337a8ea201bf065d80dba77af8fc52d8574e5cdb2",
   "file_manifests": [
     {
-      "stable_file_id": "6432d7057541b693",
+      "stable_file_id": "87553ed97d1158cf",
       "path": "src/catalog.cpp",
       "content_oid": "e0eb17ea8d91f54914c344aeba9c242f1172e433",
       "node_ids": [
@@ -20,7 +20,7 @@
       ]
     },
     {
-      "stable_file_id": "4b0d3dc55196128d",
+      "stable_file_id": "721ff1b7b1bbd9b0",
       "path": "src/include/catalog.hpp",
       "content_oid": "1be5a9d252b8a5c59b2e8d753230da0f7b0684fc",
       "node_ids": [
@@ -42,7 +42,7 @@
       ]
     },
     {
-      "stable_file_id": "05beb7c62763c52a",
+      "stable_file_id": "bca8ecd50f3e7c03",
       "path": "src/main.cpp",
       "content_oid": "66b897795dfdf6ae0eb62fafeccbb00ad575cadc",
       "node_ids": [
@@ -54,21 +54,21 @@
   ],
   "files": [
     {
-      "stable_file_id": "6432d7057541b693",
+      "stable_file_id": "87553ed97d1158cf",
       "file_path": "src/catalog.cpp"
     },
     {
-      "stable_file_id": "4b0d3dc55196128d",
+      "stable_file_id": "721ff1b7b1bbd9b0",
       "file_path": "src/include/catalog.hpp"
     },
     {
-      "stable_file_id": "05beb7c62763c52a",
+      "stable_file_id": "bca8ecd50f3e7c03",
       "file_path": "src/main.cpp"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "2b2f654575d1a792",
+      "stable_symbol_id": "7773ab6e5aa9e551",
       "file_path": "src/catalog.cpp",
       "byte_range": [
         52,
@@ -85,7 +85,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "ebe42269a76170da",
+      "stable_symbol_id": "56705ae4f9d3718d",
       "file_path": "src/catalog.cpp",
       "byte_range": [
         74,
@@ -102,7 +102,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "24dc9a0e7618f67d",
+      "stable_symbol_id": "1c9dd1a33eace1dc",
       "file_path": "src/catalog.cpp",
       "byte_range": [
         104,
@@ -119,7 +119,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "f5cb13210ae06a1b",
+      "stable_symbol_id": "c67ff4e1545e91bc",
       "file_path": "src/catalog.cpp",
       "byte_range": [
         136,
@@ -136,7 +136,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "73b40b84acd6e543",
+      "stable_symbol_id": "81e3ba4b7e802cd7",
       "file_path": "src/catalog.cpp",
       "byte_range": [
         259,
@@ -153,7 +153,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "11ec26f73851835f",
+      "stable_symbol_id": "37c4867167d67901",
       "file_path": "src/catalog.cpp",
       "byte_range": [
         473,
@@ -170,7 +170,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "2d34f9a1d5b29c51",
+      "stable_symbol_id": "9fc5f50790458ce2",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         69,
@@ -187,7 +187,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "4fa2a884533c4b97",
+      "stable_symbol_id": "50324fc35afd182e",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         100,
@@ -204,7 +204,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "5f98a4537db0514d",
+      "stable_symbol_id": "feb951cbf4435321",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         122,
@@ -221,7 +221,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "07e35e8e761f1871",
+      "stable_symbol_id": "110bc8bec8561973",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         143,
@@ -238,7 +238,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "5ce05ed20a6f1df3",
+      "stable_symbol_id": "8832057241d308b7",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         185,
@@ -255,7 +255,7 @@
       "enclosing_scope": "common"
     },
     {
-      "stable_symbol_id": "ad371fbd5f710247",
+      "stable_symbol_id": "d01c644fe09ec582",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         249,
@@ -272,7 +272,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "8bbe53827bbd0eb3",
+      "stable_symbol_id": "7313b528a6d66299",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         310,
@@ -289,7 +289,7 @@
       "enclosing_scope": "Catalog"
     },
     {
-      "stable_symbol_id": "a9d385b3a1dc083c",
+      "stable_symbol_id": "a0e671357a10850f",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         416,
@@ -306,7 +306,7 @@
       "enclosing_scope": "Catalog"
     },
     {
-      "stable_symbol_id": "4f58735952c11fac",
+      "stable_symbol_id": "098f313a84547d0a",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         483,
@@ -323,7 +323,7 @@
       "enclosing_scope": "Catalog"
     },
     {
-      "stable_symbol_id": "8e6731dc6f5b8a6e",
+      "stable_symbol_id": "dd738c4cdf9a12c9",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         543,
@@ -340,7 +340,7 @@
       "enclosing_scope": "Catalog"
     },
     {
-      "stable_symbol_id": "aa73fc5117b0ba9b",
+      "stable_symbol_id": "87247422c0b496b6",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         603,
@@ -357,7 +357,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "47328da612e96d96",
+      "stable_symbol_id": "7cf6e3937f2b2a2e",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         637,
@@ -374,7 +374,7 @@
       "enclosing_scope": "CatalogEntry"
     },
     {
-      "stable_symbol_id": "3c395b170de38753",
+      "stable_symbol_id": "f129423190608288",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         765,
@@ -391,7 +391,7 @@
       "enclosing_scope": "CatalogEntry"
     },
     {
-      "stable_symbol_id": "d8e331a0f36814c1",
+      "stable_symbol_id": "b07ee3e6381e8065",
       "file_path": "src/include/catalog.hpp",
       "byte_range": [
         788,
@@ -408,7 +408,7 @@
       "enclosing_scope": "spurtest"
     },
     {
-      "stable_symbol_id": "76df1e43793debd7",
+      "stable_symbol_id": "e9ff854ca03c4ddd",
       "file_path": "src/main.cpp",
       "byte_range": [
         122,
@@ -425,7 +425,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "4f973353d7e83aa1",
+      "stable_symbol_id": "c67087d89a808a61",
       "file_path": "src/main.cpp",
       "byte_range": [
         339,
@@ -444,44 +444,8 @@
   ],
   "edges": [
     {
-      "source_stable_symbol_id": "05beb7c62763c52a",
-      "target_stable_symbol_id": null,
-      "target_label": "<iostream>",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "05beb7c62763c52a",
-      "target_stable_symbol_id": null,
-      "target_label": "CatalogEntry",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "05beb7c62763c52a",
-      "target_stable_symbol_id": null,
-      "target_label": "spurtest::Catalog",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "05beb7c62763c52a",
-      "target_stable_symbol_id": null,
-      "target_label": "spurtest::CatalogEntry",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "05beb7c62763c52a",
-      "target_stable_symbol_id": "4f973353d7e83aa1",
+      "source_stable_symbol_id": "110bc8bec8561973",
+      "target_stable_symbol_id": "8832057241d308b7",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -489,34 +453,7 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "05beb7c62763c52a",
-      "target_stable_symbol_id": "76df1e43793debd7",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "05beb7c62763c52a",
-      "target_stable_symbol_id": "ad371fbd5f710247",
-      "target_label": "Catalog",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "07e35e8e761f1871",
-      "target_stable_symbol_id": "5ce05ed20a6f1df3",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "11ec26f73851835f",
+      "source_stable_symbol_id": "37c4867167d67901",
       "target_stable_symbol_id": null,
       "target_label": "size",
       "relation": "calls",
@@ -525,8 +462,8 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "2b2f654575d1a792",
-      "target_stable_symbol_id": "11ec26f73851835f",
+      "source_stable_symbol_id": "50324fc35afd182e",
+      "target_stable_symbol_id": "110bc8bec8561973",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -534,8 +471,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "2b2f654575d1a792",
-      "target_stable_symbol_id": "24dc9a0e7618f67d",
+      "source_stable_symbol_id": "50324fc35afd182e",
+      "target_stable_symbol_id": "87247422c0b496b6",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -543,8 +480,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "2b2f654575d1a792",
-      "target_stable_symbol_id": "73b40b84acd6e543",
+      "source_stable_symbol_id": "50324fc35afd182e",
+      "target_stable_symbol_id": "b07ee3e6381e8065",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -552,8 +489,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "2b2f654575d1a792",
-      "target_stable_symbol_id": "ebe42269a76170da",
+      "source_stable_symbol_id": "50324fc35afd182e",
+      "target_stable_symbol_id": "d01c644fe09ec582",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -561,8 +498,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "2b2f654575d1a792",
-      "target_stable_symbol_id": "f5cb13210ae06a1b",
+      "source_stable_symbol_id": "50324fc35afd182e",
+      "target_stable_symbol_id": "feb951cbf4435321",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -570,16 +507,7 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "47328da612e96d96",
-      "target_stable_symbol_id": null,
-      "target_label": "move",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "source_stable_symbol_id": "721ff1b7b1bbd9b0",
       "target_stable_symbol_id": null,
       "target_label": "#pragma",
       "relation": "calls",
@@ -588,7 +516,7 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "source_stable_symbol_id": "721ff1b7b1bbd9b0",
       "target_stable_symbol_id": null,
       "target_label": "<memory>",
       "relation": "imports",
@@ -597,7 +525,7 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "source_stable_symbol_id": "721ff1b7b1bbd9b0",
       "target_stable_symbol_id": null,
       "target_label": "<string>",
       "relation": "imports",
@@ -606,7 +534,7 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "4b0d3dc55196128d",
+      "source_stable_symbol_id": "721ff1b7b1bbd9b0",
       "target_stable_symbol_id": null,
       "target_label": "<vector>",
       "relation": "imports",
@@ -615,8 +543,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "4b0d3dc55196128d",
-      "target_stable_symbol_id": "2d34f9a1d5b29c51",
+      "source_stable_symbol_id": "721ff1b7b1bbd9b0",
+      "target_stable_symbol_id": "50324fc35afd182e",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -624,8 +552,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "4b0d3dc55196128d",
-      "target_stable_symbol_id": "4fa2a884533c4b97",
+      "source_stable_symbol_id": "721ff1b7b1bbd9b0",
+      "target_stable_symbol_id": "9fc5f50790458ce2",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -633,79 +561,61 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "4f973353d7e83aa1",
-      "target_stable_symbol_id": "76df1e43793debd7",
-      "target_label": "RunCatalog",
+      "source_stable_symbol_id": "7773ab6e5aa9e551",
+      "target_stable_symbol_id": "1c9dd1a33eace1dc",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7773ab6e5aa9e551",
+      "target_stable_symbol_id": "37c4867167d67901",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7773ab6e5aa9e551",
+      "target_stable_symbol_id": "56705ae4f9d3718d",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7773ab6e5aa9e551",
+      "target_stable_symbol_id": "81e3ba4b7e802cd7",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7773ab6e5aa9e551",
+      "target_stable_symbol_id": "c67ff4e1545e91bc",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7cf6e3937f2b2a2e",
+      "target_stable_symbol_id": null,
+      "target_label": "move",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "4fa2a884533c4b97",
-      "target_stable_symbol_id": "07e35e8e761f1871",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "4fa2a884533c4b97",
-      "target_stable_symbol_id": "5f98a4537db0514d",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "4fa2a884533c4b97",
-      "target_stable_symbol_id": "aa73fc5117b0ba9b",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "4fa2a884533c4b97",
-      "target_stable_symbol_id": "ad371fbd5f710247",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "4fa2a884533c4b97",
-      "target_stable_symbol_id": "d8e331a0f36814c1",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "6432d7057541b693",
-      "target_stable_symbol_id": null,
-      "target_label": "<utility>",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "6432d7057541b693",
-      "target_stable_symbol_id": "2b2f654575d1a792",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "73b40b84acd6e543",
+      "source_stable_symbol_id": "81e3ba4b7e802cd7",
       "target_stable_symbol_id": null,
       "target_label": "get",
       "relation": "calls",
@@ -714,7 +624,7 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "73b40b84acd6e543",
+      "source_stable_symbol_id": "81e3ba4b7e802cd7",
       "target_stable_symbol_id": null,
       "target_label": "name",
       "relation": "calls",
@@ -723,79 +633,115 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "76df1e43793debd7",
+      "source_stable_symbol_id": "87247422c0b496b6",
+      "target_stable_symbol_id": "7cf6e3937f2b2a2e",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "87247422c0b496b6",
+      "target_stable_symbol_id": "f129423190608288",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "87553ed97d1158cf",
       "target_stable_symbol_id": null,
-      "target_label": "GetEntry",
+      "target_label": "<utility>",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "87553ed97d1158cf",
+      "target_stable_symbol_id": "7773ab6e5aa9e551",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bca8ecd50f3e7c03",
+      "target_stable_symbol_id": null,
+      "target_label": "<iostream>",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bca8ecd50f3e7c03",
+      "target_stable_symbol_id": null,
+      "target_label": "CatalogEntry",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bca8ecd50f3e7c03",
+      "target_stable_symbol_id": null,
+      "target_label": "spurtest::Catalog",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bca8ecd50f3e7c03",
+      "target_stable_symbol_id": null,
+      "target_label": "spurtest::CatalogEntry",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bca8ecd50f3e7c03",
+      "target_stable_symbol_id": "c67087d89a808a61",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bca8ecd50f3e7c03",
+      "target_stable_symbol_id": "d01c644fe09ec582",
+      "target_label": "Catalog",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bca8ecd50f3e7c03",
+      "target_stable_symbol_id": "e9ff854ca03c4ddd",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "c67087d89a808a61",
+      "target_stable_symbol_id": "e9ff854ca03c4ddd",
+      "target_label": "RunCatalog",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "76df1e43793debd7",
-      "target_stable_symbol_id": "8bbe53827bbd0eb3",
-      "target_label": "Initialize",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "aa73fc5117b0ba9b",
-      "target_stable_symbol_id": "3c395b170de38753",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "aa73fc5117b0ba9b",
-      "target_stable_symbol_id": "47328da612e96d96",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "ad371fbd5f710247",
-      "target_stable_symbol_id": "4f58735952c11fac",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "ad371fbd5f710247",
-      "target_stable_symbol_id": "8bbe53827bbd0eb3",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "ad371fbd5f710247",
-      "target_stable_symbol_id": "8e6731dc6f5b8a6e",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "ad371fbd5f710247",
-      "target_stable_symbol_id": "a9d385b3a1dc083c",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "f5cb13210ae06a1b",
+      "source_stable_symbol_id": "c67ff4e1545e91bc",
       "target_stable_symbol_id": null,
       "target_label": "clear",
       "relation": "calls",
@@ -804,7 +750,7 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "f5cb13210ae06a1b",
+      "source_stable_symbol_id": "c67ff4e1545e91bc",
       "target_stable_symbol_id": null,
       "target_label": "empty",
       "relation": "calls",
@@ -813,9 +759,63 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "f5cb13210ae06a1b",
-      "target_stable_symbol_id": "2d34f9a1d5b29c51",
+      "source_stable_symbol_id": "c67ff4e1545e91bc",
+      "target_stable_symbol_id": "9fc5f50790458ce2",
       "target_label": "D_ASSERT",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "d01c644fe09ec582",
+      "target_stable_symbol_id": "098f313a84547d0a",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "d01c644fe09ec582",
+      "target_stable_symbol_id": "7313b528a6d66299",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "d01c644fe09ec582",
+      "target_stable_symbol_id": "a0e671357a10850f",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "d01c644fe09ec582",
+      "target_stable_symbol_id": "dd738c4cdf9a12c9",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "e9ff854ca03c4ddd",
+      "target_stable_symbol_id": null,
+      "target_label": "GetEntry",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "e9ff854ca03c4ddd",
+      "target_stable_symbol_id": "7313b528a6d66299",
+      "target_label": "Initialize",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,

@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::str;
 
 use anyhow::{anyhow, Context};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -40,7 +39,6 @@ pub(crate) struct FactBuilder<'a> {
     pub(crate) pending_edges: Vec<PendingEdge>,
     symbol_index: BTreeMap<String, Vec<NodeId>>,
     edge_index: HashSet<EdgeDedupKey>,
-    stable_key_ordinals: HashMap<(String, String, &'static str), u32>,
     qualified_symbol_index: BTreeMap<String, Vec<NodeId>>,
 }
 
@@ -228,7 +226,6 @@ impl<'a> FactBuilder<'a> {
             pending_edges: Vec::new(),
             symbol_index: BTreeMap::new(),
             edge_index: HashSet::new(),
-            stable_key_ordinals: HashMap::new(),
             qualified_symbol_index: BTreeMap::new(),
         }
     }
@@ -273,20 +270,19 @@ impl<'a> FactBuilder<'a> {
         let span_id = SpanId(self.next_span);
         self.next_span += 1;
         let range = node.range();
-        let kind_discriminator = kind.discriminator();
-        // The stable_key hash is keyed on (path, fqn, kind, ordinal). For ordinal
-        // disambiguation to actually distinguish nodes that share (path, fqn, kind),
-        // the ordinal counter must also be keyed on fqn — not label. In C++,
-        // overloads or in-class vs out-of-line definitions can produce the same
-        // fqn with different labels (e.g. label="AssignValue" vs label="Class::AssignValue"),
-        // and the previous label-keyed counter let both reach ordinal=1 → hash collision.
-        let ordinal = {
-            let key = (relative_path.to_string(), fqn.clone(), kind_discriminator);
-            let count = self.stable_key_ordinals.entry(key).or_insert(0);
-            *count += 1;
-            *count
+        let impl_identity;
+        let identity_fqn = if kind == NodeKind::Impl {
+            impl_identity = impl_identity_fqn(&fqn);
+            impl_identity.as_str()
+        } else {
+            &fqn
         };
-        let stable_key = stable_key(relative_path, &fqn, kind, ordinal);
+        let stable_key = crate::identity::stable_symbol_id_for(
+            relative_path,
+            identity_fqn,
+            kind,
+            range.start_byte as u64,
+        );
 
         self.facts.spans.push(SourceSpan {
             span_id,
@@ -797,19 +793,13 @@ fn is_string_literal_context(node: Node<'_>) -> bool {
     false
 }
 
-fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, ordinal: u32) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(relative_path.as_bytes());
-    hasher.update([0]);
-    hasher.update(fqn.as_bytes());
-    hasher.update([0]);
-    hasher.update(kind.discriminator().as_bytes());
-    hasher.update([0]);
-    hasher.update(ordinal.to_le_bytes());
-    let digest = hasher.finalize();
-    let mut prefix = [0; 8];
-    prefix.copy_from_slice(&digest[..8]);
-    format!("{:016x}", u64::from_be_bytes(prefix))
+fn impl_identity_fqn(fqn: &str) -> String {
+    if let Some((prefix, segment)) = fqn.rsplit_once("::") {
+        if let Some(stripped) = segment.strip_prefix("impl ") {
+            return format!("{prefix}::{stripped}");
+        }
+    }
+    fqn.strip_prefix("impl ").unwrap_or(fqn).to_string()
 }
 
 fn qualified_symbols_by_name(facts: &GraphFacts) -> HashMap<String, Vec<NodeId>> {
