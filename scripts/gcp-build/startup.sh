@@ -65,10 +65,29 @@ fi
 # Note: CARGO_TARGET_DIR and SCCACHE_BASEDIRS are NOT set here — build.sh sets
 # them per-invocation so each worktree gets an isolated target/ and so sccache
 # basedir-normalizes paths across worktrees.
+# Per-invocation rustc wrapper: sets SCCACHE_BASEDIRS to the workspace root
+# (walking up from $PWD until the topmost Cargo.toml). sccache strips this
+# prefix before hashing rustc inputs so identical source content at different
+# worktree paths produces the same cache key.
+cat >/usr/local/bin/sccache-worktree <<'WRAPPER'
+#!/bin/bash
+ROOT=""
+DIR="$PWD"
+while [[ "$DIR" != "/" ]]; do
+    if [[ -f "$DIR/Cargo.toml" ]]; then
+        ROOT="$DIR"
+    fi
+    DIR="$(dirname "$DIR")"
+done
+[[ -n "$ROOT" ]] && export SCCACHE_BASEDIRS="$ROOT"
+exec /usr/local/bin/sccache "$@"
+WRAPPER
+chmod 0755 /usr/local/bin/sccache-worktree
+
 cat >/etc/profile.d/spur-build.sh <<EOF
 export CARGO_HOME=$CACHE_MNT/cargo-home
 export RUSTUP_HOME=$CACHE_MNT/rustup
-export RUSTC_WRAPPER=/usr/local/bin/sccache
+export RUSTC_WRAPPER=/usr/local/bin/sccache-worktree
 export SCCACHE_GCS_BUCKET=${SCCACHE_GCS_BUCKET}
 export SCCACHE_GCS_RW_MODE=READ_WRITE
 export SCCACHE_GCS_KEY_PATH=
