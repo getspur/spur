@@ -1070,16 +1070,25 @@ mod tests {
         drop(_guard);
 
         assert_eq!(sessions.len(), 2);
-        // Sorted by updated_at descending (mtime).  sess-def was written after
-        // sess-abc so its mtime is slightly newer and it sorts first.
-        assert_eq!(sessions[0].session_id.0.as_ref(), "sess-def");
-        assert_eq!(
-            sessions[0].cwd,
-            PathBuf::from("/repo/spur/.spur/worktrees/w1")
+        let first_updated = sessions[0].updated_at.as_deref().unwrap_or("");
+        let second_updated = sessions[1].updated_at.as_deref().unwrap_or("");
+        assert!(
+            first_updated >= second_updated,
+            "sessions should be sorted by updated_at descending"
         );
-        assert_eq!(sessions[1].session_id.0.as_ref(), "sess-abc");
-        assert_eq!(sessions[1].cwd, PathBuf::from("/repo/spur"));
-        assert_eq!(sessions[1].title.as_deref(), Some("frolicking-kitten"));
+
+        let sess_def = sessions
+            .iter()
+            .find(|session| session.session_id.0.as_ref() == "sess-def")
+            .expect("sess-def");
+        assert_eq!(sess_def.cwd, PathBuf::from("/repo/spur/.spur/worktrees/w1"));
+
+        let sess_abc = sessions
+            .iter()
+            .find(|session| session.session_id.0.as_ref() == "sess-abc")
+            .expect("sess-abc");
+        assert_eq!(sess_abc.cwd, PathBuf::from("/repo/spur"));
+        assert_eq!(sess_abc.title.as_deref(), Some("frolicking-kitten"));
     }
 
     #[test]

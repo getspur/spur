@@ -94,6 +94,28 @@ struct Runtime {
     _task_tracker: TaskTracker,
 }
 
+impl Runtime {
+    async fn shutdown(self) {
+        let Runtime {
+            _dir,
+            repo: _repo,
+            pm: _pm,
+            server,
+            reconciler,
+            request_rx,
+            _task_tracker: task_tracker,
+        } = self;
+
+        drop(reconciler);
+        drop(request_rx);
+        server.shutdown().await;
+        task_tracker.close();
+        tokio::time::timeout(Duration::from_secs(5), task_tracker.wait())
+            .await
+            .expect("reconciler completion collectors should drain");
+    }
+}
+
 async fn new_runtime() -> Runtime {
     let dir = TempDir::new().expect("tempdir");
     run_git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -408,6 +430,8 @@ async fn happy_path_reuse_prior_worktree_and_merge_single_commit() {
         entry.dispatched_base_oid.as_deref(),
         Some(plan_base.as_str())
     );
+
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -578,6 +602,7 @@ async fn approved_dep_overlay_and_reuse_branch_are_both_present_on_redispatch() 
     // Boundary assertion for orchestrator sequencing: request includes both
     // overlay info and prior_branch_for_reuse, so pre-apply can only occur
     // after overlay application in worker setup.
+    rt.shutdown().await;
 }
 
 #[tokio::test]
