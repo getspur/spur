@@ -50,9 +50,31 @@ pub fn initialize_builder<'a, R: Runtime, M: Manager<R>>(
     builder
 }
 
+fn build_window<R: Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'_, R, M>,
+) -> tauri::Result<WebviewWindow<R>> {
+    let window = builder.build()?;
+    attach_hide_on_close(&window);
+    Ok(window)
+}
+
+#[cfg(target_os = "macos")]
+fn attach_hide_on_close<R: Runtime>(window: &WebviewWindow<R>) {
+    let hide_target = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = hide_target.hide();
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn attach_hide_on_close<R: Runtime>(_window: &WebviewWindow<R>) {}
+
 /// Opens a window with the home page.
 pub fn open_home<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
-    initialize_builder(app, "/").build()
+    build_window(initialize_builder(app, "/"))
 }
 
 /// Opens a window with the notebook file at the given path.
@@ -62,5 +84,5 @@ pub fn open_notebook_path<R: Runtime>(
 ) -> tauri::Result<WebviewWindow<R>> {
     let query = serde_urlencoded::to_string([("path", file.to_string_lossy())])
         .context("could not encode path")?;
-    initialize_builder(app, &format!("/notebook?{query}")).build()
+    build_window(initialize_builder(app, &format!("/notebook?{query}")))
 }

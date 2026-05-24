@@ -260,6 +260,18 @@ fn main() {
         .run(
             #[allow(unused_variables)]
             move |app, event| match event {
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    api.prevent_exit();
+                }
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Exit => {
+                    let bridge = Arc::clone(&bridge_for_run);
+                    tauri::async_runtime::spawn(async move {
+                        bridge.drain_on_shutdown().await;
+                    });
+                }
+                #[cfg(not(target_os = "macos"))]
                 tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } => {
                     let bridge = Arc::clone(&bridge_for_run);
                     tauri::async_runtime::spawn(async move {
