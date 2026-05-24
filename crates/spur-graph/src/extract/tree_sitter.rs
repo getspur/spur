@@ -26,10 +26,17 @@ pub(crate) struct PendingEdge {
     pub(crate) target_name: String,
     pub(crate) relation: RelationKind,
     pub(crate) edge_kind: Option<GraphEdgeKind>,
+    pub(crate) origin: CallOrigin,
     #[allow(dead_code)]
     pub(crate) receiver_text: Option<String>,
     #[allow(dead_code)]
     pub(crate) scope_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallOrigin {
+    Expression,
+    MacroBody,
 }
 
 #[derive(Debug)]
@@ -335,6 +342,44 @@ impl<'a> FactBuilder<'a> {
         target_label: Option<String>,
         edge_kind: Option<GraphEdgeKind>,
     ) {
+        let (confidence, confidence_score) = confidence_for_edge(relation, edge_kind);
+        self.add_edge_with_metadata(
+            source,
+            target,
+            relation,
+            target_label,
+            edge_kind,
+            confidence,
+            confidence_score,
+            None,
+        );
+    }
+
+    fn add_pending_edge(&mut self, edge: &PendingEdge, target: Option<NodeId>) {
+        let (confidence, confidence_score, bind_method) = metadata_for_pending_edge(edge, target);
+        self.add_edge_with_metadata(
+            edge.source,
+            target,
+            edge.relation,
+            Some(edge.target_name.clone()),
+            edge.edge_kind,
+            confidence,
+            confidence_score,
+            bind_method,
+        );
+    }
+
+    fn add_edge_with_metadata(
+        &mut self,
+        source: NodeId,
+        target: Option<NodeId>,
+        relation: RelationKind,
+        target_label: Option<String>,
+        edge_kind: Option<GraphEdgeKind>,
+        confidence: Confidence,
+        confidence_score: f32,
+        bind_method: Option<&'static str>,
+    ) {
         if !self
             .edge_index
             .insert((source, target, relation, target_label.clone(), edge_kind))
@@ -343,7 +388,6 @@ impl<'a> FactBuilder<'a> {
         }
         let edge_id = EdgeId(self.next_edge);
         self.next_edge += 1;
-        let (confidence, confidence_score) = confidence_for_edge(relation, edge_kind);
         self.facts.edges.push(GraphEdge {
             edge_id,
             source_node_id: source,
@@ -353,6 +397,7 @@ impl<'a> FactBuilder<'a> {
             confidence,
             confidence_score,
             edge_kind,
+            bind_method: bind_method.map(str::to_string),
             evidence_id: EvidenceId(edge_id.get()),
             directed: true,
             change_kind: None,
@@ -410,13 +455,7 @@ impl<'a> FactBuilder<'a> {
                                 Some(NodeKind::Method)
                             ) =>
                     {
-                        self.add_edge_with_kind(
-                            edge.source,
-                            Some(*target),
-                            edge.relation,
-                            Some(edge.target_name),
-                            edge.edge_kind,
-                        );
+                        self.add_pending_edge(&edge, Some(*target));
                     }
                     candidates if candidates.len() > 1 => {
                         ambiguous_unresolved += 1;
@@ -425,22 +464,10 @@ impl<'a> FactBuilder<'a> {
                             candidates = candidates.len(),
                             "spur-graph: ambiguous dyn trait call target; leaving unresolved"
                         );
-                        self.add_edge_with_kind(
-                            edge.source,
-                            None,
-                            edge.relation,
-                            Some(edge.target_name),
-                            edge.edge_kind,
-                        );
+                        self.add_pending_edge(&edge, None);
                     }
                     _ => {
-                        self.add_edge_with_kind(
-                            edge.source,
-                            None,
-                            edge.relation,
-                            Some(edge.target_name),
-                            edge.edge_kind,
-                        );
+                        self.add_pending_edge(&edge, None);
                     }
                 }
             } else if edge.relation == RelationKind::References {
@@ -451,13 +478,7 @@ impl<'a> FactBuilder<'a> {
                             Some(NodeKind::Function | NodeKind::Method)
                         )
                     {
-                        self.add_edge_with_kind(
-                            edge.source,
-                            Some(target),
-                            edge.relation,
-                            Some(edge.target_name),
-                            edge.edge_kind,
-                        );
+                        self.add_pending_edge(&edge, Some(target));
                     }
                 }
             } else if let Some(candidates) =
@@ -469,35 +490,17 @@ impl<'a> FactBuilder<'a> {
                     candidates,
                     "spur-graph: ambiguous pending edge target; leaving unresolved"
                 );
-                self.add_edge_with_kind(
-                    edge.source,
-                    None,
-                    edge.relation,
-                    Some(edge.target_name),
-                    edge.edge_kind,
-                );
+                self.add_pending_edge(&edge, None);
             } else if let Some(target) = singleton_symbols_by_label
                 .get(&edge.target_name)
                 .copied()
                 .or_else(|| files_by_label.get(&edge.target_name).copied())
             {
                 if target != edge.source {
-                    self.add_edge_with_kind(
-                        edge.source,
-                        Some(target),
-                        edge.relation,
-                        Some(edge.target_name),
-                        edge.edge_kind,
-                    );
+                    self.add_pending_edge(&edge, Some(target));
                 }
             } else {
-                self.add_edge_with_kind(
-                    edge.source,
-                    None,
-                    edge.relation,
-                    Some(edge.target_name),
-                    edge.edge_kind,
-                );
+                self.add_pending_edge(&edge, None);
             }
         }
         if ambiguous_unresolved > 0 {
@@ -507,6 +510,21 @@ impl<'a> FactBuilder<'a> {
             );
         }
     }
+}
+
+fn metadata_for_pending_edge(
+    edge: &PendingEdge,
+    target: Option<NodeId>,
+) -> (Confidence, f32, Option<&'static str>) {
+    if edge.origin == CallOrigin::MacroBody
+        && edge.relation == RelationKind::Calls
+        && target.is_some()
+    {
+        return (Confidence::Heuristic, 0.8, Some("macro_body_singleton"));
+    }
+
+    let (confidence, confidence_score) = confidence_for_edge(edge.relation, edge.edge_kind);
+    (confidence, confidence_score, None)
 }
 
 fn confidence_for_edge(
@@ -1005,6 +1023,7 @@ mod tests {
             target_name: "flush".to_string(),
             relation: RelationKind::Calls,
             edge_kind: None,
+            origin: CallOrigin::Expression,
             receiver_text: None,
             scope_text: None,
         });
@@ -1016,6 +1035,58 @@ mod tests {
         assert_eq!(edge.source_node_id, source);
         assert_eq!(edge.target_node_id, None);
         assert_eq!(edge.target_label.as_deref(), Some("flush"));
+    }
+
+    #[test]
+    fn macro_body_singleton_pending_edge_is_heuristic_and_stamped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "fn caller() { json!({ \"x\": helper() }); }\nfn helper() {}\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let file_id = FileId(builder.next_file_id());
+        let source = builder.add_node(
+            "src/lib.rs",
+            "caller".to_string(),
+            "caller".to_string(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        let target = builder.add_node(
+            "src/lib.rs",
+            "helper".to_string(),
+            "helper".to_string(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "helper".to_string(),
+            relation: RelationKind::Calls,
+            edge_kind: None,
+            origin: CallOrigin::MacroBody,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        assert_eq!(builder.facts.edges.len(), 1);
+        let edge = &builder.facts.edges[0];
+        assert_eq!(edge.target_node_id, Some(target));
+        assert_eq!(edge.confidence, Confidence::Heuristic);
+        assert_eq!(edge.confidence_score, 0.8);
+        assert_eq!(edge.bind_method.as_deref(), Some("macro_body_singleton"));
     }
 
     #[test]
