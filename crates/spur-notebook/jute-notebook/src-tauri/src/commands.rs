@@ -818,6 +818,35 @@ where
     Ok(trashed)
 }
 
+/// Mark the frontend agent bridge listener as registered.
+///
+/// The standalone Jute shell has no agent transport; this no-op command keeps
+/// the shared frontend boot path compatible with the SPUR notebook binary.
+#[tauri::command]
+pub async fn bridge_ready() -> Result<(), Error> {
+    Ok(())
+}
+
+/// Accept a frontend agent bridge response without forwarding it.
+///
+/// The SPUR notebook binary registers the real transport command. Standalone
+/// Jute only needs this stub so unresolved bridge invocations do not fail.
+#[tauri::command]
+pub async fn agent_response(payload: Value) -> Result<(), Error> {
+    let _ = payload;
+    Ok(())
+}
+
+/// Track whether a notebook page is active in the frontend.
+///
+/// Standalone Jute does not expose notebook state to an agent bridge, so this
+/// command intentionally records nothing.
+#[tauri::command]
+pub async fn notebook_active_changed(open: bool) -> Result<(), Error> {
+    let _ = open;
+    Ok(())
+}
+
 /// Start a new Jupyter kernel.
 #[tauri::command]
 pub async fn start_kernel(
@@ -1148,6 +1177,8 @@ mod tests {
         std::fs::write(&active, b"{}").unwrap();
         std::fs::write(&stale, b"{}").unwrap();
         std::fs::write(&non_notebook, b"not a notebook").unwrap();
+        let active = normalize_path(&active).await.unwrap();
+        let stale = normalize_path(&stale).await.unwrap();
 
         let trashed = Arc::new(StdMutex::new(Vec::<PathBuf>::new()));
         let count = discard_scratch_notebooks_in(&scratch_dir, Some(active.as_path()), {
@@ -1164,5 +1195,17 @@ mod tests {
         assert_eq!(trashed.lock().unwrap().as_slice(), [stale]);
 
         std::fs::remove_dir_all(scratch_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_bridge_stub_commands_accept_payload_without_transport() {
+        bridge_ready().await.unwrap();
+        notebook_active_changed(true).await.unwrap();
+        agent_response(serde_json::json!({
+            "requestId": "550e8400-e29b-41d4-a716-446655440000",
+            "result": { "ok": true }
+        }))
+        .await
+        .unwrap();
     }
 }

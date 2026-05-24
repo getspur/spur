@@ -1,3 +1,8 @@
+// The bridge registers on every app boot because the SPUR notebook binary owns
+// the real Rust AgentBridge; the standalone vendored Jute shell registers
+// no-op bridge commands so this shared frontend path remains valid until that
+// shell grows full agent transport.
+
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
