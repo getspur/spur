@@ -1,12 +1,12 @@
 {
   "header": {
-    "graph_index_version": "3"
+    "graph_index_version": "4"
   },
   "manifest_version": "<normalized>",
   "graph_content_hash": "a7fef1609be9f584ad08fa40cc79032a46f9081b93ce80bade71f8ebcb8eab83",
   "file_manifests": [
     {
-      "stable_file_id": "cfb90035f8daa878",
+      "stable_file_id": "f6656417814146db",
       "path": "src/app.tsx",
       "content_oid": "408858a9a04565d88c7ff77bd03bd9e7dbafdd45",
       "node_ids": [
@@ -21,7 +21,7 @@
       ]
     },
     {
-      "stable_file_id": "c0a4422c47da8073",
+      "stable_file_id": "3c6471780d9e8578",
       "path": "src/helpers.ts",
       "content_oid": "1521b0b7654bca3780979ee440bad6400bfb1594",
       "node_ids": [
@@ -31,24 +31,23 @@
         12,
         13,
         14,
-        15,
-        16
+        15
       ]
     }
   ],
   "files": [
     {
-      "stable_file_id": "cfb90035f8daa878",
+      "stable_file_id": "f6656417814146db",
       "file_path": "src/app.tsx"
     },
     {
-      "stable_file_id": "c0a4422c47da8073",
+      "stable_file_id": "3c6471780d9e8578",
       "file_path": "src/helpers.ts"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "3654d8e7804b6596",
+      "stable_symbol_id": "9f1ef0ea170a1dc1",
       "file_path": "src/app.tsx",
       "byte_range": [
         56,
@@ -65,7 +64,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "6357d5fb97a04d49",
+      "stable_symbol_id": "dc63618227586534",
       "file_path": "src/app.tsx",
       "byte_range": [
         91,
@@ -82,7 +81,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "c96bb5dfecee25f8",
+      "stable_symbol_id": "b157cefaf7fe3c8c",
       "file_path": "src/app.tsx",
       "byte_range": [
         116,
@@ -99,7 +98,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "552287194f6a520d",
+      "stable_symbol_id": "88c2887e42a7e154",
       "file_path": "src/app.tsx",
       "byte_range": [
         145,
@@ -116,7 +115,7 @@
       "enclosing_scope": "App"
     },
     {
-      "stable_symbol_id": "71d7a253d5189bed",
+      "stable_symbol_id": "925e9bcc2a4a5ecd",
       "file_path": "src/app.tsx",
       "byte_range": [
         196,
@@ -133,7 +132,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "96f2eee4fe283bbe",
+      "stable_symbol_id": "06b57d27bc6da2d7",
       "file_path": "src/app.tsx",
       "byte_range": [
         307,
@@ -150,7 +149,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "93302246b4aa109e",
+      "stable_symbol_id": "b7935e272e1df724",
       "file_path": "src/app.tsx",
       "byte_range": [
         340,
@@ -167,7 +166,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "aa5590284609af88",
+      "stable_symbol_id": "a643b3bc176ed041",
       "file_path": "src/helpers.ts",
       "byte_range": [
         7,
@@ -184,24 +183,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "7587b91618ca909a",
-      "file_path": "src/helpers.ts",
-      "byte_range": [
-        28,
-        39
-      ],
-      "line_range": [
-        2,
-        2
-      ],
-      "entity_name": "run",
-      "qualified_name": "Runner::run",
-      "symbol_kind": "method",
-      "anchor_hash": "12328839964882696488",
-      "enclosing_scope": "Runner"
-    },
-    {
-      "stable_symbol_id": "4d1dc1688628bd43",
+      "stable_symbol_id": "45524754defdd6f8",
       "file_path": "src/helpers.ts",
       "byte_range": [
         51,
@@ -218,7 +200,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "9a785a22c9c059d2",
+      "stable_symbol_id": "ba77b7195f718134",
       "file_path": "src/helpers.ts",
       "byte_range": [
         88,
@@ -235,7 +217,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "4edfa70794ae6da4",
+      "stable_symbol_id": "02775bcca5346806",
       "file_path": "src/helpers.ts",
       "byte_range": [
         126,
@@ -252,7 +234,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "7722817d2c623ab4",
+      "stable_symbol_id": "9156eac9b8c3b2ba",
       "file_path": "src/helpers.ts",
       "byte_range": [
         184,
@@ -269,7 +251,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "90e88e128d21c9dd",
+      "stable_symbol_id": "8070bc0cbf8984f8",
       "file_path": "src/helpers.ts",
       "byte_range": [
         219,
@@ -288,8 +270,71 @@
   ],
   "edges": [
     {
-      "source_stable_symbol_id": "552287194f6a520d",
-      "target_stable_symbol_id": null,
+      "source_stable_symbol_id": "3c6471780d9e8578",
+      "target_stable_symbol_id": "02775bcca5346806",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "3c6471780d9e8578",
+      "target_stable_symbol_id": "45524754defdd6f8",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "3c6471780d9e8578",
+      "target_stable_symbol_id": "9156eac9b8c3b2ba",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "3c6471780d9e8578",
+      "target_stable_symbol_id": "a643b3bc176ed041",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "3c6471780d9e8578",
+      "target_stable_symbol_id": "ba77b7195f718134",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "8070bc0cbf8984f8",
+      "target_stable_symbol_id": "02775bcca5346806",
+      "target_label": "renderThing",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "88c2887e42a7e154",
+      "target_stable_symbol_id": "02775bcca5346806",
+      "target_label": "renderThing",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "88c2887e42a7e154",
+      "target_stable_symbol_id": "8070bc0cbf8984f8",
       "target_label": "run",
       "relation": "calls",
       "confidence": "syntax_exact",
@@ -297,17 +342,17 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "552287194f6a520d",
-      "target_stable_symbol_id": "4edfa70794ae6da4",
-      "target_label": "renderThing",
-      "relation": "calls",
+      "source_stable_symbol_id": "9156eac9b8c3b2ba",
+      "target_stable_symbol_id": "8070bc0cbf8984f8",
+      "target_label": null,
+      "relation": "contains",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
-      "edge_kind": "calls"
+      "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "71d7a253d5189bed",
-      "target_stable_symbol_id": "552287194f6a520d",
+      "source_stable_symbol_id": "925e9bcc2a4a5ecd",
+      "target_stable_symbol_id": "88c2887e42a7e154",
       "target_label": "boot",
       "relation": "calls",
       "confidence": "syntax_exact",
@@ -315,8 +360,8 @@
       "edge_kind": "calls"
     },
     {
-      "source_stable_symbol_id": "7722817d2c623ab4",
-      "target_stable_symbol_id": "90e88e128d21c9dd",
+      "source_stable_symbol_id": "b157cefaf7fe3c8c",
+      "target_stable_symbol_id": "88c2887e42a7e154",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -324,79 +369,7 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "90e88e128d21c9dd",
-      "target_stable_symbol_id": "4edfa70794ae6da4",
-      "target_label": "renderThing",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "aa5590284609af88",
-      "target_stable_symbol_id": "7587b91618ca909a",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "c0a4422c47da8073",
-      "target_stable_symbol_id": "4d1dc1688628bd43",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "c0a4422c47da8073",
-      "target_stable_symbol_id": "4edfa70794ae6da4",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "c0a4422c47da8073",
-      "target_stable_symbol_id": "7722817d2c623ab4",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "c0a4422c47da8073",
-      "target_stable_symbol_id": "9a785a22c9c059d2",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "c0a4422c47da8073",
-      "target_stable_symbol_id": "aa5590284609af88",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "c96bb5dfecee25f8",
-      "target_stable_symbol_id": "552287194f6a520d",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "cfb90035f8daa878",
+      "source_stable_symbol_id": "f6656417814146db",
       "target_stable_symbol_id": null,
       "target_label": "./helpers",
       "relation": "imports",
@@ -405,17 +378,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "3654d8e7804b6596",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "4edfa70794ae6da4",
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "02775bcca5346806",
       "target_label": "renderThing",
       "relation": "imports",
       "confidence": "heuristic",
@@ -423,8 +387,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "6357d5fb97a04d49",
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "06b57d27bc6da2d7",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -432,17 +396,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "71d7a253d5189bed",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "7722817d2c623ab4",
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "9156eac9b8c3b2ba",
       "target_label": "Helper",
       "relation": "imports",
       "confidence": "heuristic",
@@ -450,8 +405,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "93302246b4aa109e",
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "925e9bcc2a4a5ecd",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -459,8 +414,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "96f2eee4fe283bbe",
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "9f1ef0ea170a1dc1",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -468,8 +423,26 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "9a785a22c9c059d2",
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "b157cefaf7fe3c8c",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "b7935e272e1df724",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "ba77b7195f718134",
       "target_label": "Mode",
       "relation": "imports",
       "confidence": "heuristic",
@@ -477,8 +450,8 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "cfb90035f8daa878",
-      "target_stable_symbol_id": "c96bb5dfecee25f8",
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "dc63618227586534",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",

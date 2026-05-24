@@ -127,7 +127,7 @@ fn analyst_build_rejects_schema_version_mismatch() {
     let resolved = std::fs::canonicalize(&current).expect("CURRENT resolves");
     let manifest_path = resolved.join("manifest.json");
     let original = std::fs::read_to_string(&manifest_path).unwrap();
-    let tampered = original.replace("spur-graph-schema-v5", "spur-graph-schema-vNEXT");
+    let tampered = original.replace("spur-graph-schema-v6", "spur-graph-schema-vNEXT");
     assert_ne!(
         original, tampered,
         "fixture invariant: schema_version must have been present"
@@ -275,6 +275,8 @@ fn analyst_build_concurrent_skip() {
 
     // Final DB must be valid (exists and non-empty).
     let db = dir.path().join(".spur/analyst.duckdb");
-    let meta = std::fs::metadata(&db).expect("DB exists after concurrent builds");
+    let meta = std::fs::metadata(&db).unwrap_or_else(|error| {
+        panic!("DB exists after concurrent builds: {error}; stderr: {combined_stderr}")
+    });
     assert!(meta.len() > 0, "DB must be non-empty");
 }
