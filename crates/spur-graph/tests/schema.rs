@@ -1,8 +1,10 @@
 use spur_graph::{
     graph_edge_kind_or_default, load_artifact, Confidence, EdgeId, EvidenceId, FileId, GraphEdge,
-    GraphEdgeArtifact, GraphEdgeKind, GraphNode, NodeId, NodeKind, RelationKind, RunId, SourceSpan,
-    SpanId,
+    GraphEdgeArtifact, GraphEdgeKind, GraphNode, GraphSymbolArtifact, NodeId, NodeKind,
+    RelationKind, RunId, SourceSpan, SpanId, SymbolSnapshotArtifact,
 };
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
@@ -196,4 +198,104 @@ fn node_kind_discriminators_are_stable_contracts() {
     assert_eq!(NodeKind::TypeAlias.discriminator(), "type_alias");
     assert_eq!(NodeKind::Macro.discriminator(), "macro");
     assert_eq!(NodeKind::Commit.discriminator(), "commit");
+}
+
+#[test]
+fn structural_symbol_ids_match_temporal_snapshot_ids_for_fixture_corpora() {
+    for fixture_root in [sample_corpus_root(), nested_fn_corpus_root()] {
+        let repo = committed_fixture_repo(&fixture_root);
+        let facts = spur_graph::build_facts(repo.path())
+            .expect("extract structural facts")
+            .0;
+        let structural =
+            spur_graph::store::build::artifact_from_facts(&facts, repo.path()).expect("artifact");
+        let (temporal, _) =
+            spur_graph::git_walk::run_full_walk_into(repo.path(), &Default::default())
+                .expect("temporal walk");
+
+        for symbol in &structural.symbols {
+            let snapshot =
+                matching_snapshot(symbol, &temporal.symbol_snapshots).unwrap_or_else(|| {
+                    let candidates: Vec<_> = temporal
+                        .symbol_snapshots
+                        .iter()
+                        .filter(|snapshot| {
+                            snapshot.file_path.to_path_buf() == Path::new(&symbol.file_path)
+                                && snapshot.entity_name == symbol.entity_name
+                                && snapshot.symbol_kind == symbol.symbol_kind
+                        })
+                        .collect();
+                    panic!("missing temporal snapshot for {symbol:?}; candidates: {candidates:#?}")
+                });
+            assert_eq!(
+                symbol.stable_symbol_id, snapshot.key.stable_symbol_id,
+                "stable id mismatch for {} {} in {} at {:?}",
+                symbol.symbol_kind, symbol.qualified_name, symbol.file_path, symbol.byte_range
+            );
+        }
+    }
+}
+
+fn sample_corpus_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_corpus")
+}
+
+fn nested_fn_corpus_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nested_fn_corpus")
+}
+
+fn committed_fixture_repo(fixture_root: &Path) -> TempDir {
+    let dir = TempDir::new().expect("tempdir");
+    copy_dir(fixture_root, dir.path());
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(
+        dir.path(),
+        &["config", "user.email", "schema-test@example.com"],
+    );
+    git(dir.path(), &["config", "user.name", "Schema Test"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "fixture"]);
+    dir
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    for entry in std::fs::read_dir(source).expect("read fixture dir") {
+        let entry = entry.expect("fixture entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            std::fs::create_dir_all(&destination_path).expect("create fixture subdir");
+            copy_dir(&source_path, &destination_path);
+        } else {
+            std::fs::copy(&source_path, &destination_path).expect("copy fixture file");
+        }
+    }
+}
+
+fn git(worktree: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(worktree)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn matching_snapshot<'a>(
+    symbol: &GraphSymbolArtifact,
+    snapshots: &'a [SymbolSnapshotArtifact],
+) -> Option<&'a SymbolSnapshotArtifact> {
+    snapshots.iter().find(|snapshot| {
+        snapshot.file_path.to_path_buf() == Path::new(&symbol.file_path)
+            && snapshot.entity_name == symbol.entity_name
+            && snapshot.symbol_kind == symbol.symbol_kind
+            && snapshot.byte_range == symbol.byte_range
+            && snapshot.line_range == symbol.line_range
+    })
 }
