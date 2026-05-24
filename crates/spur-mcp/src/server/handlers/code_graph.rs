@@ -1,11 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use serde::Serialize;
 use serde_json::{json, Value};
 use spur_graph::git_blob_oid;
 use spur_graph::temporal::{resolve_symbol_at, symbol_history, Resolution, ResolutionFailure};
@@ -25,7 +27,7 @@ use super::*;
 
 #[allow(dead_code)]
 mod file_oid_cache {
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::fs::{self, Metadata};
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
@@ -51,6 +53,24 @@ mod file_oid_cache {
             indexed_oid,
             None,
         )
+        .as_bool()
+    }
+
+    pub(super) fn file_oid_match_detail(
+        worktree: &Path,
+        worktree_head_oid: &str,
+        graph_content_hash: &str,
+        rel_path: &str,
+        indexed_oid: &str,
+    ) -> FileOidMatch {
+        file_oid_match_inner(
+            worktree,
+            worktree_head_oid,
+            graph_content_hash,
+            rel_path,
+            indexed_oid,
+            None,
+        )
     }
 
     fn file_oid_match_inner(
@@ -60,9 +80,11 @@ mod file_oid_cache {
         rel_path: &str,
         indexed_oid: &str,
         after_first_stat: Option<&dyn Fn(&Path)>,
-    ) -> Option<bool> {
+    ) -> FileOidMatch {
         let path = worktree.join(rel_path);
-        let before = FileMetadataKey::from_path(&path)?;
+        let Some(before) = FileMetadataKey::from_path(&path) else {
+            return FileOidMatch::Unknown;
+        };
         if let Some(after_first_stat) = after_first_stat {
             after_first_stat(&path);
         }
@@ -74,19 +96,35 @@ mod file_oid_cache {
             metadata: before.clone(),
         };
 
-        if let Some(cached_oid) = cache().lock().ok()?.get(&key) {
-            let after = FileMetadataKey::from_path(&path)?;
-            return (before == after).then_some(cached_oid == indexed_oid);
+        let Ok(mut cache_guard) = cache().lock() else {
+            return FileOidMatch::Unknown;
+        };
+        if let Some(cached_oid) = cache_guard.get(&key) {
+            let Some(after) = FileMetadataKey::from_path(&path) else {
+                return FileOidMatch::Unknown;
+            };
+            if before != after {
+                return FileOidMatch::Unknown;
+            }
+            return compare_file_oids(&cached_oid, indexed_oid);
         }
+        drop(cache_guard);
 
-        let current_oid = current_file_oid(worktree, rel_path).ok().flatten()?;
-        let after = FileMetadataKey::from_path(&path)?;
+        let Some(current_oid) = current_file_oid(worktree, rel_path).ok().flatten() else {
+            return FileOidMatch::Unknown;
+        };
+        let Some(after) = FileMetadataKey::from_path(&path) else {
+            return FileOidMatch::Unknown;
+        };
         if before != after {
-            return None;
+            return FileOidMatch::Unknown;
         }
 
-        cache().lock().ok()?.insert(key, current_oid.clone());
-        Some(current_oid == indexed_oid)
+        let Ok(mut cache_guard) = cache().lock() else {
+            return FileOidMatch::Unknown;
+        };
+        cache_guard.insert(key, current_oid.clone());
+        compare_file_oids(&current_oid, indexed_oid)
     }
 
     #[cfg(test)]
@@ -106,6 +144,7 @@ mod file_oid_cache {
             indexed_oid,
             Some(after_first_stat),
         )
+        .as_bool()
     }
 
     pub(super) fn aggregate_file_oids_match(
@@ -114,30 +153,95 @@ mod file_oid_cache {
         graph_content_hash: &str,
         files: &[(&str, &str)],
     ) -> Option<bool> {
+        aggregate_file_oid_report(worktree, worktree_head_oid, graph_content_hash, files).verdict
+    }
+
+    pub(super) fn aggregate_file_oid_report(
+        worktree: &Path,
+        worktree_head_oid: &str,
+        graph_content_hash: &str,
+        files: &[(&str, &str)],
+    ) -> FileOidAggregateReport {
+        let mut dirty_oids = BTreeMap::new();
         let mut saw_unknown = false;
         for (rel_path, indexed_oid) in files {
-            match file_oid_match(
+            match file_oid_match_detail(
                 worktree,
                 worktree_head_oid,
                 graph_content_hash,
                 rel_path,
                 indexed_oid,
             ) {
-                Some(true) => {}
-                Some(false) => return Some(false),
-                None => saw_unknown = true,
+                FileOidMatch::Match => {}
+                FileOidMatch::Mismatch { current_oid } => {
+                    dirty_oids.insert(PathBuf::from(*rel_path), current_oid);
+                }
+                FileOidMatch::Unknown => saw_unknown = true,
             }
         }
 
-        if saw_unknown {
+        let verdict = if !dirty_oids.is_empty() {
+            Some(false)
+        } else if saw_unknown {
             None
         } else {
             Some(true)
+        };
+
+        FileOidAggregateReport {
+            verdict,
+            dirty_oids,
         }
     }
 
     fn cache() -> &'static Mutex<FileOidCache> {
         FILE_OID_CACHE.get_or_init(|| Mutex::new(FileOidCache::new(FILE_OID_CACHE_CAPACITY)))
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) enum FileOidMatch {
+        Match,
+        Mismatch { current_oid: [u8; 20] },
+        Unknown,
+    }
+
+    impl FileOidMatch {
+        fn as_bool(&self) -> Option<bool> {
+            match self {
+                Self::Match => Some(true),
+                Self::Mismatch { .. } => Some(false),
+                Self::Unknown => None,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct FileOidAggregateReport {
+        pub verdict: Option<bool>,
+        pub dirty_oids: BTreeMap<PathBuf, [u8; 20]>,
+    }
+
+    fn compare_file_oids(current_oid: &str, indexed_oid: &str) -> FileOidMatch {
+        if current_oid == indexed_oid {
+            return FileOidMatch::Match;
+        }
+
+        match parse_git_oid(current_oid) {
+            Some(current_oid) => FileOidMatch::Mismatch { current_oid },
+            None => FileOidMatch::Unknown,
+        }
+    }
+
+    fn parse_git_oid(oid: &str) -> Option<[u8; 20]> {
+        if oid.len() != 40 {
+            return None;
+        }
+        let mut bytes = [0_u8; 20];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let start = index * 2;
+            *byte = u8::from_str_radix(&oid[start..start + 2], 16).ok()?;
+        }
+        Some(bytes)
     }
 
     #[derive(Debug)]
@@ -244,6 +348,8 @@ mod file_oid_cache {
 #[allow(dead_code)]
 #[path = "rebuild_singleflight.rs"]
 mod rebuild_singleflight;
+pub(crate) use rebuild_singleflight::RebuildCoordinator;
+use rebuild_singleflight::RebuildKey;
 
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
 const DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 40;
@@ -255,6 +361,7 @@ const MAX_MCP_CODE_SUBGRAPH_MAX_EDGES: usize = 1200;
 const MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES: usize = 50;
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
+const GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
 // Temporal resolution error codes (T3 / Phase 1.5 hardening)
 const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
 const CODE_GRAPH_DELETED_ERROR_CODE: i64 = -32005;
@@ -263,35 +370,67 @@ const CODE_GRAPH_UNKNOWN_ERROR_CODE: i64 = -32007;
 
 impl McpCallbackServer {
     pub(crate) async fn handle_code_resolve(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_resolve_response(&args).await).await
+        code_graph_response(
+            id,
+            code_resolve_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_search(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_search_response(&args).await).await
+        code_graph_response(
+            id,
+            code_search_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_file_symbols(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_file_symbols_response(&args).await).await
+        code_graph_response(
+            id,
+            code_file_symbols_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_symbol_info(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_symbol_info_response(&args).await).await
+        code_graph_response(
+            id,
+            code_symbol_info_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_read_symbol(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_read_symbol_response(&args).await).await
+        code_graph_response(
+            id,
+            code_read_symbol_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_callers(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_callers_response(&args).await).await
+        code_graph_response(
+            id,
+            code_callers_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_callees(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_callees_response(&args).await).await
+        code_graph_response(
+            id,
+            code_callees_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_subgraph(&self, id: Value, args: Value) -> JsonRpcResponse {
-        code_graph_response(id, code_subgraph_response(&args).await).await
+        code_graph_response(
+            id,
+            code_subgraph_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 
     pub(crate) async fn handle_code_symbol_history(
@@ -299,7 +438,11 @@ impl McpCallbackServer {
         id: Value,
         args: Value,
     ) -> JsonRpcResponse {
-        code_graph_response(id, code_symbol_history_response(&args).await).await
+        code_graph_response(
+            id,
+            code_symbol_history_response(&args, Arc::clone(&self.graph_rebuild_coordinator)).await,
+        )
+        .await
     }
 }
 
@@ -316,8 +459,11 @@ pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> 
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
-async fn code_search_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| {
+async fn code_search_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
         code_search_with_artifact(args, artifact).map_err(CodeGraphError::from)
     })
     .await
@@ -354,8 +500,14 @@ fn code_search_with_artifact(
     Ok(body)
 }
 
-async fn code_resolve_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_resolve_with_artifact(args, artifact)).await
+async fn code_resolve_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
+        code_resolve_with_artifact(args, artifact)
+    })
+    .await
 }
 
 fn code_resolve_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
@@ -454,8 +606,11 @@ pub(crate) async fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerE
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
-async fn code_file_symbols_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| {
+async fn code_file_symbols_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
         code_file_symbols_with_artifact(args, artifact).map_err(CodeGraphError::from)
     })
     .await
@@ -492,8 +647,11 @@ pub(crate) async fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerEr
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
-async fn code_symbol_info_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| {
+async fn code_symbol_info_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
         code_symbol_info_with_artifact(args, artifact).map_err(CodeGraphError::from)
     })
     .await
@@ -520,8 +678,11 @@ pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerEr
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
-async fn code_read_symbol_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| {
+async fn code_read_symbol_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
         code_read_symbol_with_artifact(args, artifact).map_err(CodeGraphError::from)
     })
     .await
@@ -588,8 +749,14 @@ pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError>
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
-async fn code_callers_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_callers_with_artifact(args, artifact)).await
+async fn code_callers_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
+        code_callers_with_artifact(args, artifact)
+    })
+    .await
 }
 
 fn code_callers_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
@@ -624,8 +791,14 @@ pub(crate) async fn code_callees(args: &Value) -> Result<Value, McpHandlerError>
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
-async fn code_callees_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_callees_with_artifact(args, artifact)).await
+async fn code_callees_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
+        code_callees_with_artifact(args, artifact)
+    })
+    .await
 }
 
 fn code_callees_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
@@ -660,8 +833,14 @@ pub(crate) async fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
-async fn code_subgraph_response(args: &Value) -> CodeGraphResult {
-    with_loaded_graph_artifact(|artifact| code_subgraph_with_artifact(args, artifact)).await
+async fn code_subgraph_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
+        code_subgraph_with_artifact(args, artifact)
+    })
+    .await
 }
 
 fn code_subgraph_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
@@ -752,26 +931,29 @@ pub(crate) async fn code_symbol_history(args: &Value) -> Result<Value, McpHandle
     .await)
 }
 
-async fn code_symbol_history_response(args: &Value) -> CodeGraphResult {
+async fn code_symbol_history_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> CodeGraphResult {
     let worktree = current_worktree()?;
-    let artifact =
-        load_graph_artifact_for_worktree(&worktree).map_err(CodeGraphError::without_metadata)?;
     let commits =
         load_commit_index_for_request(&worktree).map_err(CodeGraphError::without_metadata)?;
-    let symbol_id = symbol_id_arg(args).map_err(CodeGraphError::without_metadata)?;
-    let events = code_symbol_history_events(args, &artifact, &commits, &symbol_id)
-        .map_err(CodeGraphError::without_metadata)?;
+    let symbol_id = symbol_id_arg(args)
+        .map_err(CodeGraphError::without_metadata)?
+        .to_string();
 
-    let files = response_file_set_for_symbol_ids(&artifact, [symbol_id.as_str()]);
-    Ok(with_graph_metadata_with_files(
-        &artifact,
-        json!({
-            "symbol": symbol_uri(&symbol_id),
-            "events": events,
-        }),
-        &files,
-    )
-    .await)
+    with_loaded_graph_artifact_for_worktree(&worktree, Some(rebuild_coordinator), |artifact| {
+        let events = code_symbol_history_events(args, artifact, &commits, &symbol_id)?;
+        let files = response_file_set_for_symbol_ids(artifact, [symbol_id.as_str()]);
+        Ok(GraphResponsePayload::with_files(
+            json!({
+                "symbol": symbol_uri(&symbol_id),
+                "events": events,
+            }),
+            files,
+        ))
+    })
+    .await
 }
 
 fn code_symbol_history_events(
@@ -805,6 +987,32 @@ fn code_symbol_history_events(
 }
 
 type CodeGraphResult = Result<Value, CodeGraphError>;
+type CodeGraphPayloadResult = Result<GraphResponsePayload, CodeGraphError>;
+
+#[derive(Debug)]
+struct GraphResponsePayload {
+    body: Value,
+    files: Option<Vec<(String, String)>>,
+}
+
+impl GraphResponsePayload {
+    fn body(body: Value) -> Self {
+        Self { body, files: None }
+    }
+
+    fn with_files(body: Value, files: Vec<(String, String)>) -> Self {
+        Self {
+            body,
+            files: Some(files),
+        }
+    }
+
+    fn files_for_metadata(&self, artifact: &GraphIndexArtifact) -> Vec<(String, String)> {
+        self.files
+            .clone()
+            .unwrap_or_else(|| response_file_set_from_body(artifact, &self.body))
+    }
+}
 
 #[derive(Debug)]
 struct CodeGraphError {
@@ -947,6 +1155,29 @@ struct GraphResponseMetadata {
     worktree_head_oid: Option<String>,
     worktree_dirty: Option<bool>,
     response_file_oids_match: Option<bool>,
+    rebuild_status: RebuildStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RebuildStatus {
+    #[default]
+    NotNeeded,
+    Fresh,
+    StaleBudgetExceeded,
+    StaleRebuildFailed,
+}
+
+#[derive(Debug)]
+struct GraphResponseAnalysis {
+    metadata: GraphResponseMetadata,
+    rebuild_candidate: Option<RebuildCandidate>,
+}
+
+#[derive(Debug)]
+struct RebuildCandidate {
+    worktree: PathBuf,
+    key: RebuildKey,
 }
 
 impl GraphResponseMetadata {
@@ -954,24 +1185,35 @@ impl GraphResponseMetadata {
         artifact: &GraphIndexArtifact,
         files: &[(String, String)],
     ) -> Self {
-        Self::from_source_with_files(GraphMetadataSource::from_artifact(artifact), files).await
+        Self::analyze_artifact_with_files(artifact, files)
+            .await
+            .metadata
     }
 
     async fn from_source(source: GraphMetadataSource) -> Self {
         Self::from_source_inner(source, None).await
     }
 
-    async fn from_source_with_files(
-        source: GraphMetadataSource,
+    async fn analyze_artifact_with_files(
+        artifact: &GraphIndexArtifact,
         files: &[(String, String)],
-    ) -> Self {
-        Self::from_source_inner(source, Some(files)).await
+    ) -> GraphResponseAnalysis {
+        Self::analyze_source_inner(GraphMetadataSource::from_artifact(artifact), Some(files)).await
     }
 
     async fn from_source_inner(
         source: GraphMetadataSource,
         response_files: Option<&[(String, String)]>,
     ) -> Self {
+        Self::analyze_source_inner(source, response_files)
+            .await
+            .metadata
+    }
+
+    async fn analyze_source_inner(
+        source: GraphMetadataSource,
+        response_files: Option<&[(String, String)]>,
+    ) -> GraphResponseAnalysis {
         let worktree = current_worktree_root();
         let pointer = worktree
             .as_deref()
@@ -992,6 +1234,7 @@ impl GraphResponseMetadata {
                 git.has_uncommitted_changes,
             )
         });
+        let mut dirty_oids = BTreeMap::new();
         let response_file_oids_match = match (
             response_files,
             worktree.as_deref(),
@@ -1002,24 +1245,60 @@ impl GraphResponseMetadata {
                     .iter()
                     .map(|(rel_path, indexed_oid)| (rel_path.as_str(), indexed_oid.as_str()))
                     .collect::<Vec<_>>();
-                file_oid_cache::aggregate_file_oids_match(
+                let report = file_oid_cache::aggregate_file_oid_report(
                     worktree,
                     worktree_head_oid,
                     &source.graph_content_hash,
                     &files,
-                )
+                );
+                dirty_oids = report.dirty_oids;
+                report.verdict
+            }
+            _ => None,
+        };
+        let rebuild_candidate = match (
+            response_file_oids_match,
+            worktree.as_ref(),
+            worktree_head_oid.as_deref(),
+        ) {
+            (Some(false), Some(worktree), Some(head_oid)) if !dirty_oids.is_empty() => {
+                Some(RebuildCandidate {
+                    worktree: worktree.clone(),
+                    key: RebuildKey::from(head_oid, &dirty_oids),
+                })
             }
             _ => None,
         };
 
-        Self {
-            source,
-            graph_built_at,
-            indexed_head_oid,
-            worktree_head_oid,
-            worktree_dirty,
-            response_file_oids_match,
+        GraphResponseAnalysis {
+            metadata: Self {
+                source,
+                graph_built_at,
+                indexed_head_oid,
+                worktree_head_oid,
+                worktree_dirty,
+                response_file_oids_match,
+                rebuild_status: RebuildStatus::NotNeeded,
+            },
+            rebuild_candidate,
         }
+    }
+
+    fn with_rebuild_status(mut self, rebuild_status: RebuildStatus) -> Self {
+        self.rebuild_status = rebuild_status;
+        match rebuild_status {
+            RebuildStatus::Fresh => {
+                self.worktree_dirty = Some(false);
+                if self.indexed_head_oid.is_none() {
+                    self.indexed_head_oid = self.worktree_head_oid.clone();
+                }
+            }
+            RebuildStatus::StaleBudgetExceeded | RebuildStatus::StaleRebuildFailed => {
+                self.worktree_dirty = Some(true);
+            }
+            RebuildStatus::NotNeeded => {}
+        }
+        self
     }
 
     fn into_value(self) -> Value {
@@ -1031,6 +1310,7 @@ impl GraphResponseMetadata {
             "worktree_head_oid": self.worktree_head_oid,
             "worktree_dirty": self.worktree_dirty,
             "response_file_oids_match": self.response_file_oids_match,
+            "rebuild_status": self.rebuild_status,
         })
     }
 
@@ -1045,11 +1325,173 @@ impl GraphResponseMetadata {
 }
 
 async fn with_loaded_graph_artifact(
-    handler: impl FnOnce(&GraphIndexArtifact) -> CodeGraphResult,
+    rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
+    handler: impl Fn(&GraphIndexArtifact) -> CodeGraphResult,
 ) -> CodeGraphResult {
-    let artifact = load_graph_artifact_for_request().map_err(CodeGraphError::without_metadata)?;
-    let body = handler(&artifact).map_err(|error| error.with_artifact_metadata(&artifact))?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    let artifact =
+        Arc::new(load_graph_artifact_for_request().map_err(CodeGraphError::without_metadata)?);
+    with_loaded_graph_payload(rebuild_coordinator, artifact, |artifact| {
+        handler(artifact).map(GraphResponsePayload::body)
+    })
+    .await
+}
+
+async fn with_loaded_graph_artifact_for_worktree(
+    worktree: &Path,
+    rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
+    handler: impl Fn(&GraphIndexArtifact) -> CodeGraphPayloadResult,
+) -> CodeGraphResult {
+    let artifact = Arc::new(
+        load_graph_artifact_for_worktree(worktree).map_err(CodeGraphError::without_metadata)?,
+    );
+    with_loaded_graph_payload(rebuild_coordinator, artifact, handler).await
+}
+
+async fn with_loaded_graph_payload(
+    rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
+    artifact: Arc<GraphIndexArtifact>,
+    handler: impl Fn(&GraphIndexArtifact) -> CodeGraphPayloadResult,
+) -> CodeGraphResult {
+    let payload = handler(&artifact).map_err(|error| error.with_artifact_metadata(&artifact))?;
+    Ok(with_graph_metadata_for_payload(rebuild_coordinator, artifact, payload, &handler).await)
+}
+
+async fn with_graph_metadata_for_payload(
+    rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
+    artifact: Arc<GraphIndexArtifact>,
+    mut payload: GraphResponsePayload,
+    handler: &impl Fn(&GraphIndexArtifact) -> CodeGraphPayloadResult,
+) -> Value {
+    let files = payload.files_for_metadata(&artifact);
+    let mut analysis = GraphResponseMetadata::analyze_artifact_with_files(&artifact, &files).await;
+
+    if let (Some(rebuild_coordinator), Some(rebuild_candidate)) =
+        (rebuild_coordinator, analysis.rebuild_candidate.take())
+    {
+        match try_rebuild_artifact(
+            rebuild_coordinator,
+            Arc::clone(&artifact),
+            rebuild_candidate,
+        )
+        .await
+        {
+            RebuildAttempt::Fresh(rebuilt_artifact) => match handler(&rebuilt_artifact) {
+                Ok(mut fresh_payload) => {
+                    let fresh_files = fresh_payload.files_for_metadata(&rebuilt_artifact);
+                    GraphResponseMetadata::analyze_artifact_with_files(
+                        &rebuilt_artifact,
+                        &fresh_files,
+                    )
+                    .await
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::Fresh)
+                    .insert_into(&mut fresh_payload.body);
+                    return fresh_payload.body;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "spur_mcp::path_a",
+                        error = ?error,
+                        "rebuilt code graph response failed; serving stale response"
+                    );
+                    analysis.metadata = analysis
+                        .metadata
+                        .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
+                }
+            },
+            RebuildAttempt::StaleBudgetExceeded => {
+                analysis.metadata = analysis
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
+            }
+            RebuildAttempt::StaleRebuildFailed => {
+                analysis.metadata = analysis
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
+            }
+        }
+    }
+
+    analysis.metadata.insert_into(&mut payload.body);
+    payload.body
+}
+
+enum RebuildAttempt {
+    Fresh(Arc<GraphIndexArtifact>),
+    StaleBudgetExceeded,
+    StaleRebuildFailed,
+}
+
+async fn try_rebuild_artifact(
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    previous_artifact: Arc<GraphIndexArtifact>,
+    rebuild_candidate: RebuildCandidate,
+) -> RebuildAttempt {
+    let RebuildCandidate { worktree, key } = rebuild_candidate;
+    let mut task = tokio::spawn(async move {
+        rebuild_coordinator
+            .get_or_build(key, move || {
+                let previous_artifact = Arc::clone(&previous_artifact);
+                let worktree = worktree.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let (artifact, _mode) =
+                            spur_graph::store::build::artifact_from_facts_incremental(
+                                &previous_artifact,
+                                &worktree,
+                            )?;
+                        Ok(Arc::new(artifact))
+                    })
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("in-memory graph rebuild task failed: {error}")
+                    })?
+                }
+            })
+            .await
+    });
+
+    match tokio::time::timeout(GRAPH_REBUILD_LATENCY_BUDGET, &mut task).await {
+        Ok(Ok(Ok(artifact))) => RebuildAttempt::Fresh(artifact),
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                target: "spur_mcp::path_a",
+                error = %error,
+                "in-memory code graph rebuild failed; serving stale response"
+            );
+            RebuildAttempt::StaleRebuildFailed
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: "spur_mcp::path_a",
+                error = %error,
+                "in-memory code graph rebuild task failed; serving stale response"
+            );
+            RebuildAttempt::StaleRebuildFailed
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                match task.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: "spur_mcp::path_a",
+                            error = %error,
+                            "in-memory code graph rebuild failed after response budget elapsed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "spur_mcp::path_a",
+                            error = %error,
+                            "in-memory code graph rebuild task failed after response budget elapsed"
+                        );
+                    }
+                }
+            });
+            RebuildAttempt::StaleBudgetExceeded
+        }
+    }
 }
 
 async fn code_graph_response(id: Value, result: CodeGraphResult) -> JsonRpcResponse {
