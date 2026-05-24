@@ -26,30 +26,85 @@ pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
     language: &'a str,
-    tags: &'a [u8],
-    spur_edges: &'a [u8],
+    query: &'a str,
+    bytes: &'a [u8],
 }
 
 const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
     ManifestQueryBytes {
+        language: "cpp",
+        query: "tags",
+        bytes: include_bytes!("../../queries/cpp/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "cpp",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/cpp/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
         language: "markdown",
-        tags: include_bytes!("../../queries/markdown/tags.scm"),
-        spur_edges: include_bytes!("../../queries/markdown/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/markdown/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "markdown",
+        query: "symbols",
+        bytes: include_bytes!("../../queries/markdown/symbols.scm"),
+    },
+    ManifestQueryBytes {
+        language: "markdown",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/markdown/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "markdown",
+        query: "inline-spur-edges",
+        bytes: include_bytes!("../../queries/markdown/inline-spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "python",
-        tags: include_bytes!("../../queries/python/tags.scm"),
-        spur_edges: include_bytes!("../../queries/python/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/python/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "python",
+        query: "symbols",
+        bytes: include_bytes!("../../queries/python/symbols.scm"),
+    },
+    ManifestQueryBytes {
+        language: "python",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/python/spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "rust",
-        tags: include_bytes!("../../queries/rust/tags.scm"),
-        spur_edges: include_bytes!("../../queries/rust/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/rust/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "rust",
+        query: "symbols",
+        bytes: include_bytes!("../../queries/rust/symbols.scm"),
+    },
+    ManifestQueryBytes {
+        language: "rust",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/rust/spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "typescript",
-        tags: include_bytes!("../../queries/typescript/tags.scm"),
-        spur_edges: include_bytes!("../../queries/typescript/spur-edges.scm"),
+        query: "tags",
+        bytes: include_bytes!("../../queries/typescript/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "typescript",
+        query: "symbols",
+        bytes: include_bytes!("../../queries/typescript/symbols.scm"),
+    },
+    ManifestQueryBytes {
+        language: "typescript",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/typescript/spur-edges.scm"),
     },
 ];
 
@@ -89,13 +144,11 @@ fn manifest_version_from_query_bytes(
     update_manifest_hash_field(&mut hasher, schema_version.as_bytes());
     update_manifest_hash_field(&mut hasher, extractor_version.as_bytes());
     let mut query_bytes_by_language = query_bytes.iter().collect::<Vec<_>>();
-    query_bytes_by_language.sort_by_key(|query| query.language);
+    query_bytes_by_language.sort_by_key(|query| (query.language, query.query));
     for query in query_bytes_by_language {
         update_manifest_hash_field(&mut hasher, query.language.as_bytes());
-        update_manifest_hash_field(&mut hasher, b"tags");
-        update_manifest_hash_field(&mut hasher, query.tags);
-        update_manifest_hash_field(&mut hasher, b"spur-edges");
-        update_manifest_hash_field(&mut hasher, query.spur_edges);
+        update_manifest_hash_field(&mut hasher, query.query.as_bytes());
+        update_manifest_hash_field(&mut hasher, query.bytes);
     }
     format!("{:x}", hasher.finalize())
 }
@@ -1332,25 +1385,45 @@ mod tests {
         let base = [
             ManifestQueryBytes {
                 language: "rust",
-                tags: b"rust tags",
-                spur_edges: b"rust edges v1",
+                query: "tags",
+                bytes: b"rust tags",
+            },
+            ManifestQueryBytes {
+                language: "rust",
+                query: "spur-edges",
+                bytes: b"rust edges v1",
             },
             ManifestQueryBytes {
                 language: "typescript",
-                tags: b"typescript tags",
-                spur_edges: b"typescript edges",
+                query: "tags",
+                bytes: b"typescript tags",
+            },
+            ManifestQueryBytes {
+                language: "typescript",
+                query: "spur-edges",
+                bytes: b"typescript edges",
             },
         ];
         let changed = [
             ManifestQueryBytes {
                 language: "rust",
-                tags: b"rust tags",
-                spur_edges: b"rust edges v2",
+                query: "tags",
+                bytes: b"rust tags",
+            },
+            ManifestQueryBytes {
+                language: "rust",
+                query: "spur-edges",
+                bytes: b"rust edges v2",
             },
             ManifestQueryBytes {
                 language: "typescript",
-                tags: b"typescript tags",
-                spur_edges: b"typescript edges",
+                query: "tags",
+                bytes: b"typescript tags",
+            },
+            ManifestQueryBytes {
+                language: "typescript",
+                query: "spur-edges",
+                bytes: b"typescript edges",
             },
         ];
 
@@ -1365,13 +1438,13 @@ mod tests {
         let inputs = [
             ManifestQueryBytes {
                 language: "typescript",
-                tags: b"typescript tags",
-                spur_edges: b"typescript edges",
+                query: "spur-edges",
+                bytes: b"typescript edges",
             },
             ManifestQueryBytes {
                 language: "rust",
-                tags: b"rust tags",
-                spur_edges: b"rust edges",
+                query: "tags",
+                bytes: b"rust tags",
             },
         ];
 
