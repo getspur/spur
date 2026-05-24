@@ -7,6 +7,11 @@
 (interface_declaration
   name: (type_identifier) @name) @definition.interface
 
+(interface_declaration
+  body: (interface_body
+    (method_signature
+      name: (property_identifier) @name) @definition.method))
+
 (enum_declaration
   name: (identifier) @name) @definition.enum
 

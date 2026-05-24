@@ -682,15 +682,24 @@ pub fn symbol_changes_for_commit(
                     right.symbol_kind.clone(),
                     right.enclosing_scope.clone(),
                 );
+                let right_snapshot = snapshot_from(sha, &file_change.path, right);
                 match left_by_identity.remove(&identity) {
-                    Some(left) if left.anchor_hash == right.anchor_hash => continue,
-                    Some(_) => direct_changes.push(SymbolChange {
-                        snapshot: snapshot_from(sha, &file_change.path, right),
-                        change_kind: ChangeKind::Modified,
-                        parent_sha: file_change.parent_sha.clone(),
-                    }),
+                    Some(left) => {
+                        let left_snapshot = snapshot_from(sha, deleted_path, left);
+                        if left.anchor_hash == right.anchor_hash
+                            && left_snapshot.key.stable_symbol_id
+                                == right_snapshot.key.stable_symbol_id
+                        {
+                            continue;
+                        }
+                        direct_changes.push(SymbolChange {
+                            snapshot: right_snapshot,
+                            change_kind: ChangeKind::Modified,
+                            parent_sha: file_change.parent_sha.clone(),
+                        });
+                    }
                     None => added_candidates.push(SymbolChange {
-                        snapshot: snapshot_from(sha, &file_change.path, right),
+                        snapshot: right_snapshot,
                         change_kind: ChangeKind::Added,
                         parent_sha: file_change.parent_sha.clone(),
                     }),
@@ -1194,10 +1203,19 @@ fn parse_failed_diagnostic(
 }
 
 fn snapshot_from(commit: &str, path: &GitPath, symbol: &ExtractedSymbol) -> SymbolSnapshotArtifact {
-    let path_buf = path.to_path_buf();
+    let relative_path = path.to_string_lossy();
+    let fqn = match symbol.enclosing_scope.as_deref() {
+        Some(scope) => format!("{scope}::{}", symbol.entity_name),
+        None => symbol.entity_name.clone(),
+    };
     SymbolSnapshotArtifact {
         key: SnapshotKey {
-            stable_symbol_id: crate::identity::stable_symbol_id_for(&path_buf, &symbol.entity_name),
+            stable_symbol_id: crate::identity::stable_symbol_id_for_discriminator(
+                relative_path.as_ref(),
+                &fqn,
+                &symbol.symbol_kind,
+                symbol.byte_range[0] as u64,
+            ),
             commit: commit.to_string(),
         },
         file_path: path.clone(),
@@ -1554,6 +1572,30 @@ mod tests {
         assert!(matches!(by_name.get("a"), Some(ChangeKind::Modified)));
         assert!(matches!(by_name.get("c"), Some(ChangeKind::Added)));
         assert!(matches!(by_name.get("b"), Some(ChangeKind::Deleted)));
+    }
+
+    #[test]
+    fn symbol_diff_marks_byte_start_shift_as_modified() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), b"fn target() { 1 }\n").unwrap();
+        commit(dir.path(), "c1");
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"// inserted before target\nfn target() { 1 }\n",
+        )
+        .unwrap();
+        let sha2 = commit(dir.path(), "c2");
+
+        let mut ctx = SymbolDiffCtx::new();
+        let changes = symbol_changes_for_commit(dir.path(), &sha2, &mut ctx).unwrap();
+        let target = changes
+            .iter()
+            .find(|change| change.snapshot.entity_name == "target")
+            .expect("target should be emitted when stable id changes");
+
+        assert!(matches!(target.change_kind, ChangeKind::Modified));
+        assert_eq!(target.snapshot.byte_range[0], 26);
     }
 
     #[test]

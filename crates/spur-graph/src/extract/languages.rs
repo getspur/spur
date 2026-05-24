@@ -324,7 +324,7 @@ pub(crate) fn emit_definitions<'tree>(
             continue;
         };
         let parent = nearest_parent(file_node_id, &bindings, node);
-        let fqn = scoped_name(parent.fqn.unwrap_or(""), &label);
+        let fqn = scoped_name(parent.fqn.unwrap_or(""), &fqn_segment(kind, &label));
         let node_id = builder.add_node(relative_path, label, fqn.clone(), kind, file_id, node);
         builder.add_edge(parent.node_id, Some(node_id), RelationKind::Contains, None);
         bindings.push(DefinitionBinding { node, node_id, fqn });
@@ -346,10 +346,10 @@ pub(crate) fn extracted_symbols<'tree>(
             continue;
         };
         let parent = nearest_extracted_parent(&bindings, node);
-        let enclosing_scope = parent.map(extracted_enclosing_scope);
+        let enclosing_scope = parent.map(|parent| parent.fqn.clone());
         let fqn = scoped_name(
             parent.map(|parent| parent.fqn.as_str()).unwrap_or(""),
-            &label,
+            &fqn_segment(kind, &label),
         );
         let range = node.range();
         let symbol_text = child_text(node, source);
@@ -362,12 +362,7 @@ pub(crate) fn extracted_symbols<'tree>(
             anchor_hash: compute_anchor_hash(symbol_text).to_string(),
             tokens: symbol_tokens(node, source, &label),
         });
-        bindings.push(ExtractedDefinitionBinding {
-            node,
-            label,
-            kind,
-            fqn,
-        });
+        bindings.push(ExtractedDefinitionBinding { node, fqn });
     }
 
     symbols
@@ -381,30 +376,60 @@ pub(crate) fn emit_edges(
     definitions: &[DefinitionBinding<'_>],
     captures: &[CaptureHit<'_>],
 ) {
+    let typed_bindings_by_scope = typed_bindings_by_scope(definitions, source);
     for capture in captures {
         match capture.name.as_str() {
             "import" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
                 let relation = relation_kind_for_capture(config, "import", RelationKind::Imports);
-                for imported in
-                    contained_capture_text(capture.node, source, captures, "import.name")
-                {
+                for imported in contained_capture_text(capture, source, captures, "import.name") {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: imported,
                         relation,
                         edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
                     });
                 }
             }
             "call" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
-                for callee in contained_capture_text(capture.node, source, captures, "call.name") {
+                let receiver_text =
+                    contained_capture_text(capture, source, captures, "call.receiver")
+                        .into_iter()
+                        .next();
+                let scope_text = contained_capture_text(capture, source, captures, "call.scope")
+                    .into_iter()
+                    .next();
+                let inferred_scope_text = receiver_text.as_deref().and_then(|receiver| {
+                    receiver_scope_text(source_id, receiver, &typed_bindings_by_scope)
+                });
+                let scope_text = scope_text.or(inferred_scope_text);
+                for callee in contained_capture_text(capture, source, captures, "call.name") {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: callee,
                         relation: RelationKind::Calls,
                         edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: receiver_text.clone(),
+                        scope_text: scope_text.clone(),
+                    });
+                }
+            }
+            "macro_call" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                for callee in contained_capture_text(capture, source, captures, "macro_call.name") {
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: callee,
+                        relation: RelationKind::Calls,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::MacroBody,
+                        receiver_text: None,
+                        scope_text: None,
                     });
                 }
             }
@@ -418,11 +443,103 @@ pub(crate) fn emit_edges(
                     target_name: target_name.to_string(),
                     relation: RelationKind::References,
                     edge_kind: Some(GraphEdgeKind::ReferencesHof),
+                    origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                    receiver_text: None,
+                    scope_text: None,
                 });
             }
             _ => {}
         }
     }
+}
+
+fn typed_bindings_by_scope(
+    definitions: &[DefinitionBinding<'_>],
+    source: &str,
+) -> HashMap<NodeId, HashMap<String, String>> {
+    let mut bindings_by_scope = HashMap::new();
+    for definition in definitions {
+        let mut bindings = HashMap::new();
+        collect_typed_bindings(definition.node, definition.node, source, &mut bindings);
+        if !bindings.is_empty() {
+            bindings_by_scope.insert(definition.node_id, bindings);
+        }
+    }
+    bindings_by_scope
+}
+
+fn collect_typed_bindings(
+    root: Node<'_>,
+    node: Node<'_>,
+    source: &str,
+    bindings: &mut HashMap<String, String>,
+) {
+    if node != root && is_definition_node(node) {
+        return;
+    }
+
+    if matches!(node.kind(), "parameter" | "let_declaration") {
+        if let Some((name, type_text)) = typed_binding(node, source) {
+            bindings.insert(name, receiver_type_scope_text(&type_text));
+        }
+    }
+
+    for index in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(index) {
+            collect_typed_bindings(root, child, source, bindings);
+        }
+    }
+}
+
+fn typed_binding(node: Node<'_>, source: &str) -> Option<(String, String)> {
+    let pattern = node.child_by_field_name("pattern")?;
+    let name = single_identifier_text(pattern, source)?;
+    let type_node = node.child_by_field_name("type")?;
+    Some((name, child_text(type_node, source).trim().to_string()))
+}
+
+fn receiver_scope_text(
+    source_id: NodeId,
+    receiver: &str,
+    typed_bindings_by_scope: &HashMap<NodeId, HashMap<String, String>>,
+) -> Option<String> {
+    let receiver = receiver.trim();
+    if receiver == "self" {
+        return Some("Self".to_string());
+    }
+    typed_bindings_by_scope
+        .get(&source_id)
+        .and_then(|bindings| bindings.get(receiver))
+        .cloned()
+}
+
+fn receiver_type_scope_text(type_text: &str) -> String {
+    let mut ty = type_text.trim();
+    loop {
+        let Some(rest) = ty.strip_prefix('&') else {
+            break;
+        };
+        ty = rest.trim_start();
+        if let Some(rest) = ty.strip_prefix("mut ") {
+            ty = rest.trim_start();
+        }
+        if let Some(rest) = strip_lifetime_prefix(ty) {
+            ty = rest.trim_start();
+            if let Some(rest) = ty.strip_prefix("mut ") {
+                ty = rest.trim_start();
+            }
+        }
+    }
+    ty.to_string()
+}
+
+fn strip_lifetime_prefix(type_text: &str) -> Option<&str> {
+    let rest = type_text.strip_prefix('\'')?;
+    let end = rest
+        .find(char::is_whitespace)
+        .map(|index| index + 1)
+        .unwrap_or(type_text.len());
+    Some(&type_text[end..])
 }
 
 pub(crate) fn emit_rust_dyn_trait_edges(
@@ -459,6 +576,9 @@ pub(crate) fn emit_rust_dyn_trait_edges(
             target_name: format!("{trait_name}::{method}"),
             relation: RelationKind::Calls,
             edge_kind: Some(GraphEdgeKind::CallsDyn),
+            origin: crate::extract::tree_sitter::CallOrigin::Expression,
+            receiver_text: Some(receiver),
+            scope_text: None,
         });
     }
 }
@@ -632,7 +752,7 @@ fn definition_candidates<'tree>(
                 (
                     kind,
                     capture.node,
-                    definition_name(kind, capture.node, source, captures),
+                    definition_name(kind, capture, source, captures),
                 )
             })
         })
@@ -651,15 +771,15 @@ fn definition_candidates<'tree>(
 
 fn definition_name(
     kind: NodeKind,
-    definition_node: Node<'_>,
+    definition: &CaptureHit<'_>,
     source: &str,
     captures: &[CaptureHit<'_>],
 ) -> Option<String> {
     if kind == NodeKind::Impl {
-        let self_type = contained_capture_text(definition_node, source, captures, "impl.self")
+        let self_type = contained_capture_text(definition, source, captures, "impl.self")
             .into_iter()
             .next()?;
-        let trait_type = contained_capture_text(definition_node, source, captures, "impl.trait")
+        let trait_type = contained_capture_text(definition, source, captures, "impl.trait")
             .into_iter()
             .next();
         return Some(match trait_type {
@@ -668,7 +788,7 @@ fn definition_name(
         });
     }
 
-    contained_capture_text(definition_node, source, captures, "name")
+    contained_capture_text(definition, source, captures, "name")
         .into_iter()
         .next()
 }
@@ -784,8 +904,6 @@ fn definition_rank(kind: NodeKind) -> u8 {
 #[derive(Debug, Clone)]
 struct ExtractedDefinitionBinding<'tree> {
     node: Node<'tree>,
-    label: String,
-    kind: NodeKind,
     fqn: String,
 }
 
@@ -797,13 +915,6 @@ fn nearest_extracted_parent<'a, 'tree>(
         .iter()
         .rev()
         .find(|definition| contains(definition.node, node))
-}
-
-fn extracted_enclosing_scope(parent: &ExtractedDefinitionBinding<'_>) -> String {
-    match parent.kind {
-        NodeKind::Impl => format!("impl {}", parent.label),
-        _ => parent.label.clone(),
-    }
 }
 
 fn symbol_kind(kind: NodeKind) -> &'static str {
@@ -825,6 +936,13 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
 
 fn symbol_entity_name(label: &str) -> String {
     label.strip_prefix("impl ").unwrap_or(label).to_string()
+}
+
+fn fqn_segment(kind: NodeKind, label: &str) -> String {
+    match kind {
+        NodeKind::Impl => format!("impl {}", symbol_entity_name(label)),
+        _ => symbol_entity_name(label),
+    }
 }
 
 fn symbol_tokens(node: Node<'_>, source: &str, own_name: &str) -> Vec<String> {
@@ -867,14 +985,18 @@ fn is_literal_kind(kind: &str) -> bool {
 }
 
 fn contained_capture_text(
-    parent: Node<'_>,
+    parent: &CaptureHit<'_>,
     source: &str,
     captures: &[CaptureHit<'_>],
     capture_name: &str,
 ) -> Vec<String> {
     captures
         .iter()
-        .filter(|capture| capture.name == capture_name && contains(parent, capture.node))
+        .filter(|capture| {
+            capture.name == capture_name
+                && capture.pattern_index == parent.pattern_index
+                && capture.match_index == parent.match_index
+        })
         .map(|capture| child_text(capture.node, source).trim().to_string())
         .filter(|text| !text.is_empty())
         .collect()
