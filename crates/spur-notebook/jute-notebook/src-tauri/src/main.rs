@@ -38,15 +38,8 @@ fn handle_file_associations(
 fn main() {
     tracing_subscriber::fmt().init();
 
-    #[allow(unused_mut)]
-    let mut app = tauri::Builder::default();
-
-    #[cfg(target_os = "macos")]
-    {
-        app = app.plugin(jute::plugins::macos_traffic_lights::init());
-    }
-
-    app.manage(State::new())
+    tauri::Builder::default()
+        .manage(State::new())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())

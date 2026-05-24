@@ -10,7 +10,6 @@ pub mod commands;
 pub mod entity;
 mod kernel_provision;
 pub mod menu;
-pub mod plugins;
 pub mod state;
 pub mod window;
 
