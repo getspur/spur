@@ -6,6 +6,17 @@ use anyhow::Context;
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 use uuid::Uuid;
 
+// This produces equal 13px padding on the left and top of the window controls.
+// The Figma prototype this is based on has 14px positioning, but this includes
+// 1px of inset window border.
+//
+// The values come from the previous macOS traffic-light plugin. They produce
+// the intended placement on macOS Sequoia.
+#[cfg(target_os = "macos")]
+const WINDOW_CONTROL_PAD_X: f64 = 12.0;
+#[cfg(target_os = "macos")]
+const WINDOW_CONTROL_PAD_Y: f64 = 17.0;
+
 /// Initializes window size, min width, and other common settings on the
 /// builder.
 pub fn initialize_builder<'a, R: Runtime, M: Manager<R>>(
@@ -30,6 +41,10 @@ pub fn initialize_builder<'a, R: Runtime, M: Manager<R>>(
         // These methods are only available on macOS.
         builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
         builder = builder.hidden_title(true);
+        builder = builder.traffic_light_position(tauri::LogicalPosition::new(
+            WINDOW_CONTROL_PAD_X as f64,
+            WINDOW_CONTROL_PAD_Y as f64,
+        ));
     }
 
     builder

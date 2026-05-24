@@ -194,15 +194,8 @@ fn main() {
     let bridge_for_setup = Arc::clone(&bridge);
     let bridge_for_run = Arc::clone(&bridge);
 
-    #[allow(unused_mut)]
-    let mut app = tauri::Builder::default();
-
-    #[cfg(target_os = "macos")]
-    {
-        app = app.plugin(jute::plugins::macos_traffic_lights::init());
-    }
-
-    app.manage(State::new())
+    tauri::Builder::default()
+        .manage(State::new())
         .manage(bridge_for_state)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
