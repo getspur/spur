@@ -34,8 +34,8 @@ fn run_git(repo: &Path, args: &[&str]) -> String {
 }
 
 fn run_shell(repo: &Path, script: &str) {
-    let output = Command::new("zsh")
-        .arg("-lc")
+    let output = Command::new("sh")
+        .arg("-c")
         .arg(script)
         .current_dir(repo)
         .output()
