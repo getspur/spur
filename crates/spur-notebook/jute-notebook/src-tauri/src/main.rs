@@ -58,6 +58,7 @@ fn main() {
             jute::commands::discard_scratch_notebooks,
             jute::commands::start_kernel,
             jute::commands::restart_kernel,
+            jute::commands::interrupt_kernel,
             jute::commands::stop_kernel,
             jute::commands::run_cell,
             jute::commands::get_notebook,
