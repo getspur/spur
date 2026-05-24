@@ -1,13 +1,17 @@
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
-use arrow_array::{Array, Int64Array, RecordBatch};
+use arrow_array::builder::{ListBuilder, StringBuilder};
+use arrow_array::{Array, ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
 use spur_graph::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet, Confidence,
-    GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+    GitPath, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
     GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
-    GraphTombstoneEntry, NodeId, RelationKind, WriteOptions,
+    GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey, SymbolSnapshotArtifact, WriteOptions,
 };
 
 #[test]
@@ -85,6 +89,25 @@ fn default_write_emits_edges_by_dst_with_edges_schema_and_dst_src_order() {
 }
 
 #[test]
+fn reads_symbol_snapshot_file_path_b64_with_padding_and_url_safe_alphabet() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut artifact = fixture_artifact();
+    artifact.graph_content_hash = "b64-lenient-symbol-snapshots".to_string();
+    artifact.symbol_snapshots = vec![
+        symbol_snapshot("sym-standard-padded", b"x"),
+        symbol_snapshot("sym-url-safe-padded", &[0xff]),
+    ];
+    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+
+    rewrite_symbol_snapshot_b64_values(&dir, &["eA==", "_w=="])
+        .expect("rewrite symbol_snapshots.parquet file_path_b64 values");
+    let actual = read_artifact_parquet(&dir).expect("read parquet artifact");
+
+    assert_eq!(actual.symbol_snapshots, artifact.symbol_snapshots);
+}
+
+#[test]
 fn rejects_directory_without_manifest() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let dir = write_artifact_parquet(&fixture_artifact(), tempdir.path(), WriteOptions::default())
@@ -147,6 +170,87 @@ fn write_replaces_existing_hash_directory_before_publish() {
         "existing hash directory should be removed before publication"
     );
     assert!(dir.join("edges_by_dst.parquet").exists());
+}
+
+fn symbol_snapshot(stable_symbol_id: &str, file_path: &[u8]) -> SymbolSnapshotArtifact {
+    SymbolSnapshotArtifact {
+        key: SnapshotKey {
+            stable_symbol_id: stable_symbol_id.to_string(),
+            commit: "commit-a".to_string(),
+        },
+        file_path: GitPath::from_bytes(file_path.to_vec()),
+        entity_name: "sample".to_string(),
+        symbol_kind: "function".to_string(),
+        enclosing_scope: None,
+        byte_range: [0, 1],
+        line_range: [1, 1],
+        anchor_hash: format!("anchor-{stable_symbol_id}"),
+        tokens: Vec::new(),
+    }
+}
+
+fn rewrite_symbol_snapshot_b64_values(dir: &Path, encoded_paths: &[&str]) -> anyhow::Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key_stable_symbol_id", DataType::Utf8, false),
+        Field::new("key_commit", DataType::Utf8, false),
+        Field::new("file_path_b64", DataType::Utf8, false),
+        Field::new("entity_name", DataType::Utf8, false),
+        Field::new("symbol_kind", DataType::Utf8, false),
+        Field::new("enclosing_scope", DataType::Utf8, true),
+        Field::new("byte_range_start", DataType::Int64, false),
+        Field::new("byte_range_end", DataType::Int64, false),
+        Field::new("line_range_start", DataType::Int64, false),
+        Field::new("line_range_end", DataType::Int64, false),
+        Field::new("anchor_hash", DataType::Utf8, false),
+        Field::new(
+            "tokens",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ),
+    ]));
+    let key_stable_symbol_id = StringArray::from(vec![
+        "sym-standard-padded".to_string(),
+        "sym-url-safe-padded".to_string(),
+    ]);
+    let key_commit = StringArray::from(vec!["commit-a", "commit-a"]);
+    let file_path_b64 = StringArray::from_iter_values(encoded_paths.iter().copied());
+    let entity_name = StringArray::from(vec!["sample", "sample"]);
+    let symbol_kind = StringArray::from(vec!["function", "function"]);
+    let enclosing_scope = StringArray::from(vec![None::<&str>, None::<&str>]);
+    let byte_range_start = Int64Array::from(vec![0, 0]);
+    let byte_range_end = Int64Array::from(vec![1, 1]);
+    let line_range_start = Int64Array::from(vec![1, 1]);
+    let line_range_end = Int64Array::from(vec![1, 1]);
+    let anchor_hash = StringArray::from(vec![
+        "anchor-sym-standard-padded",
+        "anchor-sym-url-safe-padded",
+    ]);
+    let mut token_builder = ListBuilder::new(StringBuilder::new());
+    token_builder.append(true);
+    token_builder.append(true);
+    let tokens = token_builder.finish();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(key_stable_symbol_id) as ArrayRef,
+            Arc::new(key_commit),
+            Arc::new(file_path_b64),
+            Arc::new(entity_name),
+            Arc::new(symbol_kind),
+            Arc::new(enclosing_scope),
+            Arc::new(byte_range_start),
+            Arc::new(byte_range_end),
+            Arc::new(line_range_start),
+            Arc::new(line_range_end),
+            Arc::new(anchor_hash),
+            Arc::new(tokens),
+        ],
+    )?;
+    let file = File::create(dir.join("symbol_snapshots.parquet"))?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
 }
 
 fn fixture_artifact_with_unsorted_resolved_edges() -> GraphIndexArtifact {
