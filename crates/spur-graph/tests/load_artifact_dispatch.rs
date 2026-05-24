@@ -119,6 +119,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::ReferencesOther),
+                bind_method: None,
             },
             GraphEdgeArtifact {
                 source_stable_symbol_id: "sym-a".to_string(),
@@ -130,6 +131,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::Calls),
+                bind_method: None,
             },
             GraphEdgeArtifact {
                 source_stable_symbol_id: "sym-b".to_string(),
@@ -141,6 +143,7 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::CallsDyn),
+                bind_method: None,
             },
         ],
         tombstones: Vec::new(),

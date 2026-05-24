@@ -118,14 +118,14 @@ fn analyst_build_skips_temporal_and_diagnostics_views_without_optional_parquets(
 }
 
 #[test]
-fn analyst_bridge_maps_temporal_churn_to_structural_symbols() {
+fn analyst_build_rejects_low_direct_symbol_snapshot_coverage() {
     if !duckdb_cli_present() {
         eprintln!("skipping: duckdb CLI not on PATH");
         return;
     }
 
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let artifact = bridge_artifact("analyst-bridge-views");
+    let artifact = divergent_symbol_id_artifact("analyst-low-direct-coverage");
     let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
         &artifact,
         tempdir.path(),
@@ -144,16 +144,40 @@ fn analyst_bridge_maps_temporal_churn_to_structural_symbols() {
     )
     .expect("analyst build");
 
-    let bridge = query_csv(
+    assert!(
+        !db_path.exists(),
+        "analyst DB should not be created when direct symbol snapshot coverage is below 99%"
+    );
+}
+
+#[test]
+fn analyst_views_map_temporal_churn_by_direct_symbol_ids() {
+    if !duckdb_cli_present() {
+        eprintln!("skipping: duckdb CLI not on PATH");
+        return;
+    }
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = direct_symbol_id_artifact("analyst-direct-symbol-views");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+    )
+    .expect("write artifact");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    if !build_analyst_or_skip(tempdir.path(), &artifact_dir, &db_path) {
+        return;
+    }
+
+    let coverage = query_csv(
         &db_path,
-        "SELECT structural_stable_symbol_id, snapshot_stable_symbol_id
-         FROM v_symbol_id_bridge
-         ORDER BY structural_stable_symbol_id;",
+        "SELECT
+           (SELECT COUNT(*) FROM nodes n JOIN symbol_snapshots s USING (stable_symbol_id)),
+           (SELECT node_count FROM _meta LIMIT 1);",
     );
-    assert_eq!(
-        bridge.trim(),
-        "struct-caller,snap-caller\nstruct-target,snap-target"
-    );
+    assert_eq!(coverage.trim(), "2,2");
 
     let churn = query_csv(
         &db_path,
@@ -225,7 +249,7 @@ fn temporal_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
     artifact
 }
 
-fn bridge_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
+fn direct_symbol_id_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
     let mut artifact = structural_artifact(graph_content_hash);
     artifact.symbols = vec![
         GraphSymbolArtifact {
@@ -261,6 +285,7 @@ fn bridge_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         confidence_score: 1.0,
         change_kind: None,
         edge_kind: Some(GraphEdgeKind::Calls),
+        bind_method: None,
     });
 
     artifact.commits.push(CommitArtifact {
@@ -270,8 +295,8 @@ fn bridge_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         summary: "touch symbols".to_string(),
     });
     for (structural_id, snapshot_id, name, byte_range, line_range) in [
-        ("struct-caller", "snap-caller", "caller", [0, 20], [1, 3]),
-        ("struct-target", "snap-target", "target", [40, 60], [5, 7]),
+        ("struct-caller", "struct-caller", "caller", [0, 20], [1, 3]),
+        ("struct-target", "struct-target", "target", [40, 60], [5, 7]),
     ] {
         let snapshot = SnapshotKey {
             stable_symbol_id: snapshot_id.to_string(),
@@ -299,6 +324,14 @@ fn bridge_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         });
     }
 
+    artifact
+}
+
+fn divergent_symbol_id_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
+    let mut artifact = direct_symbol_id_artifact(graph_content_hash);
+    for snapshot in &mut artifact.symbol_snapshots {
+        snapshot.key.stable_symbol_id = format!("snapshot-{}", snapshot.key.stable_symbol_id);
+    }
     artifact
 }
 
