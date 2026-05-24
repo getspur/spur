@@ -109,6 +109,9 @@ fn main() {
                 // Handle files opened in macOS.
                 #[cfg(target_os = "macos")]
                 match event {
+                    tauri::RunEvent::ExitRequested { api, .. } => {
+                        api.prevent_exit();
+                    }
                     tauri::RunEvent::Opened { urls } => {
                         let files = urls
                             .into_iter()

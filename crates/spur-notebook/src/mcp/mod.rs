@@ -570,6 +570,20 @@ impl NotebookDaemonControl {
     }
 
     async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
+        {
+            let state = self.state.lock().await;
+            if state.current_path.as_deref() == Some(path.as_path()) {
+                if let Some(label) = state.window_label.clone() {
+                    drop(state);
+                    if let Some(window) = self.app.get_webview_window(&label) {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                        return Ok(path);
+                    }
+                }
+            }
+        }
+
         self.close_current_window().await;
         self.bridge.set_notebook_open(false);
         {
@@ -618,7 +632,7 @@ impl NotebookDaemonControl {
         let label = self.state.lock().await.window_label.clone();
         if let Some(label) = label {
             if let Some(window) = self.app.get_webview_window(&label) {
-                let _ = window.destroy();
+                let _ = window.hide();
             }
         }
     }
