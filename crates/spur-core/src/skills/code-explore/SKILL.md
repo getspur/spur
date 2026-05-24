@@ -208,7 +208,7 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 - **Trusting resolved rows blindly when the bare name is common.** `take`, `filter`, `lock`, `new`, `send`, `format` collide across crates; the resolver can pick a wrong cross-crate symbol. Sanity-check that the resolved file_path and enclosing_scope make domain sense.
 - **Treating `code_resolve` as the primary discovery tool.** It errors on imperfect names with a misleading message. Filtered `code_search` is the primary; `code_resolve` is a fast path for canonical names.
 - **`code_file_symbols` on any file you haven't sized first.** If the file is > ~1k lines, go straight to filtered `code_search`.
-- **Trusting stale graph data silently.** Every response includes `indexed_head_oid` and `worktree_dirty`. If `worktree_dirty: true` and your question touches uncommitted code, say so before relying on the answer.
+- **Trusting stale graph data silently.** Every response includes `indexed_head_oid` and `worktree_dirty`. `worktree_dirty: true` means **either** there are uncommitted edits to *tracked* files **or** HEAD has advanced past `indexed_head_oid`. Untracked files do NOT flip the flag — if your question is "what new files exist?", run `git status` yourself. When `worktree_dirty: true` and your question touches uncommitted code, say so before relying on the answer.
 
 ## Key principles
 
