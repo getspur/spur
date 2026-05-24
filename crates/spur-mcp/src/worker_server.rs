@@ -444,23 +444,6 @@ struct ListIssuesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
-struct UpdateIssueParams {
-    id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    comment: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    priority: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    assignee: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    add_labels: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    remove_labels: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct GetPlanStatusParams {
     plan_id: String,
 }
@@ -1096,44 +1079,10 @@ impl WorkerToolHandler {
         .await
     }
 
-    #[tool(
-        name = "update_issue",
-        description = "Update an issue in the configured project management backend.",
-        input_schema = crate::tool_schemas::schema_object::<UpdateIssueParams>()
-    )]
-    async fn update_issue_tool(
-        &self,
-        arguments: JsonObject,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        let args = Value::Object(arguments);
-        let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
-        let deps = Arc::clone(&self.deps);
-        self.invoke_with_lifecycle(
-            "update_issue",
-            context,
-            None,
-            move |worker_ctx| async move {
-                let result =
-                    crate::handlers::update_issue(deps.pm_service.as_ref(), &worker_ctx, args)
-                        .await;
-                if result.is_ok() {
-                    if let Some(issue_id) = issue_id.as_deref() {
-                        emit_worker_write_audit(
-                            deps.pm_service.as_ref(),
-                            deps.feature_gate.as_ref(),
-                            &worker_ctx.delegation_id,
-                            "update_issue",
-                            issue_id,
-                        )
-                        .await;
-                    }
-                }
-                result
-            },
-        )
-        .await
-    }
+    // `update_issue` is intentionally NOT exposed on the worker MCP. Workers
+    // must not mutate issue state directly — it races with brain-side updates
+    // and has hung delegations in the past. Workers should emit `report_signal`
+    // or `report_progress` and let the brain reconcile issue state.
 
     #[tool(
         name = "report_signal",
