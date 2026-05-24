@@ -145,6 +145,13 @@ impl McpCallbackServer {
 
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
+    pub fn __test_code_graph_temporal_index_build_invocation_count(&self) -> usize {
+        self.graph_rebuild_coordinator
+            .temporal_index_build_invocation_count()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn __test_set_code_graph_rebuild_budget(&self, budget: std::time::Duration) -> impl Drop {
         handlers::code_graph::set_graph_rebuild_latency_budget_for_test(budget)
     }

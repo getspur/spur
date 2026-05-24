@@ -1899,6 +1899,28 @@ async fn code_symbol_history_returns_rename_chain() {
 }
 
 #[tokio::test]
+async fn code_symbol_history_reuses_temporal_index_for_same_worktree() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    std::fs::write(worktree.path().join("README.md"), "fixture\n").expect("write fixture file");
+    commit_fixture(worktree.path());
+    write_temporal_fixture_artifact(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+    let args = json!({ "symbol": format!("graph://symbol/{NEW_ROOT_ID}") });
+
+    let first = tool_body(call_tool(&server, "code_symbol_history", args.clone()).await);
+    let second = tool_body(call_tool(&server, "code_symbol_history", args).await);
+
+    assert_eq!(first["events"].as_array().expect("first events").len(), 2);
+    assert_eq!(second["events"].as_array().expect("second events").len(), 2);
+    assert_eq!(
+        server.__test_code_graph_temporal_index_build_invocation_count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn code_symbol_history_reports_missing_commit_index_cleanly() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
