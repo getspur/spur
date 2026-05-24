@@ -208,7 +208,11 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 - **Trusting resolved rows blindly when the bare name is common.** `take`, `filter`, `lock`, `new`, `send`, `format` collide across crates; the resolver can pick a wrong cross-crate symbol. Sanity-check that the resolved file_path and enclosing_scope make domain sense.
 - **Treating `code_resolve` as the primary discovery tool.** It errors on imperfect names with a misleading message. Filtered `code_search` is the primary; `code_resolve` is a fast path for canonical names.
 - **`code_file_symbols` on any file you haven't sized first.** If the file is > ~1k lines, go straight to filtered `code_search`.
-- **Trusting stale graph data silently.** Every response includes `indexed_head_oid` and `worktree_dirty`. `worktree_dirty: true` means **either** there are uncommitted edits to *tracked* files **or** HEAD has advanced past `indexed_head_oid`. Untracked files do NOT flip the flag — if your question is "what new files exist?", run `git status` yourself. When `worktree_dirty: true` and your question touches uncommitted code, say so before relying on the answer.
+- **Trusting stale graph data silently.** Every response includes `indexed_head_oid`, `worktree_dirty`, and `response_file_oids_match`.
+  - `worktree_dirty: true` means **either** there are uncommitted edits to *tracked* files **or** HEAD has advanced past `indexed_head_oid`. Untracked files do NOT flip the flag.
+  - `response_file_oids_match: Some(true)` certifies every file referenced in *this* response is byte-for-byte identical to what the graph indexed. `Some(false)` means at least one such file changed. `None` means undetermined (no worktree, no graph pointer, or read race).
+  - **Use `response_file_oids_match` over `worktree_dirty` when judging trust in *this answer*.** Use `worktree_dirty` for broad "should I rebuild the graph?" decisions.
+  - **Caveat:** `response_file_oids_match` certifies only the files returned — it cannot detect new symbols in brand-new files that have no indexed `file_oid`. For "what new files exist?" questions, run `git status` yourself.
 
 ## Key principles
 
