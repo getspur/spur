@@ -37,9 +37,13 @@ if ! command -v cc >/dev/null 2>&1; then
         libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev
 fi
 
-# sccache (system-wide).
-SCCACHE_VERSION=v0.8.2
-if ! command -v sccache >/dev/null 2>&1; then
+# sccache (system-wide). Pinned to 0.15.0 because it's the first version that
+# treats --remap-path-prefix as cacheable (#2270) and excludes
+# CARGO_ENCODED_RUSTFLAGS from the env hash (#2651) — both required for
+# cross-worktree Rust cache hits via the path-prefix remap in build.sh.
+SCCACHE_VERSION=v0.15.0
+INSTALLED=$(/usr/local/bin/sccache --version 2>/dev/null | awk '{print "v"$2}' || echo "")
+if [[ "$INSTALLED" != "$SCCACHE_VERSION" ]]; then
     curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
         | tar xz -C /tmp
     install -m 0755 "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
