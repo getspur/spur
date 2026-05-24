@@ -706,6 +706,50 @@ fn rust_extractor_finds_expected_nodes_edges_and_spans() {
 }
 
 #[test]
+fn rust_extractor_does_not_leak_nested_call_captures_into_outer_call() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub struct Outer;\n\
+         pub struct Inner;\n\
+         impl Outer {\n\
+             pub fn foo(&self, _handler: fn(&Inner)) {}\n\
+         }\n\
+         impl Inner {\n\
+             pub fn bar(&self) {}\n\
+         }\n\
+         pub fn caller(outer: &Outer) {\n\
+             outer.foo({\n\
+                 fn nested(inner: &Inner) {\n\
+                     inner.bar();\n\
+                 }\n\
+                 nested\n\
+             });\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+    let caller = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "caller" && node.kind == NodeKind::Function)
+        .expect("caller function");
+
+    assert!(
+        !facts.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.source_node_id == caller.node_id
+                && edge.target_label.as_deref() == Some("bar")
+        }),
+        "outer PendingEdge for `outer.foo(...)` must not inherit inner `inner.bar()` captures"
+    );
+}
+
+#[test]
 fn typescript_extractor_finds_expected_nodes_and_edges() {
     let root = typescript_fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
