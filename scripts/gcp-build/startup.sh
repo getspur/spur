@@ -157,4 +157,64 @@ EOF
 systemctl daemon-reload
 systemctl enable --now spur-autoshutdown.timer
 
+# ---------------------------------------------------------------------------
+# Disk-pressure watchdog: prune idle worktree target dirs whenever
+# /mnt/cargo crosses the high-water mark. Independent of the idle-shutdown
+# check above — fires even when other workers are actively building.
+# Per-delegation worktree target dirs balloon to 40-110 GB each and three
+# concurrent workers can fill a 400 GB disk in well under an hour.
+# ---------------------------------------------------------------------------
+cat >/usr/local/sbin/spur-disk-watchdog <<'SCRIPT'
+#!/bin/bash
+set -u
+HIGH_WATER=85       # percent
+IDLE_MIN=10         # only prune worktrees idle this long
+WORKTREES=/mnt/cargo/targets/worktrees
+
+USED=$(df --output=pcent /mnt/cargo | tail -1 | tr -dc 0-9)
+[[ -z "$USED" || "$USED" -lt "$HIGH_WATER" ]] && exit 0
+
+echo "disk at ${USED}% — pruning idle worktrees (>${IDLE_MIN}m)"
+[[ ! -d "$WORKTREES" ]] && exit 0
+
+for dir in "$WORKTREES"/*/; do
+    [[ -d "$dir" ]] || continue
+    # Skip if any file modified within IDLE_MIN minutes — build still active.
+    if find "$dir" -mmin -"$IDLE_MIN" -type f -print -quit | grep -q .; then
+        echo "  keep $(basename "$dir") (active)"
+        continue
+    fi
+    SIZE=$(du -sh "$dir" 2>/dev/null | cut -f1)
+    rm -rf "$dir"
+    echo "  pruned $(basename "$dir") ($SIZE)"
+done
+
+df -h /mnt/cargo | tail -1
+SCRIPT
+chmod 0755 /usr/local/sbin/spur-disk-watchdog
+
+cat >/etc/systemd/system/spur-disk-watchdog.service <<'EOF'
+[Unit]
+Description=SPUR builder disk-pressure watchdog
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/spur-disk-watchdog
+StandardOutput=journal
+EOF
+
+cat >/etc/systemd/system/spur-disk-watchdog.timer <<'EOF'
+[Unit]
+Description=Run SPUR disk-pressure watchdog every 2 minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=spur-disk-watchdog.service
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now spur-disk-watchdog.timer
+
 echo "=== startup done $(date -u +%FT%TZ) ==="
