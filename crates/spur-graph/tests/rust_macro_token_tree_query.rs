@@ -26,7 +26,9 @@ const PARENTHESIZED_ARG_QUERY: &str = r#"
   (token_tree "(" ")")) @call
 "#;
 
-fn call_names(query_source: &str, source: &str) -> Vec<String> {
+const SPUR_EDGES_QUERY: &str = include_str!("../queries/rust/spur-edges.scm");
+
+fn capture_texts(query_source: &str, source: &str, capture_name: &str) -> Vec<String> {
     let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&language).expect("configure parser");
@@ -39,7 +41,7 @@ fn call_names(query_source: &str, source: &str) -> Vec<String> {
 
     while let Some((query_match, capture_index)) = captures.next() {
         let capture = query_match.captures[*capture_index];
-        if capture_names[capture.index as usize] == "call.name" {
+        if capture_names[capture.index as usize] == capture_name {
             names.push(
                 capture
                     .node
@@ -51,6 +53,10 @@ fn call_names(query_source: &str, source: &str) -> Vec<String> {
     }
 
     names
+}
+
+fn call_names(query_source: &str, source: &str) -> Vec<String> {
+    capture_texts(query_source, source, "call.name")
 }
 
 #[test]
@@ -74,4 +80,14 @@ fn parenthesized_arg_query_filters_common_macro_token_false_positives() {
     assert!(!names.contains(&"out".to_string()));
     assert!(!names.contains(&"else".to_string()));
     assert!(!names.contains(&"InspectPlan".to_string()));
+}
+
+#[test]
+fn rust_spur_edges_query_marks_macro_body_calls_with_macro_capture_names() {
+    let source = r#"fn caller() { json!({ "x": mermaid_subgraph(&view.nodes, &view.edges), "y": Type::bar(2) }); }"#;
+
+    let names = capture_texts(SPUR_EDGES_QUERY, source, "macro_call.name");
+
+    assert!(names.contains(&"mermaid_subgraph".to_string()));
+    assert!(names.contains(&"bar".to_string()));
 }

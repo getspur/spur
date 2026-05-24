@@ -255,6 +255,7 @@ fn bridge_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         confidence_score: 1.0,
         change_kind: None,
         edge_kind: Some(GraphEdgeKind::Calls),
+        bind_method: None,
     });
 
     artifact.commits.push(CommitArtifact {
