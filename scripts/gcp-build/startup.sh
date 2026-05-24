@@ -68,6 +68,10 @@ export RUSTC_WRAPPER=/usr/local/bin/sccache
 export SCCACHE_GCS_BUCKET=${SCCACHE_GCS_BUCKET}
 export SCCACHE_GCS_RW_MODE=READ_WRITE
 export SCCACHE_GCS_KEY_PATH=
+# Disable incremental compilation: sccache marks incremental rustc invocations
+# non-cacheable, which is why Rust cache hit rate sat at 0% (vs 97% for C/C++).
+# Non-incremental builds are slower locally but trade off against shared GCS hits.
+export CARGO_INCREMENTAL=0
 export PATH="\$CARGO_HOME/bin:\$PATH"
 EOF
 chmod 0644 /etc/profile.d/spur-build.sh
