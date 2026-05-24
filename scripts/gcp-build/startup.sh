@@ -49,6 +49,25 @@ if [[ "$INSTALLED" != "$SCCACHE_VERSION" ]]; then
     install -m 0755 "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
 fi
 
+# rustup + stable toolchain on the cache disk. Survives across boots; only
+# installs on a fresh disk (i.e. after `spin.sh` provisions a new pd or after
+# a disk swap). Workers' `rust-toolchain.toml` pins fetch additional toolchains
+# lazily, so we only bootstrap stable here.
+if [[ ! -x "$CACHE_MNT/cargo-home/bin/rustup" ]]; then
+    echo "Installing rustup + stable toolchain..."
+    BUILD_USER=$(stat -c %U "$CACHE_MNT") # the user owning /mnt/cargo
+    if [[ -z "$BUILD_USER" || "$BUILD_USER" == "root" ]]; then
+        # Fresh disk: chmod 1777 is set below, but we still need /mnt/cargo/cargo-home
+        # owned by the same user that runs cargo. Pick the first OS Login user
+        # (their home was created on first SSH); fall back to current SSH user.
+        BUILD_USER=$(ls /home 2>/dev/null | head -1 || echo root)
+    fi
+    sudo -u "$BUILD_USER" -H sh -c \
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+         RUSTUP_HOME=$CACHE_MNT/rustup CARGO_HOME=$CACHE_MNT/cargo-home \
+         sh -s -- -y --default-toolchain stable --no-modify-path --profile minimal"
+fi
+
 # DuckDB CLI (system-wide). Needed by analyst tests that shell out to `duckdb`;
 # without it those tests silently skip on the build VM.
 DUCKDB_VERSION=v1.5.3
