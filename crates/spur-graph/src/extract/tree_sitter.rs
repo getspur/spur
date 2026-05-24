@@ -26,6 +26,10 @@ pub(crate) struct PendingEdge {
     pub(crate) target_name: String,
     pub(crate) relation: RelationKind,
     pub(crate) edge_kind: Option<GraphEdgeKind>,
+    #[allow(dead_code)]
+    pub(crate) receiver_text: Option<String>,
+    #[allow(dead_code)]
+    pub(crate) scope_text: Option<String>,
 }
 
 #[derive(Debug)]
@@ -46,6 +50,8 @@ pub(crate) struct FactBuilder<'a> {
 pub(crate) struct CaptureHit<'tree> {
     pub(crate) name: String,
     pub(crate) node: Node<'tree>,
+    pub(crate) pattern_index: usize,
+    pub(crate) match_index: usize,
 }
 
 pub(crate) struct CompiledQueries {
@@ -760,17 +766,23 @@ pub(crate) fn run_query<'tree>(
 ) -> Vec<CaptureHit<'tree>> {
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
-    let mut captures = cursor.captures(query, root_node, source.as_bytes());
+    let mut matches = cursor.matches(query, root_node, source.as_bytes());
     let mut hits = Vec::new();
-    while let Some((query_match, capture_index)) = captures.next() {
-        let capture = query_match.captures[*capture_index];
-        if is_string_literal_context(capture.node) {
-            continue;
+    let mut match_index = 0usize;
+    while let Some(query_match) = matches.next() {
+        let current_match_index = match_index;
+        match_index += 1;
+        for capture in query_match.captures {
+            if is_string_literal_context(capture.node) {
+                continue;
+            }
+            hits.push(CaptureHit {
+                name: capture_names[capture.index as usize].to_string(),
+                node: capture.node,
+                pattern_index: query_match.pattern_index,
+                match_index: current_match_index,
+            });
         }
-        hits.push(CaptureHit {
-            name: capture_names[capture.index as usize].to_string(),
-            node: capture.node,
-        });
     }
     hits
 }
@@ -993,6 +1005,8 @@ mod tests {
             target_name: "flush".to_string(),
             relation: RelationKind::Calls,
             edge_kind: None,
+            receiver_text: None,
+            scope_text: None,
         });
 
         builder.resolve_pending_edges();
@@ -1002,5 +1016,69 @@ mod tests {
         assert_eq!(edge.source_node_id, source);
         assert_eq!(edge.target_node_id, None);
         assert_eq!(edge.target_label.as_deref(), Some("flush"));
+    }
+
+    #[test]
+    fn pending_edges_group_receivers_by_query_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        let path = root.join("src/lib.rs");
+        let source = "pub struct Outer;\n\
+             pub struct Inner;\n\
+             impl Outer {\n\
+                 pub fn foo(&self, _handler: fn(&Inner)) {}\n\
+             }\n\
+             impl Inner {\n\
+                 pub fn bar(&self) {}\n\
+             }\n\
+             pub fn caller(outer: &Outer) {\n\
+                 outer.foo({\n\
+                     fn nested(inner: &Inner) {\n\
+                         inner.bar();\n\
+                     }\n\
+                     nested\n\
+                 });\n\
+             }\n";
+        fs::write(&path, source).expect("write lib.rs");
+
+        let config = crate::extract::languages::rust_config();
+        let queries = compile_queries(&config, Language::Rust).expect("compile queries");
+        let mut parser = Parser::new();
+        parser
+            .set_language(&config.language)
+            .expect("configure parser");
+        let tree = parser.parse(source.as_bytes(), None).expect("parse source");
+        let mut builder = FactBuilder::new(root);
+
+        extract_file_from_tree(
+            &mut builder,
+            "rust",
+            &config,
+            &path,
+            source,
+            tree.root_node(),
+            &queries,
+        )
+        .expect("extract file");
+
+        let caller = builder
+            .facts
+            .nodes
+            .iter()
+            .find(|node| node.label == "caller" && node.kind == NodeKind::Function)
+            .expect("caller function");
+        let outer_edge = builder
+            .pending_edges
+            .iter()
+            .find(|edge| edge.source == caller.node_id && edge.target_name == "foo")
+            .expect("outer foo edge");
+
+        assert_eq!(outer_edge.receiver_text.as_deref(), Some("outer"));
+        assert_ne!(outer_edge.receiver_text.as_deref(), Some("inner"));
+        assert!(!builder
+            .pending_edges
+            .iter()
+            .any(|edge| edge.source == caller.node_id && edge.target_name == "bar"));
     }
 }

@@ -22,8 +22,10 @@
   function: [
     (identifier) @call.name
     (field_expression
+      value: (_) @call.receiver
       field: (field_identifier) @call.name)
     (scoped_identifier
+      path: (_) @call.scope
       name: (identifier) @call.name)
   ]) @call
 

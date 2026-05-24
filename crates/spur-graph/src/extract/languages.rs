@@ -381,25 +381,34 @@ pub(crate) fn emit_edges(
             "import" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
                 let relation = relation_kind_for_capture(config, "import", RelationKind::Imports);
-                for imported in
-                    contained_capture_text(capture.node, source, captures, "import.name")
-                {
+                for imported in contained_capture_text(capture, source, captures, "import.name") {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: imported,
                         relation,
                         edge_kind: None,
+                        receiver_text: None,
+                        scope_text: None,
                     });
                 }
             }
             "call" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
-                for callee in contained_capture_text(capture.node, source, captures, "call.name") {
+                let receiver_text =
+                    contained_capture_text(capture, source, captures, "call.receiver")
+                        .into_iter()
+                        .next();
+                let scope_text = contained_capture_text(capture, source, captures, "call.scope")
+                    .into_iter()
+                    .next();
+                for callee in contained_capture_text(capture, source, captures, "call.name") {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: callee,
                         relation: RelationKind::Calls,
                         edge_kind: None,
+                        receiver_text: receiver_text.clone(),
+                        scope_text: scope_text.clone(),
                     });
                 }
             }
@@ -413,6 +422,8 @@ pub(crate) fn emit_edges(
                     target_name: target_name.to_string(),
                     relation: RelationKind::References,
                     edge_kind: Some(GraphEdgeKind::ReferencesHof),
+                    receiver_text: None,
+                    scope_text: None,
                 });
             }
             _ => {}
@@ -454,6 +465,8 @@ pub(crate) fn emit_rust_dyn_trait_edges(
             target_name: format!("{trait_name}::{method}"),
             relation: RelationKind::Calls,
             edge_kind: Some(GraphEdgeKind::CallsDyn),
+            receiver_text: Some(receiver),
+            scope_text: None,
         });
     }
 }
@@ -627,7 +640,7 @@ fn definition_candidates<'tree>(
                 (
                     kind,
                     capture.node,
-                    definition_name(kind, capture.node, source, captures),
+                    definition_name(kind, capture, source, captures),
                 )
             })
         })
@@ -646,15 +659,15 @@ fn definition_candidates<'tree>(
 
 fn definition_name(
     kind: NodeKind,
-    definition_node: Node<'_>,
+    definition: &CaptureHit<'_>,
     source: &str,
     captures: &[CaptureHit<'_>],
 ) -> Option<String> {
     if kind == NodeKind::Impl {
-        let self_type = contained_capture_text(definition_node, source, captures, "impl.self")
+        let self_type = contained_capture_text(definition, source, captures, "impl.self")
             .into_iter()
             .next()?;
-        let trait_type = contained_capture_text(definition_node, source, captures, "impl.trait")
+        let trait_type = contained_capture_text(definition, source, captures, "impl.trait")
             .into_iter()
             .next();
         return Some(match trait_type {
@@ -663,7 +676,7 @@ fn definition_name(
         });
     }
 
-    contained_capture_text(definition_node, source, captures, "name")
+    contained_capture_text(definition, source, captures, "name")
         .into_iter()
         .next()
 }
@@ -860,14 +873,18 @@ fn is_literal_kind(kind: &str) -> bool {
 }
 
 fn contained_capture_text(
-    parent: Node<'_>,
+    parent: &CaptureHit<'_>,
     source: &str,
     captures: &[CaptureHit<'_>],
     capture_name: &str,
 ) -> Vec<String> {
     captures
         .iter()
-        .filter(|capture| capture.name == capture_name && contains(parent, capture.node))
+        .filter(|capture| {
+            capture.name == capture_name
+                && capture.pattern_index == parent.pattern_index
+                && capture.match_index == parent.match_index
+        })
         .map(|capture| child_text(capture.node, source).trim().to_string())
         .filter(|text| !text.is_empty())
         .collect()
