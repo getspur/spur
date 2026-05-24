@@ -31,7 +31,8 @@
         12,
         13,
         14,
-        15
+        15,
+        16
       ]
     }
   ],
@@ -183,6 +184,23 @@
       "enclosing_scope": null
     },
     {
+      "stable_symbol_id": "784f50a6d0f7404e",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        28,
+        39
+      ],
+      "line_range": [
+        2,
+        2
+      ],
+      "entity_name": "run",
+      "qualified_name": "Runner::run",
+      "symbol_kind": "method",
+      "anchor_hash": "12328839964882696488",
+      "enclosing_scope": "Runner"
+    },
+    {
       "stable_symbol_id": "45524754defdd6f8",
       "file_path": "src/helpers.ts",
       "byte_range": [
@@ -321,6 +339,16 @@
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
+      "source_stable_symbol_id": "88c2887e42a7e154",
+      "target_stable_symbol_id": null,
+      "target_label": "run",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
       "edge_kind": "calls"
     },
     {
@@ -330,16 +358,8 @@
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "88c2887e42a7e154",
-      "target_stable_symbol_id": "8070bc0cbf8984f8",
-      "target_label": "run",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
+      "edge_kind": "calls",
+      "bind_method": "singleton"
     },
     {
       "source_stable_symbol_id": "9156eac9b8c3b2ba",
@@ -358,6 +378,15 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "a643b3bc176ed041",
+      "target_stable_symbol_id": "784f50a6d0f7404e",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
     },
     {
       "source_stable_symbol_id": "b157cefaf7fe3c8c",
