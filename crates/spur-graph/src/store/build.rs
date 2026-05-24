@@ -83,11 +83,6 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
     },
     ManifestQueryBytes {
         language: "rust",
-        query: "symbols",
-        bytes: include_bytes!("../../queries/rust/symbols.scm"),
-    },
-    ManifestQueryBytes {
-        language: "rust",
         query: "spur-edges",
         bytes: include_bytes!("../../queries/rust/spur-edges.scm"),
     },
@@ -95,11 +90,6 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         language: "typescript",
         query: "tags",
         bytes: include_bytes!("../../queries/typescript/tags.scm"),
-    },
-    ManifestQueryBytes {
-        language: "typescript",
-        query: "symbols",
-        bytes: include_bytes!("../../queries/typescript/symbols.scm"),
     },
     ManifestQueryBytes {
         language: "typescript",
