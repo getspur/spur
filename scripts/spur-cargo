@@ -53,12 +53,26 @@ case "$SUBCOMMAND" in
 esac
 
 # ---- remote dispatch -------------------------------------------------------
+# build.sh exits with INFRA_UNAVAILABLE (200) only when the VM itself is
+# unreachable; cargo's own exit codes (1/100/101 for build/test failures)
+# pass through unchanged. We fall back to local cargo ONLY for 200 — a
+# genuine test/build failure must propagate so the worker doesn't waste
+# effort re-running locally.
+INFRA_UNAVAILABLE=200
 if [[ $REMOTE_ENABLED -eq 1 && $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
     echo "[spur-cargo] remote ($SUBCOMMAND) → GCP VM" >&2
-    if "$REMOTE_BUILD_SH" --auto-spin -- "$@"; then
+    set +e
+    "$REMOTE_BUILD_SH" --auto-spin -- "$@"
+    REMOTE_EXIT=$?
+    set -e
+    if [[ $REMOTE_EXIT -eq 0 ]]; then
         exit 0
     fi
-    echo "[spur-cargo] remote dispatch failed — falling back to local cargo" >&2
+    if [[ $REMOTE_EXIT -ne $INFRA_UNAVAILABLE ]]; then
+        echo "[spur-cargo] remote cargo exited $REMOTE_EXIT — propagating (not a VM-availability issue)" >&2
+        exit $REMOTE_EXIT
+    fi
+    echo "[spur-cargo] remote VM unavailable (exit $REMOTE_EXIT) — falling back to local cargo" >&2
 fi
 
 # ---- local fallback (original behavior) ------------------------------------
