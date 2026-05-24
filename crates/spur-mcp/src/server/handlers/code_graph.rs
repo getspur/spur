@@ -1890,7 +1890,12 @@ struct WorktreeGitMetadata {
 async fn worktree_git_metadata(worktree: &Path) -> Option<WorktreeGitMetadata> {
     tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
         let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
-        let status = run_git_stdout(worktree, &["status", "--porcelain"]).await?;
+        // `--untracked-files=no` scopes dirtiness to tracked changes: the flag
+        // answers "is the graph trustworthy?", not "does the filesystem have
+        // new files?". Untracked artifacts (logs, scratch RCAs) routinely
+        // litter active worktrees and would otherwise pin the flag to `true`.
+        let status =
+            run_git_stdout(worktree, &["status", "--porcelain", "--untracked-files=no"]).await?;
         Some(WorktreeGitMetadata {
             head_oid,
             has_uncommitted_changes: !status.is_empty(),
@@ -3375,6 +3380,33 @@ mod tests {
         assert_eq!(dirty["indexed_head_oid"], indexed_head_oid);
         assert_eq!(dirty["worktree_head_oid"], indexed_head_oid);
         assert_eq!(dirty["worktree_dirty"], true);
+    }
+
+    #[tokio::test]
+    async fn graph_metadata_ignores_untracked_files_when_reporting_dirty() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        let indexed_head_oid = init_clean_git_fixture(dir.path());
+        write_fixture_artifact(&dir);
+        write_fixture_pointer(&dir, &indexed_head_oid);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        std::fs::write(dir.path().join("scratch.log"), "untracked\n")
+            .expect("write untracked file");
+
+        let body = response_json(
+            server
+                .handle_code_callers(Value::from(1), json!({ "symbol": "graph://symbol/root" }))
+                .await,
+        );
+
+        assert_eq!(body["indexed_head_oid"], indexed_head_oid);
+        assert_eq!(body["worktree_head_oid"], indexed_head_oid);
+        assert_eq!(
+            body["worktree_dirty"], false,
+            "untracked-only worktrees must not flip worktree_dirty"
+        );
     }
 
     #[tokio::test]
