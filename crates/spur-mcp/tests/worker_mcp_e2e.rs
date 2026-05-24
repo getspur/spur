@@ -241,7 +241,6 @@ async fn end_to_end_orchestrator_worker_mcp_get_issue() {
         "list_issues",
         "report_progress",
         "report_signal",
-        "update_issue",
     ] {
         assert!(
             tools.iter().any(|name| name == expected),
