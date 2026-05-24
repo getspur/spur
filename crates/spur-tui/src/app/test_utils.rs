@@ -348,6 +348,22 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn issue_browser_for_test(&self) -> Option<&IssueBrowserView> {
+        self.issue_browser.as_ref()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn open_issue_browser_add_comment_modal_for_test(&mut self, issue_id: &str) {
+        if self.issue_browser.is_none() {
+            self.issue_browser = Some(IssueBrowserView::new());
+        }
+        self.current_view = ViewId::IssueBrowser;
+        if let Some(view) = self.issue_browser.as_mut() {
+            view.open_add_comment_modal_for_test(issue_id);
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn age_issue_browser_prefetch_for_test(&mut self, age: Duration) {
         if let Some(view) = self.issue_browser.as_mut() {
             view.age_pending_prefetch_for_test(age);
