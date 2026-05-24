@@ -47,7 +47,7 @@ impl<'a> TemporalIndex<'a> {
             .map(|(index, commit)| (commit.sha.as_str(), index))
             .collect();
         let mut snapshot_key_sets: HashMap<&'a str, HashSet<SnapshotKey>> = HashMap::new();
-        let mut referenced_snapshot_keys = HashSet::new();
+        let mut referenced_snapshot_count = 0;
         let mut rename_edges = Vec::new();
 
         for snapshot in &code.symbol_snapshots {
@@ -55,7 +55,7 @@ impl<'a> TemporalIndex<'a> {
                 &mut snapshot_key_sets,
                 snapshot.key.stable_symbol_id.as_str(),
                 snapshot.key.clone(),
-                &mut referenced_snapshot_keys,
+                &mut referenced_snapshot_count,
             );
         }
 
@@ -65,13 +65,13 @@ impl<'a> TemporalIndex<'a> {
                 &edge.source,
                 &mut stable_symbol_ids,
                 &mut snapshot_key_sets,
-                &mut referenced_snapshot_keys,
+                &mut referenced_snapshot_count,
             );
             index_endpoint(
                 &edge.target,
                 &mut stable_symbol_ids,
                 &mut snapshot_key_sets,
-                &mut referenced_snapshot_keys,
+                &mut referenced_snapshot_count,
             );
 
             if let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind {
@@ -80,7 +80,7 @@ impl<'a> TemporalIndex<'a> {
                     &mut snapshot_key_sets,
                     prev.stable_symbol_id.as_str(),
                     prev.clone(),
-                    &mut referenced_snapshot_keys,
+                    &mut referenced_snapshot_count,
                 );
                 if let Some(next) = rename_target(edge, prev) {
                     rename_edges.push((prev.clone(), next));
@@ -133,7 +133,7 @@ impl<'a> TemporalIndex<'a> {
             snapshot_keys_by_stable_symbol_id,
             rename_edges,
             rename_neighbors_by_snapshot,
-            referenced_snapshot_count: referenced_snapshot_keys.len(),
+            referenced_snapshot_count,
         }
     }
 
@@ -261,20 +261,22 @@ fn insert_snapshot_key<'a>(
     snapshot_key_sets: &mut HashMap<&'a str, HashSet<SnapshotKey>>,
     stable_symbol_id: &'a str,
     key: SnapshotKey,
-    referenced_snapshot_keys: &mut HashSet<SnapshotKey>,
+    referenced_snapshot_count: &mut usize,
 ) {
-    referenced_snapshot_keys.insert(key.clone());
-    snapshot_key_sets
+    if snapshot_key_sets
         .entry(stable_symbol_id)
         .or_default()
-        .insert(key);
+        .insert(key)
+    {
+        *referenced_snapshot_count += 1;
+    }
 }
 
 fn index_endpoint<'a>(
     endpoint: &'a EdgeEndpoint,
     stable_symbol_ids: &mut Vec<&'a str>,
     snapshot_key_sets: &mut HashMap<&'a str, HashSet<SnapshotKey>>,
-    referenced_snapshot_keys: &mut HashSet<SnapshotKey>,
+    referenced_snapshot_count: &mut usize,
 ) {
     match endpoint {
         EdgeEndpoint::Symbol { stable_symbol_id } => {
@@ -286,7 +288,7 @@ fn index_endpoint<'a>(
                 snapshot_key_sets,
                 key.stable_symbol_id.as_str(),
                 key.clone(),
-                referenced_snapshot_keys,
+                referenced_snapshot_count,
             );
         }
         EdgeEndpoint::File { .. } | EdgeEndpoint::Commit { .. } => {}
@@ -373,6 +375,9 @@ fn close_symbol_history_chain(
             break;
         }
     }
+    if !index.rename_edges.is_empty() {
+        detect_reachable_rename_cycle(&index.rename_edges, chain_keys)?;
+    }
     Ok(())
 }
 
@@ -419,7 +424,7 @@ fn close_rename_chain_indexed(
     }
 
     debug_assert!(chain_keys.len() <= snapshot_count);
-    detect_reachable_rename_cycle(&index.rename_edges, &component)
+    Ok(())
 }
 
 fn close_rename_chain(

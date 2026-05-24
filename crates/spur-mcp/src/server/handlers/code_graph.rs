@@ -12,7 +12,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use spur_graph::git_blob_oid;
-use spur_graph::temporal::{resolve_symbol_at, symbol_history, Resolution, ResolutionFailure};
+use spur_graph::temporal::{
+    resolve_symbol_at, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
+};
 use spur_graph::{
     bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
     resolve_artifact_location, resolve_selector, resolve_worktree_root_from, search_symbols,
@@ -971,6 +973,7 @@ fn code_symbol_history_events(
     commits: &CommitIndexArtifact,
     symbol_id: &str,
 ) -> Result<Vec<Value>, McpHandlerError> {
+    let index = TemporalIndex::new(artifact);
     let reachable = parse_as_of(args)?
         .map(|as_of| reachable_commits(commits, &as_of))
         .transpose()?;
@@ -978,7 +981,7 @@ fn code_symbol_history_events(
         return Ok(Vec::new());
     }
 
-    Ok(symbol_history(artifact, commits, symbol_id)
+    Ok(symbol_history(&index, commits, symbol_id)
         .into_iter()
         .filter(|(sha, _, _)| {
             reachable
@@ -1809,6 +1812,7 @@ fn resolve_symbol_as_of(
     symbol_id: &str,
     as_of: &str,
 ) -> Result<Resolution<String>, CodeGraphError> {
+    let index = TemporalIndex::new(artifact);
     if !commits.commits.iter().any(|commit| commit.sha == as_of) {
         return Err(McpHandlerError::InvalidParams(format!(
             "as_of commit `{as_of}` is not indexed"
@@ -1816,7 +1820,7 @@ fn resolve_symbol_as_of(
         .into());
     }
 
-    let history = symbol_history(artifact, commits, symbol_id);
+    let history = symbol_history(&index, commits, symbol_id);
     if history.is_empty() {
         return Err(McpHandlerError::NotFound(format!(
             "symbol {symbol_id} has no temporal history in graph artifact"
