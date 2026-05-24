@@ -11,77 +11,26 @@ CREATE OR REPLACE MACRO b64_decode_lenient(s) AS (
   from_base64(replace(replace(s, '-', '+'), '_', '/') || repeat('=', (4 - length(s) % 4) % 4))
 );
 
--- TRANSITIONAL. Bridges divergent stable_symbol_id recipes between structural extractor
--- and temporal writer. Remove once both writers call one shared identity function.
--- Tracked in bd-sidbridge1.
-CREATE OR REPLACE VIEW v_symbol_id_bridge AS
-WITH structural_symbols AS (
+CREATE OR REPLACE TEMP TABLE _assert_symbol_snapshot_direct_join_coverage AS
+WITH coverage AS (
   SELECT
-    stable_symbol_id AS structural_stable_symbol_id,
-    node_id AS structural_node_id,
-    file_path,
-    entity_name,
-    symbol_kind,
-    enclosing_scope,
-    line_start
-  FROM nodes
-  WHERE file_path IS NOT NULL
-    AND entity_name IS NOT NULL
-    AND symbol_kind IS NOT NULL
-),
-structural_unique AS (
-  SELECT
-    file_path,
-    entity_name,
-    symbol_kind,
-    enclosing_scope,
-    MIN(structural_stable_symbol_id) AS structural_stable_symbol_id,
-    MIN(structural_node_id) AS structural_node_id,
-    MIN(line_start) AS structural_line_start
-  FROM structural_symbols
-  GROUP BY file_path, entity_name, symbol_kind, enclosing_scope
-  HAVING COUNT(*) = 1
-     AND COUNT(DISTINCT structural_stable_symbol_id) = 1
-),
-snapshot_symbols AS (
-  SELECT DISTINCT
-    stable_symbol_id AS snapshot_stable_symbol_id,
-    TRY_CAST(decode(b64_decode_lenient(file_path_b64)) AS VARCHAR) AS file_path,
-    entity_name,
-    symbol_kind,
-    enclosing_scope
-  FROM symbol_snapshots
-  WHERE file_path_b64 IS NOT NULL
-    AND entity_name IS NOT NULL
-    AND symbol_kind IS NOT NULL
-),
-snapshot_unique AS (
-  SELECT
-    file_path,
-    entity_name,
-    symbol_kind,
-    enclosing_scope,
-    MIN(snapshot_stable_symbol_id) AS snapshot_stable_symbol_id
-  FROM snapshot_symbols
-  GROUP BY file_path, entity_name, symbol_kind, enclosing_scope
-  HAVING COUNT(*) = 1
-     AND COUNT(DISTINCT snapshot_stable_symbol_id) = 1
+    (SELECT COUNT(*) FROM nodes n JOIN symbol_snapshots s USING (stable_symbol_id)) AS direct_join_count,
+    (SELECT node_count FROM _meta LIMIT 1) AS node_count
 )
 SELECT
-  su.structural_stable_symbol_id,
-  sku.snapshot_stable_symbol_id,
-  su.structural_node_id,
-  su.file_path,
-  su.entity_name,
-  su.symbol_kind,
-  su.enclosing_scope,
-  su.structural_line_start
-FROM structural_unique su
-JOIN snapshot_unique sku
-  ON sku.file_path = su.file_path
- AND sku.entity_name = su.entity_name
- AND sku.symbol_kind = su.symbol_kind
- AND sku.enclosing_scope IS NOT DISTINCT FROM su.enclosing_scope;
+  CASE
+    WHEN direct_join_count * 100 >= node_count * 99 THEN direct_join_count
+    ELSE error(
+      'direct stable_symbol_id coverage below 99%: '
+      || CAST(direct_join_count AS VARCHAR)
+      || ' joined rows for '
+      || CAST(node_count AS VARCHAR)
+      || ' nodes'
+    )
+  END AS direct_join_count
+FROM coverage;
+
+DROP TABLE _assert_symbol_snapshot_direct_join_coverage;
 
 CREATE OR REPLACE VIEW v_symbol_file AS
 SELECT DISTINCT
