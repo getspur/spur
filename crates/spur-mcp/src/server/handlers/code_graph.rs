@@ -474,8 +474,8 @@ async fn code_search_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_search_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_search_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
     })
     .await
 }
@@ -515,8 +515,8 @@ async fn code_resolve_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_resolve_with_artifact(args, artifact)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_resolve_with_loaded_artifact(args, &loaded)
     })
     .await
 }
@@ -552,7 +552,54 @@ fn code_resolve_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> Co
 
     let worktree = current_worktree()?;
     let commits = load_commit_index_for_request(&worktree)?;
-    let resolution = resolve_symbol_as_of(artifact, &commits, &resolved.stable_symbol_id, &as_of)?;
+    let resolution =
+        resolve_symbol_as_of(artifact, None, &commits, &resolved.stable_symbol_id, &as_of)?;
+    code_resolve_temporal_response(artifact, &resolved.stable_symbol_id, &as_of, resolution)
+}
+
+fn code_resolve_with_loaded_artifact(
+    args: &Value,
+    loaded: &LoadedGraphArtifact,
+) -> CodeGraphResult {
+    let artifact = loaded.artifact();
+    let selector = selector_arg(args)?;
+    let Some(as_of) = parse_as_of(args)? else {
+        let candidates = resolve_candidate_rows(artifact, selector)?
+            .into_iter()
+            .map(candidate_row)
+            .collect::<Vec<_>>();
+
+        return Ok(json!({ "candidates": candidates }));
+    };
+
+    let resolved = match resolve_selector(artifact, selector) {
+        SelectorResolution::Resolved(resolved) => resolved,
+        SelectorResolution::Ambiguous { candidates } => {
+            let candidates = candidates
+                .into_iter()
+                .map(candidate_row)
+                .collect::<Vec<_>>();
+            return Ok(json!({ "candidates": candidates }));
+        }
+        SelectorResolution::NotFound => {
+            return Err(McpHandlerError::NotFound(format!(
+                "symbol {} not found in graph artifact",
+                missing_symbol_label(selector)
+            ))
+            .into());
+        }
+    };
+
+    let worktree = current_worktree()?;
+    let commits = load_commit_index_for_request(&worktree)?;
+    let temporal_index = loaded.temporal_index();
+    let resolution = resolve_symbol_as_of(
+        artifact,
+        Some(temporal_index),
+        &commits,
+        &resolved.stable_symbol_id,
+        &as_of,
+    )?;
     code_resolve_temporal_response(artifact, &resolved.stable_symbol_id, &as_of, resolution)
 }
 
@@ -621,8 +668,8 @@ async fn code_file_symbols_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_file_symbols_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_file_symbols_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
     })
     .await
 }
@@ -662,8 +709,8 @@ async fn code_symbol_info_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_symbol_info_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_symbol_info_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
     })
     .await
 }
@@ -693,8 +740,8 @@ async fn code_read_symbol_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_read_symbol_with_artifact(args, artifact).map_err(CodeGraphError::from)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_read_symbol_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
     })
     .await
 }
@@ -764,8 +811,8 @@ async fn code_callers_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_callers_with_artifact(args, artifact)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_callers_with_loaded_artifact(args, &loaded)
     })
     .await
 }
@@ -778,7 +825,43 @@ fn code_callers_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> Co
             return Ok(ambiguous_response(candidates));
         }
     };
-    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(artifact, &symbol_id, args)?;
+    let symbol_id =
+        resolve_symbol_for_optional_as_of_current_worktree(artifact, None, &symbol_id, args)?;
+
+    let records = find_caller_edges(artifact, &symbol_id);
+    let summary = caller_summary(&records);
+    let callers = records
+        .into_iter()
+        .filter(|record| request.include_unresolved || record.is_resolved())
+        .map(caller_row)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "callers": callers,
+        "include_unresolved": request.include_unresolved,
+        "counts_by_kind": summary.counts_by_kind,
+        "unresolved_sample": summary.unresolved_sample,
+    }))
+}
+
+fn code_callers_with_loaded_artifact(
+    args: &Value,
+    loaded: &LoadedGraphArtifact,
+) -> CodeGraphResult {
+    let artifact = loaded.artifact();
+    let request = code_traversal_request(args)?;
+    let symbol_id = match resolve_code_selector(args, artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(candidates));
+        }
+    };
+    let temporal_index = temporal_index_for_as_of(args, loaded)?;
+    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(
+        artifact,
+        temporal_index,
+        &symbol_id,
+        args,
+    )?;
 
     let records = find_caller_edges(artifact, &symbol_id);
     let summary = caller_summary(&records);
@@ -806,8 +889,8 @@ async fn code_callees_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_callees_with_artifact(args, artifact)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_callees_with_loaded_artifact(args, &loaded)
     })
     .await
 }
@@ -820,7 +903,43 @@ fn code_callees_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> Co
             return Ok(ambiguous_response(candidates));
         }
     };
-    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(artifact, &symbol_id, args)?;
+    let symbol_id =
+        resolve_symbol_for_optional_as_of_current_worktree(artifact, None, &symbol_id, args)?;
+
+    let records = find_callee_edges(artifact, &symbol_id);
+    let summary = callee_summary(&records);
+    let callees = records
+        .into_iter()
+        .filter(|record| request.include_unresolved || record.is_resolved())
+        .map(callee_row)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "callees": callees,
+        "include_unresolved": request.include_unresolved,
+        "counts_by_kind": summary.counts_by_kind,
+        "unresolved_sample": summary.unresolved_sample,
+    }))
+}
+
+fn code_callees_with_loaded_artifact(
+    args: &Value,
+    loaded: &LoadedGraphArtifact,
+) -> CodeGraphResult {
+    let artifact = loaded.artifact();
+    let request = code_traversal_request(args)?;
+    let symbol_id = match resolve_code_selector(args, artifact)? {
+        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(candidates));
+        }
+    };
+    let temporal_index = temporal_index_for_as_of(args, loaded)?;
+    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(
+        artifact,
+        temporal_index,
+        &symbol_id,
+        args,
+    )?;
 
     let records = find_callee_edges(artifact, &symbol_id);
     let summary = callee_summary(&records);
@@ -848,15 +967,31 @@ async fn code_subgraph_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |artifact| {
-        code_subgraph_with_artifact(args, artifact)
+    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
+        code_subgraph_with_loaded_artifact(args, &loaded)
     })
     .await
 }
 
 fn code_subgraph_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
+    code_subgraph_with_artifact_and_temporal(args, artifact, None)
+}
+
+fn code_subgraph_with_loaded_artifact(
+    args: &Value,
+    loaded: &LoadedGraphArtifact,
+) -> CodeGraphResult {
+    let temporal_index = temporal_index_for_as_of(args, loaded)?;
+    code_subgraph_with_artifact_and_temporal(args, loaded.artifact(), temporal_index)
+}
+
+fn code_subgraph_with_artifact_and_temporal(
+    args: &Value,
+    artifact: &GraphIndexArtifact,
+    temporal_index: Option<Arc<TemporalIndex>>,
+) -> CodeGraphResult {
     let request = code_traversal_request(args)?;
-    let root_ids = match code_subgraph_root_ids(args, artifact)? {
+    let root_ids = match code_subgraph_root_ids(args, artifact, temporal_index)? {
         CodeSubgraphRoots::RootIds(root_ids) => root_ids,
         CodeSubgraphRoots::Ambiguous(candidates) => {
             return Ok(ambiguous_response(candidates));
@@ -926,10 +1061,12 @@ fn code_subgraph_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> C
 
 pub(crate) async fn code_symbol_history(args: &Value) -> Result<Value, McpHandlerError> {
     let worktree = current_worktree()?;
-    let artifact = load_graph_artifact_for_worktree(&worktree)?;
+    let artifact = Arc::new(load_graph_artifact_for_worktree(&worktree)?);
     let commits = load_commit_index_for_request(&worktree)?;
     let symbol_id = symbol_id_arg(args)?;
-    let events = code_symbol_history_events(args, &artifact, &commits, &symbol_id)?;
+    let temporal_index = Arc::new(TemporalIndex::new(Arc::clone(&artifact)));
+    let events =
+        code_symbol_history_events(args, &artifact, &temporal_index, &commits, &symbol_id)?;
     let files = response_file_set_for_symbol_ids(&artifact, [symbol_id.as_str()]);
     Ok(with_graph_metadata_with_files(
         &artifact,
@@ -953,8 +1090,11 @@ async fn code_symbol_history_response(
         .map_err(CodeGraphError::without_metadata)?
         .to_string();
 
-    with_loaded_graph_artifact_for_worktree(&worktree, Some(rebuild_coordinator), |artifact| {
-        let events = code_symbol_history_events(args, artifact, &commits, &symbol_id)?;
+    with_loaded_graph_artifact_for_worktree(&worktree, Some(rebuild_coordinator), |loaded| {
+        let artifact = loaded.artifact();
+        let temporal_index = loaded.temporal_index();
+        let events =
+            code_symbol_history_events(args, artifact, &temporal_index, &commits, &symbol_id)?;
         let files = response_file_set_for_symbol_ids(artifact, [symbol_id.as_str()]);
         Ok(GraphResponsePayload::with_files(
             json!({
@@ -970,10 +1110,10 @@ async fn code_symbol_history_response(
 fn code_symbol_history_events(
     args: &Value,
     artifact: &GraphIndexArtifact,
+    temporal_index: &TemporalIndex,
     commits: &CommitIndexArtifact,
     symbol_id: &str,
 ) -> Result<Vec<Value>, McpHandlerError> {
-    let index = TemporalIndex::new(Arc::new(artifact.clone()));
     let reachable = parse_as_of(args)?
         .map(|as_of| reachable_commits(commits, &as_of))
         .transpose()?;
@@ -981,7 +1121,7 @@ fn code_symbol_history_events(
         return Ok(Vec::new());
     }
 
-    Ok(symbol_history(&index, commits, symbol_id)
+    Ok(symbol_history(temporal_index, commits, symbol_id)
         .into_iter()
         .filter(|(sha, _, _)| {
             reachable
@@ -1000,6 +1140,55 @@ fn code_symbol_history_events(
 
 type CodeGraphResult = Result<Value, CodeGraphError>;
 type CodeGraphPayloadResult = Result<GraphResponsePayload, CodeGraphError>;
+
+#[derive(Clone)]
+struct LoadedGraphArtifact {
+    artifact: Arc<GraphIndexArtifact>,
+    rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
+    rebuild_key: Option<LoadedRebuildKey>,
+}
+
+impl LoadedGraphArtifact {
+    fn new(
+        artifact: Arc<GraphIndexArtifact>,
+        rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
+        rebuild_key: Option<LoadedRebuildKey>,
+    ) -> Self {
+        Self {
+            artifact,
+            rebuild_coordinator,
+            rebuild_key,
+        }
+    }
+
+    fn artifact(&self) -> &GraphIndexArtifact {
+        &self.artifact
+    }
+
+    fn temporal_index(&self) -> Arc<TemporalIndex> {
+        match (&self.rebuild_coordinator, &self.rebuild_key) {
+            (Some(rebuild_coordinator), Some(rebuild_key))
+                if rebuild_key.retain_temporal_index_on_miss =>
+            {
+                rebuild_coordinator.temporal_index_for_artifact(
+                    rebuild_key.key.clone(),
+                    Arc::clone(&self.artifact),
+                )
+            }
+            (Some(rebuild_coordinator), Some(rebuild_key)) => rebuild_coordinator
+                .temporal_index_for_retained_artifact(&rebuild_key.key)
+                .unwrap_or_else(|| Arc::new(TemporalIndex::new(Arc::clone(&self.artifact)))),
+            _ => Arc::new(TemporalIndex::new(Arc::clone(&self.artifact))),
+        }
+    }
+}
+
+fn temporal_index_for_as_of(
+    args: &Value,
+    loaded: &LoadedGraphArtifact,
+) -> Result<Option<Arc<TemporalIndex>>, McpHandlerError> {
+    Ok(parse_as_of(args)?.map(|_| loaded.temporal_index()))
+}
 
 #[derive(Debug)]
 struct GraphResponsePayload {
@@ -1193,6 +1382,21 @@ struct RebuildCandidate {
     key: RebuildKey,
 }
 
+#[derive(Clone)]
+struct LoadedRebuildKey {
+    key: RebuildKey,
+    retain_temporal_index_on_miss: bool,
+}
+
+impl LoadedRebuildKey {
+    fn retain_on_miss(key: RebuildKey) -> Self {
+        Self {
+            key,
+            retain_temporal_index_on_miss: true,
+        }
+    }
+}
+
 impl GraphResponseMetadata {
     async fn from_artifact_with_files(
         artifact: &GraphIndexArtifact,
@@ -1339,12 +1543,16 @@ impl GraphResponseMetadata {
 
 async fn with_loaded_graph_artifact(
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
-    handler: impl Fn(&GraphIndexArtifact) -> CodeGraphResult,
+    handler: impl Fn(LoadedGraphArtifact) -> CodeGraphResult,
 ) -> CodeGraphResult {
     let artifact =
         Arc::new(load_graph_artifact_for_request().map_err(CodeGraphError::without_metadata)?);
-    with_loaded_graph_payload(rebuild_coordinator, artifact, |artifact| {
-        handler(artifact).map(GraphResponsePayload::body)
+    let rebuild_key = match current_worktree() {
+        Ok(worktree) => rebuild_key_for_loaded_artifact(&worktree, &artifact).await,
+        Err(_) => None,
+    };
+    with_loaded_graph_payload(rebuild_coordinator, artifact, rebuild_key, |loaded| {
+        handler(loaded).map(GraphResponsePayload::body)
     })
     .await
 }
@@ -1352,28 +1560,70 @@ async fn with_loaded_graph_artifact(
 async fn with_loaded_graph_artifact_for_worktree(
     worktree: &Path,
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
-    handler: impl Fn(&GraphIndexArtifact) -> CodeGraphPayloadResult,
+    handler: impl Fn(LoadedGraphArtifact) -> CodeGraphPayloadResult,
 ) -> CodeGraphResult {
     let artifact = Arc::new(
         load_graph_artifact_for_worktree(worktree).map_err(CodeGraphError::without_metadata)?,
     );
-    with_loaded_graph_payload(rebuild_coordinator, artifact, handler).await
+    let rebuild_key = rebuild_key_for_loaded_artifact(worktree, &artifact).await;
+    with_loaded_graph_payload(rebuild_coordinator, artifact, rebuild_key, handler).await
 }
 
 async fn with_loaded_graph_payload(
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
     artifact: Arc<GraphIndexArtifact>,
-    handler: impl Fn(&GraphIndexArtifact) -> CodeGraphPayloadResult,
+    rebuild_key: Option<LoadedRebuildKey>,
+    handler: impl Fn(LoadedGraphArtifact) -> CodeGraphPayloadResult,
 ) -> CodeGraphResult {
-    let payload = handler(&artifact).map_err(|error| error.with_artifact_metadata(&artifact))?;
+    let payload = handler(LoadedGraphArtifact::new(
+        Arc::clone(&artifact),
+        rebuild_coordinator.clone(),
+        rebuild_key,
+    ))
+    .map_err(|error| error.with_artifact_metadata(&artifact))?;
     Ok(with_graph_metadata_for_payload(rebuild_coordinator, artifact, payload, &handler).await)
+}
+
+async fn rebuild_key_for_loaded_artifact(
+    worktree: &Path,
+    artifact: &GraphIndexArtifact,
+) -> Option<LoadedRebuildKey> {
+    let git = worktree_git_metadata(worktree).await?;
+    let dirty_oids = if git.has_uncommitted_changes {
+        dirty_indexed_file_oids(worktree, &git.head_oid, artifact)
+    } else {
+        BTreeMap::new()
+    };
+    Some(LoadedRebuildKey {
+        key: RebuildKey::from(&git.head_oid, &dirty_oids),
+        retain_temporal_index_on_miss: !git.has_uncommitted_changes,
+    })
+}
+
+fn dirty_indexed_file_oids(
+    worktree: &Path,
+    worktree_head_oid: &str,
+    artifact: &GraphIndexArtifact,
+) -> BTreeMap<PathBuf, [u8; 20]> {
+    let files = artifact
+        .file_manifests
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
+        .collect::<Vec<_>>();
+    file_oid_cache::aggregate_file_oid_report(
+        worktree,
+        worktree_head_oid,
+        &artifact.graph_content_hash,
+        &files,
+    )
+    .dirty_oids
 }
 
 async fn with_graph_metadata_for_payload(
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
     artifact: Arc<GraphIndexArtifact>,
     mut payload: GraphResponsePayload,
-    handler: &impl Fn(&GraphIndexArtifact) -> CodeGraphPayloadResult,
+    handler: &impl Fn(LoadedGraphArtifact) -> CodeGraphPayloadResult,
 ) -> Value {
     let files = payload.files_for_metadata(&artifact);
     let mut analysis = GraphResponseMetadata::analyze_artifact_with_files(&artifact, &files).await;
@@ -1381,14 +1631,19 @@ async fn with_graph_metadata_for_payload(
     if let (Some(rebuild_coordinator), Some(rebuild_candidate)) =
         (rebuild_coordinator, analysis.rebuild_candidate.take())
     {
+        let rebuild_key = rebuild_candidate.key.clone();
         match try_rebuild_artifact(
-            rebuild_coordinator,
+            Arc::clone(&rebuild_coordinator),
             Arc::clone(&artifact),
             rebuild_candidate,
         )
         .await
         {
-            RebuildAttempt::Fresh(rebuilt_artifact) => match handler(&rebuilt_artifact) {
+            RebuildAttempt::Fresh(rebuilt_artifact) => match handler(LoadedGraphArtifact::new(
+                Arc::clone(&rebuilt_artifact),
+                Some(Arc::clone(&rebuild_coordinator)),
+                Some(LoadedRebuildKey::retain_on_miss(rebuild_key)),
+            )) {
                 Ok(mut fresh_payload) => {
                     let fresh_files = fresh_payload.files_for_metadata(&rebuilt_artifact);
                     GraphResponseMetadata::analyze_artifact_with_files(
@@ -1718,6 +1973,7 @@ fn commit_index_missing(worktree: &Path) -> McpHandlerError {
 
 fn resolve_symbol_for_optional_as_of(
     artifact: &GraphIndexArtifact,
+    temporal_index: Option<Arc<TemporalIndex>>,
     worktree: &Path,
     symbol_id: &str,
     args: &Value,
@@ -1729,12 +1985,13 @@ fn resolve_symbol_for_optional_as_of(
     temporal_resolution_symbol_id(
         symbol_id,
         &as_of,
-        resolve_symbol_as_of(artifact, &commits, symbol_id, &as_of)?,
+        resolve_symbol_as_of(artifact, temporal_index, &commits, symbol_id, &as_of)?,
     )
 }
 
 fn resolve_symbol_for_optional_as_of_current_worktree(
     artifact: &GraphIndexArtifact,
+    temporal_index: Option<Arc<TemporalIndex>>,
     symbol_id: &str,
     args: &Value,
 ) -> Result<String, CodeGraphError> {
@@ -1742,7 +1999,7 @@ fn resolve_symbol_for_optional_as_of_current_worktree(
         return Ok(symbol_id.to_string());
     }
     let worktree = current_worktree()?;
-    resolve_symbol_for_optional_as_of(artifact, &worktree, symbol_id, args)
+    resolve_symbol_for_optional_as_of(artifact, temporal_index, &worktree, symbol_id, args)
 }
 
 fn parse_as_of(args: &Value) -> Result<Option<String>, McpHandlerError> {
@@ -1808,11 +2065,13 @@ fn temporal_resolution_symbol_id(
 
 fn resolve_symbol_as_of(
     artifact: &GraphIndexArtifact,
+    temporal_index: Option<Arc<TemporalIndex>>,
     commits: &CommitIndexArtifact,
     symbol_id: &str,
     as_of: &str,
 ) -> Result<Resolution<String>, CodeGraphError> {
-    let index = TemporalIndex::new(Arc::new(artifact.clone()));
+    let temporal_index =
+        temporal_index.unwrap_or_else(|| Arc::new(TemporalIndex::new(Arc::new(artifact.clone()))));
     if !commits.commits.iter().any(|commit| commit.sha == as_of) {
         return Err(McpHandlerError::InvalidParams(format!(
             "as_of commit `{as_of}` is not indexed"
@@ -1820,7 +2079,7 @@ fn resolve_symbol_as_of(
         .into());
     }
 
-    let history = symbol_history(&index, commits, symbol_id);
+    let history = symbol_history(temporal_index.as_ref(), commits, symbol_id);
     if history.is_empty() {
         return Err(McpHandlerError::NotFound(format!(
             "symbol {symbol_id} has no temporal history in graph artifact"
@@ -2071,6 +2330,7 @@ fn code_traversal_request(args: &Value) -> Result<CodeTraversalRequest, McpHandl
 fn code_subgraph_root_ids(
     args: &Value,
     artifact: &GraphIndexArtifact,
+    temporal_index: Option<Arc<TemporalIndex>>,
 ) -> Result<CodeSubgraphRoots, CodeGraphError> {
     if let Some(start_nodes) = start_nodes_arg(args)? {
         if string_arg(args, "selector")?.is_some() || string_arg(args, "symbol")?.is_some() {
@@ -2087,7 +2347,12 @@ fn code_subgraph_root_ids(
 
     match resolve_code_selector(args, artifact)? {
         CodeSelectorResolution::Resolved(symbol_id) => Ok(CodeSubgraphRoots::RootIds(vec![
-            resolve_symbol_for_optional_as_of_current_worktree(artifact, &symbol_id, args)?,
+            resolve_symbol_for_optional_as_of_current_worktree(
+                artifact,
+                temporal_index,
+                &symbol_id,
+                args,
+            )?,
         ])),
         CodeSelectorResolution::Ambiguous(candidates) => {
             Ok(CodeSubgraphRoots::Ambiguous(candidates))
