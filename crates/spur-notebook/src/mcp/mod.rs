@@ -607,7 +607,7 @@ impl NotebookDaemonControl {
         Ok(path)
     }
 
-    async fn reopen(&self) -> Result<PathBuf, BridgeError> {
+    pub async fn reopen(&self) -> Result<PathBuf, BridgeError> {
         let (path, label) = {
             let state = self.state.lock().await;
             let path = state
@@ -947,6 +947,10 @@ mod tests {
             AgentBridge::new(),
         )))
     }
+    // Directly exercising NotebookDaemonControl::reopen requires an AppHandle
+    // whose manager can return a concrete WebviewWindow for the cached label.
+    // Tauri's mock AppHandle lives behind tauri's optional `test` feature,
+    // which this crate does not enable and this task's touch scope excludes.
 
     fn spawn_multiplexer(control: RecordingDaemonControl) -> (UnixStream, JoinHandle<()>) {
         let (server, client) = UnixStream::pair().expect("in-memory stream pair");

@@ -5,6 +5,8 @@ use std::{env, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use jute::state::State;
 use spur_core::notebook::notebook_binary_path;
+#[cfg(target_os = "macos")]
+use spur_notebook::mcp::NotebookDaemonControl;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
 use tauri::AppHandle;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -193,6 +195,12 @@ fn main() {
     let bridge_for_state = Arc::clone(&bridge);
     let bridge_for_setup = Arc::clone(&bridge);
     let bridge_for_run = Arc::clone(&bridge);
+    #[cfg(target_os = "macos")]
+    let daemon_control = Arc::new(tokio::sync::Mutex::new(None::<Arc<NotebookDaemonControl>>));
+    #[cfg(target_os = "macos")]
+    let daemon_control_for_setup = Arc::clone(&daemon_control);
+    #[cfg(target_os = "macos")]
+    let daemon_control_for_run = Arc::clone(&daemon_control);
 
     tauri::Builder::default()
         .manage(State::new())
@@ -232,14 +240,24 @@ fn main() {
             let server_bridge = Arc::clone(&bridge_for_setup);
             let server_socket_path = socket_path.clone();
             let server_app = app.handle().clone();
+            #[cfg(target_os = "macos")]
+            let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {
-                let result =
-                    mcp::start_daemon_server(server_socket_path, server_bridge, server_app)
-                        .await
-                        .map(|(handle, _control)| handle);
+                match mcp::start_daemon_server(server_socket_path, server_bridge, server_app).await
+                {
+                    Ok((handle, control)) => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let mut slot = daemon_control.lock().await;
+                            *slot = Some(Arc::new(control));
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        let _control = control;
 
-                match result {
-                    Ok(_handle) => std::future::pending::<()>().await,
+                        let keep_alive = handle;
+                        std::future::pending::<()>().await;
+                        drop(keep_alive);
+                    }
                     Err(error) => tracing::error!(%error, "failed to start notebook MCP server"),
                 }
             });
@@ -285,6 +303,32 @@ fn main() {
                         .filter_map(|url| url.to_file_path().ok())
                         .collect::<Vec<_>>();
                     handle_file_associations(app, &files).unwrap();
+                }
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen {
+                    has_visible_windows,
+                    ..
+                } => {
+                    if !has_visible_windows {
+                        let daemon_control = Arc::clone(&daemon_control_for_run);
+                        tauri::async_runtime::spawn(async move {
+                            let control = {
+                                let slot = daemon_control.lock().await;
+                                slot.as_ref().map(Arc::clone)
+                            };
+
+                            let Some(control) = control else {
+                                tracing::warn!(
+                                    "cannot reopen notebook window before daemon control is ready"
+                                );
+                                return;
+                            };
+
+                            if let Err(error) = control.reopen().await {
+                                tracing::warn!(%error, "failed to reopen notebook window");
+                            }
+                        });
+                    }
                 }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Ready => {
