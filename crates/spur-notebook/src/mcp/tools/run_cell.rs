@@ -23,7 +23,11 @@ struct RunCellParams {
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Run a code cell against a kernel slot, returning the full execution result.",
+        concat!(
+            "Run a code cell synchronously: the call blocks until the kernel emits Finished or ",
+            "Disconnect, then returns aggregated outputs. Long-running cells will hold the MCP ",
+            "request open for their full duration."
+        ),
         rmcp_object(json!({
             "type": "object",
             "required": ["cell_id", "kernel_id", "code"],
@@ -81,7 +85,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
                 json!({
                     "cell_id": params.cell_id,
                     "kernel_id": params.kernel_id,
-                    "event": event_value,
+                    "event": event_value.clone(),
                 }),
             );
         }
@@ -97,8 +101,14 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             RunCellEvent::Disconnect(message) => {
                 status = format!("disconnect: {message}");
             }
-            _ => {
-                outputs.push(serde_json::to_value(&event).unwrap_or(Value::Null));
+            RunCellEvent::Stdout(_)
+            | RunCellEvent::Stderr(_)
+            | RunCellEvent::ExecuteResult(_)
+            | RunCellEvent::DisplayData(_)
+            | RunCellEvent::UpdateDisplayData(_)
+            | RunCellEvent::ClearOutput(_)
+            | RunCellEvent::Error(_) => {
+                outputs.push(event_value);
             }
         }
     }
@@ -132,6 +142,15 @@ mod tests {
             app: None,
             daemon: None,
         }
+    }
+
+    #[test]
+    fn tool_description_discloses_synchronous_contract() {
+        let tool = tool();
+        let description = tool.description.expect("tool has description");
+
+        assert!(description.contains("blocks until the kernel emits Finished or Disconnect"));
+        assert!(description.contains("Long-running cells will hold the MCP request open"));
     }
 
     #[tokio::test]
