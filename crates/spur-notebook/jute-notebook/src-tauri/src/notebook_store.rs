@@ -10,9 +10,11 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use thiserror::Error;
 use tokio::sync::broadcast;
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
@@ -39,7 +41,9 @@ pub struct NotebookStore {
 }
 
 /// Cell kind to create when inserting a notebook cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum CellKind {
     /// Raw cell.
     Raw,
@@ -60,6 +64,8 @@ pub enum NotebookOp {
         source: String,
         /// Expected store version for optimistic concurrency.
         expected_version: Option<u64>,
+        /// Agent that last edited the cell.
+        last_edited_by: Option<String>,
     },
     /// Insert a new cell after an optional existing cell.
     InsertCell {
@@ -69,6 +75,8 @@ pub enum NotebookOp {
         after_id: Option<String>,
         /// Initial cell source.
         source: String,
+        /// Agent that created the cell.
+        last_edited_by: Option<String>,
     },
     /// Delete an existing cell after checking document version.
     DeleteCell {
@@ -87,16 +95,21 @@ pub enum NotebookOp {
 }
 
 /// Broadcast notification emitted after each store mutation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
 pub struct NotebookDelta {
     /// Monotonic document version after the mutation.
+    #[ts(type = "number")]
     pub version: u64,
     /// Kind of mutation represented by this delta.
     pub kind: DeltaKind,
 }
 
 /// Kind of store mutation represented by a [`NotebookDelta`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
 pub enum DeltaKind {
     /// A cell's source was replaced.
     CellWritten {
@@ -122,6 +135,7 @@ pub enum DeltaKind {
         /// Cell identifier.
         cell_id: String,
         /// Applied run event.
+        #[serde(skip_deserializing, default = "default_run_cell_event")]
         event: RunCellEvent,
     },
     /// A notebook was loaded into the store.
@@ -201,11 +215,12 @@ impl NotebookStore {
     /// Apply a notebook edit operation.
     pub fn apply(&self, op: NotebookOp) -> Result<NotebookDelta, StoreError> {
         let mut root = self.inner.write();
-        let kind = match op {
+        let (kind, metadata_update) = match op {
             NotebookOp::WriteCell {
                 id,
                 source,
                 expected_version,
+                last_edited_by,
             } => {
                 if let Some(expected) = expected_version {
                     self.ensure_version(expected)?;
@@ -213,12 +228,15 @@ impl NotebookStore {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 set_cell_source(cell, source);
-                DeltaKind::CellWritten { id }
+                let metadata_update = Some((id.clone(), last_edited_by));
+                let kind = DeltaKind::CellWritten { id };
+                (kind, metadata_update)
             }
             NotebookOp::InsertCell {
                 kind,
                 after_id,
                 source,
+                last_edited_by,
             } => {
                 let insert_at = match after_id.as_deref() {
                     Some(after_id) => find_cell_index(&root, after_id)
@@ -231,7 +249,9 @@ impl NotebookStore {
                 let id = Uuid::new_v4().to_string();
                 root.cells
                     .insert(insert_at, make_cell(kind, id.clone(), source));
-                DeltaKind::CellInserted { id, kind, after_id }
+                let metadata_update = Some((id.clone(), last_edited_by));
+                let kind = DeltaKind::CellInserted { id, kind, after_id };
+                (kind, metadata_update)
             }
             NotebookOp::DeleteCell {
                 id,
@@ -241,20 +261,26 @@ impl NotebookStore {
                 let index = find_cell_index(&root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 root.cells.remove(index);
-                DeltaKind::CellDeleted { id }
+                (DeltaKind::CellDeleted { id }, None)
             }
             NotebookOp::ApplyEdit { id, source } => {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 set_cell_source(cell, source);
-                DeltaKind::CellWritten { id }
+                let metadata_update = Some((id.clone(), None));
+                let kind = DeltaKind::CellWritten { id };
+                (kind, metadata_update)
             }
         };
 
-        let delta = NotebookDelta {
-            version: self.bump_version(),
-            kind,
-        };
+        let version = self.bump_version();
+        if let Some((id, last_edited_by)) = metadata_update {
+            if let Some(cell) = find_cell_mut(&mut root, &id) {
+                set_cell_spur_metadata(cell, version, last_edited_by);
+            }
+        }
+
+        let delta = NotebookDelta { version, kind };
         self.dirty.store(true, Ordering::SeqCst);
         drop(root);
         self.publish(&delta);
@@ -410,6 +436,26 @@ fn set_cell_source(cell: &mut Cell, source: String) {
     }
 }
 
+fn set_cell_spur_metadata(cell: &mut Cell, version: u64, last_edited_by: Option<String>) {
+    let metadata = match cell {
+        Cell::Raw(cell) => &mut cell.metadata,
+        Cell::Markdown(cell) => &mut cell.metadata,
+        Cell::Code(cell) => &mut cell.metadata,
+    };
+    let previous_last_edited_by = metadata
+        .spur
+        .as_ref()
+        .and_then(|spur| spur.last_edited_by.clone());
+    metadata.spur = Some(crate::backend::notebook::SpurCellMetadata {
+        version,
+        last_edited_by: last_edited_by.or(previous_last_edited_by),
+    });
+}
+
+fn default_run_cell_event() -> RunCellEvent {
+    RunCellEvent::Started
+}
+
 fn apply_event_to_code_cell(cell: &mut CodeCell, event: &RunCellEvent) {
     match event {
         RunCellEvent::Started => {
@@ -562,6 +608,7 @@ mod tests {
                 id: CELL_ID.to_string(),
                 source: "x = 1".to_string(),
                 expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
             })
             .unwrap();
         let run = store
@@ -611,6 +658,7 @@ mod tests {
                 id: CELL_ID.to_string(),
                 source: "fresh".to_string(),
                 expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
             })
             .unwrap();
 
@@ -619,6 +667,7 @@ mod tests {
                 id: CELL_ID.to_string(),
                 source: "stale".to_string(),
                 expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
             })
             .unwrap_err();
 

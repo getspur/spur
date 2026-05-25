@@ -40,6 +40,7 @@ pub async fn call_new(deps: &ServerDeps, arguments: Value) -> Result<CallToolRes
             command: "new".to_string(),
             path: None,
             pinned: None,
+            ..Default::default()
         })
         .await;
     let response = check_response(response)?;
@@ -92,6 +93,7 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
             command: "open".to_string(),
             path: Some(path),
             pinned: None,
+            ..Default::default()
         })
         .await;
     let response = check_response(response)?;
@@ -124,6 +126,7 @@ pub async fn call_close(deps: &ServerDeps, arguments: Value) -> Result<CallToolR
             command: "close".to_string(),
             path: None,
             pinned: None,
+            ..Default::default()
         })
         .await;
     check_response(response)?;
@@ -155,6 +158,7 @@ pub async fn call_reopen(deps: &ServerDeps, arguments: Value) -> Result<CallTool
             command: "reopen".to_string(),
             path: None,
             pinned: None,
+            ..Default::default()
         })
         .await;
     let response = check_response(response)?;
