@@ -11,6 +11,7 @@ pub mod entity;
 /// Lazy provisioning of the bundled Python 3 kernelspec.
 pub mod kernel_provision;
 pub mod menu;
+pub mod notebook_store;
 pub mod state;
 pub mod window;
 
