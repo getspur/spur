@@ -178,6 +178,30 @@ impl TemporalIndex {
         !self.commit_positions.is_empty()
     }
 
+    pub fn index_size_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        let edges_by_id = self.edges_by_stable_symbol_id.capacity()
+            * (size_of::<String>() + size_of::<Vec<usize>>());
+        let edges_by_sha =
+            self.edges_by_commit_sha.capacity() * (size_of::<String>() + size_of::<Vec<usize>>());
+        let positions =
+            self.commit_positions.capacity() * (size_of::<String>() + size_of::<usize>());
+        let snapshot_keys = self.snapshot_keys_by_stable_symbol_id.capacity()
+            * (size_of::<String>() + size_of::<Vec<SnapshotKey>>());
+        let rename_neighbors = self.rename_neighbors_by_snapshot.capacity()
+            * (size_of::<SnapshotKey>() + size_of::<Vec<SnapshotKey>>());
+        let rename_edges_bytes =
+            self.rename_edges.capacity() * size_of::<(SnapshotKey, SnapshotKey)>();
+
+        edges_by_id
+            + edges_by_sha
+            + positions
+            + snapshot_keys
+            + rename_neighbors
+            + rename_edges_bytes
+    }
+
     fn commit_position(&self, commit: &str) -> usize {
         self.commit_positions
             .get(commit)
@@ -576,15 +600,21 @@ fn resolve_from_anchor_key(
     anchor_key: SnapshotKey,
 ) -> Resolution<StableSymbolId> {
     let mut current = anchor_key;
+    let anchor = current.clone();
     let mut chain = Vec::new();
     let mut visited = HashSet::new();
 
     loop {
         if !visited.insert(current.clone()) {
+            let path = std::iter::once(&anchor)
+                .chain(chain.iter())
+                .map(|key| format!("`{}`@`{}`", key.stable_symbol_id, key.commit))
+                .collect::<Vec<_>>()
+                .join(" -> ");
             return Resolution::Unknown {
                 reason: ResolutionFailure::IndexCorrupt(format!(
-                    "cycle in rename chain at `{}`@`{}`",
-                    current.stable_symbol_id, current.commit
+                    "cycle in rename chain at `{}`@`{}` (cycle: {})",
+                    current.stable_symbol_id, current.commit, path
                 )),
             };
         }
@@ -1125,6 +1155,39 @@ mod tests {
     }
 
     #[test]
+    fn cycle_error_includes_chain_path() {
+        let (mut graph, mut commits) = fixture();
+        let old = graph.symbol_snapshots[0].key.clone();
+        let new = graph.symbol_snapshots[1].key.clone();
+        graph.temporal_edges.push(TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot { key: new.clone() },
+            target: EdgeEndpoint::Snapshot { key: old.clone() },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(new))),
+        });
+        commits.commits.truncate(2);
+        commits.commits[0].parents = vec!["c2".into()];
+        commits.refs = [("main".into(), "c2".into())].into();
+        let commit_graph = CommitGraph::new(&commits);
+        let target_ancestors = commit_graph.ancestors_of("c2").unwrap();
+
+        let resolution = resolve_from_anchor_key(&graph, &commit_graph, &target_ancestors, old);
+
+        match resolution {
+            Resolution::Unknown {
+                reason: ResolutionFailure::IndexCorrupt(message),
+            } => {
+                assert!(
+                    message.contains("cycle: `old`@`c1` -> `new`@`c2` -> `old`@`c1`"),
+                    "expected path in {message}"
+                );
+            }
+            other => panic!("expected cycle error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn resolves_renamed_symbol_to_target() {
         let (graph, commits) = fixture();
         let resolution = resolve_symbol_at(&graph, &commits, "old", "c1", "c3");
@@ -1169,6 +1232,14 @@ mod tests {
         assert_eq!(hist.len(), 2);
         assert_eq!(hist[0].2.stable_symbol_id, "old");
         assert_eq!(hist[1].2.stable_symbol_id, "new");
+    }
+
+    #[test]
+    fn index_size_bytes_is_nonzero_for_populated_index() {
+        let (graph, _) = fixture();
+        let index = TemporalIndex::new(Arc::new(graph));
+
+        assert!(index.index_size_bytes() > 0);
     }
 
     #[test]
