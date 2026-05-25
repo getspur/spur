@@ -75,13 +75,8 @@ pub async fn call_move_to_trash(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.move_to_trash path must not be empty",
-            None,
-        ));
-    }
-    jute::commands::move_notebook_to_trash(params.path)
+    let path = super::validate_notebook_path("notebook.move_to_trash", &params.path)?;
+    jute::commands::move_notebook_to_trash(path.to_string_lossy().into_owned())
         .await
         .map_err(|error| jute_error("trash_failed", "notebook.move_to_trash failed", &error))?;
     emit_recents_changed(deps);
@@ -115,13 +110,8 @@ pub async fn call_reveal_in_finder(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.reveal_in_finder path must not be empty",
-            None,
-        ));
-    }
-    jute::commands::reveal_notebook_in_finder(params.path)
+    let path = super::validate_notebook_path("notebook.reveal_in_finder", &params.path)?;
+    jute::commands::reveal_notebook_in_finder(path.to_string_lossy().into_owned())
         .await
         .map_err(|error| jute_error("reveal_failed", "notebook.reveal_in_finder failed", &error))?;
     Ok(CallToolResult::structured(json!({ "ok": true })))

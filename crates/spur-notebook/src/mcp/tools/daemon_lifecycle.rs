@@ -2,8 +2,6 @@
 //! (new/open/close/reopen). Each tool reuses the in-process
 //! `NotebookDaemonControl` so we never reimplement the daemon protocol.
 
-use std::path::PathBuf;
-
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -132,24 +130,20 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.open path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path("notebook.open", &params.path)?;
+    let fallback_path = path.to_string_lossy().into_owned();
     let daemon = require_daemon(deps)?;
     let response = daemon
         .handle(DaemonControlRequest {
             id: None,
             daemon: None,
             command: "open".to_string(),
-            path: Some(PathBuf::from(&params.path)),
+            path: Some(path),
             pinned: None,
         })
         .await;
     let response = check_response(response)?;
-    let path = response.path.unwrap_or(params.path);
+    let path = response.path.unwrap_or(fallback_path);
     emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "path": path })))
 }
