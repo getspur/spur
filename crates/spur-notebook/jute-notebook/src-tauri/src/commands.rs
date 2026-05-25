@@ -591,6 +591,33 @@ pub async fn handle_daemon_control_request(
     }
 }
 
+/// Read one cell from the authoritative in-process notebook store.
+#[tauri::command]
+pub async fn read_notebook_store_cell(
+    id: &str,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<DaemonCell, Error> {
+    if id.is_empty() {
+        return Err(Error::NotebookDaemon(
+            "cell id must not be empty".to_string(),
+        ));
+    }
+
+    let notebook = state.get_notebook();
+    let (root, _version) = notebook.snapshot();
+    read_daemon_cell(&root, id).map_err(daemon_control_failure_to_error)
+}
+
+/// Read a full snapshot from the authoritative in-process notebook store.
+#[tauri::command]
+pub async fn notebook_store_snapshot(
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<DaemonNotebookSnapshot, Error> {
+    let notebook = state.get_notebook();
+    let (root, version) = notebook.snapshot();
+    Ok(DaemonNotebookSnapshot { root, version })
+}
+
 async fn handle_daemon_control_inner(
     command: DaemonControlCommand,
     state: &State,
@@ -677,6 +704,14 @@ async fn handle_daemon_control_inner(
             format!("daemon command is not handled by the notebook store: {command:?}"),
         )),
     }
+}
+
+fn daemon_control_failure_to_error(response: DaemonControlResponse) -> Error {
+    let message = response
+        .error
+        .map(|error| format!("{}: {}", error.code, error.message))
+        .unwrap_or_else(|| "notebook store command failed without an error body".to_string());
+    Error::NotebookDaemon(message)
 }
 
 fn validate_cell_id(id: &str) -> Result<(), DaemonControlResponse> {
