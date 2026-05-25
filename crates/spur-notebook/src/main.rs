@@ -230,6 +230,8 @@ fn main() {
             jute::commands::run_cell,
             jute::commands::interrupt_kernel,
             jute::commands::get_notebook,
+            jute::commands::read_notebook_store_cell,
+            jute::commands::notebook_store_snapshot,
             jute::commands::save_to_disk,
             jute::commands::venv::venv_list_python_versions,
             jute::commands::venv::venv_create,
@@ -244,6 +246,10 @@ fn main() {
             let server_socket_path = socket_path.clone();
             let server_app = app.handle().clone();
             let server_state = Arc::clone(&state_for_setup);
+            jute::spawn_notebook_delta_forwarder(
+                app.handle().clone(),
+                Arc::clone(&state_for_setup),
+            );
             #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {

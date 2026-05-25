@@ -467,6 +467,7 @@ async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook()
             command: "open".to_string(),
             path: Some(notebook_a.clone()),
             pinned: None,
+            ..Default::default()
         })
         .await;
     assert!(first_open.ok, "{:?}", first_open.error);
@@ -493,6 +494,7 @@ async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook()
             command: "open".to_string(),
             path: Some(notebook_b.clone()),
             pinned: None,
+            ..Default::default()
         })
         .await;
     assert!(second_open.ok, "{:?}", second_open.error);
