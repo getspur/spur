@@ -69,7 +69,7 @@ fn emit_recents_changed(deps: &ServerDeps) {
 pub fn new_tool() -> Tool {
     Tool::new(
         "notebook.new",
-        "Create a new Untitled scratch notebook and open it.",
+        "Create a new Untitled scratch notebook and open it. If a notebook is already open, the daemon first flushes its in-memory cell buffer to the current path.",
         rmcp_object(json!({
             "type": "object",
             "properties": {},
@@ -111,7 +111,7 @@ struct OpenParams {
 pub fn open_tool() -> Tool {
     Tool::new(
         "notebook.open",
-        "Open a notebook at the given path through the daemon.",
+        "Open a notebook at the given path through the daemon. If a notebook is already open, the daemon first flushes its in-memory cell buffer to the current path.",
         rmcp_object(json!({
             "type": "object",
             "required": ["path"],
@@ -153,7 +153,7 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
 pub fn close_tool() -> Tool {
     Tool::new(
         "notebook.close",
-        "Close the daemon's currently open notebook window.",
+        "Close the daemon's currently open notebook window after flushing its in-memory cell buffer to the current path.",
         rmcp_object(json!({
             "type": "object",
             "properties": {},
