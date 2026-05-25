@@ -125,6 +125,7 @@ struct PendingResolutionIndexes<'a> {
     singleton_symbols_by_label: &'a HashMap<String, NodeId>,
     ambiguous_symbols_by_label: &'a HashMap<String, usize>,
     files_by_label: &'a HashMap<String, NodeId>,
+    file_by_id: &'a HashMap<NodeId, &'a str>,
     node_kind_by_id: &'a HashMap<NodeId, NodeKind>,
     enclosing_scope_by_id: &'a HashMap<NodeId, String>,
 }
@@ -454,7 +455,14 @@ impl<'a> FactBuilder<'a> {
             .iter()
             .map(|node| (node.node_id, node.kind))
             .collect();
-        let (qualified_symbols_by_name, enclosing_scope_by_id) = {
+        let file_path_by_file_node: HashMap<NodeId, String> = self
+            .facts
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::File)
+            .map(|node| (node.node_id, node.label.clone()))
+            .collect();
+        let (qualified_symbols_by_name, enclosing_scope_by_id, file_by_id) = {
             let nodes_by_id: HashMap<_, _> = self
                 .facts
                 .nodes
@@ -465,6 +473,12 @@ impl<'a> FactBuilder<'a> {
             (
                 qualified_symbols_by_name_from_maps(&self.facts, &nodes_by_id, &parent_by_target),
                 enclosing_scope_by_id(&self.facts, &nodes_by_id, &parent_by_target),
+                file_by_id_from_maps(
+                    &self.facts,
+                    &nodes_by_id,
+                    &parent_by_target,
+                    &file_path_by_file_node,
+                ),
             )
         };
         let pending = std::mem::take(&mut self.pending_edges);
@@ -472,10 +486,13 @@ impl<'a> FactBuilder<'a> {
             singleton_symbols_by_label: &singleton_symbols_by_label,
             ambiguous_symbols_by_label: &ambiguous_symbols_by_label,
             files_by_label: &files_by_label,
+            file_by_id: &file_by_id,
             node_kind_by_id: &node_kind_by_id,
             enclosing_scope_by_id: &enclosing_scope_by_id,
         };
         let mut ambiguous_unresolved = 0usize;
+        let mut phantom_blocked_references = 0usize;
+        let mut phantom_blocked_calls = 0usize;
         for edge in pending {
             if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
                 let mut candidates = Vec::new();
@@ -519,6 +536,14 @@ impl<'a> FactBuilder<'a> {
                             Some(NodeKind::Function | NodeKind::Method)
                         )
                     {
+                        if let (Some(src_file), Some(tgt_file)) = (
+                            file_by_id.get(&edge.source).copied(),
+                            file_by_id.get(&target).copied(),
+                        ) {
+                            if !function_singleton_safe(src_file, tgt_file) {
+                                phantom_blocked_references += 1;
+                            }
+                        }
                         self.add_pending_edge(&edge, Some(target));
                     }
                 }
@@ -543,6 +568,7 @@ impl<'a> FactBuilder<'a> {
                             &edge,
                             &indexes,
                             &mut ambiguous_unresolved,
+                            &mut phantom_blocked_calls,
                         );
                     }
                 }
@@ -557,13 +583,26 @@ impl<'a> FactBuilder<'a> {
                 );
                 self.add_pending_edge(&edge, None);
             } else {
-                resolve_bare_pending_edge(self, &edge, &indexes, &mut ambiguous_unresolved);
+                resolve_bare_pending_edge(
+                    self,
+                    &edge,
+                    &indexes,
+                    &mut ambiguous_unresolved,
+                    &mut phantom_blocked_calls,
+                );
             }
         }
         if ambiguous_unresolved > 0 {
             tracing::info!(
                 ambiguous_unresolved,
                 "spur-graph: left ambiguous pending edges unresolved"
+            );
+        }
+        if phantom_blocked_references > 0 || phantom_blocked_calls > 0 {
+            tracing::info!(
+                phantom_blocked_references,
+                phantom_blocked_calls,
+                "spur-graph: crate-scope gate (measurement-only) would have blocked phantom singleton binds"
             );
         }
     }
@@ -574,6 +613,7 @@ fn resolve_call_edge_after_qualified_miss(
     edge: &PendingEdge,
     indexes: &PendingResolutionIndexes<'_>,
     ambiguous_unresolved: &mut usize,
+    phantom_blocked_calls: &mut usize,
 ) {
     let candidates = method_scope_candidates(
         edge,
@@ -595,7 +635,13 @@ fn resolve_call_edge_after_qualified_miss(
             builder.add_pending_edge(edge, None);
         }
         _ => {
-            resolve_bare_pending_edge(builder, edge, indexes, ambiguous_unresolved);
+            resolve_bare_pending_edge(
+                builder,
+                edge,
+                indexes,
+                ambiguous_unresolved,
+                phantom_blocked_calls,
+            );
         }
     }
 }
@@ -605,6 +651,7 @@ fn resolve_bare_pending_edge(
     edge: &PendingEdge,
     indexes: &PendingResolutionIndexes<'_>,
     ambiguous_unresolved: &mut usize,
+    phantom_blocked_calls: &mut usize,
 ) {
     if let Some(candidates) = indexes
         .ambiguous_symbols_by_label
@@ -648,12 +695,48 @@ fn resolve_bare_pending_edge(
             }
         }
         Some(NodeKind::Function) if edge.relation == RelationKind::Calls => {
+            if let (Some(src_file), Some(tgt_file)) = (
+                indexes.file_by_id.get(&edge.source).copied(),
+                indexes.file_by_id.get(&target).copied(),
+            ) {
+                if !function_singleton_safe(src_file, tgt_file) {
+                    *phantom_blocked_calls += 1;
+                }
+            }
             builder.add_pending_edge_with_bind_method(edge, Some(target), Some("singleton"));
         }
         _ => {
             builder.add_pending_edge(edge, Some(target));
         }
     }
+}
+
+fn function_singleton_safe(src_file: &str, tgt_file: &str) -> bool {
+    if src_file == tgt_file {
+        return true;
+    }
+    let src_crate = path_scope(src_file);
+    let tgt_crate = path_scope(tgt_file);
+    src_crate.is_some() && src_crate == tgt_crate
+}
+
+fn path_crate(path: &str) -> Option<&str> {
+    let stripped = path.strip_prefix("crates/")?;
+    let end = stripped.find('/')?;
+    if end == 0 {
+        return None;
+    }
+    Some(&stripped[..end])
+}
+
+fn path_scope(path: &str) -> Option<&str> {
+    if let Some(krate) = path_crate(path) {
+        return Some(krate);
+    }
+    if path.starts_with("crates/") {
+        return None;
+    }
+    path.split('/').next().filter(|segment| !segment.is_empty())
 }
 
 fn method_scope_candidates(
@@ -782,6 +865,50 @@ fn enclosing_scope_by_id(
             }
         })
         .collect()
+}
+
+fn file_by_id_from_maps<'a>(
+    facts: &GraphFacts,
+    nodes_by_id: &HashMap<NodeId, &GraphNode>,
+    parent_by_target: &HashMap<NodeId, NodeId>,
+    file_path_by_file_node: &'a HashMap<NodeId, String>,
+) -> HashMap<NodeId, &'a str> {
+    facts
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let file_node_id = file_node_id_for(node, nodes_by_id, parent_by_target)?;
+            let file_path = file_path_by_file_node.get(&file_node_id)?;
+            Some((node.node_id, file_path.as_str()))
+        })
+        .collect()
+}
+
+fn file_node_id_for(
+    node: &GraphNode,
+    nodes_by_id: &HashMap<NodeId, &GraphNode>,
+    parent_by_target: &HashMap<NodeId, NodeId>,
+) -> Option<NodeId> {
+    if node.kind == NodeKind::File {
+        return Some(node.node_id);
+    }
+
+    let mut current = node;
+    let mut seen = HashSet::new();
+    seen.insert(node.node_id);
+    while let Some(parent) = parent_by_target
+        .get(&current.node_id)
+        .and_then(|id| nodes_by_id.get(id).copied())
+    {
+        if !seen.insert(parent.node_id) {
+            return None;
+        }
+        if parent.kind == NodeKind::File {
+            return Some(parent.node_id);
+        }
+        current = parent;
+    }
+    None
 }
 
 fn metadata_for_pending_edge(
@@ -1248,6 +1375,48 @@ mod tests {
             symbol_query_policy(Language::Markdown),
             SymbolQueryPolicy::Dedicated(_)
         ));
+    }
+
+    #[test]
+    fn function_singleton_safe_same_file_allows() {
+        assert!(function_singleton_safe(
+            "crates/spur-graph/src/git_walk.rs",
+            "crates/spur-graph/src/git_walk.rs"
+        ));
+    }
+
+    #[test]
+    fn function_singleton_safe_same_crate_allows() {
+        assert!(function_singleton_safe(
+            "crates/spur-graph/src/git_walk.rs",
+            "crates/spur-graph/src/temporal.rs"
+        ));
+    }
+
+    #[test]
+    fn function_singleton_safe_cross_crate_blocks() {
+        assert!(!function_singleton_safe(
+            "crates/spur-bot/src/foo.rs",
+            "crates/spur-graph/src/git_walk.rs"
+        ));
+    }
+
+    #[test]
+    fn function_singleton_safe_non_crate_path() {
+        assert!(!function_singleton_safe(
+            "xtask/src/main.rs",
+            "crates/spur-graph/src/git_walk.rs"
+        ));
+    }
+
+    #[test]
+    fn path_crate_extracts_correctly() {
+        assert_eq!(
+            path_crate("crates/spur-graph/src/git_walk.rs"),
+            Some("spur-graph")
+        );
+        assert_eq!(path_crate("xtask/src/main.rs"), None);
+        assert_eq!(path_crate("README.md"), None);
     }
 
     #[test]
