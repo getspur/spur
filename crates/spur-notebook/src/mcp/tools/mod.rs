@@ -4,6 +4,9 @@ use std::{
     path::{Component, Path, PathBuf},
     time::Duration,
 };
+use tauri::Emitter;
+
+use super::{DaemonControlResponse, ServerDeps};
 
 pub mod daemon_files;
 pub mod daemon_lifecycle;
@@ -27,6 +30,7 @@ pub mod venv_list_python_versions;
 pub mod write_cell;
 
 pub(crate) const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const RECENTS_CHANGED_EVENT: &str = "notebook://recents_changed";
 
 pub fn tools() -> Vec<Tool> {
     vec![
@@ -64,7 +68,14 @@ fn empty_params() -> Value {
     json!({})
 }
 
-fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
+pub(super) fn daemon_unavailable() -> McpError {
+    McpError::internal_error(
+        "notebook daemon control plane is not available",
+        Some(json!({ "code": "daemon_unavailable" })),
+    )
+}
+
+pub(super) fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
     let value = if arguments.is_null() {
         json!({})
     } else {
@@ -79,7 +90,7 @@ fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
     }
 }
 
-fn validate_notebook_path(method: &str, raw: &str) -> Result<PathBuf, McpError> {
+pub(super) fn validate_notebook_path(method: &str, raw: &str) -> Result<PathBuf, McpError> {
     if raw.is_empty() {
         return Err(invalid_path(method, "path must not be empty"));
     }
@@ -122,6 +133,32 @@ fn invalid_path(method: &str, reason: &str) -> McpError {
             "reason": reason
         })),
     )
+}
+
+pub(super) fn check_response(
+    response: DaemonControlResponse,
+) -> Result<DaemonControlResponse, McpError> {
+    if response.ok {
+        Ok(response)
+    } else {
+        let (code, message) = match response.error {
+            Some(error) => (error.code, error.message),
+            None => (
+                "daemon_command_failed".to_string(),
+                "daemon command failed without an error body".to_string(),
+            ),
+        };
+        Err(McpError::internal_error(
+            message,
+            Some(json!({ "code": code })),
+        ))
+    }
+}
+
+pub(super) fn emit_recents_changed(deps: &ServerDeps) {
+    if let Some(app) = deps.app.as_ref() {
+        let _ = app.emit(RECENTS_CHANGED_EVENT, &json!({}));
+    }
 }
 
 fn require_app<'a>(

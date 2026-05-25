@@ -127,7 +127,14 @@ impl ServerHandler for NotebookMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        match request.name.as_ref() {
+        fn arguments(arguments: Option<serde_json::Map<String, Value>>) -> Value {
+            arguments.map(Value::Object).unwrap_or_else(|| json!({}))
+        }
+
+        let name = request.name;
+        let arguments = arguments(request.arguments);
+
+        match name.as_ref() {
             "notebook.ping" => Ok(CallToolResult::structured(json!({
                 "ok": true,
                 "tool": "notebook.ping",
@@ -135,186 +142,44 @@ impl ServerHandler for NotebookMcpServer {
                 "windowAlive": self.deps.bridge.window_alive()
             }))),
             "notebook.snapshot" => tools::snapshot::call(&self.deps).await,
-            "notebook.get_notebook" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::get_notebook::call(&self.deps, arguments).await
-            }
-            "notebook.read_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::read_cell::call(&self.deps, arguments).await
-            }
-            "notebook.kernel_info" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::kernel_info::call(&self.deps, arguments).await
-            }
-            "notebook.insert_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::insert_cell::call(&self.deps, arguments).await
-            }
-            "notebook.write_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::write_cell::call(&self.deps, arguments).await
-            }
-            "notebook.save" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::save::call(&self.deps, arguments).await
-            }
-            "notebook.delete_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::delete_cell::call(&self.deps, arguments).await
-            }
-            "notebook.interrupt" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::interrupt::call(&self.deps, arguments).await
-            }
-            "notebook.run_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::run_cell::call(&self.deps, arguments).await
-            }
-            "notebook.start_kernel" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::start_kernel::call(&self.deps, arguments).await
-            }
-            "notebook.restart_kernel" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::restart_kernel::call(&self.deps, arguments).await
-            }
-            "notebook.stop_kernel" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::stop_kernel::call(&self.deps, arguments).await
-            }
-            "notebook.venv_list" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::venv_list::call(&self.deps, arguments).await
-            }
-            "notebook.venv_create" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::venv_create::call(&self.deps, arguments).await
-            }
-            "notebook.venv_delete" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::venv_delete::call(&self.deps, arguments).await
-            }
+            "notebook.get_notebook" => tools::get_notebook::call(&self.deps, arguments).await,
+            "notebook.read_cell" => tools::read_cell::call(&self.deps, arguments).await,
+            "notebook.kernel_info" => tools::kernel_info::call(&self.deps, arguments).await,
+            "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
+            "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
+            "notebook.save" => tools::save::call(&self.deps, arguments).await,
+            "notebook.delete_cell" => tools::delete_cell::call(&self.deps, arguments).await,
+            "notebook.interrupt" => tools::interrupt::call(&self.deps, arguments).await,
+            "notebook.run_cell" => tools::run_cell::call(&self.deps, arguments).await,
+            "notebook.start_kernel" => tools::start_kernel::call(&self.deps, arguments).await,
+            "notebook.restart_kernel" => tools::restart_kernel::call(&self.deps, arguments).await,
+            "notebook.stop_kernel" => tools::stop_kernel::call(&self.deps, arguments).await,
+            "notebook.venv_list" => tools::venv_list::call(&self.deps, arguments).await,
+            "notebook.venv_create" => tools::venv_create::call(&self.deps, arguments).await,
+            "notebook.venv_delete" => tools::venv_delete::call(&self.deps, arguments).await,
             "notebook.venv_list_python_versions" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::venv_list_python_versions::call(&self.deps, arguments).await
             }
-            "notebook.new" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_new(&self.deps, arguments).await
-            }
-            "notebook.open" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_open(&self.deps, arguments).await
-            }
-            "notebook.close" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_close(&self.deps, arguments).await
-            }
-            "notebook.reopen" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_reopen(&self.deps, arguments).await
-            }
+            "notebook.new" => tools::daemon_lifecycle::call_new(&self.deps, arguments).await,
+            "notebook.open" => tools::daemon_lifecycle::call_open(&self.deps, arguments).await,
+            "notebook.close" => tools::daemon_lifecycle::call_close(&self.deps, arguments).await,
+            "notebook.reopen" => tools::daemon_lifecycle::call_reopen(&self.deps, arguments).await,
             "notebook.list_recents" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_recents::call_list_recents(&self.deps, arguments).await
             }
             "notebook.set_pinned" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_recents::call_set_pinned(&self.deps, arguments).await
             }
             "notebook.remove_from_recents" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_recents::call_remove_from_recents(&self.deps, arguments).await
             }
             "notebook.move_to_trash" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_files::call_move_to_trash(&self.deps, arguments).await
             }
             "notebook.reveal_in_finder" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_files::call_reveal_in_finder(&self.deps, arguments).await
             }
             "notebook.discard_scratch" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_files::call_discard_scratch(&self.deps, arguments).await
             }
             name => Err(McpError::invalid_params(
