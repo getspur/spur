@@ -22,6 +22,7 @@ import {
 } from "react";
 import { useLocation } from "wouter";
 
+import { listenForRecentNotebookChanges } from "@/agent/events";
 import type { RecentNotebookEntry } from "@/bindings";
 import Header from "@/ui/shared/Header";
 
@@ -240,13 +241,17 @@ export default function HomePage() {
 
   useEffect(() => {
     void refreshRecents();
+    const stopRecentsListener = listenForRecentNotebookChanges(refreshRecents);
 
     const handleFocus = () => {
       void refreshRecents();
     };
 
     window.addEventListener("focus", handleFocus);
-    return () => window.removeEventListener("focus", handleFocus);
+    return () => {
+      stopRecentsListener();
+      window.removeEventListener("focus", handleFocus);
+    };
   }, [refreshRecents]);
 
   useEffect(() => {

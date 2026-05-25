@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
+use jute::state::State;
 use rmcp::{
     model::{
         object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation,
@@ -38,14 +39,42 @@ pub mod bridge;
 pub mod tools;
 pub mod transport;
 
+/// Shared dependencies plumbed into every MCP tool invocation. Future tools
+/// will reach for `state` (kernel slots, save coordinator) and `app` (fan-out
+/// `Emitter::emit`); the existing five tools only use `bridge`. `state` and
+/// `app` are `Option` so non-daemon entry points (`start_server`, unit tests)
+/// can construct a `ServerDeps` without a live Tauri runtime.
+pub struct ServerDeps {
+    pub bridge: Arc<dyn BridgeRequester>,
+    pub state: Option<Arc<State>>,
+    pub app: Option<tauri::AppHandle>,
+    /// In-process daemon control plane. Populated only by `start_daemon_server`;
+    /// daemon-routed MCP tools surface `daemon_unavailable` when this is `None`.
+    pub daemon: Option<NotebookDaemonControl>,
+}
+
+impl ServerDeps {
+    /// Build a `ServerDeps` carrying only a bridge — used by the standalone
+    /// `start_server` path and by tool-level unit tests that exercise the
+    /// bridge contract directly.
+    pub fn from_bridge(bridge: Arc<dyn BridgeRequester>) -> Self {
+        Self {
+            bridge,
+            state: None,
+            app: None,
+            daemon: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct NotebookMcpServer {
-    bridge: Arc<dyn BridgeRequester>,
+    deps: Arc<ServerDeps>,
 }
 
 impl NotebookMcpServer {
-    pub fn new(bridge: Arc<dyn BridgeRequester>) -> Self {
-        Self { bridge }
+    pub fn new(deps: Arc<ServerDeps>) -> Self {
+        Self { deps }
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -96,52 +125,197 @@ impl ServerHandler for NotebookMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         match request.name.as_ref() {
             "notebook.ping" => Ok(CallToolResult::structured(json!({
                 "ok": true,
                 "tool": "notebook.ping",
-                "listenerRegistered": self.bridge.listener_registered(),
-                "windowAlive": self.bridge.window_alive()
+                "listenerRegistered": self.deps.bridge.listener_registered(),
+                "windowAlive": self.deps.bridge.window_alive()
             }))),
-            "notebook.snapshot" => tools::snapshot::call(self.bridge.as_ref()).await,
+            "notebook.snapshot" => tools::snapshot::call(&self.deps).await,
+            "notebook.get_notebook" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::get_notebook::call(&self.deps, arguments).await
+            }
             "notebook.read_cell" => {
                 let arguments = request
                     .arguments
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
-                tools::read_cell::call(self.bridge.as_ref(), arguments).await
+                tools::read_cell::call(&self.deps, arguments).await
             }
-            "notebook.kernel_info" => tools::kernel_info::call(self.bridge.as_ref()).await,
+            "notebook.kernel_info" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::kernel_info::call(&self.deps, arguments).await
+            }
             "notebook.insert_cell" => {
                 let arguments = request
                     .arguments
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
-                tools::insert_cell::call(self.bridge.as_ref(), arguments).await
+                tools::insert_cell::call(&self.deps, arguments).await
             }
             "notebook.write_cell" => {
                 let arguments = request
                     .arguments
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
-                tools::write_cell::call(self.bridge.as_ref(), arguments).await
+                tools::write_cell::call(&self.deps, arguments).await
+            }
+            "notebook.save" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::save::call(&self.deps, arguments).await
             }
             "notebook.delete_cell" => {
                 let arguments = request
                     .arguments
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
-                tools::delete_cell::call(self.bridge.as_ref(), arguments).await
+                tools::delete_cell::call(&self.deps, arguments).await
             }
-            "notebook.interrupt" => tools::interrupt::call(self.bridge.as_ref()).await,
+            "notebook.interrupt" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::interrupt::call(&self.deps, arguments).await
+            }
             "notebook.run_cell" => {
                 let arguments = request
                     .arguments
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
-                tools::run_cell::call(self.bridge.as_ref(), arguments, context).await
+                tools::run_cell::call(&self.deps, arguments).await
+            }
+            "notebook.start_kernel" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::start_kernel::call(&self.deps, arguments).await
+            }
+            "notebook.restart_kernel" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::restart_kernel::call(&self.deps, arguments).await
+            }
+            "notebook.stop_kernel" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::stop_kernel::call(&self.deps, arguments).await
+            }
+            "notebook.venv_list" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_list::call(&self.deps, arguments).await
+            }
+            "notebook.venv_create" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_create::call(&self.deps, arguments).await
+            }
+            "notebook.venv_delete" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_delete::call(&self.deps, arguments).await
+            }
+            "notebook.venv_list_python_versions" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_list_python_versions::call(&self.deps, arguments).await
+            }
+            "notebook.new" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_new(&self.deps, arguments).await
+            }
+            "notebook.open" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_open(&self.deps, arguments).await
+            }
+            "notebook.close" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_close(&self.deps, arguments).await
+            }
+            "notebook.reopen" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_reopen(&self.deps, arguments).await
+            }
+            "notebook.list_recents" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_recents::call_list_recents(&self.deps, arguments).await
+            }
+            "notebook.set_pinned" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_recents::call_set_pinned(&self.deps, arguments).await
+            }
+            "notebook.remove_from_recents" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_recents::call_remove_from_recents(&self.deps, arguments).await
+            }
+            "notebook.move_to_trash" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_files::call_move_to_trash(&self.deps, arguments).await
+            }
+            "notebook.reveal_in_finder" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_files::call_reveal_in_finder(&self.deps, arguments).await
+            }
+            "notebook.discard_scratch" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_files::call_discard_scratch(&self.deps, arguments).await
             }
             name => Err(McpError::invalid_params(
                 format!("unknown notebook tool: {name}"),
@@ -292,6 +466,7 @@ async fn start_server_with_bridge_requester(
     socket_path: impl AsRef<Path>,
     bridge: Arc<dyn BridgeRequester>,
 ) -> Result<NotebookMcpServerHandle> {
+    let deps = Arc::new(ServerDeps::from_bridge(Arc::clone(&bridge)));
     let socket_path = socket_path.as_ref().to_path_buf();
     if let Some(parent) = socket_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -324,10 +499,10 @@ async fn start_server_with_bridge_requester(
                             continue;
                         }
                     };
-                    let bridge = Arc::clone(&bridge);
+                    let deps = Arc::clone(&deps);
                     tokio::spawn(async move {
                         let transport = LengthPrefixedJsonTransport::<RoleServer>::new(stream);
-                        match NotebookMcpServer::new(bridge).serve(transport).await {
+                        match NotebookMcpServer::new(deps).serve(transport).await {
                             Ok(running) => {
                                 let _ = running.waiting().await;
                             }
@@ -441,7 +616,7 @@ impl NotebookDaemonControl {
         }
     }
 
-    async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
+    pub async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
         let id = request.id.clone();
         match self.handle_inner(request).await {
             Ok(success) => DaemonControlResponse {
@@ -559,14 +734,10 @@ impl NotebookDaemonControl {
     }
 
     async fn save_current(&self) -> Result<(), BridgeError> {
-        if !self.bridge.notebook_open() {
-            return Ok(());
-        }
-        let requester = TauriBridgeRequester::with_app(Arc::clone(&self.bridge), self.app.clone());
-        requester
-            .request("notebook.save", json!({}), tools::BRIDGE_TIMEOUT)
-            .await
-            .map(|_| ())
+        // Frontend bridge handlers no longer expose notebook.save. MCP save is
+        // now explicit: callers provide { path, contents } and the backend
+        // writes through SaveCoordinator directly.
+        Ok(())
     }
 
     async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
@@ -778,17 +949,25 @@ pub async fn start_daemon_server(
     socket_path: impl AsRef<Path>,
     bridge: Arc<AgentBridge>,
     app: tauri::AppHandle,
+    state: Arc<State>,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
     let control = NotebookDaemonControl::new(Arc::clone(&bridge), app);
-    let requester = Arc::new(TauriBridgeRequester::with_app(bridge, control.app.clone()));
-    let handle = start_multiplexed_server(socket_path, requester, control.clone()).await?;
+    let requester: Arc<dyn BridgeRequester> =
+        Arc::new(TauriBridgeRequester::with_app(bridge, control.app.clone()));
+    let deps = Arc::new(ServerDeps {
+        bridge: requester,
+        state: Some(state),
+        app: Some(control.app.clone()),
+        daemon: Some(control.clone()),
+    });
+    let handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
     control.restore_last_open_notebook().await;
     Ok((handle, control))
 }
 
 async fn start_multiplexed_server(
     socket_path: impl AsRef<Path>,
-    bridge: Arc<dyn BridgeRequester>,
+    deps: Arc<ServerDeps>,
     control: NotebookDaemonControl,
 ) -> Result<NotebookMcpServerHandle> {
     let socket_path = prepare_socket_path(socket_path).await?;
@@ -808,10 +987,10 @@ async fn start_multiplexed_server(
                             continue;
                         }
                     };
-                    let bridge = Arc::clone(&bridge);
+                    let deps = Arc::clone(&deps);
                     let control = control.clone();
                     tokio::spawn(async move {
-                        handle_daemon_connection(stream, bridge, control).await;
+                        handle_daemon_connection(stream, deps, control).await;
                     });
                 }
             }
@@ -828,7 +1007,7 @@ async fn start_multiplexed_server(
 
 async fn handle_daemon_connection(
     mut stream: UnixStream,
-    bridge: Arc<dyn BridgeRequester>,
+    deps: Arc<ServerDeps>,
     control: impl DaemonControlHandler,
 ) {
     let first = match read_frame_value(&mut stream).await {
@@ -874,7 +1053,7 @@ async fn handle_daemon_connection(
     };
     let transport =
         LengthPrefixedJsonTransport::<RoleServer>::with_initial_message(stream, message);
-    match NotebookMcpServer::new(bridge).serve(transport).await {
+    match NotebookMcpServer::new(deps).serve(transport).await {
         Ok(running) => {
             let _ = running.waiting().await;
         }
@@ -947,6 +1126,10 @@ mod tests {
             AgentBridge::new(),
         )))
     }
+
+    fn test_server_deps() -> Arc<ServerDeps> {
+        Arc::new(ServerDeps::from_bridge(test_bridge_requester()))
+    }
     // Directly exercising NotebookDaemonControl::reopen requires an AppHandle
     // whose manager can return a concrete WebviewWindow for the cached label.
     // Tauri's mock AppHandle lives behind tauri's optional `test` feature,
@@ -955,7 +1138,7 @@ mod tests {
     fn spawn_multiplexer(control: RecordingDaemonControl) -> (UnixStream, JoinHandle<()>) {
         let (server, client) = UnixStream::pair().expect("in-memory stream pair");
         let handler = tokio::spawn(async move {
-            handle_daemon_connection(server, test_bridge_requester(), control).await;
+            handle_daemon_connection(server, test_server_deps(), control).await;
         });
         (client, handler)
     }
@@ -1030,6 +1213,58 @@ mod tests {
 
         drop(client);
         handler.await.expect("handler finishes");
+    }
+
+    #[test]
+    fn server_tool_inventory_includes_venv_tools() {
+        let server = NotebookMcpServer::new(test_server_deps());
+        let names = server
+            .tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "notebook.venv_list",
+            "notebook.venv_create",
+            "notebook.venv_delete",
+            "notebook.venv_list_python_versions",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing tool: {expected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn venv_tool_dispatch_reaches_app_handle_requirement() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-venv-mcp-")
+            .tempdir()
+            .expect("temp dir");
+        let socket_path = temp_dir.path().join("notebook.sock");
+        let _server = start_server(&socket_path).await.expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+
+        let error = client
+            .call_tool(CallToolRequestParams::new("notebook.venv_list"))
+            .await
+            .expect_err("tool routes but cannot run without app handle");
+        let message = error.to_string();
+        assert!(
+            message.contains("Tauri app handle"),
+            "unexpected error: {message}"
+        );
+
+        client.cancel().await.expect("client closes");
     }
 
     #[tokio::test]

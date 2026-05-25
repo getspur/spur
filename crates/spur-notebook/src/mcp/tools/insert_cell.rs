@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::BRIDGE_TIMEOUT;
-use crate::mcp::bridge::BridgeRequester;
+use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.insert_cell";
 const LAST_EDITED_BY: &str = "brain";
@@ -41,10 +41,8 @@ pub fn tool() -> Tool {
     )
 }
 
-pub async fn call(
-    bridge: &dyn BridgeRequester,
-    arguments: Value,
-) -> Result<CallToolResult, McpError> {
+pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
+    let bridge = deps.bridge.as_ref();
     let params: InsertCellParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
             "notebook.insert_cell requires { after_id?, kind, source }",
