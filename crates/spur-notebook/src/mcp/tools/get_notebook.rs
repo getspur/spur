@@ -76,6 +76,7 @@ mod tests {
             ))),
             state: None,
             app: None,
+            daemon: None,
         }
     }
 
