@@ -36,6 +36,10 @@ pub trait BridgeRequester: Send + Sync {
         timeout: Duration,
     ) -> BridgeRequestFuture<'a>;
 
+    fn flush_pending<'a>(&'a self, _timeout: Duration) -> BridgeRequestFuture<'a> {
+        Box::pin(async { Ok(Value::Null) })
+    }
+
     fn drain_on_shutdown<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async {})
     }
@@ -167,6 +171,10 @@ impl BridgeRequester for TauriBridgeRequester {
             }
             None => Box::pin(async { Err(BridgeError::NotebookNotOpen) }),
         }
+    }
+
+    fn flush_pending<'a>(&'a self, timeout: Duration) -> BridgeRequestFuture<'a> {
+        self.request("notebook.flush_pending", json!({}), timeout)
     }
 
     fn drain_on_shutdown<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {

@@ -25,6 +25,8 @@ export async function dispatchAgentRequest(
       return snapshot(requireNotebook(notebook));
     case "notebook.export":
       return requireNotebook(notebook).export();
+    case "notebook.flush_pending":
+      return flushPending(requireNotebook(notebook));
     case "notebook.read_cell":
       return readCell(requireNotebook(notebook), request.params);
     case "notebook.insert_cell":
@@ -39,6 +41,17 @@ export async function dispatchAgentRequest(
         `Unknown notebook agent method: ${request.method}`,
       );
   }
+}
+
+function flushPending(notebook: Notebook) {
+  const path = notebook.state.path;
+  if (!path) {
+    throw new AgentHandlerError(
+      "notebook_not_open",
+      "No notebook path is loaded",
+    );
+  }
+  return { path, contents: notebook.export() };
 }
 
 function requireNotebook(notebook: Notebook | undefined): Notebook {
