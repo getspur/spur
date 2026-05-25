@@ -38,16 +38,17 @@ impl OverviewTab {
 
     fn render_provenance(frame: &mut Frame, area: Rect, snap: &InsightsSnapshot) {
         let split = &snap.kpis.cost_source_split;
-        let ratio = (split.native_pct / 100.0).clamp(0.0, 1.0);
+        let priced_pct = 100.0 - split.unpriced_pct;
+        let ratio = (priced_pct / 100.0).clamp(0.0, 1.0);
         let label = format!(
-            "{:.1}% native | {:.1}% priced | {:.1}% unpriced",
-            split.native_pct, split.priced_pct, split.unpriced_pct
+            "{:.1}% priced | {:.1}% unpriced",
+            priced_pct, split.unpriced_pct
         );
         let gauge = Gauge::default()
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Cost provenance"),
+                    .title("Cost coverage"),
             )
             .ratio(ratio)
             .label(label)
