@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use spur_graph::git_walk::{symbol_changes_for_commit, SymbolDiffCtx};
+use spur_graph::git_walk::{file_changes_for_commit, symbol_changes_for_commit, SymbolDiffCtx};
 use spur_graph::ChangeKind;
 use tempfile::TempDir;
 
@@ -76,7 +76,8 @@ pub fn process_batch(records: &[String]) -> usize {
     let sha = commit(dir.path(), "rewrite rename");
 
     let mut ctx = SymbolDiffCtx::new();
-    let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+    let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+    let changes = symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap();
     let added = changes
         .iter()
         .find(|change| change.snapshot.entity_name == "process_batch")
