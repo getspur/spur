@@ -3689,11 +3689,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d56aad357ae016449434705033df644ac6253dfcf1281aad3af3af9e907560d1"
 dependencies = [
  "crc32fast",
+ "crossbeam-channel",
  "gix-path",
  "gix-trace",
  "gix-utils",
  "libc",
  "once_cell",
+ "parking_lot",
  "prodash",
  "thiserror 2.0.18",
  "walkdir",
@@ -3880,6 +3882,7 @@ dependencies = [
  "memmap2",
  "smallvec",
  "thiserror 2.0.18",
+ "uluru",
 ]
 
 [[package]]
@@ -9192,6 +9195,7 @@ dependencies = [
  "chrono",
  "criterion",
  "fs2",
+ "gix",
  "globset",
  "ignore",
  "insta",
@@ -11013,6 +11017,15 @@ dependencies = [
  "memoffset 0.9.1",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "uluru"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c8a2469e56e6e5095c82ccd3afb98dad95f7af7929aab6d8ba8d6e0f73657da"
+dependencies = [
+ "arrayvec",
 ]
 
 [[package]]
