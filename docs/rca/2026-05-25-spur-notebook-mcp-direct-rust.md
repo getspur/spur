@@ -20,6 +20,23 @@ Everything else moves to Rust:
 
 The resulting rule is simple: if a tool needs the current unsaved cell buffer, it uses the bridge; if it needs kernel/fs/daemon/environment state, it calls Rust.
 
+### Lifecycle Save Contract
+
+H1 audit found that the Tauri frontend schedules debounced autosave from the
+Zustand notebook store (`store.subscribe(() => scheduleAutosave())`), but it
+does not synchronously flush on notebook page unmount, window close, window blur,
+or before opening another notebook. A daemon lifecycle transition can therefore
+hide or replace the webview before the debounce fires.
+
+Resolution: daemon lifecycle branches that leave the current document
+(`notebook.open`, `notebook.new`, `notebook.close`, and daemon `shutdown`) now
+flush the active in-memory document before continuing. The flush asks the
+frontend bridge for `notebook.export` so JavaScript remains the live cell-buffer
+source of truth, then Rust writes the returned `NotebookRoot` through
+`SaveCoordinator` for the currently loaded path. Public MCP save remains
+explicit as `notebook.save { path, contents }`; the lifecycle flush is a daemon
+data-loss guard, not a replacement for caller-directed saves to arbitrary paths.
+
 ---
 
 ## 2. Tool Surface by Category
