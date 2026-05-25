@@ -40,6 +40,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
+gix = { version = "0.77", default-features = false, features = ["max-performance-safe", "revision", "blob-diff"] }
 insta = { workspace = true }
 libc = "0.2"
 parquet = { workspace = true, features = ["arrow"] }
