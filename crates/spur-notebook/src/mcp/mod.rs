@@ -525,11 +525,20 @@ async fn start_server_with_bridge_requester(
     })
 }
 
-#[derive(Clone)]
-pub struct NotebookDaemonControl {
+pub struct NotebookDaemonControl<R: tauri::Runtime = tauri::Wry> {
     bridge: Arc<AgentBridge>,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
+}
+
+impl<R: tauri::Runtime> Clone for NotebookDaemonControl<R> {
+    fn clone(&self) -> Self {
+        Self {
+            bridge: Arc::clone(&self.bridge),
+            app: self.app.clone(),
+            state: Arc::clone(&self.state),
+        }
+    }
 }
 
 type DaemonControlFuture<'a> = Pin<Box<dyn Future<Output = DaemonControlResponse> + Send + 'a>>;
@@ -607,8 +616,8 @@ impl DaemonControlSuccess {
     }
 }
 
-impl NotebookDaemonControl {
-    pub fn new(bridge: Arc<AgentBridge>, app: tauri::AppHandle) -> Self {
+impl<R: tauri::Runtime> NotebookDaemonControl<R> {
+    pub fn new(bridge: Arc<AgentBridge>, app: tauri::AppHandle<R>) -> Self {
         Self {
             bridge,
             app,
@@ -741,10 +750,30 @@ impl NotebookDaemonControl {
     }
 
     async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
-        {
+        let app = self.app.clone();
+        self.open_path_with_window_opener(path, move |path| {
+            let window = jute::window::open_notebook_path(&app, path).map_err(|error| {
+                BridgeError::Handler {
+                    code: "window_open_failed".to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+            Ok(window.label().to_string())
+        })
+        .await
+    }
+
+    async fn open_path_with_window_opener(
+        &self,
+        path: PathBuf,
+        open_window: impl FnOnce(&Path) -> Result<String, BridgeError>,
+    ) -> Result<PathBuf, BridgeError> {
+        let (previous_path, previous_window_label) = {
             let state = self.state.lock().await;
+            let previous_path = state.current_path.clone();
+            let previous_window_label = state.window_label.clone();
             if state.current_path.as_deref() == Some(path.as_path()) {
-                if let Some(label) = state.window_label.clone() {
+                if let Some(label) = previous_window_label.clone() {
                     drop(state);
                     if let Some(window) = self.app.get_webview_window(&label) {
                         let _ = window.show();
@@ -753,22 +782,34 @@ impl NotebookDaemonControl {
                     }
                 }
             }
-        }
 
-        self.close_current_window().await;
-        self.bridge.set_notebook_open(false);
-        {
-            let mut state = self.state.lock().await;
-            state.current_path = None;
-            state.window_label = None;
-        }
-        let window = jute::window::open_notebook_path(&self.app, &path).map_err(|error| {
-            BridgeError::Handler {
-                code: "window_open_failed".to_string(),
-                message: error.to_string(),
+            (previous_path, previous_window_label)
+        };
+
+        let label = match open_window(&path) {
+            Ok(label) => label,
+            Err(error) => {
+                // Keep the old state authoritative on failure. If opening a
+                // new Tauri window fails while the old one still exists, bring
+                // the previous notebook back to the foreground when possible.
+                if previous_path.is_some() {
+                    if let Some(label) = previous_window_label.as_deref() {
+                        if let Some(window) = self.app.get_webview_window(label) {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                }
+                return Err(error);
             }
-        })?;
-        let label = window.label().to_string();
+        };
+
+        if let Some(label) = previous_window_label.as_deref() {
+            if let Some(window) = self.app.get_webview_window(label) {
+                let _ = window.hide();
+            }
+        }
+        self.bridge.set_notebook_open(false);
         let mut state = self.state.lock().await;
         state.current_path = Some(path.clone());
         state.window_label = Some(label);
@@ -822,7 +863,7 @@ impl NotebookDaemonControl {
     }
 }
 
-impl DaemonControlHandler for NotebookDaemonControl {
+impl<R: tauri::Runtime> DaemonControlHandler for NotebookDaemonControl<R> {
     fn handle_control<'a>(&'a self, request: DaemonControlRequest) -> DaemonControlFuture<'a> {
         Box::pin(async move { self.handle(request).await })
     }
@@ -1130,10 +1171,6 @@ mod tests {
     fn test_server_deps() -> Arc<ServerDeps> {
         Arc::new(ServerDeps::from_bridge(test_bridge_requester()))
     }
-    // Directly exercising NotebookDaemonControl::reopen requires an AppHandle
-    // whose manager can return a concrete WebviewWindow for the cached label.
-    // Tauri's mock AppHandle lives behind tauri's optional `test` feature,
-    // which this crate does not enable and this task's touch scope excludes.
 
     fn spawn_multiplexer(control: RecordingDaemonControl) -> (UnixStream, JoinHandle<()>) {
         let (server, client) = UnixStream::pair().expect("in-memory stream pair");
@@ -1235,6 +1272,42 @@ mod tests {
                 "missing tool: {expected}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn open_path_failure_preserves_previous_window_state() {
+        let app = tauri::test::mock_app();
+        let bridge = Arc::new(AgentBridge::new());
+        bridge.set_notebook_open(true);
+        let control = NotebookDaemonControl::new(Arc::clone(&bridge), app.handle().clone());
+        let previous_path = PathBuf::from("/tmp/previous.ipynb");
+        let previous_label = "jute-window-existing".to_string();
+
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(previous_path.clone());
+            state.window_label = Some(previous_label.clone());
+        }
+
+        let error = control
+            .open_path_with_window_opener(PathBuf::from("/tmp/new.ipynb"), |_path| {
+                Err(BridgeError::Handler {
+                    code: "window_open_failed".to_string(),
+                    message: "mock jute failure".to_string(),
+                })
+            })
+            .await
+            .expect_err("window open failure should bubble");
+
+        assert!(matches!(
+            error,
+            BridgeError::Handler { ref code, .. } if code == "window_open_failed"
+        ));
+
+        let state = control.state.lock().await;
+        assert_eq!(state.current_path.as_deref(), Some(previous_path.as_path()));
+        assert_eq!(state.window_label.as_deref(), Some(previous_label.as_str()));
+        assert!(bridge.notebook_open());
     }
 
     #[tokio::test]
