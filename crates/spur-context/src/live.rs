@@ -91,8 +91,8 @@ impl<'a> LiveSessionTracker<'a> {
         self.last_poll.map(|t| t.elapsed())
     }
 
-    /// Compute burn rate (cost per minute) from the last two polls.
-    pub fn burn_rate(&self) -> Option<f64> {
+    /// Mean cost per recorded event in the latest snapshot. Returns 0.0 when no events. For time-based projections use Reporter::live_report.
+    pub fn avg_cost_per_event(&self) -> Option<f64> {
         // Burn rate requires at least two data points.
         // For now, return simple heuristic based on current snapshot.
         self.last_snapshot.as_ref().map(|s| {
