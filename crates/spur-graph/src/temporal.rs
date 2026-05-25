@@ -914,6 +914,15 @@ impl<'a> CommitGraph<'a> {
             return false;
         }
 
+        let ancestor_pos = self.positions.get(ancestor).copied();
+        let descendant_pos = self.positions.get(descendant).copied();
+        if let (Some(a), Some(d)) = (ancestor_pos, descendant_pos) {
+            // Commits are indexed oldest-first via `git rev-list --topo-order --reverse`.
+            if a > d {
+                return false;
+            }
+        }
+
         let mut seen = HashSet::new();
         let mut stack = vec![descendant];
         while let Some(current) = stack.pop() {
@@ -1081,6 +1090,38 @@ mod tests {
         };
 
         (graph, commits)
+    }
+
+    #[test]
+    fn is_ancestor_topo_fast_reject_returns_false_without_dfs() {
+        let (_, mut commits) = fixture();
+        commits.commits.swap(0, 1);
+        let graph = CommitGraph::new(&commits);
+
+        assert_eq!(graph.position("c1"), 1);
+        assert_eq!(graph.position("c2"), 0);
+        assert!(!graph.is_ancestor("c1", "c2"));
+    }
+
+    #[test]
+    fn is_ancestor_matches_dfs_for_fixture_pairs() {
+        let (_, commits) = fixture();
+        let graph = CommitGraph::new(&commits);
+
+        for ancestor in &commits.commits {
+            for descendant in &commits.commits {
+                let dfs_result = graph
+                    .ancestors_of(&descendant.sha)
+                    .is_some_and(|ancestors| ancestors.contains(&ancestor.sha));
+                assert_eq!(
+                    graph.is_ancestor(&ancestor.sha, &descendant.sha),
+                    dfs_result,
+                    "ancestor={}, descendant={}",
+                    ancestor.sha,
+                    descendant.sha
+                );
+            }
+        }
     }
 
     #[test]
