@@ -40,7 +40,7 @@ fn install(extra: Vec<String>) -> ExitCode {
     let debug = extra.iter().any(|a| a == "--debug");
     let workspace_root = workspace_root();
 
-    if let Err(err) = cargo_install(&workspace_root, "crates/spur-cli", debug, &extra) {
+    if let Err(err) = cargo_install(&workspace_root, "crates/spur-cli", debug, &[], &extra) {
         eprintln!("xtask: {err}");
         return ExitCode::FAILURE;
     }
@@ -57,7 +57,19 @@ fn install(extra: Vec<String>) -> ExitCode {
             }
         }
     } else {
-        if let Err(err) = cargo_install(&workspace_root, "crates/spur-notebook", debug, &extra) {
+        let jute_dir = workspace_root.join("crates/spur-notebook/jute-notebook");
+        if let Err(err) = ensure_jute_frontend_dist(&jute_dir) {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
+        }
+
+        if let Err(err) = cargo_install(
+            &workspace_root,
+            "crates/spur-notebook",
+            debug,
+            &["custom-protocol"],
+            &extra,
+        ) {
             eprintln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
@@ -70,10 +82,23 @@ fn cargo_install(
     workspace_root: &Path,
     crate_path: &str,
     debug: bool,
+    features: &[&str],
     extra: &[String],
 ) -> Result<(), String> {
     let manifest_path = workspace_root.join(crate_path);
     eprintln!("==> cargo install --path {}", manifest_path.display());
+    let mut cmd = cargo_install_command(workspace_root, crate_path, debug, features, extra);
+    run_status(&mut cmd, &format!("cargo install for {crate_path}"))
+}
+
+fn cargo_install_command(
+    workspace_root: &Path,
+    crate_path: &str,
+    debug: bool,
+    features: &[&str],
+    extra: &[String],
+) -> Command {
+    let manifest_path = workspace_root.join(crate_path);
     let mut cmd = Command::new(cargo());
     cmd.arg("install")
         .arg("--path")
@@ -89,27 +114,20 @@ fn cargo_install(
     if debug {
         cmd.arg("--debug");
     }
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
     for arg in extra.iter().filter(|a| a.as_str() != "--debug") {
         cmd.arg(arg);
     }
-    run_status(&mut cmd, &format!("cargo install for {crate_path}"))
+    cmd
 }
 
 fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
     let jute_dir = workspace_root.join("crates/spur-notebook/jute-notebook");
     let tauri_dir = jute_dir.join("src-tauri");
 
-    if npm_install_needed(&jute_dir) {
-        let mut cmd = Command::new("npm");
-        cmd.arg("install").current_dir(&jute_dir);
-        run_status(&mut cmd, "npm install")?;
-    } else {
-        eprintln!("==> npm install skipped; node_modules and package-lock.json look current");
-    }
-
-    let mut build = Command::new("npm");
-    build.arg("run").arg("build").current_dir(&jute_dir);
-    run_status(&mut build, "npm run build")?;
+    ensure_jute_frontend_dist(&jute_dir)?;
 
     if tauri_uv_sidecars_missing(&tauri_dir) {
         let mut download = Command::new("python3");
@@ -121,12 +139,23 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
 
     let mut tauri_build = Command::new("npm");
     tauri_build
-        .args(["run", "tauri", "build", "--", "--bundles", "app"])
+        .args([
+            "run",
+            "tauri",
+            "build",
+            "--",
+            "--no-bundle",
+            "--bundles",
+            "app",
+        ])
         .current_dir(&jute_dir)
         .env_remove("TAURI_CONFIG")
         // See cargo_install: avoids the macOS provenance vs sccache collision.
         .env_remove("RUSTC_WRAPPER");
-    run_status(&mut tauri_build, "npm run tauri build -- --bundles app")?;
+    run_status(
+        &mut tauri_build,
+        "npm run tauri build -- --no-bundle --bundles app",
+    )?;
 
     let built_app = workspace_root.join("target/release/bundle/macos/Jute.app");
     if !built_app.exists() {
@@ -166,6 +195,21 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
 
     eprintln!("installed Jute.app: {}", installed_app.display());
     Ok(installed_app)
+}
+
+fn ensure_jute_frontend_dist(jute_dir: &Path) -> Result<(), String> {
+    if npm_install_needed(jute_dir) {
+        let mut cmd = Command::new("npm");
+        cmd.arg("install").current_dir(jute_dir);
+        run_status(&mut cmd, "npm install")?;
+    } else {
+        eprintln!("==> npm install skipped; node_modules and package-lock.json look current");
+    }
+
+    let mut build = Command::new("npm");
+    build.arg("run").arg("build").current_dir(jute_dir);
+    run_status(&mut build, "npm run build")?;
+    Ok(())
 }
 
 fn build_outer_spur_notebook_binary(workspace_root: &Path) -> Result<PathBuf, String> {
@@ -507,6 +551,41 @@ mod tests {
         }
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_install_command_includes_requested_features() {
+        let root = PathBuf::from("/workspace");
+        let extra = vec!["--locked".to_string(), "--debug".to_string()];
+
+        let command = cargo_install_command(
+            &root,
+            "crates/spur-notebook",
+            true,
+            &["custom-protocol"],
+            &extra,
+        );
+
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "install".to_string(),
+                "--path".to_string(),
+                root.join("crates/spur-notebook")
+                    .to_string_lossy()
+                    .into_owned(),
+                "--force".to_string(),
+                "--debug".to_string(),
+                "--features".to_string(),
+                "custom-protocol".to_string(),
+                "--locked".to_string(),
+            ]
+        );
     }
 
     fn make_temp_workspace(name: &str) -> PathBuf {
