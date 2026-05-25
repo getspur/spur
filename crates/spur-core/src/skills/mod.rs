@@ -75,6 +75,10 @@ fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
         );
         m.insert("brainstorming", include_str!("brainstorming/SKILL.md"));
         m.insert("code-explore", include_str!("code-explore/SKILL.md"));
+        m.insert(
+            "performance-investigation",
+            include_str!("performance-investigation/SKILL.md"),
+        );
         m.insert("writing-plans", include_str!("writing-plans/SKILL.md"));
         m.insert("writing-skills", include_str!("writing-skills/SKILL.md"));
         m
