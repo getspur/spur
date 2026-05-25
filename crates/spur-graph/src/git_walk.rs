@@ -233,13 +233,14 @@ pub fn run_full_walk_into(
         graph.commits.push(commit.clone());
         commits.commits.push(commit);
 
-        for file_change in file_changes_for_commit(worktree, &sha)? {
+        let file_changes = file_changes_for_commit(worktree, &sha)?;
+        for file_change in &file_changes {
             graph
                 .temporal_edges
-                .push(file_change_to_temporal_edge(&sha, &file_change));
+                .push(file_change_to_temporal_edge(&sha, file_change));
         }
 
-        for symbol_change in symbol_changes_for_commit(worktree, &sha, &mut ctx)? {
+        for symbol_change in symbol_changes_for_commit(worktree, &sha, &file_changes, &mut ctx)? {
             let snapshot_key = symbol_change.snapshot.key.clone();
             let parent_sha = symbol_change.parent_sha.clone();
             let change_kind = symbol_change.change_kind.clone();
@@ -569,12 +570,13 @@ pub struct SymbolChange {
 pub fn symbol_changes_for_commit(
     worktree: &Path,
     sha: &str,
+    file_changes: &[FileChange],
     ctx: &mut SymbolDiffCtx,
 ) -> Result<Vec<SymbolChange>> {
     let mut out = Vec::new();
     let mut by_snapshot_key = HashMap::new();
 
-    for file_change in file_changes_for_commit(worktree, sha)? {
+    for file_change in file_changes {
         if matches!(file_change.kind, FileChangeKind::Gitlink { .. }) {
             let diagnostic = format!(
                 "gitlink: file={} commit={} skipped submodule recursion; file-level touch retained",
@@ -591,7 +593,7 @@ pub fn symbol_changes_for_commit(
             continue;
         };
 
-        let blobs = blobs_for_change(worktree, sha, &file_change)?;
+        let blobs = blobs_for_change(worktree, sha, file_change)?;
         if blobs.left.as_deref().is_some_and(is_binary)
             || blobs.right.as_deref().is_some_and(is_binary)
         {
@@ -716,7 +718,7 @@ pub fn symbol_changes_for_commit(
         }
 
         let (rename_changes, diagnostics) =
-            detect_renames(deleted_candidates, added_candidates, &file_change, language);
+            detect_renames(deleted_candidates, added_candidates, file_change, language);
         ctx.record_diagnostics(diagnostics);
 
         for change in direct_changes.into_iter().chain(rename_changes) {
@@ -1588,7 +1590,9 @@ mod tests {
         let sha2 = commit(dir.path(), "c2");
 
         let mut ctx = SymbolDiffCtx::new();
-        let changes = symbol_changes_for_commit(dir.path(), &sha2, &mut ctx).unwrap();
+        let file_changes = file_changes_for_commit(dir.path(), &sha2).unwrap();
+        let changes =
+            symbol_changes_for_commit(dir.path(), &sha2, &file_changes, &mut ctx).unwrap();
         let by_name: std::collections::HashMap<_, _> = changes
             .iter()
             .map(|c| (c.snapshot.entity_name.clone(), &c.change_kind))
@@ -1613,7 +1617,9 @@ mod tests {
         let sha2 = commit(dir.path(), "c2");
 
         let mut ctx = SymbolDiffCtx::new();
-        let changes = symbol_changes_for_commit(dir.path(), &sha2, &mut ctx).unwrap();
+        let file_changes = file_changes_for_commit(dir.path(), &sha2).unwrap();
+        let changes =
+            symbol_changes_for_commit(dir.path(), &sha2, &file_changes, &mut ctx).unwrap();
         let target = changes
             .iter()
             .find(|change| change.snapshot.entity_name == "target")
@@ -1633,7 +1639,8 @@ mod tests {
         let sha = commit(dir.path(), "rename");
 
         let mut ctx = SymbolDiffCtx::new();
-        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap();
         let helper = changes
             .iter()
             .find(|c| c.snapshot.entity_name == "helper")
@@ -1660,7 +1667,8 @@ mod tests {
         let sha = commit(dir.path(), "c2");
 
         let mut ctx = SymbolDiffCtx::new();
-        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap();
         let renamed = changes
             .iter()
             .find(|c| c.snapshot.entity_name == "new_name")
@@ -1683,7 +1691,8 @@ mod tests {
         let sha = commit(dir.path(), "c2");
 
         let mut ctx = SymbolDiffCtx::new();
-        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap();
         let kinds: Vec<_> = changes.iter().map(|c| &c.change_kind).collect();
 
         assert!(kinds.iter().any(|k| matches!(k, ChangeKind::Deleted)));
@@ -1721,7 +1730,8 @@ mod tests {
         let sha = commit(dir.path(), "c2");
 
         let mut ctx = SymbolDiffCtx::new();
-        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap();
         let added: Vec<_> = changes
             .iter()
             .filter(|c| matches!(c.change_kind, ChangeKind::Added))
@@ -1821,7 +1831,8 @@ mod tests {
         let sha = commit(dir.path(), "binary rust extension");
 
         let mut ctx = SymbolDiffCtx::new();
-        let changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+        let changes = symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap();
 
         assert!(changes.is_empty());
         assert!(ctx
@@ -1848,7 +1859,9 @@ mod tests {
         std::fs::remove_file(object_path).unwrap();
 
         let mut ctx = SymbolDiffCtx::new();
-        let error = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap_err();
+        let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+        let error =
+            symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap_err();
         let message = format!("{error:#}");
 
         assert!(message.contains("missing blob"));
@@ -1916,7 +1929,8 @@ mod tests {
         assert_eq!(changes[0].path.as_bytes(), path.as_os_str().as_bytes());
 
         let mut ctx = SymbolDiffCtx::new();
-        let symbol_changes = symbol_changes_for_commit(dir.path(), &sha, &mut ctx).unwrap();
+        let symbol_changes =
+            symbol_changes_for_commit(dir.path(), &sha, &changes, &mut ctx).unwrap();
         assert!(symbol_changes
             .iter()
             .any(|change| change.snapshot.entity_name == "non_utf8_path"));
