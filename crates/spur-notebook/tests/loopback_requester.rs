@@ -13,7 +13,7 @@ mod unix {
     use serde_json::json;
     use spur_notebook::mcp::{
         bridge::BridgeRequester,
-        inproc_requester::InProcStoreRequester,
+        loopback_requester::LoopbackDaemonRequester,
         transport::{read_frame_value, write_frame_json},
     };
     use tokio::net::UnixListener;
@@ -23,7 +23,7 @@ mod unix {
     #[tokio::test]
     async fn write_and_read_cell_round_trip_matches_bridge_contract() {
         let dir = tempfile::Builder::new()
-            .prefix("spur-notebook-inproc-requester-")
+            .prefix("spur-notebook-loopback-requester-")
             .tempdir()
             .expect("temp dir");
         let socket_path = dir.path().join("notebook.sock");
@@ -51,7 +51,7 @@ mod unix {
             }
         });
 
-        let requester = InProcStoreRequester::new(socket_path);
+        let requester = LoopbackDaemonRequester::new(socket_path);
         assert!(requester.listener_registered());
         assert!(requester.window_alive());
         assert!(requester.notebook_open());
@@ -127,4 +127,4 @@ mod unix {
 
 #[cfg(not(unix))]
 #[test]
-fn inproc_requester_requires_unix_sockets() {}
+fn loopback_requester_requires_unix_sockets() {}
