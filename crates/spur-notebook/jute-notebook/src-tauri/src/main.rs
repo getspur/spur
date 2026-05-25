@@ -62,6 +62,8 @@ fn main() {
             jute::commands::stop_kernel,
             jute::commands::run_cell,
             jute::commands::get_notebook,
+            jute::commands::read_notebook_store_cell,
+            jute::commands::notebook_store_snapshot,
             jute::commands::save_to_disk,
             jute::commands::bridge_ready,
             jute::commands::notebook_active_changed,
@@ -72,6 +74,9 @@ fn main() {
             jute::commands::venv::venv_delete,
         ])
         .setup(|app| {
+            let state = app.state::<std::sync::Arc<State>>().inner().clone();
+            jute::spawn_notebook_delta_forwarder(app.handle().clone(), state);
+
             // Parse files that were opened via CLI arguments (Windows + Linux).
             if cfg!(any(windows, target_os = "linux")) {
                 let mut files = Vec::new();

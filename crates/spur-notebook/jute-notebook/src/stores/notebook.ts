@@ -9,6 +9,9 @@ import { immer } from "zustand/middleware/immer";
 import type {
   Cell,
   CellMetadata,
+  DaemonCell,
+  DaemonNotebookSnapshot,
+  NotebookDelta,
   NotebookRoot,
   Output,
   OutputDisplayData,
@@ -22,6 +25,7 @@ type NotebookStoreActions = ReturnType<typeof notebookStoreActions>;
 
 const INITIAL_CELL_VERSION = 1;
 const AUTOSAVE_DEBOUNCE_MS = 5000;
+const NOTEBOOK_IN_PROC_STORE_ENV = "VITE_SPUR_NOTEBOOK_IN_PROC_STORE";
 
 /** Zustand reactive data used by the UI to render notebooks. */
 export type NotebookStoreState = {
@@ -157,6 +161,35 @@ function notebookStoreActions(
         cell.lastEditedBy = lastEditedBy;
       }),
 
+    /** Reconcile one cell from the authoritative Rust store. */
+    applyCellSnapshot: (cell: DaemonCell, afterId?: string | null) =>
+      set((state) => {
+        const type = cellTypeFromDaemon(cell.kind);
+        if (!type) return;
+
+        const existing = state.cells[cell.id];
+        if (!existing) {
+          const afterIndex = afterId ? state.cellIds.indexOf(afterId) : -1;
+          const insertAt =
+            afterIndex >= 0 ? afterIndex + 1 : state.cellIds.length;
+          if (!state.cellIds.includes(cell.id)) {
+            state.cellIds.splice(insertAt, 0, cell.id);
+          }
+          state.cells[cell.id] = {
+            type,
+            initialText: cell.source,
+            source: cell.source,
+            version: cell.version,
+          };
+          return;
+        }
+
+        existing.type = type;
+        existing.source = cell.source;
+        existing.version = cell.version;
+        existing.lastEditedBy = undefined;
+      }),
+
     /** Delete a cell from the notebook. */
     deleteCell: (cellId: string) =>
       set((state) => {
@@ -176,64 +209,19 @@ function notebookStoreActions(
     /** Update properties of a cell result, except the actual `outputs` array. */
     updateResult: (cellId: string, result: CellResult) =>
       set((state) => {
-        const obj = state.cells[cellId].result;
-        if (obj) {
-          for (const [key, value] of Object.entries(result)) {
-            // @ts-ignore
-            obj[key] = value;
-          }
-        } else {
-          // @ts-ignore Type instantiation is excessively deep and possibly infinite.
-          state.cells[cellId].result = result;
-        }
+        updateResultDraft(state, cellId, result);
       }),
 
     /** Append outputs to a cell. */
     appendOutput: (cellId: string, output: Output, displayId?: string) =>
       set((state) => {
-        const obj = state.cells[cellId].result;
-        if (obj) {
-          if (displayId) {
-            if (output.output_type !== "display_data") {
-              throw new Error("displayId can only be used with display_data");
-            }
-            obj.displays ??= {};
-            obj.displays[displayId] = obj.outputs?.length ?? 0;
-          }
-
-          obj.outputs = obj.outputs ?? [];
-          if (obj.outputs.length > 0) {
-            const lastOutput = obj.outputs[obj.outputs.length - 1];
-            if (
-              lastOutput.output_type === "stream" &&
-              output.output_type === "stream" &&
-              lastOutput.name === output.name
-            ) {
-              // Concatenate to the last stream output if on the same stream.
-              lastOutput.text = [
-                ...(typeof lastOutput.text === "string"
-                  ? [lastOutput.text]
-                  : lastOutput.text),
-                ...(typeof output.text === "string"
-                  ? [output.text]
-                  : output.text),
-              ];
-              return;
-            }
-          }
-
-          obj.outputs.push(output);
-        }
+        appendOutputDraft(state, cellId, output, displayId);
       }),
 
     /** Clear the output of a cell. */
     clearOutput: (cellId: string) =>
       set((state) => {
-        const obj = state.cells[cellId].result;
-        if (obj) {
-          obj.outputs = [];
-          obj.displays = {};
-        }
+        clearOutputDraft(state, cellId);
       }),
 
     /** Update an existing `display_data` output. */
@@ -243,18 +231,27 @@ function notebookStoreActions(
       displayData: OutputDisplayData,
     ) =>
       set((state) => {
-        const obj = state.cells[cellId].result;
-        if (obj) {
-          const index = obj.displays?.[displayId];
-          if (index !== undefined) {
-            const output = obj.outputs?.[index];
-            if (output && output.output_type === "display_data") {
-              output.data = displayData.data;
-              output.metadata = displayData.metadata;
-            }
-          }
-        }
+        updateOutputDisplayDraft(state, cellId, displayId, displayData);
       }),
+
+    applyRunCellEvent: (
+      cellId: string,
+      event: RunCellEvent,
+      runState: RunCellEventApplicationState,
+      options?: ApplyRunCellEventOptions,
+    ) => {
+      let nextRunState = runState;
+      set((state) => {
+        nextRunState = applyRunCellEvent(
+          state,
+          cellId,
+          event,
+          runState,
+          options,
+        );
+      });
+      return nextRunState;
+    },
 
     /**
      * Start loading the notebook from an external source.
@@ -354,12 +351,251 @@ type CellHandle = {
   editor?: EditorView;
 };
 
-type DirectRunCellState = {
+export type RunCellEventApplicationState = {
   status: CellResult["status"];
   timings: NonNullable<CellResult["timings"]>;
   executionCount: CellResult["executionCount"];
   willClearOutput: boolean;
 };
+
+type DirectRunCellState = RunCellEventApplicationState;
+
+type ApplyRunCellEventOptions = {
+  displayId?: string;
+  finishedAt?: number;
+  handleDisconnect?: boolean;
+};
+
+function updateResultDraft(
+  state: WritableDraft<NotebookStoreState>,
+  cellId: string,
+  result: CellResult,
+) {
+  const obj = state.cells[cellId].result;
+  if (obj) {
+    for (const [key, value] of Object.entries(result)) {
+      // @ts-ignore
+      obj[key] = value;
+    }
+  } else {
+    // @ts-ignore Type instantiation is excessively deep and possibly infinite.
+    state.cells[cellId].result = result;
+  }
+}
+
+function appendOutputDraft(
+  state: WritableDraft<NotebookStoreState>,
+  cellId: string,
+  output: Output,
+  displayId?: string,
+) {
+  const obj = state.cells[cellId].result;
+  if (obj) {
+    if (displayId) {
+      if (output.output_type !== "display_data") {
+        throw new Error("displayId can only be used with display_data");
+      }
+      obj.displays ??= {};
+      obj.displays[displayId] = obj.outputs?.length ?? 0;
+    }
+
+    obj.outputs = obj.outputs ?? [];
+    if (obj.outputs.length > 0) {
+      const lastOutput = obj.outputs[obj.outputs.length - 1];
+      if (
+        lastOutput.output_type === "stream" &&
+        output.output_type === "stream" &&
+        lastOutput.name === output.name
+      ) {
+        // Concatenate to the last stream output if on the same stream.
+        lastOutput.text = [
+          ...(typeof lastOutput.text === "string"
+            ? [lastOutput.text]
+            : lastOutput.text),
+          ...(typeof output.text === "string" ? [output.text] : output.text),
+        ];
+        return;
+      }
+    }
+
+    obj.outputs.push(output);
+  }
+}
+
+function clearOutputDraft(
+  state: WritableDraft<NotebookStoreState>,
+  cellId: string,
+) {
+  const obj = state.cells[cellId].result;
+  if (obj) {
+    obj.outputs = [];
+    obj.displays = {};
+  }
+}
+
+function updateOutputDisplayDraft(
+  state: WritableDraft<NotebookStoreState>,
+  cellId: string,
+  displayId: string,
+  displayData: OutputDisplayData,
+) {
+  const obj = state.cells[cellId].result;
+  if (obj) {
+    const index = obj.displays?.[displayId];
+    if (index !== undefined) {
+      const output = obj.outputs?.[index];
+      if (output && output.output_type === "display_data") {
+        output.data = displayData.data;
+        output.metadata = displayData.metadata;
+      }
+    }
+  }
+}
+
+function updateRunCellResultDraft(
+  state: WritableDraft<NotebookStoreState>,
+  cellId: string,
+  runState: RunCellEventApplicationState,
+) {
+  updateResultDraft(state, cellId, {
+    status: runState.status,
+    timings: runState.timings,
+    executionCount: runState.executionCount,
+  });
+}
+
+export function applyRunCellEvent(
+  state: WritableDraft<NotebookStoreState>,
+  cellId: string,
+  message: RunCellEvent,
+  runState: RunCellEventApplicationState,
+  options: ApplyRunCellEventOptions = {},
+): RunCellEventApplicationState {
+  const nextRunState = { ...runState };
+
+  if (nextRunState.willClearOutput) {
+    clearOutputDraft(state, cellId);
+    nextRunState.willClearOutput = false;
+  }
+
+  if (message.event === "stdout" || message.event === "stderr") {
+    appendOutputDraft(state, cellId, {
+      output_type: "stream",
+      name: message.event,
+      text: message.data,
+    });
+  } else if (message.event === "error") {
+    nextRunState.status = "error";
+    updateRunCellResultDraft(state, cellId, nextRunState);
+    appendOutputDraft(state, cellId, {
+      output_type: "error",
+      ename: message.data.ename,
+      evalue: message.data.evalue,
+      traceback: message.data.traceback,
+    });
+  } else if (message.event === "execute_result") {
+    // This means that there was a return value for the cell.
+    nextRunState.executionCount = message.data.execution_count;
+    updateRunCellResultDraft(state, cellId, nextRunState);
+    appendOutputDraft(state, cellId, {
+      output_type: "execute_result",
+      execution_count: message.data.execution_count,
+      data: message.data.data,
+      metadata: message.data.metadata,
+    });
+  } else if (message.event === "display_data") {
+    const displayId = message.data.transient?.display_id || options.displayId;
+    appendOutputDraft(
+      state,
+      cellId,
+      {
+        output_type: "display_data",
+        data: message.data.data,
+        metadata: message.data.metadata,
+      },
+      displayId,
+    );
+  } else if (message.event === "update_display_data") {
+    const displayId = message.data.transient?.display_id;
+    if (displayId) {
+      updateOutputDisplayDraft(state, cellId, displayId, {
+        data: message.data.data,
+        metadata: message.data.metadata,
+      });
+    }
+  } else if (message.event === "clear_output") {
+    if (message.data.wait) {
+      nextRunState.willClearOutput = true;
+    } else {
+      clearOutputDraft(state, cellId);
+    }
+  } else if (message.event === "started") {
+    nextRunState.status = "running";
+    updateRunCellResultDraft(state, cellId, nextRunState);
+  } else if (message.event === "finished") {
+    nextRunState.status = message.data.status === "ok" ? "success" : "error";
+    nextRunState.executionCount =
+      message.data.exec_count ?? nextRunState.executionCount;
+    if (options.finishedAt !== undefined) {
+      nextRunState.timings = {
+        ...nextRunState.timings,
+        finishedAt: options.finishedAt,
+      };
+    }
+    updateRunCellResultDraft(state, cellId, nextRunState);
+  } else if (message.event === "disconnect" && options.handleDisconnect) {
+    nextRunState.status = "error";
+    if (options.finishedAt !== undefined) {
+      nextRunState.timings = {
+        ...nextRunState.timings,
+        finishedAt: options.finishedAt,
+      };
+    }
+    updateRunCellResultDraft(state, cellId, nextRunState);
+    appendOutputDraft(state, cellId, {
+      output_type: "error",
+      ename: "InternalError",
+      evalue: message.data,
+      traceback: [],
+    });
+  }
+
+  return nextRunState;
+}
+
+export function notebookInProcStoreEnabled(): boolean {
+  const metaEnv = import.meta.env as Record<string, unknown>;
+  const processEnv = typeof process === "undefined" ? undefined : process.env;
+  return flagValueEnabled(
+    metaEnv[NOTEBOOK_IN_PROC_STORE_ENV] ??
+      processEnv?.[NOTEBOOK_IN_PROC_STORE_ENV] ??
+      processEnv?.SPUR_NOTEBOOK_IN_PROC_STORE,
+  );
+}
+
+function flagValueEnabled(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
+function displayIdForRunCellEvent(message: RunCellEvent): string | undefined {
+  if (message.event !== "display_data") return undefined;
+  return message.data.transient?.display_id || uuidv4();
+}
+
+function cellTypeFromDaemon(kind: string): CellType | undefined {
+  if (kind === "code" || kind === "markdown") return kind;
+  return undefined;
+}
+
+export async function reconcileNotebookDelta(
+  notebook: Notebook,
+  delta: NotebookDelta,
+) {
+  if (!notebookInProcStoreEnabled()) return;
+  await notebook.applyNotebookDelta(delta);
+}
 
 /**
  * Centralized stateful object representing a notebook.
@@ -506,6 +742,25 @@ export class Notebook {
     this.state.setCellSource(cellId, source, lastEditedBy);
   }
 
+  async applyNotebookDelta(delta: NotebookDelta) {
+    const kind = delta.kind;
+    if (kind.type === "loaded") {
+      const snapshot = await invoke<DaemonNotebookSnapshot>(
+        "notebook_store_snapshot",
+      );
+      this.loadNotebook(snapshot.root);
+    } else if (kind.type === "cellWritten") {
+      await this.reconcileStoreCell(kind.id);
+    } else if (kind.type === "cellInserted") {
+      await this.reconcileStoreCell(kind.id, kind.after_id);
+    } else if (kind.type === "cellDeleted") {
+      this.refs.delete(kind.id);
+      this.state.deleteCell(kind.id);
+    } else if (kind.type === "runCellEvent") {
+      this.handleRunCellEvent(kind.cell_id, kind.event);
+    }
+  }
+
   clearResult(cellId: string) {
     this.state.clearResult(cellId);
   }
@@ -561,88 +816,30 @@ export class Notebook {
     const lastEditedBy = cell?.source === code ? cell.lastEditedBy : undefined;
     this.updateCellSource(cellId, code, lastEditedBy);
 
-    let status: CellResult["status"] = "running";
-    let timings: CellResult["timings"] = { startedAt: Date.now() };
-    let executionCount: CellResult["executionCount"] = undefined;
+    let runState: RunCellEventApplicationState = {
+      status: "running",
+      timings: { startedAt: Date.now() },
+      executionCount: undefined,
+      willClearOutput: false,
+    };
 
     const update = () =>
       this.state.updateResult(cellId, {
-        status,
-        timings,
-        executionCount,
+        status: runState.status,
+        timings: runState.timings,
+        executionCount: runState.executionCount,
       });
     update();
     this.state.clearOutput(cellId);
-
-    let willClearOutput = false;
 
     try {
       const onEvent = new Channel<RunCellEvent>();
 
       onEvent.onmessage = (message: RunCellEvent) => {
-        if (willClearOutput) {
-          this.state.clearOutput(cellId);
-          willClearOutput = false;
-        }
-
-        if (message.event === "stdout" || message.event === "stderr") {
-          this.state.appendOutput(cellId, {
-            output_type: "stream",
-            name: message.event,
-            text: message.data,
-          });
-        } else if (message.event === "error") {
-          status = "error";
-          update();
-          this.state.appendOutput(cellId, {
-            output_type: "error",
-            ename: message.data.ename,
-            evalue: message.data.evalue,
-            traceback: message.data.traceback,
-          });
-        } else if (message.event === "execute_result") {
-          // This means that there was a return value for the cell.
-          executionCount = message.data.execution_count;
-          update();
-          this.state.appendOutput(cellId, {
-            output_type: "execute_result",
-            execution_count: message.data.execution_count,
-            data: message.data.data,
-            metadata: message.data.metadata,
-          });
-        } else if (message.event === "display_data") {
-          const displayId = message.data.transient?.display_id || uuidv4();
-          this.state.appendOutput(
-            cellId,
-            {
-              output_type: "display_data",
-              data: message.data.data,
-              metadata: message.data.metadata,
-            },
-            displayId,
-          );
-        } else if (message.event === "update_display_data") {
-          const displayId = message.data.transient?.display_id;
-          if (displayId) {
-            this.state.updateOutputDisplay(cellId, displayId, {
-              data: message.data.data,
-              metadata: message.data.metadata,
-            });
-          }
-        } else if (message.event === "clear_output") {
-          if (message.data.wait) {
-            willClearOutput = true;
-          } else {
-            this.state.clearOutput(cellId);
-          }
-        } else if (message.event === "started") {
-          status = "running";
-          update();
-        } else if (message.event === "finished") {
-          status = message.data.status === "ok" ? "success" : "error";
-          executionCount = message.data.exec_count ?? executionCount;
-          update();
-        } else {
+        runState = this.state.applyRunCellEvent(cellId, message, runState, {
+          displayId: displayIdForRunCellEvent(message),
+        });
+        if (message.event === "disconnect") {
           console.warn("Skipping unhandled event", message);
         }
       };
@@ -652,11 +849,11 @@ export class Notebook {
         code,
         onEvent,
       });
-      if (status === "running") {
-        status = "success";
+      if (runState.status === "running") {
+        runState = { ...runState, status: "success" };
       }
     } catch (error: any) {
-      status = "error";
+      runState = { ...runState, status: "error" };
       // Synthesize an error output for kernel disconnects or other errors.
       this.state.appendOutput(cellId, {
         output_type: "error",
@@ -665,7 +862,10 @@ export class Notebook {
         traceback: [],
       });
     } finally {
-      timings = { ...timings, finishedAt: Date.now() };
+      runState = {
+        ...runState,
+        timings: { ...runState.timings, finishedAt: Date.now() },
+      };
       update();
     }
   }
@@ -698,83 +898,22 @@ export class Notebook {
       beginRun();
       return;
     }
-    runState ??= beginRun();
-
-    if (runState.willClearOutput) {
-      this.state.clearOutput(cellId);
-      runState.willClearOutput = false;
+    if (!runState) {
+      runState = beginRun();
     }
 
-    if (message.event === "stdout" || message.event === "stderr") {
-      this.state.appendOutput(cellId, {
-        output_type: "stream",
-        name: message.event,
-        text: message.data,
-      });
-    } else if (message.event === "error") {
-      runState.status = "error";
-      this.updateDirectRunResult(cellId, runState);
-      this.state.appendOutput(cellId, {
-        output_type: "error",
-        ename: message.data.ename,
-        evalue: message.data.evalue,
-        traceback: message.data.traceback,
-      });
-    } else if (message.event === "execute_result") {
-      // This means that there was a return value for the cell.
-      runState.executionCount = message.data.execution_count;
-      this.updateDirectRunResult(cellId, runState);
-      this.state.appendOutput(cellId, {
-        output_type: "execute_result",
-        execution_count: message.data.execution_count,
-        data: message.data.data,
-        metadata: message.data.metadata,
-      });
-    } else if (message.event === "display_data") {
-      const displayId = message.data.transient?.display_id || uuidv4();
-      this.state.appendOutput(
-        cellId,
-        {
-          output_type: "display_data",
-          data: message.data.data,
-          metadata: message.data.metadata,
-        },
-        displayId,
-      );
-    } else if (message.event === "update_display_data") {
-      const displayId = message.data.transient?.display_id;
-      if (displayId) {
-        this.state.updateOutputDisplay(cellId, displayId, {
-          data: message.data.data,
-          metadata: message.data.metadata,
-        });
-      }
-    } else if (message.event === "clear_output") {
-      if (message.data.wait) {
-        runState.willClearOutput = true;
-      } else {
-        this.state.clearOutput(cellId);
-      }
-    } else if (message.event === "finished") {
-      runState.status = message.data.status === "ok" ? "success" : "error";
-      runState.executionCount =
-        message.data.exec_count ?? runState.executionCount;
-      runState.timings = { ...runState.timings, finishedAt: Date.now() };
-      this.updateDirectRunResult(cellId, runState);
-      this.directRunCellStates.delete(cellId);
-    } else if (message.event === "disconnect") {
-      runState.status = "error";
-      runState.timings = { ...runState.timings, finishedAt: Date.now() };
-      this.updateDirectRunResult(cellId, runState);
-      this.state.appendOutput(cellId, {
-        output_type: "error",
-        ename: "InternalError",
-        evalue: message.data,
-        traceback: [],
-      });
+    const isTerminal =
+      message.event === "finished" || message.event === "disconnect";
+    runState = this.state.applyRunCellEvent(cellId, message, runState, {
+      displayId: displayIdForRunCellEvent(message),
+      finishedAt: isTerminal ? Date.now() : undefined,
+      handleDisconnect: true,
+    });
+
+    if (isTerminal) {
       this.directRunCellStates.delete(cellId);
     } else {
-      console.warn("Skipping unhandled event", message);
+      this.directRunCellStates.set(cellId, runState);
     }
   }
 
@@ -784,6 +923,23 @@ export class Notebook {
       timings: runState.timings,
       executionCount: runState.executionCount,
     });
+  }
+
+  private async reconcileStoreCell(cellId: string, afterId?: string | null) {
+    const cell = await invoke<DaemonCell>("read_notebook_store_cell", {
+      id: cellId,
+    });
+    if (!cellTypeFromDaemon(cell.kind)) {
+      console.warn("Skipping unsupported notebook store cell kind", {
+        cellId,
+        kind: cell.kind,
+      });
+      return;
+    }
+    if (!this.refs.has(cell.id)) {
+      this.refs.set(cell.id, {});
+    }
+    this.state.applyCellSnapshot(cell, afterId);
   }
 
   private scheduleAutosave() {
