@@ -72,6 +72,8 @@ pub struct Totals {
     pub total_tokens: i64,
     pub cost_usd: f64,
     pub session_count: i64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 impl Totals {
@@ -84,6 +86,7 @@ impl Totals {
             t.cache_creation_tokens += r.cache_creation_tokens;
             t.cost_usd += r.cost_usd;
             t.session_count += r.sessions;
+            t.unpriced_events += r.unpriced_events;
         }
         t.total_tokens =
             t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_creation_tokens;
@@ -99,6 +102,7 @@ impl Totals {
             t.cache_creation_tokens += r.cache_creation_tokens;
             t.cost_usd += r.cost_usd;
             t.session_count += r.sessions;
+            t.unpriced_events += r.unpriced_events;
         }
         t.total_tokens =
             t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_creation_tokens;
@@ -114,6 +118,7 @@ impl Totals {
             t.cache_creation_tokens += r.cache_creation_tokens;
             t.cost_usd += r.cost_usd;
             t.session_count += r.sessions;
+            t.unpriced_events += r.unpriced_events;
         }
         t.total_tokens =
             t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_creation_tokens;
@@ -211,6 +216,8 @@ pub struct ModelTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_cost: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 impl ModelTotals {
@@ -221,6 +228,7 @@ impl ModelTotals {
             t.input_tokens += r.input_tokens;
             t.output_tokens += r.output_tokens;
             t.total_cost += r.total_cost;
+            t.unpriced_events += r.unpriced_events;
         }
         t
     }
@@ -240,6 +248,8 @@ pub struct ProjectTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 impl ProjectTotals {
@@ -250,6 +260,7 @@ impl ProjectTotals {
             t.input_tokens += r.input_tokens;
             t.output_tokens += r.output_tokens;
             t.cost_usd += r.cost_usd;
+            t.unpriced_events += r.unpriced_events;
         }
         t
     }
