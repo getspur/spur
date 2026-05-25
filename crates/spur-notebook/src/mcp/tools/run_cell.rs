@@ -1,202 +1,159 @@
+use jute::backend::commands::RunCellEvent;
+use jute::commands::run_cell_events;
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
-    service::RequestContext,
-    ErrorData as McpError, RoleServer,
+    ErrorData as McpError,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tauri::Emitter;
 
-use crate::mcp::bridge::BridgeRequester;
 use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.run_cell";
+const RUN_CELL_EVENT_NAME: &str = "notebook://run_cell_event";
 
 #[derive(Debug, Deserialize)]
 struct RunCellParams {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunCellResponse {
-    id: String,
-    status: String,
-    #[serde(default)]
-    events: Vec<Value>,
+    cell_id: String,
+    kernel_id: String,
+    code: String,
 }
 
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Run a code cell through the notebook agent bridge.",
+        "Run a code cell against a kernel slot, returning the full execution result.",
         rmcp_object(json!({
             "type": "object",
-            "required": ["id"],
+            "required": ["cell_id", "kernel_id", "code"],
             "properties": {
-                "id": { "type": "string", "minLength": 1 }
+                "cell_id": { "type": "string", "minLength": 1 },
+                "kernel_id": { "type": "string", "minLength": 1 },
+                "code": { "type": "string" }
             },
             "additionalProperties": false
         })),
     )
 }
 
-pub async fn call(
-    deps: &ServerDeps,
-    arguments: Value,
-    _context: RequestContext<RoleServer>,
-) -> Result<CallToolResult, McpError> {
-    call_inner(deps.bridge.as_ref(), arguments).await
-}
-
-pub async fn call_with_progress(
-    bridge: &dyn BridgeRequester,
-    arguments: Value,
-    _progress: &mut RecordingProgress,
-) -> Result<CallToolResult, McpError> {
-    call_inner(bridge, arguments).await
-}
-
-async fn call_inner(
-    bridge: &dyn BridgeRequester,
-    arguments: Value,
-) -> Result<CallToolResult, McpError> {
+pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
     let params: RunCellParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
-            "notebook.run_cell requires { id }",
+            "notebook.run_cell requires { cell_id, kernel_id, code }",
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.id.is_empty() {
+    if params.cell_id.is_empty() {
         return Err(McpError::invalid_params(
-            "notebook.run_cell id must not be empty",
+            "notebook.run_cell cell_id must not be empty",
             None,
         ));
     }
-
-    let value = bridge
-        .request_no_timeout(METHOD, json!({ "id": params.id }))
-        .await
-        .map_err(|error| error.into_mcp_error())?;
-    let response: RunCellResponse = serde_json::from_value(value).map_err(|error| {
-        McpError::internal_error(
-            "invalid notebook.run_cell bridge response",
-            Some(json!({ "error": error.to_string() })),
-        )
+    if params.kernel_id.is_empty() {
+        return Err(McpError::invalid_params(
+            "notebook.run_cell kernel_id must not be empty",
+            None,
+        ));
+    }
+    let state = deps.state.as_ref().ok_or_else(|| {
+        McpError::internal_error("notebook.run_cell requires notebook daemon state", None)
     })?;
 
-    Ok(CallToolResult::structured(json!({
-        "id": response.id,
-        "events": response.events,
-        "terminal": {
-            "status": response.status
+    let rx = run_cell_events(&params.kernel_id, &params.code, state)
+        .await
+        .map_err(|error| {
+            McpError::internal_error(
+                "notebook.run_cell failed to dispatch",
+                Some(json!({ "error": error.to_string() })),
+            )
+        })?;
+
+    let mut outputs: Vec<Value> = Vec::new();
+    let mut exec_count: Option<u32> = None;
+    let mut status: String = "error".to_string();
+
+    while let Ok(event) = rx.recv().await {
+        let event_value = serde_json::to_value(&event).unwrap_or(Value::Null);
+        if let Some(app) = deps.app.as_ref() {
+            let _ = app.emit(
+                RUN_CELL_EVENT_NAME,
+                json!({
+                    "cell_id": params.cell_id,
+                    "kernel_id": params.kernel_id,
+                    "event": event_value,
+                }),
+            );
         }
-    })))
-}
-
-#[derive(Default)]
-pub struct RecordingProgress {
-    events: Vec<Value>,
-}
-
-impl RecordingProgress {
-    pub fn events(&self) -> Vec<Value> {
-        self.events.clone()
+        match &event {
+            RunCellEvent::Finished {
+                exec_count: ec,
+                status: s,
+            } => {
+                exec_count = *ec;
+                status = s.clone();
+            }
+            RunCellEvent::Started => {}
+            RunCellEvent::Disconnect(message) => {
+                status = format!("disconnect: {message}");
+            }
+            _ => {
+                outputs.push(serde_json::to_value(&event).unwrap_or(Value::Null));
+            }
+        }
     }
+
+    Ok(CallToolResult::structured(json!({
+        "id": params.cell_id,
+        "status": status,
+        "exec_count": exec_count,
+        "outputs": outputs,
+    })))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-        time::Duration,
-    };
+    use std::sync::Arc;
 
-    use crate::mcp::bridge::BridgeRequestFuture;
-    use tokio::sync::Mutex;
+    use jute::state::State;
 
     use super::*;
+    use crate::mcp::{
+        bridge::{AgentBridge, TauriBridgeRequester},
+        ServerDeps,
+    };
 
-    #[derive(Default)]
-    struct FakeBridge {
-        requests: Mutex<Vec<String>>,
-        direct_kernel_calls: AtomicUsize,
-    }
-
-    impl FakeBridge {
-        async fn requested_methods(&self) -> Vec<String> {
-            self.requests.lock().await.clone()
-        }
-
-        fn direct_kernel_calls(&self) -> usize {
-            self.direct_kernel_calls.load(Ordering::SeqCst)
-        }
-    }
-
-    impl BridgeRequester for Arc<FakeBridge> {
-        fn listener_registered(&self) -> bool {
-            true
-        }
-
-        fn window_alive(&self) -> bool {
-            true
-        }
-
-        fn notebook_open(&self) -> bool {
-            true
-        }
-
-        fn request<'a>(
-            &'a self,
-            method: &'static str,
-            params: Value,
-            _timeout: Duration,
-        ) -> BridgeRequestFuture<'a> {
-            Box::pin(async move {
-                self.requests.lock().await.push(method.to_string());
-                match method {
-                    METHOD => Ok(json!({
-                        "id": params["id"],
-                        "status": "success",
-                        "exec_count": 1,
-                        "outputs": [],
-                        "events": []
-                    })),
-                    _ => unreachable!("unexpected bridge method {method}"),
-                }
-            })
+    fn deps_with_state(state: Arc<State>) -> ServerDeps {
+        ServerDeps {
+            bridge: Arc::new(TauriBridgeRequester::without_app(Arc::new(
+                AgentBridge::new(),
+            ))),
+            state: Some(state),
+            app: None,
         }
     }
 
     #[tokio::test]
-    async fn call_returns_terminal_status_from_bridge_response() {
-        let bridge = Arc::new(FakeBridge::default());
-        let mut progress = RecordingProgress::default();
-
-        let result = call_with_progress(&bridge, json!({ "id": "code-1" }), &mut progress)
-            .await
-            .expect("run cell succeeds");
-        let body = result.structured_content.expect("structured content");
-
-        assert_eq!(body["events"], json!(progress.events()));
-        assert_eq!(body["terminal"]["status"], "success");
+    async fn missing_slot_yields_dispatch_error() {
+        let deps = deps_with_state(Arc::new(State::new()));
+        let error = call(
+            &deps,
+            json!({ "cell_id": "code-1", "kernel_id": "missing", "code": "1+1" }),
+        )
+        .await
+        .expect_err("missing slot reports error");
+        assert!(error.message.contains("run_cell"));
     }
 
     #[tokio::test]
-    async fn mcp_run_cell_routes_through_bridge() {
-        let bridge = Arc::new(FakeBridge::default());
-        let mut progress = RecordingProgress::default();
-
-        let result = call_with_progress(&bridge, json!({ "id": "code-1" }), &mut progress)
-            .await
-            .expect("run cell succeeds");
-        let body = result.structured_content.expect("structured content");
-
-        assert_eq!(body["id"], "code-1");
-        assert_eq!(body["events"], json!([]));
-        assert_eq!(body["terminal"]["status"], "success");
-        assert_eq!(bridge.requested_methods().await, vec![METHOD.to_string()]);
-        assert_eq!(bridge.direct_kernel_calls(), 0);
+    async fn invalid_params_rejects_empty_kernel_id() {
+        let deps = deps_with_state(Arc::new(State::new()));
+        let error = call(
+            &deps,
+            json!({ "cell_id": "code-1", "kernel_id": "", "code": "" }),
+        )
+        .await
+        .expect_err("empty kernel_id rejected");
+        assert!(error.message.contains("must not be empty"));
     }
 }

@@ -8,7 +8,8 @@ use std::io;
 pub mod backend;
 pub mod commands;
 pub mod entity;
-mod kernel_provision;
+/// Lazy provisioning of the bundled Python 3 kernelspec.
+pub mod kernel_provision;
 pub mod menu;
 pub mod state;
 pub mod window;

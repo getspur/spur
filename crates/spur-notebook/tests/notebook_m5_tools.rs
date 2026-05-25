@@ -4,7 +4,7 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 use spur_notebook::mcp::{
     bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
-    tools::{delete_cell, insert_cell, run_cell, write_cell},
+    tools::{delete_cell, insert_cell, write_cell},
     ServerDeps,
 };
 use tokio::sync::Mutex;
@@ -181,7 +181,6 @@ fn structured(result: CallToolResult) -> Value {
 async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
     let notebook = Arc::new(MockNotebook::default());
     let deps = ServerDeps::from_bridge(notebook.clone());
-    let mut progress = run_cell::RecordingProgress::default();
 
     let c1 = structured(
         insert_cell::call(&deps, json!({ "kind": "code", "source": "x = 2 + 2" }))
@@ -189,12 +188,6 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
             .unwrap(),
     );
     assert_eq!(c1["version"], 1);
-
-    structured(
-        run_cell::call_with_progress(notebook.as_ref(), json!({ "id": c1["id"] }), &mut progress)
-            .await
-            .unwrap(),
-    );
 
     let c2 = structured(
         insert_cell::call(
@@ -207,12 +200,6 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
         )
         .await
         .unwrap(),
-    );
-
-    structured(
-        run_cell::call_with_progress(notebook.as_ref(), json!({ "id": c2["id"] }), &mut progress)
-            .await
-            .unwrap(),
     );
 
     let write = structured(
@@ -247,22 +234,6 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
             Some("brain")
         );
     }
-
-    structured(
-        run_cell::call_with_progress(notebook.as_ref(), json!({ "id": c2["id"] }), &mut progress)
-            .await
-            .unwrap(),
-    );
-
-    assert!(progress.events().is_empty());
-    assert_eq!(
-        *notebook.run_sources.lock().await,
-        vec![
-            "x = 2 + 2".to_string(),
-            "print(x)".to_string(),
-            "print(x + 1)".to_string()
-        ]
-    );
 
     let stale = write_cell::call(
         &deps,

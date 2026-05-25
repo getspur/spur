@@ -121,7 +121,7 @@ impl ServerHandler for NotebookMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         match request.name.as_ref() {
             "notebook.ping" => Ok(CallToolResult::structured(json!({
@@ -138,7 +138,13 @@ impl ServerHandler for NotebookMcpServer {
                     .unwrap_or_else(|| json!({}));
                 tools::read_cell::call(&self.deps, arguments).await
             }
-            "notebook.kernel_info" => tools::kernel_info::call(&self.deps).await,
+            "notebook.kernel_info" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::kernel_info::call(&self.deps, arguments).await
+            }
             "notebook.insert_cell" => {
                 let arguments = request
                     .arguments
@@ -160,13 +166,40 @@ impl ServerHandler for NotebookMcpServer {
                     .unwrap_or_else(|| json!({}));
                 tools::delete_cell::call(&self.deps, arguments).await
             }
-            "notebook.interrupt" => tools::interrupt::call(&self.deps).await,
+            "notebook.interrupt" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::interrupt::call(&self.deps, arguments).await
+            }
             "notebook.run_cell" => {
                 let arguments = request
                     .arguments
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
-                tools::run_cell::call(&self.deps, arguments, context).await
+                tools::run_cell::call(&self.deps, arguments).await
+            }
+            "notebook.start_kernel" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::start_kernel::call(&self.deps, arguments).await
+            }
+            "notebook.restart_kernel" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::restart_kernel::call(&self.deps, arguments).await
+            }
+            "notebook.stop_kernel" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::stop_kernel::call(&self.deps, arguments).await
             }
             name => Err(McpError::invalid_params(
                 format!("unknown notebook tool: {name}"),
