@@ -1336,7 +1336,7 @@ fn parse_raw_diff(
                 b'A' => FileChangeKind::Added,
                 b'M' | b'T' => FileChangeKind::Modified,
                 b'D' => FileChangeKind::Deleted,
-                b'R' => FileChangeKind::Renamed {
+                b'R' | b'C' => FileChangeKind::Renamed {
                     from: GitPath::from_bytes(path1.to_vec()),
                 },
                 other => bail!(
@@ -1348,10 +1348,12 @@ fn parse_raw_diff(
 
         let path = match &kind {
             FileChangeKind::Renamed { .. } | FileChangeKind::Gitlink { .. }
-                if status_kind == b'R' =>
+                if status_kind == b'R' || status_kind == b'C' =>
             {
                 let path2 = fields.next().with_context(|| {
-                    format!("git diff-tree emitted rename `{status}` without a destination path")
+                    format!(
+                        "git diff-tree emitted rename/copy `{status}` without a destination path"
+                    )
                 })?;
                 GitPath::from_bytes(path2.to_vec())
             }
@@ -1360,9 +1362,7 @@ fn parse_raw_diff(
             | FileChangeKind::Deleted
             | FileChangeKind::Gitlink { .. } => GitPath::from_bytes(path1.to_vec()),
             FileChangeKind::Renamed { .. } => {
-                return Err(anyhow!(
-                    "git diff-tree emitted rename status `{status}` without rename marker"
-                ))
+                unreachable!("kind=Renamed implies status_kind in [R,C]; see lines 1339-1340")
             }
         };
 
@@ -1551,6 +1551,31 @@ mod tests {
 
         let r = changes.iter().find(|c| c.path.ends_with("new.rs")).unwrap();
         assert!(matches!(&r.kind, FileChangeKind::Renamed { from } if from.ends_with("old.rs")));
+    }
+
+    #[test]
+    fn parse_raw_diff_handles_copy_status_like_rename() {
+        let mut stdout = Vec::new();
+        stdout.extend_from_slice(b":100644 100644 0000000000000000000000000000000000000001 0000000000000000000000000000000000000002 C100");
+        stdout.push(0);
+        stdout.extend_from_slice(b"src/original.rs");
+        stdout.push(0);
+        stdout.extend_from_slice(b"src/copied.rs");
+        stdout.push(0);
+
+        let mut changes = Vec::new();
+        parse_raw_diff(&stdout, Some("deadbeef".into()), &mut changes)
+            .expect("copy status must parse");
+
+        assert_eq!(changes.len(), 1);
+        let change = &changes[0];
+        assert_eq!(change.path.display().to_string(), "src/copied.rs");
+        match &change.kind {
+            FileChangeKind::Renamed { from } => {
+                assert_eq!(from.display().to_string(), "src/original.rs");
+            }
+            other => panic!("expected Renamed (copy treated as rename), got {other:?}"),
+        }
     }
 
     #[test]
