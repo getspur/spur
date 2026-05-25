@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react";
 import { useSearch } from "wouter";
 
 import { setActiveAgentNotebook } from "@/agent/bridge";
+import { listenForNotebookEvents } from "@/agent/events";
 import { Notebook, NotebookContext } from "@/stores/notebook";
 import NotebookCommandMenu from "@/ui/notebook/NotebookCommandMenu";
 import NotebookFooter from "@/ui/notebook/NotebookFooter";
@@ -13,6 +14,8 @@ export default function NotebookPage() {
 
   // Singleton notebook object used for the lifetime of this component.
   const notebook = useMemo(() => new Notebook(), []);
+
+  useEffect(() => listenForNotebookEvents(notebook), [notebook]);
 
   useEffect(() => {
     let cancelled = false;

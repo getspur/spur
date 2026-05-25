@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{empty_params, BRIDGE_TIMEOUT};
-use crate::mcp::bridge::BridgeRequester;
+use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.snapshot";
 const SOURCE_PREVIEW_CHARS: usize = 160;
@@ -44,7 +44,8 @@ pub fn tool() -> Tool {
     )
 }
 
-pub async fn call(bridge: &dyn BridgeRequester) -> Result<CallToolResult, McpError> {
+pub async fn call(deps: &ServerDeps) -> Result<CallToolResult, McpError> {
+    let bridge = deps.bridge.as_ref();
     let value = bridge
         .request(METHOD, empty_params(), BRIDGE_TIMEOUT)
         .await

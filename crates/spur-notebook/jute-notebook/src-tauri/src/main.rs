@@ -39,7 +39,7 @@ fn main() {
     tracing_subscriber::fmt().init();
 
     tauri::Builder::default()
-        .manage(State::new())
+        .manage(std::sync::Arc::new(State::new()))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())

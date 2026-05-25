@@ -71,7 +71,7 @@ pub struct State {
     pub kernels: DashMap<String, KernelSlot>,
 
     /// Coordinator for debounced notebook saves.
-    pub(crate) save_coordinator: SaveCoordinator,
+    pub save_coordinator: SaveCoordinator,
 }
 
 impl State {

@@ -101,7 +101,7 @@ struct LastNotebookRecord {
 
 /// Coordinates disk saves so only one notebook write runs at a time.
 #[derive(Clone)]
-pub(crate) struct SaveCoordinator {
+pub struct SaveCoordinator {
     inner: Arc<Mutex<SaveState>>,
     writer: Arc<SaveWriter>,
 }
@@ -129,7 +129,8 @@ impl Default for SaveCoordinator {
 }
 
 impl SaveCoordinator {
-    async fn save(&self, path: PathBuf, contents: NotebookRoot) -> Result<(), Error> {
+    /// Queue and persist notebook contents to disk.
+    pub async fn save(&self, path: PathBuf, contents: NotebookRoot) -> Result<(), Error> {
         let mut state = self.inner.lock().await;
         state.queued = Some(PendingSave { path, contents });
         if state.in_flight {
@@ -439,7 +440,8 @@ fn is_root_or_prefix_only(path: &Path) -> bool {
     saw_anchor
 }
 
-async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
+/// Start a local Jupyter kernel by spec name.
+pub async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
     // Temporary hack to just start a kernel locally with ZeroMQ.
     let kernels = environment::list_kernels(None).await;
     let mut kernel_spec = match kernels
@@ -473,7 +475,8 @@ async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
     Ok(kernel)
 }
 
-fn install_kernel_in_slot(
+/// Install a fresh kernel in a slot, returning its generation and any previous kernel.
+pub fn install_kernel_in_slot(
     state: &State,
     slot_id: &str,
     spec_name: String,
@@ -500,7 +503,8 @@ fn take_kernel_if_present(state: &State, slot_id: &str) -> Option<LocalKernel> {
     slot.kernel.take()
 }
 
-fn take_kernel_from_slot(state: &State, slot_id: &str) -> Result<LocalKernel, Error> {
+/// Remove and return the kernel currently bound to a slot, or `KernelDisconnect`.
+pub fn take_kernel_from_slot(state: &State, slot_id: &str) -> Result<LocalKernel, Error> {
     let mut slot = state
         .kernels
         .get_mut(slot_id)
@@ -527,7 +531,8 @@ fn kernel_connection_for_slot(
         .clone())
 }
 
-fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
+/// Return the spec name recorded for an existing kernel slot.
+pub fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
     let slot = state.kernels.get(slot_id).ok_or(Error::KernelDisconnect)?;
     Ok(slot.spec_name().to_string())
 }
@@ -558,7 +563,7 @@ async fn kernel_process_usage(pid: Pid) -> Option<KernelProcessUsage> {
 #[tauri::command]
 pub async fn kernel_usage_info(
     kernel_id: &str,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<KernelUsageInfo, Error> {
     let pid: Pid = {
         let slot = state.kernels.get(kernel_id).ok_or(Error::KernelNotFound)?;
@@ -582,12 +587,13 @@ pub async fn kernel_usage_info(
 #[tauri::command]
 pub async fn kernel_slot_info(
     kernel_id: &str,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<KernelSlotInfo, Error> {
     kernel_slot_info_for_state(kernel_id, &state).await
 }
 
-async fn kernel_slot_info_for_state(
+/// Read-only kernel slot info usable outside the Tauri command surface.
+pub async fn kernel_slot_info_for_state(
     kernel_id: &str,
     state: &State,
 ) -> Result<KernelSlotInfo, Error> {
@@ -640,7 +646,7 @@ async fn kernel_alive_for_notebook(path: &str, state: &State) -> bool {
 /// List daemon recent notebooks with Tauri-side status metadata.
 #[tauri::command]
 pub async fn list_recent_notebooks(
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<Vec<RecentNotebookEntry>, Error> {
     let response = send_daemon_control("list_recents", None, None).await?;
     let current_path = load_current_notebook_path_normalized().await?;
@@ -853,7 +859,7 @@ pub async fn start_kernel(
     app: AppHandle,
     spec_name: &str,
     window: WebviewWindow,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<String, Error> {
     // TODO: Save the client in a better place.
     // let client = JupyterClient::new("", "")?;
@@ -880,7 +886,7 @@ pub async fn start_kernel(
 pub async fn restart_kernel(
     slot_id: &str,
     spec_name: Option<String>,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<String, Error> {
     info!("restarting jute kernel slot {slot_id}");
     let next_spec_name = match spec_name {
@@ -930,7 +936,7 @@ pub async fn get_notebook(path: &str) -> Result<NotebookRoot, Error> {
 pub async fn save_to_disk(
     path: &str,
     contents: NotebookRoot,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
     info!("saving notebook at {path}");
     state
@@ -961,7 +967,7 @@ pub async fn run_cell(
     kernel_id: &str,
     code: &str,
     on_event: Channel<RunCellEvent>,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
     let rx = run_cell_events(kernel_id, code, &state).await?;
     while let Ok(event) = rx.recv().await {
@@ -976,7 +982,7 @@ pub async fn run_cell(
 #[tauri::command]
 pub async fn interrupt_kernel(
     kernel_id: &str,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
     interrupt_kernel_slot(kernel_id, &state).await
 }

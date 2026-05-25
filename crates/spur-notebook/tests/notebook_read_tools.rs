@@ -1,12 +1,33 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use jute::commands::{install_kernel_in_slot, start_local_kernel};
+use jute::state::{KernelSlot, State};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 use spur_notebook::mcp::{
-    bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
-    tools::{kernel_info, read_cell, snapshot},
+    bridge::{
+        AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester, TauriBridgeRequester,
+    },
+    tools::{kernel_info, read_cell, run_cell, save, snapshot, stop_kernel},
+    ServerDeps,
 };
 use tokio::sync::Mutex;
+
+fn deps_with(bridge: Arc<dyn BridgeRequester>) -> ServerDeps {
+    ServerDeps::from_bridge(bridge)
+}
+
+fn deps_with_state(state: Arc<State>) -> ServerDeps {
+    ServerDeps {
+        bridge: Arc::new(TauriBridgeRequester::without_app(Arc::new(
+            AgentBridge::new(),
+        ))),
+        state: Some(state),
+        app: None,
+        daemon: None,
+    }
+}
 
 #[derive(Default)]
 struct MockBridge {
@@ -57,7 +78,7 @@ fn structured(result: CallToolResult) -> Value {
 
 #[tokio::test]
 async fn snapshot_returns_preview_and_blake3_16_hash_for_all_cells() {
-    let bridge = MockBridge::default();
+    let bridge = Arc::new(MockBridge::default());
     let long_source = format!("{}tail", "a".repeat(200));
     bridge
         .push_response(Ok(json!([
@@ -80,7 +101,8 @@ async fn snapshot_returns_preview_and_blake3_16_hash_for_all_cells() {
         ])))
         .await;
 
-    let body = structured(snapshot::call(&bridge).await.expect("snapshot succeeds"));
+    let deps = deps_with(bridge.clone());
+    let body = structured(snapshot::call(&deps).await.expect("snapshot succeeds"));
     let cells = body.as_array().expect("snapshot is an array");
 
     assert_eq!(cells.len(), 2);
@@ -99,7 +121,7 @@ async fn snapshot_returns_preview_and_blake3_16_hash_for_all_cells() {
 
 #[tokio::test]
 async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
-    let bridge = MockBridge::default();
+    let bridge = Arc::new(MockBridge::default());
     bridge
         .push_response(Ok(json!({
             "id": "code-1",
@@ -118,8 +140,9 @@ async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
         })))
         .await;
 
+    let deps = deps_with(bridge.clone());
     let body = structured(
-        read_cell::call(&bridge, json!({ "id": "code-1" }))
+        read_cell::call(&deps, json!({ "id": "code-1" }))
             .await
             .expect("read_cell succeeds"),
     );
@@ -135,62 +158,151 @@ async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
 
 #[tokio::test]
 async fn kernel_info_returns_slot_generation_and_usage() {
-    let bridge = MockBridge::default();
-    bridge
-        .push_response(Ok(json!({
-            "kernel_id": "notebook:/tmp/demo.ipynb",
-            "spec_name": "python3",
-            "generation": 2,
-            "status": "idle",
-            "cpu_pct": 3.5,
-            "mem_mb": 128.25
-        })))
-        .await;
+    let state = Arc::new(State::new());
+    let slot_id = "notebook:/tmp/notebook_read_tools.ipynb".to_string();
+    state
+        .kernels
+        .insert(slot_id.clone(), KernelSlot::new("python3".to_string()));
 
+    let deps = deps_with_state(state);
     let body = structured(
-        kernel_info::call(&bridge)
+        kernel_info::call(&deps, json!({ "kernel_id": slot_id }))
             .await
             .expect("kernel_info succeeds"),
     );
 
-    assert_eq!(body["kernel_id"], "notebook:/tmp/demo.ipynb");
+    assert_eq!(body["kernel_id"], slot_id);
     assert_eq!(body["spec_name"], "python3");
-    assert_eq!(body["generation"], 2);
-    assert_eq!(body["status"], "idle");
-    assert_eq!(
-        bridge.calls().await,
-        vec![("notebook.kernel_info".to_string(), json!({}))]
-    );
+    // Empty slot reports dead with generation 0 and zeroed usage.
+    assert_eq!(body["status"], "dead");
+    assert_eq!(body["generation"], 0);
+    assert!(body["cpu_pct"].is_number());
+    assert!(body["mem_mb"].is_number());
 }
 
 #[tokio::test]
-async fn no_registered_notebook_reports_notebook_not_open() {
-    let bridge = spur_notebook::mcp::bridge::TauriBridgeRequester::without_app(
-        std::sync::Arc::new(spur_notebook::mcp::bridge::AgentBridge::new()),
-    );
+async fn save_writes_notebook_through_save_coordinator() {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-save-")
+        .tempdir()
+        .expect("temp dir");
+    let path = temp_dir.path().join("saved.ipynb");
+    let contents = json!({
+        "metadata": {},
+        "nbformat_minor": 5,
+        "nbformat": 4,
+        "cells": [
+            { "cell_type": "markdown", "id": "c1", "metadata": {}, "source": "hello" }
+        ]
+    });
+    let deps = deps_with_state(Arc::new(State::new()));
 
-    let error = kernel_info::call(&bridge)
+    let body = structured(
+        save::call(
+            &deps,
+            json!({
+                "path": path.display().to_string(),
+                "contents": contents,
+            }),
+        )
         .await
-        .expect_err("missing active notebook should be a tool error");
+        .expect("save succeeds"),
+    );
+    assert_eq!(body["ok"], true);
 
-    assert_eq!(error.data.unwrap()["code"], "notebook_not_open");
+    let written: Value = serde_json::from_slice(
+        &tokio::fs::read(&path)
+            .await
+            .expect("notebook file was written"),
+    )
+    .expect("written notebook is valid JSON");
+    assert_eq!(written["cells"][0]["source"], "hello");
+    assert_eq!(written["nbformat"], 4);
+    // deps.app is None so the notebook://saved emit path is skipped; that
+    // branch is exercised by the daemon integration tests where a Tauri
+    // AppHandle is wired up.
+}
+
+// Live-kernel tests below need a working python3 kernel on the host (and a
+// usable spawn path through start_local_kernel). They're gated behind
+// `#[ignore]` so the default `cargo test -p spur-notebook --test
+// notebook_read_tools` invocation stays hermetic; run explicitly with
+// `cargo test -p spur-notebook --test notebook_read_tools -- --ignored`.
+
+#[tokio::test]
+#[ignore = "requires a working python3 kernel; run with --ignored"]
+async fn start_kernel_then_stop_kernel_cycles_slot() {
+    let state = Arc::new(State::new());
+    let slot_id = "mcp:notebook-read-tools-stop".to_string();
+    let kernel = start_local_kernel("python3")
+        .await
+        .expect("python3 kernel starts");
+    let (generation, previous) =
+        install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
+    assert_eq!(generation, 1);
+    assert!(previous.is_none());
+
+    let deps = deps_with_state(state.clone());
+    let body = structured(
+        stop_kernel::call(&deps, json!({ "kernel_id": slot_id }))
+            .await
+            .expect("stop_kernel succeeds"),
+    );
+    assert_eq!(body["ok"], true);
+
+    // After stop the slot is empty: kernel_info reports "dead" and a second
+    // stop_kernel surfaces the kernel_disconnect error from take_kernel_from_slot.
+    let info = structured(
+        kernel_info::call(&deps, json!({ "kernel_id": slot_id }))
+            .await
+            .expect("kernel_info after stop succeeds"),
+    );
+    assert_eq!(info["status"], "dead");
+
+    stop_kernel::call(&deps, json!({ "kernel_id": slot_id }))
+        .await
+        .expect_err("second stop reports kernel disconnect");
 }
 
 #[tokio::test]
-async fn handler_notebook_not_open_error_is_preserved_as_mcp_error_data() {
-    let bridge = MockBridge::default();
-    bridge
-        .push_response(Err(BridgeError::Handler {
-            code: "notebook_not_open".to_string(),
-            message: "No notebook is loaded".to_string(),
-        }))
-        .await;
-
-    let error = kernel_info::call(&bridge)
+#[ignore = "requires a working python3 kernel; run with --ignored"]
+async fn run_cell_collects_events_against_in_process_kernel_mock() {
+    let state = Arc::new(State::new());
+    let slot_id = "mcp:notebook-read-tools-run".to_string();
+    let kernel = start_local_kernel("python3")
         .await
-        .expect_err("notebook_not_open is an MCP error");
+        .expect("python3 kernel starts");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
 
-    assert_eq!(error.data.unwrap()["code"], "notebook_not_open");
+    let deps = deps_with_state(state.clone());
+    let body = structured(
+        run_cell::call(
+            &deps,
+            json!({
+                "cell_id": "code-run-1",
+                "kernel_id": slot_id,
+                "code": "print(2 + 2)",
+            }),
+        )
+        .await
+        .expect("run_cell succeeds"),
+    );
+
+    assert_eq!(body["id"], "code-run-1");
+    assert_eq!(body["status"], "ok");
+    let outputs = body["outputs"].as_array().expect("outputs is an array");
+    let combined = outputs
+        .iter()
+        .filter_map(|event| event.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        combined.contains('4'),
+        "expected stdout to contain '4', got outputs={outputs:?}"
+    );
+
+    // Tear down the kernel so the test process doesn't leak a python child.
+    let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
 }
 
 fn blake3_16_hex(source: &str) -> String {

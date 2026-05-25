@@ -17,6 +17,11 @@ use crate::{
 /// environment.
 #[tauri::command]
 pub async fn venv_list_python_versions(app: AppHandle) -> Result<Vec<String>, Error> {
+    venv_list_python_versions_impl(&app).await
+}
+
+/// Implementation for [`venv_list_python_versions`] that accepts a borrowed app handle.
+pub async fn venv_list_python_versions_impl(app: &AppHandle) -> Result<Vec<String>, Error> {
     let output = app
         .shell()
         .sidecar("uv")?
@@ -27,20 +32,9 @@ pub async fn venv_list_python_versions(app: AppHandle) -> Result<Vec<String>, Er
         .await?;
 
     if output.status.success() {
-        let mut versions = Vec::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            if let Some(version_string) = line.split_whitespace().next() {
-                // Some versions are prefixed with `pypy-`, ignore those for now.
-                if let Some(stripped) = version_string.strip_prefix("cpython-") {
-                    let version_number = match stripped.find("-") {
-                        Some(index) => &stripped[..index],
-                        None => stripped,
-                    };
-                    versions.push(version_number.to_string());
-                }
-            }
-        }
-        Ok(versions)
+        Ok(parse_python_versions(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     } else {
         let message = String::from_utf8_lossy(&output.stderr);
         Err(Error::Subprocess(io::Error::new(
@@ -50,9 +44,31 @@ pub async fn venv_list_python_versions(app: AppHandle) -> Result<Vec<String>, Er
     }
 }
 
+fn parse_python_versions(output: &str) -> Vec<String> {
+    let mut versions = Vec::new();
+    for line in output.lines() {
+        if let Some(version_string) = line.split_whitespace().next() {
+            // Some versions are prefixed with `pypy-`, ignore those for now.
+            if let Some(stripped) = version_string.strip_prefix("cpython-") {
+                let version_number = match stripped.find('-') {
+                    Some(index) => &stripped[..index],
+                    None => stripped,
+                };
+                versions.push(version_number.to_string());
+            }
+        }
+    }
+    versions
+}
+
 /// Create a new virtual environment, and return its ID.
 #[tauri::command]
 pub async fn venv_create(python_version: &str, app: AppHandle) -> Result<EntityId, Error> {
+    venv_create_impl(python_version, &app).await
+}
+
+/// Implementation for [`venv_create`] that accepts a borrowed app handle.
+pub async fn venv_create_impl(python_version: &str, app: &AppHandle) -> Result<EntityId, Error> {
     let venv_id = EntityId::new(Entity::Venv);
     let venv_path = app
         .path()
@@ -125,6 +141,11 @@ pub struct VenvListItem {
 /// Return a list of virtual environments managed by Jute.
 #[tauri::command]
 pub async fn venv_list(app: AppHandle) -> Result<Vec<VenvListItem>, Error> {
+    venv_list_impl(&app).await
+}
+
+/// Implementation for [`venv_list`] that accepts a borrowed app handle.
+pub async fn venv_list_impl(app: &AppHandle) -> Result<Vec<VenvListItem>, Error> {
     let venv_dir = app.path().app_data_dir()?.join("venv");
     let mut venvs = Vec::new();
     let mut it = match tokio::fs::read_dir(venv_dir).await {
@@ -168,6 +189,11 @@ pub async fn venv_list(app: AppHandle) -> Result<Vec<VenvListItem>, Error> {
 /// Delete a virtual environment by ID.
 #[tauri::command]
 pub async fn venv_delete(venv_id: EntityId, app: AppHandle) -> Result<bool, Error> {
+    venv_delete_impl(venv_id, &app).await
+}
+
+/// Implementation for [`venv_delete`] that accepts a borrowed app handle.
+pub async fn venv_delete_impl(venv_id: EntityId, app: &AppHandle) -> Result<bool, Error> {
     let venv_dir = app.path().app_data_dir()?.join("venv");
     let venv_path = venv_dir.join(venv_id.to_string());
     if tokio::fs::metadata(&venv_path).await.is_ok() {
@@ -177,5 +203,24 @@ pub async fn venv_delete(venv_id: EntityId, app: AppHandle) -> Result<bool, Erro
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_managed_cpython_versions() {
+        let versions = parse_python_versions(
+            "\
+cpython-3.13.2-macos-aarch64-none     <download available>
+pypy-3.10.16-macos-aarch64-none        <download available>
+cpython-3.12.9-macos-aarch64-none      /Users/me/.local/bin/python
+cpython-3.11.11
+",
+        );
+
+        assert_eq!(versions, vec!["3.13.2", "3.12.9", "3.11.11"]);
     }
 }
