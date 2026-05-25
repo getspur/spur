@@ -529,6 +529,7 @@ pub struct SymbolDiffCtx {
     extractors: HashMap<Language, BytesExtractor>,
     diagnostics: Vec<String>,
     cat_file_batches: HashMap<PathBuf, CatFileBatch>,
+    parse_cache: HashMap<(Language, String), Vec<ExtractedSymbol>>,
 }
 
 impl SymbolDiffCtx {
@@ -537,11 +538,17 @@ impl SymbolDiffCtx {
             extractors: HashMap::new(),
             diagnostics: Vec::new(),
             cat_file_batches: HashMap::new(),
+            parse_cache: HashMap::new(),
         }
     }
 
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_cache_len(&self) -> usize {
+        self.parse_cache.len()
     }
 
     fn for_language(&mut self, language: Language) -> Result<&mut BytesExtractor> {
@@ -610,8 +617,14 @@ pub fn symbol_changes_for_commit(
             let cat_file_batch = ctx.cat_file_batch(worktree)?;
             blobs_for_change(worktree, cat_file_batch, sha, file_change)?
         };
-        if blobs.left.as_deref().is_some_and(is_binary)
-            || blobs.right.as_deref().is_some_and(is_binary)
+        if blobs
+            .left
+            .as_ref()
+            .is_some_and(|(_, bytes)| is_binary(bytes))
+            || blobs
+                .right
+                .as_ref()
+                .is_some_and(|(_, bytes)| is_binary(bytes))
         {
             let diagnostic = format!(
                 "binary_blob: file={} commit={} skipped symbol diff; file-level touch retained",
@@ -625,12 +638,13 @@ pub fn symbol_changes_for_commit(
 
         let deleted_path = blobs.left_path.as_ref().unwrap_or(&file_change.path);
         let left_path_buf = blobs.left_path.as_ref().map(GitPath::to_path_buf);
-        let (left_result, right_result) = {
-            let extractor = ctx.for_language(language)?;
-            (
-                extract_symbols(extractor, left_path_buf.as_deref(), &blobs.left),
-                extract_symbols(extractor, Some(&current_path), &blobs.right),
-            )
+        let left_result = match (left_path_buf.as_deref(), blobs.left.as_ref()) {
+            (Some(path), Some((oid, bytes))) => cached_extract(ctx, language, oid, path, bytes)?,
+            _ => Ok(Vec::new()),
+        };
+        let right_result = match blobs.right.as_ref() {
+            Some((oid, bytes)) => cached_extract(ctx, language, oid, &current_path, bytes)?,
+            None => Ok(Vec::new()),
         };
         let mut parse_failed = false;
         let left_symbols = match left_result {
@@ -1041,8 +1055,8 @@ fn jaccard_threshold_for(language: Language) -> Option<f64> {
 
 struct ChangeBlobs {
     left_path: Option<GitPath>,
-    left: Option<Vec<u8>>,
-    right: Option<Vec<u8>>,
+    left: Option<(String, Vec<u8>)>,
+    right: Option<(String, Vec<u8>)>,
 }
 
 fn blobs_for_change(
@@ -1131,7 +1145,7 @@ impl CatFileBatch {
         })
     }
 
-    fn read(&mut self, sha: &str, path: &Path) -> Result<Option<Vec<u8>>> {
+    fn read(&mut self, sha: &str, path: &Path) -> Result<Option<(String, Vec<u8>)>> {
         let spec = blob_spec(sha, path);
         let spec_display = blob_spec_display(sha, path);
         let stdin = self
@@ -1176,6 +1190,7 @@ impl CatFileBatch {
             .next()
             .filter(|part| !part.is_empty())
             .with_context(|| format!("git cat-file --batch header `{header}` missing oid"))?;
+        let oid = oid.to_string();
         let object_type = parts
             .next()
             .with_context(|| format!("git cat-file --batch header `{header}` missing type"))?;
@@ -1211,7 +1226,7 @@ impl CatFileBatch {
             bail!("git cat-file --batch body for `{spec_display}` missing trailing newline");
         }
 
-        Ok(Some(bytes))
+        Ok(Some((oid, bytes)))
     }
 }
 
@@ -1230,7 +1245,7 @@ fn cat_file_blob(
     cat_file_batch: &mut CatFileBatch,
     sha: &str,
     path: &Path,
-) -> Result<Vec<u8>> {
+) -> Result<(String, Vec<u8>)> {
     let spec_display = blob_spec_display(sha, path);
     let missing_blob_name = || {
         blob_oid_for_path(worktree, sha, path)
@@ -1239,7 +1254,7 @@ fn cat_file_blob(
     };
 
     match cat_file_batch.read(sha, path) {
-        Ok(Some(bytes)) => Ok(bytes),
+        Ok(Some(blob)) => Ok(blob),
         Ok(None) if has_promisor_remote(worktree) => {
             let missing = missing_blob_name();
             let first_error = missing_batch_error(worktree, &spec_display);
@@ -1252,7 +1267,7 @@ fn cat_file_blob(
                 format!("missing blob `{missing}` not recovered by promisor remote; fail-closed for this commit")
             })?;
             match cat_file_batch.read(sha, path) {
-                Ok(Some(bytes)) => Ok(bytes),
+                Ok(Some(blob)) => Ok(blob),
                 Ok(None) => Err(missing_batch_error(worktree, &spec_display).context(format!(
                     "missing blob `{missing}` not recovered by promisor remote; fail-closed for this commit"
                 ))),
@@ -1278,7 +1293,7 @@ fn cat_file_blob(
     }
 }
 
-fn cat_file_blob_legacy(worktree: &Path, sha: &str, path: &Path) -> Result<Vec<u8>> {
+fn cat_file_blob_legacy(worktree: &Path, sha: &str, path: &Path) -> Result<(String, Vec<u8>)> {
     let spec = blob_spec(sha, path);
     let spec_display = blob_spec_display(sha, path);
     let output = Command::new("git")
@@ -1294,7 +1309,7 @@ fn cat_file_blob_legacy(worktree: &Path, sha: &str, path: &Path) -> Result<Vec<u
         })?;
 
     if output.status.success() {
-        Ok(output.stdout)
+        Ok((blob_oid_for_path(worktree, sha, path)?, output.stdout))
     } else {
         Err(anyhow!(
             "git cat-file blob `{spec_display}` failed in `{}`: {}",
@@ -1393,15 +1408,25 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|byte| *byte == 0)
 }
 
-fn extract_symbols(
-    extractor: &mut BytesExtractor,
-    logical_path: Option<&Path>,
-    bytes: &Option<Vec<u8>>,
-) -> std::result::Result<Vec<ExtractedSymbol>, ExtractError> {
-    match (logical_path, bytes.as_deref()) {
-        (Some(path), Some(bytes)) => extractor.extract(path, bytes),
-        _ => Ok(Vec::new()),
+fn cached_extract(
+    ctx: &mut SymbolDiffCtx,
+    language: Language,
+    oid: &str,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>> {
+    let key = (language, oid.to_string());
+    if let Some(cached) = ctx.parse_cache.get(&key) {
+        return Ok(Ok(cached.clone()));
     }
+    let result = {
+        let extractor = ctx.for_language(language)?;
+        extractor.extract(path, bytes)
+    };
+    if let Ok(symbols) = &result {
+        ctx.parse_cache.insert(key, symbols.clone());
+    }
+    Ok(result)
 }
 
 fn parse_failed_diagnostic(
@@ -2057,6 +2082,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_cache_dedups_repeated_blob_oids() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn repeated_blob() {}\n").unwrap();
+        let sha1 = commit(dir.path(), "add rust file");
+        run_git(dir.path(), &["update-index", "--chmod=+x", "lib.rs"]).unwrap();
+        run_git(dir.path(), &["commit", "-q", "-m", "mode only"]).unwrap();
+        let sha2 = run_git(dir.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let mut ctx = SymbolDiffCtx::new();
+        let file_changes1 = file_changes_for_commit(dir.path(), &sha1).unwrap();
+        symbol_changes_for_commit(dir.path(), &sha1, &file_changes1, &mut ctx).unwrap();
+        let file_changes2 = file_changes_for_commit(dir.path(), &sha2).unwrap();
+
+        assert!(file_changes2
+            .iter()
+            .any(|change| matches!(change.kind, FileChangeKind::Modified)));
+        symbol_changes_for_commit(dir.path(), &sha2, &file_changes2, &mut ctx).unwrap();
+
+        assert_eq!(ctx.parse_cache_len(), 1);
+    }
+
+    #[test]
     fn cat_file_batch_reads_multiple_blobs_and_reports_missing() {
         let dir = TempDir::new().unwrap();
         let fixture_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2078,7 +2129,7 @@ mod tests {
         let mut batch = CatFileBatch::new(dir.path()).unwrap();
         for path in valid_paths {
             let expected = std::fs::read(dir.path().join(path)).unwrap();
-            let actual = batch.read(&sha, path).unwrap();
+            let actual = batch.read(&sha, path).unwrap().map(|(_oid, bytes)| bytes);
 
             assert_eq!(actual, Some(expected));
         }
