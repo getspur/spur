@@ -800,7 +800,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     };
 
     use super::*;
@@ -815,7 +815,6 @@ mod tests {
     };
     use spur_pm::PmSource;
 
-    static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
     const TEST_GRAPH_INDEX_VERSION: &str = "fixture-2026-05-11";
 
     fn issue(id: &str, title: &str, assignee: Option<&str>) -> IssueMentionDescriptor {
@@ -858,7 +857,7 @@ mod tests {
 
     #[test]
     fn code_graph_pointer_appearing_after_startup_lazy_registers_source() {
-        let _guard = PROCESS_ENV_LOCK
+        let _guard = crate::theme::runtime::test_support::TEST_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -891,7 +890,7 @@ mod tests {
 
     #[test]
     fn code_graph_pointer_path_change_reloads_immediately() {
-        let _guard = PROCESS_ENV_LOCK
+        let _guard = crate::theme::runtime::test_support::TEST_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -920,7 +919,7 @@ mod tests {
 
     #[test]
     fn code_graph_pointer_hash_change_reloads_even_when_artifact_metadata_is_stable() {
-        let _guard = PROCESS_ENV_LOCK
+        let _guard = crate::theme::runtime::test_support::TEST_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -970,7 +969,7 @@ mod tests {
 
     #[test]
     fn code_graph_env_override_still_wins_over_pointer() {
-        let _guard = PROCESS_ENV_LOCK
+        let _guard = crate::theme::runtime::test_support::TEST_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -1006,7 +1005,7 @@ mod tests {
 
     #[test]
     fn code_graph_without_pointer_falls_back_to_legacy_worktree_artifact() {
-        let _guard = PROCESS_ENV_LOCK
+        let _guard = crate::theme::runtime::test_support::TEST_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -1035,7 +1034,7 @@ mod tests {
 
     #[test]
     fn code_graph_auto_discovery_prefers_current_parquet_over_legacy_json() {
-        let _guard = PROCESS_ENV_LOCK
+        let _guard = crate::theme::runtime::test_support::TEST_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let tmp = tempfile::tempdir().unwrap();
