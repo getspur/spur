@@ -127,6 +127,17 @@ pub(crate) fn derive_kpis(q: &AtomicQueries) -> Kpis {
         0.0
     };
 
+    // DailyRow does not expose total event count. Use sessions as a
+    // session-day proxy denominator until spur-context surfaces events.
+    let (sessions_total, unpriced_total) = q.daily_90.iter().fold((0_i64, 0_i64), |acc, row| {
+        (acc.0 + row.sessions, acc.1 + row.unpriced_events)
+    });
+    let unpriced_pct = if sessions_total > 0 {
+        (unpriced_total as f64 / sessions_total as f64 * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
     Kpis {
         today_cost,
         last_7d_cost,
@@ -134,7 +145,7 @@ pub(crate) fn derive_kpis(q: &AtomicQueries) -> Kpis {
         mtd_cost,
         active_session_count: q.live_30min.len(),
         cache_hit_pct,
-        cost_source_split: CostSourceSplit::default(),
+        cost_source_split: CostSourceSplit { unpriced_pct },
         top_agent: top_agent(q),
         top_model: top_model(q),
     }

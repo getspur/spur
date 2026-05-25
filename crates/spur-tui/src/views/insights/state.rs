@@ -41,8 +41,7 @@ pub struct Kpis {
 
 #[derive(Debug, Clone, Default)]
 pub struct CostSourceSplit {
-    pub native_pct: f64,
-    pub priced_pct: f64,
+    // 0.0..=100.0; 100.0 means all events unpriced.
     pub unpriced_pct: f64,
 }
 
@@ -180,6 +179,29 @@ mod tests {
     }
 
     #[test]
+    fn derive_kpis_unpriced_pct() {
+        let q = AtomicQueries {
+            daily_90: vec![DailyRow {
+                sessions: 10,
+                unpriced_events: 2,
+                ..day("2026-04-28", "codex", 0.0)
+            }],
+            ..Default::default()
+        };
+
+        let k = derive_kpis(&q);
+
+        assert_close(k.cost_source_split.unpriced_pct, 20.0);
+    }
+
+    #[test]
+    fn derive_kpis_unpriced_pct_zero_when_empty() {
+        let k = derive_kpis(&AtomicQueries::default());
+
+        assert_close(k.cost_source_split.unpriced_pct, 0.0);
+    }
+
+    #[test]
     fn derive_kpis_top_agent_top_model() {
         let q = AtomicQueries {
             by_agent_30d: vec![
@@ -223,8 +245,6 @@ mod tests {
         assert_close(k.mtd_cost, 0.0);
         assert_eq!(k.active_session_count, 0);
         assert_close(k.cache_hit_pct, 0.0);
-        assert_close(k.cost_source_split.native_pct, 0.0);
-        assert_close(k.cost_source_split.priced_pct, 0.0);
         assert_close(k.cost_source_split.unpriced_pct, 0.0);
         assert_eq!(k.top_agent, None);
         assert_eq!(k.top_model, None);
