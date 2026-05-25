@@ -101,7 +101,7 @@ struct LastNotebookRecord {
 
 /// Coordinates disk saves so only one notebook write runs at a time.
 #[derive(Clone)]
-pub(crate) struct SaveCoordinator {
+pub struct SaveCoordinator {
     inner: Arc<Mutex<SaveState>>,
     writer: Arc<SaveWriter>,
 }
@@ -129,7 +129,8 @@ impl Default for SaveCoordinator {
 }
 
 impl SaveCoordinator {
-    async fn save(&self, path: PathBuf, contents: NotebookRoot) -> Result<(), Error> {
+    /// Queue and persist notebook contents to disk.
+    pub async fn save(&self, path: PathBuf, contents: NotebookRoot) -> Result<(), Error> {
         let mut state = self.inner.lock().await;
         state.queued = Some(PendingSave { path, contents });
         if state.in_flight {

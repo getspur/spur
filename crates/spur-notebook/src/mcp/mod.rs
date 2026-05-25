@@ -131,6 +131,13 @@ impl ServerHandler for NotebookMcpServer {
                 "windowAlive": self.deps.bridge.window_alive()
             }))),
             "notebook.snapshot" => tools::snapshot::call(&self.deps).await,
+            "notebook.get_notebook" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::get_notebook::call(&self.deps, arguments).await
+            }
             "notebook.read_cell" => {
                 let arguments = request
                     .arguments
@@ -158,6 +165,13 @@ impl ServerHandler for NotebookMcpServer {
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
                 tools::write_cell::call(&self.deps, arguments).await
+            }
+            "notebook.save" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::save::call(&self.deps, arguments).await
             }
             "notebook.delete_cell" => {
                 let arguments = request
@@ -618,14 +632,10 @@ impl NotebookDaemonControl {
     }
 
     async fn save_current(&self) -> Result<(), BridgeError> {
-        if !self.bridge.notebook_open() {
-            return Ok(());
-        }
-        let requester = TauriBridgeRequester::with_app(Arc::clone(&self.bridge), self.app.clone());
-        requester
-            .request("notebook.save", json!({}), tools::BRIDGE_TIMEOUT)
-            .await
-            .map(|_| ())
+        // Frontend bridge handlers no longer expose notebook.save. MCP save is
+        // now explicit: callers provide { path, contents } and the backend
+        // writes through SaveCoordinator directly.
+        Ok(())
     }
 
     async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
