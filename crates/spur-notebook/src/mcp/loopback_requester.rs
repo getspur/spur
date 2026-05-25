@@ -16,13 +16,17 @@ use serde_json::{json, Value};
 
 use super::bridge::{BridgeError, BridgeRequestFuture, BridgeRequester};
 
+/// Same-process bridge that loops back through the Unix socket.
+/// This reuses the `handle_daemon_connection` dispatch path.
+/// For MCP transport it is functionally equivalent to the Tauri bridge.
+/// It skips the JavaScript round-trip used by the Tauri bridge.
 #[derive(Debug)]
-pub struct InProcStoreRequester {
+pub struct LoopbackDaemonRequester {
     socket_path: PathBuf,
     closed: AtomicBool,
 }
 
-impl InProcStoreRequester {
+impl LoopbackDaemonRequester {
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: socket_path.into(),
@@ -45,7 +49,7 @@ impl InProcStoreRequester {
     }
 }
 
-impl BridgeRequester for InProcStoreRequester {
+impl BridgeRequester for LoopbackDaemonRequester {
     fn listener_registered(&self) -> bool {
         !self.closed.load(Ordering::SeqCst)
     }

@@ -31,7 +31,7 @@ use tracing::warn;
 use crate::recents::{self, RecentEntry};
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
-use self::inproc_requester::InProcStoreRequester;
+use self::loopback_requester::LoopbackDaemonRequester;
 use self::{
     bridge::{AgentBridge, BridgeError},
     transport::{read_frame_value, write_frame_json, LengthPrefixedJsonTransport},
@@ -40,7 +40,7 @@ use self::{
 const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub mod bridge;
-pub mod inproc_requester;
+pub mod loopback_requester;
 pub mod tools;
 pub mod transport;
 
@@ -1113,17 +1113,26 @@ async fn create_untitled_notebook_in_dir(dir: &Path) -> anyhow::Result<PathBuf> 
 
 pub async fn start_daemon_server(
     socket_path: impl AsRef<Path>,
-    bridge: Arc<AgentBridge>,
+    lifecycle_bridge: Arc<AgentBridge>,
     app: tauri::AppHandle,
     state: Arc<State>,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
-    start_daemon_server_with_config(socket_path, bridge, app, state, NotebookConfig::default())
-        .await
+    start_daemon_server_with_config(
+        socket_path,
+        lifecycle_bridge,
+        app,
+        state,
+        NotebookConfig::default(),
+    )
+    .await
 }
 
+/// Starts the daemon with a bridge for window-lifecycle signals.
+/// The lifecycle bridge is always used for notebook-open and shutdown-drain plumbing.
+/// When `in_proc_store` is false, it is also wrapped as the MCP transport.
 pub async fn start_daemon_server_with_config(
     socket_path: impl AsRef<Path>,
-    bridge: Arc<AgentBridge>,
+    lifecycle_bridge: Arc<AgentBridge>,
     app: tauri::AppHandle,
     state: Arc<State>,
     config: NotebookConfig,
@@ -1131,16 +1140,16 @@ pub async fn start_daemon_server_with_config(
     let socket_path = socket_path.as_ref().to_path_buf();
     let app_for_deps = app.clone();
     let requester: Arc<dyn BridgeRequester> = if config.in_proc_store {
-        Arc::new(InProcStoreRequester::new(socket_path.clone()))
+        Arc::new(LoopbackDaemonRequester::new(socket_path.clone()))
     } else {
         Arc::new(TauriBridgeRequester::with_app(
-            Arc::clone(&bridge),
+            Arc::clone(&lifecycle_bridge),
             app.clone(),
         ))
     };
     let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
     let control = NotebookDaemonControl::new_with_parts(
-        bridge,
+        lifecycle_bridge,
         Arc::clone(&requester),
         Arc::clone(&state),
         windows,
