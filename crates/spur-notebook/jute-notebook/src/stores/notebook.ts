@@ -9,6 +9,9 @@ import { immer } from "zustand/middleware/immer";
 import type {
   Cell,
   CellMetadata,
+  DaemonCell,
+  DaemonNotebookSnapshot,
+  NotebookDelta,
   NotebookRoot,
   Output,
   OutputDisplayData,
@@ -22,6 +25,7 @@ type NotebookStoreActions = ReturnType<typeof notebookStoreActions>;
 
 const INITIAL_CELL_VERSION = 1;
 const AUTOSAVE_DEBOUNCE_MS = 5000;
+const NOTEBOOK_IN_PROC_STORE_ENV = "VITE_SPUR_NOTEBOOK_IN_PROC_STORE";
 
 /** Zustand reactive data used by the UI to render notebooks. */
 export type NotebookStoreState = {
@@ -155,6 +159,35 @@ function notebookStoreActions(
           cell.version += 1;
         }
         cell.lastEditedBy = lastEditedBy;
+      }),
+
+    /** Reconcile one cell from the authoritative Rust store. */
+    applyCellSnapshot: (cell: DaemonCell, afterId?: string | null) =>
+      set((state) => {
+        const type = cellTypeFromDaemon(cell.kind);
+        if (!type) return;
+
+        const existing = state.cells[cell.id];
+        if (!existing) {
+          const afterIndex = afterId ? state.cellIds.indexOf(afterId) : -1;
+          const insertAt =
+            afterIndex >= 0 ? afterIndex + 1 : state.cellIds.length;
+          if (!state.cellIds.includes(cell.id)) {
+            state.cellIds.splice(insertAt, 0, cell.id);
+          }
+          state.cells[cell.id] = {
+            type,
+            initialText: cell.source,
+            source: cell.source,
+            version: cell.version,
+          };
+          return;
+        }
+
+        existing.type = type;
+        existing.source = cell.source;
+        existing.version = cell.version;
+        existing.lastEditedBy = undefined;
       }),
 
     /** Delete a cell from the notebook. */
@@ -530,9 +563,38 @@ export function applyRunCellEvent(
   return nextRunState;
 }
 
+export function notebookInProcStoreEnabled(): boolean {
+  const metaEnv = import.meta.env as Record<string, unknown>;
+  const processEnv = typeof process === "undefined" ? undefined : process.env;
+  return flagValueEnabled(
+    metaEnv[NOTEBOOK_IN_PROC_STORE_ENV] ??
+      processEnv?.[NOTEBOOK_IN_PROC_STORE_ENV] ??
+      processEnv?.SPUR_NOTEBOOK_IN_PROC_STORE,
+  );
+}
+
+function flagValueEnabled(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
 function displayIdForRunCellEvent(message: RunCellEvent): string | undefined {
   if (message.event !== "display_data") return undefined;
   return message.data.transient?.display_id || uuidv4();
+}
+
+function cellTypeFromDaemon(kind: string): CellType | undefined {
+  if (kind === "code" || kind === "markdown") return kind;
+  return undefined;
+}
+
+export async function reconcileNotebookDelta(
+  notebook: Notebook,
+  delta: NotebookDelta,
+) {
+  if (!notebookInProcStoreEnabled()) return;
+  await notebook.applyNotebookDelta(delta);
 }
 
 /**
@@ -678,6 +740,25 @@ export class Notebook {
 
   updateCellSource(cellId: string, source: string, lastEditedBy?: string) {
     this.state.setCellSource(cellId, source, lastEditedBy);
+  }
+
+  async applyNotebookDelta(delta: NotebookDelta) {
+    const kind = delta.kind;
+    if (kind.type === "loaded") {
+      const snapshot = await invoke<DaemonNotebookSnapshot>(
+        "notebook_store_snapshot",
+      );
+      this.loadNotebook(snapshot.root);
+    } else if (kind.type === "cellWritten") {
+      await this.reconcileStoreCell(kind.id);
+    } else if (kind.type === "cellInserted") {
+      await this.reconcileStoreCell(kind.id, kind.after_id);
+    } else if (kind.type === "cellDeleted") {
+      this.refs.delete(kind.id);
+      this.state.deleteCell(kind.id);
+    } else if (kind.type === "runCellEvent") {
+      this.handleRunCellEvent(kind.cell_id, kind.event);
+    }
   }
 
   clearResult(cellId: string) {
@@ -842,6 +923,23 @@ export class Notebook {
       timings: runState.timings,
       executionCount: runState.executionCount,
     });
+  }
+
+  private async reconcileStoreCell(cellId: string, afterId?: string | null) {
+    const cell = await invoke<DaemonCell>("read_notebook_store_cell", {
+      id: cellId,
+    });
+    if (!cellTypeFromDaemon(cell.kind)) {
+      console.warn("Skipping unsupported notebook store cell kind", {
+        cellId,
+        kind: cell.kind,
+      });
+      return;
+    }
+    if (!this.refs.has(cell.id)) {
+      this.refs.set(cell.id, {});
+    }
+    this.state.applyCellSnapshot(cell, afterId);
   }
 
   private scheduleAutosave() {

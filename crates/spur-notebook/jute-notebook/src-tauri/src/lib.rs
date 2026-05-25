@@ -3,7 +3,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::io;
+use std::{env, io, sync::Arc};
+
+use tauri::Emitter;
+use tokio::sync::broadcast::error::RecvError;
+use tracing::warn;
 
 pub mod backend;
 pub mod commands;
@@ -14,6 +18,41 @@ pub mod menu;
 pub mod notebook_store;
 pub mod state;
 pub mod window;
+
+const NOTEBOOK_CHANGED_EVENT: &str = "notebook://changed";
+const NOTEBOOK_IN_PROC_STORE_ENV: &str = "VITE_SPUR_NOTEBOOK_IN_PROC_STORE";
+const NOTEBOOK_IN_PROC_STORE_RUNTIME_ENV: &str = "SPUR_NOTEBOOK_IN_PROC_STORE";
+
+/// Spawn the process-wide notebook delta forwarder when the in-process store flag is enabled.
+pub fn spawn_notebook_delta_forwarder(app: tauri::AppHandle, state: Arc<state::State>) {
+    if !notebook_in_proc_store_enabled() {
+        return;
+    }
+
+    let mut receiver = state.get_notebook().subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(delta) => {
+                    if let Err(error) = app.emit(NOTEBOOK_CHANGED_EVENT, delta) {
+                        warn!(%error, "failed to emit notebook delta");
+                    }
+                }
+                Err(RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "notebook delta receiver lagged");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+fn notebook_in_proc_store_enabled() -> bool {
+    env::var(NOTEBOOK_IN_PROC_STORE_ENV)
+        .or_else(|_| env::var(NOTEBOOK_IN_PROC_STORE_RUNTIME_ENV))
+        .map(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
 
 /// A serializable error type for application errors.
 #[derive(Debug, thiserror::Error)]

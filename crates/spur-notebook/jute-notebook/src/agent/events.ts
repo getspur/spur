@@ -1,7 +1,11 @@
 import { type UnlistenFn, listen } from "@tauri-apps/api/event";
 
-import type { RunCellEvent } from "@/bindings";
-import type { Notebook } from "@/stores/notebook";
+import type { NotebookDelta, RunCellEvent } from "@/bindings";
+import {
+  type Notebook,
+  notebookInProcStoreEnabled,
+  reconcileNotebookDelta,
+} from "@/stores/notebook";
 
 type RunCellEventPayload = {
   cell_id: string;
@@ -57,24 +61,33 @@ function runAsync(label: string, action: () => Promise<void>) {
 }
 
 export function listenForNotebookEvents(notebook: Notebook): () => void {
-  return listenForAll(
-    [
-      listen<RunCellEventPayload>("notebook://run_cell_event", (event) => {
-        if (event.payload.kernel_id !== notebook.state.kernelId) return;
-        notebook.handleRunCellEvent(event.payload.cell_id, event.payload.event);
-      }),
-      listen("notebook://kernel_changed", () => {
-        runAsync("notebook://kernel_changed", async () => {
-          await notebook.refreshKernelSlotInfo();
+  const registrations = [
+    listen<RunCellEventPayload>("notebook://run_cell_event", (event) => {
+      if (event.payload.kernel_id !== notebook.state.kernelId) return;
+      notebook.handleRunCellEvent(event.payload.cell_id, event.payload.event);
+    }),
+    listen("notebook://kernel_changed", () => {
+      runAsync("notebook://kernel_changed", async () => {
+        await notebook.refreshKernelSlotInfo();
+      });
+    }),
+    listen<SavedPayload>("notebook://saved", (event) => {
+      // TODO: Clear the unsaved indicator once notebook dirty state exists.
+      void event.payload;
+    }),
+  ];
+
+  if (notebookInProcStoreEnabled()) {
+    registrations.push(
+      listen<NotebookDelta>("notebook://changed", (event) => {
+        runAsync("notebook://changed", async () => {
+          await reconcileNotebookDelta(notebook, event.payload);
         });
       }),
-      listen<SavedPayload>("notebook://saved", (event) => {
-        // TODO: Clear the unsaved indicator once notebook dirty state exists.
-        void event.payload;
-      }),
-    ],
-    "notebook",
-  );
+    );
+  }
+
+  return listenForAll(registrations, "notebook");
 }
 
 export function listenForRecentNotebookChanges(
