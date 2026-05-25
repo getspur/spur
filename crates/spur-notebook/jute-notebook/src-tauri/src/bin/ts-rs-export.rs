@@ -6,7 +6,12 @@ use std::{
 
 use jute::{
     backend::{commands::RunCellEvent, local::KernelUsageInfo, notebook::NotebookRoot},
-    commands::RecentNotebookEntry,
+    commands::{
+        DaemonCell, DaemonControlCommand, DaemonControlError, DaemonControlRequest,
+        DaemonControlResponse, DaemonControlResult, DaemonNotebookSnapshot, DaemonRecentEntry,
+        RecentNotebookEntry,
+    },
+    notebook_store::{CellKind, DeltaKind, NotebookDelta},
 };
 use ts_rs::TS;
 
@@ -34,6 +39,17 @@ fn main() {
     RunCellEvent::export_all_to(&export_path).unwrap();
     KernelUsageInfo::export_all_to(&export_path).unwrap();
     RecentNotebookEntry::export_all_to(&export_path).unwrap();
+    CellKind::export_all_to(&export_path).unwrap();
+    DeltaKind::export_all_to(&export_path).unwrap();
+    NotebookDelta::export_all_to(&export_path).unwrap();
+    DaemonRecentEntry::export_all_to(&export_path).unwrap();
+    DaemonControlCommand::export_all_to(&export_path).unwrap();
+    DaemonControlRequest::export_all_to(&export_path).unwrap();
+    DaemonControlError::export_all_to(&export_path).unwrap();
+    DaemonCell::export_all_to(&export_path).unwrap();
+    DaemonNotebookSnapshot::export_all_to(&export_path).unwrap();
+    DaemonControlResult::export_all_to(&export_path).unwrap();
+    DaemonControlResponse::export_all_to(&export_path).unwrap();
 
     // Generate `index.ts` file
     println!("Generating index.ts...");
