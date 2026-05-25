@@ -274,6 +274,7 @@ fn temporal_walk_config() -> GitWalkConfig {
         target_refs: vec!["HEAD".to_string()],
         walk_strategy: WalkStrategy::FirstParent,
         allow_replace_refs: false,
+        use_gix_diff: !matches!(std::env::var("SPUR_GRAPH_USE_CLI_DIFF"), Ok(v) if v == "1"),
     }
 }
 
