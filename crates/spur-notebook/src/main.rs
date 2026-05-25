@@ -1,7 +1,14 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{env, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use jute::state::State;
 use spur_core::notebook::notebook_binary_path;
@@ -172,14 +179,10 @@ fn spawn_notebook_app(socket_path: &PathBuf, config: mcp::NotebookConfig) -> any
     let program = std::env::current_exe().unwrap_or_else(|_| notebook_binary_path());
     let mut command = std::process::Command::new(program);
     command
-        .arg("--socket")
-        .arg(socket_path)
+        .args(notebook_daemon_args(socket_path, config))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
-    if config.in_proc_store {
-        command.arg("--notebook-in-proc-store");
-    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -187,6 +190,18 @@ fn spawn_notebook_app(socket_path: &PathBuf, config: mcp::NotebookConfig) -> any
     }
     command.spawn()?;
     Ok(())
+}
+
+fn notebook_daemon_args(socket_path: &Path, config: mcp::NotebookConfig) -> Vec<OsString> {
+    vec![
+        OsString::from("--socket"),
+        socket_path.as_os_str().to_owned(),
+        OsString::from(if config.in_proc_store {
+            "--notebook-in-proc-store"
+        } else {
+            "--no-notebook-in-proc-store"
+        }),
+    ]
 }
 
 async fn wait_for_daemon_socket(socket_path: &PathBuf) -> anyhow::Result<UnixStream> {
@@ -547,6 +562,32 @@ mod tests {
             panic!("expected app mode");
         };
 
+        assert!(!config.in_proc_store);
+    }
+
+    #[test]
+    fn daemon_spawn_args_round_trip_no_in_proc_store_opt_out() {
+        let socket_path = PathBuf::from("/tmp/notebook-session.sock");
+        let args = notebook_daemon_args(
+            &socket_path,
+            mcp::NotebookConfig {
+                in_proc_store: false,
+            },
+        )
+        .into_iter()
+        .map(|arg| arg.into_string().expect("test args should be utf-8"))
+        .collect::<Vec<_>>();
+
+        let Mode::App { socket, config, .. } = parse_mode_from_with_config(
+            args,
+            mcp::NotebookConfig {
+                in_proc_store: true,
+            },
+        ) else {
+            panic!("expected app mode");
+        };
+
+        assert_eq!(socket, Some(socket_path));
         assert!(!config.in_proc_store);
     }
 }
