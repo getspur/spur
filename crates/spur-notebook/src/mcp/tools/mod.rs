@@ -1,6 +1,9 @@
 use rmcp::{model::Tool, ErrorData as McpError};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{
+    path::{Component, Path, PathBuf},
+    time::Duration,
+};
 
 pub mod daemon_files;
 pub mod daemon_lifecycle;
@@ -76,6 +79,51 @@ fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
     }
 }
 
+fn validate_notebook_path(method: &str, raw: &str) -> Result<PathBuf, McpError> {
+    if raw.is_empty() {
+        return Err(invalid_path(method, "path must not be empty"));
+    }
+
+    let path = Path::new(raw);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(invalid_path(method, "path must not contain '..'"));
+    }
+
+    if requires_ipynb_extension(method)
+        && path.extension().and_then(|extension| extension.to_str()) != Some("ipynb")
+    {
+        return Err(invalid_path(method, "path must have .ipynb extension"));
+    }
+
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path))
+    }
+}
+
+fn requires_ipynb_extension(method: &str) -> bool {
+    !matches!(
+        method,
+        "notebook.reveal_in_finder" | "notebook.set_pinned" | "notebook.remove_from_recents"
+    )
+}
+
+fn invalid_path(method: &str, reason: &str) -> McpError {
+    McpError::invalid_params(
+        format!("{method} {reason}"),
+        Some(json!({
+            "code": "invalid_path",
+            "reason": reason
+        })),
+    )
+}
+
 fn require_app<'a>(
     deps: &'a crate::mcp::ServerDeps,
     method: &str,
@@ -135,5 +183,82 @@ mod tests {
                 "missing tool: {expected}"
             );
         }
+    }
+
+    fn assert_invalid_path_code(error: McpError) {
+        let serialized = serde_json::to_value(&error).expect("error serializes");
+        assert_eq!(serialized["data"]["code"], "invalid_path");
+    }
+
+    #[test]
+    fn validate_notebook_path_rejects_empty_path() {
+        let error =
+            validate_notebook_path("notebook.save", "").expect_err("empty path should be rejected");
+        assert_invalid_path_code(error);
+    }
+
+    #[test]
+    fn validate_notebook_path_rejects_parent_dir_prefix() {
+        let error = validate_notebook_path("notebook.save", "../foo.ipynb")
+            .expect_err("parent-dir prefix should be rejected");
+        assert_invalid_path_code(error);
+    }
+
+    #[test]
+    fn validate_notebook_path_rejects_parent_dir_component() {
+        let error = validate_notebook_path("notebook.save", "foo/../bar.ipynb")
+            .expect_err("parent-dir component should be rejected");
+        assert_invalid_path_code(error);
+    }
+
+    #[test]
+    fn validate_notebook_path_requires_ipynb_extension_for_notebook_tools() {
+        let error = validate_notebook_path("notebook.save", "notes.txt")
+            .expect_err("non-notebook path should be rejected");
+        assert_invalid_path_code(error);
+    }
+
+    #[test]
+    fn validate_notebook_path_allows_non_ipynb_extension_for_reveal_and_recents() {
+        let reveal = validate_notebook_path("notebook.reveal_in_finder", "notes.txt")
+            .expect("reveal accepts non-notebook paths");
+        let pinned = validate_notebook_path("notebook.set_pinned", "notes.txt")
+            .expect("recents accepts non-notebook paths");
+
+        assert_eq!(
+            reveal,
+            std::env::current_dir()
+                .expect("current dir")
+                .join("notes.txt")
+        );
+        assert_eq!(
+            pinned,
+            std::env::current_dir()
+                .expect("current dir")
+                .join("notes.txt")
+        );
+    }
+
+    #[test]
+    fn validate_notebook_path_accepts_valid_absolute_path() {
+        let path = std::env::temp_dir().join("valid.ipynb");
+        let resolved =
+            validate_notebook_path("notebook.save", path.to_str().expect("utf-8 temp path"))
+                .expect("absolute notebook path accepted");
+
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn validate_notebook_path_accepts_valid_relative_path() {
+        let resolved = validate_notebook_path("notebook.save", "relative/notebook.ipynb")
+            .expect("relative notebook path accepted");
+
+        assert_eq!(
+            resolved,
+            std::env::current_dir()
+                .expect("current dir")
+                .join("relative/notebook.ipynb")
+        );
     }
 }

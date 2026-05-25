@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use jute::backend::notebook::NotebookRoot;
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
@@ -52,19 +50,15 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.save path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path(METHOD, &params.path)?;
+    let saved_path = path.to_string_lossy().into_owned();
     let state = deps.state.as_ref().ok_or_else(|| {
         McpError::internal_error("notebook.save requires notebook daemon state", None)
     })?;
 
     state
         .save_coordinator
-        .save(PathBuf::from(&params.path), params.contents)
+        .save(path, params.contents)
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -74,7 +68,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         })?;
 
     if let Some(app) = deps.app.as_ref() {
-        app.emit("notebook://saved", &json!({ "path": params.path }))
+        app.emit("notebook://saved", &json!({ "path": saved_path }))
             .map_err(|error| {
                 McpError::internal_error(
                     "notebook.save failed to emit saved event",

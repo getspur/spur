@@ -2,8 +2,6 @@
 //! the mutating tools also fan out a `notebook://recents_changed` event so the
 //! Tauri shell can re-render its sidebar without polling.
 
-use std::path::PathBuf;
-
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -126,19 +124,14 @@ pub async fn call_set_pinned(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.set_pinned path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path("notebook.set_pinned", &params.path)?;
     let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
     let response = daemon
         .handle(DaemonControlRequest {
             id: None,
             daemon: None,
             command: "set_pinned".to_string(),
-            path: Some(PathBuf::from(&params.path)),
+            path: Some(path),
             pinned: Some(params.pinned),
         })
         .await;
@@ -179,19 +172,14 @@ pub async fn call_remove_from_recents(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.remove_from_recents path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path("notebook.remove_from_recents", &params.path)?;
     let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
     let response = daemon
         .handle(DaemonControlRequest {
             id: None,
             daemon: None,
             command: "remove_from_recents".to_string(),
-            path: Some(PathBuf::from(&params.path)),
+            path: Some(path),
             pinned: None,
         })
         .await;
