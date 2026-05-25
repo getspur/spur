@@ -1382,7 +1382,8 @@ impl AnalyticsEngine {
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
+                SUM(CASE WHEN cost_source = 'unpriced' THEN 1 ELSE 0 END) AS unpriced_events
             FROM all_events_with_cost
             WHERE timestamp >= current_date - CAST(? || ' days' AS INTERVAL)
             GROUP BY day, agent
@@ -1400,6 +1401,7 @@ impl AnalyticsEngine {
                 cache_read_tokens: row.get(5)?,
                 cache_creation_tokens: row.get(6)?,
                 cost_usd: row.get(7)?,
+                unpriced_events: row.get(8)?,
             })
         })?;
 
@@ -1418,7 +1420,8 @@ impl AnalyticsEngine {
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
+                SUM(CASE WHEN cost_source = 'unpriced' THEN 1 ELSE 0 END) AS unpriced_events
             FROM all_events_with_cost
             WHERE timestamp >= current_date - CAST(? || ' weeks' AS INTERVAL)
             GROUP BY week, agent
@@ -1436,6 +1439,7 @@ impl AnalyticsEngine {
                 cache_read_tokens: row.get(5)?,
                 cache_creation_tokens: row.get(6)?,
                 cost_usd: row.get(7)?,
+                unpriced_events: row.get(8)?,
             })
         })?;
 
@@ -1454,7 +1458,8 @@ impl AnalyticsEngine {
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
+                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
+                SUM(CASE WHEN cost_source = 'unpriced' THEN 1 ELSE 0 END) AS unpriced_events
             FROM all_events_with_cost
             WHERE timestamp >= current_date - CAST(? || ' months' AS INTERVAL)
             GROUP BY month, agent
@@ -1472,6 +1477,7 @@ impl AnalyticsEngine {
                 cache_read_tokens: row.get(5)?,
                 cache_creation_tokens: row.get(6)?,
                 cost_usd: row.get(7)?,
+                unpriced_events: row.get(8)?,
             })
         })?;
 
@@ -1494,6 +1500,7 @@ impl AnalyticsEngine {
                 cache_read_tokens: row.get(5)?,
                 cache_creation_tokens: row.get(6)?,
                 cost_usd: row.get(7)?,
+                unpriced_events: row.get(8)?,
             })
         })?;
 
@@ -1516,6 +1523,7 @@ impl AnalyticsEngine {
                 cache_read_tokens: row.get(5)?,
                 cache_creation_tokens: row.get(6)?,
                 cost_usd: row.get(7)?,
+                unpriced_events: row.get(8)?,
             })
         })?;
 
@@ -1542,6 +1550,7 @@ impl AnalyticsEngine {
                 cache_read_tokens: row.get(5)?,
                 cache_creation_tokens: row.get(6)?,
                 cost_usd: row.get(7)?,
+                unpriced_events: row.get(8)?,
             })
         })?;
 
@@ -1554,8 +1563,8 @@ impl AnalyticsEngine {
         let sql = r#"
             SELECT
                 session_id,
-                agent,
-                model,
+                any_value(agent) AS agent,
+                string_agg(DISTINCT model, ',' ORDER BY model) AS models,
                 strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
                 strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS last_activity,
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -1566,7 +1575,7 @@ impl AnalyticsEngine {
                 COUNT(*) AS events
             FROM all_events_with_cost
             WHERE timestamp >= (now() AT TIME ZONE 'UTC') - CAST(? || ' minutes' AS INTERVAL)
-            GROUP BY session_id, agent, model
+            GROUP BY session_id
             ORDER BY cost_usd DESC
         "#;
 
@@ -1575,7 +1584,7 @@ impl AnalyticsEngine {
             Ok(LiveBlockRow {
                 session_id: row.get(0)?,
                 agent: row.get(1)?,
-                model: row.get(2)?,
+                models: row.get(2)?,
                 started_at: row.get(3)?,
                 last_activity: row.get(4)?,
                 input_tokens: row.get(5)?,
@@ -1603,6 +1612,7 @@ impl AnalyticsEngine {
                 output_tokens: row.get(4)?,
                 avg_cost: row.get(5)?,
                 total_cost: row.get(6)?,
+                unpriced_events: row.get(7)?,
             })
         })?;
 
@@ -1621,6 +1631,7 @@ impl AnalyticsEngine {
                 input_tokens: row.get(3)?,
                 output_tokens: row.get(4)?,
                 cost_usd: row.get(5)?,
+                unpriced_events: row.get(6)?,
             })
         })?;
 
@@ -1892,6 +1903,8 @@ pub struct DailyRow {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 /// Weekly cost report row.
@@ -1905,6 +1918,8 @@ pub struct WeeklyRow {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 /// Monthly cost report row.
@@ -1918,6 +1933,8 @@ pub struct MonthlyRow {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 /// Model breakdown row.
@@ -1930,6 +1947,8 @@ pub struct ModelRow {
     pub output_tokens: i64,
     pub avg_cost: f64,
     pub total_cost: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 /// Project breakdown row.
@@ -1941,6 +1960,8 @@ pub struct ProjectRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 /// Session detail row.
@@ -2008,7 +2029,7 @@ struct KimiRow {
 pub struct LiveBlockRow {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<String>,
     pub last_activity: Option<String>,
     pub input_tokens: i64,
@@ -2570,6 +2591,90 @@ mod tests {
     }
 
     #[test]
+    fn live_recent_sessions_aggregates_model_switch() {
+        let engine = setup_engine();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                DROP TABLE IF EXISTS live_recent_sessions_model_switch_events;
+                CREATE TABLE live_recent_sessions_model_switch_events (
+                    timestamp_ms          BIGINT,
+                    session_id            VARCHAR,
+                    agent                 VARCHAR,
+                    model                 VARCHAR,
+                    project               VARCHAR,
+                    input_tokens          BIGINT,
+                    output_tokens         BIGINT,
+                    cache_read_tokens     BIGINT,
+                    cache_creation_tokens BIGINT,
+                    cost_usd              DOUBLE
+                );
+                "#,
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_model_switch_events VALUES \
+                 (?1, 'switch-session', 'claude', 'claude-sonnet-4', 'spur', \
+                  100::BIGINT, 50::BIGINT, 0::BIGINT, 0::BIGINT, 0.01::DOUBLE)",
+                duckdb::params![now_ms - 60_000],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_model_switch_events VALUES \
+                 (?1, 'switch-session', 'claude', 'claude-opus-4-5', 'spur', \
+                  200::BIGINT, 75::BIGINT, 0::BIGINT, 0::BIGINT, 0.02::DOUBLE)",
+                duckdb::params![now_ms - 30_000],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                CREATE OR REPLACE VIEW all_events AS
+                SELECT
+                    epoch_ms(timestamp_ms) AS timestamp,
+                    session_id,
+                    agent,
+                    model,
+                    project,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    cost_usd
+                FROM live_recent_sessions_model_switch_events;
+                "#,
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute_batch(ALL_EVENTS_WITH_COST_VIEW)
+            .unwrap();
+
+        let rows = engine.live_recent_sessions(2).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, "switch-session");
+        assert_eq!(
+            rows[0].models.as_deref(),
+            Some("claude-opus-4-5,claude-sonnet-4")
+        );
+        assert_eq!(rows[0].input_tokens, 300);
+        assert_eq!(rows[0].output_tokens, 125);
+        assert_eq!(rows[0].events, 2);
+    }
+
+    #[test]
     fn strip_provider_prefix_handles_known_providers() {
         use super::strip_provider_prefix;
 
@@ -2994,6 +3099,49 @@ mod tests {
             report.is_empty(),
             "model breakdown should be empty with no data"
         );
+    }
+
+    #[test]
+    fn model_breakdown_reports_unpriced_events() {
+        let engine = setup_engine();
+
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO pricing VALUES
+                    ('known-native-model', 1.0, 1.0, 1.0, 1.0, '2020-01-01', NULL);
+
+                CREATE OR REPLACE VIEW all_events AS
+                SELECT * FROM (VALUES
+                    (TIMESTAMP '2026-04-20 10:00:00', 'sess-native', 'codex', 'known-native-model', 'proj',
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, 0.05::DOUBLE),
+                    (TIMESTAMP '2026-04-20 10:05:00', 'sess-unpriced-a', 'codex', 'unknown-model-xyz', 'proj',
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, NULL::DOUBLE),
+                    (TIMESTAMP '2026-04-20 10:10:00', 'sess-unpriced-b', 'codex', 'unknown-model-xyz', 'proj',
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, NULL::DOUBLE)
+                ) AS t(timestamp, session_id, agent, model, project,
+                       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd);
+                "#,
+            )
+            .unwrap();
+
+        let rows = engine.model_breakdown().unwrap();
+        assert_eq!(rows.len(), 2);
+
+        let known = rows
+            .iter()
+            .find(|row| row.model == "known-native-model")
+            .expect("known native model row");
+        assert_eq!(known.requests, 1);
+        assert_eq!(known.unpriced_events, 0);
+
+        let unknown = rows
+            .iter()
+            .find(|row| row.model == "unknown-model-xyz")
+            .expect("unknown model row");
+        assert_eq!(unknown.requests, 2);
+        assert_eq!(unknown.unpriced_events, unknown.requests);
     }
 
     #[test]
