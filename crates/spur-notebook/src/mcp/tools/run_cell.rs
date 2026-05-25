@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::mcp::bridge::BridgeRequester;
+use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.run_cell";
 
@@ -39,11 +40,11 @@ pub fn tool() -> Tool {
 }
 
 pub async fn call(
-    bridge: &dyn BridgeRequester,
+    deps: &ServerDeps,
     arguments: Value,
     _context: RequestContext<RoleServer>,
 ) -> Result<CallToolResult, McpError> {
-    call_inner(bridge, arguments).await
+    call_inner(deps.bridge.as_ref(), arguments).await
 }
 
 pub async fn call_with_progress(

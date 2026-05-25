@@ -558,7 +558,7 @@ async fn kernel_process_usage(pid: Pid) -> Option<KernelProcessUsage> {
 #[tauri::command]
 pub async fn kernel_usage_info(
     kernel_id: &str,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<KernelUsageInfo, Error> {
     let pid: Pid = {
         let slot = state.kernels.get(kernel_id).ok_or(Error::KernelNotFound)?;
@@ -582,7 +582,7 @@ pub async fn kernel_usage_info(
 #[tauri::command]
 pub async fn kernel_slot_info(
     kernel_id: &str,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<KernelSlotInfo, Error> {
     kernel_slot_info_for_state(kernel_id, &state).await
 }
@@ -640,7 +640,7 @@ async fn kernel_alive_for_notebook(path: &str, state: &State) -> bool {
 /// List daemon recent notebooks with Tauri-side status metadata.
 #[tauri::command]
 pub async fn list_recent_notebooks(
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<Vec<RecentNotebookEntry>, Error> {
     let response = send_daemon_control("list_recents", None, None).await?;
     let current_path = load_current_notebook_path_normalized().await?;
@@ -853,7 +853,7 @@ pub async fn start_kernel(
     app: AppHandle,
     spec_name: &str,
     window: WebviewWindow,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<String, Error> {
     // TODO: Save the client in a better place.
     // let client = JupyterClient::new("", "")?;
@@ -880,7 +880,7 @@ pub async fn start_kernel(
 pub async fn restart_kernel(
     slot_id: &str,
     spec_name: Option<String>,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<String, Error> {
     info!("restarting jute kernel slot {slot_id}");
     let next_spec_name = match spec_name {
@@ -930,7 +930,7 @@ pub async fn get_notebook(path: &str) -> Result<NotebookRoot, Error> {
 pub async fn save_to_disk(
     path: &str,
     contents: NotebookRoot,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
     info!("saving notebook at {path}");
     state
@@ -961,7 +961,7 @@ pub async fn run_cell(
     kernel_id: &str,
     code: &str,
     on_event: Channel<RunCellEvent>,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
     let rx = run_cell_events(kernel_id, code, &state).await?;
     while let Ok(event) = rx.recv().await {
@@ -976,7 +976,7 @@ pub async fn run_cell(
 #[tauri::command]
 pub async fn interrupt_kernel(
     kernel_id: &str,
-    state: tauri::State<'_, State>,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
     interrupt_kernel_slot(kernel_id, &state).await
 }

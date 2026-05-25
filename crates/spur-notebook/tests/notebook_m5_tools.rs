@@ -1,10 +1,11 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 use spur_notebook::mcp::{
     bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
     tools::{delete_cell, insert_cell, run_cell, write_cell},
+    ServerDeps,
 };
 use tokio::sync::Mutex;
 
@@ -178,25 +179,26 @@ fn structured(result: CallToolResult) -> Value {
 
 #[tokio::test]
 async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
-    let notebook = MockNotebook::default();
+    let notebook = Arc::new(MockNotebook::default());
+    let deps = ServerDeps::from_bridge(notebook.clone());
     let mut progress = run_cell::RecordingProgress::default();
 
     let c1 = structured(
-        insert_cell::call(&notebook, json!({ "kind": "code", "source": "x = 2 + 2" }))
+        insert_cell::call(&deps, json!({ "kind": "code", "source": "x = 2 + 2" }))
             .await
             .unwrap(),
     );
     assert_eq!(c1["version"], 1);
 
     structured(
-        run_cell::call_with_progress(&notebook, json!({ "id": c1["id"] }), &mut progress)
+        run_cell::call_with_progress(notebook.as_ref(), json!({ "id": c1["id"] }), &mut progress)
             .await
             .unwrap(),
     );
 
     let c2 = structured(
         insert_cell::call(
-            &notebook,
+            &deps,
             json!({
                 "after_id": c1["id"],
                 "kind": "code",
@@ -208,14 +210,14 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
     );
 
     structured(
-        run_cell::call_with_progress(&notebook, json!({ "id": c2["id"] }), &mut progress)
+        run_cell::call_with_progress(notebook.as_ref(), json!({ "id": c2["id"] }), &mut progress)
             .await
             .unwrap(),
     );
 
     let write = structured(
         write_cell::call(
-            &notebook,
+            &deps,
             json!({
                 "id": c2["id"],
                 "source": "print(x + 1)",
@@ -247,7 +249,7 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
     }
 
     structured(
-        run_cell::call_with_progress(&notebook, json!({ "id": c2["id"] }), &mut progress)
+        run_cell::call_with_progress(notebook.as_ref(), json!({ "id": c2["id"] }), &mut progress)
             .await
             .unwrap(),
     );
@@ -263,7 +265,7 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
     );
 
     let stale = write_cell::call(
-        &notebook,
+        &deps,
         json!({
             "id": c2["id"],
             "source": "print(0)",
@@ -275,7 +277,7 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
     assert_eq!(stale.data.unwrap()["code"], "stale_version");
 
     structured(
-        delete_cell::call(&notebook, json!({ "id": c2["id"], "expected_version": 2 }))
+        delete_cell::call(&deps, json!({ "id": c2["id"], "expected_version": 2 }))
             .await
             .unwrap(),
     );

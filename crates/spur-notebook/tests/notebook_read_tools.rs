@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::CallToolResult;
@@ -5,8 +6,13 @@ use serde_json::{json, Value};
 use spur_notebook::mcp::{
     bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
     tools::{kernel_info, read_cell, snapshot},
+    ServerDeps,
 };
 use tokio::sync::Mutex;
+
+fn deps_with(bridge: Arc<dyn BridgeRequester>) -> ServerDeps {
+    ServerDeps::from_bridge(bridge)
+}
 
 #[derive(Default)]
 struct MockBridge {
@@ -57,7 +63,7 @@ fn structured(result: CallToolResult) -> Value {
 
 #[tokio::test]
 async fn snapshot_returns_preview_and_blake3_16_hash_for_all_cells() {
-    let bridge = MockBridge::default();
+    let bridge = Arc::new(MockBridge::default());
     let long_source = format!("{}tail", "a".repeat(200));
     bridge
         .push_response(Ok(json!([
@@ -80,7 +86,8 @@ async fn snapshot_returns_preview_and_blake3_16_hash_for_all_cells() {
         ])))
         .await;
 
-    let body = structured(snapshot::call(&bridge).await.expect("snapshot succeeds"));
+    let deps = deps_with(bridge.clone());
+    let body = structured(snapshot::call(&deps).await.expect("snapshot succeeds"));
     let cells = body.as_array().expect("snapshot is an array");
 
     assert_eq!(cells.len(), 2);
@@ -99,7 +106,7 @@ async fn snapshot_returns_preview_and_blake3_16_hash_for_all_cells() {
 
 #[tokio::test]
 async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
-    let bridge = MockBridge::default();
+    let bridge = Arc::new(MockBridge::default());
     bridge
         .push_response(Ok(json!({
             "id": "code-1",
@@ -118,8 +125,9 @@ async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
         })))
         .await;
 
+    let deps = deps_with(bridge.clone());
     let body = structured(
-        read_cell::call(&bridge, json!({ "id": "code-1" }))
+        read_cell::call(&deps, json!({ "id": "code-1" }))
             .await
             .expect("read_cell succeeds"),
     );
@@ -135,7 +143,7 @@ async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
 
 #[tokio::test]
 async fn kernel_info_returns_slot_generation_and_usage() {
-    let bridge = MockBridge::default();
+    let bridge = Arc::new(MockBridge::default());
     bridge
         .push_response(Ok(json!({
             "kernel_id": "notebook:/tmp/demo.ipynb",
@@ -147,8 +155,9 @@ async fn kernel_info_returns_slot_generation_and_usage() {
         })))
         .await;
 
+    let deps = deps_with(bridge.clone());
     let body = structured(
-        kernel_info::call(&bridge)
+        kernel_info::call(&deps)
             .await
             .expect("kernel_info succeeds"),
     );
@@ -165,11 +174,14 @@ async fn kernel_info_returns_slot_generation_and_usage() {
 
 #[tokio::test]
 async fn no_registered_notebook_reports_notebook_not_open() {
-    let bridge = spur_notebook::mcp::bridge::TauriBridgeRequester::without_app(
-        std::sync::Arc::new(spur_notebook::mcp::bridge::AgentBridge::new()),
+    let bridge: Arc<dyn BridgeRequester> = Arc::new(
+        spur_notebook::mcp::bridge::TauriBridgeRequester::without_app(Arc::new(
+            spur_notebook::mcp::bridge::AgentBridge::new(),
+        )),
     );
+    let deps = deps_with(bridge);
 
-    let error = kernel_info::call(&bridge)
+    let error = kernel_info::call(&deps)
         .await
         .expect_err("missing active notebook should be a tool error");
 
@@ -178,15 +190,16 @@ async fn no_registered_notebook_reports_notebook_not_open() {
 
 #[tokio::test]
 async fn handler_notebook_not_open_error_is_preserved_as_mcp_error_data() {
-    let bridge = MockBridge::default();
+    let bridge = Arc::new(MockBridge::default());
     bridge
         .push_response(Err(BridgeError::Handler {
             code: "notebook_not_open".to_string(),
             message: "No notebook is loaded".to_string(),
         }))
         .await;
+    let deps = deps_with(bridge.clone());
 
-    let error = kernel_info::call(&bridge)
+    let error = kernel_info::call(&deps)
         .await
         .expect_err("notebook_not_open is an MCP error");
 
