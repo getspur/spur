@@ -1,10 +1,16 @@
 //! Defines state and stores for the Tauri application.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use dashmap::DashMap;
+use parking_lot::Mutex;
 
-use crate::{backend::local::LocalKernel, commands::SaveCoordinator};
+use crate::{
+    backend::local::LocalKernel, commands::SaveCoordinator, notebook_store::NotebookStore,
+};
 
 /// Stable prefix used for notebook path-derived kernel slots.
 pub(crate) const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
@@ -72,12 +78,23 @@ pub struct State {
 
     /// Coordinator for debounced notebook saves.
     pub save_coordinator: SaveCoordinator,
+
+    /// Lazily initialized authoritative notebook document store.
+    notebook: Mutex<Option<Arc<NotebookStore>>>,
 }
 
 impl State {
     /// Create a new state object.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the process-wide notebook store, initializing it on first use.
+    pub fn get_notebook(&self) -> Arc<NotebookStore> {
+        let mut notebook = self.notebook.lock();
+        notebook
+            .get_or_insert_with(|| NotebookStore::new(Arc::new(self.save_coordinator.clone())))
+            .clone()
     }
 }
 
@@ -141,5 +158,15 @@ mod tests {
 
         assert_eq!(restarted_slot.record_start("python3".to_string()), 1);
         assert_eq!(restarted_slot.generation(), 1);
+    }
+
+    #[test]
+    fn notebook_store_is_initialized_lazily_and_reused() {
+        let state = State::new();
+
+        let first = state.get_notebook();
+        let second = state.get_notebook();
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }

@@ -11,7 +11,7 @@ use std::{
 
 use dashmap::mapref::entry::Entry;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use sysinfo::{Pid, System};
 use tauri::{ipc::Channel, AppHandle, WebviewWindow};
 use tokio::sync::Mutex;
@@ -23,8 +23,9 @@ use crate::{
     backend::{
         commands::{self, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
-        notebook::NotebookRoot,
+        notebook::{Cell, MultilineString, NotebookRoot},
     },
+    notebook_store::{CellKind, NotebookDelta, NotebookOp, StoreError},
     state::{notebook_slot_id, window_slot_id, KernelSlot, State},
     Error,
 };
@@ -70,28 +71,203 @@ pub struct RecentNotebookEntry {
     pub is_current: bool,
 }
 
-#[derive(Debug, Deserialize)]
+/// Recent notebook entry returned by the daemon control protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-struct DaemonRecentEntry {
-    path: PathBuf,
-    last_opened: String,
-    is_scratch: bool,
-    pinned: bool,
+#[ts(rename_all = "camelCase")]
+pub struct DaemonRecentEntry {
+    /// Absolute notebook path.
+    pub path: String,
+    /// Last opened time in RFC3339 format.
+    pub last_opened: String,
+    /// Whether the notebook lives under the scratch directory.
+    pub is_scratch: bool,
+    /// Whether the notebook is pinned in recents.
+    pub pinned: bool,
 }
 
-#[derive(Debug, Deserialize)]
+/// A daemon control protocol request.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-struct DaemonControlResponse {
-    ok: bool,
-    path: Option<String>,
-    entries: Option<Vec<DaemonRecentEntry>>,
-    error: Option<DaemonControlError>,
+#[ts(rename_all = "camelCase")]
+pub struct DaemonControlRequest {
+    /// Protocol discriminator for notebook daemon control frames.
+    pub daemon: String,
+    /// Requested daemon operation.
+    #[serde(flatten)]
+    pub command: DaemonControlCommand,
 }
 
-#[derive(Debug, Deserialize)]
-struct DaemonControlError {
-    code: String,
-    message: String,
+impl DaemonControlRequest {
+    /// Build a notebook daemon v1 request.
+    pub fn new(command: DaemonControlCommand) -> Self {
+        Self {
+            daemon: "notebook.v1".to_string(),
+            command,
+        }
+    }
+}
+
+/// Operation encoded in a daemon control request.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "command", rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum DaemonControlCommand {
+    /// Open a notebook file.
+    Open { path: String },
+    /// Create a scratch notebook.
+    New {},
+    /// Reopen the current notebook window.
+    Reopen {},
+    /// Close the current notebook window.
+    Close {},
+    /// List daemon recents.
+    ListRecents {},
+    /// Remove a path from daemon recents.
+    RemoveFromRecents { path: String },
+    /// Set a recent notebook's pin state.
+    SetPinned { path: String, pinned: bool },
+    /// Shut the daemon down.
+    Shutdown {},
+    /// Replace one cell's source.
+    WriteCell {
+        id: String,
+        source: String,
+        #[ts(type = "number | null")]
+        expected_version: Option<u64>,
+        last_edited_by: Option<String>,
+    },
+    /// Read one cell.
+    ReadCell { id: String },
+    /// Insert a cell.
+    InsertCell {
+        kind: CellKind,
+        after_id: Option<String>,
+        source: String,
+    },
+    /// Delete one cell.
+    DeleteCell {
+        id: String,
+        #[ts(type = "number")]
+        expected_version: u64,
+    },
+    /// Return the full notebook root and store version.
+    Snapshot {},
+    /// Apply a UI edit without an optimistic concurrency check.
+    ApplyEdit { id: String, source: String },
+    /// Persist the current store snapshot to disk.
+    FlushNotebook {},
+}
+
+/// A daemon control protocol response.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct DaemonControlResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub entries: Option<Vec<DaemonRecentEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub result: Option<DaemonControlResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<DaemonControlError>,
+}
+
+impl DaemonControlResponse {
+    fn success(result: DaemonControlResult) -> Self {
+        Self {
+            ok: true,
+            path: None,
+            entries: None,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn failure(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            path: None,
+            entries: None,
+            result: None,
+            error: Some(DaemonControlError {
+                code: code.into(),
+                message: message.into(),
+            }),
+        }
+    }
+
+    /// Return the success payload or daemon error.
+    pub fn into_result(self) -> Result<DaemonControlResult, DaemonControlError> {
+        if self.ok {
+            Ok(self.result.unwrap_or(DaemonControlResult::Empty {}))
+        } else {
+            Err(self.error.unwrap_or_else(|| DaemonControlError {
+                code: "daemon_command_failed".to_string(),
+                message: "daemon command failed without an error body".to_string(),
+            }))
+        }
+    }
+}
+
+/// Successful daemon control payloads.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "type", content = "data", rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum DaemonControlResult {
+    /// No payload.
+    Empty {},
+    /// Notebook mutation delta.
+    Delta(NotebookDelta),
+    /// Full cell payload.
+    Cell(DaemonCell),
+    /// Full notebook snapshot.
+    Snapshot(DaemonNotebookSnapshot),
+}
+
+/// Cell payload returned by daemon control read operations.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct DaemonCell {
+    pub id: String,
+    pub kind: String,
+    #[ts(type = "number")]
+    pub version: u64,
+    pub source: String,
+    pub exec_count: Option<u32>,
+    pub status: String,
+    pub outputs: Vec<Value>,
+}
+
+/// Full notebook snapshot returned by daemon control.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct DaemonNotebookSnapshot {
+    pub root: NotebookRoot,
+    #[ts(type = "number")]
+    pub version: u64,
+}
+
+/// Error payload returned by daemon control failures.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct DaemonControlError {
+    /// Stable machine-readable error code.
+    pub code: String,
+    /// Human-readable error message.
+    pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,7 +431,8 @@ fn daemon_socket_path_from_args() -> Result<PathBuf, Error> {
 }
 
 #[cfg(unix)]
-async fn write_daemon_frame<W>(writer: &mut W, bytes: &[u8]) -> Result<(), Error>
+/// Write one length-prefixed daemon-control frame.
+pub async fn write_daemon_frame<W>(writer: &mut W, bytes: &[u8]) -> Result<(), Error>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -276,7 +453,8 @@ where
 }
 
 #[cfg(unix)]
-async fn read_daemon_frame<R>(reader: &mut R) -> Result<Vec<u8>, Error>
+/// Read one length-prefixed daemon-control frame.
+pub async fn read_daemon_frame<R>(reader: &mut R) -> Result<Vec<u8>, Error>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -302,29 +480,17 @@ where
 }
 
 #[cfg(unix)]
-async fn send_daemon_control(
-    command: &str,
-    path: Option<&Path>,
-    pinned: Option<bool>,
+/// Send one daemon-control request to a Unix socket and read one response frame.
+pub async fn send_daemon_control_to(
+    socket_path: &Path,
+    request: &DaemonControlRequest,
 ) -> Result<DaemonControlResponse, Error> {
     use tokio::net::UnixStream;
 
-    let socket_path = daemon_socket_path_from_args()?;
-    let mut request = json!({
-        "daemon": "notebook.v1",
-        "command": command,
-    });
-    if let Some(path) = path {
-        request["path"] = Value::String(path.display().to_string());
-    }
-    if let Some(pinned) = pinned {
-        request["pinned"] = Value::Bool(pinned);
-    }
-
-    let mut stream = UnixStream::connect(&socket_path)
+    let mut stream = UnixStream::connect(socket_path)
         .await
         .map_err(Error::Filesystem)?;
-    write_daemon_frame(&mut stream, &serde_json::to_vec(&request)?).await?;
+    write_daemon_frame(&mut stream, &serde_json::to_vec(request)?).await?;
     let bytes = read_daemon_frame(&mut stream).await?;
     let response: DaemonControlResponse = serde_json::from_slice(&bytes)?;
     if response.ok {
@@ -332,10 +498,33 @@ async fn send_daemon_control(
     } else {
         let message = response
             .error
+            .as_ref()
             .map(|error| format!("{}: {}", error.code, error.message))
             .unwrap_or_else(|| "daemon command failed without an error body".to_string());
         Err(Error::NotebookDaemon(message))
     }
+}
+
+#[cfg(not(unix))]
+/// Send one daemon-control request to a Unix socket and read one response frame.
+pub async fn send_daemon_control_to(
+    _socket_path: &Path,
+    _request: &DaemonControlRequest,
+) -> Result<DaemonControlResponse, Error> {
+    Err(Error::NotebookDaemon(
+        "notebook daemon socket commands are only available on Unix platforms".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+async fn send_daemon_control(
+    command: &str,
+    path: Option<&Path>,
+    pinned: Option<bool>,
+) -> Result<DaemonControlResponse, Error> {
+    let socket_path = daemon_socket_path_from_args()?;
+    let request = daemon_control_request_from_legacy(command, path, pinned)?;
+    send_daemon_control_to(&socket_path, &request).await
 }
 
 #[cfg(not(unix))]
@@ -347,6 +536,250 @@ async fn send_daemon_control(
     Err(Error::NotebookDaemon(
         "notebook daemon socket commands are only available on Unix platforms".to_string(),
     ))
+}
+
+fn daemon_control_request_from_legacy(
+    command: &str,
+    path: Option<&Path>,
+    pinned: Option<bool>,
+) -> Result<DaemonControlRequest, Error> {
+    let path_string = || {
+        path.map(|path| path.display().to_string())
+            .ok_or_else(|| Error::NotebookDaemon(format!("{command} requires path")))
+    };
+    let command = match command {
+        "open" => DaemonControlCommand::Open {
+            path: path_string()?,
+        },
+        "new" => DaemonControlCommand::New {},
+        "reopen" => DaemonControlCommand::Reopen {},
+        "close" => DaemonControlCommand::Close {},
+        "list_recents" => DaemonControlCommand::ListRecents {},
+        "remove_from_recents" => DaemonControlCommand::RemoveFromRecents {
+            path: path_string()?,
+        },
+        "set_pinned" => DaemonControlCommand::SetPinned {
+            path: path_string()?,
+            pinned: pinned
+                .ok_or_else(|| Error::NotebookDaemon("set_pinned requires pinned".to_string()))?,
+        },
+        "shutdown" => DaemonControlCommand::Shutdown {},
+        command => {
+            return Err(Error::NotebookDaemon(format!(
+                "unknown daemon command: {command}"
+            )))
+        }
+    };
+    Ok(DaemonControlRequest::new(command))
+}
+
+/// Handle notebook-store daemon control requests inside the Tauri process.
+pub async fn handle_daemon_control_request(
+    request: DaemonControlRequest,
+    state: &State,
+) -> DaemonControlResponse {
+    if request.daemon != "notebook.v1" {
+        return DaemonControlResponse::failure(
+            "invalid_control_message",
+            format!("unsupported daemon discriminator: {}", request.daemon),
+        );
+    }
+
+    match handle_daemon_control_inner(request.command, state).await {
+        Ok(result) => DaemonControlResponse::success(result),
+        Err(error) => error,
+    }
+}
+
+async fn handle_daemon_control_inner(
+    command: DaemonControlCommand,
+    state: &State,
+) -> Result<DaemonControlResult, DaemonControlResponse> {
+    let notebook = state.get_notebook();
+    match command {
+        DaemonControlCommand::WriteCell {
+            id,
+            source,
+            expected_version,
+            last_edited_by,
+        } => {
+            validate_cell_id(&id)?;
+            notebook
+                .apply(NotebookOp::WriteCell {
+                    id,
+                    source,
+                    expected_version,
+                    last_edited_by,
+                })
+                .map(DaemonControlResult::Delta)
+                .map_err(store_error_response)
+        }
+        DaemonControlCommand::ReadCell { id } => {
+            validate_cell_id(&id)?;
+            let (root, _version) = notebook.snapshot();
+            read_daemon_cell(&root, &id).map(DaemonControlResult::Cell)
+        }
+        DaemonControlCommand::InsertCell {
+            kind,
+            after_id,
+            source,
+        } => {
+            if matches!(after_id.as_deref(), Some("")) {
+                return Err(DaemonControlResponse::failure(
+                    "invalid_params",
+                    "insert_cell after_id must not be empty",
+                ));
+            }
+            notebook
+                .apply(NotebookOp::InsertCell {
+                    kind,
+                    after_id,
+                    source,
+                    last_edited_by: None,
+                })
+                .map(DaemonControlResult::Delta)
+                .map_err(store_error_response)
+        }
+        DaemonControlCommand::DeleteCell {
+            id,
+            expected_version,
+        } => {
+            validate_cell_id(&id)?;
+            notebook
+                .apply(NotebookOp::DeleteCell {
+                    id,
+                    expected_version,
+                })
+                .map(DaemonControlResult::Delta)
+                .map_err(store_error_response)
+        }
+        DaemonControlCommand::Snapshot {} => {
+            let (root, version) = notebook.snapshot();
+            Ok(DaemonControlResult::Snapshot(DaemonNotebookSnapshot {
+                root,
+                version,
+            }))
+        }
+        DaemonControlCommand::ApplyEdit { id, source } => {
+            validate_cell_id(&id)?;
+            notebook
+                .apply(NotebookOp::ApplyEdit { id, source })
+                .map(DaemonControlResult::Delta)
+                .map_err(store_error_response)
+        }
+        DaemonControlCommand::FlushNotebook {} => notebook
+            .flush()
+            .await
+            .map(|()| DaemonControlResult::Empty {})
+            .map_err(|error| DaemonControlResponse::failure("flush_failed", error.to_string())),
+        command => Err(DaemonControlResponse::failure(
+            "unsupported_daemon_command",
+            format!("daemon command is not handled by the notebook store: {command:?}"),
+        )),
+    }
+}
+
+fn validate_cell_id(id: &str) -> Result<(), DaemonControlResponse> {
+    if id.is_empty() {
+        Err(DaemonControlResponse::failure(
+            "invalid_params",
+            "cell id must not be empty",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn store_error_response(error: StoreError) -> DaemonControlResponse {
+    match error {
+        StoreError::OptimisticConcurrency { expected, actual } => DaemonControlResponse::failure(
+            "stale_version",
+            format!("expected version {expected}, actual version {actual}"),
+        ),
+        StoreError::CellNotFound { id } => {
+            DaemonControlResponse::failure("cell_not_found", format!("cell not found: {id}"))
+        }
+        StoreError::NotCodeCell { id } => {
+            DaemonControlResponse::failure("not_code_cell", format!("cell is not code: {id}"))
+        }
+    }
+}
+
+fn read_daemon_cell(root: &NotebookRoot, id: &str) -> Result<DaemonCell, DaemonControlResponse> {
+    let cell = root
+        .cells
+        .iter()
+        .find(|cell| cell_id(cell).is_some_and(|cell_id| cell_id == id))
+        .ok_or_else(|| {
+            DaemonControlResponse::failure("cell_not_found", format!("cell not found: {id}"))
+        })?;
+
+    let (kind, source, version, exec_count, outputs) = match cell {
+        Cell::Raw(cell) => (
+            "raw",
+            multiline_to_string(&cell.source),
+            cell.metadata
+                .spur
+                .as_ref()
+                .map(|spur| spur.version)
+                .unwrap_or_default(),
+            None,
+            Vec::new(),
+        ),
+        Cell::Markdown(cell) => (
+            "markdown",
+            multiline_to_string(&cell.source),
+            cell.metadata
+                .spur
+                .as_ref()
+                .map(|spur| spur.version)
+                .unwrap_or_default(),
+            None,
+            Vec::new(),
+        ),
+        Cell::Code(cell) => (
+            "code",
+            multiline_to_string(&cell.source),
+            cell.metadata
+                .spur
+                .as_ref()
+                .map(|spur| spur.version)
+                .unwrap_or_default(),
+            cell.execution_count,
+            cell.outputs
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    DaemonControlResponse::failure("cell_encode_failed", error.to_string())
+                })?,
+        ),
+    };
+
+    Ok(DaemonCell {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        version,
+        source,
+        exec_count,
+        status: "idle".to_string(),
+        outputs,
+    })
+}
+
+fn cell_id(cell: &Cell) -> Option<&str> {
+    match cell {
+        Cell::Raw(cell) => cell.id.as_deref(),
+        Cell::Markdown(cell) => cell.id.as_deref(),
+        Cell::Code(cell) => cell.id.as_deref(),
+    }
+}
+
+fn multiline_to_string(source: &MultilineString) -> String {
+    match source {
+        MultilineString::Single(source) => source.clone(),
+        MultilineString::Multi(lines) => lines.join(""),
+    }
 }
 
 fn home_dir() -> Result<PathBuf, Error> {
@@ -653,7 +1086,7 @@ pub async fn list_recent_notebooks(
     let entries = response.entries.unwrap_or_default();
     let mut recent_notebooks = Vec::with_capacity(entries.len());
     for entry in entries {
-        let normalized_path = normalize_path(&entry.path).await?;
+        let normalized_path = normalize_path(Path::new(&entry.path)).await?;
         let path = normalized_path.display().to_string();
         let kernel_alive = kernel_alive_for_notebook(&path, &state).await;
         let is_current = current_path.as_ref() == Some(&normalized_path);
@@ -1003,6 +1436,7 @@ mod tests {
     use crate::backend::notebook::{
         Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, SpurCellMetadata,
     };
+    use crate::notebook_store::DeltaKind;
 
     fn notebook_with_source(source: &str, version: u64) -> NotebookRoot {
         NotebookRoot {
@@ -1213,5 +1647,181 @@ mod tests {
         }))
         .await
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_control_cell_commands_round_trip_through_temp_socket() {
+        use tokio::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("jute-daemon-control-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("notebook.sock");
+        let notebook_path = dir.join("notebook.ipynb");
+        let cell_id = "550e8400-e29b-41d4-a716-446655440000".to_string();
+
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load(&notebook_path, notebook_with_source("initial", 1));
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server_state = Arc::clone(&state);
+        let server = tokio::spawn(async move {
+            for _ in 0..7 {
+                let (mut stream, _addr) = listener.accept().await.unwrap();
+                let bytes = read_daemon_frame(&mut stream).await.unwrap();
+                let request: DaemonControlRequest = serde_json::from_slice(&bytes).unwrap();
+                let response = handle_daemon_control_request(request, &server_state).await;
+                write_daemon_frame(&mut stream, &serde_json::to_vec(&response).unwrap())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let read = send_daemon_control_to(
+            &socket_path,
+            &DaemonControlRequest::new(DaemonControlCommand::ReadCell {
+                id: cell_id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+        let DaemonControlResult::Cell(read) = read else {
+            panic!("expected cell response");
+        };
+        assert_eq!(read.source, "initial");
+        assert_eq!(read.version, 1);
+
+        let write = send_daemon_control_to(
+            &socket_path,
+            &DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                id: cell_id.clone(),
+                source: "updated".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+        assert!(matches!(
+            write,
+            DaemonControlResult::Delta(NotebookDelta {
+                version: 2,
+                kind: DeltaKind::CellWritten { ref id },
+            }) if id == &cell_id
+        ));
+
+        let insert = send_daemon_control_to(
+            &socket_path,
+            &DaemonControlRequest::new(DaemonControlCommand::InsertCell {
+                kind: CellKind::Markdown,
+                after_id: Some(cell_id.clone()),
+                source: "notes".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+        let DaemonControlResult::Delta(NotebookDelta {
+            version: 3,
+            kind:
+                DeltaKind::CellInserted {
+                    id: inserted_id,
+                    kind: CellKind::Markdown,
+                    after_id: Some(after_id),
+                },
+        }) = insert
+        else {
+            panic!("expected insert delta");
+        };
+        assert_eq!(after_id, cell_id);
+
+        let apply = send_daemon_control_to(
+            &socket_path,
+            &DaemonControlRequest::new(DaemonControlCommand::ApplyEdit {
+                id: inserted_id.clone(),
+                source: "edited notes".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+        assert!(matches!(
+            apply,
+            DaemonControlResult::Delta(NotebookDelta {
+                version: 4,
+                kind: DeltaKind::CellWritten { ref id },
+            }) if id == &inserted_id
+        ));
+
+        let snapshot = send_daemon_control_to(
+            &socket_path,
+            &DaemonControlRequest::new(DaemonControlCommand::Snapshot {}),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+        let DaemonControlResult::Snapshot(snapshot) = snapshot else {
+            panic!("expected snapshot response");
+        };
+        assert_eq!(snapshot.version, 4);
+        assert_eq!(snapshot.root.cells.len(), 2);
+
+        let delete = send_daemon_control_to(
+            &socket_path,
+            &DaemonControlRequest::new(DaemonControlCommand::DeleteCell {
+                id: inserted_id.clone(),
+                expected_version: 4,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+        assert!(matches!(
+            delete,
+            DaemonControlResult::Delta(NotebookDelta {
+                version: 5,
+                kind: DeltaKind::CellDeleted { ref id },
+            }) if id == &inserted_id
+        ));
+
+        let flush = send_daemon_control_to(
+            &socket_path,
+            &DaemonControlRequest::new(DaemonControlCommand::FlushNotebook {}),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+        assert!(matches!(flush, DaemonControlResult::Empty {}));
+
+        server.await.unwrap();
+
+        let persisted: NotebookRoot =
+            serde_json::from_slice(&std::fs::read(&notebook_path).unwrap()).unwrap();
+        assert_eq!(first_source(&persisted), "updated");
+        let Cell::Code(cell) = &persisted.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.metadata
+                .spur
+                .as_ref()
+                .unwrap()
+                .last_edited_by
+                .as_deref(),
+            Some("brain")
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
