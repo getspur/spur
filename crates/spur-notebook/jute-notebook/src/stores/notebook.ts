@@ -599,17 +599,6 @@ export async function loadNotebookRuntimeConfig(): Promise<NotebookRuntimeConfig
   return runtimeConfigPromise;
 }
 
-/**
- * Synchronous flag accessor.
- *
- * Returns the cached Rust-resolved value once `loadNotebookRuntimeConfig` has
- * completed; before that — and from contexts without a Tauri host — falls back
- * to the env-derived default (true unless explicitly disabled).
- */
-export function notebookInProcStoreEnabled(): boolean {
-  return runtimeConfigCache?.inProcStore ?? envInProcStoreEnabled();
-}
-
 function envInProcStoreEnabled(): boolean {
   const metaEnv = import.meta.env as Record<string, unknown>;
   const processEnv = typeof process === "undefined" ? undefined : process.env;
