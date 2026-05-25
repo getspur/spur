@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
-use jute::state::State;
+use jute::{backend::notebook::NotebookRoot, state::State};
 use rmcp::{
     model::{
         object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation,
@@ -127,7 +127,14 @@ impl ServerHandler for NotebookMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        match request.name.as_ref() {
+        fn arguments(arguments: Option<serde_json::Map<String, Value>>) -> Value {
+            arguments.map(Value::Object).unwrap_or_else(|| json!({}))
+        }
+
+        let name = request.name;
+        let arguments = arguments(request.arguments);
+
+        match name.as_ref() {
             "notebook.ping" => Ok(CallToolResult::structured(json!({
                 "ok": true,
                 "tool": "notebook.ping",
@@ -135,186 +142,44 @@ impl ServerHandler for NotebookMcpServer {
                 "windowAlive": self.deps.bridge.window_alive()
             }))),
             "notebook.snapshot" => tools::snapshot::call(&self.deps).await,
-            "notebook.get_notebook" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::get_notebook::call(&self.deps, arguments).await
-            }
-            "notebook.read_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::read_cell::call(&self.deps, arguments).await
-            }
-            "notebook.kernel_info" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::kernel_info::call(&self.deps, arguments).await
-            }
-            "notebook.insert_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::insert_cell::call(&self.deps, arguments).await
-            }
-            "notebook.write_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::write_cell::call(&self.deps, arguments).await
-            }
-            "notebook.save" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::save::call(&self.deps, arguments).await
-            }
-            "notebook.delete_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::delete_cell::call(&self.deps, arguments).await
-            }
-            "notebook.interrupt" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::interrupt::call(&self.deps, arguments).await
-            }
-            "notebook.run_cell" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::run_cell::call(&self.deps, arguments).await
-            }
-            "notebook.start_kernel" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::start_kernel::call(&self.deps, arguments).await
-            }
-            "notebook.restart_kernel" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::restart_kernel::call(&self.deps, arguments).await
-            }
-            "notebook.stop_kernel" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::stop_kernel::call(&self.deps, arguments).await
-            }
-            "notebook.venv_list" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::venv_list::call(&self.deps, arguments).await
-            }
-            "notebook.venv_create" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::venv_create::call(&self.deps, arguments).await
-            }
-            "notebook.venv_delete" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::venv_delete::call(&self.deps, arguments).await
-            }
+            "notebook.get_notebook" => tools::get_notebook::call(&self.deps, arguments).await,
+            "notebook.read_cell" => tools::read_cell::call(&self.deps, arguments).await,
+            "notebook.kernel_info" => tools::kernel_info::call(&self.deps, arguments).await,
+            "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
+            "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
+            "notebook.save" => tools::save::call(&self.deps, arguments).await,
+            "notebook.delete_cell" => tools::delete_cell::call(&self.deps, arguments).await,
+            "notebook.interrupt" => tools::interrupt::call(&self.deps, arguments).await,
+            "notebook.run_cell" => tools::run_cell::call(&self.deps, arguments).await,
+            "notebook.start_kernel" => tools::start_kernel::call(&self.deps, arguments).await,
+            "notebook.restart_kernel" => tools::restart_kernel::call(&self.deps, arguments).await,
+            "notebook.stop_kernel" => tools::stop_kernel::call(&self.deps, arguments).await,
+            "notebook.venv_list" => tools::venv_list::call(&self.deps, arguments).await,
+            "notebook.venv_create" => tools::venv_create::call(&self.deps, arguments).await,
+            "notebook.venv_delete" => tools::venv_delete::call(&self.deps, arguments).await,
             "notebook.venv_list_python_versions" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::venv_list_python_versions::call(&self.deps, arguments).await
             }
-            "notebook.new" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_new(&self.deps, arguments).await
-            }
-            "notebook.open" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_open(&self.deps, arguments).await
-            }
-            "notebook.close" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_close(&self.deps, arguments).await
-            }
-            "notebook.reopen" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
-                tools::daemon_lifecycle::call_reopen(&self.deps, arguments).await
-            }
+            "notebook.new" => tools::daemon_lifecycle::call_new(&self.deps, arguments).await,
+            "notebook.open" => tools::daemon_lifecycle::call_open(&self.deps, arguments).await,
+            "notebook.close" => tools::daemon_lifecycle::call_close(&self.deps, arguments).await,
+            "notebook.reopen" => tools::daemon_lifecycle::call_reopen(&self.deps, arguments).await,
             "notebook.list_recents" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_recents::call_list_recents(&self.deps, arguments).await
             }
             "notebook.set_pinned" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_recents::call_set_pinned(&self.deps, arguments).await
             }
             "notebook.remove_from_recents" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_recents::call_remove_from_recents(&self.deps, arguments).await
             }
             "notebook.move_to_trash" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_files::call_move_to_trash(&self.deps, arguments).await
             }
             "notebook.reveal_in_finder" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_files::call_reveal_in_finder(&self.deps, arguments).await
             }
             "notebook.discard_scratch" => {
-                let arguments = request
-                    .arguments
-                    .map(Value::Object)
-                    .unwrap_or_else(|| json!({}));
                 tools::daemon_files::call_discard_scratch(&self.deps, arguments).await
             }
             name => Err(McpError::invalid_params(
@@ -528,8 +393,53 @@ async fn start_server_with_bridge_requester(
 #[derive(Clone)]
 pub struct NotebookDaemonControl {
     bridge: Arc<AgentBridge>,
-    app: tauri::AppHandle,
+    requester: Arc<dyn BridgeRequester>,
+    jute_state: Arc<State>,
+    windows: Arc<dyn DaemonWindowOps>,
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
+    last_record_path: Option<PathBuf>,
+}
+
+trait DaemonWindowOps: Send + Sync {
+    fn show_and_focus(&self, label: &str) -> bool;
+    fn hide(&self, label: &str);
+    fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError>;
+    fn exit(&self);
+}
+
+struct TauriDaemonWindowOps {
+    app: tauri::AppHandle,
+}
+
+impl DaemonWindowOps for TauriDaemonWindowOps {
+    fn show_and_focus(&self, label: &str) -> bool {
+        let Some(window) = self.app.get_webview_window(label) else {
+            return false;
+        };
+        let _ = window.show();
+        let _ = window.set_focus();
+        true
+    }
+
+    fn hide(&self, label: &str) {
+        if let Some(window) = self.app.get_webview_window(label) {
+            let _ = window.hide();
+        }
+    }
+
+    fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError> {
+        let window = jute::window::open_notebook_path(&self.app, path).map_err(|error| {
+            BridgeError::Handler {
+                code: "window_open_failed".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        Ok(window.label().to_string())
+    }
+
+    fn exit(&self) {
+        self.app.exit(0);
+    }
 }
 
 type DaemonControlFuture<'a> = Pin<Box<dyn Future<Output = DaemonControlResponse> + Send + 'a>>;
@@ -608,12 +518,41 @@ impl DaemonControlSuccess {
 }
 
 impl NotebookDaemonControl {
-    pub fn new(bridge: Arc<AgentBridge>, app: tauri::AppHandle) -> Self {
+    pub fn new(bridge: Arc<AgentBridge>, app: tauri::AppHandle, jute_state: Arc<State>) -> Self {
+        let requester: Arc<dyn BridgeRequester> = Arc::new(TauriBridgeRequester::with_app(
+            Arc::clone(&bridge),
+            app.clone(),
+        ));
+        let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
+        Self::new_with_parts(bridge, requester, jute_state, windows, None)
+    }
+
+    fn new_with_parts(
+        bridge: Arc<AgentBridge>,
+        requester: Arc<dyn BridgeRequester>,
+        jute_state: Arc<State>,
+        windows: Arc<dyn DaemonWindowOps>,
+        last_record_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             bridge,
-            app,
+            requester,
+            jute_state,
+            windows,
             state: Arc::new(tokio::sync::Mutex::new(NotebookDaemonState::default())),
+            last_record_path,
         }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        bridge: Arc<AgentBridge>,
+        requester: Arc<dyn BridgeRequester>,
+        jute_state: Arc<State>,
+        windows: Arc<dyn DaemonWindowOps>,
+        last_record_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path)
     }
 
     pub async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
@@ -676,10 +615,12 @@ impl NotebookDaemonControl {
                 self.save_current().await?;
                 self.close_current_window().await;
                 self.bridge.set_notebook_open(false);
-                let mut state = self.state.lock().await;
-                state.current_path = None;
-                state.window_label = None;
-                if let Err(error) = clear_last_notebook().await {
+                {
+                    let mut state = self.state.lock().await;
+                    state.current_path = None;
+                    state.window_label = None;
+                }
+                if let Err(error) = self.clear_last_notebook().await {
                     warn!(%error, "failed to clear last notebook record");
                 }
                 Ok(DaemonControlSuccess::empty())
@@ -723,7 +664,7 @@ impl NotebookDaemonControl {
             }
             "shutdown" => {
                 self.save_current().await?;
-                self.app.exit(0);
+                self.windows.exit();
                 Ok(DaemonControlSuccess::empty())
             }
             command => Err(BridgeError::Handler {
@@ -734,45 +675,78 @@ impl NotebookDaemonControl {
     }
 
     async fn save_current(&self) -> Result<(), BridgeError> {
-        // Frontend bridge handlers no longer expose notebook.save. MCP save is
-        // now explicit: callers provide { path, contents } and the backend
-        // writes through SaveCoordinator directly.
-        Ok(())
+        let path = {
+            let state = self.state.lock().await;
+            state.current_path.clone()
+        };
+        let Some(path) = path else {
+            return Ok(());
+        };
+        if !self.requester.notebook_open() {
+            return Ok(());
+        }
+
+        let value = self
+            .requester
+            .request("notebook.export", json!({}), tools::BRIDGE_TIMEOUT)
+            .await?;
+        let contents: NotebookRoot =
+            serde_json::from_value(value).map_err(|error| BridgeError::Handler {
+                code: "invalid_notebook_export".to_string(),
+                message: error.to_string(),
+            })?;
+
+        self.jute_state
+            .save_coordinator
+            .save(path, contents)
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "save_failed".to_string(),
+                message: error.to_string(),
+            })
     }
 
     async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
-        {
+        let (previous_path, previous_window_label) = {
             let state = self.state.lock().await;
+            let previous_path = state.current_path.clone();
+            let previous_window_label = state.window_label.clone();
             if state.current_path.as_deref() == Some(path.as_path()) {
-                if let Some(label) = state.window_label.clone() {
+                if let Some(label) = previous_window_label.clone() {
                     drop(state);
-                    if let Some(window) = self.app.get_webview_window(&label) {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                    if self.windows.show_and_focus(&label) {
                         return Ok(path);
                     }
                 }
             }
-        }
 
-        self.close_current_window().await;
+            (previous_path, previous_window_label)
+        };
+
+        // Try to open the new window first; only mutate state on success so a
+        // failure leaves the previously open notebook recoverable (H2).
+        let label = match self.windows.open_notebook_path(&path) {
+            Ok(label) => label,
+            Err(error) => {
+                if previous_path.is_some() {
+                    if let Some(label) = previous_window_label.as_deref() {
+                        let _ = self.windows.show_and_focus(label);
+                    }
+                }
+                return Err(error);
+            }
+        };
+
+        if let Some(label) = previous_window_label.as_deref() {
+            self.windows.hide(label);
+        }
         self.bridge.set_notebook_open(false);
         {
             let mut state = self.state.lock().await;
-            state.current_path = None;
-            state.window_label = None;
+            state.current_path = Some(path.clone());
+            state.window_label = Some(label);
         }
-        let window = jute::window::open_notebook_path(&self.app, &path).map_err(|error| {
-            BridgeError::Handler {
-                code: "window_open_failed".to_string(),
-                message: error.to_string(),
-            }
-        })?;
-        let label = window.label().to_string();
-        let mut state = self.state.lock().await;
-        state.current_path = Some(path.clone());
-        state.window_label = Some(label);
-        if let Err(error) = persist_last_notebook(&path).await {
+        if let Err(error) = self.persist_last_notebook(&path).await {
             warn!(%error, path = %path.display(), "failed to persist last notebook record");
         }
         Ok(path)
@@ -789,9 +763,7 @@ impl NotebookDaemonControl {
         };
 
         if let Some(label) = label {
-            if let Some(window) = self.app.get_webview_window(&label) {
-                let _ = window.show();
-                let _ = window.set_focus();
+            if self.windows.show_and_focus(&label) {
                 return Ok(path);
             }
         }
@@ -802,9 +774,21 @@ impl NotebookDaemonControl {
     async fn close_current_window(&self) {
         let label = self.state.lock().await.window_label.clone();
         if let Some(label) = label {
-            if let Some(window) = self.app.get_webview_window(&label) {
-                let _ = window.hide();
-            }
+            self.windows.hide(&label);
+        }
+    }
+
+    async fn persist_last_notebook(&self, path: &Path) -> Result<()> {
+        match self.last_record_path.as_deref() {
+            Some(record_path) => persist_last_notebook_at(record_path, path).await,
+            None => persist_last_notebook(path).await,
+        }
+    }
+
+    async fn clear_last_notebook(&self) -> Result<()> {
+        match self.last_record_path.as_deref() {
+            Some(record_path) => clear_last_notebook_at(record_path).await,
+            None => clear_last_notebook().await,
         }
     }
 
@@ -951,13 +935,13 @@ pub async fn start_daemon_server(
     app: tauri::AppHandle,
     state: Arc<State>,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
-    let control = NotebookDaemonControl::new(Arc::clone(&bridge), app);
-    let requester: Arc<dyn BridgeRequester> =
-        Arc::new(TauriBridgeRequester::with_app(bridge, control.app.clone()));
+    let app_for_deps = app.clone();
+    let control = NotebookDaemonControl::new(Arc::clone(&bridge), app.clone(), Arc::clone(&state));
+    let requester: Arc<dyn BridgeRequester> = Arc::new(TauriBridgeRequester::with_app(bridge, app));
     let deps = Arc::new(ServerDeps {
         bridge: requester,
         state: Some(state),
-        app: Some(control.app.clone()),
+        app: Some(app_for_deps),
         daemon: Some(control.clone()),
     });
     let handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
@@ -1085,9 +1069,14 @@ async fn prepare_socket_path(socket_path: impl AsRef<Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
     use tokio::net::UnixStream;
     use tokio::time::{timeout, Duration};
+
+    use jute::state::State;
+
+    use super::bridge::BridgeRequestFuture;
 
     #[derive(Clone, Default)]
     struct RecordingDaemonControl {
@@ -1130,10 +1119,224 @@ mod tests {
     fn test_server_deps() -> Arc<ServerDeps> {
         Arc::new(ServerDeps::from_bridge(test_bridge_requester()))
     }
-    // Directly exercising NotebookDaemonControl::reopen requires an AppHandle
-    // whose manager can return a concrete WebviewWindow for the cached label.
-    // Tauri's mock AppHandle lives behind tauri's optional `test` feature,
-    // which this crate does not enable and this task's touch scope excludes.
+
+    struct BufferedNotebookBridge {
+        notebook: tokio::sync::Mutex<Value>,
+        calls: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    impl BufferedNotebookBridge {
+        fn new(notebook: Value) -> Self {
+            Self {
+                notebook: tokio::sync::Mutex::new(notebook),
+                calls: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn calls(&self) -> Vec<String> {
+            self.calls.lock().await.clone()
+        }
+    }
+
+    impl BridgeRequester for BufferedNotebookBridge {
+        fn listener_registered(&self) -> bool {
+            true
+        }
+
+        fn window_alive(&self) -> bool {
+            true
+        }
+
+        fn notebook_open(&self) -> bool {
+            true
+        }
+
+        fn request<'a>(
+            &'a self,
+            method: &'static str,
+            params: Value,
+            _timeout: Duration,
+        ) -> BridgeRequestFuture<'a> {
+            Box::pin(async move {
+                self.calls.lock().await.push(method.to_string());
+                match method {
+                    "notebook.insert_cell" => {
+                        let kind = params["kind"]
+                            .as_str()
+                            .expect("insert_cell kind")
+                            .to_string();
+                        let source = params["source"]
+                            .as_str()
+                            .expect("insert_cell source")
+                            .to_string();
+                        let last_edited_by = params["last_edited_by"]
+                            .as_str()
+                            .unwrap_or("brain")
+                            .to_string();
+                        let is_code = kind == "code";
+                        let id = "inserted-cell".to_string();
+                        let mut cell = json!({
+                            "cell_type": kind,
+                            "id": id,
+                            "metadata": {
+                                "spur": {
+                                    "version": 1,
+                                    "last_edited_by": last_edited_by
+                                }
+                            },
+                            "source": source
+                        });
+                        if is_code {
+                            cell["execution_count"] = Value::Null;
+                            cell["outputs"] = json!([]);
+                        }
+
+                        let mut notebook = self.notebook.lock().await;
+                        notebook["cells"]
+                            .as_array_mut()
+                            .expect("notebook cells")
+                            .push(cell);
+                        Ok(json!({ "id": id, "version": 1 }))
+                    }
+                    "notebook.export" => Ok(self.notebook.lock().await.clone()),
+                    _ => Err(BridgeError::Handler {
+                        code: "unknown_method".to_string(),
+                        message: format!("unexpected method: {method}"),
+                    }),
+                }
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingWindowOps {
+        opened: StdMutex<Vec<PathBuf>>,
+        hidden: StdMutex<Vec<String>>,
+        exited: AtomicBool,
+    }
+
+    impl RecordingWindowOps {
+        fn opened(&self) -> Vec<PathBuf> {
+            self.opened.lock().expect("opened lock").clone()
+        }
+
+        fn hidden(&self) -> Vec<String> {
+            self.hidden.lock().expect("hidden lock").clone()
+        }
+    }
+
+    impl DaemonWindowOps for RecordingWindowOps {
+        fn show_and_focus(&self, _label: &str) -> bool {
+            false
+        }
+
+        fn hide(&self, label: &str) {
+            self.hidden
+                .lock()
+                .expect("hidden lock")
+                .push(label.to_string());
+        }
+
+        fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError> {
+            self.opened
+                .lock()
+                .expect("opened lock")
+                .push(path.to_path_buf());
+            Ok(format!("window-{}", self.opened().len()))
+        }
+
+        fn exit(&self) {
+            self.exited.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn empty_notebook() -> Value {
+        json!({
+            "metadata": {},
+            "nbformat_minor": 5,
+            "nbformat": 4,
+            "cells": []
+        })
+    }
+
+    #[tokio::test]
+    async fn open_flushes_buffered_edits_to_current_path_before_switching() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-daemon-flush-")
+            .tempdir()
+            .expect("temp dir");
+        let current_path = temp_dir.path().join("current.ipynb");
+        let other_path = temp_dir.path().join("other.ipynb");
+        let last_record_path = temp_dir.path().join("last.json");
+        tokio::fs::write(
+            &current_path,
+            serde_json::to_vec_pretty(&empty_notebook()).unwrap(),
+        )
+        .await
+        .expect("current notebook writes");
+
+        let buffered_bridge = Arc::new(BufferedNotebookBridge::new(empty_notebook()));
+        let requester: Arc<dyn BridgeRequester> = buffered_bridge.clone();
+        let notebook_state = Arc::new(State::new());
+        let windows = Arc::new(RecordingWindowOps::default());
+        let window_ops: Arc<dyn DaemonWindowOps> = windows.clone();
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            requester.clone(),
+            notebook_state,
+            window_ops,
+            Some(last_record_path),
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(current_path.clone());
+            state.window_label = Some("current-window".to_string());
+        }
+
+        let deps = ServerDeps::from_bridge(requester);
+        tools::insert_cell::call(
+            &deps,
+            json!({
+                "kind": "markdown",
+                "source": "persist me before switching"
+            }),
+        )
+        .await
+        .expect("insert_cell mutates in-memory notebook");
+
+        let response = control
+            .handle(DaemonControlRequest {
+                id: None,
+                daemon: None,
+                command: "open".to_string(),
+                path: Some(other_path.clone()),
+                pinned: None,
+            })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.path, Some(other_path.display().to_string()));
+        assert_eq!(windows.hidden(), vec!["current-window"]);
+        assert_eq!(windows.opened(), vec![other_path]);
+        assert_eq!(
+            buffered_bridge.calls().await,
+            vec!["notebook.insert_cell", "notebook.export"]
+        );
+
+        let saved: Value = serde_json::from_slice(
+            &tokio::fs::read(&current_path)
+                .await
+                .expect("current notebook reads"),
+        )
+        .expect("saved notebook parses");
+        assert_eq!(saved["cells"][0]["source"], "persist me before switching");
+        assert_eq!(
+            saved["cells"][0]["metadata"]["spur"]["last_edited_by"],
+            "brain"
+        );
+    }
+    // DaemonWindowOps keeps lifecycle tests independent of a concrete Tauri
+    // AppHandle; the production implementation still delegates to Tauri.
 
     fn spawn_multiplexer(control: RecordingDaemonControl) -> (UnixStream, JoinHandle<()>) {
         let (server, client) = UnixStream::pair().expect("in-memory stream pair");
@@ -1235,6 +1438,64 @@ mod tests {
                 "missing tool: {expected}"
             );
         }
+    }
+
+    #[derive(Default)]
+    struct FailingWindowOps;
+
+    impl DaemonWindowOps for FailingWindowOps {
+        fn show_and_focus(&self, _label: &str) -> bool {
+            false
+        }
+
+        fn hide(&self, _label: &str) {}
+
+        fn open_notebook_path(&self, _path: &Path) -> Result<String, BridgeError> {
+            Err(BridgeError::Handler {
+                code: "window_open_failed".to_string(),
+                message: "mock jute failure".to_string(),
+            })
+        }
+
+        fn exit(&self) {}
+    }
+
+    #[tokio::test]
+    async fn open_path_failure_preserves_previous_window_state() {
+        let bridge = Arc::new(AgentBridge::new());
+        bridge.set_notebook_open(true);
+        let requester: Arc<dyn BridgeRequester> = test_bridge_requester();
+        let windows: Arc<dyn DaemonWindowOps> = Arc::new(FailingWindowOps);
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::clone(&bridge),
+            requester,
+            Arc::new(State::new()),
+            windows,
+            None,
+        );
+        let previous_path = PathBuf::from("/tmp/previous.ipynb");
+        let previous_label = "jute-window-existing".to_string();
+
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(previous_path.clone());
+            state.window_label = Some(previous_label.clone());
+        }
+
+        let error = control
+            .open_path(PathBuf::from("/tmp/new.ipynb"))
+            .await
+            .expect_err("window open failure should bubble");
+
+        assert!(matches!(
+            error,
+            BridgeError::Handler { ref code, .. } if code == "window_open_failed"
+        ));
+
+        let state = control.state.lock().await;
+        assert_eq!(state.current_path.as_deref(), Some(previous_path.as_path()));
+        assert_eq!(state.window_label.as_deref(), Some(previous_label.as_str()));
+        assert!(bridge.notebook_open());
     }
 
     #[tokio::test]

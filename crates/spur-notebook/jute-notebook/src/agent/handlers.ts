@@ -23,6 +23,8 @@ export async function dispatchAgentRequest(
   switch (request.method) {
     case "notebook.snapshot":
       return snapshot(requireNotebook(notebook));
+    case "notebook.export":
+      return requireNotebook(notebook).export();
     case "notebook.read_cell":
       return readCell(requireNotebook(notebook), request.params);
     case "notebook.insert_cell":
