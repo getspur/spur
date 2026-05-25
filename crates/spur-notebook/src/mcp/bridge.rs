@@ -36,14 +36,6 @@ pub trait BridgeRequester: Send + Sync {
         timeout: Duration,
     ) -> BridgeRequestFuture<'a>;
 
-    fn request_no_timeout<'a>(
-        &'a self,
-        method: &'static str,
-        params: Value,
-    ) -> BridgeRequestFuture<'a> {
-        self.request(method, params, Duration::MAX)
-    }
-
     fn drain_on_shutdown<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async {})
     }
@@ -177,21 +169,6 @@ impl BridgeRequester for TauriBridgeRequester {
         }
     }
 
-    fn request_no_timeout<'a>(
-        &'a self,
-        method: &'static str,
-        params: Value,
-    ) -> BridgeRequestFuture<'a> {
-        match &self.app {
-            Some(app) => Box::pin(async move {
-                self.bridge
-                    .request_with_timeout(app, method, params, None)
-                    .await
-            }),
-            None => Box::pin(async { Err(BridgeError::NotebookNotOpen) }),
-        }
-    }
-
     fn drain_on_shutdown<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         let bridge = Arc::clone(&self.bridge);
         Box::pin(async move { bridge.drain_on_shutdown().await })
@@ -243,7 +220,7 @@ impl AgentBridge {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, BridgeError> {
-        self.request_with_timeout(app, method, params, Some(timeout))
+        self.request_with_timeout(app, method, params, timeout)
             .await
     }
 
@@ -252,7 +229,7 @@ impl AgentBridge {
         app: &tauri::AppHandle<R>,
         method: impl Into<String>,
         params: Value,
-        timeout: Option<Duration>,
+        timeout: Duration,
     ) -> Result<Value, BridgeError> {
         if !self.notebook_open() {
             return Err(BridgeError::NotebookNotOpen);
@@ -279,21 +256,14 @@ impl AgentBridge {
             return Err(BridgeError::WindowClosed);
         }
 
-        match timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(BridgeResponse::Success(value))) => Ok(value),
-                Ok(Ok(BridgeResponse::Error(error))) => Err(error),
-                Ok(Err(_closed)) => Err(BridgeError::AppRestarted),
-                Err(_elapsed) => {
-                    self.pending.lock().await.remove(&request_id);
-                    Err(BridgeError::Timeout)
-                }
-            },
-            None => match rx.await {
-                Ok(BridgeResponse::Success(value)) => Ok(value),
-                Ok(BridgeResponse::Error(error)) => Err(error),
-                Err(_closed) => Err(BridgeError::AppRestarted),
-            },
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(BridgeResponse::Success(value))) => Ok(value),
+            Ok(Ok(BridgeResponse::Error(error))) => Err(error),
+            Ok(Err(_closed)) => Err(BridgeError::AppRestarted),
+            Err(_elapsed) => {
+                self.pending.lock().await.remove(&request_id);
+                Err(BridgeError::Timeout)
+            }
         }
     }
 
