@@ -8,60 +8,12 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::Emitter;
 
-use crate::mcp::{DaemonControlRequest, DaemonControlResponse, NotebookDaemonControl, ServerDeps};
-
-const RECENTS_CHANGED_EVENT: &str = "notebook://recents_changed";
-
-fn daemon_unavailable() -> McpError {
-    McpError::internal_error(
-        "notebook daemon control plane is not available",
-        Some(json!({ "code": "daemon_unavailable" })),
-    )
-}
+use super::{check_response, daemon_unavailable, emit_recents_changed, parse_no_args};
+use crate::mcp::{DaemonControlRequest, NotebookDaemonControl, ServerDeps};
 
 fn require_daemon(deps: &ServerDeps) -> Result<&NotebookDaemonControl, McpError> {
     deps.daemon.as_ref().ok_or_else(daemon_unavailable)
-}
-
-fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
-    let value = if arguments.is_null() {
-        json!({})
-    } else {
-        arguments
-    };
-    match value {
-        Value::Object(map) if map.is_empty() => Ok(()),
-        _ => Err(McpError::invalid_params(
-            format!("{method} takes no arguments"),
-            None,
-        )),
-    }
-}
-
-fn check_response(response: DaemonControlResponse) -> Result<DaemonControlResponse, McpError> {
-    if response.ok {
-        Ok(response)
-    } else {
-        let (code, message) = match response.error {
-            Some(error) => (error.code, error.message),
-            None => (
-                "daemon_command_failed".to_string(),
-                "daemon command failed without an error body".to_string(),
-            ),
-        };
-        Err(McpError::internal_error(
-            message,
-            Some(json!({ "code": code })),
-        ))
-    }
-}
-
-fn emit_recents_changed(deps: &ServerDeps) {
-    if let Some(app) = deps.app.as_ref() {
-        let _ = app.emit(RECENTS_CHANGED_EVENT, &json!({}));
-    }
 }
 
 // ---------------------------------------------------------------- notebook.new

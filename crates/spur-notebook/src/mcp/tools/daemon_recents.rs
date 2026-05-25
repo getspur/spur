@@ -1,5 +1,5 @@
 //! MCP tools for daemon recents — list/set_pinned/remove. List is read-only;
-//! the mutating tools also fan out a `notebook://recents_changed` event so the
+//! the mutating tools also fan out the recents-changed event so the
 //! Tauri shell can re-render its sidebar without polling.
 
 use rmcp::{
@@ -8,56 +8,10 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::Emitter;
 
-use crate::mcp::{DaemonControlRequest, DaemonControlResponse, ServerDeps};
+use super::{check_response, daemon_unavailable, emit_recents_changed, parse_no_args};
+use crate::mcp::{DaemonControlRequest, ServerDeps};
 use crate::recents;
-
-fn daemon_unavailable() -> McpError {
-    McpError::internal_error(
-        "notebook daemon control plane is not available",
-        Some(json!({ "code": "daemon_unavailable" })),
-    )
-}
-
-fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
-    let value = if arguments.is_null() {
-        json!({})
-    } else {
-        arguments
-    };
-    match value {
-        Value::Object(map) if map.is_empty() => Ok(()),
-        _ => Err(McpError::invalid_params(
-            format!("{method} takes no arguments"),
-            None,
-        )),
-    }
-}
-
-fn check_response(response: DaemonControlResponse) -> Result<DaemonControlResponse, McpError> {
-    if response.ok {
-        Ok(response)
-    } else {
-        let (code, message) = match response.error {
-            Some(error) => (error.code, error.message),
-            None => (
-                "daemon_command_failed".to_string(),
-                "daemon command failed without an error body".to_string(),
-            ),
-        };
-        Err(McpError::internal_error(
-            message,
-            Some(json!({ "code": code })),
-        ))
-    }
-}
-
-fn emit_recents_changed(deps: &ServerDeps) {
-    if let Some(app) = deps.app.as_ref() {
-        let _ = app.emit("notebook://recents_changed", &json!({}));
-    }
-}
 
 // ---------------------------------------------------------- notebook.list_recents
 

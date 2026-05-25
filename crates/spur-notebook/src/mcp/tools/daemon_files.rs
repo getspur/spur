@@ -8,30 +8,9 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::Emitter;
 
+use super::{emit_recents_changed, parse_no_args};
 use crate::mcp::ServerDeps;
-
-fn emit_recents_changed(deps: &ServerDeps) {
-    if let Some(app) = deps.app.as_ref() {
-        let _ = app.emit("notebook://recents_changed", &json!({}));
-    }
-}
-
-fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
-    let value = if arguments.is_null() {
-        json!({})
-    } else {
-        arguments
-    };
-    match value {
-        Value::Object(map) if map.is_empty() => Ok(()),
-        _ => Err(McpError::invalid_params(
-            format!("{method} takes no arguments"),
-            None,
-        )),
-    }
-}
 
 fn jute_error(code: &str, message: &str, error: &jute::Error) -> McpError {
     McpError::internal_error(
