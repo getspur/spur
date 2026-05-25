@@ -6,9 +6,7 @@ import {
   type AgentDeleteCell,
   AgentHandlerError,
   type AgentInsertCell,
-  type AgentKernelInfo,
   type AgentReadCell,
-  type AgentRunCell,
   type AgentSnapshotCell,
   type AgentWriteCell,
 } from "./types";
@@ -16,7 +14,7 @@ import {
 // Atomic-handler invariant: handlers that perform version checks and mutations
 // must keep check + mutation synchronous, with no await between them. The M5
 // write-side handlers below enforce expected_version and mutate Zustand in the
-// same tick; kernel_info/interrupt may await because they do not mutate cells.
+// same tick.
 
 export async function dispatchAgentRequest(
   notebook: Notebook | undefined,
@@ -27,18 +25,12 @@ export async function dispatchAgentRequest(
       return snapshot(requireNotebook(notebook));
     case "notebook.read_cell":
       return readCell(requireNotebook(notebook), request.params);
-    case "notebook.run_cell":
-      return runCell(requireNotebook(notebook), request.params);
-    case "notebook.kernel_info":
-      return kernelInfo(requireNotebook(notebook));
     case "notebook.insert_cell":
       return insertCell(requireNotebook(notebook), request.params);
     case "notebook.write_cell":
       return writeCell(requireNotebook(notebook), request.params);
     case "notebook.delete_cell":
       return deleteCell(requireNotebook(notebook), request.params);
-    case "notebook.interrupt":
-      return interrupt(requireNotebook(notebook));
     default:
       throw new AgentHandlerError(
         "unknown_method",
@@ -86,47 +78,6 @@ function readCell(notebook: Notebook, params: unknown): AgentReadCell {
     source: cell.source,
     outputs: cell.result?.outputs ?? [],
   };
-}
-
-async function runCell(
-  notebook: Notebook,
-  params: unknown,
-): Promise<AgentRunCell> {
-  const id = readStringParam(params, "id", "notebook.run_cell");
-  const cell = notebook.state.cells[id];
-  if (!cell) {
-    throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
-  }
-  if (cell.type !== "code") {
-    throw new AgentHandlerError(
-      "invalid_params",
-      "notebook.run_cell can only run code cells",
-    );
-  }
-  if (cell.result?.status === "running") {
-    throw new AgentHandlerError(
-      "cell_running",
-      `Cell is already running: ${id}`,
-    );
-  }
-
-  await notebook.execute(id);
-  const updated = notebook.state.cells[id];
-  if (!updated) {
-    throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
-  }
-
-  return {
-    id,
-    status: cellStatus(updated.result?.status),
-    exec_count: updated.result?.executionCount ?? null,
-    outputs: updated.result?.outputs ?? [],
-    events: [],
-  };
-}
-
-async function kernelInfo(notebook: Notebook): Promise<AgentKernelInfo> {
-  return notebook.refreshKernelSlotInfo();
 }
 
 function insertCell(notebook: Notebook, params: unknown): AgentInsertCell {
@@ -181,11 +132,6 @@ function deleteCell(notebook: Notebook, params: unknown): AgentDeleteCell {
 
   notebook.deleteCell(id);
   return { deleted: true };
-}
-
-async function interrupt(notebook: Notebook): Promise<{ ok: true }> {
-  await notebook.interruptKernel();
-  return { ok: true };
 }
 
 function readCellId(params: unknown): string {

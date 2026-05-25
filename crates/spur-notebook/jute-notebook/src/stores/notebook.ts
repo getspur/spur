@@ -354,6 +354,13 @@ type CellHandle = {
   editor?: EditorView;
 };
 
+type DirectRunCellState = {
+  status: CellResult["status"];
+  timings: NonNullable<CellResult["timings"]>;
+  executionCount: CellResult["executionCount"];
+  willClearOutput: boolean;
+};
+
 /**
  * Centralized stateful object representing a notebook.
  *
@@ -376,10 +383,13 @@ export class Notebook {
 
   private autosaveTimer?: ReturnType<typeof setTimeout>;
 
+  private directRunCellStates: Map<string, DirectRunCellState>;
+
   constructor() {
     const store = createNotebookStore();
     this.store = store;
     this.refs = new Map();
+    this.directRunCellStates = new Map();
 
     store.subscribe(() => this.scheduleAutosave());
 
@@ -658,6 +668,122 @@ export class Notebook {
       timings = { ...timings, finishedAt: Date.now() };
       update();
     }
+  }
+
+  handleRunCellEvent(cellId: string, message: RunCellEvent) {
+    if (!this.state.cells[cellId]) {
+      this.directRunCellStates.delete(cellId);
+      console.warn("Skipping run cell event for unknown cell", {
+        cellId,
+        message,
+      });
+      return;
+    }
+
+    const beginRun = () => {
+      const runState: DirectRunCellState = {
+        status: "running",
+        timings: { startedAt: Date.now() },
+        executionCount: undefined,
+        willClearOutput: false,
+      };
+      this.directRunCellStates.set(cellId, runState);
+      this.updateDirectRunResult(cellId, runState);
+      this.state.clearOutput(cellId);
+      return runState;
+    };
+
+    let runState = this.directRunCellStates.get(cellId);
+    if (message.event === "started") {
+      beginRun();
+      return;
+    }
+    runState ??= beginRun();
+
+    if (runState.willClearOutput) {
+      this.state.clearOutput(cellId);
+      runState.willClearOutput = false;
+    }
+
+    if (message.event === "stdout" || message.event === "stderr") {
+      this.state.appendOutput(cellId, {
+        output_type: "stream",
+        name: message.event,
+        text: message.data,
+      });
+    } else if (message.event === "error") {
+      runState.status = "error";
+      this.updateDirectRunResult(cellId, runState);
+      this.state.appendOutput(cellId, {
+        output_type: "error",
+        ename: message.data.ename,
+        evalue: message.data.evalue,
+        traceback: message.data.traceback,
+      });
+    } else if (message.event === "execute_result") {
+      // This means that there was a return value for the cell.
+      runState.executionCount = message.data.execution_count;
+      this.updateDirectRunResult(cellId, runState);
+      this.state.appendOutput(cellId, {
+        output_type: "execute_result",
+        execution_count: message.data.execution_count,
+        data: message.data.data,
+        metadata: message.data.metadata,
+      });
+    } else if (message.event === "display_data") {
+      const displayId = message.data.transient?.display_id || uuidv4();
+      this.state.appendOutput(
+        cellId,
+        {
+          output_type: "display_data",
+          data: message.data.data,
+          metadata: message.data.metadata,
+        },
+        displayId,
+      );
+    } else if (message.event === "update_display_data") {
+      const displayId = message.data.transient?.display_id;
+      if (displayId) {
+        this.state.updateOutputDisplay(cellId, displayId, {
+          data: message.data.data,
+          metadata: message.data.metadata,
+        });
+      }
+    } else if (message.event === "clear_output") {
+      if (message.data.wait) {
+        runState.willClearOutput = true;
+      } else {
+        this.state.clearOutput(cellId);
+      }
+    } else if (message.event === "finished") {
+      runState.status = message.data.status === "ok" ? "success" : "error";
+      runState.executionCount =
+        message.data.exec_count ?? runState.executionCount;
+      runState.timings = { ...runState.timings, finishedAt: Date.now() };
+      this.updateDirectRunResult(cellId, runState);
+      this.directRunCellStates.delete(cellId);
+    } else if (message.event === "disconnect") {
+      runState.status = "error";
+      runState.timings = { ...runState.timings, finishedAt: Date.now() };
+      this.updateDirectRunResult(cellId, runState);
+      this.state.appendOutput(cellId, {
+        output_type: "error",
+        ename: "InternalError",
+        evalue: message.data,
+        traceback: [],
+      });
+      this.directRunCellStates.delete(cellId);
+    } else {
+      console.warn("Skipping unhandled event", message);
+    }
+  }
+
+  private updateDirectRunResult(cellId: string, runState: DirectRunCellState) {
+    this.state.updateResult(cellId, {
+      status: runState.status,
+      timings: runState.timings,
+      executionCount: runState.executionCount,
+    });
   }
 
   private scheduleAutosave() {
