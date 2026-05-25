@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use spur_graph::git_blob_oid;
 use spur_graph::temporal::{
-    resolve_symbol_at, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
+    resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
 use spur_graph::{
     bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
@@ -2089,7 +2089,13 @@ fn resolve_symbol_as_of(
 
     let mut last_unknown = None;
     for (_, _, key) in history {
-        match resolve_symbol_at(artifact, commits, &key.stable_symbol_id, &key.commit, as_of) {
+        match resolve_symbol_at_indexed(
+            temporal_index.as_ref(),
+            commits,
+            &key.stable_symbol_id,
+            &key.commit,
+            as_of,
+        ) {
             Resolution::Found { value, chain } => return Ok(Resolution::Found { value, chain }),
             Resolution::Deleted { last_seen } => return Ok(Resolution::Deleted { last_seen }),
             Resolution::Ambiguous { candidates } => {
