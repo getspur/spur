@@ -557,27 +557,129 @@ fn edge_rows(
 ) -> anyhow::Result<(Vec<ResolvedEdgeRow>, Vec<UnresolvedEdgeRow>)> {
     let mut resolved = Vec::new();
     let mut unresolved = Vec::new();
+    let mut dropped_stale = 0usize;
     for edge in &artifact.edges {
         let src_id = *endpoint_ids
             .get(&edge.source_stable_symbol_id)
             .ok_or_else(|| anyhow!("missing source endpoint `{}`", edge.source_stable_symbol_id))?;
-        if let Some(target_stable_id) = &edge.target_stable_symbol_id {
-            let dst_id = *endpoint_ids
-                .get(target_stable_id)
-                .ok_or_else(|| anyhow!("missing target endpoint `{target_stable_id}`"))?;
-            resolved.push(ResolvedEdgeRow {
+        match edge.target_stable_symbol_id.as_deref() {
+            Some(target_stable_id) => match endpoint_ids.get(target_stable_id) {
+                Some(&dst_id) => resolved.push(ResolvedEdgeRow {
+                    edge: edge.clone(),
+                    src_id,
+                    dst_id,
+                }),
+                None => {
+                    dropped_stale += 1;
+                    tracing::warn!(
+                        stable_symbol_id = %target_stable_id,
+                        source_stable_symbol_id = %edge.source_stable_symbol_id,
+                        "spur-graph: edge target endpoint missing in current artifact; routing to unresolved (likely stale phantom edge after byte-range shift)"
+                    );
+                    unresolved.push(UnresolvedEdgeRow {
+                        edge: edge.clone(),
+                        src_id,
+                    });
+                }
+            },
+            None => unresolved.push(UnresolvedEdgeRow {
                 edge: edge.clone(),
                 src_id,
-                dst_id,
-            });
-        } else {
-            unresolved.push(UnresolvedEdgeRow {
-                edge: edge.clone(),
-                src_id,
-            });
+            }),
         }
     }
+    if dropped_stale > 0 {
+        tracing::info!(
+            dropped_stale,
+            "spur-graph: dropped {} edge(s) with stale target id; see warn-level logs for details",
+            dropped_stale
+        );
+    }
     Ok((resolved, unresolved))
+}
+
+#[cfg(test)]
+mod edge_rows_test {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn edge_rows_routes_stale_target_to_unresolved() {
+        let edge = test_edge("sym-a", Some("sym-stale-target"));
+        let artifact = test_artifact(edge.clone());
+        let endpoint_ids = HashMap::from([("sym-a".to_string(), NodeId(1))]);
+
+        let (resolved, unresolved) =
+            edge_rows(&artifact, &endpoint_ids).expect("stale target routes to unresolved");
+
+        assert!(resolved.is_empty());
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].edge, edge);
+        assert_eq!(unresolved[0].src_id, NodeId(1));
+    }
+
+    #[test]
+    fn edge_rows_still_bails_on_missing_source() {
+        let edge = test_edge("sym-missing-source", Some("sym-a"));
+        let artifact = test_artifact(edge);
+        let endpoint_ids = HashMap::from([("sym-a".to_string(), NodeId(1))]);
+
+        let err =
+            edge_rows(&artifact, &endpoint_ids).expect_err("missing source endpoint remains fatal");
+
+        assert!(
+            err.to_string()
+                .contains("missing source endpoint `sym-missing-source`"),
+            "error should mention missing source endpoint: {err:#}"
+        );
+    }
+
+    fn test_artifact(edge: GraphEdgeArtifact) -> GraphIndexArtifact {
+        GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: crate::schema::GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test-manifest".to_string(),
+            graph_content_hash: "test-content-hash".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            file_node_ids: Vec::new(),
+            symbols: vec![GraphSymbolArtifact {
+                stable_symbol_id: "sym-a".to_string(),
+                file_path: "src/a.rs".to_string(),
+                byte_range: [0, 10],
+                line_range: [1, 1],
+                entity_name: "a".to_string(),
+                qualified_name: "crate::a".to_string(),
+                symbol_kind: "function".to_string(),
+                anchor_hash: "anchor-a".to_string(),
+                enclosing_scope: None,
+            }],
+            symbol_node_ids: vec![NodeId(1)],
+            edges: vec![edge],
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        }
+    }
+
+    fn test_edge(source: &str, target: Option<&str>) -> GraphEdgeArtifact {
+        GraphEdgeArtifact {
+            source_stable_symbol_id: source.to_string(),
+            target_stable_symbol_id: target.map(str::to_string),
+            target_label: target.map(|_| "target".to_string()),
+            relation: RelationKind::Calls,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: Some(GraphEdgeKind::Calls),
+            bind_method: None,
+        }
+    }
 }
 
 fn write_nodes(path: &Path, rows: &[NodeRow]) -> anyhow::Result<()> {
