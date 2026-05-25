@@ -439,7 +439,8 @@ fn is_root_or_prefix_only(path: &Path) -> bool {
     saw_anchor
 }
 
-async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
+/// Start a local Jupyter kernel by spec name.
+pub async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
     // Temporary hack to just start a kernel locally with ZeroMQ.
     let kernels = environment::list_kernels(None).await;
     let mut kernel_spec = match kernels
@@ -473,7 +474,8 @@ async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
     Ok(kernel)
 }
 
-fn install_kernel_in_slot(
+/// Install a fresh kernel in a slot, returning its generation and any previous kernel.
+pub fn install_kernel_in_slot(
     state: &State,
     slot_id: &str,
     spec_name: String,
@@ -500,7 +502,8 @@ fn take_kernel_if_present(state: &State, slot_id: &str) -> Option<LocalKernel> {
     slot.kernel.take()
 }
 
-fn take_kernel_from_slot(state: &State, slot_id: &str) -> Result<LocalKernel, Error> {
+/// Remove and return the kernel currently bound to a slot, or `KernelDisconnect`.
+pub fn take_kernel_from_slot(state: &State, slot_id: &str) -> Result<LocalKernel, Error> {
     let mut slot = state
         .kernels
         .get_mut(slot_id)
@@ -527,7 +530,8 @@ fn kernel_connection_for_slot(
         .clone())
 }
 
-fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
+/// Return the spec name recorded for an existing kernel slot.
+pub fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
     let slot = state.kernels.get(slot_id).ok_or(Error::KernelDisconnect)?;
     Ok(slot.spec_name().to_string())
 }
@@ -587,7 +591,8 @@ pub async fn kernel_slot_info(
     kernel_slot_info_for_state(kernel_id, &state).await
 }
 
-async fn kernel_slot_info_for_state(
+/// Read-only kernel slot info usable outside the Tauri command surface.
+pub async fn kernel_slot_info_for_state(
     kernel_id: &str,
     state: &State,
 ) -> Result<KernelSlotInfo, Error> {

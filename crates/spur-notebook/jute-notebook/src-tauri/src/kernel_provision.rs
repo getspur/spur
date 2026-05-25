@@ -11,7 +11,8 @@ use crate::{
 
 static PYTHON3_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
 
-pub(crate) async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
+/// Ensure the bundled `python3` kernelspec is installed for this app.
+pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     let _guard = PYTHON3_KERNELSPEC_LOCK.lock().await;
     let spur_jupyter =
         environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {

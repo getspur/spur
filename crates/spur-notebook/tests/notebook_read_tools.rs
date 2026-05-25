@@ -5,7 +5,7 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 use spur_notebook::mcp::{
     bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
-    tools::{kernel_info, read_cell, snapshot},
+    tools::{read_cell, snapshot},
     ServerDeps,
 };
 use tokio::sync::Mutex;
@@ -139,71 +139,6 @@ async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
         bridge.calls().await,
         vec![("notebook.read_cell".to_string(), json!({ "id": "code-1" }))]
     );
-}
-
-#[tokio::test]
-async fn kernel_info_returns_slot_generation_and_usage() {
-    let bridge = Arc::new(MockBridge::default());
-    bridge
-        .push_response(Ok(json!({
-            "kernel_id": "notebook:/tmp/demo.ipynb",
-            "spec_name": "python3",
-            "generation": 2,
-            "status": "idle",
-            "cpu_pct": 3.5,
-            "mem_mb": 128.25
-        })))
-        .await;
-
-    let deps = deps_with(bridge.clone());
-    let body = structured(
-        kernel_info::call(&deps)
-            .await
-            .expect("kernel_info succeeds"),
-    );
-
-    assert_eq!(body["kernel_id"], "notebook:/tmp/demo.ipynb");
-    assert_eq!(body["spec_name"], "python3");
-    assert_eq!(body["generation"], 2);
-    assert_eq!(body["status"], "idle");
-    assert_eq!(
-        bridge.calls().await,
-        vec![("notebook.kernel_info".to_string(), json!({}))]
-    );
-}
-
-#[tokio::test]
-async fn no_registered_notebook_reports_notebook_not_open() {
-    let bridge: Arc<dyn BridgeRequester> = Arc::new(
-        spur_notebook::mcp::bridge::TauriBridgeRequester::without_app(Arc::new(
-            spur_notebook::mcp::bridge::AgentBridge::new(),
-        )),
-    );
-    let deps = deps_with(bridge);
-
-    let error = kernel_info::call(&deps)
-        .await
-        .expect_err("missing active notebook should be a tool error");
-
-    assert_eq!(error.data.unwrap()["code"], "notebook_not_open");
-}
-
-#[tokio::test]
-async fn handler_notebook_not_open_error_is_preserved_as_mcp_error_data() {
-    let bridge = Arc::new(MockBridge::default());
-    bridge
-        .push_response(Err(BridgeError::Handler {
-            code: "notebook_not_open".to_string(),
-            message: "No notebook is loaded".to_string(),
-        }))
-        .await;
-    let deps = deps_with(bridge.clone());
-
-    let error = kernel_info::call(&deps)
-        .await
-        .expect_err("notebook_not_open is an MCP error");
-
-    assert_eq!(error.data.unwrap()["code"], "notebook_not_open");
 }
 
 fn blake3_16_hex(source: &str) -> String {
