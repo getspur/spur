@@ -31,6 +31,7 @@ use tracing::warn;
 use crate::recents::{self, RecentEntry};
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
+use self::inproc_requester::InProcStoreRequester;
 use self::{
     bridge::{AgentBridge, BridgeError},
     transport::{read_frame_value, write_frame_json, LengthPrefixedJsonTransport},
@@ -39,6 +40,7 @@ use self::{
 const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub mod bridge;
+pub mod inproc_requester;
 pub mod tools;
 pub mod transport;
 
@@ -197,6 +199,11 @@ pub struct NotebookMcpServerHandle {
     socket_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NotebookConfig {
+    pub in_proc_store: bool,
 }
 
 impl NotebookMcpServerHandle {
@@ -1110,9 +1117,35 @@ pub async fn start_daemon_server(
     app: tauri::AppHandle,
     state: Arc<State>,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
+    start_daemon_server_with_config(socket_path, bridge, app, state, NotebookConfig::default())
+        .await
+}
+
+pub async fn start_daemon_server_with_config(
+    socket_path: impl AsRef<Path>,
+    bridge: Arc<AgentBridge>,
+    app: tauri::AppHandle,
+    state: Arc<State>,
+    config: NotebookConfig,
+) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
+    let socket_path = socket_path.as_ref().to_path_buf();
     let app_for_deps = app.clone();
-    let control = NotebookDaemonControl::new(Arc::clone(&bridge), app.clone(), Arc::clone(&state));
-    let requester: Arc<dyn BridgeRequester> = Arc::new(TauriBridgeRequester::with_app(bridge, app));
+    let requester: Arc<dyn BridgeRequester> = if config.in_proc_store {
+        Arc::new(InProcStoreRequester::new(socket_path.clone()))
+    } else {
+        Arc::new(TauriBridgeRequester::with_app(
+            Arc::clone(&bridge),
+            app.clone(),
+        ))
+    };
+    let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
+    let control = NotebookDaemonControl::new_with_parts(
+        bridge,
+        Arc::clone(&requester),
+        Arc::clone(&state),
+        windows,
+        None,
+    );
     let deps = Arc::new(ServerDeps {
         bridge: requester,
         state: Some(state),
@@ -1154,6 +1187,7 @@ async fn start_multiplexed_server(
                 }
             }
         }
+        deps.bridge.drain_on_shutdown().await;
         let _ = tokio::fs::remove_file(task_socket_path).await;
     });
 

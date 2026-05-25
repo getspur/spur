@@ -431,7 +431,8 @@ fn daemon_socket_path_from_args() -> Result<PathBuf, Error> {
 }
 
 #[cfg(unix)]
-async fn write_daemon_frame<W>(writer: &mut W, bytes: &[u8]) -> Result<(), Error>
+/// Write one length-prefixed daemon-control frame.
+pub async fn write_daemon_frame<W>(writer: &mut W, bytes: &[u8]) -> Result<(), Error>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -452,7 +453,8 @@ where
 }
 
 #[cfg(unix)]
-async fn read_daemon_frame<R>(reader: &mut R) -> Result<Vec<u8>, Error>
+/// Read one length-prefixed daemon-control frame.
+pub async fn read_daemon_frame<R>(reader: &mut R) -> Result<Vec<u8>, Error>
 where
     R: tokio::io::AsyncRead + Unpin,
 {

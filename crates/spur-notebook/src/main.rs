@@ -26,15 +26,25 @@ enum Mode {
     App {
         files: Vec<PathBuf>,
         socket: Option<PathBuf>,
+        config: mcp::NotebookConfig,
     },
     McpProxy {
         socket_path: PathBuf,
+        config: mcp::NotebookConfig,
     },
 }
 
 fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
+    parse_mode_from_with_config(args, notebook_config_from_env())
+}
+
+fn parse_mode_from_with_config(
+    args: impl IntoIterator<Item = String>,
+    mut config: mcp::NotebookConfig,
+) -> Mode {
     let mut files = Vec::new();
     let mut socket = None;
+    let mut mcp_proxy_socket = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -43,10 +53,16 @@ fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
                     .next()
                     .map(PathBuf::from)
                     .expect("--mcp-proxy requires <path>");
-                return Mode::McpProxy { socket_path };
+                mcp_proxy_socket = Some(socket_path);
             }
             "--socket" => {
                 socket = args.next().map(PathBuf::from);
+            }
+            "--notebook-in-proc-store" => {
+                config.in_proc_store = true;
+            }
+            "--no-notebook-in-proc-store" => {
+                config.in_proc_store = false;
             }
             _ if arg.starts_with('-') => {}
             _ => {
@@ -62,15 +78,42 @@ fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
             }
         }
     }
-    Mode::App { files, socket }
+    if let Some(socket_path) = mcp_proxy_socket {
+        return Mode::McpProxy {
+            socket_path,
+            config,
+        };
+    }
+    Mode::App {
+        files,
+        socket,
+        config,
+    }
 }
 
 fn parse_mode() -> Mode {
     parse_mode_from(env::args().skip(1))
 }
 
-async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
-    let stream = connect_or_spawn_daemon(&socket_path).await?;
+fn notebook_config_from_env() -> mcp::NotebookConfig {
+    mcp::NotebookConfig {
+        in_proc_store: env_flag_enabled("SPUR_NOTEBOOK_IN_PROC_STORE"),
+    }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn run_mcp_proxy(socket_path: PathBuf, config: mcp::NotebookConfig) -> anyhow::Result<()> {
+    let stream = connect_or_spawn_daemon(&socket_path, config).await?;
     let (mut socket_reader, mut socket_writer) = stream.into_split();
 
     let stdin_to_socket = tokio::spawn(async move {
@@ -101,7 +144,10 @@ async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn connect_or_spawn_daemon(socket_path: &PathBuf) -> anyhow::Result<UnixStream> {
+async fn connect_or_spawn_daemon(
+    socket_path: &PathBuf,
+    config: mcp::NotebookConfig,
+) -> anyhow::Result<UnixStream> {
     match UnixStream::connect(socket_path).await {
         Ok(stream) => Ok(stream),
         Err(error)
@@ -110,14 +156,14 @@ async fn connect_or_spawn_daemon(socket_path: &PathBuf) -> anyhow::Result<UnixSt
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
             ) =>
         {
-            spawn_notebook_app(socket_path)?;
+            spawn_notebook_app(socket_path, config)?;
             wait_for_daemon_socket(socket_path).await
         }
         Err(error) => Err(error).map_err(Into::into),
     }
 }
 
-fn spawn_notebook_app(socket_path: &PathBuf) -> anyhow::Result<()> {
+fn spawn_notebook_app(socket_path: &PathBuf, config: mcp::NotebookConfig) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -140,6 +186,9 @@ fn spawn_notebook_app(socket_path: &PathBuf) -> anyhow::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
+    if config.in_proc_store {
+        command.arg("--notebook-in-proc-store");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -170,22 +219,26 @@ async fn wait_for_daemon_socket(socket_path: &PathBuf) -> anyhow::Result<UnixStr
 fn main() {
     tracing_subscriber::fmt().init();
 
-    let (files, socket_path) = match parse_mode() {
+    let (files, socket_path, config) = match parse_mode() {
         Mode::App {
             files,
             socket: Some(socket_path),
-        } => (files, socket_path),
+            config,
+        } => (files, socket_path, config),
         Mode::App { socket: None, .. } => {
             eprintln!("spur-notebook app mode requires --socket <path>");
             std::process::exit(2);
         }
-        Mode::McpProxy { socket_path } => {
+        Mode::McpProxy {
+            socket_path,
+            config,
+        } => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("failed to build tokio runtime");
             runtime
-                .block_on(run_mcp_proxy(socket_path))
+                .block_on(run_mcp_proxy(socket_path, config))
                 .expect("notebook MCP proxy failed");
             return;
         }
@@ -247,11 +300,12 @@ fn main() {
             #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {
-                match mcp::start_daemon_server(
+                match mcp::start_daemon_server_with_config(
                     server_socket_path,
                     server_bridge,
                     server_app,
                     server_state,
+                    config,
                 )
                 .await
                 {
@@ -362,37 +416,97 @@ mod tests {
 
     #[test]
     fn mcp_proxy_requires_explicit_socket_path() {
-        let Mode::McpProxy { socket_path } = parse_mode_from([
+        let Mode::McpProxy {
+            socket_path,
+            config,
+        } = parse_mode_from([
             "--mcp-proxy".to_string(),
             "/tmp/notebook-session.sock".to_string(),
-        ]) else {
+        ])
+        else {
             panic!("expected mcp proxy mode");
         };
 
         assert_eq!(socket_path, PathBuf::from("/tmp/notebook-session.sock"));
+        assert!(!config.in_proc_store);
     }
 
     #[test]
     fn app_mode_accepts_explicit_socket_path() {
-        let Mode::App { files, socket } = parse_mode_from([
+        let Mode::App {
+            files,
+            socket,
+            config,
+        } = parse_mode_from([
             "--socket".to_string(),
             "/tmp/notebook-session.sock".to_string(),
             "something.ipynb".to_string(),
-        ]) else {
+        ])
+        else {
             panic!("expected app mode");
         };
 
         assert_eq!(socket, Some(PathBuf::from("/tmp/notebook-session.sock")));
         assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
+        assert!(!config.in_proc_store);
     }
 
     #[test]
     fn app_mode_collects_file_args() {
-        let Mode::App { files, socket } = parse_mode_from(["something.ipynb".to_string()]) else {
+        let Mode::App {
+            files,
+            socket,
+            config,
+        } = parse_mode_from(["something.ipynb".to_string()])
+        else {
             panic!("expected app mode");
         };
 
         assert_eq!(socket, None);
         assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
+        assert!(!config.in_proc_store);
+    }
+
+    #[test]
+    fn app_mode_accepts_in_proc_store_flag() {
+        let Mode::App { config, .. } = parse_mode_from([
+            "--notebook-in-proc-store".to_string(),
+            "--socket".to_string(),
+            "/tmp/notebook-session.sock".to_string(),
+        ]) else {
+            panic!("expected app mode");
+        };
+
+        assert!(config.in_proc_store);
+    }
+
+    #[test]
+    fn mcp_proxy_accepts_in_proc_store_flag_after_socket_path() {
+        let Mode::McpProxy { config, .. } = parse_mode_from([
+            "--mcp-proxy".to_string(),
+            "/tmp/notebook-session.sock".to_string(),
+            "--notebook-in-proc-store".to_string(),
+        ]) else {
+            panic!("expected mcp proxy mode");
+        };
+
+        assert!(config.in_proc_store);
+    }
+
+    #[test]
+    fn app_mode_accepts_in_proc_store_env_fallback() {
+        let Mode::App { config, .. } = parse_mode_from_with_config(
+            [
+                "--socket".to_string(),
+                "/tmp/notebook-session.sock".to_string(),
+            ],
+            mcp::NotebookConfig {
+                in_proc_store: true,
+            },
+        ) else {
+            panic!("expected app mode");
+        };
+
+        assert!(config.in_proc_store);
     }
 }
