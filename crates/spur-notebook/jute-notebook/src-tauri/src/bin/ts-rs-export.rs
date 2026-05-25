@@ -11,34 +11,34 @@ use jute::{
 use ts_rs::TS;
 
 fn main() {
-    let export_path = Path::new("../src/bindings");
+    let jute_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri should have a parent directory");
+    let export_path = jute_root.join("src/bindings");
 
     // print the full path of the export directory
-    println!(
-        "Exporting TypeScript bindings to `{:?}`",
-        fs::canonicalize(export_path).expect("Failed to get full path of export directory")
-    );
+    println!("Exporting TypeScript bindings to `{export_path:?}`");
 
     // Clear the `src/bindings` directory
     if export_path.exists() {
         println!("Clearing old bindings...");
-        fs::remove_dir_all(export_path).expect("Failed to clear bindings directory");
+        fs::remove_dir_all(&export_path).expect("Failed to clear bindings directory");
     }
 
-    fs::create_dir_all(export_path).expect("Failed to recreate bindings directory");
+    fs::create_dir_all(&export_path).expect("Failed to recreate bindings directory");
 
     // Generate TypeScript bindings
     println!("Exporting TypeScript bindings...");
 
-    NotebookRoot::export_all_to(export_path).unwrap();
-    RunCellEvent::export_all_to(export_path).unwrap();
-    KernelUsageInfo::export_all_to(export_path).unwrap();
-    RecentNotebookEntry::export_all_to(export_path).unwrap();
+    NotebookRoot::export_all_to(&export_path).unwrap();
+    RunCellEvent::export_all_to(&export_path).unwrap();
+    KernelUsageInfo::export_all_to(&export_path).unwrap();
+    RecentNotebookEntry::export_all_to(&export_path).unwrap();
 
     // Generate `index.ts` file
     println!("Generating index.ts...");
     let mut index_file = String::new();
-    for entry in fs::read_dir(export_path).expect("Failed to read bindings directory") {
+    for entry in fs::read_dir(&export_path).expect("Failed to read bindings directory") {
         let entry = entry.expect("Failed to read directory entry");
         let path = entry.path();
         if let Some(extension) = path.extension() {
@@ -57,6 +57,7 @@ fn main() {
         .arg("prettier")
         .arg("--write")
         .arg(format!("{}/**/*.ts", export_path.display()))
+        .current_dir(jute_root)
         .status()
         .expect("Failed to run Prettier");
 
