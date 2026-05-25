@@ -36,8 +36,9 @@ fn gix_diff_matches_cli_for_linear_rename_and_merge_history() {
         &["merge", "--no-ff", "-q", "side", "-m", "merge side"],
     );
 
-    let (cli_graph, cli_commits) =
-        run_full_walk_into(dir.path(), &GitWalkConfig::default()).unwrap();
+    let mut cli_config = GitWalkConfig::default();
+    cli_config.use_gix_diff = false;
+    let (cli_graph, cli_commits) = run_full_walk_into(dir.path(), &cli_config).unwrap();
     let mut gix_config = GitWalkConfig::default();
     gix_config.use_gix_diff = true;
     let (gix_graph, gix_commits) = run_full_walk_into(dir.path(), &gix_config).unwrap();
