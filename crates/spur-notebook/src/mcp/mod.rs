@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -34,6 +35,8 @@ use self::{
     bridge::{AgentBridge, BridgeError},
     transport::{read_frame_value, write_frame_json, LengthPrefixedJsonTransport},
 };
+
+const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub mod bridge;
 pub mod tools;
@@ -400,7 +403,8 @@ pub struct NotebookDaemonControl {
     last_record_path: Option<PathBuf>,
 }
 
-trait DaemonWindowOps: Send + Sync {
+#[doc(hidden)]
+pub trait DaemonWindowOps: Send + Sync {
     fn show_and_focus(&self, label: &str) -> bool;
     fn hide(&self, label: &str);
     fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError>;
@@ -489,6 +493,12 @@ pub struct DaemonControlError {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PendingNotebookFlush {
+    path: PathBuf,
+    contents: NotebookRoot,
+}
+
 struct DaemonControlSuccess {
     path: Option<PathBuf>,
     entries: Option<Vec<RecentEntry>>,
@@ -546,6 +556,17 @@ impl NotebookDaemonControl {
 
     #[cfg(test)]
     fn new_for_test(
+        bridge: Arc<AgentBridge>,
+        requester: Arc<dyn BridgeRequester>,
+        jute_state: Arc<State>,
+        windows: Arc<dyn DaemonWindowOps>,
+        last_record_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path)
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_parts_for_test(
         bridge: Arc<AgentBridge>,
         requester: Arc<dyn BridgeRequester>,
         jute_state: Arc<State>,
@@ -686,19 +707,30 @@ impl NotebookDaemonControl {
             return Ok(());
         }
 
-        let value = self
-            .requester
-            .request("notebook.export", json!({}), tools::BRIDGE_TIMEOUT)
-            .await?;
-        let contents: NotebookRoot =
+        let value = match self.requester.flush_pending(FLUSH_PENDING_TIMEOUT).await {
+            Ok(value) => value,
+            Err(error) if should_continue_without_flush(&error) => {
+                warn!(
+                    %error,
+                    path = %path.display(),
+                    "failed to flush pending notebook edits before lifecycle transition; proceeding"
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        let flush: PendingNotebookFlush =
             serde_json::from_value(value).map_err(|error| BridgeError::Handler {
-                code: "invalid_notebook_export".to_string(),
+                code: "invalid_notebook_flush".to_string(),
                 message: error.to_string(),
             })?;
 
         self.jute_state
             .save_coordinator
-            .save(path, contents)
+            .save(flush.path, flush.contents)
             .await
             .map_err(|error| BridgeError::Handler {
                 code: "save_failed".to_string(),
@@ -803,6 +835,17 @@ impl NotebookDaemonControl {
                 "failed to open notebook on daemon start"
             );
         }
+    }
+}
+
+fn should_continue_without_flush(error: &BridgeError) -> bool {
+    match error {
+        BridgeError::NotebookNotOpen
+        | BridgeError::WindowClosed
+        | BridgeError::AppRestarted
+        | BridgeError::NoListener
+        | BridgeError::Timeout => true,
+        BridgeError::Handler { code, .. } => code == "notebook_not_open",
     }
 }
 
@@ -1122,13 +1165,15 @@ mod tests {
 
     struct BufferedNotebookBridge {
         notebook: tokio::sync::Mutex<Value>,
+        path: PathBuf,
         calls: tokio::sync::Mutex<Vec<String>>,
     }
 
     impl BufferedNotebookBridge {
-        fn new(notebook: Value) -> Self {
+        fn new(path: PathBuf, notebook: Value) -> Self {
             Self {
                 notebook: tokio::sync::Mutex::new(notebook),
+                path,
                 calls: tokio::sync::Mutex::new(Vec::new()),
             }
         }
@@ -1198,12 +1243,24 @@ mod tests {
                             .push(cell);
                         Ok(json!({ "id": id, "version": 1 }))
                     }
-                    "notebook.export" => Ok(self.notebook.lock().await.clone()),
                     _ => Err(BridgeError::Handler {
                         code: "unknown_method".to_string(),
                         message: format!("unexpected method: {method}"),
                     }),
                 }
+            })
+        }
+
+        fn flush_pending<'a>(&'a self, _timeout: Duration) -> BridgeRequestFuture<'a> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .await
+                    .push("notebook.flush_pending".to_string());
+                Ok(json!({
+                    "path": self.path.display().to_string(),
+                    "contents": self.notebook.lock().await.clone()
+                }))
             })
         }
     }
@@ -1275,7 +1332,10 @@ mod tests {
         .await
         .expect("current notebook writes");
 
-        let buffered_bridge = Arc::new(BufferedNotebookBridge::new(empty_notebook()));
+        let buffered_bridge = Arc::new(BufferedNotebookBridge::new(
+            current_path.clone(),
+            empty_notebook(),
+        ));
         let requester: Arc<dyn BridgeRequester> = buffered_bridge.clone();
         let notebook_state = Arc::new(State::new());
         let windows = Arc::new(RecordingWindowOps::default());
@@ -1320,7 +1380,7 @@ mod tests {
         assert_eq!(windows.opened(), vec![other_path]);
         assert_eq!(
             buffered_bridge.calls().await,
-            vec!["notebook.insert_cell", "notebook.export"]
+            vec!["notebook.insert_cell", "notebook.flush_pending"]
         );
 
         let saved: Value = serde_json::from_slice(
