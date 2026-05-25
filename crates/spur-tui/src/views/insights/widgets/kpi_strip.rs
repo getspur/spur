@@ -8,13 +8,14 @@ use ratatui::{
     Frame,
 };
 
-/// Render the four overview KPI cards.
+/// Render the overview KPI cards.
 pub fn render_kpi_strip(frame: &mut Frame, area: Rect, kpis: &Kpis) {
     let chunks = Layout::horizontal([
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
     ])
     .split(area);
 
@@ -36,6 +37,13 @@ pub fn render_kpi_strip(frame: &mut Frame, area: Rect, kpis: &Kpis) {
             "Cache hit",
             format!("{:.1}%\nread reuse", kpis.cache_hit_pct),
         ),
+        (
+            "Coverage",
+            format!(
+                "{:.1}%\npriced events",
+                100.0 - kpis.cost_source_split.unpriced_pct
+            ),
+        ),
     ];
 
     for (idx, (title, body)) in cards.into_iter().enumerate() {
@@ -53,7 +61,7 @@ fn dollars(cost: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::views::insights::state::Kpis;
+    use crate::views::insights::state::{CostSourceSplit, Kpis};
     use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
 
     fn render_to_text(
@@ -79,13 +87,14 @@ mod tests {
     }
 
     #[test]
-    fn renders_four_kpi_cards() {
+    fn renders_five_kpi_cards() {
         let kpis = Kpis {
             today_cost: 4.21,
             last_7d_cost: 28.40,
             last_30d_cost: 112.00,
             cache_hit_pct: 47.8,
             active_session_count: 3,
+            cost_source_split: CostSourceSplit { unpriced_pct: 1.6 },
             ..Default::default()
         };
 
@@ -97,5 +106,7 @@ mod tests {
         assert!(text.contains("$28.40"), "rendered:\n{text}");
         assert!(text.contains("$112.00"), "rendered:\n{text}");
         assert!(text.contains("47.8%"), "rendered:\n{text}");
+        assert!(text.contains("Coverage"), "rendered:\n{text}");
+        assert!(text.contains("98.4%"), "rendered:\n{text}");
     }
 }
