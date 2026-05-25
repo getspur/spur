@@ -18,6 +18,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
 
 use anyhow::{anyhow, bail, Context, Result};
+use gix::object::tree::diff::{Action, Change};
+use gix::objs::tree::EntryMode;
 
 use crate::extract::languages::Language;
 use crate::extract::tree_sitter::{BytesExtractor, ExtractError, ExtractedSymbol};
@@ -33,6 +35,7 @@ pub struct GitWalkConfig {
     pub target_refs: Vec<String>,
     pub walk_strategy: WalkStrategy,
     pub allow_replace_refs: bool,
+    pub use_gix_diff: bool,
 }
 
 impl Default for GitWalkConfig {
@@ -41,6 +44,7 @@ impl Default for GitWalkConfig {
             target_refs: vec!["main".to_string()],
             walk_strategy: WalkStrategy::Reachable,
             allow_replace_refs: false,
+            use_gix_diff: false,
         }
     }
 }
@@ -186,6 +190,11 @@ pub fn run_full_walk_into(
 ) -> Result<(GraphIndexArtifact, CommitIndexArtifact)> {
     ensure_not_shallow(worktree)?;
     check_replace_refs(worktree, config.allow_replace_refs)?;
+    let gix_repo = if config.use_gix_diff {
+        Some(open_gix_repo_without_replace_refs(worktree)?)
+    } else {
+        None
+    };
 
     let first_ref = config
         .target_refs
@@ -231,11 +240,17 @@ pub fn run_full_walk_into(
     let mut ctx = SymbolDiffCtx::new();
 
     for sha in commit_shas {
-        let commit = read_commit(worktree, &sha)?;
+        let commit = match &gix_repo {
+            Some(repo) => read_commit_gix(repo, &sha)?,
+            None => read_commit(worktree, &sha)?,
+        };
         graph.commits.push(commit.clone());
         commits.commits.push(commit);
 
-        let file_changes = file_changes_for_commit(worktree, &sha)?;
+        let file_changes = match &gix_repo {
+            Some(repo) => file_changes_for_commit_gix(repo, &sha)?,
+            None => file_changes_for_commit(worktree, &sha)?,
+        };
         for file_change in &file_changes {
             graph
                 .temporal_edges
@@ -433,6 +448,46 @@ fn read_commit(worktree: &Path, sha: &str) -> Result<CommitArtifact> {
     })
 }
 
+fn open_gix_repo_without_replace_refs(worktree: &Path) -> Result<gix::Repository> {
+    // SAFETY: gix 0.77 exposes the replacement-object bypass through the
+    // `core.useReplaceRefs` CLI override; forcing it here prevents
+    // refs/replace mappings from being installed in the object database.
+    let mut repo = gix::open_opts(
+        worktree,
+        gix::open::Options::default().cli_overrides(["core.useReplaceRefs=true"]),
+    )
+    .with_context(|| format!("open gix repository `{}`", worktree.display()))?;
+    repo.object_cache_size_if_unset(128 * 1024 * 1024);
+    Ok(repo)
+}
+
+fn read_commit_gix(repo: &gix::Repository, sha: &str) -> Result<CommitArtifact> {
+    let oid = gix::ObjectId::from_hex(sha.as_bytes())?;
+    let commit = repo.find_commit(oid)?;
+    let parents = commit
+        .parent_ids()
+        .map(|parent| parent.to_hex().to_string())
+        .collect();
+    let author_time = commit.author()?.seconds();
+    let summary = commit_subject(&commit);
+
+    Ok(CommitArtifact {
+        sha: commit.id.to_hex().to_string(),
+        parents,
+        author_time,
+        summary,
+    })
+}
+
+fn commit_subject(commit: &gix::Commit<'_>) -> String {
+    let message = commit.message_raw_sloppy();
+    let first_line = message
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(message, |index| &message[..index]);
+    String::from_utf8_lossy(first_line).into_owned()
+}
+
 fn file_change_to_temporal_edge(commit_sha: &str, change: &FileChange) -> TemporalEdgeArtifact {
     TemporalEdgeArtifact {
         source: EdgeEndpoint::Commit {
@@ -523,6 +578,176 @@ pub fn file_changes_for_commit(worktree: &Path, sha: &str) -> Result<Vec<FileCha
     }
 
     Ok(changes)
+}
+
+fn file_changes_for_commit_gix(repo: &gix::Repository, sha: &str) -> Result<Vec<FileChange>> {
+    let oid = gix::ObjectId::from_hex(sha.as_bytes())?;
+    let commit = repo.find_commit(oid)?;
+    let parent_ids = commit.parent_ids().map(gix::Id::detach).collect::<Vec<_>>();
+
+    if parent_ids.is_empty() {
+        return root_commit_changes_gix(&commit);
+    }
+
+    let commit_tree = commit.tree()?;
+    let mut resource_cache = repo.diff_resource_cache_for_tree_diff()?;
+    let mut changes = Vec::new();
+
+    for parent_id in parent_ids {
+        let parent = repo.find_commit(parent_id)?;
+        let parent_tree = parent.tree()?;
+        let parent_sha = parent_id.to_hex().to_string();
+        let mut platform = parent_tree.changes()?;
+        platform.options(|opts| {
+            opts.track_path()
+                .track_rewrites(Some(gix::diff::Rewrites::default()));
+        });
+        platform.for_each_to_obtain_tree_with_cache(
+            &commit_tree,
+            &mut resource_cache,
+            |change| -> std::result::Result<Action, std::convert::Infallible> {
+                if let Some(change) = gix_change_to_file_change(change, &parent_sha) {
+                    changes.push(change);
+                }
+                Ok(Action::Continue)
+            },
+        )?;
+        resource_cache.clear_resource_cache_keep_allocation();
+    }
+
+    Ok(changes)
+}
+
+fn root_commit_changes_gix(commit: &gix::Commit<'_>) -> Result<Vec<FileChange>> {
+    let tree = commit.tree()?;
+    let entries = tree.traverse().breadthfirst.files()?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| !entry.mode.is_tree())
+        .map(|entry| {
+            let kind = if is_gitlink(entry.mode) {
+                FileChangeKind::Gitlink {
+                    old_oid: None,
+                    new_oid: Some(entry.oid.to_hex().to_string()),
+                }
+            } else {
+                FileChangeKind::Added
+            };
+            FileChange {
+                path: GitPath::from_bytes(entry.filepath.to_vec()),
+                kind,
+                parent_sha: None,
+            }
+        })
+        .collect())
+}
+
+fn gix_change_to_file_change(change: Change<'_, '_, '_>, parent_sha: &str) -> Option<FileChange> {
+    let parent_sha = Some(parent_sha.to_string());
+    match change {
+        Change::Addition {
+            location,
+            entry_mode,
+            id,
+            ..
+        } => {
+            if entry_mode.is_tree() {
+                return None;
+            }
+            let kind = if is_gitlink(entry_mode) {
+                FileChangeKind::Gitlink {
+                    old_oid: None,
+                    new_oid: Some(id.to_hex().to_string()),
+                }
+            } else {
+                FileChangeKind::Added
+            };
+            Some(FileChange {
+                path: GitPath::from_bytes(location.to_vec()),
+                kind,
+                parent_sha,
+            })
+        }
+        Change::Deletion {
+            location,
+            entry_mode,
+            id,
+            ..
+        } => {
+            if entry_mode.is_tree() {
+                return None;
+            }
+            let kind = if is_gitlink(entry_mode) {
+                FileChangeKind::Gitlink {
+                    old_oid: Some(id.to_hex().to_string()),
+                    new_oid: None,
+                }
+            } else {
+                FileChangeKind::Deleted
+            };
+            Some(FileChange {
+                path: GitPath::from_bytes(location.to_vec()),
+                kind,
+                parent_sha,
+            })
+        }
+        Change::Modification {
+            location,
+            previous_entry_mode,
+            previous_id,
+            entry_mode,
+            id,
+        } => {
+            if previous_entry_mode.is_tree() || entry_mode.is_tree() {
+                return None;
+            }
+            let kind = if is_gitlink(previous_entry_mode) || is_gitlink(entry_mode) {
+                FileChangeKind::Gitlink {
+                    old_oid: Some(previous_id.to_hex().to_string()),
+                    new_oid: Some(id.to_hex().to_string()),
+                }
+            } else {
+                FileChangeKind::Modified
+            };
+            Some(FileChange {
+                path: GitPath::from_bytes(location.to_vec()),
+                kind,
+                parent_sha,
+            })
+        }
+        Change::Rewrite {
+            source_location,
+            source_entry_mode,
+            source_id,
+            entry_mode,
+            id,
+            location,
+            ..
+        } => {
+            if source_entry_mode.is_tree() || entry_mode.is_tree() {
+                return None;
+            }
+            let kind = if is_gitlink(source_entry_mode) || is_gitlink(entry_mode) {
+                FileChangeKind::Gitlink {
+                    old_oid: Some(source_id.to_hex().to_string()),
+                    new_oid: Some(id.to_hex().to_string()),
+                }
+            } else {
+                FileChangeKind::Renamed {
+                    from: GitPath::from_bytes(source_location.to_vec()),
+                }
+            };
+            Some(FileChange {
+                path: GitPath::from_bytes(location.to_vec()),
+                kind,
+                parent_sha,
+            })
+        }
+    }
+}
+
+fn is_gitlink(mode: EntryMode) -> bool {
+    mode.value() == 0o160000
 }
 
 pub struct SymbolDiffCtx {
