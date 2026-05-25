@@ -195,6 +195,9 @@ fn main() {
     let bridge_for_state = Arc::clone(&bridge);
     let bridge_for_setup = Arc::clone(&bridge);
     let bridge_for_run = Arc::clone(&bridge);
+    let state = Arc::new(State::new());
+    let state_for_manage = Arc::clone(&state);
+    let state_for_setup = Arc::clone(&state);
     #[cfg(target_os = "macos")]
     let daemon_control = Arc::new(tokio::sync::Mutex::new(None::<Arc<NotebookDaemonControl>>));
     #[cfg(target_os = "macos")]
@@ -203,7 +206,7 @@ fn main() {
     let daemon_control_for_run = Arc::clone(&daemon_control);
 
     tauri::Builder::default()
-        .manage(State::new())
+        .manage(state_for_manage)
         .manage(bridge_for_state)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -240,10 +243,17 @@ fn main() {
             let server_bridge = Arc::clone(&bridge_for_setup);
             let server_socket_path = socket_path.clone();
             let server_app = app.handle().clone();
+            let server_state = Arc::clone(&state_for_setup);
             #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {
-                match mcp::start_daemon_server(server_socket_path, server_bridge, server_app).await
+                match mcp::start_daemon_server(
+                    server_socket_path,
+                    server_bridge,
+                    server_app,
+                    server_state,
+                )
+                .await
                 {
                     Ok((handle, control)) => {
                         #[cfg(target_os = "macos")]
