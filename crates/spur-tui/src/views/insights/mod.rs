@@ -17,7 +17,7 @@ use ratatui::{
 };
 use spur_acp::SpurEvent;
 use spur_context::AsyncEngine;
-use state::{Dimension, Granularity, InsightsTab, RefreshState};
+use state::{Dimension, Granularity, InsightsTab, Kpis, RefreshState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -187,12 +187,18 @@ impl View for InsightsView {
                 };
 
                 let [header_area, body_area, footer_area] = Layout::vertical([
-                    Constraint::Length(1),
+                    Constraint::Length(2),
                     Constraint::Min(0),
                     Constraint::Length(1),
                 ])
                 .areas(area);
-                render_header(frame, header_area, self.active_tab, state.refreshing);
+                render_header(
+                    frame,
+                    header_area,
+                    self.active_tab,
+                    state.refreshing,
+                    &snapshot.kpis,
+                );
 
                 match self.active_tab {
                     InsightsTab::Overview => tabs::OverviewTab::render(frame, body_area, snapshot),
@@ -214,7 +220,13 @@ impl View for InsightsView {
     fn tick(&mut self) {}
 }
 
-fn render_header(frame: &mut Frame, area: Rect, active_tab: InsightsTab, refreshing: bool) {
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    active_tab: InsightsTab,
+    refreshing: bool,
+    kpis: &Kpis,
+) {
     use ratatui::widgets::Paragraph;
 
     let left_width = " 1 Overview │ 2 Timeline │ 3 Breakdown │ 4 Live "
@@ -229,7 +241,7 @@ fn render_header(frame: &mut Frame, area: Rect, active_tab: InsightsTab, refresh
         .width
         .saturating_sub((left_width + right.chars().count()) as u16) as usize;
 
-    let line = Line::from(vec![
+    let tab_line = Line::from(vec![
         Span::raw(" "),
         tab_label("1 Overview", active_tab == InsightsTab::Overview),
         Span::raw(" │ "),
@@ -241,8 +253,38 @@ fn render_header(frame: &mut Frame, area: Rect, active_tab: InsightsTab, refresh
         Span::raw(" ".repeat(pad + 1)),
         Span::styled(right, Style::default().fg(Color::Green)),
     ]);
+    let subtitle = Line::from(Span::styled(
+        header_subtitle(kpis),
+        Style::default().fg(Color::DarkGray),
+    ));
 
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(vec![tab_line, subtitle]), area);
+}
+
+fn header_subtitle(kpis: &Kpis) -> String {
+    match (
+        top_kpi_half("Top agent", &kpis.top_agent),
+        top_kpi_half("Top model", &kpis.top_model),
+    ) {
+        (Some(agent), Some(model)) => format!(" {agent} · {model}"),
+        (Some(agent), None) => format!(" {agent}"),
+        (None, Some(model)) => format!(" {model}"),
+        (None, None) => " Top agent: — · Top model: —".to_string(),
+    }
+}
+
+fn top_kpi_half(label: &str, value: &Option<(String, f64)>) -> Option<String> {
+    value
+        .as_ref()
+        .map(|(name, cost)| format!("{label}: {} (${cost:.2})", truncate_kpi_name(name)))
+}
+
+fn truncate_kpi_name(name: &str) -> String {
+    if name.chars().count() > 24 {
+        format!("{}…", name.chars().take(22).collect::<String>())
+    } else {
+        name.to_string()
+    }
 }
 
 fn tab_label(label: &'static str, active: bool) -> Span<'static> {
@@ -275,9 +317,32 @@ fn render_key_hint_footer(frame: &mut Frame, area: Rect, active_tab: InsightsTab
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
     use spur_context::{AnalyticsEngine, AsyncEngine};
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
+
+    fn render_to_text(
+        width: u16,
+        height: u16,
+        render: impl FnOnce(&mut ratatui::Frame<'_>),
+    ) -> String {
+        fn buffer_text(buf: &Buffer) -> String {
+            let mut rendered = String::new();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    rendered.push_str(buf[(x, y)].symbol());
+                }
+                rendered.push('\n');
+            }
+            rendered
+        }
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(render).unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -358,5 +423,83 @@ mod tests {
         view.handle_key(key(KeyCode::Char('4')), &ctx);
 
         assert!(view.is_live_tab.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn header_subtitle_renders_top_agent_and_model() {
+        let kpis = state::Kpis {
+            top_agent: Some(("codex".to_string(), 6.5)),
+            top_model: Some(("gpt-5.3-codex".to_string(), 11.0)),
+            ..Default::default()
+        };
+
+        let text = render_to_text(120, 2, |frame| {
+            render_header(
+                frame,
+                Rect::new(0, 0, 120, 2),
+                InsightsTab::Overview,
+                false,
+                &kpis,
+            );
+        });
+
+        assert!(
+            text.contains(" Top agent: codex ($6.50) · Top model: gpt-5.3-codex ($11.00)"),
+            "rendered:\n{text}"
+        );
+    }
+
+    #[test]
+    fn header_subtitle_allocates_row_when_top_agent_and_model_missing() {
+        let text = render_to_text(120, 2, |frame| {
+            render_header(
+                frame,
+                Rect::new(0, 0, 120, 2),
+                InsightsTab::Overview,
+                false,
+                &state::Kpis::default(),
+            );
+        });
+
+        assert!(
+            text.contains(" Top agent: — · Top model: —"),
+            "rendered:\n{text}"
+        );
+    }
+
+    #[test]
+    fn header_subtitle_truncates_long_names() {
+        let kpis = state::Kpis {
+            top_agent: Some(("abcdefghijklmnopqrstuvwxyz".to_string(), 1.0)),
+            top_model: Some(("01234567890123456789012345".to_string(), 2.0)),
+            ..Default::default()
+        };
+
+        let text = render_to_text(120, 2, |frame| {
+            render_header(
+                frame,
+                Rect::new(0, 0, 120, 2),
+                InsightsTab::Overview,
+                false,
+                &kpis,
+            );
+        });
+
+        assert!(
+            text.contains("abcdefghijklmnopqrstuv… ($1.00)"),
+            "rendered:\n{text}"
+        );
+        assert!(
+            text.contains("0123456789012345678901… ($2.00)"),
+            "rendered:\n{text}"
+        );
+        assert!(
+            !text.contains("abcdefghijklmnopqrstuvwxyz"),
+            "rendered:\n{text}"
+        );
+        assert!(
+            !text.contains("01234567890123456789012345"),
+            "rendered:\n{text}"
+        );
     }
 }
