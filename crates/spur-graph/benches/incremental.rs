@@ -8,12 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use spur_graph::temporal::{symbol_history, TemporalIndex};
+use spur_graph::temporal::{
+    resolve_symbol_at, resolve_symbol_at_indexed, symbol_history, Resolution, TemporalIndex,
+};
 use spur_graph::{
     build_facts_for_paths, compute_graph_content_hash, current_manifest_version, ChangeKind,
     CommitArtifact, CommitIndexArtifact, EdgeEndpoint, GitPath, GraphIndexArtifact,
-    GraphIndexHeader, RelationKind, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
-    WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
+    GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
+    TemporalEdgeArtifact, WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 use tempfile::TempDir;
 
@@ -41,6 +43,10 @@ const HISTORY_WALK_SNAPSHOT_COUNT: usize = 50_000;
 const HISTORY_WALK_TARGET_CHAIN: usize = 8;
 const HISTORY_WALK_ASSERT_ITERATIONS: usize = 1_000;
 const HISTORY_WALK_ASSERT_MS: usize = 250;
+const RESOLVE_SYMBOL_AT_SNAPSHOT_COUNT: usize = 50_000;
+const RESOLVE_SYMBOL_AT_TARGET_CHAIN: usize = 8;
+const RESOLVE_SYMBOL_AT_ASSERT_ITERATIONS: usize = 10;
+const RESOLVE_SYMBOL_AT_ASSERT_MIN_SPEEDUP: u128 = 5;
 const SYNTHETIC_SYMBOL_COUNT: usize = 16;
 const SYNTHETIC_RENAME_RATE: f32 = 0.04;
 // T15 baseline, captured for the 20k synthetic merge fixture on 2026-05-21:
@@ -657,6 +663,45 @@ fn bench_history_walk_50k_snapshots(c: &mut Criterion) {
     });
 }
 
+fn bench_resolve_symbol_at(c: &mut Criterion) {
+    const BENCH_NAME: &str = "resolve_symbol_at raw vs indexed";
+    if !criterion_filter_allows(&[BENCH_NAME, "resolve_symbol_at"]) {
+        return;
+    }
+
+    assert_resolve_symbol_at_indexed_speedup();
+
+    let (graph, commits, symbol, anchor, target) = synthetic_resolve_artifact(
+        RESOLVE_SYMBOL_AT_SNAPSHOT_COUNT,
+        RESOLVE_SYMBOL_AT_TARGET_CHAIN,
+    );
+    let index = TemporalIndex::new(Arc::new(graph.clone()));
+    let mut group = c.benchmark_group("resolve_symbol_at");
+    group.bench_function("raw", |b| {
+        b.iter(|| {
+            black_box(resolve_symbol_at(
+                black_box(&graph),
+                black_box(&commits),
+                black_box(&symbol),
+                black_box(&anchor),
+                black_box(&target),
+            ))
+        })
+    });
+    group.bench_function("indexed", |b| {
+        b.iter(|| {
+            black_box(resolve_symbol_at_indexed(
+                black_box(&index),
+                black_box(&commits),
+                black_box(&symbol),
+                black_box(&anchor),
+                black_box(&target),
+            ))
+        })
+    });
+    group.finish();
+}
+
 fn assert_history_walk_budget() {
     let iterations = env_usize(
         HISTORY_WALK_ASSERT_ITERATIONS_ENV,
@@ -685,6 +730,51 @@ fn assert_history_walk_budget() {
         "history walk budget exceeded: {} for {iterations} walks over {HISTORY_WALK_SNAPSHOT_COUNT} snapshots, budget={} (set {HISTORY_WALK_ASSERT_MS_ENV} to tune for CI)",
         fmt_duration(elapsed),
         fmt_duration(Duration::from_millis(max_ms as u64))
+    );
+}
+
+fn assert_resolve_symbol_at_indexed_speedup() {
+    let (graph, commits, symbol, anchor, target) = synthetic_resolve_artifact(
+        RESOLVE_SYMBOL_AT_SNAPSHOT_COUNT,
+        RESOLVE_SYMBOL_AT_TARGET_CHAIN,
+    );
+    let index = TemporalIndex::new(Arc::new(graph.clone()));
+
+    let raw_start = Instant::now();
+    let mut raw_result = None;
+    for _ in 0..RESOLVE_SYMBOL_AT_ASSERT_ITERATIONS {
+        raw_result = Some(resolve_symbol_at(
+            &graph, &commits, &symbol, &anchor, &target,
+        ));
+    }
+    let raw_elapsed = raw_start.elapsed();
+
+    let indexed_start = Instant::now();
+    let mut indexed_result = None;
+    for _ in 0..RESOLVE_SYMBOL_AT_ASSERT_ITERATIONS {
+        indexed_result = Some(resolve_symbol_at_indexed(
+            &index, &commits, &symbol, &anchor, &target,
+        ));
+    }
+    let indexed_elapsed = indexed_start.elapsed();
+
+    assert_eq!(
+        raw_result, indexed_result,
+        "raw and indexed resolve_symbol_at must return identical results"
+    );
+    assert!(
+        matches!(indexed_result, Some(Resolution::Found { .. })),
+        "synthetic resolve fixture should resolve the rename chain"
+    );
+
+    let raw_nanos = raw_elapsed.as_nanos();
+    let indexed_nanos = indexed_elapsed.as_nanos().max(1);
+    assert!(
+        raw_nanos >= indexed_nanos * RESOLVE_SYMBOL_AT_ASSERT_MIN_SPEEDUP,
+        "resolve_symbol_at_indexed speedup below {RESOLVE_SYMBOL_AT_ASSERT_MIN_SPEEDUP}x: raw={} indexed={} ratio={:.2}x",
+        fmt_duration(raw_elapsed),
+        fmt_duration(indexed_elapsed),
+        raw_elapsed.as_secs_f64() / indexed_elapsed.as_secs_f64().max(f64::EPSILON)
     );
 }
 
@@ -951,6 +1041,120 @@ fn synthetic_history_artifact(
         walk_strategy: WalkStrategy::Reachable,
     };
     (graph, commit_index, target_symbol)
+}
+
+fn synthetic_resolve_artifact(
+    snapshot_count: usize,
+    target_chain_len: usize,
+) -> (
+    GraphIndexArtifact,
+    CommitIndexArtifact,
+    String,
+    String,
+    String,
+) {
+    assert!(target_chain_len > 1);
+    assert!(snapshot_count >= target_chain_len);
+
+    let mut graph = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.into(),
+            content_hash_blake3: None,
+        },
+        manifest_version: String::new(),
+        graph_content_hash: String::new(),
+        file_manifests: vec![],
+        files: vec![],
+        file_node_ids: vec![],
+        symbols: vec![],
+        symbol_node_ids: vec![],
+        edges: vec![],
+        tombstones: vec![],
+        diagnostics: vec![],
+        commits: vec![],
+        symbol_snapshots: Vec::with_capacity(snapshot_count),
+        temporal_edges: Vec::with_capacity(snapshot_count + target_chain_len),
+    };
+    let mut commits = Vec::with_capacity(snapshot_count);
+    let initial_symbol = "resolve-target-r000".to_string();
+    let mut previous_sha: Option<String> = None;
+    let mut previous_target_key: Option<SnapshotKey> = None;
+    let mut anchor = String::new();
+    let mut target = String::new();
+
+    for index in 0..snapshot_count {
+        let sha = format!("resolve-{index:05}");
+        let commit = CommitArtifact {
+            sha: sha.clone(),
+            parents: previous_sha.iter().cloned().collect(),
+            author_time: SYNTHETIC_START_TIME + index as i64,
+            summary: format!("resolve snapshot {index}"),
+        };
+        graph.commits.push(commit.clone());
+        commits.push(commit);
+
+        let stable_symbol_id = if index < target_chain_len {
+            format!("resolve-target-r{index:03}")
+        } else {
+            format!("resolve-unrelated-{index:05}")
+        };
+        let key = SnapshotKey {
+            stable_symbol_id: stable_symbol_id.clone(),
+            commit: sha.clone(),
+        };
+        graph.symbol_snapshots.push(SymbolSnapshotArtifact {
+            key: key.clone(),
+            file_path: GitPath::from_bytes(format!("src/{stable_symbol_id}.rs").into_bytes()),
+            entity_name: stable_symbol_id.clone(),
+            symbol_kind: "function".into(),
+            enclosing_scope: None,
+            byte_range: [0, 10],
+            line_range: [1, 1],
+            anchor_hash: format!("resolve-anchor-{index:05}"),
+            tokens: vec![],
+        });
+
+        let rename_prev = (index > 0 && index < target_chain_len)
+            .then(|| previous_target_key.clone().expect("previous target key"));
+        let change_kind = rename_prev
+            .clone()
+            .map(|prev| ChangeKind::RenamedFrom(RenamePrev::Symbol(prev)))
+            .unwrap_or(ChangeKind::Added);
+        graph.temporal_edges.push(TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit { sha: sha.clone() },
+            target: EdgeEndpoint::Snapshot { key: key.clone() },
+            relation: RelationKind::Touches,
+            parent: previous_sha.clone(),
+            change_kind: Some(change_kind),
+        });
+        if let Some(prev) = rename_prev {
+            graph.temporal_edges.push(TemporalEdgeArtifact {
+                source: EdgeEndpoint::Snapshot { key: prev.clone() },
+                target: EdgeEndpoint::Snapshot { key: key.clone() },
+                relation: RelationKind::Touches,
+                parent: previous_sha.clone(),
+                change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))),
+            });
+        }
+
+        if index == 0 {
+            anchor = sha.clone();
+        }
+        if index < target_chain_len {
+            previous_target_key = Some(key);
+        }
+        target = sha.clone();
+        previous_sha = Some(sha);
+    }
+
+    let commit_index = CommitIndexArtifact {
+        schema_version: 1,
+        commits,
+        refs: [("main".into(), target.clone())].into(),
+        indexed_at: "2026-05-21T00:00:00Z".into(),
+        walk_strategy: WalkStrategy::Reachable,
+    };
+    (graph, commit_index, initial_symbol, anchor, target)
 }
 
 fn synthetic_bench_commits(env_name: &str, default: usize, quick_default: usize) -> usize {
@@ -1377,6 +1581,7 @@ criterion_group!(
     benchmark_incremental,
     bench_full_walk_1k,
     bench_full_walk_20k_merges,
-    bench_history_walk_50k_snapshots
+    bench_history_walk_50k_snapshots,
+    bench_resolve_symbol_at
 );
 criterion_main!(benches);

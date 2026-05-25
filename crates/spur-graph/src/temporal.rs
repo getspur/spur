@@ -29,6 +29,7 @@ pub struct TemporalIndex {
     edges_by_stable_symbol_id: HashMap<String, Vec<usize>>,
     edges_by_commit_sha: HashMap<String, Vec<usize>>,
     commit_positions: HashMap<String, usize>,
+    commit_parents: HashMap<String, Vec<String>>,
     snapshot_keys_by_stable_symbol_id: HashMap<String, Vec<SnapshotKey>>,
     rename_edges: Vec<(SnapshotKey, SnapshotKey)>,
     rename_neighbors_by_snapshot: HashMap<SnapshotKey, Vec<SnapshotKey>>,
@@ -44,6 +45,11 @@ impl TemporalIndex {
             .iter()
             .enumerate()
             .map(|(index, commit)| (commit.sha.clone(), index))
+            .collect();
+        let commit_parents = code
+            .commits
+            .iter()
+            .map(|commit| (commit.sha.clone(), commit.parents.clone()))
             .collect();
         let mut snapshot_key_sets: HashMap<String, HashSet<SnapshotKey>> = HashMap::new();
         let mut referenced_snapshot_count = 0;
@@ -135,6 +141,7 @@ impl TemporalIndex {
             edges_by_stable_symbol_id,
             edges_by_commit_sha,
             commit_positions,
+            commit_parents,
             snapshot_keys_by_stable_symbol_id,
             rename_edges,
             rename_neighbors_by_snapshot,
@@ -144,6 +151,10 @@ impl TemporalIndex {
 
     pub fn artifact(&self) -> &GraphIndexArtifact {
         self.code.as_ref()
+    }
+
+    pub fn commit_graph(&self) -> CommitGraph<'_> {
+        CommitGraph::from_borrowed(&self.commit_positions, &self.commit_parents)
     }
 
     pub fn edges_for_stable_symbol_id(
@@ -351,7 +362,23 @@ pub fn resolve_symbol_at(
     anchor: &str,
     target: &str,
 ) -> Resolution<StableSymbolId> {
-    let graph = CommitGraph::new(commits);
+    let index = TemporalIndex::new(Arc::new(code.clone()));
+    resolve_symbol_at_indexed(&index, commits, symbol, anchor, target)
+}
+
+pub fn resolve_symbol_at_indexed(
+    index: &TemporalIndex,
+    commits: &CommitIndexArtifact,
+    symbol: &str,
+    anchor: &str,
+    target: &str,
+) -> Resolution<StableSymbolId> {
+    let code = index.artifact();
+    let graph = if index.has_commit_positions() {
+        index.commit_graph()
+    } else {
+        CommitGraph::new(commits)
+    };
 
     let Some(target_ancestors) = graph.ancestors_of(target) else {
         return Resolution::Unknown {
@@ -390,11 +417,11 @@ pub fn resolve_symbol_at(
 
     let anchor_key = anchor_candidates.remove(0);
     let mut reachable_chain = [anchor_key.clone()].into_iter().collect();
-    if let Err(reason) = close_rename_chain(code, &mut reachable_chain) {
+    if let Err(reason) = close_rename_chain_indexed(index, &mut reachable_chain) {
         return Resolution::Unknown { reason };
     }
 
-    resolve_from_anchor_key(code, &graph, &target_ancestors, anchor_key)
+    resolve_from_anchor_key_indexed(index, &graph, &target_ancestors, anchor_key)
 }
 
 fn seed_symbol_history_keys(index: &TemporalIndex, symbol: &str) -> HashSet<SnapshotKey> {
@@ -464,74 +491,6 @@ fn close_rename_chain_indexed(
     Ok(())
 }
 
-fn close_rename_chain(
-    code: &GraphIndexArtifact,
-    chain_keys: &mut HashSet<SnapshotKey>,
-) -> Result<(), ResolutionFailure> {
-    let rename_edges = rename_edges(code);
-    if rename_edges.is_empty() {
-        return Ok(());
-    }
-
-    let snapshot_count = referenced_snapshot_keys(code).len();
-    let mut component = HashSet::new();
-    let mut stack: Vec<_> = chain_keys.iter().cloned().collect();
-
-    while let Some(current) = stack.pop() {
-        if !component.insert(current.clone()) {
-            continue;
-        }
-        chain_keys.insert(current.clone());
-        guard_rename_chain_bound(chain_keys.len(), snapshot_count, &current)?;
-
-        for (prev, next) in &rename_edges {
-            if prev == &current && !component.contains(next) {
-                stack.push(next.clone());
-            }
-            if next == &current && !component.contains(prev) {
-                stack.push(prev.clone());
-            }
-        }
-    }
-
-    debug_assert!(chain_keys.len() <= snapshot_count);
-    detect_reachable_rename_cycle(&rename_edges, &component)
-}
-
-fn rename_edges(code: &GraphIndexArtifact) -> Vec<(SnapshotKey, SnapshotKey)> {
-    code.temporal_edges
-        .iter()
-        .filter_map(|edge| {
-            let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind else {
-                return None;
-            };
-            rename_target(edge, prev).map(|next| (prev.clone(), next))
-        })
-        .collect()
-}
-
-fn referenced_snapshot_keys(code: &GraphIndexArtifact) -> HashSet<SnapshotKey> {
-    let mut keys: HashSet<_> = code
-        .symbol_snapshots
-        .iter()
-        .map(|snapshot| snapshot.key.clone())
-        .collect();
-
-    for edge in &code.temporal_edges {
-        if let EdgeEndpoint::Snapshot { key } = &edge.source {
-            keys.insert(key.clone());
-        }
-        if let EdgeEndpoint::Snapshot { key } = &edge.target {
-            keys.insert(key.clone());
-        }
-        if let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind {
-            keys.insert(prev.clone());
-        }
-    }
-
-    keys
-}
-
 fn guard_rename_chain_bound(
     chain_len: usize,
     snapshot_count: usize,
@@ -593,12 +552,13 @@ fn visit_rename_chain(
     Ok(())
 }
 
-fn resolve_from_anchor_key(
-    code: &GraphIndexArtifact,
+fn resolve_from_anchor_key_indexed(
+    index: &TemporalIndex,
     graph: &CommitGraph<'_>,
     target_ancestors: &HashSet<String>,
     anchor_key: SnapshotKey,
 ) -> Resolution<StableSymbolId> {
+    let code = index.artifact();
     let mut current = anchor_key;
     let anchor = current.clone();
     let mut chain = Vec::new();
@@ -619,8 +579,8 @@ fn resolve_from_anchor_key(
             };
         }
 
-        let mut candidates = match forward_rename_candidates(
-            code,
+        let mut candidates = match forward_rename_candidates_indexed(
+            index,
             graph,
             target_ancestors,
             &current.stable_symbol_id,
@@ -631,8 +591,8 @@ fn resolve_from_anchor_key(
         };
 
         if candidates.is_empty() {
-            match latest_reachable_snapshots(
-                code,
+            match latest_reachable_snapshots_indexed(
+                index,
                 graph,
                 target_ancestors,
                 &current.stable_symbol_id,
@@ -701,14 +661,14 @@ fn latest_anchor_snapshots(
     latest_from_candidates(candidates, graph)
 }
 
-fn latest_reachable_snapshots(
-    code: &GraphIndexArtifact,
+fn latest_reachable_snapshots_indexed(
+    index: &TemporalIndex,
     graph: &CommitGraph<'_>,
     target_ancestors: &HashSet<String>,
     stable_symbol_id: &str,
     after_commit: &str,
 ) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
-    let mut candidates = snapshot_keys_for_symbol(code, stable_symbol_id);
+    let mut candidates = snapshot_keys_for_symbol_indexed(index, stable_symbol_id);
     candidates.retain(|key| {
         target_ancestors.contains(&key.commit) && graph.is_ancestor(after_commit, &key.commit)
     });
@@ -745,15 +705,31 @@ fn latest_from_candidates(
     Ok(latest)
 }
 
-fn forward_rename_candidates(
-    code: &GraphIndexArtifact,
+fn forward_rename_candidates_indexed(
+    index: &TemporalIndex,
+    graph: &CommitGraph<'_>,
+    target_ancestors: &HashSet<String>,
+    stable_symbol_id: &str,
+    after_commit: &str,
+) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
+    forward_rename_candidates_from_edges(
+        index.edges_for_stable_symbol_id(stable_symbol_id),
+        graph,
+        target_ancestors,
+        stable_symbol_id,
+        after_commit,
+    )
+}
+
+fn forward_rename_candidates_from_edges<'a>(
+    edges: impl IntoIterator<Item = &'a TemporalEdgeArtifact>,
     graph: &CommitGraph<'_>,
     target_ancestors: &HashSet<String>,
     stable_symbol_id: &str,
     after_commit: &str,
 ) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
     let mut candidates = Vec::new();
-    for edge in &code.temporal_edges {
+    for edge in edges {
         if edge.relation != RelationKind::Touches {
             continue;
         }
@@ -818,35 +794,6 @@ fn rename_target(
     }
 }
 
-fn snapshot_keys_for_symbol(code: &GraphIndexArtifact, stable_symbol_id: &str) -> Vec<SnapshotKey> {
-    let mut keys: Vec<_> = code
-        .symbol_snapshots
-        .iter()
-        .filter(|snapshot| snapshot.key.stable_symbol_id == stable_symbol_id)
-        .map(|snapshot| snapshot.key.clone())
-        .collect();
-
-    for edge in &code.temporal_edges {
-        if let EdgeEndpoint::Snapshot { key } = &edge.source {
-            if key.stable_symbol_id == stable_symbol_id {
-                keys.push(key.clone());
-            }
-        }
-        if let EdgeEndpoint::Snapshot { key } = &edge.target {
-            if key.stable_symbol_id == stable_symbol_id {
-                keys.push(key.clone());
-            }
-        }
-        if let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(prev))) = &edge.change_kind {
-            if prev.stable_symbol_id == stable_symbol_id {
-                keys.push(prev.clone());
-            }
-        }
-    }
-
-    keys
-}
-
 fn snapshot_keys_for_symbol_indexed(
     index: &TemporalIndex,
     stable_symbol_id: &str,
@@ -888,34 +835,75 @@ fn sort_snapshot_keys(keys: &mut [SnapshotKey], graph: &CommitGraph<'_>) {
     });
 }
 
-struct CommitGraph<'a> {
-    parents: HashMap<&'a str, &'a [String]>,
-    positions: HashMap<&'a str, usize>,
+pub struct CommitGraph<'a> {
+    parents: CommitGraphParents<'a>,
+    positions: CommitGraphPositions<'a>,
+}
+
+enum CommitGraphParents<'a> {
+    Built(HashMap<&'a str, &'a [String]>),
+    Borrowed(&'a HashMap<String, Vec<String>>),
+}
+
+enum CommitGraphPositions<'a> {
+    Built(HashMap<&'a str, usize>),
+    Borrowed(&'a HashMap<String, usize>),
 }
 
 impl<'a> CommitGraph<'a> {
     fn new(commits: &'a CommitIndexArtifact) -> Self {
         Self {
-            parents: commits
-                .commits
-                .iter()
-                .map(|commit| (commit.sha.as_str(), commit.parents.as_slice()))
-                .collect(),
-            positions: commits
-                .commits
-                .iter()
-                .enumerate()
-                .map(|(index, commit)| (commit.sha.as_str(), index))
-                .collect(),
+            parents: CommitGraphParents::Built(
+                commits
+                    .commits
+                    .iter()
+                    .map(|commit| (commit.sha.as_str(), commit.parents.as_slice()))
+                    .collect(),
+            ),
+            positions: CommitGraphPositions::Built(
+                commits
+                    .commits
+                    .iter()
+                    .enumerate()
+                    .map(|(index, commit)| (commit.sha.as_str(), index))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn from_borrowed(
+        commit_positions: &'a HashMap<String, usize>,
+        commit_parents: &'a HashMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            parents: CommitGraphParents::Borrowed(commit_parents),
+            positions: CommitGraphPositions::Borrowed(commit_positions),
         }
     }
 
     fn contains(&self, commit: &str) -> bool {
-        self.positions.contains_key(commit)
+        match &self.positions {
+            CommitGraphPositions::Built(positions) => positions.contains_key(commit),
+            CommitGraphPositions::Borrowed(positions) => positions.contains_key(commit),
+        }
     }
 
     fn position(&self, commit: &str) -> usize {
-        self.positions.get(commit).copied().unwrap_or(usize::MAX)
+        match &self.positions {
+            CommitGraphPositions::Built(positions) => {
+                positions.get(commit).copied().unwrap_or(usize::MAX)
+            }
+            CommitGraphPositions::Borrowed(positions) => {
+                positions.get(commit).copied().unwrap_or(usize::MAX)
+            }
+        }
+    }
+
+    fn parent_shas(&self, commit: &str) -> Option<&[String]> {
+        match &self.parents {
+            CommitGraphParents::Built(parents) => parents.get(commit).copied(),
+            CommitGraphParents::Borrowed(parents) => parents.get(commit).map(Vec::as_slice),
+        }
     }
 
     fn ancestors_of(&self, commit: &str) -> Option<HashSet<String>> {
@@ -929,7 +917,7 @@ impl<'a> CommitGraph<'a> {
             if !seen.insert(current.clone()) {
                 continue;
             }
-            if let Some(parents) = self.parents.get(current.as_str()) {
+            if let Some(parents) = self.parent_shas(current.as_str()) {
                 stack.extend(parents.iter().cloned());
             }
         }
@@ -962,7 +950,7 @@ impl<'a> CommitGraph<'a> {
             if !seen.insert(current) {
                 continue;
             }
-            if let Some(parents) = self.parents.get(current) {
+            if let Some(parents) = self.parent_shas(current) {
                 stack.extend(parents.iter().map(String::as_str));
             }
         }
@@ -1171,8 +1159,10 @@ mod tests {
         commits.refs = [("main".into(), "c2".into())].into();
         let commit_graph = CommitGraph::new(&commits);
         let target_ancestors = commit_graph.ancestors_of("c2").unwrap();
+        let index = TemporalIndex::new(Arc::new(graph));
 
-        let resolution = resolve_from_anchor_key(&graph, &commit_graph, &target_ancestors, old);
+        let resolution =
+            resolve_from_anchor_key_indexed(&index, &commit_graph, &target_ancestors, old);
 
         match resolution {
             Resolution::Unknown {
@@ -1198,6 +1188,26 @@ mod tests {
                 assert_eq!(chain.len(), 1);
             }
             other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_symbol_at_indexed_matches_raw() {
+        let (graph, commits) = fixture();
+        let index = TemporalIndex::new(Arc::new(graph.clone()));
+        let symbols = ["old", "new", "missing"];
+        let commits_to_check = ["c1", "c2", "c3", "nonexistent"];
+
+        for symbol in symbols {
+            for anchor in commits_to_check {
+                for target in commits_to_check {
+                    assert_eq!(
+                        resolve_symbol_at(&graph, &commits, symbol, anchor, target),
+                        resolve_symbol_at_indexed(&index, &commits, symbol, anchor, target),
+                        "symbol={symbol} anchor={anchor} target={target}"
+                    );
+                }
+            }
         }
     }
 
