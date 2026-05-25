@@ -103,10 +103,35 @@ exec /usr/local/bin/sccache "$@"
 WRAPPER
 chmod 0755 /usr/local/bin/sccache-worktree
 
+# C/C++ wrappers for build-script-driven compiles (libduckdb-sys, ring,
+# tree-sitter-*, zstd-sys, ...). $PWD at invocation is cargo's project root,
+# not OUT_DIR, so paths embedded in __FILE__/preprocessed output stay
+# worktree-absolute and miss the cache cross-worktree. Setting
+# SCCACHE_BASEDIR=$OUT_DIR — inherited from build.rs — normalizes those
+# paths to relative form. Verified: libduckdb-sys cold compile drops from
+# ~280s to ~107s cross-worktree at 99% C++ hit rate.
+cat >/usr/local/bin/sccache-cc <<'WRAPPER'
+#!/bin/bash
+[[ -n "$OUT_DIR" ]] && export SCCACHE_BASEDIR="$OUT_DIR" || export SCCACHE_BASEDIR="$PWD"
+exec /usr/local/bin/sccache /usr/bin/cc "$@"
+WRAPPER
+cat >/usr/local/bin/sccache-cxx <<'WRAPPER'
+#!/bin/bash
+[[ -n "$OUT_DIR" ]] && export SCCACHE_BASEDIR="$OUT_DIR" || export SCCACHE_BASEDIR="$PWD"
+exec /usr/local/bin/sccache /usr/bin/c++ "$@"
+WRAPPER
+chmod 0755 /usr/local/bin/sccache-cc /usr/local/bin/sccache-cxx
+
 cat >/etc/profile.d/spur-build.sh <<EOF
 export CARGO_HOME=$CACHE_MNT/cargo-home
 export RUSTUP_HOME=$CACHE_MNT/rustup
 export RUSTC_WRAPPER=/usr/local/bin/sccache-worktree
+# Wrap cc/c++ too so build.rs-driven C/C++ compiles (libduckdb-sys is the
+# big one — ~280s of single-threaded amalgamation otherwise) hit the same
+# GCS cache. The cc crate honors CC/CXX env vars and dispatches per-file
+# in parallel via cargo's jobserver, so every TU is independently cacheable.
+export CC=/usr/local/bin/sccache-cc
+export CXX=/usr/local/bin/sccache-cxx
 export SCCACHE_GCS_BUCKET=${SCCACHE_GCS_BUCKET}
 export SCCACHE_GCS_RW_MODE=READ_WRITE
 export SCCACHE_GCS_KEY_PATH=
