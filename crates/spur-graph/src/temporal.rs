@@ -1143,32 +1143,61 @@ mod tests {
 
     #[test]
     fn cycle_error_includes_chain_path() {
-        let (mut graph, mut commits) = fixture();
-        let old = graph.symbol_snapshots[0].key.clone();
-        let new = graph.symbol_snapshots[1].key.clone();
+        // Construct the cycle within a single commit so the `is_ancestor`
+        // topo-position fast-reject (which assumes commits are stored in
+        // `git rev-list --topo-order --reverse` order) stays satisfied and
+        // the visited-set cycle detector in `resolve_from_anchor_key_indexed`
+        // is what actually fires.
+        let (mut graph, commits) = fixture();
+        let foo = SnapshotKey {
+            stable_symbol_id: "foo".into(),
+            commit: "c1".into(),
+        };
+        let bar = SnapshotKey {
+            stable_symbol_id: "bar".into(),
+            commit: "c1".into(),
+        };
+        let snap = |key: &SnapshotKey, anchor: &str| SymbolSnapshotArtifact {
+            key: key.clone(),
+            file_path: "lib.rs".into(),
+            entity_name: key.stable_symbol_id.clone(),
+            symbol_kind: "function".into(),
+            enclosing_scope: None,
+            byte_range: [0, 10],
+            line_range: [1, 1],
+            anchor_hash: anchor.into(),
+            tokens: vec![],
+        };
+        graph.symbol_snapshots.push(snap(&foo, "hf"));
+        graph.symbol_snapshots.push(snap(&bar, "hb"));
         graph.temporal_edges.push(TemporalEdgeArtifact {
-            source: EdgeEndpoint::Snapshot { key: new.clone() },
-            target: EdgeEndpoint::Snapshot { key: old.clone() },
+            source: EdgeEndpoint::Snapshot { key: foo.clone() },
+            target: EdgeEndpoint::Snapshot { key: bar.clone() },
             relation: RelationKind::Touches,
             parent: None,
-            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(new))),
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(foo.clone()))),
         });
-        commits.commits.truncate(2);
-        commits.commits[0].parents = vec!["c2".into()];
-        commits.refs = [("main".into(), "c2".into())].into();
+        graph.temporal_edges.push(TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot { key: bar.clone() },
+            target: EdgeEndpoint::Snapshot { key: foo.clone() },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(bar))),
+        });
+
         let commit_graph = CommitGraph::new(&commits);
-        let target_ancestors = commit_graph.ancestors_of("c2").unwrap();
+        let target_ancestors = commit_graph.ancestors_of("c3").unwrap();
         let index = TemporalIndex::new(Arc::new(graph));
 
         let resolution =
-            resolve_from_anchor_key_indexed(&index, &commit_graph, &target_ancestors, old);
+            resolve_from_anchor_key_indexed(&index, &commit_graph, &target_ancestors, foo);
 
         match resolution {
             Resolution::Unknown {
                 reason: ResolutionFailure::IndexCorrupt(message),
             } => {
                 assert!(
-                    message.contains("cycle: `old`@`c1` -> `new`@`c2` -> `old`@`c1`"),
+                    message.contains("cycle: `foo`@`c1` -> `bar`@`c1` -> `foo`@`c1`"),
                     "expected path in {message}"
                 );
             }
