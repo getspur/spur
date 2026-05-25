@@ -134,11 +134,7 @@ pub(super) fn synthetic_snapshot() -> crate::views::insights::state::InsightsSna
             mtd_cost: 112.00,
             active_session_count: 2,
             cache_hit_pct: 47.8,
-            cost_source_split: CostSourceSplit {
-                native_pct: 42.0,
-                priced_pct: 51.0,
-                unpriced_pct: 7.0,
-            },
+            cost_source_split: CostSourceSplit { unpriced_pct: 7.0 },
             top_agent: Some(("claude-code".to_string(), 89.12)),
             top_model: Some(("claude-opus-4-5".to_string(), 74.50)),
         },
