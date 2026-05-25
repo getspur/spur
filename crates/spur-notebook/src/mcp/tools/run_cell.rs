@@ -130,6 +130,7 @@ mod tests {
             ))),
             state: Some(state),
             app: None,
+            daemon: None,
         }
     }
 

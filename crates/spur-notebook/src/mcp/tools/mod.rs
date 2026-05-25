@@ -2,6 +2,9 @@ use rmcp::model::Tool;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+pub mod daemon_files;
+pub mod daemon_lifecycle;
+pub mod daemon_recents;
 pub mod delete_cell;
 pub mod get_notebook;
 pub mod insert_cell;
@@ -33,6 +36,16 @@ pub fn tools() -> Vec<Tool> {
         start_kernel::tool(),
         restart_kernel::tool(),
         stop_kernel::tool(),
+        daemon_lifecycle::new_tool(),
+        daemon_lifecycle::open_tool(),
+        daemon_lifecycle::close_tool(),
+        daemon_lifecycle::reopen_tool(),
+        daemon_recents::list_recents_tool(),
+        daemon_recents::set_pinned_tool(),
+        daemon_recents::remove_from_recents_tool(),
+        daemon_files::move_to_trash_tool(),
+        daemon_files::reveal_in_finder_tool(),
+        daemon_files::discard_scratch_tool(),
     ]
 }
 
@@ -53,5 +66,31 @@ mod tests {
 
         assert!(names.iter().any(|name| name == "notebook.save"));
         assert!(names.iter().any(|name| name == "notebook.get_notebook"));
+    }
+
+    #[test]
+    fn tools_include_daemon_lifecycle_recents_and_file_tools() {
+        let names = tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "notebook.new",
+            "notebook.open",
+            "notebook.close",
+            "notebook.reopen",
+            "notebook.list_recents",
+            "notebook.set_pinned",
+            "notebook.remove_from_recents",
+            "notebook.move_to_trash",
+            "notebook.reveal_in_finder",
+            "notebook.discard_scratch",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing tool: {expected}"
+            );
+        }
     }
 }

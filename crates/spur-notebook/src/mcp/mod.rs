@@ -48,6 +48,9 @@ pub struct ServerDeps {
     pub bridge: Arc<dyn BridgeRequester>,
     pub state: Option<Arc<State>>,
     pub app: Option<tauri::AppHandle>,
+    /// In-process daemon control plane. Populated only by `start_daemon_server`;
+    /// daemon-routed MCP tools surface `daemon_unavailable` when this is `None`.
+    pub daemon: Option<NotebookDaemonControl>,
 }
 
 impl ServerDeps {
@@ -59,6 +62,7 @@ impl ServerDeps {
             bridge,
             state: None,
             app: None,
+            daemon: None,
         }
     }
 }
@@ -214,6 +218,76 @@ impl ServerHandler for NotebookMcpServer {
                     .map(Value::Object)
                     .unwrap_or_else(|| json!({}));
                 tools::stop_kernel::call(&self.deps, arguments).await
+            }
+            "notebook.new" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_new(&self.deps, arguments).await
+            }
+            "notebook.open" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_open(&self.deps, arguments).await
+            }
+            "notebook.close" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_close(&self.deps, arguments).await
+            }
+            "notebook.reopen" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_lifecycle::call_reopen(&self.deps, arguments).await
+            }
+            "notebook.list_recents" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_recents::call_list_recents(&self.deps, arguments).await
+            }
+            "notebook.set_pinned" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_recents::call_set_pinned(&self.deps, arguments).await
+            }
+            "notebook.remove_from_recents" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_recents::call_remove_from_recents(&self.deps, arguments).await
+            }
+            "notebook.move_to_trash" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_files::call_move_to_trash(&self.deps, arguments).await
+            }
+            "notebook.reveal_in_finder" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_files::call_reveal_in_finder(&self.deps, arguments).await
+            }
+            "notebook.discard_scratch" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::daemon_files::call_discard_scratch(&self.deps, arguments).await
             }
             name => Err(McpError::invalid_params(
                 format!("unknown notebook tool: {name}"),
@@ -514,7 +588,7 @@ impl NotebookDaemonControl {
         }
     }
 
-    async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
+    pub async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
         let id = request.id.clone();
         match self.handle_inner(request).await {
             Ok(success) => DaemonControlResponse {
@@ -856,6 +930,7 @@ pub async fn start_daemon_server(
         bridge: requester,
         state: Some(state),
         app: Some(control.app.clone()),
+        daemon: Some(control.clone()),
     });
     let handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
     control.restore_last_open_notebook().await;
