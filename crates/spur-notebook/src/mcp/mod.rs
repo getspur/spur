@@ -219,6 +219,34 @@ impl ServerHandler for NotebookMcpServer {
                     .unwrap_or_else(|| json!({}));
                 tools::stop_kernel::call(&self.deps, arguments).await
             }
+            "notebook.venv_list" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_list::call(&self.deps, arguments).await
+            }
+            "notebook.venv_create" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_create::call(&self.deps, arguments).await
+            }
+            "notebook.venv_delete" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_delete::call(&self.deps, arguments).await
+            }
+            "notebook.venv_list_python_versions" => {
+                let arguments = request
+                    .arguments
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}));
+                tools::venv_list_python_versions::call(&self.deps, arguments).await
+            }
             "notebook.new" => {
                 let arguments = request
                     .arguments
@@ -1185,6 +1213,58 @@ mod tests {
 
         drop(client);
         handler.await.expect("handler finishes");
+    }
+
+    #[test]
+    fn server_tool_inventory_includes_venv_tools() {
+        let server = NotebookMcpServer::new(test_server_deps());
+        let names = server
+            .tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "notebook.venv_list",
+            "notebook.venv_create",
+            "notebook.venv_delete",
+            "notebook.venv_list_python_versions",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing tool: {expected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn venv_tool_dispatch_reaches_app_handle_requirement() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-venv-mcp-")
+            .tempdir()
+            .expect("temp dir");
+        let socket_path = temp_dir.path().join("notebook.sock");
+        let _server = start_server(&socket_path).await.expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+
+        let error = client
+            .call_tool(CallToolRequestParams::new("notebook.venv_list"))
+            .await
+            .expect_err("tool routes but cannot run without app handle");
+        let message = error.to_string();
+        assert!(
+            message.contains("Tauri app handle"),
+            "unexpected error: {message}"
+        );
+
+        client.cancel().await.expect("client closes");
     }
 
     #[tokio::test]
