@@ -4,7 +4,7 @@
 //! similar to `spur_cost::Reporter` but backed by DuckDB views.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Utc};
 use std::collections::HashMap;
 
 use crate::engine::{
@@ -72,6 +72,8 @@ pub struct Totals {
     pub total_tokens: i64,
     pub cost_usd: f64,
     pub session_count: i64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 impl Totals {
@@ -84,6 +86,7 @@ impl Totals {
             t.cache_creation_tokens += r.cache_creation_tokens;
             t.cost_usd += r.cost_usd;
             t.session_count += r.sessions;
+            t.unpriced_events += r.unpriced_events;
         }
         t.total_tokens =
             t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_creation_tokens;
@@ -99,6 +102,7 @@ impl Totals {
             t.cache_creation_tokens += r.cache_creation_tokens;
             t.cost_usd += r.cost_usd;
             t.session_count += r.sessions;
+            t.unpriced_events += r.unpriced_events;
         }
         t.total_tokens =
             t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_creation_tokens;
@@ -114,6 +118,7 @@ impl Totals {
             t.cache_creation_tokens += r.cache_creation_tokens;
             t.cost_usd += r.cost_usd;
             t.session_count += r.sessions;
+            t.unpriced_events += r.unpriced_events;
         }
         t.total_tokens =
             t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_creation_tokens;
@@ -211,6 +216,8 @@ pub struct ModelTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_cost: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 impl ModelTotals {
@@ -221,6 +228,7 @@ impl ModelTotals {
             t.input_tokens += r.input_tokens;
             t.output_tokens += r.output_tokens;
             t.total_cost += r.total_cost;
+            t.unpriced_events += r.unpriced_events;
         }
         t
     }
@@ -240,6 +248,8 @@ pub struct ProjectTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub unpriced_events: i64,
 }
 
 impl ProjectTotals {
@@ -250,6 +260,7 @@ impl ProjectTotals {
             t.input_tokens += r.input_tokens;
             t.output_tokens += r.output_tokens;
             t.cost_usd += r.cost_usd;
+            t.unpriced_events += r.unpriced_events;
         }
         t
     }
@@ -269,6 +280,9 @@ pub struct SessionReport {
 }
 
 /// Burn-rate metrics for a live (active) session block.
+///
+/// Burn rate is omitted until a block has at least [`MIN_BURN_OBS_SECONDS`]
+/// observed seconds and [`MIN_BURN_OBS_EVENTS`] events.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BurnRate {
     pub tokens_per_minute: f64,
@@ -281,7 +295,7 @@ pub struct BurnRate {
 pub struct LiveBlock {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub last_activity: Option<DateTime<Utc>>,
     pub is_active: bool,
@@ -300,6 +314,12 @@ pub struct LiveReport {
     pub blocks: Vec<LiveBlock>,
     pub totals: Totals,
 }
+
+/// Minimum observed duration before live burn-rate projections are shown.
+pub const MIN_BURN_OBS_SECONDS: u64 = 60;
+
+/// Minimum event count before live burn-rate projections are shown.
+pub const MIN_BURN_OBS_EVENTS: i64 = 2;
 
 // ─── Reporter ─────────────────────────────────────────────────────────
 
@@ -469,7 +489,8 @@ impl Reporter {
                 _ => 0,
             };
 
-            let burn_rate = if dur_sec > 0 {
+            let burn_rate = if dur_sec >= MIN_BURN_OBS_SECONDS && row.events >= MIN_BURN_OBS_EVENTS
+            {
                 let minutes = dur_sec as f64 / 60.0;
                 let total_tokens = row.input_tokens
                     + row.output_tokens
@@ -499,7 +520,7 @@ impl Reporter {
             blocks.push(LiveBlock {
                 session_id: row.session_id,
                 agent: row.agent,
-                model: row.model,
+                models: row.models,
                 started_at,
                 last_activity,
                 is_active,
@@ -545,14 +566,14 @@ fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
         .or_else(|| {
-            DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
                 .ok()
-                .map(|dt| dt.with_timezone(&Utc))
+                .map(|dt| dt.and_utc())
         })
         .or_else(|| {
-            DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+            NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
                 .ok()
-                .map(|dt| dt.with_timezone(&Utc))
+                .map(|dt| dt.and_utc())
         })
 }
 
@@ -566,25 +587,27 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup_engine_with_claude_data(tmp: &TempDir) -> AnalyticsEngine {
+        setup_engine_with_claude_jsonl(
+            tmp,
+            &[
+                // Two events on 2026-04-23
+                r#"{"timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","costUSD":0.05,"tokenUsage":{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+                r#"{"timestamp":"2026-04-23T11:00:00Z","sessionId":"sess-2","costUSD":0.10,"tokenUsage":{"inputTokens":2000,"outputTokens":1000,"cacheReadTokens":400,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+                // One event on 2026-04-22
+                r#"{"timestamp":"2026-04-22T10:00:00Z","sessionId":"sess-3","costUSD":0.03,"tokenUsage":{"inputTokens":500,"outputTokens":250,"cacheReadTokens":100,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+            ],
+        )
+    }
+
+    fn setup_engine_with_claude_jsonl(tmp: &TempDir, lines: &[&str]) -> AnalyticsEngine {
         let claude_dir = tmp.path().join("claude/projects/spur");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let jsonl_path = claude_dir.join("events.jsonl");
         let mut file = std::fs::File::create(&jsonl_path).unwrap();
 
-        // Two events on 2026-04-23
-        writeln!(
-            file,
-            r#"{{"timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","costUSD":0.05,"tokenUsage":{{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0}},"model":"claude-sonnet-4","project":"spur"}}"#
-        ).unwrap();
-        writeln!(
-            file,
-            r#"{{"timestamp":"2026-04-23T11:00:00Z","sessionId":"sess-2","costUSD":0.10,"tokenUsage":{{"inputTokens":2000,"outputTokens":1000,"cacheReadTokens":400,"cacheCreationTokens":0}},"model":"claude-sonnet-4","project":"spur"}}"#
-        ).unwrap();
-        // One event on 2026-04-22
-        writeln!(
-            file,
-            r#"{{"timestamp":"2026-04-22T10:00:00Z","sessionId":"sess-3","costUSD":0.03,"tokenUsage":{{"inputTokens":500,"outputTokens":250,"cacheReadTokens":100,"cacheCreationTokens":0}},"model":"claude-sonnet-4","project":"spur"}}"#
-        ).unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
 
         let engine = AnalyticsEngine::open_in_memory().unwrap();
         engine.initialize().unwrap();
@@ -616,13 +639,28 @@ mod tests {
         engine
     }
 
+    fn claude_fixture_range() -> ReportRange {
+        ReportRange {
+            from: NaiveDate::from_ymd_opt(2026, 4, 22)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc(),
+            to: NaiveDate::from_ymd_opt(2026, 4, 24)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc(),
+        }
+    }
+
     #[test]
     fn test_reporter_daily_grouping() {
         let tmp = TempDir::new().unwrap();
         let engine = setup_engine_with_claude_data(&tmp);
         let reporter = Reporter::new(engine);
 
-        let reports = reporter.daily_report(ReportRange::last_days(7)).unwrap();
+        let reports = reporter.daily_report(claude_fixture_range()).unwrap();
         assert_eq!(reports.len(), 2, "expected 2 days");
 
         // Most recent first
@@ -648,7 +686,7 @@ mod tests {
         let engine = setup_engine_with_claude_data(&tmp);
         let reporter = Reporter::new(engine);
 
-        let reports = reporter.weekly_report(ReportRange::last_days(7)).unwrap();
+        let reports = reporter.weekly_report(claude_fixture_range()).unwrap();
         assert_eq!(reports.len(), 1);
         // 2026-04-20 is Monday of that week
         assert_eq!(
@@ -664,7 +702,7 @@ mod tests {
         let engine = setup_engine_with_claude_data(&tmp);
         let reporter = Reporter::new(engine);
 
-        let reports = reporter.monthly_report(ReportRange::last_days(30)).unwrap();
+        let reports = reporter.monthly_report(claude_fixture_range()).unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].year_month, "2026-04");
         assert_eq!(reports[0].totals.input_tokens, 3500);
@@ -679,6 +717,72 @@ mod tests {
         let live = reporter.live_report(1_000_000).unwrap();
         assert_eq!(live.blocks.len(), 3);
         assert!((live.totals.cost_usd - 0.18).abs() < 0.001);
+    }
+
+    #[test]
+    fn live_block_burn_rate_omitted_below_min_window() {
+        let tmp = TempDir::new().unwrap();
+        let engine = setup_engine_with_claude_jsonl(
+            &tmp,
+            &[
+                r#"{"timestamp":"2026-04-23T10:00:00Z","sessionId":"single-event","costUSD":0.05,"tokenUsage":{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+            ],
+        );
+        let reporter = Reporter::new(engine);
+
+        let live = reporter.live_report(1_000_000).unwrap();
+        let block = live.blocks.first().expect("expected one live block");
+        let started_at = block.started_at.as_ref().expect("started_at");
+        let last_activity = block.last_activity.as_ref().expect("last_activity");
+
+        assert_eq!(
+            last_activity
+                .signed_duration_since(*started_at)
+                .num_seconds(),
+            0
+        );
+        assert!(block.burn_rate.is_none());
+        assert!(block.projected_cost.is_none());
+    }
+
+    #[test]
+    fn live_block_burn_rate_omitted_below_min_observation() {
+        let tmp = TempDir::new().unwrap();
+        let engine = setup_engine_with_claude_jsonl(
+            &tmp,
+            &[
+                r#"{"timestamp":"2026-04-23T10:00:00Z","sessionId":"short-session","costUSD":0.05,"tokenUsage":{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+                r#"{"timestamp":"2026-04-23T10:00:05Z","sessionId":"short-session","costUSD":0.05,"tokenUsage":{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+            ],
+        );
+        let reporter = Reporter::new(engine);
+
+        let live = reporter.live_report(1_000_000).unwrap();
+        let block = live.blocks.first().expect("expected one live block");
+
+        assert!(block.burn_rate.is_none());
+        assert!(block.projected_cost.is_none());
+    }
+
+    #[test]
+    fn live_block_burn_rate_computed_above_min_window() {
+        let tmp = TempDir::new().unwrap();
+        let engine = setup_engine_with_claude_jsonl(
+            &tmp,
+            &[
+                r#"{"timestamp":"2026-04-23T10:00:00Z","sessionId":"observed-session","costUSD":0.05,"tokenUsage":{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+                r#"{"timestamp":"2026-04-23T10:01:30Z","sessionId":"observed-session","costUSD":0.05,"tokenUsage":{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":200,"cacheCreationTokens":0},"model":"claude-sonnet-4","project":"spur"}"#,
+            ],
+        );
+        let reporter = Reporter::new(engine);
+
+        let live = reporter.live_report(1_000_000).unwrap();
+        let block = live.blocks.first().expect("expected one live block");
+        let burn_rate = block.burn_rate.as_ref().expect("expected burn rate");
+
+        assert_eq!(burn_rate.observed_seconds, 90);
+        assert!(burn_rate.cost_per_hour > 0.0);
+        assert_eq!(block.projected_cost, Some(burn_rate.cost_per_hour));
     }
 
     #[test]

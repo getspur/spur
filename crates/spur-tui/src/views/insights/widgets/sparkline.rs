@@ -59,6 +59,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
             cost_usd: idx as f64,
+            unpriced_events: 0,
         }
     }
 
