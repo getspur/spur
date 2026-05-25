@@ -23,9 +23,19 @@ const NOTEBOOK_CHANGED_EVENT: &str = "notebook://changed";
 const NOTEBOOK_IN_PROC_STORE_ENV: &str = "VITE_SPUR_NOTEBOOK_IN_PROC_STORE";
 const NOTEBOOK_IN_PROC_STORE_RUNTIME_ENV: &str = "SPUR_NOTEBOOK_IN_PROC_STORE";
 
-/// Spawn the process-wide notebook delta forwarder when the in-process store flag is enabled.
-pub fn spawn_notebook_delta_forwarder(app: tauri::AppHandle, state: Arc<state::State>) {
-    if !notebook_in_proc_store_enabled() {
+/// Spawn the process-wide notebook delta forwarder when the in-process store is enabled.
+///
+/// `enabled` is the caller's authoritative flag value — typically the merged
+/// CLI-and-env config from `spur-notebook`'s `parse_mode`. When `false`, the
+/// forwarder returns immediately without subscribing; when `true`, it owns the
+/// single broadcast::Receiver for the process and emits `notebook://changed`
+/// for every `NotebookDelta`.
+pub fn spawn_notebook_delta_forwarder(
+    app: tauri::AppHandle,
+    state: Arc<state::State>,
+    enabled: bool,
+) {
+    if !enabled {
         return;
     }
 
@@ -47,11 +57,26 @@ pub fn spawn_notebook_delta_forwarder(app: tauri::AppHandle, state: Arc<state::S
     });
 }
 
-fn notebook_in_proc_store_enabled() -> bool {
-    env::var(NOTEBOOK_IN_PROC_STORE_ENV)
-        .or_else(|_| env::var(NOTEBOOK_IN_PROC_STORE_RUNTIME_ENV))
-        .map(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+/// Resolve the in-process notebook store flag from env vars.
+///
+/// Defaults to **true** (in-proc store on) unless an env var explicitly disables
+/// it with `0`, `false`, `no`, or `off` (case-insensitive). Both `SPUR_NOTEBOOK_IN_PROC_STORE`
+/// (runtime) and `VITE_SPUR_NOTEBOOK_IN_PROC_STORE` (Vite-prefixed for build-time
+/// inlining) are read; either set to a falsy value flips the default off.
+///
+/// Callers that own their own config layer (e.g. `spur-notebook`'s `Mode::App`)
+/// should use this as the *initial* value and apply CLI overrides on top.
+pub fn notebook_in_proc_store_enabled() -> bool {
+    let runtime = env::var(NOTEBOOK_IN_PROC_STORE_RUNTIME_ENV).ok();
+    let vite = env::var(NOTEBOOK_IN_PROC_STORE_ENV).ok();
+    for value in [runtime, vite].into_iter().flatten() {
+        match value.to_lowercase().as_str() {
+            "0" | "false" | "no" | "off" => return false,
+            "1" | "true" | "yes" | "on" => return true,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// A serializable error type for application errors.

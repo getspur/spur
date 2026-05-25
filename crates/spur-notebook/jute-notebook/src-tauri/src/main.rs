@@ -40,6 +40,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(std::sync::Arc::new(State::new()))
+        .manage(jute::commands::NotebookRuntimeConfig::resolved())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -66,6 +67,7 @@ fn main() {
             jute::commands::notebook_store_snapshot,
             jute::commands::save_to_disk,
             jute::commands::bridge_ready,
+            jute::commands::notebook_runtime_config,
             jute::commands::notebook_active_changed,
             jute::commands::agent_response,
             jute::commands::venv::venv_list_python_versions,
@@ -75,7 +77,11 @@ fn main() {
         ])
         .setup(|app| {
             let state = app.state::<std::sync::Arc<State>>().inner().clone();
-            jute::spawn_notebook_delta_forwarder(app.handle().clone(), state);
+            jute::spawn_notebook_delta_forwarder(
+                app.handle().clone(),
+                state,
+                jute::notebook_in_proc_store_enabled(),
+            );
 
             // Parse files that were opened via CLI arguments (Windows + Linux).
             if cfg!(any(windows, target_os = "linux")) {

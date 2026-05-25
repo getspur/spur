@@ -1301,6 +1301,42 @@ pub async fn bridge_ready() -> Result<(), Error> {
     Ok(())
 }
 
+/// Runtime config the webview reads on boot; the Rust process is the single
+/// source of truth, so the frontend never re-derives flag values from env vars.
+///
+/// Construct with [`crate::NotebookRuntimeConfig::resolved`] (env-only default)
+/// or directly when a richer config layer (e.g. spur-notebook's CLI flags) has
+/// already merged its overrides; then `.manage` it on the Tauri app so this
+/// command can return the authoritative value.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct NotebookRuntimeConfig {
+    /// Resolved in-process notebook store flag for this process.
+    pub in_proc_store: bool,
+}
+
+/// Return the runtime config the webview should mirror.
+///
+/// Both Tauri main.rs entry points (`jute` and `spur-notebook`) `.manage` an
+/// instance of [`NotebookRuntimeConfig`] at startup, so this command always
+/// returns the binary's resolved (CLI- and env-merged) view.
+#[tauri::command]
+pub async fn notebook_runtime_config(
+    config: tauri::State<'_, NotebookRuntimeConfig>,
+) -> Result<NotebookRuntimeConfig, Error> {
+    Ok(config.inner().clone())
+}
+
+impl NotebookRuntimeConfig {
+    /// Build the env-only default — equivalent to what the TS fallback would compute.
+    pub fn resolved() -> Self {
+        Self {
+            in_proc_store: crate::notebook_in_proc_store_enabled(),
+        }
+    }
+}
+
 /// Accept a frontend agent bridge response without forwarding it.
 ///
 /// The SPUR notebook binary registers the real transport command. Standalone
