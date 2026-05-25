@@ -87,6 +87,7 @@ pub async fn call_set_pinned(
             command: "set_pinned".to_string(),
             path: Some(path),
             pinned: Some(params.pinned),
+            ..Default::default()
         })
         .await;
     check_response(response)?;
@@ -135,6 +136,7 @@ pub async fn call_remove_from_recents(
             command: "remove_from_recents".to_string(),
             path: Some(path),
             pinned: None,
+            ..Default::default()
         })
         .await;
     check_response(response)?;

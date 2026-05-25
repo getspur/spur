@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -30,12 +31,16 @@ use tracing::warn;
 use crate::recents::{self, RecentEntry};
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
+use self::inproc_requester::InProcStoreRequester;
 use self::{
     bridge::{AgentBridge, BridgeError},
     transport::{read_frame_value, write_frame_json, LengthPrefixedJsonTransport},
 };
 
+const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub mod bridge;
+pub mod inproc_requester;
 pub mod tools;
 pub mod transport;
 
@@ -194,6 +199,11 @@ pub struct NotebookMcpServerHandle {
     socket_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NotebookConfig {
+    pub in_proc_store: bool,
 }
 
 impl NotebookMcpServerHandle {
@@ -400,7 +410,8 @@ pub struct NotebookDaemonControl {
     last_record_path: Option<PathBuf>,
 }
 
-trait DaemonWindowOps: Send + Sync {
+#[doc(hidden)]
+pub trait DaemonWindowOps: Send + Sync {
     fn show_and_focus(&self, label: &str) -> bool;
     fn hide(&self, label: &str);
     fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError>;
@@ -454,7 +465,7 @@ struct NotebookDaemonState {
     window_label: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonControlRequest {
     #[serde(default)]
@@ -466,6 +477,16 @@ pub struct DaemonControlRequest {
     pub path: Option<PathBuf>,
     #[serde(default)]
     pub pinned: Option<bool>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default, alias = "expected_version")]
+    pub expected_version: Option<u64>,
+    #[serde(default, alias = "last_edited_by")]
+    pub last_edited_by: Option<String>,
+    #[serde(default)]
+    pub kind: Option<jute::notebook_store::CellKind>,
+    #[serde(default, alias = "after_id")]
+    pub after_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -479,6 +500,8 @@ pub struct DaemonControlResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entries: Option<Vec<RecentEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DaemonControlError>,
 }
 
@@ -487,6 +510,12 @@ pub struct DaemonControlResponse {
 pub struct DaemonControlError {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PendingNotebookFlush {
+    path: PathBuf,
+    contents: NotebookRoot,
 }
 
 struct DaemonControlSuccess {
@@ -555,7 +584,22 @@ impl NotebookDaemonControl {
         Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path)
     }
 
+    #[doc(hidden)]
+    pub fn new_with_parts_for_test(
+        bridge: Arc<AgentBridge>,
+        requester: Arc<dyn BridgeRequester>,
+        jute_state: Arc<State>,
+        windows: Arc<dyn DaemonWindowOps>,
+        last_record_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path)
+    }
+
     pub async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
+        if is_notebook_store_command(&request.command) {
+            return self.handle_notebook_store_control(request).await;
+        }
+
         let id = request.id.clone();
         match self.handle_inner(request).await {
             Ok(success) => DaemonControlResponse {
@@ -563,6 +607,7 @@ impl NotebookDaemonControl {
                 ok: true,
                 path: success.path.map(|path| path.display().to_string()),
                 entries: success.entries,
+                result: None,
                 error: None,
             },
             Err(error) => DaemonControlResponse {
@@ -570,11 +615,47 @@ impl NotebookDaemonControl {
                 ok: false,
                 path: None,
                 entries: None,
+                result: None,
                 error: Some(DaemonControlError {
                     code: error.mcp_code().to_string(),
                     message: error.to_string(),
                 }),
             },
+        }
+    }
+
+    async fn handle_notebook_store_control(
+        &self,
+        request: DaemonControlRequest,
+    ) -> DaemonControlResponse {
+        let cell_id = request.id.clone();
+        let jute_request = match notebook_store_request_from_daemon(request) {
+            Ok(request) => request,
+            Err(error) => {
+                return DaemonControlResponse {
+                    id: cell_id,
+                    ok: false,
+                    path: None,
+                    entries: None,
+                    result: None,
+                    error: Some(error),
+                }
+            }
+        };
+        let response =
+            jute::commands::handle_daemon_control_request(jute_request, &self.jute_state).await;
+        DaemonControlResponse {
+            id: cell_id,
+            ok: response.ok,
+            path: response.path,
+            entries: None,
+            result: response
+                .result
+                .and_then(|result| serde_json::to_value(result).ok()),
+            error: response.error.map(|error| DaemonControlError {
+                code: error.code,
+                message: error.message,
+            }),
         }
     }
 
@@ -686,19 +767,30 @@ impl NotebookDaemonControl {
             return Ok(());
         }
 
-        let value = self
-            .requester
-            .request("notebook.export", json!({}), tools::BRIDGE_TIMEOUT)
-            .await?;
-        let contents: NotebookRoot =
+        let value = match self.requester.flush_pending(FLUSH_PENDING_TIMEOUT).await {
+            Ok(value) => value,
+            Err(error) if should_continue_without_flush(&error) => {
+                warn!(
+                    %error,
+                    path = %path.display(),
+                    "failed to flush pending notebook edits before lifecycle transition; proceeding"
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        let flush: PendingNotebookFlush =
             serde_json::from_value(value).map_err(|error| BridgeError::Handler {
-                code: "invalid_notebook_export".to_string(),
+                code: "invalid_notebook_flush".to_string(),
                 message: error.to_string(),
             })?;
 
         self.jute_state
             .save_coordinator
-            .save(path, contents)
+            .save(flush.path, flush.contents)
             .await
             .map_err(|error| BridgeError::Handler {
                 code: "save_failed".to_string(),
@@ -803,6 +895,96 @@ impl NotebookDaemonControl {
                 "failed to open notebook on daemon start"
             );
         }
+    }
+}
+
+fn should_continue_without_flush(error: &BridgeError) -> bool {
+    match error {
+        BridgeError::NotebookNotOpen
+        | BridgeError::WindowClosed
+        | BridgeError::AppRestarted
+        | BridgeError::NoListener
+        | BridgeError::Timeout => true,
+        BridgeError::Handler { code, .. } => code == "notebook_not_open",
+    }
+}
+
+fn is_notebook_store_command(command: &str) -> bool {
+    matches!(
+        command,
+        "write_cell"
+            | "read_cell"
+            | "insert_cell"
+            | "delete_cell"
+            | "snapshot"
+            | "apply_edit"
+            | "flush_notebook"
+    )
+}
+
+fn notebook_store_request_from_daemon(
+    request: DaemonControlRequest,
+) -> std::result::Result<jute::commands::DaemonControlRequest, DaemonControlError> {
+    let command = match request.command.as_str() {
+        "write_cell" => jute::commands::DaemonControlCommand::WriteCell {
+            id: required_cell_id(&request)?,
+            source: required_string(&request.source, "write_cell requires source")?,
+            expected_version: request.expected_version,
+            last_edited_by: request.last_edited_by,
+        },
+        "read_cell" => jute::commands::DaemonControlCommand::ReadCell {
+            id: required_cell_id(&request)?,
+        },
+        "insert_cell" => jute::commands::DaemonControlCommand::InsertCell {
+            kind: request
+                .kind
+                .ok_or_else(|| invalid_params("insert_cell requires kind"))?,
+            after_id: request.after_id,
+            source: required_string(&request.source, "insert_cell requires source")?,
+        },
+        "delete_cell" => jute::commands::DaemonControlCommand::DeleteCell {
+            id: required_cell_id(&request)?,
+            expected_version: request
+                .expected_version
+                .ok_or_else(|| invalid_params("delete_cell requires expected_version"))?,
+        },
+        "snapshot" => jute::commands::DaemonControlCommand::Snapshot {},
+        "apply_edit" => jute::commands::DaemonControlCommand::ApplyEdit {
+            id: required_cell_id(&request)?,
+            source: required_string(&request.source, "apply_edit requires source")?,
+        },
+        "flush_notebook" => jute::commands::DaemonControlCommand::FlushNotebook {},
+        command => {
+            return Err(DaemonControlError {
+                code: "unsupported_daemon_command".to_string(),
+                message: format!("unsupported notebook store command: {command}"),
+            })
+        }
+    };
+    Ok(jute::commands::DaemonControlRequest::new(command))
+}
+
+fn required_cell_id(
+    request: &DaemonControlRequest,
+) -> std::result::Result<String, DaemonControlError> {
+    required_string(&request.id, "cell command requires id")
+}
+
+fn required_string(
+    value: &Option<String>,
+    message: &str,
+) -> std::result::Result<String, DaemonControlError> {
+    value
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| invalid_params(message))
+}
+
+fn invalid_params(message: &str) -> DaemonControlError {
+    DaemonControlError {
+        code: "invalid_params".to_string(),
+        message: message.to_string(),
     }
 }
 
@@ -935,9 +1117,35 @@ pub async fn start_daemon_server(
     app: tauri::AppHandle,
     state: Arc<State>,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
+    start_daemon_server_with_config(socket_path, bridge, app, state, NotebookConfig::default())
+        .await
+}
+
+pub async fn start_daemon_server_with_config(
+    socket_path: impl AsRef<Path>,
+    bridge: Arc<AgentBridge>,
+    app: tauri::AppHandle,
+    state: Arc<State>,
+    config: NotebookConfig,
+) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
+    let socket_path = socket_path.as_ref().to_path_buf();
     let app_for_deps = app.clone();
-    let control = NotebookDaemonControl::new(Arc::clone(&bridge), app.clone(), Arc::clone(&state));
-    let requester: Arc<dyn BridgeRequester> = Arc::new(TauriBridgeRequester::with_app(bridge, app));
+    let requester: Arc<dyn BridgeRequester> = if config.in_proc_store {
+        Arc::new(InProcStoreRequester::new(socket_path.clone()))
+    } else {
+        Arc::new(TauriBridgeRequester::with_app(
+            Arc::clone(&bridge),
+            app.clone(),
+        ))
+    };
+    let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
+    let control = NotebookDaemonControl::new_with_parts(
+        bridge,
+        Arc::clone(&requester),
+        Arc::clone(&state),
+        windows,
+        None,
+    );
     let deps = Arc::new(ServerDeps {
         bridge: requester,
         state: Some(state),
@@ -979,6 +1187,7 @@ async fn start_multiplexed_server(
                 }
             }
         }
+        deps.bridge.drain_on_shutdown().await;
         let _ = tokio::fs::remove_file(task_socket_path).await;
     });
 
@@ -1010,6 +1219,7 @@ async fn handle_daemon_connection(
                 ok: false,
                 path: None,
                 entries: None,
+                result: None,
                 error: Some(DaemonControlError {
                     code: "invalid_control_message".to_string(),
                     message: error.to_string(),
@@ -1101,6 +1311,7 @@ mod tests {
                     ok: false,
                     path: None,
                     entries: None,
+                    result: None,
                     error: Some(DaemonControlError {
                         code: "recorded_control_request".to_string(),
                         message: "recorded control request".to_string(),
@@ -1122,13 +1333,15 @@ mod tests {
 
     struct BufferedNotebookBridge {
         notebook: tokio::sync::Mutex<Value>,
+        path: PathBuf,
         calls: tokio::sync::Mutex<Vec<String>>,
     }
 
     impl BufferedNotebookBridge {
-        fn new(notebook: Value) -> Self {
+        fn new(path: PathBuf, notebook: Value) -> Self {
             Self {
                 notebook: tokio::sync::Mutex::new(notebook),
+                path,
                 calls: tokio::sync::Mutex::new(Vec::new()),
             }
         }
@@ -1198,12 +1411,24 @@ mod tests {
                             .push(cell);
                         Ok(json!({ "id": id, "version": 1 }))
                     }
-                    "notebook.export" => Ok(self.notebook.lock().await.clone()),
                     _ => Err(BridgeError::Handler {
                         code: "unknown_method".to_string(),
                         message: format!("unexpected method: {method}"),
                     }),
                 }
+            })
+        }
+
+        fn flush_pending<'a>(&'a self, _timeout: Duration) -> BridgeRequestFuture<'a> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .await
+                    .push("notebook.flush_pending".to_string());
+                Ok(json!({
+                    "path": self.path.display().to_string(),
+                    "contents": self.notebook.lock().await.clone()
+                }))
             })
         }
     }
@@ -1275,7 +1500,10 @@ mod tests {
         .await
         .expect("current notebook writes");
 
-        let buffered_bridge = Arc::new(BufferedNotebookBridge::new(empty_notebook()));
+        let buffered_bridge = Arc::new(BufferedNotebookBridge::new(
+            current_path.clone(),
+            empty_notebook(),
+        ));
         let requester: Arc<dyn BridgeRequester> = buffered_bridge.clone();
         let notebook_state = Arc::new(State::new());
         let windows = Arc::new(RecordingWindowOps::default());
@@ -1311,6 +1539,7 @@ mod tests {
                 command: "open".to_string(),
                 path: Some(other_path.clone()),
                 pinned: None,
+                ..Default::default()
             })
             .await;
 
@@ -1320,7 +1549,7 @@ mod tests {
         assert_eq!(windows.opened(), vec![other_path]);
         assert_eq!(
             buffered_bridge.calls().await,
-            vec!["notebook.insert_cell", "notebook.export"]
+            vec!["notebook.insert_cell", "notebook.flush_pending"]
         );
 
         let saved: Value = serde_json::from_slice(

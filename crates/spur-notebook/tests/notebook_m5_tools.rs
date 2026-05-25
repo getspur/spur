@@ -1,11 +1,23 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
+use jute::{
+    backend::notebook::{
+        Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, NotebookRoot,
+        SpurCellMetadata,
+    },
+    state::State,
+};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 use spur_notebook::mcp::{
-    bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
+    bridge::{AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester},
     tools::{delete_cell, insert_cell, write_cell},
-    ServerDeps,
+    DaemonControlRequest, DaemonWindowOps, NotebookDaemonControl, ServerDeps,
 };
 use tokio::sync::Mutex;
 
@@ -23,6 +35,8 @@ struct MockNotebook {
     order: Mutex<Vec<String>>,
     next_id: Mutex<u64>,
     run_sources: Mutex<Vec<String>>,
+    flush_path: Mutex<Option<PathBuf>>,
+    calls: Mutex<Vec<String>>,
 }
 
 impl BridgeRequester for MockNotebook {
@@ -45,6 +59,7 @@ impl BridgeRequester for MockNotebook {
         _timeout: Duration,
     ) -> BridgeRequestFuture<'a> {
         Box::pin(async move {
+            self.calls.lock().await.push(method.to_string());
             match method {
                 "notebook.insert_cell" => {
                     let kind = params["kind"].as_str().unwrap().to_string();
@@ -170,11 +185,175 @@ impl BridgeRequester for MockNotebook {
             }
         })
     }
+
+    fn flush_pending<'a>(&'a self, _timeout: Duration) -> BridgeRequestFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .await
+                .push("notebook.flush_pending".to_string());
+            let path = self
+                .flush_path
+                .lock()
+                .await
+                .clone()
+                .expect("flush path is set");
+            Ok(json!({
+                "path": path,
+                "contents": self.export_notebook().await
+            }))
+        })
+    }
+}
+
+impl MockNotebook {
+    async fn load_single_code_cell(&self, path: PathBuf, id: &str, source: &str) {
+        self.flush_path.lock().await.replace(path);
+        self.cells.lock().await.insert(
+            id.to_string(),
+            MockCell {
+                kind: "code".to_string(),
+                source: source.to_string(),
+                version: 1,
+                last_edited_by: None,
+            },
+        );
+        self.order.lock().await.push(id.to_string());
+    }
+
+    async fn calls(&self) -> Vec<String> {
+        self.calls.lock().await.clone()
+    }
+
+    async fn export_notebook(&self) -> NotebookRoot {
+        let cells = self.cells.lock().await;
+        let order = self.order.lock().await;
+        NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                other: Default::default(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: order
+                .iter()
+                .map(|id| {
+                    let cell = cells.get(id).expect("cell in order exists");
+                    Cell::Code(CodeCell {
+                        id: Some(id.clone()),
+                        metadata: CellMetadata {
+                            spur: Some(SpurCellMetadata {
+                                version: cell.version,
+                                last_edited_by: cell.last_edited_by.clone(),
+                            }),
+                            other: Default::default(),
+                        },
+                        source: MultilineString::Single(cell.source.clone()),
+                        execution_count: None,
+                        outputs: Vec::new(),
+                    })
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RecordingWindowOps {
+    opened: StdMutex<Vec<PathBuf>>,
+    path_to_check: StdMutex<Option<PathBuf>>,
+    switch_path: StdMutex<Option<PathBuf>>,
+    source_seen_before_switch_open: StdMutex<Option<String>>,
+}
+
+impl RecordingWindowOps {
+    fn check_before_opening_switch(&self, path_to_check: PathBuf, switch_path: PathBuf) {
+        self.path_to_check
+            .lock()
+            .expect("path_to_check lock")
+            .replace(path_to_check);
+        self.switch_path
+            .lock()
+            .expect("switch_path lock")
+            .replace(switch_path);
+    }
+
+    fn opened(&self) -> Vec<PathBuf> {
+        self.opened.lock().expect("opened lock").clone()
+    }
+
+    fn source_seen_before_switch_open(&self) -> Option<String> {
+        self.source_seen_before_switch_open
+            .lock()
+            .expect("source lock")
+            .clone()
+    }
+}
+
+impl DaemonWindowOps for RecordingWindowOps {
+    fn show_and_focus(&self, _label: &str) -> bool {
+        false
+    }
+
+    fn hide(&self, _label: &str) {}
+
+    fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError> {
+        let should_check = self
+            .switch_path
+            .lock()
+            .expect("switch_path lock")
+            .as_ref()
+            .is_some_and(|switch_path| switch_path == path);
+        if should_check {
+            let path_to_check = self
+                .path_to_check
+                .lock()
+                .expect("path_to_check lock")
+                .clone()
+                .expect("path to check is set");
+            self.source_seen_before_switch_open
+                .lock()
+                .expect("source lock")
+                .replace(first_source_on_disk(&path_to_check));
+        }
+
+        let mut opened = self.opened.lock().expect("opened lock");
+        opened.push(path.to_path_buf());
+        Ok(format!("window-{}", opened.len()))
+    }
+
+    fn exit(&self) {}
 }
 
 fn structured(result: CallToolResult) -> Value {
     assert_eq!(result.is_error, Some(false));
     result.structured_content.expect("structured content")
+}
+
+fn first_source(contents: &NotebookRoot) -> String {
+    let Cell::Code(cell) = &contents.cells[0] else {
+        panic!("expected code cell");
+    };
+    match &cell.source {
+        MultilineString::Single(source) => source.clone(),
+        MultilineString::Multi(lines) => lines.join(""),
+    }
+}
+
+fn first_source_on_disk(path: &Path) -> String {
+    let contents = std::fs::read_to_string(path).expect("notebook reads");
+    let parsed: NotebookRoot = serde_json::from_str(&contents).expect("notebook parses");
+    first_source(&parsed)
+}
+
+async fn write_notebook(path: &Path, notebook: &NotebookRoot) {
+    tokio::fs::write(path, serde_json::to_vec_pretty(notebook).unwrap())
+        .await
+        .expect("notebook writes");
 }
 
 #[tokio::test]
@@ -251,5 +430,86 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
         delete_cell::call(&deps, json!({ "id": c2["id"], "expected_version": 2 }))
             .await
             .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook() {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-m5-daemon-flush-")
+        .tempdir()
+        .expect("temp dir");
+    let notebook_a = temp_dir.path().join("a.ipynb");
+    let notebook_b = temp_dir.path().join("b.ipynb");
+    let last_record_path = temp_dir.path().join("last.json");
+
+    let notebook = Arc::new(MockNotebook::default());
+    notebook
+        .load_single_code_cell(notebook_a.clone(), "c1", "original")
+        .await;
+    write_notebook(&notebook_a, &notebook.export_notebook().await).await;
+    write_notebook(&notebook_b, &notebook.export_notebook().await).await;
+
+    let windows = Arc::new(RecordingWindowOps::default());
+    windows.check_before_opening_switch(notebook_a.clone(), notebook_b.clone());
+    let control = NotebookDaemonControl::new_with_parts_for_test(
+        Arc::new(AgentBridge::new()),
+        notebook.clone(),
+        Arc::new(State::new()),
+        windows.clone(),
+        Some(last_record_path),
+    );
+
+    let first_open = control
+        .handle(DaemonControlRequest {
+            id: None,
+            daemon: None,
+            command: "open".to_string(),
+            path: Some(notebook_a.clone()),
+            pinned: None,
+            ..Default::default()
+        })
+        .await;
+    assert!(first_open.ok, "{:?}", first_open.error);
+
+    let deps = ServerDeps::from_bridge(notebook.clone());
+    let write = structured(
+        write_cell::call(
+            &deps,
+            json!({
+                "id": "c1",
+                "source": "edited before switch",
+                "expected_version": 1
+            }),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(write["version"], 2);
+
+    let second_open = control
+        .handle(DaemonControlRequest {
+            id: None,
+            daemon: None,
+            command: "open".to_string(),
+            path: Some(notebook_b.clone()),
+            pinned: None,
+            ..Default::default()
+        })
+        .await;
+    assert!(second_open.ok, "{:?}", second_open.error);
+
+    assert_eq!(
+        windows.opened(),
+        vec![notebook_a.clone(), notebook_b.clone()]
+    );
+    assert_eq!(
+        windows.source_seen_before_switch_open().as_deref(),
+        Some("edited before switch")
+    );
+    assert_eq!(first_source_on_disk(&notebook_a), "edited before switch");
+    assert_eq!(
+        notebook.calls().await,
+        vec!["notebook.write_cell", "notebook.flush_pending"]
     );
 }
