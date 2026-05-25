@@ -458,7 +458,7 @@ struct NotebookDaemonState {
     window_label: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonControlRequest {
     #[serde(default)]
@@ -470,6 +470,16 @@ pub struct DaemonControlRequest {
     pub path: Option<PathBuf>,
     #[serde(default)]
     pub pinned: Option<bool>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default, alias = "expected_version")]
+    pub expected_version: Option<u64>,
+    #[serde(default, alias = "last_edited_by")]
+    pub last_edited_by: Option<String>,
+    #[serde(default)]
+    pub kind: Option<jute::notebook_store::CellKind>,
+    #[serde(default, alias = "after_id")]
+    pub after_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -482,6 +492,8 @@ pub struct DaemonControlResponse {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entries: Option<Vec<RecentEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DaemonControlError>,
 }
@@ -577,6 +589,10 @@ impl NotebookDaemonControl {
     }
 
     pub async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
+        if is_notebook_store_command(&request.command) {
+            return self.handle_notebook_store_control(request).await;
+        }
+
         let id = request.id.clone();
         match self.handle_inner(request).await {
             Ok(success) => DaemonControlResponse {
@@ -584,6 +600,7 @@ impl NotebookDaemonControl {
                 ok: true,
                 path: success.path.map(|path| path.display().to_string()),
                 entries: success.entries,
+                result: None,
                 error: None,
             },
             Err(error) => DaemonControlResponse {
@@ -591,11 +608,47 @@ impl NotebookDaemonControl {
                 ok: false,
                 path: None,
                 entries: None,
+                result: None,
                 error: Some(DaemonControlError {
                     code: error.mcp_code().to_string(),
                     message: error.to_string(),
                 }),
             },
+        }
+    }
+
+    async fn handle_notebook_store_control(
+        &self,
+        request: DaemonControlRequest,
+    ) -> DaemonControlResponse {
+        let cell_id = request.id.clone();
+        let jute_request = match notebook_store_request_from_daemon(request) {
+            Ok(request) => request,
+            Err(error) => {
+                return DaemonControlResponse {
+                    id: cell_id,
+                    ok: false,
+                    path: None,
+                    entries: None,
+                    result: None,
+                    error: Some(error),
+                }
+            }
+        };
+        let response =
+            jute::commands::handle_daemon_control_request(jute_request, &self.jute_state).await;
+        DaemonControlResponse {
+            id: cell_id,
+            ok: response.ok,
+            path: response.path,
+            entries: None,
+            result: response
+                .result
+                .and_then(|result| serde_json::to_value(result).ok()),
+            error: response.error.map(|error| DaemonControlError {
+                code: error.code,
+                message: error.message,
+            }),
         }
     }
 
@@ -849,6 +902,85 @@ fn should_continue_without_flush(error: &BridgeError) -> bool {
     }
 }
 
+fn is_notebook_store_command(command: &str) -> bool {
+    matches!(
+        command,
+        "write_cell"
+            | "read_cell"
+            | "insert_cell"
+            | "delete_cell"
+            | "snapshot"
+            | "apply_edit"
+            | "flush_notebook"
+    )
+}
+
+fn notebook_store_request_from_daemon(
+    request: DaemonControlRequest,
+) -> std::result::Result<jute::commands::DaemonControlRequest, DaemonControlError> {
+    let command = match request.command.as_str() {
+        "write_cell" => jute::commands::DaemonControlCommand::WriteCell {
+            id: required_cell_id(&request)?,
+            source: required_string(&request.source, "write_cell requires source")?,
+            expected_version: request.expected_version,
+            last_edited_by: request.last_edited_by,
+        },
+        "read_cell" => jute::commands::DaemonControlCommand::ReadCell {
+            id: required_cell_id(&request)?,
+        },
+        "insert_cell" => jute::commands::DaemonControlCommand::InsertCell {
+            kind: request
+                .kind
+                .ok_or_else(|| invalid_params("insert_cell requires kind"))?,
+            after_id: request.after_id,
+            source: required_string(&request.source, "insert_cell requires source")?,
+        },
+        "delete_cell" => jute::commands::DaemonControlCommand::DeleteCell {
+            id: required_cell_id(&request)?,
+            expected_version: request
+                .expected_version
+                .ok_or_else(|| invalid_params("delete_cell requires expected_version"))?,
+        },
+        "snapshot" => jute::commands::DaemonControlCommand::Snapshot {},
+        "apply_edit" => jute::commands::DaemonControlCommand::ApplyEdit {
+            id: required_cell_id(&request)?,
+            source: required_string(&request.source, "apply_edit requires source")?,
+        },
+        "flush_notebook" => jute::commands::DaemonControlCommand::FlushNotebook {},
+        command => {
+            return Err(DaemonControlError {
+                code: "unsupported_daemon_command".to_string(),
+                message: format!("unsupported notebook store command: {command}"),
+            })
+        }
+    };
+    Ok(jute::commands::DaemonControlRequest::new(command))
+}
+
+fn required_cell_id(
+    request: &DaemonControlRequest,
+) -> std::result::Result<String, DaemonControlError> {
+    required_string(&request.id, "cell command requires id")
+}
+
+fn required_string(
+    value: &Option<String>,
+    message: &str,
+) -> std::result::Result<String, DaemonControlError> {
+    value
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| invalid_params(message))
+}
+
+fn invalid_params(message: &str) -> DaemonControlError {
+    DaemonControlError {
+        code: "invalid_params".to_string(),
+        message: message.to_string(),
+    }
+}
+
 impl DaemonControlHandler for NotebookDaemonControl {
     fn handle_control<'a>(&'a self, request: DaemonControlRequest) -> DaemonControlFuture<'a> {
         Box::pin(async move { self.handle(request).await })
@@ -1053,6 +1185,7 @@ async fn handle_daemon_connection(
                 ok: false,
                 path: None,
                 entries: None,
+                result: None,
                 error: Some(DaemonControlError {
                     code: "invalid_control_message".to_string(),
                     message: error.to_string(),
@@ -1144,6 +1277,7 @@ mod tests {
                     ok: false,
                     path: None,
                     entries: None,
+                    result: None,
                     error: Some(DaemonControlError {
                         code: "recorded_control_request".to_string(),
                         message: "recorded control request".to_string(),
@@ -1371,6 +1505,7 @@ mod tests {
                 command: "open".to_string(),
                 path: Some(other_path.clone()),
                 pinned: None,
+                ..Default::default()
             })
             .await;
 
