@@ -39,8 +39,6 @@ export async function dispatchAgentRequest(
       return deleteCell(requireNotebook(notebook), request.params);
     case "notebook.interrupt":
       return interrupt(requireNotebook(notebook));
-    case "notebook.save":
-      return save(requireNotebook(notebook));
     default:
       throw new AgentHandlerError(
         "unknown_method",
@@ -187,11 +185,6 @@ function deleteCell(notebook: Notebook, params: unknown): AgentDeleteCell {
 
 async function interrupt(notebook: Notebook): Promise<{ ok: true }> {
   await notebook.interruptKernel();
-  return { ok: true };
-}
-
-async function save(notebook: Notebook): Promise<{ ok: true }> {
-  await notebook.saveNow();
   return { ok: true };
 }
 
