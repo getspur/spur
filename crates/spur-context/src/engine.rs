@@ -62,10 +62,10 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
         END AS cost_source,
         COALESCE(
             e.cost_usd,
-            (e.input_tokens * p.input_price_per_1m / 1000000.0)
-            + (e.output_tokens * p.output_price_per_1m / 1000000.0)
-            + (e.cache_read_tokens * p.cache_read_price_per_1m / 1000000.0)
-            + (e.cache_creation_tokens * p.cache_creation_price_per_1m / 1000000.0)
+            (COALESCE(e.input_tokens, 0) * p.input_price_per_1m / 1000000.0)
+            + (COALESCE(e.output_tokens, 0) * p.output_price_per_1m / 1000000.0)
+            + (COALESCE(e.cache_read_tokens, 0) * p.cache_read_price_per_1m / 1000000.0)
+            + (COALESCE(e.cache_creation_tokens, 0) * p.cache_creation_price_per_1m / 1000000.0)
         ) AS computed_cost_usd
     FROM all_events e
     LEFT JOIN LATERAL (
@@ -84,6 +84,20 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
     ) p ON TRUE;
 "#;
 
+#[cfg(feature = "duckdb")]
+const EVENTS_CACHE_COLUMNS: &[(&str, &str)] = &[
+    ("timestamp", "TIMESTAMP"),
+    ("session_id", "VARCHAR"),
+    ("agent", "VARCHAR"),
+    ("model", "VARCHAR"),
+    ("project", "VARCHAR"),
+    ("input_tokens", "BIGINT"),
+    ("output_tokens", "BIGINT"),
+    ("cache_read_tokens", "BIGINT"),
+    ("cache_creation_tokens", "BIGINT"),
+    ("cost_usd", "DOUBLE"),
+];
+
 /// Strip a leading `<segment>/` from a model id.
 ///
 /// OpenCode stores model strings as `<provider>/<canonical>`. The pricing
@@ -92,6 +106,24 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
 #[cfg(feature = "duckdb")]
 fn strip_provider_prefix(s: &str) -> &str {
     s.split_once('/').map_or(s, |(_, rest)| rest)
+}
+
+#[cfg(feature = "duckdb")]
+fn normalize_sql_type(sql_type: &str) -> String {
+    sql_type
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+#[cfg(feature = "duckdb")]
+fn create_events_cache_table_sql() -> String {
+    let columns = EVENTS_CACHE_COLUMNS
+        .iter()
+        .map(|(name, ty)| format!("    {name} {ty}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("CREATE TABLE events_cache (\n{columns}\n);")
 }
 
 // ─── Engine ───────────────────────────────────────────────────────────
@@ -184,7 +216,67 @@ impl AnalyticsEngine {
         self.conn
             .execute_batch(SCHEMA_SQL)
             .context("failed to initialize DuckDB base schema")?;
+        self.ensure_events_cache_schema()?;
         tracing::debug!("initialized DuckDB base schema");
+        Ok(())
+    }
+
+    fn ensure_events_cache_schema(&self) -> Result<()> {
+        let existing = {
+            let mut stmt = self
+                .conn
+                .prepare("PRAGMA table_info('events_cache')")
+                .context("failed to inspect events_cache schema")?;
+            stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut missing = Vec::new();
+        let mut mismatched = Vec::new();
+        for &(name, expected_type) in EVENTS_CACHE_COLUMNS {
+            match existing
+                .iter()
+                .find(|(existing_name, _)| existing_name.eq_ignore_ascii_case(name))
+            {
+                Some((_, actual_type))
+                    if normalize_sql_type(actual_type) == normalize_sql_type(expected_type) => {}
+                Some((_, actual_type)) => {
+                    mismatched.push(format!(
+                        "{name}: expected {expected_type}, found {actual_type}"
+                    ));
+                }
+                None => missing.push((name, expected_type)),
+            }
+        }
+
+        if !mismatched.is_empty() {
+            tracing::warn!(
+                columns = ?mismatched,
+                "rebuilding events_cache after schema type mismatch"
+            );
+            self.conn
+                .execute_batch(&format!(
+                    "DROP TABLE IF EXISTS events_cache;\n{}",
+                    create_events_cache_table_sql()
+                ))
+                .context("failed to rebuild events_cache after schema mismatch")?;
+            return Ok(());
+        }
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let missing_names = missing.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        tracing::warn!(
+            missing_columns = ?missing_names,
+            "migrating events_cache by adding missing columns"
+        );
+        for (name, ty) in missing {
+            self.conn
+                .execute_batch(&format!("ALTER TABLE events_cache ADD COLUMN {name} {ty};"))
+                .with_context(|| format!("failed to add events_cache.{name} column"))?;
+        }
         Ok(())
     }
 
@@ -237,7 +329,11 @@ impl AnalyticsEngine {
         self.conn.execute_batch(
             r#"
             DELETE FROM events_cache;
-            INSERT INTO events_cache
+            INSERT INTO events_cache (
+                timestamp, session_id, agent, model, project,
+                input_tokens, output_tokens, cache_read_tokens,
+                cache_creation_tokens, cost_usd
+            )
               SELECT timestamp, session_id, agent, model, project,
                      input_tokens, output_tokens, cache_read_tokens,
                      cache_creation_tokens, cost_usd
@@ -277,8 +373,15 @@ impl AnalyticsEngine {
     /// reading the raw UNION through that stable name regardless of how
     /// often `use_cached_events` is called.
     pub fn use_cached_events(&self) -> Result<()> {
-        self.conn
-            .execute_batch("CREATE OR REPLACE VIEW all_events AS SELECT * FROM events_cache;")?;
+        self.conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW all_events AS
+            SELECT timestamp, session_id, agent, model, project,
+                   input_tokens, output_tokens, cache_read_tokens,
+                   cache_creation_tokens, cost_usd
+            FROM events_cache;
+            "#,
+        )?;
         // Rebuild all_events_with_cost so its underlying reference
         // resolves to the cache-backed view. The longest-prefix lateral
         // matcher is unchanged — only the backing view differs.
@@ -2505,6 +2608,73 @@ mod tests {
     }
 
     #[test]
+    fn priced_cost_treats_null_token_operands_as_zero() {
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+
+        engine
+            .conn
+            .execute_batch(
+                "INSERT INTO pricing VALUES \
+                 ('claude-opus-4', 15.0, 75.0, 1.5, 18.75, '2020-01-01', NULL);
+                 CREATE OR REPLACE VIEW claude_events AS \
+                 SELECT TIMESTAMP '2026-04-20 10:00:00' AS timestamp,
+                        'sess-null-cache' AS session_id,
+                        'claude' AS agent,
+                        'claude-opus-4' AS model,
+                        'proj' AS project,
+                        1000::BIGINT AS input_tokens,
+                        100::BIGINT AS output_tokens,
+                        NULL::BIGINT AS cache_read_tokens,
+                        50::BIGINT AS cache_creation_tokens,
+                        NULL::DOUBLE AS cost_usd;",
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute_batch("CREATE OR REPLACE VIEW all_events AS SELECT * FROM claude_events;")
+            .unwrap();
+
+        let assert_null_token_cost = |label: &str| {
+            let (source, cost): (String, Option<f64>) = engine
+                .conn
+                .query_row(
+                    "SELECT cost_source, computed_cost_usd
+                     FROM all_events_with_cost
+                     WHERE session_id = 'sess-null-cache'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+
+            assert_eq!(source, "priced", "{label}");
+            let cost = cost
+                .unwrap_or_else(|| panic!("{label}: priced row should compute a non-NULL cost"));
+            let expected = (1000.0 * 15.0 / 1_000_000.0)
+                + (100.0 * 75.0 / 1_000_000.0)
+                + (50.0 * 18.75 / 1_000_000.0);
+            assert!(
+                (cost - expected).abs() < 0.000001,
+                "{label}: expected {expected}, got {cost}"
+            );
+        };
+
+        assert_null_token_cost("schema all_events_with_cost");
+        for view in [
+            "codex_events",
+            "kiro_events",
+            "opencode_events",
+            "kimi_events",
+            "gemini_events",
+        ] {
+            engine.create_empty_stub(view).unwrap();
+        }
+        engine.rebuild_unified_views().unwrap();
+
+        assert_null_token_cost("runtime all_events_with_cost");
+    }
+
+    #[test]
     fn live_recent_sessions_window_uses_utc() {
         let engine = setup_engine();
         engine
@@ -3089,6 +3259,66 @@ mod tests {
             report.is_empty(),
             "daily report should be empty with no data"
         );
+    }
+
+    #[test]
+    fn initialize_migrates_old_events_cache_before_cached_reports() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("analytics.duckdb");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE events_cache (
+                    timestamp             TIMESTAMP,
+                    session_id            VARCHAR,
+                    agent                 VARCHAR,
+                    model                 VARCHAR,
+                    project               VARCHAR,
+                    input_tokens          BIGINT,
+                    output_tokens         BIGINT,
+                    cache_creation_tokens BIGINT,
+                    cost_usd              DOUBLE
+                );
+                INSERT INTO events_cache VALUES
+                    (TIMESTAMP '2026-04-20 10:00:00', 'sess-old-cache', 'claude',
+                     'claude-opus-4', 'proj', 1000::BIGINT, 100::BIGINT,
+                     50::BIGINT, NULL::DOUBLE);",
+            )
+            .unwrap();
+        }
+
+        let (engine, _recovered) = AnalyticsEngine::open(&db_path).unwrap();
+        engine.initialize().unwrap();
+        engine
+            .load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())
+            .unwrap();
+        engine.use_cached_events().unwrap();
+
+        let columns: Vec<String> = {
+            let mut stmt = engine
+                .conn
+                .prepare("PRAGMA table_info('events_cache')")
+                .unwrap();
+            stmt.query_map([], |r| r.get(1))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(
+            columns.iter().any(|column| column == "cache_read_tokens"),
+            "old events_cache should gain cache_read_tokens on initialize"
+        );
+
+        let report = engine
+            .daily_report_range(
+                NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 4, 21).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].sessions, 1);
+        assert_eq!(report[0].cache_read_tokens, 0);
     }
 
     #[test]

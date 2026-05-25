@@ -59,10 +59,10 @@ SELECT
     END AS cost_source,
     COALESCE(
         e.cost_usd,
-        (e.input_tokens * p.input_price_per_1m / 1000000.0)
-        + (e.output_tokens * p.output_price_per_1m / 1000000.0)
-        + (e.cache_read_tokens * p.cache_read_price_per_1m / 1000000.0)
-        + (e.cache_creation_tokens * p.cache_creation_price_per_1m / 1000000.0)
+        (COALESCE(e.input_tokens, 0) * p.input_price_per_1m / 1000000.0)
+        + (COALESCE(e.output_tokens, 0) * p.output_price_per_1m / 1000000.0)
+        + (COALESCE(e.cache_read_tokens, 0) * p.cache_read_price_per_1m / 1000000.0)
+        + (COALESCE(e.cache_creation_tokens, 0) * p.cache_creation_price_per_1m / 1000000.0)
     ) AS computed_cost_usd
 FROM all_events e
 LEFT JOIN pricing p
