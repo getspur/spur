@@ -932,13 +932,12 @@ impl<'a> CommitGraph<'a> {
             return false;
         }
 
-        let ancestor_pos = self.positions.get(ancestor).copied();
-        let descendant_pos = self.positions.get(descendant).copied();
-        if let (Some(a), Some(d)) = (ancestor_pos, descendant_pos) {
-            // Commits are indexed oldest-first via `git rev-list --topo-order --reverse`.
-            if a > d {
-                return false;
-            }
+        // Commits are indexed oldest-first via `git rev-list --topo-order --reverse`,
+        // so an ancestor with a higher position than its descendant cannot precede it.
+        // Both calls are safe to compare directly because the `contains` guards above
+        // ensure neither lookup falls through to the `usize::MAX` sentinel.
+        if self.position(ancestor) > self.position(descendant) {
+            return false;
         }
 
         let mut seen = HashSet::new();
