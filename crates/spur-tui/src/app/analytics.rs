@@ -325,7 +325,7 @@ impl App {
         let Some(engine) = self.analytics_engine.clone() else {
             return;
         };
-        match timeout(Duration::from_secs(2), engine.run(|e| e.checkpoint())).await {
+        match tokio::time::timeout(Duration::from_secs(2), engine.run(|e| e.checkpoint())).await {
             Ok(Ok(())) => {
                 tracing::debug!(target: "spur_tui::insights", "analytics checkpoint completed during shutdown");
             }
