@@ -8,30 +8,9 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::Emitter;
 
+use super::{emit_recents_changed, parse_no_args};
 use crate::mcp::ServerDeps;
-
-fn emit_recents_changed(deps: &ServerDeps) {
-    if let Some(app) = deps.app.as_ref() {
-        let _ = app.emit("notebook://recents_changed", &json!({}));
-    }
-}
-
-fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
-    let value = if arguments.is_null() {
-        json!({})
-    } else {
-        arguments
-    };
-    match value {
-        Value::Object(map) if map.is_empty() => Ok(()),
-        _ => Err(McpError::invalid_params(
-            format!("{method} takes no arguments"),
-            None,
-        )),
-    }
-}
 
 fn jute_error(code: &str, message: &str, error: &jute::Error) -> McpError {
     McpError::internal_error(
@@ -75,13 +54,8 @@ pub async fn call_move_to_trash(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.move_to_trash path must not be empty",
-            None,
-        ));
-    }
-    jute::commands::move_notebook_to_trash(params.path)
+    let path = super::validate_notebook_path("notebook.move_to_trash", &params.path)?;
+    jute::commands::move_notebook_to_trash(path.to_string_lossy().into_owned())
         .await
         .map_err(|error| jute_error("trash_failed", "notebook.move_to_trash failed", &error))?;
     emit_recents_changed(deps);
@@ -115,13 +89,8 @@ pub async fn call_reveal_in_finder(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.reveal_in_finder path must not be empty",
-            None,
-        ));
-    }
-    jute::commands::reveal_notebook_in_finder(params.path)
+    let path = super::validate_notebook_path("notebook.reveal_in_finder", &params.path)?;
+    jute::commands::reveal_notebook_in_finder(path.to_string_lossy().into_owned())
         .await
         .map_err(|error| jute_error("reveal_failed", "notebook.reveal_in_finder failed", &error))?;
     Ok(CallToolResult::structured(json!({ "ok": true })))

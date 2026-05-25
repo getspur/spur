@@ -37,21 +37,14 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.get_notebook path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path(METHOD, &params.path)?;
 
-    let contents = tokio::fs::read_to_string(&params.path)
-        .await
-        .map_err(|error| {
-            McpError::internal_error(
-                "notebook.get_notebook failed to read notebook",
-                Some(json!({ "error": error.to_string() })),
-            )
-        })?;
+    let contents = tokio::fs::read_to_string(path).await.map_err(|error| {
+        McpError::internal_error(
+            "notebook.get_notebook failed to read notebook",
+            Some(json!({ "error": error.to_string() })),
+        )
+    })?;
     let notebook: NotebookRoot = serde_json::from_str(&contents).map_err(|error| {
         McpError::internal_error(
             "notebook.get_notebook failed to parse notebook",

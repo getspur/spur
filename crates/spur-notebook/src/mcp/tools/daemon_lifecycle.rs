@@ -2,68 +2,18 @@
 //! (new/open/close/reopen). Each tool reuses the in-process
 //! `NotebookDaemonControl` so we never reimplement the daemon protocol.
 
-use std::path::PathBuf;
-
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::Emitter;
 
-use crate::mcp::{DaemonControlRequest, DaemonControlResponse, NotebookDaemonControl, ServerDeps};
-
-const RECENTS_CHANGED_EVENT: &str = "notebook://recents_changed";
-
-fn daemon_unavailable() -> McpError {
-    McpError::internal_error(
-        "notebook daemon control plane is not available",
-        Some(json!({ "code": "daemon_unavailable" })),
-    )
-}
+use super::{check_response, daemon_unavailable, emit_recents_changed, parse_no_args};
+use crate::mcp::{DaemonControlRequest, NotebookDaemonControl, ServerDeps};
 
 fn require_daemon(deps: &ServerDeps) -> Result<&NotebookDaemonControl, McpError> {
     deps.daemon.as_ref().ok_or_else(daemon_unavailable)
-}
-
-fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
-    let value = if arguments.is_null() {
-        json!({})
-    } else {
-        arguments
-    };
-    match value {
-        Value::Object(map) if map.is_empty() => Ok(()),
-        _ => Err(McpError::invalid_params(
-            format!("{method} takes no arguments"),
-            None,
-        )),
-    }
-}
-
-fn check_response(response: DaemonControlResponse) -> Result<DaemonControlResponse, McpError> {
-    if response.ok {
-        Ok(response)
-    } else {
-        let (code, message) = match response.error {
-            Some(error) => (error.code, error.message),
-            None => (
-                "daemon_command_failed".to_string(),
-                "daemon command failed without an error body".to_string(),
-            ),
-        };
-        Err(McpError::internal_error(
-            message,
-            Some(json!({ "code": code })),
-        ))
-    }
-}
-
-fn emit_recents_changed(deps: &ServerDeps) {
-    if let Some(app) = deps.app.as_ref() {
-        let _ = app.emit(RECENTS_CHANGED_EVENT, &json!({}));
-    }
 }
 
 // ---------------------------------------------------------------- notebook.new
@@ -71,7 +21,7 @@ fn emit_recents_changed(deps: &ServerDeps) {
 pub fn new_tool() -> Tool {
     Tool::new(
         "notebook.new",
-        "Create a new Untitled scratch notebook and open it.",
+        "Create a new Untitled scratch notebook and open it. If a notebook is already open, the daemon first flushes its in-memory cell buffer to the current path.",
         rmcp_object(json!({
             "type": "object",
             "properties": {},
@@ -113,7 +63,7 @@ struct OpenParams {
 pub fn open_tool() -> Tool {
     Tool::new(
         "notebook.open",
-        "Open a notebook at the given path through the daemon.",
+        "Open a notebook at the given path through the daemon. If a notebook is already open, the daemon first flushes its in-memory cell buffer to the current path.",
         rmcp_object(json!({
             "type": "object",
             "required": ["path"],
@@ -132,24 +82,20 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.open path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path("notebook.open", &params.path)?;
+    let fallback_path = path.to_string_lossy().into_owned();
     let daemon = require_daemon(deps)?;
     let response = daemon
         .handle(DaemonControlRequest {
             id: None,
             daemon: None,
             command: "open".to_string(),
-            path: Some(PathBuf::from(&params.path)),
+            path: Some(path),
             pinned: None,
         })
         .await;
     let response = check_response(response)?;
-    let path = response.path.unwrap_or(params.path);
+    let path = response.path.unwrap_or(fallback_path);
     emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "path": path })))
 }
@@ -159,7 +105,7 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
 pub fn close_tool() -> Tool {
     Tool::new(
         "notebook.close",
-        "Close the daemon's currently open notebook window.",
+        "Close the daemon's currently open notebook window after flushing its in-memory cell buffer to the current path.",
         rmcp_object(json!({
             "type": "object",
             "properties": {},

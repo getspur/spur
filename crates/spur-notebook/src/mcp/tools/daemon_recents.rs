@@ -1,8 +1,6 @@
 //! MCP tools for daemon recents — list/set_pinned/remove. List is read-only;
-//! the mutating tools also fan out a `notebook://recents_changed` event so the
+//! the mutating tools also fan out the recents-changed event so the
 //! Tauri shell can re-render its sidebar without polling.
-
-use std::path::PathBuf;
 
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
@@ -10,56 +8,10 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::Emitter;
 
-use crate::mcp::{DaemonControlRequest, DaemonControlResponse, ServerDeps};
+use super::{check_response, daemon_unavailable, emit_recents_changed, parse_no_args};
+use crate::mcp::{DaemonControlRequest, ServerDeps};
 use crate::recents;
-
-fn daemon_unavailable() -> McpError {
-    McpError::internal_error(
-        "notebook daemon control plane is not available",
-        Some(json!({ "code": "daemon_unavailable" })),
-    )
-}
-
-fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
-    let value = if arguments.is_null() {
-        json!({})
-    } else {
-        arguments
-    };
-    match value {
-        Value::Object(map) if map.is_empty() => Ok(()),
-        _ => Err(McpError::invalid_params(
-            format!("{method} takes no arguments"),
-            None,
-        )),
-    }
-}
-
-fn check_response(response: DaemonControlResponse) -> Result<DaemonControlResponse, McpError> {
-    if response.ok {
-        Ok(response)
-    } else {
-        let (code, message) = match response.error {
-            Some(error) => (error.code, error.message),
-            None => (
-                "daemon_command_failed".to_string(),
-                "daemon command failed without an error body".to_string(),
-            ),
-        };
-        Err(McpError::internal_error(
-            message,
-            Some(json!({ "code": code })),
-        ))
-    }
-}
-
-fn emit_recents_changed(deps: &ServerDeps) {
-    if let Some(app) = deps.app.as_ref() {
-        let _ = app.emit("notebook://recents_changed", &json!({}));
-    }
-}
 
 // ---------------------------------------------------------- notebook.list_recents
 
@@ -126,19 +78,14 @@ pub async fn call_set_pinned(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.set_pinned path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path("notebook.set_pinned", &params.path)?;
     let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
     let response = daemon
         .handle(DaemonControlRequest {
             id: None,
             daemon: None,
             command: "set_pinned".to_string(),
-            path: Some(PathBuf::from(&params.path)),
+            path: Some(path),
             pinned: Some(params.pinned),
         })
         .await;
@@ -179,19 +126,14 @@ pub async fn call_remove_from_recents(
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.path.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.remove_from_recents path must not be empty",
-            None,
-        ));
-    }
+    let path = super::validate_notebook_path("notebook.remove_from_recents", &params.path)?;
     let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
     let response = daemon
         .handle(DaemonControlRequest {
             id: None,
             daemon: None,
             command: "remove_from_recents".to_string(),
-            path: Some(PathBuf::from(&params.path)),
+            path: Some(path),
             pinned: None,
         })
         .await;
