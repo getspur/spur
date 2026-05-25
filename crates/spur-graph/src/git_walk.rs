@@ -12,8 +12,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
-use std::path::Path;
-use std::process::Command;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::JoinHandle;
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -526,6 +528,7 @@ pub fn file_changes_for_commit(worktree: &Path, sha: &str) -> Result<Vec<FileCha
 pub struct SymbolDiffCtx {
     extractors: HashMap<Language, BytesExtractor>,
     diagnostics: Vec<String>,
+    cat_file_batches: HashMap<PathBuf, CatFileBatch>,
 }
 
 impl SymbolDiffCtx {
@@ -533,6 +536,7 @@ impl SymbolDiffCtx {
         Self {
             extractors: HashMap::new(),
             diagnostics: Vec::new(),
+            cat_file_batches: HashMap::new(),
         }
     }
 
@@ -551,6 +555,15 @@ impl SymbolDiffCtx {
 
     fn record_diagnostics(&mut self, diagnostics: Vec<String>) {
         self.diagnostics.extend(diagnostics);
+    }
+
+    fn cat_file_batch(&mut self, worktree: &Path) -> Result<&mut CatFileBatch> {
+        match self.cat_file_batches.entry(worktree.to_path_buf()) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                Ok(entry.insert(CatFileBatch::new(worktree)?))
+            }
+        }
     }
 }
 
@@ -593,7 +606,10 @@ pub fn symbol_changes_for_commit(
             continue;
         };
 
-        let blobs = blobs_for_change(worktree, sha, file_change)?;
+        let blobs = {
+            let cat_file_batch = ctx.cat_file_batch(worktree)?;
+            blobs_for_change(worktree, cat_file_batch, sha, file_change)?
+        };
         if blobs.left.as_deref().is_some_and(is_binary)
             || blobs.right.as_deref().is_some_and(is_binary)
         {
@@ -1029,12 +1045,22 @@ struct ChangeBlobs {
     right: Option<Vec<u8>>,
 }
 
-fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Result<ChangeBlobs> {
+fn blobs_for_change(
+    worktree: &Path,
+    cat_file_batch: &mut CatFileBatch,
+    sha: &str,
+    file_change: &FileChange,
+) -> Result<ChangeBlobs> {
     let right = match &file_change.kind {
         FileChangeKind::Deleted => None,
-        FileChangeKind::Added | FileChangeKind::Modified | FileChangeKind::Renamed { .. } => Some(
-            cat_file_blob(worktree, sha, &file_change.path.to_path_buf())?,
-        ),
+        FileChangeKind::Added | FileChangeKind::Modified | FileChangeKind::Renamed { .. } => {
+            Some(cat_file_blob(
+                worktree,
+                cat_file_batch,
+                sha,
+                &file_change.path.to_path_buf(),
+            )?)
+        }
         FileChangeKind::Gitlink { .. } => None,
     };
 
@@ -1044,7 +1070,12 @@ fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Res
         FileChangeKind::Renamed { from } => Some(from.clone()),
     };
     let left = match (file_change.parent_sha.as_deref(), left_path.as_ref()) {
-        (Some(parent), Some(path)) => Some(cat_file_blob(worktree, parent, &path.to_path_buf())?),
+        (Some(parent), Some(path)) => Some(cat_file_blob(
+            worktree,
+            cat_file_batch,
+            parent,
+            &path.to_path_buf(),
+        )?),
         _ => None,
     };
 
@@ -1055,52 +1086,188 @@ fn blobs_for_change(worktree: &Path, sha: &str, file_change: &FileChange) -> Res
     })
 }
 
-fn cat_file_blob(worktree: &Path, sha: &str, path: &Path) -> Result<Vec<u8>> {
-    let spec = blob_spec(sha, path);
+struct CatFileBatch {
+    worktree: PathBuf,
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    stderr_drain: Option<JoinHandle<()>>,
+}
+
+impl CatFileBatch {
+    fn new(worktree: &Path) -> Result<Self> {
+        let mut child = Command::new("git")
+            .current_dir(worktree)
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn git cat-file --batch in `{}`", worktree.display()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("git cat-file --batch missing stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("git cat-file --batch missing stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("git cat-file --batch missing stderr")?;
+        let stderr_drain = std::thread::spawn(move || {
+            let mut stderr = stderr;
+            let mut sink = io::sink();
+            let _ = io::copy(&mut stderr, &mut sink);
+        });
+
+        Ok(Self {
+            worktree: worktree.to_path_buf(),
+            child,
+            stdin: Some(stdin),
+            stdout: BufReader::new(stdout),
+            stderr_drain: Some(stderr_drain),
+        })
+    }
+
+    fn read(&mut self, sha: &str, path: &Path) -> Result<Option<Vec<u8>>> {
+        let spec = blob_spec(sha, path);
+        let spec_display = blob_spec_display(sha, path);
+        let stdin = self
+            .stdin
+            .as_mut()
+            .context("git cat-file --batch stdin already closed")?;
+        write_blob_query(stdin, &spec).with_context(|| {
+            format!(
+                "write git cat-file --batch query `{spec_display}` in `{}`",
+                self.worktree.display()
+            )
+        })?;
+
+        let mut header = Vec::new();
+        let bytes_read = self
+            .stdout
+            .read_until(b'\n', &mut header)
+            .with_context(|| {
+                format!(
+                    "read git cat-file --batch header for `{spec_display}` in `{}`",
+                    self.worktree.display()
+                )
+            })?;
+        if bytes_read == 0 {
+            bail!(
+                "git cat-file --batch closed before header for `{spec_display}` in `{}`",
+                self.worktree.display()
+            );
+        }
+        if header.ends_with(b" missing\n") {
+            return Ok(None);
+        }
+        if header.ends_with(b"\n") {
+            header.pop();
+        }
+
+        let header = std::str::from_utf8(&header).with_context(|| {
+            format!("git cat-file --batch header for `{spec_display}` emitted non-UTF-8")
+        })?;
+        let mut parts = header.split(' ');
+        let oid = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .with_context(|| format!("git cat-file --batch header `{header}` missing oid"))?;
+        let object_type = parts
+            .next()
+            .with_context(|| format!("git cat-file --batch header `{header}` missing type"))?;
+        let size = parts
+            .next()
+            .with_context(|| format!("git cat-file --batch header `{header}` missing size"))?;
+        if parts.next().is_some() {
+            bail!("unexpected git cat-file --batch header `{header}` for `{spec_display}`");
+        }
+        if object_type != "blob" {
+            bail!(
+                "git cat-file --batch `{spec_display}` resolved {oid} as `{object_type}`, expected blob"
+            );
+        }
+        let size = size.parse::<usize>().with_context(|| {
+            format!("parse git cat-file --batch size `{size}` for `{spec_display}`")
+        })?;
+        let mut bytes = vec![0; size];
+        self.stdout.read_exact(&mut bytes).with_context(|| {
+            format!(
+                "read git cat-file --batch body for `{spec_display}` in `{}`",
+                self.worktree.display()
+            )
+        })?;
+        let mut trailing = [0; 1];
+        self.stdout.read_exact(&mut trailing).with_context(|| {
+            format!(
+                "read git cat-file --batch trailing newline for `{spec_display}` in `{}`",
+                self.worktree.display()
+            )
+        })?;
+        if trailing != [b'\n'] {
+            bail!("git cat-file --batch body for `{spec_display}` missing trailing newline");
+        }
+
+        Ok(Some(bytes))
+    }
+}
+
+impl Drop for CatFileBatch {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.wait();
+        if let Some(stderr_drain) = self.stderr_drain.take() {
+            let _ = stderr_drain.join();
+        }
+    }
+}
+
+fn cat_file_blob(
+    worktree: &Path,
+    cat_file_batch: &mut CatFileBatch,
+    sha: &str,
+    path: &Path,
+) -> Result<Vec<u8>> {
     let spec_display = blob_spec_display(sha, path);
     let missing_blob_name = || {
         blob_oid_for_path(worktree, sha, path)
             .map(|oid| format!("{oid} (`{spec_display}`)"))
             .unwrap_or_else(|_| spec_display.clone())
     };
-    let attempt = || -> Result<Vec<u8>> {
-        let output = Command::new("git")
-            .current_dir(worktree)
-            .args(["cat-file", "blob"])
-            .arg(&spec)
-            .output()
-            .with_context(|| {
-                format!(
-                    "spawn git cat-file blob `{spec_display}` in `{}`",
-                    worktree.display()
-                )
-            })?;
 
-        if output.status.success() {
-            Ok(output.stdout)
-        } else {
-            Err(anyhow!(
-                "git cat-file blob `{spec_display}` failed in `{}`: {}",
-                worktree.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
-        }
-    };
-
-    match attempt() {
-        Ok(bytes) => Ok(bytes),
-        Err(first_error) if has_promisor_remote(worktree) => {
+    match cat_file_batch.read(sha, path) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) if has_promisor_remote(worktree) => {
             let missing = missing_blob_name();
+            let first_error = missing_batch_error(worktree, &spec_display);
             tracing::warn!(
                 blob = %missing,
                 error = %first_error,
                 "spur-graph: missing blob during git walk; retrying once to trigger promisor fetch"
             );
-            attempt().with_context(|| {
-                format!(
+            cat_file_blob_legacy(worktree, sha, path).with_context(|| {
+                format!("missing blob `{missing}` not recovered by promisor remote; fail-closed for this commit")
+            })?;
+            match cat_file_batch.read(sha, path) {
+                Ok(Some(bytes)) => Ok(bytes),
+                Ok(None) => Err(missing_batch_error(worktree, &spec_display).context(format!(
                     "missing blob `{missing}` not recovered by promisor remote; fail-closed for this commit"
-                )
-            })
+                ))),
+                Err(error) => Err(error.context(format!(
+                    "missing blob `{missing}` not recovered by promisor remote; fail-closed for this commit"
+                ))),
+            }
+        }
+        Ok(None) => {
+            let missing = missing_blob_name();
+            Err(
+                missing_batch_error(worktree, &spec_display).context(format!(
+                    "missing blob `{missing}`; partial clone? fail-closed"
+                )),
+            )
         }
         Err(error) => {
             let missing = missing_blob_name();
@@ -1109,6 +1276,39 @@ fn cat_file_blob(worktree: &Path, sha: &str, path: &Path) -> Result<Vec<u8>> {
             )))
         }
     }
+}
+
+fn cat_file_blob_legacy(worktree: &Path, sha: &str, path: &Path) -> Result<Vec<u8>> {
+    let spec = blob_spec(sha, path);
+    let spec_display = blob_spec_display(sha, path);
+    let output = Command::new("git")
+        .current_dir(worktree)
+        .args(["cat-file", "blob"])
+        .arg(&spec)
+        .output()
+        .with_context(|| {
+            format!(
+                "spawn git cat-file blob `{spec_display}` in `{}`",
+                worktree.display()
+            )
+        })?;
+
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(anyhow!(
+            "git cat-file blob `{spec_display}` failed in `{}`: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn missing_batch_error(worktree: &Path, spec_display: &str) -> anyhow::Error {
+    anyhow!(
+        "git cat-file --batch reported `{spec_display}` missing in `{}`",
+        worktree.display()
+    )
 }
 
 fn blob_oid_for_path(worktree: &Path, sha: &str, path: &Path) -> Result<String> {
@@ -1159,6 +1359,21 @@ fn blob_spec(sha: &str, path: &Path) -> OsString {
 #[cfg(not(unix))]
 fn blob_spec(sha: &str, path: &Path) -> OsString {
     OsString::from(format!("{sha}:{}", path.to_string_lossy()))
+}
+
+fn write_blob_query(stdin: &mut ChildStdin, spec: &OsString) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        stdin.write_all(spec.as_os_str().as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        stdin.write_all(spec.to_string_lossy().as_bytes())?;
+    }
+    stdin.write_all(b"\n")?;
+    stdin.flush()
 }
 
 fn blob_spec_display(sha: &str, path: &Path) -> String {
@@ -1839,6 +2054,40 @@ mod tests {
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.contains("binary_blob")));
+    }
+
+    #[test]
+    fn cat_file_batch_reads_multiple_blobs_and_reports_missing() {
+        let dir = TempDir::new().unwrap();
+        let fixture_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sample_corpus");
+        for path in ["src/lib.rs", "src/utils.rs", "expected_graph_index.json"] {
+            let source = fixture_root.join(path);
+            let destination = dir.path().join(path);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::copy(source, destination).unwrap();
+        }
+        init_repo(dir.path());
+        let sha = commit(dir.path(), "fixture");
+
+        let valid_paths = [
+            std::path::Path::new("src/lib.rs"),
+            std::path::Path::new("src/utils.rs"),
+            std::path::Path::new("expected_graph_index.json"),
+        ];
+        let mut batch = CatFileBatch::new(dir.path()).unwrap();
+        for path in valid_paths {
+            let expected = std::fs::read(dir.path().join(path)).unwrap();
+            let actual = batch.read(&sha, path).unwrap();
+
+            assert_eq!(actual, Some(expected));
+        }
+
+        let missing = batch
+            .read(&sha, std::path::Path::new("src/missing.rs"))
+            .unwrap();
+
+        assert_eq!(missing, None);
     }
 
     #[test]
