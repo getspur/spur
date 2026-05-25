@@ -124,7 +124,7 @@ mod tests {
         LiveBlockRow {
             session_id: session_id.to_string(),
             agent: "codex".to_string(),
-            model: Some("gpt-5.3-codex".to_string()),
+            models: Some("gpt-5.3-codex".to_string()),
             started_at: None,
             last_activity: None,
             input_tokens: 0,

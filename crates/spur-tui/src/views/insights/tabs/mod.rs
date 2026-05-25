@@ -77,7 +77,7 @@ pub(super) fn synthetic_snapshot() -> crate::views::insights::state::InsightsSna
         LiveBlockRow {
             session_id: session_id.to_string(),
             agent: agent.to_string(),
-            model: Some("gpt-5-codex".to_string()),
+            models: Some("gpt-5-codex".to_string()),
             started_at: Some("2026-04-28T00:00:00Z".to_string()),
             last_activity: Some("2026-04-28T00:05:00Z".to_string()),
             input_tokens: 16_000,
