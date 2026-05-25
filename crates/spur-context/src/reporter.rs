@@ -281,7 +281,7 @@ pub struct BurnRate {
 pub struct LiveBlock {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub last_activity: Option<DateTime<Utc>>,
     pub is_active: bool,
@@ -499,7 +499,7 @@ impl Reporter {
             blocks.push(LiveBlock {
                 session_id: row.session_id,
                 agent: row.agent,
-                model: row.model,
+                models: row.models,
                 started_at,
                 last_activity,
                 is_active,
@@ -616,13 +616,28 @@ mod tests {
         engine
     }
 
+    fn claude_fixture_range() -> ReportRange {
+        ReportRange {
+            from: NaiveDate::from_ymd_opt(2026, 4, 22)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc(),
+            to: NaiveDate::from_ymd_opt(2026, 4, 24)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc(),
+        }
+    }
+
     #[test]
     fn test_reporter_daily_grouping() {
         let tmp = TempDir::new().unwrap();
         let engine = setup_engine_with_claude_data(&tmp);
         let reporter = Reporter::new(engine);
 
-        let reports = reporter.daily_report(ReportRange::last_days(7)).unwrap();
+        let reports = reporter.daily_report(claude_fixture_range()).unwrap();
         assert_eq!(reports.len(), 2, "expected 2 days");
 
         // Most recent first
@@ -648,7 +663,7 @@ mod tests {
         let engine = setup_engine_with_claude_data(&tmp);
         let reporter = Reporter::new(engine);
 
-        let reports = reporter.weekly_report(ReportRange::last_days(7)).unwrap();
+        let reports = reporter.weekly_report(claude_fixture_range()).unwrap();
         assert_eq!(reports.len(), 1);
         // 2026-04-20 is Monday of that week
         assert_eq!(
@@ -664,7 +679,7 @@ mod tests {
         let engine = setup_engine_with_claude_data(&tmp);
         let reporter = Reporter::new(engine);
 
-        let reports = reporter.monthly_report(ReportRange::last_days(30)).unwrap();
+        let reports = reporter.monthly_report(claude_fixture_range()).unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].year_month, "2026-04");
         assert_eq!(reports[0].totals.input_tokens, 3500);

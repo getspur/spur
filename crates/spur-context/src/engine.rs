@@ -1554,8 +1554,8 @@ impl AnalyticsEngine {
         let sql = r#"
             SELECT
                 session_id,
-                agent,
-                model,
+                any_value(agent) AS agent,
+                string_agg(DISTINCT model, ',' ORDER BY model) AS models,
                 strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
                 strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS last_activity,
                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -1566,7 +1566,7 @@ impl AnalyticsEngine {
                 COUNT(*) AS events
             FROM all_events_with_cost
             WHERE timestamp >= (now() AT TIME ZONE 'UTC') - CAST(? || ' minutes' AS INTERVAL)
-            GROUP BY session_id, agent, model
+            GROUP BY session_id
             ORDER BY cost_usd DESC
         "#;
 
@@ -1575,7 +1575,7 @@ impl AnalyticsEngine {
             Ok(LiveBlockRow {
                 session_id: row.get(0)?,
                 agent: row.get(1)?,
-                model: row.get(2)?,
+                models: row.get(2)?,
                 started_at: row.get(3)?,
                 last_activity: row.get(4)?,
                 input_tokens: row.get(5)?,
@@ -2008,7 +2008,7 @@ struct KimiRow {
 pub struct LiveBlockRow {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<String>,
     pub last_activity: Option<String>,
     pub input_tokens: i64,
@@ -2567,6 +2567,90 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(session_ids, vec!["recent-session"]);
+    }
+
+    #[test]
+    fn live_recent_sessions_aggregates_model_switch() {
+        let engine = setup_engine();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                DROP TABLE IF EXISTS live_recent_sessions_model_switch_events;
+                CREATE TABLE live_recent_sessions_model_switch_events (
+                    timestamp_ms          BIGINT,
+                    session_id            VARCHAR,
+                    agent                 VARCHAR,
+                    model                 VARCHAR,
+                    project               VARCHAR,
+                    input_tokens          BIGINT,
+                    output_tokens         BIGINT,
+                    cache_read_tokens     BIGINT,
+                    cache_creation_tokens BIGINT,
+                    cost_usd              DOUBLE
+                );
+                "#,
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_model_switch_events VALUES \
+                 (?1, 'switch-session', 'claude', 'claude-sonnet-4', 'spur', \
+                  100::BIGINT, 50::BIGINT, 0::BIGINT, 0::BIGINT, 0.01::DOUBLE)",
+                duckdb::params![now_ms - 60_000],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_model_switch_events VALUES \
+                 (?1, 'switch-session', 'claude', 'claude-opus-4-5', 'spur', \
+                  200::BIGINT, 75::BIGINT, 0::BIGINT, 0::BIGINT, 0.02::DOUBLE)",
+                duckdb::params![now_ms - 30_000],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                CREATE OR REPLACE VIEW all_events AS
+                SELECT
+                    epoch_ms(timestamp_ms) AS timestamp,
+                    session_id,
+                    agent,
+                    model,
+                    project,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    cost_usd
+                FROM live_recent_sessions_model_switch_events;
+                "#,
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute_batch(ALL_EVENTS_WITH_COST_VIEW)
+            .unwrap();
+
+        let rows = engine.live_recent_sessions(2).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, "switch-session");
+        assert_eq!(
+            rows[0].models.as_deref(),
+            Some("claude-opus-4-5,claude-sonnet-4")
+        );
+        assert_eq!(rows[0].input_tokens, 300);
+        assert_eq!(rows[0].output_tokens, 125);
+        assert_eq!(rows[0].events, 2);
     }
 
     #[test]
