@@ -17,10 +17,11 @@ use tempfile::TempDir;
 fn incremental_run_full_walk_uses_prior_pointer_to_ingest_only_new_commits() {
     let repo = TempDir::new().unwrap();
     init_repo(repo.path());
+    let mut config = GitWalkConfig::default();
+    config.use_gix_diff = false;
 
     append_commits(repo.path(), 1..=5);
-    let (first_graph, first_commits) =
-        run_full_walk_into(repo.path(), &GitWalkConfig::default()).unwrap();
+    let (first_graph, first_commits) = run_full_walk_into(repo.path(), &config).unwrap();
     save_temporal_artifacts(repo.path(), &first_graph, &first_commits);
 
     let git_log = repo.path().join("git-show.log");
@@ -30,7 +31,7 @@ fn incremental_run_full_walk_uses_prior_pointer_to_ingest_only_new_commits() {
     fs::write(&git_log, "").unwrap();
     append_commits(repo.path(), 6..=8);
     let (incremental_graph, incremental_commits) =
-        run_full_walk_into(repo.path(), &GitWalkConfig::default()).unwrap();
+        run_full_walk_into(repo.path(), &config).unwrap();
 
     let ingested_commits = logged_show_calls(&git_log);
     assert_eq!(
@@ -42,8 +43,7 @@ fn incremental_run_full_walk_uses_prior_pointer_to_ingest_only_new_commits() {
     let spur_dir = repo.path().join(".spur");
     let saved_spur_dir = repo.path().join(".spur.saved");
     fs::rename(&spur_dir, &saved_spur_dir).unwrap();
-    let (cold_graph, cold_commits) =
-        run_full_walk_into(repo.path(), &GitWalkConfig::default()).unwrap();
+    let (cold_graph, cold_commits) = run_full_walk_into(repo.path(), &config).unwrap();
     fs::rename(&saved_spur_dir, &spur_dir).unwrap();
 
     assert_eq!(incremental_graph, cold_graph);

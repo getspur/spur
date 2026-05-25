@@ -44,7 +44,7 @@ impl Default for GitWalkConfig {
             target_refs: vec!["main".to_string()],
             walk_strategy: WalkStrategy::Reachable,
             allow_replace_refs: false,
-            use_gix_diff: false,
+            use_gix_diff: true,
         }
     }
 }
@@ -449,12 +449,20 @@ fn read_commit(worktree: &Path, sha: &str) -> Result<CommitArtifact> {
 }
 
 fn open_gix_repo_without_replace_refs(worktree: &Path) -> Result<gix::Repository> {
-    // SAFETY: gix 0.77 exposes the replacement-object bypass through the
-    // `core.useReplaceRefs` CLI override; forcing it here prevents
-    // refs/replace mappings from being installed in the object database.
+    // Disable git's default replace-ref honoring inside gix. We rely on the
+    // pre-walk `check_replace_refs` guard to refuse repos with `refs/replace`
+    // entries unless `allow_replace_refs: true` is explicitly set; if a caller
+    // opts in to allow them, the CLI path uses raw OIDs, and we want gix to do
+    // the same so the two paths stay equivalent.
+    // gix 0.77 treats `core.useReplaceRefs=false` as permission to scan the
+    // replacement namespace at open time, so route that scan to an empty
+    // SPUR-private prefix while keeping the git-compatible config override.
     let mut repo = gix::open_opts(
         worktree,
-        gix::open::Options::default().cli_overrides(["core.useReplaceRefs=true"]),
+        gix::open::Options::default().cli_overrides([
+            "core.useReplaceRefs=false",
+            "gitoxide.objects.replaceRefBase=refs/spur-disabled-replace/",
+        ]),
     )
     .with_context(|| format!("open gix repository `{}`", worktree.display()))?;
     repo.object_cache_size_if_unset(128 * 1024 * 1024);
@@ -1936,6 +1944,35 @@ mod tests {
             .unwrap()
             .trim()
             .to_string()
+    }
+
+    #[test]
+    fn gix_open_ignores_replace_refs() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("a.rs"), b"fn a() -> u8 { 1 }\n").unwrap();
+        let a = commit(dir.path(), "A");
+        std::fs::write(dir.path().join("a.rs"), b"fn a() -> u8 { 2 }\n").unwrap();
+        let b = commit(dir.path(), "B");
+        std::fs::write(dir.path().join("a.rs"), b"fn a() -> u8 { 3 }\n").unwrap();
+        let c = commit(dir.path(), "C");
+        run_git(dir.path(), &["replace", &c, &a]).unwrap();
+
+        let repo = open_gix_repo_without_replace_refs(dir.path()).unwrap();
+        assert_eq!(
+            repo.config_snapshot().boolean("core.useReplaceRefs"),
+            Some(false),
+            "opener must expose git-compatible replace-ref config"
+        );
+        let commit = repo
+            .find_commit(gix::ObjectId::from_hex(c.as_bytes()).unwrap())
+            .unwrap();
+        let parents: Vec<_> = commit
+            .parent_ids()
+            .map(|parent| parent.to_hex().to_string())
+            .collect();
+
+        assert_eq!(parents, vec![b]);
     }
 
     #[test]
