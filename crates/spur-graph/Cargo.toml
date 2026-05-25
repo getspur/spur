@@ -18,6 +18,7 @@ anyhow = { workspace = true }
 blake3 = "1"
 chrono = { workspace = true }
 fs2 = "0.4"
+gix = { version = "0.77", default-features = false, features = ["max-performance-safe", "revision", "blob-diff"] }
 globset = "0.4"
 ignore = "0.4.25"
 arrow-array = { workspace = true }
@@ -40,7 +41,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
-gix = { version = "0.77", default-features = false, features = ["max-performance-safe", "revision", "blob-diff"] }
 insta = { workspace = true }
 libc = "0.2"
 parquet = { workspace = true, features = ["arrow"] }
