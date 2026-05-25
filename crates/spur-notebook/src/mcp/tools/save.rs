@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use jute::backend::notebook::NotebookRoot;
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
@@ -15,6 +17,8 @@ const METHOD: &str = "notebook.save";
 struct SaveParams {
     path: String,
     contents: NotebookRoot,
+    #[serde(default)]
+    force: bool,
 }
 
 pub fn tool() -> Tool {
@@ -36,6 +40,10 @@ pub fn tool() -> Tool {
                         "cells": { "type": "array" }
                     },
                     "additionalProperties": true
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Override the empty-overwrite guard. Required when cells is empty and the existing notebook on disk has cells."
                 }
             },
             "additionalProperties": false
@@ -55,6 +63,17 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     let state = deps.state.as_ref().ok_or_else(|| {
         McpError::internal_error("notebook.save requires notebook daemon state", None)
     })?;
+
+    if params.contents.cells.is_empty() && !params.force {
+        if let Some(existing_cells) = existing_cell_count(&path).await {
+            if existing_cells > 0 {
+                return Err(McpError::invalid_params(
+                    "notebook.save refuses to overwrite a non-empty notebook with zero cells; pass force=true to override",
+                    Some(json!({ "path": saved_path, "existing_cells": existing_cells })),
+                ));
+            }
+        }
+    }
 
     state
         .save_coordinator
@@ -78,6 +97,12 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     }
 
     Ok(CallToolResult::structured(json!({ "ok": true })))
+}
+
+async fn existing_cell_count(path: &Path) -> Option<usize> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let root: NotebookRoot = serde_json::from_slice(&bytes).ok()?;
+    Some(root.cells.len())
 }
 
 #[cfg(test)]
@@ -115,6 +140,94 @@ mod tests {
             ]
         }))
         .expect("sample notebook parses")
+    }
+
+    fn empty_notebook() -> NotebookRoot {
+        serde_json::from_value(json!({
+            "metadata": {},
+            "nbformat_minor": 5,
+            "nbformat": 4,
+            "cells": []
+        }))
+        .expect("empty notebook parses")
+    }
+
+    #[tokio::test]
+    async fn refuses_to_clobber_non_empty_with_empty_cells() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-mcp-save-guard-")
+            .tempdir()
+            .expect("temp dir");
+        let path = temp_dir.path().join("guarded.ipynb");
+        tokio::fs::write(&path, serde_json::to_vec(&sample_notebook()).unwrap())
+            .await
+            .expect("seed disk");
+        let deps = deps_with_state(Arc::new(State::new()));
+
+        let err = call(
+            &deps,
+            json!({
+                "path": path.display().to_string(),
+                "contents": empty_notebook()
+            }),
+        )
+        .await
+        .expect_err("guard rejects clobber");
+        assert!(
+            err.to_string().contains("refuses to overwrite"),
+            "unexpected error: {err}"
+        );
+        let after = tokio::fs::read_to_string(&path).await.expect("file kept");
+        let parsed: NotebookRoot = serde_json::from_str(&after).unwrap();
+        assert_eq!(parsed.cells.len(), 1, "disk content preserved");
+    }
+
+    #[tokio::test]
+    async fn force_flag_allows_empty_overwrite() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-mcp-save-force-")
+            .tempdir()
+            .expect("temp dir");
+        let path = temp_dir.path().join("forced.ipynb");
+        tokio::fs::write(&path, serde_json::to_vec(&sample_notebook()).unwrap())
+            .await
+            .expect("seed disk");
+        let deps = deps_with_state(Arc::new(State::new()));
+
+        call(
+            &deps,
+            json!({
+                "path": path.display().to_string(),
+                "contents": empty_notebook(),
+                "force": true
+            }),
+        )
+        .await
+        .expect("force overrides guard");
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed: NotebookRoot = serde_json::from_str(&after).unwrap();
+        assert!(parsed.cells.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_save_allowed_when_no_existing_file() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-mcp-save-fresh-")
+            .tempdir()
+            .expect("temp dir");
+        let path = temp_dir.path().join("fresh.ipynb");
+        let deps = deps_with_state(Arc::new(State::new()));
+
+        call(
+            &deps,
+            json!({
+                "path": path.display().to_string(),
+                "contents": empty_notebook()
+            }),
+        )
+        .await
+        .expect("empty save succeeds for fresh path");
+        assert!(tokio::fs::metadata(&path).await.is_ok());
     }
 
     #[tokio::test]

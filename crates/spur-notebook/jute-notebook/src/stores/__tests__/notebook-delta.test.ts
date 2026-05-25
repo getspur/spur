@@ -5,6 +5,7 @@ import type { DaemonCell, NotebookDelta, NotebookRoot } from "@/bindings";
 import {
   Notebook,
   type NotebookStoreState,
+  __resetNotebookRuntimeConfigCacheForTesting,
   reconcileNotebookDelta,
 } from "../notebook";
 
@@ -21,10 +22,10 @@ describe("reconcileNotebookDelta", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     invokeMock.mockReset();
+    __resetNotebookRuntimeConfigCacheForTesting();
   });
 
   test("updates a cell source after a CellWritten delta", async () => {
-    vi.stubEnv("VITE_SPUR_NOTEBOOK_IN_PROC_STORE", "1");
     const cellId = "cell-1";
     const updatedCell: DaemonCell = {
       id: cellId,
@@ -37,6 +38,7 @@ describe("reconcileNotebookDelta", () => {
     };
 
     invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "notebook_runtime_config") return { inProcStore: true };
       if (command === "start_kernel") return "kernel-1";
       if (command === "kernel_slot_info") {
         return {

@@ -563,20 +563,63 @@ export function applyRunCellEvent(
   return nextRunState;
 }
 
-export function notebookInProcStoreEnabled(): boolean {
-  const metaEnv = import.meta.env as Record<string, unknown>;
-  const processEnv = typeof process === "undefined" ? undefined : process.env;
-  return flagValueEnabled(
-    metaEnv[NOTEBOOK_IN_PROC_STORE_ENV] ??
-      processEnv?.[NOTEBOOK_IN_PROC_STORE_ENV] ??
-      processEnv?.SPUR_NOTEBOOK_IN_PROC_STORE,
-  );
+/** Webview-side mirror of the Rust `NotebookRuntimeConfig` Tauri command. */
+export type NotebookRuntimeConfig = { inProcStore: boolean };
+
+let runtimeConfigCache: NotebookRuntimeConfig | null = null;
+let runtimeConfigPromise: Promise<NotebookRuntimeConfig> | null = null;
+
+/**
+ * Resolve the runtime config from the Rust process (single source of truth).
+ *
+ * Cached on first success. Falls back to the env-derived default — which now
+ * matches the Rust default of in-proc-store enabled — when invoke is
+ * unavailable (vitest, SSR, jute standalone shells without the command
+ * registered).
+ */
+export async function loadNotebookRuntimeConfig(): Promise<NotebookRuntimeConfig> {
+  if (runtimeConfigCache) return runtimeConfigCache;
+  if (!runtimeConfigPromise) {
+    runtimeConfigPromise = (async () => {
+      try {
+        const cfg = await invoke<NotebookRuntimeConfig>(
+          "notebook_runtime_config",
+        );
+        runtimeConfigCache = cfg;
+        return cfg;
+      } catch {
+        const cfg: NotebookRuntimeConfig = {
+          inProcStore: envInProcStoreEnabled(),
+        };
+        runtimeConfigCache = cfg;
+        return cfg;
+      }
+    })();
+  }
+  return runtimeConfigPromise;
 }
 
-function flagValueEnabled(value: unknown): boolean {
+/**
+ * Synchronous flag accessor.
+ *
+ * Returns the cached Rust-resolved value once `loadNotebookRuntimeConfig` has
+ * completed; before that — and from contexts without a Tauri host — falls back
+ * to the env-derived default (true unless explicitly disabled).
+ */
+export function notebookInProcStoreEnabled(): boolean {
+  return runtimeConfigCache?.inProcStore ?? envInProcStoreEnabled();
+}
+
+function envInProcStoreEnabled(): boolean {
+  const metaEnv = import.meta.env as Record<string, unknown>;
+  const processEnv = typeof process === "undefined" ? undefined : process.env;
+  const value =
+    metaEnv[NOTEBOOK_IN_PROC_STORE_ENV] ??
+    processEnv?.[NOTEBOOK_IN_PROC_STORE_ENV] ??
+    processEnv?.SPUR_NOTEBOOK_IN_PROC_STORE;
   if (typeof value === "boolean") return value;
-  if (typeof value !== "string") return false;
-  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+  if (typeof value !== "string") return true;
+  return !["0", "false", "no", "off"].includes(value.toLowerCase());
 }
 
 function displayIdForRunCellEvent(message: RunCellEvent): string | undefined {
@@ -593,8 +636,15 @@ export async function reconcileNotebookDelta(
   notebook: Notebook,
   delta: NotebookDelta,
 ) {
-  if (!notebookInProcStoreEnabled()) return;
+  const { inProcStore } = await loadNotebookRuntimeConfig();
+  if (!inProcStore) return;
   await notebook.applyNotebookDelta(delta);
+}
+
+/** Test-only: drop the cached runtime config so the next call refetches. */
+export function __resetNotebookRuntimeConfigCacheForTesting() {
+  runtimeConfigCache = null;
+  runtimeConfigPromise = null;
 }
 
 /**

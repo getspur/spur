@@ -3,7 +3,7 @@ import { type UnlistenFn, listen } from "@tauri-apps/api/event";
 import type { NotebookDelta, RunCellEvent } from "@/bindings";
 import {
   type Notebook,
-  notebookInProcStoreEnabled,
+  loadNotebookRuntimeConfig,
   reconcileNotebookDelta,
 } from "@/stores/notebook";
 
@@ -77,15 +77,16 @@ export function listenForNotebookEvents(notebook: Notebook): () => void {
     }),
   ];
 
-  if (notebookInProcStoreEnabled()) {
-    registrations.push(
-      listen<NotebookDelta>("notebook://changed", (event) => {
-        runAsync("notebook://changed", async () => {
-          await reconcileNotebookDelta(notebook, event.payload);
-        });
-      }),
-    );
-  }
+  // Warm the runtime-config cache so the first delta is gated on the
+  // Rust-resolved flag rather than the env fallback.
+  void loadNotebookRuntimeConfig();
+  registrations.push(
+    listen<NotebookDelta>("notebook://changed", (event) => {
+      runAsync("notebook://changed", async () => {
+        await reconcileNotebookDelta(notebook, event.payload);
+      });
+    }),
+  );
 
   return listenForAll(registrations, "notebook");
 }
