@@ -38,7 +38,7 @@ impl LiveTab {
         );
         frame.render_widget(
             Paragraph::new(
-                "session_id  agent          model                  tokens      tpm        burn $/min  $/hr proj",
+                "session_id  agent          models                 tokens      tpm        burn $/min  $/hr proj",
             ),
             chunks[1],
         );
@@ -105,7 +105,7 @@ fn render_live_row(
     .split(text_area);
 
     let prefix = &row.session_id[..row.session_id.len().min(8)];
-    let model = row.model.as_deref().unwrap_or("—");
+    let models = row.models.as_deref().unwrap_or("—");
     let burn = metric
         .burn_per_minute
         .map(dollars)
@@ -117,7 +117,7 @@ fn render_live_row(
 
     frame.render_widget(Paragraph::new(prefix.to_string()), columns[0]);
     frame.render_widget(Paragraph::new(row.agent.clone()), columns[1]);
-    frame.render_widget(Paragraph::new(model.to_string()), columns[2]);
+    frame.render_widget(Paragraph::new(models.to_string()), columns[2]);
     frame.render_widget(Paragraph::new(compact(metric.token_count)), columns[3]);
     frame.render_widget(
         Paragraph::new(
@@ -192,7 +192,7 @@ mod tests {
         LiveBlockRow {
             session_id: session_id.to_string(),
             agent: "codex".to_string(),
-            model: Some("gpt-5-codex".to_string()),
+            models: Some("gpt-5-codex".to_string()),
             started_at: Some("2026-04-28T00:00:00Z".to_string()),
             last_activity: None,
             input_tokens: 1_200,

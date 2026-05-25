@@ -47,6 +47,7 @@ pub(super) fn synthetic_snapshot() -> crate::views::insights::state::InsightsSna
             cache_read_tokens: 1_000,
             cache_creation_tokens: 500,
             cost_usd,
+            unpriced_events: 0,
         }
     }
 
@@ -59,6 +60,7 @@ pub(super) fn synthetic_snapshot() -> crate::views::insights::state::InsightsSna
             output_tokens: 4_000,
             avg_cost: total_cost / 12.0,
             total_cost,
+            unpriced_events: 0,
         }
     }
 
@@ -70,6 +72,7 @@ pub(super) fn synthetic_snapshot() -> crate::views::insights::state::InsightsSna
             input_tokens: 30_000,
             output_tokens: 6_000,
             cost_usd,
+            unpriced_events: 0,
         }
     }
 
@@ -77,7 +80,7 @@ pub(super) fn synthetic_snapshot() -> crate::views::insights::state::InsightsSna
         LiveBlockRow {
             session_id: session_id.to_string(),
             agent: agent.to_string(),
-            model: Some("gpt-5-codex".to_string()),
+            models: Some("gpt-5-codex".to_string()),
             started_at: Some("2026-04-28T00:00:00Z".to_string()),
             last_activity: Some("2026-04-28T00:05:00Z".to_string()),
             input_tokens: 16_000,
