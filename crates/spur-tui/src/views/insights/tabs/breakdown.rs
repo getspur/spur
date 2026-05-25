@@ -182,6 +182,7 @@ mod tests {
             output_tokens: 250,
             avg_cost: total_cost / 8.0,
             total_cost,
+            unpriced_events: 0,
         }
     }
 
