@@ -1,12 +1,14 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use serde::Deserialize;
 use spur_graph::store::parquet::read_artifact_parquet_slim;
 use spur_graph::{
     artifact_from_facts, build_facts, read_artifact_parquet, write_artifact_parquet,
-    GraphIndexArtifact, WriteOptions,
+    GraphIndexArtifact, GraphQueryClient, InMemoryClient, ParquetClient, SearchFilters, SearchMode,
+    SearchOptions, WriteOptions,
 };
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +65,45 @@ fn bench_read_artifact_parquet_slim(c: &mut Criterion) {
     });
 }
 
+fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
+    let fixture = load_fixture();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let parquet_dir =
+        write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
+            .expect("write parquet artifact");
+    let query = search_benchmark_query(&fixture.artifact);
+    let options = SearchOptions {
+        query,
+        mode: SearchMode::Exact,
+        filters: SearchFilters::default(),
+        limit: 20,
+    };
+    let mut group = c.benchmark_group("bench_search_symbols_parquet_vs_inmemory");
+
+    group.bench_function("inmemory_load_then_search", |b| {
+        b.iter(|| {
+            let artifact = read_artifact_parquet(black_box(parquet_dir.as_path()))
+                .expect("read parquet artifact");
+            let in_memory = InMemoryClient::new(Arc::new(artifact));
+            let result = in_memory
+                .search_symbols(black_box(&options))
+                .expect("in-memory search symbols");
+            black_box(result);
+        })
+    });
+    group.bench_function("parquet_open_then_search", |b| {
+        b.iter(|| {
+            let parquet =
+                ParquetClient::open(black_box(parquet_dir.as_path())).expect("open parquet client");
+            let result = parquet
+                .search_symbols(black_box(&options))
+                .expect("parquet search symbols");
+            black_box(result);
+        })
+    });
+    group.finish();
+}
+
 fn load_fixture() -> Fixture {
     let baselines = baselines();
     let fixture_path = std::env::var_os("SPUR_GRAPH_PERF_FIXTURE")
@@ -96,6 +137,16 @@ fn load_fixture() -> Fixture {
     }
 }
 
+fn search_benchmark_query(artifact: &GraphIndexArtifact) -> String {
+    artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "handle_code_search")
+        .or_else(|| artifact.symbols.first())
+        .map(|symbol| symbol.entity_name.clone())
+        .expect("benchmark fixture has at least one symbol")
+}
+
 fn baselines() -> Baselines {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/baselines.json");
     let content = std::fs::read_to_string(&path)
@@ -121,6 +172,7 @@ criterion_group!(
     benches,
     bench_write_artifact_parquet,
     bench_read_artifact_parquet,
-    bench_read_artifact_parquet_slim
+    bench_read_artifact_parquet_slim,
+    bench_search_symbols_parquet_vs_inmemory
 );
 criterion_main!(benches);
