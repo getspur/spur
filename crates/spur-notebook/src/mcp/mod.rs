@@ -625,6 +625,10 @@ impl NotebookDaemonControl {
         }
     }
 
+    pub async fn current_path(&self) -> Option<PathBuf> {
+        self.state.lock().await.current_path.clone()
+    }
+
     async fn handle_notebook_store_control(
         &self,
         request: DaemonControlRequest,
