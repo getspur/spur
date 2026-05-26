@@ -553,56 +553,112 @@ fn find_codex_session_path(home: &Path, session_uuid: &str) -> Option<PathBuf> {
 
 fn parse_codex_history_from_jsonl(content: &str) -> Vec<spur_acp::HistoryEntry> {
     let mut entries = Vec::new();
+    let mut saw_response_item_user = false;
     for line in content.lines().filter(|line| !line.trim().is_empty()) {
         let json: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        let is_message = json.get("type").and_then(|value| value.as_str()) == Some("message")
-            || json.get("kind").and_then(|value| value.as_str()) == Some("message");
-        if !is_message {
-            continue;
-        }
+        match json.get("type").and_then(|value| value.as_str()) {
+            Some("response_item") => {
+                let Some(payload) = json.get("payload") else {
+                    continue;
+                };
 
-        let Some(role @ ("user" | "assistant")) = json.get("role").and_then(|value| value.as_str())
-        else {
-            continue;
-        };
-
-        let text = match json.get("content") {
-            Some(value) => {
-                if let Some(text) = value.as_str() {
-                    text.trim_end().to_string()
-                } else if let Some(blocks) = value.as_array() {
-                    blocks
-                        .iter()
-                        .filter_map(|block| {
-                            if block.get("type").and_then(|value| value.as_str()) == Some("text") {
-                                block.get("text").and_then(|value| value.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                        .trim_end()
-                        .to_string()
-                } else {
-                    String::new()
+                if payload.get("type").and_then(|value| value.as_str()) != Some("message") {
+                    continue;
                 }
-            }
-            None => String::new(),
-        };
 
-        if !text.trim().is_empty() {
-            entries.push(spur_acp::HistoryEntry {
-                role: role.into(),
-                text,
-            });
+                let Some(role @ ("user" | "assistant")) =
+                    payload.get("role").and_then(|value| value.as_str())
+                else {
+                    continue;
+                };
+
+                let Some(text) = extract_codex_message_text(payload.get("content")) else {
+                    continue;
+                };
+                let text = text.trim_end().to_string();
+
+                if text.trim().is_empty() {
+                    continue;
+                }
+
+                if role == "user" {
+                    let is_first_response_item_user = !saw_response_item_user;
+                    saw_response_item_user = true;
+                    if is_first_response_item_user
+                        && is_codex_framework_injected_user_message(&text)
+                    {
+                        continue;
+                    }
+                }
+
+                entries.push(spur_acp::HistoryEntry {
+                    role: role.into(),
+                    text,
+                });
+            }
+            Some("event_msg") => {
+                let Some(payload) = json.get("payload") else {
+                    continue;
+                };
+
+                if payload.get("type").and_then(|value| value.as_str()) != Some("user_message") {
+                    continue;
+                }
+
+                let Some(text) = payload
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .map(|text| text.trim())
+                else {
+                    continue;
+                };
+
+                if text.is_empty() {
+                    continue;
+                }
+
+                entries.push(spur_acp::HistoryEntry {
+                    role: "user".into(),
+                    text: text.to_string(),
+                });
+            }
+            _ => {}
         }
     }
     entries
+}
+
+fn extract_codex_message_text(content: Option<&serde_json::Value>) -> Option<String> {
+    let content = content?;
+
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+
+    let blocks = content.as_array()?;
+    Some(
+        blocks
+            .iter()
+            .filter_map(|block| {
+                let block_type = block.get("type").and_then(|value| value.as_str())?;
+                if matches!(block_type, "input_text" | "output_text" | "text") {
+                    block.get("text").and_then(|value| value.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn is_codex_framework_injected_user_message(text: &str) -> bool {
+    text.starts_with("# AGENTS.md instructions for ")
+        || text.starts_with("<permissions instructions>")
 }
 
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
@@ -879,20 +935,21 @@ not-json
     }
 
     #[test]
-    fn parses_codex_message_string_content() {
-        let entries =
-            parse_codex_history_from_jsonl(r#"{"type":"message","role":"user","content":"hi"}"#);
+    fn parses_codex_response_item_user_with_input_text_block() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"X"}]}}"#,
+        );
 
         assert_eq!(
             entry_pairs(entries),
-            vec![("user".to_string(), "hi".to_string())]
+            vec![("user".to_string(), "X".to_string())]
         );
     }
 
     #[test]
-    fn parses_codex_message_array_text_blocks() {
+    fn parses_codex_response_item_assistant_with_output_text_blocks() {
         let entries = parse_codex_history_from_jsonl(
-            r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"a"},{"type":"reasoning","text":"skip"},{"type":"output_text","text":"b"}]}}"#,
         );
 
         assert_eq!(
@@ -902,26 +959,114 @@ not-json
     }
 
     #[test]
-    fn skips_codex_non_message_lines() {
+    fn parses_codex_event_msg_user_message() {
         let entries = parse_codex_history_from_jsonl(
-            r#"{"type":"session_header","role":"user","content":"skip"}
-{"type":"message","role":"assistant","content":"keep"}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":" codex prompt "}}"#,
         );
 
         assert_eq!(
             entry_pairs(entries),
-            vec![("assistant".to_string(), "keep".to_string())]
+            vec![("user".to_string(), "codex prompt".to_string())]
         );
     }
 
     #[test]
-    fn skips_codex_empty_text_after_trim() {
+    fn skips_codex_developer_role() {
         let entries = parse_codex_history_from_jsonl(
-            r#"{"type":"message","role":"user","content":"   "}
-{"kind":"message","role":"assistant","content":[{"type":"text","text":"\n"}]}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"skip"}]}}"#,
         );
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn skips_codex_session_meta_and_unknown_event_msg() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"session_meta","payload":{"id":"session"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}
+{"type":"event_msg","payload":{"type":"token_count","input_tokens":1}}"#,
+        );
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn skips_codex_response_item_with_non_message_payload_type() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"summary_text","text":"skip"}]}}"#,
+        );
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parses_codex_string_content_payload() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"string payload\n"}}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![("user".to_string(), "string payload".to_string())]
+        );
+    }
+
+    #[test]
+    fn skips_codex_blank_and_malformed_lines() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"
+not-json
+{"type":"response_item","payload":{"type":"message","role":"user","content":"   "}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"before"}]}}
+{"type":
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"\n"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after"}]}}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![
+                ("user".to_string(), "before".to_string()),
+                ("assistant".to_string(), "after".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_preserves_order_across_event_msg_and_response_item() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"one"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"two"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"three"}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"four"}}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![
+                ("user".to_string(), "one".to_string()),
+                ("assistant".to_string(), "two".to_string()),
+                ("user".to_string(), "three".to_string()),
+                ("user".to_string(), "four".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_real_codex_rollout_fixture_shape() {
+        let content = include_str!("../../tests/fixtures/codex/sample_rollout.jsonl");
+        let entries = parse_codex_history_from_jsonl(content);
+
+        assert!(entries.iter().filter(|entry| entry.role == "user").count() >= 2);
+        assert!(entries.iter().any(|entry| entry.role == "assistant"));
+        assert!(!entries.iter().any(|entry| entry.role == "developer"));
+        assert!(entries
+            .iter()
+            .find(|entry| entry.role == "user")
+            .is_some_and(|entry| !entry.text.is_empty()));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.text.starts_with("# AGENTS.md instructions for ")));
     }
 
     #[test]
@@ -996,14 +1141,17 @@ not-json
     }
 
     #[test]
-    fn reads_codex_history_when_only_codex_path_exists() {
+    fn reads_codex_history_when_only_codex_path_exists_real_shape() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_codex_session(
             temp.path(),
             "codex-session",
-            r#"{"type":"session_header","content":"skip"}
-{"kind":"message","role":"user","content":"codex prompt"}
-{"type":"message","role":"assistant","content":[{"type":"text","text":"codex answer"}]}"#,
+            r#"{"type":"session_meta","payload":{"id":"codex-session"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"skip"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex prompt"}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"codex prompt canonical"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"codex answer"},{"type":"reasoning","text":"skip"}]}}"#,
         );
 
         let entries = with_home(temp.path(), || history_entries("codex-session"));
@@ -1012,6 +1160,7 @@ not-json
             entries,
             vec![
                 ("user".to_string(), "codex prompt".to_string()),
+                ("user".to_string(), "codex prompt canonical".to_string()),
                 ("assistant".to_string(), "codex answer".to_string())
             ]
         );
