@@ -1,7 +1,7 @@
 {
   "build": {
-    "beforeDevCommand": "npm run dev --prefix jute-notebook",
-    "beforeBuildCommand": "npm run build --prefix jute-notebook",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "jute-notebook/dist",
     "devUrl": "http://localhost:1420"
   },
@@ -27,7 +27,7 @@
   },
   "productName": "Jute",
   "mainBinaryName": "Jute",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "identifier": "com.ekzhang.jute",
   "plugins": {},
   "app": {
