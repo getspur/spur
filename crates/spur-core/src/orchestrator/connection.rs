@@ -261,13 +261,25 @@ impl Orchestrator {
                 .unwrap_or_default();
         }
 
-        let Some(context_path) = find_kimi_context_path(&home, session_uuid) else {
-            return Vec::new();
-        };
+        if let Some(context_path) = find_kimi_context_path(&home, session_uuid) {
+            return std::fs::read_to_string(&context_path)
+                .map(|content| parse_kimi_history_from_jsonl(&content))
+                .unwrap_or_default();
+        }
 
-        std::fs::read_to_string(&context_path)
-            .map(|content| parse_kimi_history_from_jsonl(&content))
-            .unwrap_or_default()
+        if let Some(path) = find_claude_session_path(&home, session_uuid) {
+            return std::fs::read_to_string(&path)
+                .map(|content| parse_claude_history_from_jsonl(&content))
+                .unwrap_or_default();
+        }
+
+        if let Some(path) = find_codex_session_path(&home, session_uuid) {
+            return std::fs::read_to_string(&path)
+                .map(|content| parse_codex_history_from_jsonl(&content))
+                .unwrap_or_default();
+        }
+
+        Vec::new()
     }
 }
 
@@ -392,6 +404,207 @@ fn parse_kimi_history_from_jsonl(content: &str) -> Vec<spur_acp::HistoryEntry> {
     entries
 }
 
+fn find_claude_session_path(home: &Path, session_uuid: &str) -> Option<PathBuf> {
+    let projects_root = home.join(".claude/projects");
+    let mut project_dirs = std::fs::read_dir(&projects_root)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    project_dirs.sort();
+
+    for project_dir in project_dirs {
+        let session_path = project_dir.join(format!("{session_uuid}.jsonl"));
+        if session_path.is_file() {
+            return Some(session_path);
+        }
+    }
+
+    None
+}
+
+fn parse_claude_history_from_jsonl(content: &str) -> Vec<spur_acp::HistoryEntry> {
+    let mut entries = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let json: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        match json.get("type").and_then(|value| value.as_str()) {
+            Some("user") => {
+                if json
+                    .get("isMeta")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                let Some(text) = json
+                    .pointer("/message/content")
+                    .and_then(|value| value.as_str())
+                    .map(|text| text.trim_end())
+                else {
+                    continue;
+                };
+
+                if !text.trim().is_empty() {
+                    entries.push(spur_acp::HistoryEntry {
+                        role: "user".into(),
+                        text: text.to_string(),
+                    });
+                }
+            }
+            Some("assistant") => {
+                let text = match json.pointer("/message/content") {
+                    Some(value) => {
+                        if let Some(text) = value.as_str() {
+                            text.trim_end().to_string()
+                        } else if let Some(blocks) = value.as_array() {
+                            blocks
+                                .iter()
+                                .filter_map(|block| {
+                                    if block.get("type").and_then(|value| value.as_str())
+                                        == Some("text")
+                                    {
+                                        block.get("text").and_then(|value| value.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                                .trim_end()
+                                .to_string()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    None => String::new(),
+                };
+
+                if !text.trim().is_empty() {
+                    entries.push(spur_acp::HistoryEntry {
+                        role: "assistant".into(),
+                        text,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    entries
+}
+
+fn find_codex_session_path(home: &Path, session_uuid: &str) -> Option<PathBuf> {
+    let sessions_root = home.join(".codex/sessions");
+    let mut year_dirs = std::fs::read_dir(&sessions_root)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    year_dirs.sort();
+
+    for year_dir in year_dirs {
+        let Ok(months) = std::fs::read_dir(&year_dir) else {
+            continue;
+        };
+        let mut month_dirs = months
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        month_dirs.sort();
+
+        for month_dir in month_dirs {
+            let Ok(days) = std::fs::read_dir(&month_dir) else {
+                continue;
+            };
+            let mut day_dirs = days
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            day_dirs.sort();
+
+            for day_dir in day_dirs {
+                let Ok(files) = std::fs::read_dir(&day_dir) else {
+                    continue;
+                };
+                let mut files = files
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| path.is_file())
+                    .collect::<Vec<_>>();
+                files.sort();
+
+                for path in files {
+                    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                        continue;
+                    };
+                    if file_name.contains(session_uuid) && file_name.ends_with(".jsonl") {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_codex_history_from_jsonl(content: &str) -> Vec<spur_acp::HistoryEntry> {
+    let mut entries = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let json: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let is_message = json.get("type").and_then(|value| value.as_str()) == Some("message")
+            || json.get("kind").and_then(|value| value.as_str()) == Some("message");
+        if !is_message {
+            continue;
+        }
+
+        let Some(role @ ("user" | "assistant")) = json.get("role").and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+
+        let text = match json.get("content") {
+            Some(value) => {
+                if let Some(text) = value.as_str() {
+                    text.trim_end().to_string()
+                } else if let Some(blocks) = value.as_array() {
+                    blocks
+                        .iter()
+                        .filter_map(|block| {
+                            if block.get("type").and_then(|value| value.as_str()) == Some("text") {
+                                block.get("text").and_then(|value| value.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim_end()
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            }
+            None => String::new(),
+        };
+
+        if !text.trim().is_empty() {
+            entries.push(spur_acp::HistoryEntry {
+                role: role.into(),
+                text,
+            });
+        }
+    }
+    entries
+}
+
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
 ///
 /// Single source of truth for the `match transport { Acp/Stdio/CliWrap/StreamJson }`
@@ -465,8 +678,30 @@ mod tests {
         std::fs::write(session_dir.join("context.jsonl"), content).expect("write context");
     }
 
+    fn write_claude_session(home: &Path, project: &str, session_uuid: &str, content: &str) {
+        let session_dir = home.join(".claude/projects").join(project);
+        std::fs::create_dir_all(&session_dir).expect("create claude session dir");
+        std::fs::write(session_dir.join(format!("{session_uuid}.jsonl")), content)
+            .expect("write claude session");
+    }
+
+    fn write_codex_session(home: &Path, session_uuid: &str, content: &str) -> PathBuf {
+        let session_dir = home.join(".codex/sessions/2026/05/26");
+        std::fs::create_dir_all(&session_dir).expect("create codex session dir");
+        let path = session_dir.join(format!("rollout-2026-05-26T00-00-00-{session_uuid}.jsonl"));
+        std::fs::write(&path, content).expect("write codex session");
+        path
+    }
+
     fn history_entries(session_uuid: &str) -> Vec<(String, String)> {
         Orchestrator::read_session_history_from_disk(session_uuid)
+            .into_iter()
+            .map(|entry| (entry.role, entry.text))
+            .collect()
+    }
+
+    fn entry_pairs(entries: Vec<spur_acp::HistoryEntry>) -> Vec<(String, String)> {
+        entries
             .into_iter()
             .map(|entry| (entry.role, entry.text))
             .collect()
@@ -558,5 +793,227 @@ mod tests {
         let entries = with_home(temp.path(), || history_entries("missing-session"));
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parses_claude_user_string_content_as_history() {
+        let entries = parse_claude_history_from_jsonl(
+            r#"{"type":"user","message":{"content":"hello from claude"}}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![("user".to_string(), "hello from claude".to_string())]
+        );
+    }
+
+    #[test]
+    fn skips_claude_user_meta_entries() {
+        let entries = parse_claude_history_from_jsonl(
+            r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>"}}
+{"type":"user","isMeta":true,"message":{"content":"/model opus"}}"#,
+        );
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn skips_claude_user_tool_result_arrays() {
+        let entries = parse_claude_history_from_jsonl(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ignored"}]}}"#,
+        );
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parses_claude_assistant_text_blocks() {
+        let entries = parse_claude_history_from_jsonl(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"tool_use","name":"Edit"},{"type":"text","text":"second"}]}}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![("assistant".to_string(), "first\nsecond".to_string())]
+        );
+    }
+
+    #[test]
+    fn skips_blank_and_malformed_claude_lines() {
+        let entries = parse_claude_history_from_jsonl(
+            r#"
+not-json
+{"type":"user","message":{"content":"first"}}
+
+{"type":"assistant","message":{"content":"second"}}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![
+                ("user".to_string(), "first".to_string()),
+                ("assistant".to_string(), "second".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_preserves_order_user_assistant_user() {
+        let entries = parse_claude_history_from_jsonl(
+            r#"{"type":"user","message":{"content":"one"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"two"}]}}
+{"type":"user","message":{"content":"three"}}"#,
+        );
+
+        assert_eq!(
+            entries
+                .into_iter()
+                .map(|entry| (entry.role, entry.text))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user".to_string(), "one".to_string()),
+                ("assistant".to_string(), "two".to_string()),
+                ("user".to_string(), "three".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_codex_message_string_content() {
+        let entries =
+            parse_codex_history_from_jsonl(r#"{"type":"message","role":"user","content":"hi"}"#);
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![("user".to_string(), "hi".to_string())]
+        );
+    }
+
+    #[test]
+    fn parses_codex_message_array_text_blocks() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![("assistant".to_string(), "a\nb".to_string())]
+        );
+    }
+
+    #[test]
+    fn skips_codex_non_message_lines() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"session_header","role":"user","content":"skip"}
+{"type":"message","role":"assistant","content":"keep"}"#,
+        );
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![("assistant".to_string(), "keep".to_string())]
+        );
+    }
+
+    #[test]
+    fn skips_codex_empty_text_after_trim() {
+        let entries = parse_codex_history_from_jsonl(
+            r#"{"type":"message","role":"user","content":"   "}
+{"kind":"message","role":"assistant","content":[{"type":"text","text":"\n"}]}"#,
+        );
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn find_claude_session_path_locates_file_in_first_matching_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let uuid = "claude-session";
+        write_claude_session(temp.path(), "proj-a", uuid, "{}");
+
+        let path = find_claude_session_path(temp.path(), uuid);
+
+        assert_eq!(
+            path,
+            Some(
+                temp.path()
+                    .join(".claude/projects/proj-a")
+                    .join(format!("{uuid}.jsonl"))
+            )
+        );
+    }
+
+    #[test]
+    fn find_claude_session_path_returns_none_when_uuid_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_claude_session(temp.path(), "proj-a", "other-session", "{}");
+
+        let path = find_claude_session_path(temp.path(), "missing-session");
+
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn find_codex_session_path_locates_jsonl_under_year_month_day() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let uuid = "codex-session";
+        let expected = write_codex_session(temp.path(), uuid, "{}");
+
+        let path = find_codex_session_path(temp.path(), uuid);
+
+        assert_eq!(path, Some(expected));
+    }
+
+    #[test]
+    fn find_codex_session_path_returns_none_when_uuid_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_codex_session(temp.path(), "other-session", "{}");
+
+        let path = find_codex_session_path(temp.path(), "missing-session");
+
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn reads_claude_history_when_only_claude_path_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_claude_session(
+            temp.path(),
+            "-Volumes-Projects-spur",
+            "claude-session",
+            r#"{"type":"user","message":{"content":"claude prompt"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"claude answer"}]}}"#,
+        );
+
+        let entries = with_home(temp.path(), || history_entries("claude-session"));
+
+        assert_eq!(
+            entries,
+            vec![
+                ("user".to_string(), "claude prompt".to_string()),
+                ("assistant".to_string(), "claude answer".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_codex_history_when_only_codex_path_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_codex_session(
+            temp.path(),
+            "codex-session",
+            r#"{"type":"session_header","content":"skip"}
+{"kind":"message","role":"user","content":"codex prompt"}
+{"type":"message","role":"assistant","content":[{"type":"text","text":"codex answer"}]}"#,
+        );
+
+        let entries = with_home(temp.path(), || history_entries("codex-session"));
+
+        assert_eq!(
+            entries,
+            vec![
+                ("user".to_string(), "codex prompt".to_string()),
+                ("assistant".to_string(), "codex answer".to_string())
+            ]
+        );
     }
 }
