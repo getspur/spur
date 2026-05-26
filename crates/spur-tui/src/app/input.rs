@@ -164,6 +164,12 @@ impl App {
 
                 // Global Ctrl+K opens palette. Plain `:` is a Dashboard Navigate
                 // alias only, so Compose mode can still type the character.
+                // NOTE: This global Ctrl+K intercept shadows InputBar::handle_emacs_input's
+                // Ctrl+K kill-to-EOL (input_bar.rs:581). That Emacs binding stays in place
+                // because (a) it is part of InputBar's component contract — tests/input_bar_editing.rs
+                // ::ctrl_k_deletes_to_end_of_line covers it directly — and (b) any future
+                // InputBar consumer not sitting behind this dispatcher will need it. The
+                // shadowing is intentional, not dead code.
                 let is_ctrl_k = key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char('k'));
                 let is_dashboard_colon_alias = key.code == KeyCode::Char(':')
