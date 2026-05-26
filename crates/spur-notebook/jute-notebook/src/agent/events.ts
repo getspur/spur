@@ -63,8 +63,12 @@ function runAsync(label: string, action: () => Promise<void>) {
 export function listenForNotebookEvents(notebook: Notebook): () => void {
   const registrations = [
     listen<RunCellEventPayload>("notebook://run_cell_event", (event) => {
-      if (event.payload.kernel_id !== notebook.state.kernelId) return;
-      notebook.handleRunCellEvent(event.payload.cell_id, event.payload.event);
+      runAsync("notebook://run_cell_event", async () => {
+        const { inProcStore } = await loadNotebookRuntimeConfig();
+        if (inProcStore) return;
+        if (event.payload.kernel_id !== notebook.state.kernelId) return;
+        notebook.handleRunCellEvent(event.payload.cell_id, event.payload.event);
+      });
     }),
     listen("notebook://kernel_changed", () => {
       runAsync("notebook://kernel_changed", async () => {
