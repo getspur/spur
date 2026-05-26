@@ -620,17 +620,15 @@ impl App {
             }
 
             Action::NewSessionRequested => {
-                // Shut down the current brain atomically so picker [+ New session]
-                // doesn't leave the old agent subprocess's session running.
-                // Orchestrator's NewSessionWithMessage arm with empty blocks is
-                // defined as "retire current brain, defer spawn to next Message."
+                // Retire the current brain AND eagerly spawn a fresh session so
+                // the user lands directly on the new SessionDetail view (via the
+                // SessionCreated auto-navigate at events.rs). Distinct from
+                // ClearSession, which uses NewSessionWithMessage{empty} to defer
+                // spawn until the next Message — that path preserves the open
+                // SessionDetail for the `/clear` reset banner.
                 if let Some(ref tx) = self.user_input_tx {
-                    let _ = tx.try_send(UserInput::NewSessionWithMessage {
-                        blocks: vec![],
-                        interrupt: false,
-                    });
+                    let _ = tx.try_send(UserInput::NewSession);
                 }
-                self.navigate_to(ViewId::Dashboard);
             }
 
             Action::TogglePlanMode => {

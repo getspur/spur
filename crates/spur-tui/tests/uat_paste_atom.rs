@@ -52,6 +52,7 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::SetSessionConfigOption { .. } => "SetSessionConfigOption",
         UserInput::SetSessionModel { .. } => "SetSessionModel",
         UserInput::AddIssueComment { .. } => "AddIssueComment",
+        UserInput::NewSession => "NewSession",
     }
 }
 
