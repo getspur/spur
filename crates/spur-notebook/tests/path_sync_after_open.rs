@@ -72,6 +72,8 @@ mod unix {
             Ok(format!("window-{}", path.display()))
         }
 
+        fn emit_recents_changed(&self) {}
+
         fn exit(&self) {}
     }
 
