@@ -15,7 +15,7 @@ use base64::Engine as _;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::{ByteArray, ByteArrayType, FloatType, Int32Type, Int64Type};
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
 use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::ColumnPath;
@@ -737,6 +737,9 @@ mod edge_rows_test {
 }
 
 fn write_nodes(path: &Path, rows: &[NodeRow]) -> anyhow::Result<()> {
+    let mut rows = rows.to_vec();
+    rows.sort_by(|a, b| a.symbol.stable_symbol_id.cmp(&b.symbol.stable_symbol_id));
+
     write_table(
         path,
         r#"
@@ -765,6 +768,12 @@ fn write_nodes(path: &Path, rows: &[NodeRow]) -> anyhow::Result<()> {
             } else {
                 ""
             },
+        ],
+        &[
+            "stable_symbol_id",
+            "file_path",
+            "entity_name",
+            "qualified_name",
         ],
         vec![
             ColumnData::RequiredString(
@@ -857,6 +866,7 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
             "edge_kind",
             "bind_method",
         ],
+        &["source_stable_id", "target_stable_id"],
         vec![
             ColumnData::RequiredString(
                 rows.iter()
@@ -936,6 +946,7 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
             "edge_kind",
             "bind_method",
         ],
+        &["source_stable_id", "target_label"],
         vec![
             ColumnData::RequiredString(
                 rows.iter()
@@ -978,6 +989,9 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
 }
 
 fn write_files(path: &Path, rows: &[FileRow]) -> anyhow::Result<()> {
+    let mut rows = rows.to_vec();
+    rows.sort_by(|a, b| a.file.file_path.cmp(&b.file.file_path));
+
     write_table(
         path,
         r#"
@@ -987,6 +1001,7 @@ fn write_files(path: &Path, rows: &[FileRow]) -> anyhow::Result<()> {
           required binary file_path (STRING);
         }
         "#,
+        &["file_path"],
         &["file_path"],
         vec![
             ColumnData::RequiredString(
@@ -1005,6 +1020,9 @@ fn write_files(path: &Path, rows: &[FileRow]) -> anyhow::Result<()> {
 }
 
 fn write_file_manifests(path: &Path, rows: &[GraphFileManifestEntry]) -> anyhow::Result<()> {
+    let mut rows = rows.to_vec();
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+
     write_table(
         path,
         r#"
@@ -1020,6 +1038,7 @@ fn write_file_manifests(path: &Path, rows: &[GraphFileManifestEntry]) -> anyhow:
         }
         "#,
         &["path"],
+        &["stable_file_id", "path"],
         vec![
             ColumnData::RequiredString(rows.iter().map(|row| row.stable_file_id.clone()).collect()),
             ColumnData::RequiredString(rows.iter().map(|row| row.path.clone()).collect()),
@@ -1040,6 +1059,9 @@ fn write_file_manifests(path: &Path, rows: &[GraphFileManifestEntry]) -> anyhow:
 }
 
 fn write_tombstones(path: &Path, rows: &[GraphTombstoneEntry]) -> anyhow::Result<()> {
+    let mut rows = rows.to_vec();
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+
     write_table(
         path,
         r#"
@@ -1049,6 +1071,7 @@ fn write_tombstones(path: &Path, rows: &[GraphTombstoneEntry]) -> anyhow::Result
         }
         "#,
         &["path"],
+        &["stable_file_id", "path"],
         vec![
             ColumnData::RequiredString(rows.iter().map(|row| row.path.clone()).collect()),
             ColumnData::RequiredString(rows.iter().map(|row| row.stable_file_id.clone()).collect()),
@@ -1061,7 +1084,7 @@ fn write_commits(
     rows: &[CommitArtifact],
     _options: &WriteOptions,
 ) -> anyhow::Result<usize> {
-    let rows: Vec<CommitRow> = rows
+    let mut rows: Vec<CommitRow> = rows
         .iter()
         .map(|row| CommitRow {
             sha: row.sha.clone(),
@@ -1070,6 +1093,8 @@ fn write_commits(
             summary: row.summary.clone(),
         })
         .collect();
+    rows.sort_by(|a, b| a.sha.cmp(&b.sha));
+
     write_table(
         path,
         r#"
@@ -1085,6 +1110,7 @@ fn write_commits(
         }
         "#,
         &["sha", "summary"],
+        &["sha"],
         vec![
             ColumnData::RequiredString(rows.iter().map(|row| row.sha.clone()).collect()),
             ColumnData::RequiredListString(rows.iter().map(|row| row.parents.clone()).collect()),
@@ -1100,7 +1126,7 @@ fn write_symbol_snapshots(
     rows: &[SymbolSnapshotArtifact],
     _options: &WriteOptions,
 ) -> anyhow::Result<usize> {
-    let rows = rows
+    let mut rows = rows
         .iter()
         .map(|row| {
             Ok(SymbolSnapshotRow {
@@ -1119,6 +1145,12 @@ fn write_symbol_snapshots(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    rows.sort_by(|a, b| {
+        a.key_stable_symbol_id
+            .cmp(&b.key_stable_symbol_id)
+            .then(a.key_commit.cmp(&b.key_commit))
+    });
+
     write_table(
         path,
         r#"
@@ -1154,6 +1186,7 @@ fn write_symbol_snapshots(
             },
             "anchor_hash",
         ],
+        &["key_stable_symbol_id"],
         vec![
             ColumnData::RequiredString(
                 rows.iter()
@@ -1183,7 +1216,7 @@ fn write_temporal_edges(
     rows: &[TemporalEdgeArtifact],
     _options: &WriteOptions,
 ) -> anyhow::Result<usize> {
-    let rows: Vec<TemporalEdgeRow> = rows
+    let mut rows: Vec<TemporalEdgeRow> = rows
         .iter()
         .map(|row| {
             let (source_path_b64, source_stable_symbol_id, source_commit) =
@@ -1214,6 +1247,12 @@ fn write_temporal_edges(
             }
         })
         .collect();
+    rows.sort_by(|a, b| {
+        a.target_stable_symbol_id
+            .cmp(&b.target_stable_symbol_id)
+            .then(a.source_commit.cmp(&b.source_commit))
+    });
+
     write_table(
         path,
         r#"
@@ -1235,6 +1274,7 @@ fn write_temporal_edges(
         }
         "#,
         &["source_kind", "target_kind", "relation", "change_kind"],
+        &["target_stable_symbol_id"],
         vec![
             ColumnData::RequiredString(rows.iter().map(|row| row.source_kind.clone()).collect()),
             ColumnData::OptionalString(
@@ -1288,6 +1328,7 @@ fn write_diagnostics(path: &Path, rows: &[String]) -> anyhow::Result<usize> {
         }
         "#,
         &["message"],
+        &[],
         vec![ColumnData::RequiredString(rows.to_vec())],
     )?;
     Ok(rows.len())
@@ -1297,6 +1338,7 @@ fn write_table(
     path: &Path,
     schema: &str,
     dictionary_columns: &[&str],
+    bloom_filter_columns: &[&str],
     columns: Vec<ColumnData>,
 ) -> anyhow::Result<()> {
     let row_count = columns.first().map(ColumnData::len).unwrap_or(0);
@@ -1309,7 +1351,7 @@ fn write_table(
     let schema = Arc::new(parse_message_type(schema).context("failed to parse Parquet schema")?);
     let file =
         File::create(path).with_context(|| format!("failed to create `{}`", path.display()))?;
-    let props = Arc::new(writer_properties(dictionary_columns)?);
+    let props = Arc::new(writer_properties(dictionary_columns, bloom_filter_columns)?);
     let mut writer =
         SerializedFileWriter::new(file, schema, props).context("failed to create writer")?;
 
@@ -1448,13 +1490,17 @@ fn parquet_temp_dir_is_stale(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn writer_properties(dictionary_columns: &[&str]) -> anyhow::Result<WriterProperties> {
+fn writer_properties(
+    dictionary_columns: &[&str],
+    bloom_filter_columns: &[&str],
+) -> anyhow::Result<WriterProperties> {
     let mut builder = WriterProperties::builder()
         .set_compression(Compression::ZSTD(
             ZstdLevel::try_new(3).context("invalid zstd compression level")?,
         ))
         .set_max_row_group_size(PARQUET_ROW_GROUP_SIZE)
-        .set_dictionary_enabled(false);
+        .set_dictionary_enabled(false)
+        .set_statistics_enabled(EnabledStatistics::Page);
 
     for column in dictionary_columns
         .iter()
@@ -1462,6 +1508,15 @@ fn writer_properties(dictionary_columns: &[&str]) -> anyhow::Result<WriterProper
         .filter(|column| !column.is_empty())
     {
         builder = builder.set_column_dictionary_enabled(ColumnPath::from(column), true);
+    }
+    for column in bloom_filter_columns
+        .iter()
+        .copied()
+        .filter(|column| !column.is_empty())
+    {
+        builder = builder
+            .set_column_bloom_filter_enabled(ColumnPath::from(column), true)
+            .set_column_bloom_filter_fpp(ColumnPath::from(column), 0.01);
     }
     Ok(builder.build())
 }
@@ -2583,11 +2638,14 @@ mod helpers_test {
 
 #[cfg(test)]
 mod parquet_temporal_test {
+    use std::fs::File;
+
     use super::*;
     use crate::{
         ChangeKind, CommitArtifact, EdgeEndpoint, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
         TemporalEdgeArtifact,
     };
+    use parquet::file::reader::{FileReader, SerializedFileReader};
 
     #[test]
     fn commits_round_trip() -> anyhow::Result<()> {
@@ -2660,17 +2718,6 @@ mod parquet_temporal_test {
         let new_symbol = snapshot_key("sym-new", "c2");
         let rows = vec![
             TemporalEdgeArtifact {
-                source: EdgeEndpoint::Snapshot {
-                    key: old_symbol.clone(),
-                },
-                target: EdgeEndpoint::Snapshot {
-                    key: new_symbol.clone(),
-                },
-                relation: RelationKind::Touches,
-                parent: Some("c1".to_string()),
-                change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_symbol))),
-            },
-            TemporalEdgeArtifact {
                 source: EdgeEndpoint::Commit {
                     sha: "c3".to_string(),
                 },
@@ -2682,6 +2729,17 @@ mod parquet_temporal_test {
                 change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::File(
                     GitPath::from_bytes(b"src/old-name.rs".to_vec()),
                 ))),
+            },
+            TemporalEdgeArtifact {
+                source: EdgeEndpoint::Snapshot {
+                    key: old_symbol.clone(),
+                },
+                target: EdgeEndpoint::Snapshot {
+                    key: new_symbol.clone(),
+                },
+                relation: RelationKind::Touches,
+                parent: Some("c1".to_string()),
+                change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_symbol))),
             },
         ];
 
@@ -2717,17 +2775,6 @@ mod parquet_temporal_test {
         ];
         artifact.symbol_snapshots = vec![
             SymbolSnapshotArtifact {
-                key: old_symbol.clone(),
-                file_path: GitPath::from_bytes(b"src/old.rs".to_vec()),
-                entity_name: "alpha".to_string(),
-                symbol_kind: "function".to_string(),
-                enclosing_scope: Some("mod root".to_string()),
-                byte_range: [10, 42],
-                line_range: [2, 5],
-                anchor_hash: "anchor-old".to_string(),
-                tokens: vec!["alpha".to_string(), "body".to_string()],
-            },
-            SymbolSnapshotArtifact {
                 key: new_symbol.clone(),
                 file_path: GitPath::from_bytes(b"src/new.rs".to_vec()),
                 entity_name: "beta".to_string(),
@@ -2738,19 +2785,19 @@ mod parquet_temporal_test {
                 anchor_hash: "anchor-new".to_string(),
                 tokens: vec!["beta".to_string(), "body".to_string()],
             },
+            SymbolSnapshotArtifact {
+                key: old_symbol.clone(),
+                file_path: GitPath::from_bytes(b"src/old.rs".to_vec()),
+                entity_name: "alpha".to_string(),
+                symbol_kind: "function".to_string(),
+                enclosing_scope: Some("mod root".to_string()),
+                byte_range: [10, 42],
+                line_range: [2, 5],
+                anchor_hash: "anchor-old".to_string(),
+                tokens: vec!["alpha".to_string(), "body".to_string()],
+            },
         ];
         artifact.temporal_edges = vec![
-            TemporalEdgeArtifact {
-                source: EdgeEndpoint::Commit {
-                    sha: "c2".to_string(),
-                },
-                target: EdgeEndpoint::Snapshot {
-                    key: new_symbol.clone(),
-                },
-                relation: RelationKind::Touches,
-                parent: Some("c1".to_string()),
-                change_kind: Some(ChangeKind::Added),
-            },
             TemporalEdgeArtifact {
                 source: EdgeEndpoint::Snapshot {
                     key: old_symbol.clone(),
@@ -2761,6 +2808,17 @@ mod parquet_temporal_test {
                 relation: RelationKind::Touches,
                 parent: Some("c1".to_string()),
                 change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_symbol))),
+            },
+            TemporalEdgeArtifact {
+                source: EdgeEndpoint::Commit {
+                    sha: "c2".to_string(),
+                },
+                target: EdgeEndpoint::Snapshot {
+                    key: new_symbol.clone(),
+                },
+                relation: RelationKind::Touches,
+                parent: Some("c1".to_string()),
+                change_kind: Some(ChangeKind::Added),
             },
         ];
 
@@ -2882,6 +2940,70 @@ mod parquet_temporal_test {
         assert!(decoded.commits.is_empty());
         assert!(decoded.symbol_snapshots.is_empty());
         assert!(decoded.temporal_edges.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn parquet_writer_emits_node_stats_bloom_filter_and_sorted_ids() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut artifact = empty_artifact("node-stats-bloom-sort");
+        artifact.symbols = vec![
+            GraphSymbolArtifact {
+                stable_symbol_id: "sym-z".to_string(),
+                file_path: "src/a.rs".to_string(),
+                byte_range: [0, 8],
+                line_range: [1, 2],
+                entity_name: "zeta".to_string(),
+                qualified_name: "crate::zeta".to_string(),
+                symbol_kind: "function".to_string(),
+                anchor_hash: "anchor-z".to_string(),
+                enclosing_scope: None,
+            },
+            GraphSymbolArtifact {
+                stable_symbol_id: "sym-a".to_string(),
+                file_path: "src/z.rs".to_string(),
+                byte_range: [10, 18],
+                line_range: [3, 4],
+                entity_name: "alpha".to_string(),
+                qualified_name: "crate::alpha".to_string(),
+                symbol_kind: "function".to_string(),
+                anchor_hash: "anchor-a".to_string(),
+                enclosing_scope: None,
+            },
+            GraphSymbolArtifact {
+                stable_symbol_id: "sym-m".to_string(),
+                file_path: "src/m.rs".to_string(),
+                byte_range: [20, 28],
+                line_range: [5, 6],
+                entity_name: "middle".to_string(),
+                qualified_name: "crate::middle".to_string(),
+                symbol_kind: "function".to_string(),
+                anchor_hash: "anchor-m".to_string(),
+                enclosing_scope: None,
+            },
+        ];
+        artifact.symbol_node_ids = vec![NodeId(1), NodeId(2), NodeId(3)];
+
+        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        let reader = SerializedFileReader::new(File::open(dir.join("nodes.parquet"))?)?;
+        let metadata = reader.metadata();
+        let stable_symbol_id_column = metadata.row_group(0).column(0);
+        let stats = stable_symbol_id_column
+            .statistics()
+            .expect("stable_symbol_id should have row-group statistics");
+
+        assert!(stats.min_bytes_opt().is_some());
+        assert!(stats.max_bytes_opt().is_some());
+        assert!(stable_symbol_id_column.bloom_filter_offset().is_some());
+
+        let decoded = read_artifact_parquet(&dir)?;
+        let stable_symbol_ids = decoded
+            .symbols
+            .iter()
+            .map(|symbol| symbol.stable_symbol_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(stable_symbol_ids, vec!["sym-a", "sym-m", "sym-z"]);
         Ok(())
     }
 
