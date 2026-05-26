@@ -19,7 +19,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::{
     io::AsyncWriteExt,
     net::{UnixListener, UnixStream},
@@ -409,6 +409,7 @@ pub struct NotebookDaemonControl {
     windows: Arc<dyn DaemonWindowOps>,
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
     last_record_path: Option<PathBuf>,
+    recents_record_path: Option<PathBuf>,
 }
 
 #[doc(hidden)]
@@ -416,6 +417,7 @@ pub trait DaemonWindowOps: Send + Sync {
     fn show_and_focus(&self, label: &str) -> bool;
     fn hide(&self, label: &str);
     fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError>;
+    fn emit_recents_changed(&self);
     fn exit(&self);
 }
 
@@ -449,6 +451,12 @@ impl DaemonWindowOps for TauriDaemonWindowOps {
         Ok(window.label().to_string())
     }
 
+    fn emit_recents_changed(&self) {
+        let _ = self
+            .app
+            .emit(self::tools::RECENTS_CHANGED_EVENT, &json!({}));
+    }
+
     fn exit(&self) {
         self.app.exit(0);
     }
@@ -476,6 +484,10 @@ pub struct DaemonControlRequest {
     pub command: String,
     #[serde(default)]
     pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub from: Option<PathBuf>,
+    #[serde(default)]
+    pub to: Option<PathBuf>,
     #[serde(default)]
     pub pinned: Option<bool>,
     #[serde(default)]
@@ -571,6 +583,7 @@ impl NotebookDaemonControl {
             windows,
             state: Arc::new(tokio::sync::Mutex::new(NotebookDaemonState::default())),
             last_record_path,
+            recents_record_path: None,
         }
     }
 
@@ -583,6 +596,21 @@ impl NotebookDaemonControl {
         last_record_path: Option<PathBuf>,
     ) -> Self {
         Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path)
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_recents_record(
+        bridge: Arc<AgentBridge>,
+        requester: Arc<dyn BridgeRequester>,
+        jute_state: Arc<State>,
+        windows: Arc<dyn DaemonWindowOps>,
+        last_record_path: Option<PathBuf>,
+        recents_record_path: Option<PathBuf>,
+    ) -> Self {
+        let mut control =
+            Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path);
+        control.recents_record_path = recents_record_path;
+        control
     }
 
     #[doc(hidden)]
@@ -672,8 +700,10 @@ impl NotebookDaemonControl {
                 })?;
                 self.save_current().await?;
                 let path = self.open_path(resolve_notebook_path(path)).await?;
-                if let Err(error) = recents::record_open(&path).await {
+                if let Err(error) = self.record_recent_open(&path).await {
                     warn!(%error, path = %path.display(), "failed to record recent notebook");
+                } else {
+                    self.windows.emit_recents_changed();
                 }
                 Ok(DaemonControlSuccess::path(path))
             }
@@ -687,12 +717,29 @@ impl NotebookDaemonControl {
                             message: error.to_string(),
                         })?;
                 let path = self.open_path(path).await?;
-                if let Err(error) = recents::record_open(&path).await {
+                if let Err(error) = self.record_recent_open(&path).await {
                     warn!(%error, path = %path.display(), "failed to record recent notebook");
+                } else {
+                    self.windows.emit_recents_changed();
                 }
                 Ok(DaemonControlSuccess::path(path))
             }
             "reopen" => self.reopen().await.map(DaemonControlSuccess::path),
+            "rename" => {
+                let from = request.from.ok_or_else(|| BridgeError::Handler {
+                    code: "invalid_params".to_string(),
+                    message: "rename requires from".to_string(),
+                })?;
+                let to = request.to.ok_or_else(|| BridgeError::Handler {
+                    code: "invalid_params".to_string(),
+                    message: "rename requires to".to_string(),
+                })?;
+                self.save_current().await?;
+                let path = self
+                    .rename_path(resolve_notebook_path(from), resolve_notebook_path(to))
+                    .await?;
+                Ok(DaemonControlSuccess::path(path))
+            }
             "close" => {
                 self.save_current().await?;
                 self.close_current_window().await;
@@ -705,6 +752,7 @@ impl NotebookDaemonControl {
                 if let Err(error) = self.clear_last_notebook().await {
                     warn!(%error, "failed to clear last notebook record");
                 }
+                self.windows.emit_recents_changed();
                 Ok(DaemonControlSuccess::empty())
             }
             "list_recents" => recents::list_recents()
@@ -725,6 +773,7 @@ impl NotebookDaemonControl {
                         code: "recents_failed".to_string(),
                         message: error.to_string(),
                     })?;
+                self.windows.emit_recents_changed();
                 Ok(DaemonControlSuccess::empty())
             }
             "set_pinned" => {
@@ -742,6 +791,7 @@ impl NotebookDaemonControl {
                         code: "recents_failed".to_string(),
                         message: error.to_string(),
                     })?;
+                self.windows.emit_recents_changed();
                 Ok(DaemonControlSuccess::empty())
             }
             "shutdown" => {
@@ -797,6 +847,59 @@ impl NotebookDaemonControl {
                 code: "save_failed".to_string(),
                 message: error.to_string(),
             })
+    }
+
+    async fn record_recent_open(&self, path: &Path) -> Result<()> {
+        match self.recents_record_path.as_deref() {
+            Some(record_path) => recents::record_open_at(record_path, &scratch_dir()?, path).await,
+            None => recents::record_open(path).await,
+        }
+    }
+
+    async fn rename_recent_path(&self, from: &Path, to: &Path) -> Result<()> {
+        match self.recents_record_path.as_deref() {
+            Some(record_path) => recents::rename_path_at(record_path, from, to).await,
+            None => recents::rename_path(from, to).await,
+        }
+    }
+
+    async fn rename_path(&self, from: PathBuf, to: PathBuf) -> Result<PathBuf, BridgeError> {
+        tokio::fs::rename(&from, &to)
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "rename_failed".to_string(),
+                message: format!(
+                    "failed to rename {} to {}: {error}",
+                    from.display(),
+                    to.display()
+                ),
+            })?;
+
+        let renamed_current = {
+            let mut state = self.state.lock().await;
+            if state.current_path.as_deref() == Some(from.as_path()) {
+                state.current_path = Some(to.clone());
+                true
+            } else {
+                false
+            }
+        };
+        if renamed_current {
+            // TODO: update the native window title when DaemonWindowOps exposes
+            // a verified title-update hook for the current notebook window.
+            if let Err(error) = self.persist_last_notebook(&to).await {
+                warn!(%error, path = %to.display(), "failed to persist renamed notebook record");
+            }
+        }
+
+        self.rename_recent_path(&from, &to)
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "recents_failed".to_string(),
+                message: error.to_string(),
+            })?;
+        self.windows.emit_recents_changed();
+        Ok(to)
     }
 
     async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
@@ -1334,7 +1437,7 @@ async fn prepare_socket_path(socket_path: impl AsRef<Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use tokio::net::UnixStream;
     use tokio::time::{timeout, Duration};
@@ -1493,6 +1596,7 @@ mod tests {
     struct RecordingWindowOps {
         opened: StdMutex<Vec<PathBuf>>,
         hidden: StdMutex<Vec<String>>,
+        recents_changed: AtomicUsize,
         exited: AtomicBool,
     }
 
@@ -1503,6 +1607,10 @@ mod tests {
 
         fn hidden(&self) -> Vec<String> {
             self.hidden.lock().expect("hidden lock").clone()
+        }
+
+        fn recents_changed_count(&self) -> usize {
+            self.recents_changed.load(Ordering::SeqCst)
         }
     }
 
@@ -1524,6 +1632,10 @@ mod tests {
                 .expect("opened lock")
                 .push(path.to_path_buf());
             Ok(format!("window-{}", self.opened().len()))
+        }
+
+        fn emit_recents_changed(&self) {
+            self.recents_changed.fetch_add(1, Ordering::SeqCst);
         }
 
         fn exit(&self) {
@@ -1549,6 +1661,7 @@ mod tests {
         let current_path = temp_dir.path().join("current.ipynb");
         let other_path = temp_dir.path().join("other.ipynb");
         let last_record_path = temp_dir.path().join("last.json");
+        let recents_record_path = temp_dir.path().join("recents.json");
         tokio::fs::write(
             &current_path,
             serde_json::to_vec_pretty(&empty_notebook()).unwrap(),
@@ -1564,12 +1677,13 @@ mod tests {
         let notebook_state = Arc::new(State::new());
         let windows = Arc::new(RecordingWindowOps::default());
         let window_ops: Arc<dyn DaemonWindowOps> = windows.clone();
-        let control = NotebookDaemonControl::new_for_test(
+        let control = NotebookDaemonControl::new_for_test_with_recents_record(
             Arc::new(AgentBridge::new()),
             requester.clone(),
             notebook_state,
             window_ops,
             Some(last_record_path),
+            Some(recents_record_path),
         );
         {
             let mut state = control.state.lock().await;
@@ -1623,6 +1737,81 @@ mod tests {
             saved["cells"][0]["metadata"]["spur"]["last_edited_by"],
             "brain"
         );
+    }
+
+    #[tokio::test]
+    async fn rename_moves_file_updates_current_path_and_recents() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-daemon-rename-")
+            .tempdir()
+            .expect("temp dir");
+        let from = temp_dir.path().join("old-name.ipynb");
+        let to = temp_dir.path().join("new-name.ipynb");
+        let last_record_path = temp_dir.path().join("last.json");
+        let recents_record_path = temp_dir.path().join("recents.json");
+        tokio::fs::write(&from, serde_json::to_vec_pretty(&empty_notebook()).unwrap())
+            .await
+            .expect("source notebook writes");
+        tokio::fs::write(
+            &recents_record_path,
+            serde_json::to_vec_pretty(&json!({
+                "entries": [{
+                    "path": from,
+                    "lastOpened": chrono::Utc::now(),
+                    "isScratch": false,
+                    "pinned": true
+                }]
+            }))
+            .unwrap(),
+        )
+        .await
+        .expect("recents writes");
+
+        let windows = Arc::new(RecordingWindowOps::default());
+        let window_ops: Arc<dyn DaemonWindowOps> = windows.clone();
+        let control = NotebookDaemonControl::new_for_test_with_recents_record(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::new(State::new()),
+            window_ops,
+            Some(last_record_path.clone()),
+            Some(recents_record_path.clone()),
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(from.clone());
+            state.window_label = Some("current-window".to_string());
+        }
+
+        let response = control
+            .handle(DaemonControlRequest {
+                id: None,
+                daemon: None,
+                command: "rename".to_string(),
+                from: Some(from.clone()),
+                to: Some(to.clone()),
+                ..Default::default()
+            })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.path, Some(to.display().to_string()));
+        assert!(!from.exists());
+        assert!(to.exists());
+
+        let state = control.state.lock().await;
+        assert_eq!(state.current_path.as_deref(), Some(to.as_path()));
+        drop(state);
+        assert_eq!(
+            load_last_notebook_at(&last_record_path).await.unwrap(),
+            Some(to.clone())
+        );
+
+        let recents: Value =
+            serde_json::from_slice(&tokio::fs::read(&recents_record_path).await.unwrap()).unwrap();
+        assert_eq!(recents["entries"][0]["path"], to.display().to_string());
+        assert_eq!(recents["entries"][0]["pinned"], true);
+        assert_eq!(windows.recents_changed_count(), 1);
     }
     // DaemonWindowOps keeps lifecycle tests independent of a concrete Tauri
     // AppHandle; the production implementation still delegates to Tauri.
@@ -1745,6 +1934,8 @@ mod tests {
                 message: "mock jute failure".to_string(),
             })
         }
+
+        fn emit_recents_changed(&self) {}
 
         fn exit(&self) {}
     }

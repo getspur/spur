@@ -11,6 +11,7 @@ export type DaemonControlRequest = {
   daemon: string;
 } & (
   | { command: "open"; path: string }
+  | { command: "rename"; from: string; to: string }
   | { command: "new" }
   | { command: "reopen" }
   | { command: "close" }

@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{check_response, daemon_unavailable, emit_recents_changed, parse_no_args};
+use super::{check_response, daemon_unavailable, parse_no_args};
 use crate::mcp::{DaemonControlRequest, ServerDeps};
 use crate::recents;
 
@@ -91,7 +91,6 @@ pub async fn call_set_pinned(
         })
         .await;
     check_response(response)?;
-    emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "ok": true })))
 }
 
@@ -140,7 +139,6 @@ pub async fn call_remove_from_recents(
         })
         .await;
     check_response(response)?;
-    emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "ok": true })))
 }
 

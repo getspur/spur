@@ -6,6 +6,7 @@ import {
   ArrowUp,
   Circle,
   FolderOpen,
+  Pencil,
   Pin,
   PinOff,
   Plus,
@@ -20,7 +21,6 @@ import {
   useMemo,
   useState,
 } from "react";
-import { useLocation } from "wouter";
 
 import { listenForRecentNotebookChanges } from "@/agent/events";
 import type { RecentNotebookEntry } from "@/bindings";
@@ -31,10 +31,6 @@ type ContextMenuState = {
   x: number;
   y: number;
 } | null;
-
-function notebookUrl(path: string) {
-  return "/notebook?" + new URLSearchParams({ path }).toString();
-}
 
 function normalizeSeparators(path: string) {
   return path.replace(/\\/g, "/");
@@ -52,6 +48,20 @@ function notebookParentPath(path: string) {
   if (index > 0) return normalized.slice(0, index);
   if (index === 0) return "/";
   return "Unknown folder";
+}
+
+function notebookDirectory(path: string) {
+  const normalized = normalizeSeparators(path);
+  const index = normalized.lastIndexOf("/");
+  if (index > 0) return normalized.slice(0, index);
+  if (index === 0) return "/";
+  return "";
+}
+
+function notebookRenameTarget(path: string, fileName: string) {
+  const directory = notebookDirectory(path);
+  if (directory === "/") return `/${fileName}`;
+  return directory ? `${directory}/${fileName}` : fileName;
 }
 
 function relativeLastOpened(lastOpened: string) {
@@ -95,7 +105,7 @@ type NotebookCardProps = {
     event: MouseEvent<HTMLElement>,
     entry: RecentNotebookEntry,
   ) => void;
-  onOpen: (entry: RecentNotebookEntry) => void;
+  onOpen: (entry: RecentNotebookEntry) => void | Promise<void>;
   onTogglePinned: (entry: RecentNotebookEntry) => void;
 };
 
@@ -109,7 +119,7 @@ function NotebookCard({
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      onOpen(entry);
+      void onOpen(entry);
     }
   };
 
@@ -121,7 +131,7 @@ function NotebookCard({
         "group flex cursor-pointer flex-col rounded border border-gray-300 transition-colors hover:border-black",
         compact ? "min-h-28 p-3" : "min-h-44 p-4",
       ].join(" ")}
-      onClick={() => onOpen(entry)}
+      onClick={() => void onOpen(entry)}
       onContextMenu={(event) => onContextMenu(event, entry)}
       onKeyDown={handleKeyDown}
       role="button"
@@ -219,7 +229,6 @@ function ContextMenuItem({
 }
 
 export default function HomePage() {
-  const [, navigate] = useLocation();
   const [recents, setRecents] = useState<RecentNotebookEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -277,30 +286,36 @@ export default function HomePage() {
   const scratchNotebooks = sortedRecents.filter((entry) => entry.isScratch);
   const regularNotebooks = sortedRecents.filter((entry) => !entry.isScratch);
 
-  const openNotebook = useCallback(
-    (entry: RecentNotebookEntry) => {
-      navigate(notebookUrl(entry.path));
-    },
-    [navigate],
-  );
-
-  const handleOpenFile = useCallback(async () => {
-    const file = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Jupyter Notebook", extensions: ["ipynb"] }],
-    });
-    if (typeof file === "string") navigate(notebookUrl(file));
-  }, [navigate]);
-
-  const handleNewNotebook = useCallback(async () => {
+  const openNotebook = useCallback(async (entry: RecentNotebookEntry) => {
     try {
-      const path = await invoke<string>("new_notebook_via_daemon");
-      navigate(notebookUrl(path));
+      await invoke<string>("open_notebook_via_daemon", { path: entry.path });
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, [navigate]);
+  }, []);
+
+  const handleOpenFile = useCallback(async () => {
+    try {
+      const file = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Jupyter Notebook", extensions: ["ipynb"] }],
+      });
+      if (typeof file === "string") {
+        await invoke<string>("open_notebook_via_daemon", { path: file });
+      }
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
+
+  const handleNewNotebook = useCallback(async () => {
+    try {
+      await invoke<string>("new_notebook_via_daemon");
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
 
   const handleReopenCurrent = useCallback(async () => {
     if (!currentNotebook) return;
@@ -309,9 +324,8 @@ export default function HomePage() {
       await invoke<string>("reopen_notebook_via_daemon");
     } catch (caught) {
       setError(errorMessage(caught));
-      navigate(notebookUrl(currentNotebook.path));
     }
-  }, [currentNotebook, navigate]);
+  }, [currentNotebook]);
 
   const handleCloseCurrent = useCallback(async () => {
     try {
@@ -346,6 +360,40 @@ export default function HomePage() {
       }
     },
     [],
+  );
+
+  const handleRenameNotebook = useCallback(
+    async (entry: RecentNotebookEntry) => {
+      const input = window.prompt(
+        "Rename notebook",
+        notebookFilename(entry.path),
+      );
+      if (input === null) return;
+
+      const trimmed = input.trim();
+      if (!trimmed) {
+        setError("Notebook name must not be empty.");
+        return;
+      }
+      if (/[\\/]/.test(trimmed)) {
+        setError("Notebook name must not contain path separators.");
+        return;
+      }
+
+      const fileName = trimmed.toLowerCase().endsWith(".ipynb")
+        ? trimmed
+        : `${trimmed}.ipynb`;
+      const to = notebookRenameTarget(entry.path, fileName);
+      if (to === entry.path) return;
+
+      try {
+        await invoke<string>("rename_notebook", { from: entry.path, to });
+        await refreshRecents();
+      } catch (caught) {
+        setError(errorMessage(caught));
+      }
+    },
+    [refreshRecents],
   );
 
   const handleRemoveFromRecents = useCallback(
@@ -556,7 +604,7 @@ export default function HomePage() {
           >
             <ContextMenuItem
               icon={<ArrowRight size={16} strokeWidth={1.5} />}
-              onClick={() => openNotebook(contextMenu.entry)}
+              onClick={() => void openNotebook(contextMenu.entry)}
             >
               Open
             </ContextMenuItem>
@@ -565,6 +613,12 @@ export default function HomePage() {
               onClick={() => void handleRevealInFinder(contextMenu.entry)}
             >
               Reveal in Finder
+            </ContextMenuItem>
+            <ContextMenuItem
+              icon={<Pencil size={16} strokeWidth={1.5} />}
+              onClick={() => void handleRenameNotebook(contextMenu.entry)}
+            >
+              Rename...
             </ContextMenuItem>
             <ContextMenuItem
               icon={
