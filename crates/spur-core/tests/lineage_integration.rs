@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use spur_acp::{
-    Artifact, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
-    SessionId, SpurEvent, SpurEventBody,
+    Artifact, AttemptSetupError, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind,
+    ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::{ExecutorId, ExecutorLineage};
+use spur_core::{AttemptStatus, ExecutorId, ExecutorLineage};
 
 #[test]
 fn full_flow_brain_to_review_to_resolved() {
@@ -420,6 +420,45 @@ fn delegation_completed_rejected_renders_as_failed_with_reason() {
             .map(|e| e.contains("out of scope"))
             .unwrap_or(false),
         "adapter must carry rejection reason into attempt.error, got: {:?}",
+        a.error
+    );
+}
+
+#[test]
+fn delegation_completed_setup_failed_renders_as_failed_with_setup_error() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: std::path::PathBuf::from("/tmp/wt"),
+    }));
+
+    let setup_error = AttemptSetupError::OverlayConflict {
+        source_task_id: "task-1".to_string(),
+        files: vec!["src/lib.rs".to_string()],
+    };
+    let expected_error = setup_error.to_string();
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session: SessionId("w1".into()),
+        status: DelegationStatus::SetupFailed { error: setup_error },
+    }));
+
+    let n = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(n.phase, LifecycleState::Failed);
+    assert_eq!(n.last_error.as_deref(), Some(expected_error.as_str()));
+    let a = n.current_attempt().unwrap();
+    assert_eq!(a.status, AttemptStatus::Failed);
+    assert_eq!(a.error.as_deref(), Some(expected_error.as_str()));
+    assert!(
+        a.error
+            .as_deref()
+            .map(|e| e.contains("overlay"))
+            .unwrap_or(false),
+        "adapter must carry setup error into attempt.error, got: {:?}",
         a.error
     );
 }
