@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -374,6 +374,9 @@ static GRAPH_REBUILD_LATENCY_BUDGET_OVERRIDE_MS: AtomicU64 =
     AtomicU64::new(GRAPH_REBUILD_LATENCY_BUDGET_UNSET_MS);
 #[cfg(any(test, feature = "test-support"))]
 static GRAPH_REBUILD_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
+static GRAPH_ARTIFACT_FULL_LOAD_INVOCATIONS: AtomicUsize = AtomicUsize::new(0);
 // Temporal resolution error codes (T3 / Phase 1.5 hardening)
 const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
 const CODE_GRAPH_DELETED_ERROR_CODE: i64 = -32005;
@@ -459,14 +462,7 @@ impl McpCallbackServer {
 }
 
 pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
-    if parse_as_of(args)?.is_none() {
-        return code_graph_backend_value(args, code_resolve_with_client).await;
-    }
-
-    let artifact = load_graph_artifact_for_request()?;
-    let body =
-        code_resolve_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    code_graph_backend_value(args, code_resolve_with_client).await
 }
 
 pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
@@ -487,12 +483,12 @@ async fn code_search_response(
 ) -> CodeGraphResult {
     let backend =
         open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
-    let search =
-        code_search_body_for_client(args, backend.client()).map_err(CodeGraphError::from)?;
+    let source = backend.metadata_source();
+    let search = code_search_body_for_client(args, backend.client())
+        .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
     let files = backend
         .search_response_file_set(&search)
-        .map_err(CodeGraphError::from)?;
-    let source = backend.metadata_source();
+        .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
     let mut analysis = GraphResponseMetadata::analyze_source_inner(source, Some(&files)).await;
 
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
@@ -632,6 +628,29 @@ async fn code_graph_backend_response(
     Ok(body)
 }
 
+async fn code_graph_backend_response_without_rebuild(
+    args: &Value,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> CodeGraphResult {
+    let backend =
+        open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
+    let source = backend.metadata_source();
+    let mut body = handler(args, backend.client()).map_err(|mut error| {
+        if error.metadata.is_none() && error.temporal_code.is_none() {
+            error.metadata = Some(Box::new(source.clone()));
+        }
+        error
+    })?;
+    let files = backend
+        .response_file_set_from_body(&body)
+        .map_err(CodeGraphError::from)?;
+    GraphResponseMetadata::analyze_source_inner(source, Some(&files))
+        .await
+        .metadata
+        .insert_into(&mut body);
+    Ok(body)
+}
+
 struct CodeSearchBody {
     body: Value,
     result: SearchResult,
@@ -748,27 +767,60 @@ async fn code_resolve_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    if parse_as_of(args)?.is_none() {
-        return code_graph_backend_response(args, rebuild_coordinator, code_resolve_with_client)
-            .await;
-    }
-
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_resolve_with_loaded_artifact(args, &loaded)
-    })
-    .await
+    code_graph_backend_response(args, rebuild_coordinator, code_resolve_with_client).await
 }
 
 fn code_resolve_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
     let selector = selector_arg(args)?;
-    let candidates = resolve_candidate_rows_for_client(client, selector)?
-        .into_iter()
-        .map(candidate_row)
-        .collect::<Vec<_>>();
+    let Some(as_of) = parse_as_of(args)? else {
+        let candidates = resolve_candidate_rows_for_client(client, selector)?
+            .into_iter()
+            .map(candidate_row)
+            .collect::<Vec<_>>();
 
-    Ok(json!({ "candidates": candidates }))
+        return Ok(json!({ "candidates": candidates }));
+    };
+
+    let resolved = match client
+        .resolve_selector(selector)
+        .map_err(graph_query_error)?
+    {
+        SelectorResolution::Resolved(resolved) => resolved,
+        SelectorResolution::Ambiguous { candidates } => {
+            let candidates = candidates
+                .into_iter()
+                .map(candidate_row)
+                .collect::<Vec<_>>();
+            return Ok(json!({ "candidates": candidates }));
+        }
+        SelectorResolution::NotFound => {
+            return Err(McpHandlerError::NotFound(format!(
+                "symbol {} not found in graph artifact",
+                missing_symbol_label(selector)
+            ))
+            .into());
+        }
+    };
+
+    let worktree = current_worktree()?;
+    let commits = load_commit_index_for_request(&worktree)?;
+    let temporal_index = client.temporal_index();
+    let resolution = resolve_symbol_as_of(
+        temporal_index.artifact(),
+        Some(Arc::clone(&temporal_index)),
+        &commits,
+        &resolved.stable_symbol_id,
+        &as_of,
+    )?;
+    code_resolve_temporal_response_with_client(
+        client,
+        &resolved.stable_symbol_id,
+        &as_of,
+        resolution,
+    )
 }
 
+#[allow(dead_code)]
 fn code_resolve_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
     let selector = selector_arg(args)?;
     let Some(as_of) = parse_as_of(args)? else {
@@ -805,6 +857,7 @@ fn code_resolve_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> Co
     code_resolve_temporal_response(artifact, &resolved.stable_symbol_id, &as_of, resolution)
 }
 
+#[allow(dead_code)]
 fn code_resolve_with_loaded_artifact(
     args: &Value,
     loaded: &LoadedGraphArtifact,
@@ -851,6 +904,7 @@ fn code_resolve_with_loaded_artifact(
     code_resolve_temporal_response(artifact, &resolved.stable_symbol_id, &as_of, resolution)
 }
 
+#[allow(dead_code)]
 fn code_resolve_temporal_response(
     artifact: &GraphIndexArtifact,
     requested_symbol_id: &str,
@@ -887,6 +941,64 @@ fn code_resolve_temporal_response(
             let candidate_rows = candidates
                 .iter()
                 .map(|candidate| symbol_by_id(artifact, candidate).map(candidate_row_for_symbol))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(candidate_row)
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "candidates": candidate_rows,
+                "resolution": {
+                    "kind": "ambiguous",
+                    "as_of": as_of,
+                    "candidates": candidates,
+                },
+            }))
+        }
+        Resolution::Unknown { reason } => {
+            Err(unknown_resolution_error(requested_symbol_id, as_of, reason))
+        }
+    }
+}
+
+fn code_resolve_temporal_response_with_client(
+    client: &dyn GraphQueryClient,
+    requested_symbol_id: &str,
+    as_of: &str,
+    resolution: Resolution<String>,
+) -> CodeGraphResult {
+    match resolution {
+        Resolution::Found { value, chain } => {
+            let symbol = symbol_by_id_for_client(client, &value)?;
+            let kind = if value == requested_symbol_id {
+                "found"
+            } else {
+                "renamed"
+            };
+            Ok(json!({
+                "candidates": [candidate_row(candidate_row_for_symbol(&symbol))],
+                "resolution": {
+                    "kind": kind,
+                    "as_of": as_of,
+                    "symbol": symbol_uri(&value),
+                    "chain": chain,
+                },
+            }))
+        }
+        Resolution::Deleted { last_seen } => Ok(json!({
+            "candidates": [],
+            "resolution": {
+                "kind": "deleted",
+                "as_of": as_of,
+                "last_seen": last_seen,
+            },
+        })),
+        Resolution::Ambiguous { candidates } => {
+            let candidate_rows = candidates
+                .iter()
+                .map(|candidate| {
+                    symbol_by_id_for_client(client, candidate)
+                        .map(|symbol| candidate_row_for_symbol(&symbol))
+                })
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .map(candidate_row)
@@ -965,9 +1077,9 @@ pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerEr
 
 async fn code_read_symbol_response(
     args: &Value,
-    rebuild_coordinator: Arc<RebuildCoordinator>,
+    _rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    code_graph_backend_response(args, rebuild_coordinator, code_read_symbol_with_client).await
+    code_graph_backend_response_without_rebuild(args, code_read_symbol_with_client).await
 }
 
 fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -1104,26 +1216,92 @@ fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
 }
 
 pub(crate) async fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
-    let artifact = load_graph_artifact_for_request()?;
-    let body =
-        code_subgraph_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    code_graph_backend_value(args, code_subgraph_with_client).await
 }
 
 async fn code_subgraph_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_subgraph_with_loaded_artifact(args, &loaded)
-    })
-    .await
+    code_graph_backend_response(args, rebuild_coordinator, code_subgraph_with_client).await
 }
 
+fn code_subgraph_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let request = code_traversal_request(args)?;
+    let root_ids = match code_subgraph_root_ids_with_client(args, client)? {
+        CodeSubgraphRoots::RootIds(root_ids) => root_ids,
+        CodeSubgraphRoots::Ambiguous(candidates) => {
+            return Ok(ambiguous_response(candidates));
+        }
+    };
+
+    let requested_radius = args
+        .get("radius")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1);
+    let radius = requested_radius.min(u64::from(MAX_MCP_CODE_SUBGRAPH_RADIUS)) as u8;
+    let warning = (requested_radius > u64::from(MAX_MCP_CODE_SUBGRAPH_RADIUS)).then(|| {
+        format!(
+            "radius {requested_radius} exceeds max {MAX_MCP_CODE_SUBGRAPH_RADIUS}; clamped to {MAX_MCP_CODE_SUBGRAPH_RADIUS}"
+        )
+    });
+    let format = args
+        .get("format")
+        .and_then(|value| value.as_str())
+        .unwrap_or("json");
+    let edge_kinds = parse_edge_kinds(args)?;
+    let edge_filter = edge_kinds.as_deref();
+    let budget = code_subgraph_budget(args)?;
+    let root_refs = root_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let view = client_bounded_subgraph_with_budget(
+        client,
+        &root_refs,
+        radius,
+        edge_filter,
+        request.include_unresolved,
+        budget.budget,
+    )?;
+
+    match format {
+        "json" => {
+            let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
+            if let Some(warning) = warning {
+                metadata["warning"] = Value::String(warning);
+            }
+            Ok(json!({
+                "nodes": view.nodes.iter().map(symbol_row).collect::<Vec<_>>(),
+                "edges": view.edges.iter().map(edge_row).collect::<Vec<_>>(),
+                "truncated_frontier": view.truncated_frontier,
+                "include_unresolved": request.include_unresolved,
+                "metadata": metadata,
+            }))
+        }
+        "mermaid" => {
+            let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
+            if let Some(warning) = warning {
+                metadata["warning"] = Value::String(warning);
+            }
+            let mermaid = mermaid_subgraph_owned(&view.nodes, &view.edges);
+            Ok(json!({
+                "mermaid": mermaid,
+                "truncated_frontier": view.truncated_frontier,
+                "include_unresolved": request.include_unresolved,
+                "metadata": metadata,
+            }))
+        }
+        other => Err(McpHandlerError::InvalidParams(format!(
+            "invalid format `{other}`; expected `json` or `mermaid`"
+        ))
+        .into()),
+    }
+}
+
+#[allow(dead_code)]
 fn code_subgraph_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
     code_subgraph_with_artifact_and_temporal(args, artifact, None)
 }
 
+#[allow(dead_code)]
 fn code_subgraph_with_loaded_artifact(
     args: &Value,
     loaded: &LoadedGraphArtifact,
@@ -1132,6 +1310,7 @@ fn code_subgraph_with_loaded_artifact(
     code_subgraph_with_artifact_and_temporal(args, loaded.artifact(), temporal_index)
 }
 
+#[allow(dead_code)]
 fn code_subgraph_with_artifact_and_temporal(
     args: &Value,
     artifact: &GraphIndexArtifact,
@@ -1261,15 +1440,18 @@ fn code_symbol_history_events(
 }
 
 type CodeGraphResult = Result<Value, CodeGraphError>;
+#[allow(dead_code)]
 type CodeGraphPayloadResult = Result<GraphResponsePayload, CodeGraphError>;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct LoadedGraphArtifact {
     artifact: Arc<GraphIndexArtifact>,
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
     rebuild_key: Option<LoadedRebuildKey>,
 }
 
+#[allow(dead_code)]
 impl LoadedGraphArtifact {
     fn new(
         artifact: Arc<GraphIndexArtifact>,
@@ -1305,6 +1487,7 @@ impl LoadedGraphArtifact {
     }
 }
 
+#[allow(dead_code)]
 fn temporal_index_for_as_of(
     args: &Value,
     loaded: &LoadedGraphArtifact,
@@ -1321,11 +1504,13 @@ fn temporal_index_for_as_of(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct GraphResponsePayload {
     body: Value,
     files: Option<Vec<(String, String)>>,
 }
 
+#[allow(dead_code)]
 impl GraphResponsePayload {
     fn body(body: Value) -> Self {
         Self { body, files: None }
@@ -1371,6 +1556,13 @@ impl CodeGraphError {
     fn with_artifact_metadata(mut self, artifact: &GraphIndexArtifact) -> Self {
         if self.metadata.is_none() && self.temporal_code.is_none() {
             self.metadata = Some(Box::new(GraphMetadataSource::from_artifact(artifact)));
+        }
+        self
+    }
+
+    fn with_metadata_source(mut self, source: GraphMetadataSource) -> Self {
+        if self.metadata.is_none() && self.temporal_code.is_none() {
+            self.metadata = Some(Box::new(source));
         }
         self
     }
@@ -1514,11 +1706,13 @@ struct RebuildCandidate {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct LoadedRebuildKey {
     key: RebuildKey,
     retain_temporal_index_on_miss: bool,
 }
 
+#[allow(dead_code)]
 impl LoadedRebuildKey {
     fn retain_on_miss(key: RebuildKey) -> Self {
         Self {
@@ -1529,6 +1723,7 @@ impl LoadedRebuildKey {
 }
 
 impl GraphResponseMetadata {
+    #[allow(dead_code)]
     async fn from_artifact_with_files(
         artifact: &GraphIndexArtifact,
         files: &[(String, String)],
@@ -1672,6 +1867,7 @@ impl GraphResponseMetadata {
     }
 }
 
+#[allow(dead_code)]
 async fn with_loaded_graph_artifact(
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
     handler: impl Fn(LoadedGraphArtifact) -> CodeGraphResult,
@@ -1688,6 +1884,7 @@ async fn with_loaded_graph_artifact(
     .await
 }
 
+#[allow(dead_code)]
 async fn with_loaded_graph_payload(
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
     artifact: Arc<GraphIndexArtifact>,
@@ -1703,6 +1900,7 @@ async fn with_loaded_graph_payload(
     Ok(with_graph_metadata_for_payload(rebuild_coordinator, artifact, payload, &handler).await)
 }
 
+#[allow(dead_code)]
 async fn rebuild_key_for_loaded_artifact(
     worktree: &Path,
     artifact: &GraphIndexArtifact,
@@ -1719,6 +1917,7 @@ async fn rebuild_key_for_loaded_artifact(
     })
 }
 
+#[allow(dead_code)]
 fn dirty_indexed_file_oids(
     worktree: &Path,
     worktree_head_oid: &str,
@@ -1738,6 +1937,7 @@ fn dirty_indexed_file_oids(
     .dirty_oids
 }
 
+#[allow(dead_code)]
 async fn with_graph_metadata_for_payload(
     rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
     artifact: Arc<GraphIndexArtifact>,
@@ -2123,7 +2323,11 @@ fn open_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandle
 }
 
 #[allow(clippy::result_large_err)]
+#[allow(dead_code)]
 fn load_graph_artifact_for_request() -> Result<GraphIndexArtifact, McpHandlerError> {
+    #[cfg(any(test, feature = "test-support"))]
+    GRAPH_ARTIFACT_FULL_LOAD_INVOCATIONS.fetch_add(1, Ordering::SeqCst);
+
     let worktree = current_worktree()?;
     let resolved = resolve_artifact_location(&worktree, None)
         .map_err(|_| graph_artifact_missing(&worktree))?;
@@ -2144,6 +2348,16 @@ fn load_graph_artifact_for_request() -> Result<GraphIndexArtifact, McpHandlerErr
             artifact_path.display()
         ))),
     }
+}
+
+#[cfg(test)]
+fn reset_graph_artifact_full_load_invocation_count() {
+    GRAPH_ARTIFACT_FULL_LOAD_INVOCATIONS.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn graph_artifact_full_load_invocation_count() -> usize {
+    GRAPH_ARTIFACT_FULL_LOAD_INVOCATIONS.load(Ordering::SeqCst)
 }
 
 fn graph_artifact_missing(worktree: &Path) -> McpHandlerError {
@@ -2176,6 +2390,7 @@ fn commit_index_missing(worktree: &Path) -> McpHandlerError {
     ))
 }
 
+#[allow(dead_code)]
 fn resolve_symbol_for_optional_as_of(
     artifact: &GraphIndexArtifact,
     temporal_index: Option<Arc<TemporalIndex>>,
@@ -2194,6 +2409,7 @@ fn resolve_symbol_for_optional_as_of(
     )
 }
 
+#[allow(dead_code)]
 fn resolve_symbol_for_optional_as_of_current_worktree(
     artifact: &GraphIndexArtifact,
     temporal_index: Option<Arc<TemporalIndex>>,
@@ -2374,6 +2590,7 @@ enum OnAmbiguousMode {
     Error,
 }
 
+#[allow(dead_code)]
 fn resolve_code_selector(
     args: &Value,
     artifact: &GraphIndexArtifact,
@@ -2589,6 +2806,7 @@ fn code_traversal_request(args: &Value) -> Result<CodeTraversalRequest, McpHandl
     })
 }
 
+#[allow(dead_code)]
 fn code_subgraph_root_ids(
     args: &Value,
     artifact: &GraphIndexArtifact,
@@ -2614,6 +2832,35 @@ fn code_subgraph_root_ids(
                 temporal_index,
                 &symbol_id,
                 args,
+            )?,
+        ])),
+        CodeSelectorResolution::Ambiguous(candidates) => {
+            Ok(CodeSubgraphRoots::Ambiguous(candidates))
+        }
+    }
+}
+
+fn code_subgraph_root_ids_with_client(
+    args: &Value,
+    client: &dyn GraphQueryClient,
+) -> Result<CodeSubgraphRoots, CodeGraphError> {
+    if let Some(start_nodes) = start_nodes_arg(args)? {
+        if string_arg(args, "selector")?.is_some() || string_arg(args, "symbol")?.is_some() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'start_nodes' is mutually exclusive with 'selector' and 'symbol'".into(),
+            )
+            .into());
+        }
+        for node_id in &start_nodes {
+            ensure_symbol_id_exists_with_client(client, node_id)?;
+        }
+        return Ok(CodeSubgraphRoots::RootIds(start_nodes));
+    }
+
+    match resolve_code_selector_with_client(args, client)? {
+        CodeSelectorResolution::Resolved(symbol_id) => Ok(CodeSubgraphRoots::RootIds(vec![
+            resolve_symbol_for_optional_as_of_current_worktree_with_client(
+                client, &symbol_id, args,
             )?,
         ])),
         CodeSelectorResolution::Ambiguous(candidates) => {
@@ -2661,6 +2908,7 @@ fn start_nodes_arg(args: &Value) -> Result<Option<Vec<String>>, McpHandlerError>
     Ok(Some(start_nodes))
 }
 
+#[allow(dead_code)]
 fn ensure_symbol_id_exists(
     artifact: &GraphIndexArtifact,
     symbol_id: &str,
@@ -2677,6 +2925,251 @@ fn ensure_symbol_id_exists(
             missing_symbol_label(symbol_id)
         )))
     }
+}
+
+fn ensure_symbol_id_exists_with_client(
+    client: &dyn GraphQueryClient,
+    symbol_id: &str,
+) -> Result<(), McpHandlerError> {
+    if client
+        .symbol_by_id(symbol_id)
+        .map_err(graph_query_error)?
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(McpHandlerError::NotFound(format!(
+            "symbol {} not found in graph artifact",
+            missing_symbol_label(symbol_id)
+        )))
+    }
+}
+
+#[derive(Debug)]
+struct OwnedSubgraphView {
+    nodes: Vec<GraphSymbolArtifact>,
+    edges: Vec<GraphEdgeArtifact>,
+    truncated_frontier: Vec<String>,
+    truncated: bool,
+}
+
+fn client_bounded_subgraph_with_budget(
+    client: &dyn GraphQueryClient,
+    root_ids: &[&str],
+    radius: u8,
+    edge_kinds: Option<&[GraphEdgeKind]>,
+    include_unresolved: bool,
+    budget: SubgraphBudget,
+) -> Result<OwnedSubgraphView, McpHandlerError> {
+    let mut traversal =
+        ClientSubgraphTraversal::new(client, edge_kinds, include_unresolved, budget);
+    for root_id in root_ids {
+        traversal.seed_root(root_id)?;
+    }
+    traversal.run(radius.min(MAX_MCP_CODE_SUBGRAPH_RADIUS))?;
+    Ok(traversal.finish())
+}
+
+struct ClientSubgraphTraversal<'a, 'k> {
+    client: &'a dyn GraphQueryClient,
+    edge_kinds: Option<&'k [GraphEdgeKind]>,
+    include_unresolved: bool,
+    budget: SubgraphBudget,
+    nodes: Vec<GraphSymbolArtifact>,
+    edges: Vec<GraphEdgeArtifact>,
+    visited_nodes: HashSet<String>,
+    visited_edges: HashSet<String>,
+    queue: VecDeque<(String, u8)>,
+    truncated_frontier: Vec<String>,
+    frontier_seen: HashSet<String>,
+    truncated: bool,
+}
+
+impl<'a, 'k> ClientSubgraphTraversal<'a, 'k> {
+    fn new(
+        client: &'a dyn GraphQueryClient,
+        edge_kinds: Option<&'k [GraphEdgeKind]>,
+        include_unresolved: bool,
+        budget: SubgraphBudget,
+    ) -> Self {
+        Self {
+            client,
+            edge_kinds,
+            include_unresolved,
+            budget,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            visited_nodes: HashSet::new(),
+            visited_edges: HashSet::new(),
+            queue: VecDeque::new(),
+            truncated_frontier: Vec::new(),
+            frontier_seen: HashSet::new(),
+            truncated: false,
+        }
+    }
+
+    fn seed_root(&mut self, root_id: &str) -> Result<(), McpHandlerError> {
+        if self.visited_nodes.contains(root_id) {
+            return Ok(());
+        }
+        let Some(root) = self
+            .client
+            .symbol_by_id(root_id)
+            .map_err(graph_query_error)?
+        else {
+            return Ok(());
+        };
+        if self.node_budget_full() {
+            self.truncated = true;
+            self.add_frontier(root_id);
+            return Ok(());
+        }
+
+        self.visited_nodes.insert(root_id.to_string());
+        self.nodes.push(root);
+        self.queue.push_back((root_id.to_string(), 0));
+        Ok(())
+    }
+
+    fn run(&mut self, radius: u8) -> Result<(), McpHandlerError> {
+        while let Some((current_id, depth)) = self.queue.pop_front() {
+            if depth >= radius {
+                continue;
+            }
+            self.expand_node(&current_id, depth)?;
+        }
+        Ok(())
+    }
+
+    fn expand_node(&mut self, current_id: &str, depth: u8) -> Result<(), McpHandlerError> {
+        for record in self.client.find_callee_edges(current_id) {
+            match record {
+                OwnedCalleeRecord::Resolved { symbol, edge } => {
+                    if edge_matches_subgraph_filter(&edge, self.edge_kinds) {
+                        self.try_add_neighbor_edge(edge, symbol, depth + 1);
+                    }
+                }
+                OwnedCalleeRecord::Unresolved { edge, .. } => {
+                    if self.include_unresolved
+                        && edge_matches_subgraph_filter(&edge, self.edge_kinds)
+                    {
+                        self.try_add_edge(edge);
+                    }
+                }
+            }
+        }
+
+        for record in self.client.find_caller_edges(current_id) {
+            match record {
+                OwnedCallerRecord::Resolved { caller, edge }
+                | OwnedCallerRecord::Unresolved { caller, edge, .. } => {
+                    if record_is_unresolved(&edge) && !self.include_unresolved {
+                        continue;
+                    }
+                    if edge_matches_subgraph_filter(&edge, self.edge_kinds) {
+                        self.try_add_neighbor_edge(edge, caller, depth + 1);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn try_add_neighbor_edge(
+        &mut self,
+        edge: GraphEdgeArtifact,
+        symbol: GraphSymbolArtifact,
+        depth: u8,
+    ) {
+        let neighbor_id = symbol.stable_symbol_id.clone();
+        if self.visited_nodes.contains(&neighbor_id) {
+            self.try_add_edge(edge);
+            return;
+        }
+
+        let edge_key = subgraph_edge_key(&edge);
+        let edge_seen = self.visited_edges.contains(&edge_key);
+        if self.node_budget_full() || (!edge_seen && self.edge_budget_full()) {
+            self.truncated = true;
+            self.add_frontier(&neighbor_id);
+            return;
+        }
+
+        if !edge_seen {
+            self.visited_edges.insert(edge_key);
+            self.edges.push(edge);
+        }
+        self.visited_nodes.insert(neighbor_id.clone());
+        self.nodes.push(symbol);
+        self.queue.push_back((neighbor_id, depth));
+    }
+
+    fn try_add_edge(&mut self, edge: GraphEdgeArtifact) -> bool {
+        let edge_key = subgraph_edge_key(&edge);
+        if self.visited_edges.contains(&edge_key) {
+            return true;
+        }
+        if self.edge_budget_full() {
+            self.truncated = true;
+            return false;
+        }
+
+        self.visited_edges.insert(edge_key);
+        self.edges.push(edge);
+        true
+    }
+
+    fn node_budget_full(&self) -> bool {
+        self.nodes.len() >= self.budget.max_nodes
+    }
+
+    fn edge_budget_full(&self) -> bool {
+        self.edges.len() >= self.budget.max_edges
+    }
+
+    fn add_frontier(&mut self, symbol_id: &str) {
+        if self.visited_nodes.contains(symbol_id) {
+            return;
+        }
+        if self.frontier_seen.insert(symbol_id.to_string()) {
+            self.truncated_frontier.push(symbol_id.to_string());
+        }
+    }
+
+    fn finish(self) -> OwnedSubgraphView {
+        OwnedSubgraphView {
+            nodes: self.nodes,
+            edges: self.edges,
+            truncated_frontier: self.truncated_frontier,
+            truncated: self.truncated,
+        }
+    }
+}
+
+fn record_is_unresolved(edge: &GraphEdgeArtifact) -> bool {
+    edge.target_stable_symbol_id.is_none()
+}
+
+fn edge_matches_subgraph_filter(
+    edge: &GraphEdgeArtifact,
+    edge_kinds: Option<&[GraphEdgeKind]>,
+) -> bool {
+    edge_kinds.is_none_or(|kinds| kinds.contains(&edge_kind(edge)))
+}
+
+fn subgraph_edge_key(edge: &GraphEdgeArtifact) -> String {
+    format!(
+        "{}\0{}\0{}\0{:?}\0{:?}\0{}\0{:?}\0{}\0{:?}",
+        edge.source_stable_symbol_id,
+        edge.target_stable_symbol_id.as_deref().unwrap_or_default(),
+        edge.target_label.as_deref().unwrap_or_default(),
+        edge.relation,
+        edge.confidence,
+        edge.confidence_score.to_bits(),
+        edge.change_kind,
+        edge.edge_kind.map(edge_kind_str).unwrap_or(""),
+        edge.bind_method
+    )
 }
 
 fn code_subgraph_budget(args: &Value) -> Result<CodeSubgraphBudgetRequest, McpHandlerError> {
@@ -2974,6 +3467,7 @@ fn parse_edge_kinds(args: &Value) -> Result<Option<Vec<GraphEdgeKind>>, McpHandl
         .map(Some)
 }
 
+#[allow(dead_code)]
 fn resolve_candidate_rows(
     artifact: &GraphIndexArtifact,
     selector: &str,
@@ -3204,6 +3698,7 @@ fn ambiguous_response(candidates: Vec<CandidateRow>) -> Value {
     })
 }
 
+#[allow(dead_code)]
 async fn with_graph_metadata(artifact: &GraphIndexArtifact, mut body: Value) -> Value {
     let files = response_file_set_from_body(artifact, &body);
     GraphResponseMetadata::from_artifact_with_files(artifact, &files)
@@ -3643,7 +4138,19 @@ fn json_success(id: Value, body: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
 }
 
+#[allow(dead_code)]
 fn mermaid_subgraph(nodes: &[&GraphSymbolArtifact], edges: &[&GraphEdgeArtifact]) -> String {
+    mermaid_subgraph_from_iters(nodes.iter().copied(), edges.iter().copied())
+}
+
+fn mermaid_subgraph_owned(nodes: &[GraphSymbolArtifact], edges: &[GraphEdgeArtifact]) -> String {
+    mermaid_subgraph_from_iters(nodes.iter(), edges.iter())
+}
+
+fn mermaid_subgraph_from_iters<'a>(
+    nodes: impl IntoIterator<Item = &'a GraphSymbolArtifact>,
+    edges: impl IntoIterator<Item = &'a GraphEdgeArtifact>,
+) -> String {
     let mut lines = vec!["graph TD".to_string()];
     for symbol in nodes {
         lines.push(format!(
@@ -4597,6 +5104,85 @@ mod tests {
         assert_eq!(body["graph_content_hash"], "parquet-handler-test");
         assert_eq!(body["graph_index_version"], "parquet-test");
         assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn parquet_mcp_session_does_not_load_full_graph_artifact_after_handlers_complete() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_current_parquet_fixture(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+        super::reset_graph_artifact_full_load_invocation_count();
+
+        let search = response_json(
+            server
+                .handle_code_search(Value::from(1), json!({ "query": "parquet_root" }))
+                .await,
+        );
+        let read = response_json(
+            server
+                .handle_code_read_symbol(
+                    Value::from(2),
+                    json!({ "stable_symbol_id": "graph://symbol/parquet-root" }),
+                )
+                .await,
+        );
+        let callers = response_json(
+            server
+                .handle_code_callers(
+                    Value::from(3),
+                    json!({ "selector": "graph://symbol/parquet-child" }),
+                )
+                .await,
+        );
+
+        assert_eq!(
+            search["candidates"][0]["uri"],
+            "graph://symbol/parquet-root"
+        );
+        assert_eq!(read["symbol"]["uri"], "graph://symbol/parquet-root");
+        assert_eq!(callers["callers"][0]["uri"], "graph://symbol/parquet-root");
+        assert_eq!(
+            super::graph_artifact_full_load_invocation_count(),
+            0,
+            "Parquet MCP session must not load a full GraphIndexArtifact"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_subgraph_reads_parquet_without_full_graph_artifact_loader() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_current_parquet_fixture(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+        super::reset_graph_artifact_full_load_invocation_count();
+
+        let response = server
+            .handle_code_subgraph(
+                Value::from(1),
+                json!({ "selector": "graph://symbol/parquet-root", "radius": 1 }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["nodes"].as_array().expect("nodes").len(), 2);
+        assert_eq!(body["edges"].as_array().expect("edges").len(), 1);
+        assert_eq!(
+            body["edges"][0]["source_uri"],
+            "graph://symbol/parquet-root"
+        );
+        assert_eq!(
+            body["edges"][0]["target_uri"],
+            "graph://symbol/parquet-child"
+        );
+        assert_eq!(body["graph_content_hash"], "parquet-handler-test");
+        assert_eq!(
+            super::graph_artifact_full_load_invocation_count(),
+            0,
+            "code_subgraph should use ParquetClient instead of loading GraphIndexArtifact"
+        );
     }
 
     #[tokio::test]

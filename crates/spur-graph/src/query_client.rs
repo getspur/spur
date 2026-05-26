@@ -1,3 +1,12 @@
+//! Query clients for code graph MCP request handlers.
+//!
+//! `GraphQueryClient` is the migration boundary from full `GraphIndexArtifact`
+//! residency to query-scoped access. `InMemoryClient` preserves the legacy
+//! artifact-backed behavior for tests and JSON artifacts, while `ParquetClient`
+//! serves hot-path MCP operations directly from Parquet projections so handlers
+//! such as `code_search`, `code_read_symbol`, `code_callers`, and `code_callees`
+//! do not deserialize and retain the full graph artifact per request.
+
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};

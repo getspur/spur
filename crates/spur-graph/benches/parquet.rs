@@ -221,6 +221,51 @@ fn bench_temporal_index_first_call_parquet_vs_inmemory(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_end_to_end_mcp_latency_session(c: &mut Criterion) {
+    let fixture = load_fixture();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let parquet_dir =
+        write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
+            .expect("write parquet artifact");
+    let options = SearchOptions {
+        query: search_benchmark_query(&fixture.artifact),
+        mode: SearchMode::Exact,
+        filters: SearchFilters::default(),
+        limit: 20,
+    };
+    let mut group = c.benchmark_group("bench_end_to_end_mcp_latency_session");
+
+    group.bench_function("parquet_open_then_session", |b| {
+        b.iter(|| {
+            let parquet =
+                ParquetClient::open(black_box(parquet_dir.as_path())).expect("open parquet client");
+            run_mcp_latency_session(black_box(&parquet), black_box(&options));
+        })
+    });
+    group.finish();
+}
+
+fn run_mcp_latency_session(client: &dyn GraphQueryClient, options: &SearchOptions) {
+    let search = client
+        .search_symbols(options)
+        .expect("MCP session code_search");
+    let symbol_id = search
+        .candidates
+        .first()
+        .expect("benchmark query returns at least one symbol")
+        .stable_symbol_id
+        .clone();
+    let symbol = client
+        .symbol_by_id(&symbol_id)
+        .expect("MCP session code_read_symbol lookup")
+        .expect("MCP session symbol exists");
+    let manifest = client
+        .file_manifest_by_path(&symbol.file_path)
+        .expect("MCP session file manifest lookup");
+    let callers = client.find_caller_edges(&symbol_id);
+    black_box((search, symbol, manifest, callers));
+}
+
 fn load_fixture() -> Fixture {
     let baselines = baselines();
     let fixture_path = std::env::var_os("SPUR_GRAPH_PERF_FIXTURE")
@@ -466,6 +511,7 @@ criterion_group!(
     bench_find_caller_edges_parquet_vs_inmemory,
     bench_find_callee_edges_parquet_vs_inmemory,
     bench_resolve_selector_parquet_vs_inmemory,
-    bench_temporal_index_first_call_parquet_vs_inmemory
+    bench_temporal_index_first_call_parquet_vs_inmemory,
+    bench_end_to_end_mcp_latency_session
 );
 criterion_main!(benches);
