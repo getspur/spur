@@ -22,7 +22,11 @@ struct StartKernelParams {
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Provision and start a Jupyter kernel in a stable slot.",
+        concat!(
+            "Provision and start a Jupyter kernel in a stable slot. When slot_id is omitted, ",
+            "defaults to the slot bound to the currently open notebook (shared with the UI). ",
+            "Falls back to a fresh mcp:<uuid> slot only if no notebook is loaded."
+        ),
         rmcp_object(json!({
             "type": "object",
             "required": ["spec_name"],
@@ -71,13 +75,60 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             )
         })?;
 
-    let slot_id = params
-        .slot_id
-        .unwrap_or_else(|| format!("mcp:{}", Uuid::new_v4()));
+    let slot_id = resolve_slot_id(deps, params.slot_id).await;
     let (generation, _previous) = install_kernel_in_slot(state, &slot_id, params.spec_name, kernel);
 
     Ok(CallToolResult::structured(json!({
         "slot_id": slot_id,
         "generation": generation,
     })))
+}
+
+async fn resolve_slot_id(deps: &ServerDeps, explicit_slot_id: Option<String>) -> String {
+    if let Some(slot_id) = explicit_slot_id {
+        return slot_id;
+    }
+
+    super::current_notebook_slot_id(deps)
+        .await
+        .unwrap_or_else(|| format!("mcp:{}", Uuid::new_v4()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use jute::state::State;
+
+    use super::*;
+    use crate::mcp::bridge::{AgentBridge, TauriBridgeRequester};
+
+    fn deps_without_notebook() -> ServerDeps {
+        ServerDeps {
+            bridge: Arc::new(TauriBridgeRequester::without_app(Arc::new(
+                AgentBridge::new(),
+            ))),
+            state: Some(Arc::new(State::new())),
+            app: None,
+            daemon: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn omitted_slot_id_without_open_notebook_uses_mcp_slot() {
+        let slot_id = resolve_slot_id(&deps_without_notebook(), None).await;
+
+        assert!(
+            slot_id.starts_with("mcp:"),
+            "expected mcp fallback slot, got {slot_id}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_slot_id_is_preserved() {
+        let slot_id =
+            resolve_slot_id(&deps_without_notebook(), Some("custom:slot".to_string())).await;
+
+        assert_eq!(slot_id, "custom:slot");
+    }
 }

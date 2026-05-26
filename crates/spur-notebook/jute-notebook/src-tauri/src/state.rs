@@ -16,7 +16,7 @@ use crate::{
 pub(crate) const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 
 /// Derive the stable in-memory kernel slot ID for a notebook path.
-pub(crate) fn notebook_slot_id(path: &str) -> String {
+pub fn notebook_slot_id(path: &str) -> String {
     format!("{NOTEBOOK_SLOT_PREFIX}{path}")
 }
 
