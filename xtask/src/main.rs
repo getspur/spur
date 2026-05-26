@@ -137,38 +137,14 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
         eprintln!("==> python3 binaries/download.py skipped; uv sidecars already exist");
     }
 
-    let mut tauri_build = Command::new("npm");
-    tauri_build
-        .args([
-            "run",
-            "tauri",
-            "build",
-            "--",
-            "--no-bundle",
-            "--bundles",
-            "app",
-        ])
-        .current_dir(&jute_dir)
-        .env_remove("TAURI_CONFIG")
-        // See cargo_install: avoids the macOS provenance vs sccache collision.
-        .env_remove("RUSTC_WRAPPER");
-    run_status(
-        &mut tauri_build,
-        "npm run tauri build -- --no-bundle --bundles app",
-    )?;
+    let mut tauri_build = tauri_build_command(workspace_root);
+    run_status(&mut tauri_build, "tauri build --bundles app")?;
 
     let built_app = workspace_root.join("target/release/bundle/macos/Jute.app");
     if !built_app.exists() {
         return Err(format!("expected built bundle at {}", built_app.display()));
     }
 
-    build_outer_spur_notebook_binary(workspace_root)?;
-    // Tauri builds the vendored upstream Jute binary from
-    // crates/spur-notebook/jute-notebook/src-tauri, but that binary does not know
-    // about our MCP proxy, --socket, or lazy-spawn daemon flow. Keep Tauri's .app
-    // scaffolding and sidecars, then swap in the outer crates/spur-notebook binary
-    // as Contents/MacOS/Jute to match CFBundleExecutable.
-    replace_bundle_executable_with_outer_binary(workspace_root, &built_app)?;
     resign_macos_bundle_ad_hoc(&built_app);
 
     let applications_dir = user_applications_dir()?;
@@ -197,6 +173,28 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
     Ok(installed_app)
 }
 
+fn tauri_build_command(workspace_root: &Path) -> Command {
+    let spur_notebook_dir = workspace_root.join("crates/spur-notebook");
+    let jute_dir = spur_notebook_dir.join("jute-notebook");
+    let mut cmd = Command::new(jute_dir.join(tauri_cli_bin()));
+    cmd.args(["build", "--bundles", "app"])
+        .current_dir(spur_notebook_dir)
+        .env_remove("TAURI_CONFIG")
+        // See cargo_install: avoids the macOS provenance vs sccache collision.
+        .env_remove("RUSTC_WRAPPER");
+    cmd
+}
+
+fn tauri_cli_bin() -> PathBuf {
+    let mut path = PathBuf::from("node_modules").join(".bin");
+    if cfg!(windows) {
+        path.push("tauri.cmd");
+    } else {
+        path.push("tauri");
+    }
+    path
+}
+
 fn ensure_jute_frontend_dist(jute_dir: &Path) -> Result<(), String> {
     if npm_install_needed(jute_dir) {
         let mut cmd = Command::new("npm");
@@ -209,109 +207,6 @@ fn ensure_jute_frontend_dist(jute_dir: &Path) -> Result<(), String> {
     let mut build = Command::new("npm");
     build.arg("run").arg("build").current_dir(jute_dir);
     run_status(&mut build, "npm run build")?;
-    Ok(())
-}
-
-fn build_outer_spur_notebook_binary(workspace_root: &Path) -> Result<PathBuf, String> {
-    let mut cmd = Command::new(cargo());
-    cmd.args([
-        "build",
-        "--release",
-        "-p",
-        "spur-notebook",
-        "--bin",
-        "spur-notebook",
-        // Tauri 2.0.4 gates production mode on this feature
-        // (`tauri/src/lib.rs:338`). The `tauri build` CLI sets it
-        // automatically; we drive cargo build directly, so we must set it
-        // ourselves to get embedded-asset behavior. Without it, the runtime
-        // tries to load `devUrl` and the webview shows a blank page in the
-        // installed bundle.
-        "--features",
-        "custom-protocol",
-    ])
-    .current_dir(workspace_root)
-    .env_remove("RUSTC_WRAPPER");
-    run_status(
-        &mut cmd,
-        "cargo build --release -p spur-notebook --bin spur-notebook --features custom-protocol",
-    )?;
-
-    let outer_binary = outer_spur_notebook_binary(workspace_root);
-    if outer_binary.is_file() {
-        Ok(outer_binary)
-    } else {
-        Err(format!(
-            "expected outer spur-notebook binary at {}",
-            outer_binary.display()
-        ))
-    }
-}
-
-fn replace_bundle_executable_with_outer_binary(
-    workspace_root: &Path,
-    built_app: &Path,
-) -> Result<(), String> {
-    let outer_binary = outer_spur_notebook_binary(workspace_root);
-    if !outer_binary.is_file() {
-        return Err(format!(
-            "expected outer spur-notebook binary at {}",
-            outer_binary.display()
-        ));
-    }
-
-    let bundle_executable = jute_bundle_executable(built_app);
-    if !bundle_executable
-        .parent()
-        .is_some_and(|parent| parent.is_dir())
-    {
-        return Err(format!(
-            "expected bundle executable directory at {}",
-            bundle_executable.parent().unwrap_or(built_app).display()
-        ));
-    }
-
-    fs::copy(&outer_binary, &bundle_executable).map_err(|err| {
-        format!(
-            "failed to copy {} to {}: {err}",
-            outer_binary.display(),
-            bundle_executable.display()
-        )
-    })?;
-
-    let source_permissions = fs::metadata(&outer_binary)
-        .map_err(|err| format!("failed to stat {}: {err}", outer_binary.display()))?
-        .permissions();
-    fs::set_permissions(&bundle_executable, source_permissions).map_err(|err| {
-        format!(
-            "failed to set permissions on {}: {err}",
-            bundle_executable.display()
-        )
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(&bundle_executable)
-            .map_err(|err| format!("failed to stat {}: {err}", bundle_executable.display()))?
-            .permissions();
-        let mode = permissions.mode();
-        if mode & 0o111 == 0 {
-            permissions.set_mode(mode | 0o111);
-            fs::set_permissions(&bundle_executable, permissions).map_err(|err| {
-                format!(
-                    "failed to mark {} executable: {err}",
-                    bundle_executable.display()
-                )
-            })?;
-        }
-    }
-
-    eprintln!(
-        "replaced bundled Jute executable with {}",
-        outer_binary.display()
-    );
     Ok(())
 }
 
@@ -339,10 +234,6 @@ fn resign_macos_bundle_ad_hoc(built_app: &Path) {
             );
         }
     }
-}
-
-fn outer_spur_notebook_binary(workspace_root: &Path) -> PathBuf {
-    workspace_root.join("target/release/spur-notebook")
 }
 
 fn jute_bundle_executable(app_path: &Path) -> PathBuf {
@@ -519,39 +410,6 @@ fn cargo_home_bin() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn swap_outer_spur_notebook_binary_copies_marker_binary_into_bundle() {
-        let root = make_temp_workspace("swap-outer-binary");
-        let outer_binary = root.join("target/release/spur-notebook");
-        let bundle_binary = root.join("target/release/bundle/macos/Jute.app/Contents/MacOS/Jute");
-
-        fs::create_dir_all(outer_binary.parent().unwrap()).unwrap();
-        fs::create_dir_all(bundle_binary.parent().unwrap()).unwrap();
-        fs::write(&outer_binary, b"outer spur-notebook --socket --mcp-proxy").unwrap();
-        fs::write(&bundle_binary, b"upstream jute").unwrap();
-
-        replace_bundle_executable_with_outer_binary(
-            &root,
-            &root.join("target/release/bundle/macos/Jute.app"),
-        )
-        .unwrap();
-
-        let installed_bytes = fs::read(&bundle_binary).unwrap();
-        assert_eq!(installed_bytes, b"outer spur-notebook --socket --mcp-proxy");
-        assert!(binary_contains(&bundle_binary, b"--socket").unwrap());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mode = fs::metadata(&bundle_binary).unwrap().permissions().mode();
-            assert_ne!(mode & 0o111, 0, "bundle executable should be executable");
-        }
-
-        fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn cargo_install_command_includes_requested_features() {
@@ -588,13 +446,34 @@ mod tests {
         );
     }
 
-    fn make_temp_workspace(name: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = env::temp_dir().join(format!("spur-xtask-{name}-{nonce}"));
-        fs::create_dir_all(&root).unwrap();
-        root
+    #[test]
+    fn tauri_build_command_runs_outer_spur_notebook_crate() {
+        let root = PathBuf::from("/workspace");
+
+        let command = tauri_build_command(&root);
+
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            command.get_program(),
+            root.join("crates/spur-notebook/jute-notebook")
+                .join(tauri_cli_bin())
+                .as_os_str()
+        );
+        assert_eq!(
+            args,
+            vec![
+                "build".to_string(),
+                "--bundles".to_string(),
+                "app".to_string()
+            ]
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(root.join("crates/spur-notebook").as_path())
+        );
     }
 }
