@@ -1252,6 +1252,39 @@ impl DashboardView {
                 }
                 None
             }
+            // ── Input history navigation ─────────────────────────────────
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input_bar.history_prev();
+                let env = crate::components::input_completion::CompletionEnv {
+                    command_registry: &self.command_registry,
+                    mention_registry: &self.mention_registry,
+                    cwd: &self.cwd,
+                    scope: crate::mentions::CompletionScope::PreSession,
+                    session_config_options: &[],
+                };
+                self.completion.dispatch(
+                    crate::components::completion_trigger::IntentEvent::SetText,
+                    &mut self.input_bar,
+                    &env,
+                );
+                None
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input_bar.history_next();
+                let env = crate::components::input_completion::CompletionEnv {
+                    command_registry: &self.command_registry,
+                    mention_registry: &self.mention_registry,
+                    cwd: &self.cwd,
+                    scope: crate::mentions::CompletionScope::PreSession,
+                    session_config_options: &[],
+                };
+                self.completion.dispatch(
+                    crate::components::completion_trigger::IntentEvent::SetText,
+                    &mut self.input_bar,
+                    &env,
+                );
+                None
+            }
             KeyCode::Char('o')
                 if self.focused_node.is_some()
                     && !key
@@ -1623,14 +1656,6 @@ impl DashboardView {
         let key = super::normalize_macos_option(key);
 
         // Global shortcuts that bypass ownership.
-        if matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.input_bar.history_prev();
-            return None;
-        }
-        if matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.input_bar.history_next();
-            return None;
-        }
         if matches!(key.code, KeyCode::Char('i')) && key.modifiers.contains(KeyModifiers::ALT) {
             return Some(Action::ToggleVimMode);
         }
@@ -1638,16 +1663,32 @@ impl DashboardView {
         let owner = self.key_owner(key);
 
         match owner {
-            KeyOwner::Picker => self
-                .completion
-                .handle_picker_key(key, &mut self.input_bar)
-                .and_then(|accept| {
-                    crate::commands::submit_router::local_action_from_picker_accept(
-                        accept,
-                        &self.command_registry,
-                        None,
-                    )
-                }),
+            KeyOwner::Picker => {
+                let picker_key = match key.code {
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyEvent {
+                            code: KeyCode::Up,
+                            ..key
+                        }
+                    }
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyEvent {
+                            code: KeyCode::Down,
+                            ..key
+                        }
+                    }
+                    _ => key,
+                };
+                self.completion
+                    .handle_picker_key(picker_key, &mut self.input_bar)
+                    .and_then(|accept| {
+                        crate::commands::submit_router::local_action_from_picker_accept(
+                            accept,
+                            &self.command_registry,
+                            None,
+                        )
+                    })
+            }
             KeyOwner::Composer => {
                 // Enter Compose mode when typing in Navigate mode.
                 if self.mode == DashboardMode::Navigate {
