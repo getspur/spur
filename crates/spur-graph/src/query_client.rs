@@ -1,23 +1,29 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context};
-use arrow_array::{Array, BooleanArray, Int32Array, RecordBatch, StringArray};
+use arrow_array::{
+    Array, BooleanArray, Float32Array, Int32Array, Int64Array, RecordBatch, StringArray,
+};
 use arrow_schema::ArrowError;
 use globset::Glob;
 use parquet::arrow::arrow_reader::{
     ArrowPredicateFn, ArrowReaderMetadata, ParquetRecordBatchReaderBuilder, RowFilter,
 };
 use parquet::arrow::ProjectionMask;
+use parquet::schema::types::SchemaDescriptor;
 
-use crate::store::parquet::PARQUET_ROW_GROUP_SIZE;
+use crate::store::parquet::{
+    confidence_from_str, edge_kind_from_str, relation_from_str, PARQUET_ROW_GROUP_SIZE,
+};
 use crate::temporal::TemporalIndex;
 use crate::{
     compare_symbols, find_callee_edges, find_caller_edges, read_artifact_header_parquet,
-    resolve_selector, search_symbols, CalleeRecord, CallerRecord, GraphArtifactManifest,
-    GraphFileManifestEntry, GraphIndexArtifact, SearchOptions, SearchResult, SearchSymbol,
-    SelectorResolution,
+    resolve_selector, search_symbols, GraphArtifactManifest, GraphEdgeArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact, OwnedCalleeRecord,
+    OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
 };
 use crate::{SearchFilters, SearchMode};
 
@@ -25,8 +31,8 @@ pub type CodeSelectorResolution = SelectorResolution;
 
 pub trait GraphQueryClient {
     fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult>;
-    fn find_caller_edges(&self, sid: &str) -> Vec<CallerRecord<'_>>;
-    fn find_callee_edges(&self, sid: &str) -> Vec<CalleeRecord<'_>>;
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord>;
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord>;
     fn resolve_selector(&self, selector: &str) -> CodeSelectorResolution;
     fn file_manifest_by_path(&self, path: &str) -> Option<&GraphFileManifestEntry>;
     fn temporal_index(&self) -> Arc<TemporalIndex>;
@@ -52,12 +58,18 @@ impl GraphQueryClient for InMemoryClient {
         Ok(search_symbols(&self.artifact, opts))
     }
 
-    fn find_caller_edges(&self, sid: &str) -> Vec<CallerRecord<'_>> {
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
         find_caller_edges(&self.artifact, sid)
+            .into_iter()
+            .map(OwnedCallerRecord::from)
+            .collect()
     }
 
-    fn find_callee_edges(&self, sid: &str) -> Vec<CalleeRecord<'_>> {
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
         find_callee_edges(&self.artifact, sid)
+            .into_iter()
+            .map(OwnedCalleeRecord::from)
+            .collect()
     }
 
     fn resolve_selector(&self, selector: &str) -> CodeSelectorResolution {
@@ -89,6 +101,38 @@ const SEARCH_COLUMNS: [&str; 8] = [
 const SEARCH_PREDICATE_COLUMNS: [&str; 4] =
     ["entity_name", "qualified_name", "file_path", "symbol_kind"];
 const FILE_OID_COLUMNS: [&str; 2] = ["path", "content_oid"];
+const SYMBOL_COLUMNS: [&str; 11] = [
+    "stable_symbol_id",
+    "file_path",
+    "byte_range_start",
+    "byte_range_end",
+    "line_start",
+    "line_end",
+    "entity_name",
+    "qualified_name",
+    "symbol_kind",
+    "anchor_hash",
+    "enclosing_scope",
+];
+const RESOLVED_EDGE_COLUMNS: [&str; 8] = [
+    "source_stable_id",
+    "target_stable_id",
+    "target_label",
+    "relation",
+    "confidence",
+    "confidence_score",
+    "edge_kind",
+    "bind_method",
+];
+const UNRESOLVED_EDGE_COLUMNS: [&str; 7] = [
+    "source_stable_id",
+    "target_label",
+    "relation",
+    "confidence",
+    "confidence_score",
+    "edge_kind",
+    "bind_method",
+];
 
 pub struct ParquetClient {
     dir: PathBuf,
@@ -198,6 +242,187 @@ impl ParquetClient {
             truncated,
         })
     }
+
+    pub fn try_find_caller_edges(&self, sid: &str) -> anyhow::Result<Vec<OwnedCallerRecord>> {
+        self.find_caller_edges_inner(sid)
+    }
+
+    pub fn try_find_callee_edges(&self, sid: &str) -> anyhow::Result<Vec<OwnedCalleeRecord>> {
+        self.find_callee_edges_inner(sid)
+    }
+
+    fn find_caller_edges_inner(&self, target_sid: &str) -> anyhow::Result<Vec<OwnedCallerRecord>> {
+        let Some(target_symbol) = self.symbol_by_id(target_sid)? else {
+            return Ok(Vec::new());
+        };
+        let unresolved_labels = unresolved_target_labels_for_symbol(&target_symbol);
+        let resolved_edges = self.resolved_edges_by_target(target_sid)?;
+        let unresolved_edges = self.unresolved_edges_by_target_labels(&unresolved_labels)?;
+        if resolved_edges.is_empty() && unresolved_edges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let caller_ids = resolved_edges
+            .iter()
+            .chain(unresolved_edges.iter())
+            .filter(|edge| is_caller_relation(edge.relation))
+            .map(|edge| edge.source_stable_symbol_id.clone())
+            .collect::<HashSet<_>>();
+        let callers = self.symbols_by_ids(&caller_ids)?;
+
+        let mut records = Vec::with_capacity(resolved_edges.len() + unresolved_edges.len());
+        for edge in resolved_edges {
+            if !is_caller_relation(edge.relation) {
+                continue;
+            }
+            if let Some(caller) = callers.get(&edge.source_stable_symbol_id) {
+                records.push(OwnedCallerRecord::Resolved {
+                    caller: caller.clone(),
+                    edge,
+                });
+            }
+        }
+        for edge in unresolved_edges {
+            if !is_caller_relation(edge.relation) {
+                continue;
+            }
+            if let Some(caller) = callers.get(&edge.source_stable_symbol_id) {
+                records.push(OwnedCallerRecord::Unresolved {
+                    caller: caller.clone(),
+                    target_label: edge.target_label.clone().unwrap_or_default(),
+                    edge,
+                });
+            }
+        }
+        Ok(records)
+    }
+
+    fn find_callee_edges_inner(&self, source_sid: &str) -> anyhow::Result<Vec<OwnedCalleeRecord>> {
+        if self.symbol_by_id(source_sid)?.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let resolved_edges = self.resolved_edges_by_source(source_sid)?;
+        let unresolved_edges = self.unresolved_edges_by_source(source_sid)?;
+        if resolved_edges.is_empty() && unresolved_edges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let target_ids = resolved_edges
+            .iter()
+            .filter(|edge| is_caller_relation(edge.relation))
+            .filter_map(|edge| edge.target_stable_symbol_id.clone())
+            .collect::<HashSet<_>>();
+        let targets = self.symbols_by_ids(&target_ids)?;
+
+        let mut records = Vec::with_capacity(resolved_edges.len() + unresolved_edges.len());
+        for edge in resolved_edges {
+            if !is_caller_relation(edge.relation) {
+                continue;
+            }
+            if let Some(target_id) = edge.target_stable_symbol_id.as_deref() {
+                if let Some(symbol) = targets.get(target_id) {
+                    records.push(OwnedCalleeRecord::Resolved {
+                        symbol: symbol.clone(),
+                        edge,
+                    });
+                }
+            }
+        }
+        for edge in unresolved_edges {
+            if !is_caller_relation(edge.relation) {
+                continue;
+            }
+            if let Some(target_label) = edge.target_label.clone() {
+                records.push(OwnedCalleeRecord::Unresolved { edge, target_label });
+            }
+        }
+        Ok(records)
+    }
+
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        let ids = HashSet::from([sid.to_string()]);
+        Ok(self.symbols_by_ids(&ids)?.remove(sid))
+    }
+
+    fn symbols_by_ids(
+        &self,
+        sids: &HashSet<String>,
+    ) -> anyhow::Result<HashMap<String, GraphSymbolArtifact>> {
+        if sids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let batches = filtered_projected_batches(
+            &self.dir.join("nodes.parquet"),
+            SYMBOL_COLUMNS,
+            |schema| string_in_row_filter(schema, "stable_symbol_id", sids.clone()),
+        )?;
+        let mut symbols = HashMap::new();
+        for batch in batches {
+            for symbol in symbols_from_batch(&batch)? {
+                symbols.insert(symbol.stable_symbol_id.clone(), symbol);
+            }
+        }
+        Ok(symbols)
+    }
+
+    fn resolved_edges_by_source(&self, source_sid: &str) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+        self.resolved_edges_where("edges.parquet", "source_stable_id", source_sid)
+    }
+
+    fn resolved_edges_by_target(&self, target_sid: &str) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+        self.resolved_edges_where("edges_by_dst.parquet", "target_stable_id", target_sid)
+    }
+
+    fn resolved_edges_where(
+        &self,
+        file_name: &str,
+        column: &str,
+        value: &str,
+    ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+        let path = self.dir.join(file_name);
+        let batches = filtered_projected_batches(&path, RESOLVED_EDGE_COLUMNS, |schema| {
+            string_eq_row_filter(schema, column, value.to_string())
+        })?;
+        let mut edges = Vec::new();
+        for batch in batches {
+            edges.extend(resolved_edges_from_batch(&batch)?);
+        }
+        Ok(edges)
+    }
+
+    fn unresolved_edges_by_source(
+        &self,
+        source_sid: &str,
+    ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+        let path = self.dir.join("edges_unresolved.parquet");
+        let batches = filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, |schema| {
+            string_eq_row_filter(schema, "source_stable_id", source_sid.to_string())
+        })?;
+        let mut edges = Vec::new();
+        for batch in batches {
+            edges.extend(unresolved_edges_from_batch(&batch)?);
+        }
+        Ok(edges)
+    }
+
+    fn unresolved_edges_by_target_labels(
+        &self,
+        labels: &HashSet<String>,
+    ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+        if labels.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = self.dir.join("edges_unresolved.parquet");
+        let batches = filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, |schema| {
+            string_in_row_filter(schema, "target_label", labels.clone())
+        })?;
+        let mut edges = Vec::new();
+        for batch in batches {
+            edges.extend(unresolved_edges_from_batch(&batch)?);
+        }
+        Ok(edges)
+    }
 }
 
 impl GraphQueryClient for ParquetClient {
@@ -205,12 +430,14 @@ impl GraphQueryClient for ParquetClient {
         self.search_symbols_inner(opts)
     }
 
-    fn find_caller_edges(&self, _sid: &str) -> Vec<CallerRecord<'_>> {
-        unimplemented!("PR3")
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        self.try_find_caller_edges(sid)
+            .unwrap_or_else(|error| panic!("failed to query Parquet caller edges: {error:#}"))
     }
 
-    fn find_callee_edges(&self, _sid: &str) -> Vec<CalleeRecord<'_>> {
-        unimplemented!("PR3")
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        self.try_find_callee_edges(sid)
+            .unwrap_or_else(|error| panic!("failed to query Parquet callee edges: {error:#}"))
     }
 
     fn resolve_selector(&self, _selector: &str) -> CodeSelectorResolution {
@@ -237,6 +464,26 @@ fn projected_batches<const N: usize>(
     builder
         .with_batch_size(PARQUET_ROW_GROUP_SIZE)
         .with_projection(projection)
+        .build()
+        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to decode `{}`", path.display()))
+}
+
+fn filtered_projected_batches<const N: usize>(
+    path: &Path,
+    columns: [&str; N],
+    row_filter: impl FnOnce(&SchemaDescriptor) -> RowFilter,
+) -> anyhow::Result<Vec<RecordBatch>> {
+    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("failed to read `{}`", path.display()))?;
+    let projection = ProjectionMask::columns(builder.parquet_schema(), columns);
+    let row_filter = row_filter(builder.parquet_schema());
+    builder
+        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
+        .with_projection(projection)
+        .with_row_filter(row_filter)
         .build()
         .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -373,6 +620,44 @@ fn row_matches_filters(
     true
 }
 
+fn string_eq_row_filter(
+    parquet_schema: &SchemaDescriptor,
+    column: &str,
+    expected: String,
+) -> RowFilter {
+    string_in_row_filter(parquet_schema, column, HashSet::from([expected]))
+}
+
+fn string_in_row_filter(
+    parquet_schema: &SchemaDescriptor,
+    column: &str,
+    expected: HashSet<String>,
+) -> RowFilter {
+    let projection = ProjectionMask::columns(parquet_schema, [column]);
+    let column = column.to_string();
+    let predicate = move |batch: RecordBatch| -> Result<BooleanArray, ArrowError> {
+        let values = string_array_by_name(&batch, &column)?;
+        let mut keep = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            keep.push(!values.is_null(row) && expected.contains(values.value(row)));
+        }
+        Ok(BooleanArray::from(keep))
+    };
+    RowFilter::new(vec![Box::new(ArrowPredicateFn::new(projection, predicate))])
+}
+
+fn unresolved_target_labels_for_symbol(symbol: &GraphSymbolArtifact) -> HashSet<String> {
+    HashSet::from([
+        symbol.entity_name.clone(),
+        symbol.qualified_name.clone(),
+        symbol.stable_symbol_id.clone(),
+    ])
+}
+
+fn is_caller_relation(relation: RelationKind) -> bool {
+    matches!(relation, RelationKind::Calls | RelationKind::References)
+}
+
 fn search_symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<SearchSymbol>> {
     let stable_symbol_id = string_array_by_name(batch, "stable_symbol_id")?;
     let file_path = string_array_by_name(batch, "file_path")?;
@@ -403,6 +688,113 @@ fn search_symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<SearchSy
     Ok(symbols)
 }
 
+fn symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+    let stable_symbol_id = string_array_by_name(batch, "stable_symbol_id")?;
+    let file_path = string_array_by_name(batch, "file_path")?;
+    let byte_range_start = i64_array_by_name(batch, "byte_range_start")?;
+    let byte_range_end = i64_array_by_name(batch, "byte_range_end")?;
+    let line_start = i32_array_by_name(batch, "line_start")?;
+    let line_end = i32_array_by_name(batch, "line_end")?;
+    let entity_name = string_array_by_name(batch, "entity_name")?;
+    let qualified_name = string_array_by_name(batch, "qualified_name")?;
+    let symbol_kind = string_array_by_name(batch, "symbol_kind")?;
+    let anchor_hash = string_array_by_name(batch, "anchor_hash")?;
+    let enclosing_scope = string_array_by_name(batch, "enclosing_scope")?;
+
+    let mut symbols = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        symbols.push(GraphSymbolArtifact {
+            stable_symbol_id: required_string_value(stable_symbol_id, row, "stable_symbol_id")?
+                .to_string(),
+            file_path: required_string_value(file_path, row, "file_path")?.to_string(),
+            byte_range: [
+                i64_to_usize(byte_range_start.value(row), "byte_range_start")?,
+                i64_to_usize(byte_range_end.value(row), "byte_range_end")?,
+            ],
+            line_range: [
+                i32_to_usize(line_start.value(row), "line_start")?,
+                i32_to_usize(line_end.value(row), "line_end")?,
+            ],
+            entity_name: required_string_value(entity_name, row, "entity_name")?.to_string(),
+            qualified_name: required_string_value(qualified_name, row, "qualified_name")?
+                .to_string(),
+            symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?.to_string(),
+            anchor_hash: required_string_value(anchor_hash, row, "anchor_hash")?.to_string(),
+            enclosing_scope: optional_string_value(enclosing_scope, row),
+        });
+    }
+    Ok(symbols)
+}
+
+fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+    let source_stable_id = string_array_by_name(batch, "source_stable_id")?;
+    let target_stable_id = string_array_by_name(batch, "target_stable_id")?;
+    let target_label = string_array_by_name(batch, "target_label")?;
+    let relation = string_array_by_name(batch, "relation")?;
+    let confidence = string_array_by_name(batch, "confidence")?;
+    let confidence_score = f32_array_by_name(batch, "confidence_score")?;
+    let edge_kind = string_array_by_name(batch, "edge_kind")?;
+    let bind_method = string_array_by_name(batch, "bind_method")?;
+
+    let mut edges = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        edges.push(GraphEdgeArtifact {
+            source_stable_symbol_id: required_string_value(
+                source_stable_id,
+                row,
+                "source_stable_id",
+            )?
+            .to_string(),
+            target_stable_symbol_id: Some(
+                required_string_value(target_stable_id, row, "target_stable_id")?.to_string(),
+            ),
+            target_label: optional_string_value(target_label, row),
+            relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
+            confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
+            confidence_score: confidence_score.value(row),
+            change_kind: None,
+            edge_kind: optional_string_value(edge_kind, row)
+                .map(|value| edge_kind_from_str(&value))
+                .transpose()?,
+            bind_method: optional_string_value(bind_method, row),
+        });
+    }
+    Ok(edges)
+}
+
+fn unresolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
+    let source_stable_id = string_array_by_name(batch, "source_stable_id")?;
+    let target_label = string_array_by_name(batch, "target_label")?;
+    let relation = string_array_by_name(batch, "relation")?;
+    let confidence = string_array_by_name(batch, "confidence")?;
+    let confidence_score = f32_array_by_name(batch, "confidence_score")?;
+    let edge_kind = string_array_by_name(batch, "edge_kind")?;
+    let bind_method = string_array_by_name(batch, "bind_method")?;
+
+    let mut edges = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        edges.push(GraphEdgeArtifact {
+            source_stable_symbol_id: required_string_value(
+                source_stable_id,
+                row,
+                "source_stable_id",
+            )?
+            .to_string(),
+            target_stable_symbol_id: None,
+            target_label: optional_string_value(target_label, row),
+            relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
+            confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
+            confidence_score: confidence_score.value(row),
+            change_kind: None,
+            edge_kind: optional_string_value(edge_kind, row)
+                .map(|value| edge_kind_from_str(&value))
+                .transpose()?,
+            bind_method: optional_string_value(bind_method, row),
+        });
+    }
+    Ok(edges)
+}
+
 fn string_array_by_name<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -424,6 +816,27 @@ fn i32_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32
         .ok_or_else(|| ArrowError::CastError(format!("expected int32 column `{name}`")))
 }
 
+fn i64_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array, ArrowError> {
+    let index = batch.schema().index_of(name)?;
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| ArrowError::CastError(format!("expected int64 column `{name}`")))
+}
+
+fn f32_array_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a Float32Array, ArrowError> {
+    let index = batch.schema().index_of(name)?;
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| ArrowError::CastError(format!("expected float32 column `{name}`")))
+}
+
 fn required_string_value<'a>(
     values: &'a StringArray,
     index: usize,
@@ -442,6 +855,10 @@ fn optional_string_value(values: &StringArray, index: usize) -> Option<String> {
 }
 
 fn i32_to_usize(value: i32, name: &str) -> anyhow::Result<usize> {
+    usize::try_from(value).map_err(|_| anyhow!("column `{name}` has negative value {value}"))
+}
+
+fn i64_to_usize(value: i64, name: &str) -> anyhow::Result<usize> {
     usize::try_from(value).map_err(|_| anyhow!("column `{name}` has negative value {value}"))
 }
 

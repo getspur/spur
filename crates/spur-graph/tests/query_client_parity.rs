@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use spur_graph::{
-    write_artifact_parquet, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
-    GraphSymbolArtifact, InMemoryClient, NodeId, ParquetClient, SearchFilters, SearchMode,
+    write_artifact_parquet, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact,
+    GraphIndexHeader, GraphQueryClient, GraphSymbolArtifact, InMemoryClient, NodeId,
+    OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, RelationKind, SearchFilters, SearchMode,
     SearchOptions, WriteOptions,
 };
 
@@ -62,6 +63,17 @@ fn artifact() -> GraphIndexArtifact {
             "run_query",
             "run_query",
         ),
+        symbol("caller", "src/callers.rs", [50, 51], "caller", "caller"),
+        symbol(
+            "unresolved-caller",
+            "src/callers.rs",
+            [55, 56],
+            "unresolved_caller",
+            "unresolved_caller",
+        ),
+        symbol("target", "src/callees.rs", [60, 61], "target", "target"),
+        symbol("root", "src/root.rs", [70, 71], "root", "root"),
+        symbol("callee", "src/root.rs", [80, 81], "callee", "callee"),
     ];
     let symbol_node_ids = (1..=symbols.len()).map(|id| NodeId(id as u64)).collect();
 
@@ -77,7 +89,12 @@ fn artifact() -> GraphIndexArtifact {
         file_node_ids: Vec::new(),
         symbols,
         symbol_node_ids,
-        edges: Vec::new(),
+        edges: vec![
+            edge("caller", Some("target"), Some("target")),
+            edge("unresolved-caller", None, Some("target")),
+            edge("root", Some("callee"), Some("callee")),
+            edge("root", None, Some("external_call")),
+        ],
         tombstones: Vec::new(),
         diagnostics: Vec::new(),
         commits: Vec::new(),
@@ -103,6 +120,20 @@ fn symbol(
         symbol_kind: "function".to_string(),
         anchor_hash: format!("hash-{id}"),
         enclosing_scope: None,
+    }
+}
+
+fn edge(source: &str, target: Option<&str>, target_label: Option<&str>) -> GraphEdgeArtifact {
+    GraphEdgeArtifact {
+        source_stable_symbol_id: source.to_string(),
+        target_stable_symbol_id: target.map(str::to_string),
+        target_label: target_label.map(str::to_string),
+        relation: RelationKind::Calls,
+        confidence: Confidence::SyntaxExact,
+        confidence_score: 1.0,
+        change_kind: None,
+        edge_kind: Some(GraphEdgeKind::Calls),
+        bind_method: None,
     }
 }
 
@@ -147,4 +178,78 @@ fn parquet_client_search_symbols_matches_in_memory_client() {
 
         assert_eq!(actual, expected, "options: {options:?}");
     }
+}
+
+#[test]
+fn parquet_client_find_caller_edges_matches_in_memory_client() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact();
+    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let in_memory = InMemoryClient::new(Arc::new(artifact));
+    let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+    let expected = caller_records(in_memory.find_caller_edges("target"));
+    let actual = caller_records(parquet.find_caller_edges("target"));
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn parquet_client_find_callee_edges_matches_in_memory_client() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact();
+    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let in_memory = InMemoryClient::new(Arc::new(artifact));
+    let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+    let expected = callee_records(in_memory.find_callee_edges("root"));
+    let actual = callee_records(parquet.find_callee_edges("root"));
+
+    assert_eq!(actual, expected);
+}
+
+fn caller_records(records: Vec<OwnedCallerRecord>) -> Vec<(String, String, bool, Option<String>)> {
+    records
+        .into_iter()
+        .map(|record| match record {
+            OwnedCallerRecord::Resolved { caller, edge } => (
+                caller.stable_symbol_id.clone(),
+                edge.source_stable_symbol_id.clone(),
+                true,
+                edge.target_label.clone(),
+            ),
+            OwnedCallerRecord::Unresolved {
+                caller,
+                edge,
+                target_label,
+            } => (
+                caller.stable_symbol_id.clone(),
+                edge.source_stable_symbol_id.clone(),
+                false,
+                Some(target_label),
+            ),
+        })
+        .collect()
+}
+
+fn callee_records(records: Vec<OwnedCalleeRecord>) -> Vec<(String, String, bool, Option<String>)> {
+    records
+        .into_iter()
+        .map(|record| match record {
+            OwnedCalleeRecord::Resolved { symbol, edge } => (
+                symbol.stable_symbol_id.clone(),
+                edge.source_stable_symbol_id.clone(),
+                true,
+                edge.target_label.clone(),
+            ),
+            OwnedCalleeRecord::Unresolved { edge, target_label } => (
+                target_label.clone(),
+                edge.source_stable_symbol_id.clone(),
+                false,
+                Some(target_label),
+            ),
+        })
+        .collect()
 }
