@@ -578,6 +578,9 @@ impl InputBar {
                 }
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
+            // Reachable only when InputBar is consumed outside the main App dispatcher
+            // (App::handle_crossterm_event steals Ctrl+K for the palette). Covered by
+            // tests/input_bar_editing.rs::ctrl_k_*.
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let cursor = self.cursor_to_byte();
                 let text = self.text();
