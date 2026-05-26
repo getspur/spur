@@ -494,6 +494,57 @@ pub fn read_artifact_parquet_slim(dir: &Path) -> anyhow::Result<GraphIndexArtifa
     Ok(artifact)
 }
 
+pub(crate) fn read_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
+        || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
+    let symbol_snapshots_path = dir.join("symbol_snapshots.parquet");
+    let temporal_edges_path = dir.join("temporal_edges.parquet");
+    let row_counts = manifest.row_counts.clone();
+
+    let (symbol_snapshots, temporal_edges) = std::thread::scope(|scope| {
+        let symbol_snapshots = scope
+            .spawn(|| read_symbol_snapshots(&symbol_snapshots_path, row_counts.symbol_snapshots));
+        let temporal_edges =
+            scope.spawn(|| read_temporal_edges(&temporal_edges_path, row_counts.temporal_edges));
+
+        Ok::<_, anyhow::Error>((
+            join_scoped(symbol_snapshots, "read symbol_snapshots.parquet")?,
+            join_scoped(temporal_edges, "read temporal_edges.parquet")?,
+        ))
+    })?;
+
+    let mut artifact = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: manifest.graph_index_version,
+            content_hash_blake3: None,
+        },
+        manifest_version: manifest.manifest_version,
+        graph_content_hash: manifest.graph_content_hash,
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: Vec::new(),
+        symbol_node_ids: Vec::new(),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots,
+        temporal_edges,
+    };
+    if legacy_snapshot_ids {
+        crate::schema::rehash_legacy_snapshot_ids(&mut artifact);
+    }
+    Ok(artifact)
+}
+
 fn join_scoped<T>(
     handle: ScopedJoinHandle<'_, anyhow::Result<T>>,
     label: &str,

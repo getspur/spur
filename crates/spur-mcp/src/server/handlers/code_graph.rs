@@ -16,9 +16,8 @@ use spur_graph::temporal::{
     resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
 use spur_graph::{
-    artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, find_callee_edges,
-    find_caller_edges, load_artifact, load_artifact_slim, resolve_artifact_location,
-    resolve_selector, resolve_worktree_root_from, ArtifactFormat, CalleeRecord, CallerRecord,
+    artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, load_artifact,
+    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, ArtifactFormat,
     CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
     GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
     OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode, SearchOptions,
@@ -691,7 +690,17 @@ impl CodeSearchBackend {
                 })?;
                 let mut paths = Vec::new();
                 collect_response_file_paths(body, &mut paths);
-                Ok(file_oid_subset(&file_oids, paths))
+                let mut files = file_oid_subset(&file_oids, paths);
+                if files.is_empty() {
+                    if let Some(symbol_id) = response_symbol_id(body) {
+                        if let Some(symbol) =
+                            client.symbol_by_id(symbol_id).map_err(graph_query_error)?
+                        {
+                            files = file_oid_subset(&file_oids, [symbol.file_path.as_str()]);
+                        }
+                    }
+                }
+                Ok(files)
             }
             Self::LegacyJson { artifact, .. } => Ok(response_file_set_from_body(artifact, body)),
         }
@@ -1021,156 +1030,28 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
 
 pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
     selected_code_selector(args)?;
-    if parse_as_of(args)?.is_none() {
-        let backend = open_code_search_backend_for_request()?;
-        let mut body = code_callers_with_query_backend(args, &backend)
-            .map_err(CodeGraphError::into_handler_error)?;
-        let files = backend.response_file_set_from_body(&body)?;
-        GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
-            .await
-            .insert_into(&mut body);
-        return Ok(body);
-    }
-
-    let artifact = load_graph_artifact_for_request()?;
-    let body =
-        code_callers_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    code_graph_backend_value(args, code_callers_with_client).await
 }
 
 async fn code_callers_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    if parse_as_of(args)?.is_none() {
-        let backend =
-            open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
-        let mut body = code_callers_with_query_backend(args, &backend)?;
-        let files = backend
-            .response_file_set_from_body(&body)
-            .map_err(CodeGraphError::from)?;
-        let mut analysis =
-            GraphResponseMetadata::analyze_source_inner(backend.metadata_source(), Some(&files))
-                .await;
-
-        if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
-            let rebuild = match &backend {
-                CodeSearchBackend::Parquet(_) => {
-                    try_rebuild_artifact_from_worktree(
-                        Arc::clone(&rebuild_coordinator),
-                        rebuild_candidate,
-                    )
-                    .await
-                }
-                CodeSearchBackend::LegacyJson { artifact, .. } => {
-                    try_rebuild_artifact(
-                        Arc::clone(&rebuild_coordinator),
-                        Arc::clone(artifact),
-                        rebuild_candidate,
-                    )
-                    .await
-                }
-            };
-            match rebuild {
-                RebuildAttempt::Fresh(rebuilt_artifact) => {
-                    let mut fresh_body = code_callers_with_artifact(args, &rebuilt_artifact)
-                        .map_err(|error| error.with_artifact_metadata(&rebuilt_artifact))?;
-                    let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
-                    GraphResponseMetadata::analyze_artifact_with_files(
-                        &rebuilt_artifact,
-                        &fresh_files,
-                    )
-                    .await
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into(&mut fresh_body);
-                    return Ok(fresh_body);
-                }
-                RebuildAttempt::StaleBudgetExceeded => {
-                    analysis.metadata = analysis
-                        .metadata
-                        .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
-                }
-                RebuildAttempt::StaleRebuildFailed => {
-                    analysis.metadata = analysis
-                        .metadata
-                        .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
-                }
-            }
-        }
-
-        analysis.metadata.insert_into(&mut body);
-        return Ok(body);
-    }
-
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_callers_with_loaded_artifact(args, &loaded)
-    })
-    .await
+    code_graph_backend_response(args, rebuild_coordinator, code_callers_with_client).await
 }
 
-fn code_callers_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
+fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
     let request = code_traversal_request(args)?;
-    let symbol_id = match resolve_code_selector(args, artifact)? {
+    let symbol_id = match resolve_code_selector_with_client(args, client)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
             return Ok(ambiguous_response(candidates));
         }
     };
     let symbol_id =
-        resolve_symbol_for_optional_as_of_current_worktree(artifact, None, &symbol_id, args)?;
+        resolve_symbol_for_optional_as_of_current_worktree_with_client(client, &symbol_id, args)?;
 
-    let records = find_caller_edges(artifact, &symbol_id);
-    let summary = caller_summary(&records);
-    let callers = records
-        .into_iter()
-        .filter(|record| request.include_unresolved || record.is_resolved())
-        .map(caller_row)
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "callers": callers,
-        "include_unresolved": request.include_unresolved,
-        "counts_by_kind": summary.counts_by_kind,
-        "unresolved_sample": summary.unresolved_sample,
-    }))
-}
-
-fn code_callers_with_query_backend(args: &Value, backend: &CodeSearchBackend) -> CodeGraphResult {
-    match backend {
-        CodeSearchBackend::Parquet(client) => {
-            let resolver = parquet_resolver_artifact(client)?;
-            code_callers_with_owned_records(args, &resolver, |symbol_id| {
-                client.try_find_caller_edges(symbol_id).map_err(|error| {
-                    McpHandlerError::Internal(format!(
-                        "failed to query graph caller edges from `{}`: {error}",
-                        client.dir().display()
-                    ))
-                    .into()
-                })
-            })
-        }
-        CodeSearchBackend::LegacyJson { artifact, client } => {
-            code_callers_with_owned_records(args, artifact, |symbol_id| {
-                Ok(client.find_caller_edges(symbol_id))
-            })
-        }
-    }
-}
-
-fn code_callers_with_owned_records(
-    args: &Value,
-    resolver_artifact: &GraphIndexArtifact,
-    records_for_symbol: impl FnOnce(&str) -> Result<Vec<OwnedCallerRecord>, CodeGraphError>,
-) -> CodeGraphResult {
-    let request = code_traversal_request(args)?;
-    let symbol_id = match resolve_code_selector(args, resolver_artifact)? {
-        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
-        CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(candidates));
-        }
-    };
-
-    let records = records_for_symbol(&symbol_id)?;
+    let records = client.find_caller_edges(&symbol_id);
     let summary = owned_caller_summary(&records);
     let callers = records
         .into_iter()
@@ -1185,232 +1066,34 @@ fn code_callers_with_owned_records(
     }))
 }
 
-fn code_callers_with_loaded_artifact(
-    args: &Value,
-    loaded: &LoadedGraphArtifact,
-) -> CodeGraphResult {
-    let artifact = loaded.artifact();
-    let request = code_traversal_request(args)?;
-    let symbol_id = match resolve_code_selector(args, artifact)? {
-        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
-        CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(candidates));
-        }
-    };
-    let temporal_index = temporal_index_for_as_of(args, loaded)?;
-    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(
-        artifact,
-        temporal_index,
-        &symbol_id,
-        args,
-    )?;
-
-    let records = find_caller_edges(artifact, &symbol_id);
-    let summary = caller_summary(&records);
-    let callers = records
-        .into_iter()
-        .filter(|record| request.include_unresolved || record.is_resolved())
-        .map(caller_row)
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "callers": callers,
-        "include_unresolved": request.include_unresolved,
-        "counts_by_kind": summary.counts_by_kind,
-        "unresolved_sample": summary.unresolved_sample,
-    }))
-}
-
 pub(crate) async fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
-    if parse_as_of(args)?.is_none() {
-        let backend = open_code_search_backend_for_request()?;
-        let mut body = code_callees_with_query_backend(args, &backend)
-            .map_err(CodeGraphError::into_handler_error)?;
-        let files = backend.response_file_set_from_body(&body)?;
-        GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
-            .await
-            .insert_into(&mut body);
-        return Ok(body);
-    }
-
-    let artifact = load_graph_artifact_for_request()?;
-    let body =
-        code_callees_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    code_graph_backend_value(args, code_callees_with_client).await
 }
 
 async fn code_callees_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    if parse_as_of(args)?.is_none() {
-        let backend =
-            open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
-        let mut body = code_callees_with_query_backend(args, &backend)?;
-        let files = backend
-            .response_file_set_from_body(&body)
-            .map_err(CodeGraphError::from)?;
-        let mut analysis =
-            GraphResponseMetadata::analyze_source_inner(backend.metadata_source(), Some(&files))
-                .await;
-
-        if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
-            let rebuild = match &backend {
-                CodeSearchBackend::Parquet(_) => {
-                    try_rebuild_artifact_from_worktree(
-                        Arc::clone(&rebuild_coordinator),
-                        rebuild_candidate,
-                    )
-                    .await
-                }
-                CodeSearchBackend::LegacyJson { artifact, .. } => {
-                    try_rebuild_artifact(
-                        Arc::clone(&rebuild_coordinator),
-                        Arc::clone(artifact),
-                        rebuild_candidate,
-                    )
-                    .await
-                }
-            };
-            match rebuild {
-                RebuildAttempt::Fresh(rebuilt_artifact) => {
-                    let mut fresh_body = code_callees_with_artifact(args, &rebuilt_artifact)
-                        .map_err(|error| error.with_artifact_metadata(&rebuilt_artifact))?;
-                    let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
-                    GraphResponseMetadata::analyze_artifact_with_files(
-                        &rebuilt_artifact,
-                        &fresh_files,
-                    )
-                    .await
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into(&mut fresh_body);
-                    return Ok(fresh_body);
-                }
-                RebuildAttempt::StaleBudgetExceeded => {
-                    analysis.metadata = analysis
-                        .metadata
-                        .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
-                }
-                RebuildAttempt::StaleRebuildFailed => {
-                    analysis.metadata = analysis
-                        .metadata
-                        .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
-                }
-            }
-        }
-
-        analysis.metadata.insert_into(&mut body);
-        return Ok(body);
-    }
-
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_callees_with_loaded_artifact(args, &loaded)
-    })
-    .await
+    code_graph_backend_response(args, rebuild_coordinator, code_callees_with_client).await
 }
 
-fn code_callees_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
+fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
     let request = code_traversal_request(args)?;
-    let symbol_id = match resolve_code_selector(args, artifact)? {
+    let symbol_id = match resolve_code_selector_with_client(args, client)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
             return Ok(ambiguous_response(candidates));
         }
     };
     let symbol_id =
-        resolve_symbol_for_optional_as_of_current_worktree(artifact, None, &symbol_id, args)?;
+        resolve_symbol_for_optional_as_of_current_worktree_with_client(client, &symbol_id, args)?;
 
-    let records = find_callee_edges(artifact, &symbol_id);
-    let summary = callee_summary(&records);
-    let callees = records
-        .into_iter()
-        .filter(|record| request.include_unresolved || record.is_resolved())
-        .map(callee_row)
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "callees": callees,
-        "include_unresolved": request.include_unresolved,
-        "counts_by_kind": summary.counts_by_kind,
-        "unresolved_sample": summary.unresolved_sample,
-    }))
-}
-
-fn code_callees_with_query_backend(args: &Value, backend: &CodeSearchBackend) -> CodeGraphResult {
-    match backend {
-        CodeSearchBackend::Parquet(client) => {
-            let resolver = parquet_resolver_artifact(client)?;
-            code_callees_with_owned_records(args, &resolver, |symbol_id| {
-                client.try_find_callee_edges(symbol_id).map_err(|error| {
-                    McpHandlerError::Internal(format!(
-                        "failed to query graph callee edges from `{}`: {error}",
-                        client.dir().display()
-                    ))
-                    .into()
-                })
-            })
-        }
-        CodeSearchBackend::LegacyJson { artifact, client } => {
-            code_callees_with_owned_records(args, artifact, |symbol_id| {
-                Ok(client.find_callee_edges(symbol_id))
-            })
-        }
-    }
-}
-
-fn code_callees_with_owned_records(
-    args: &Value,
-    resolver_artifact: &GraphIndexArtifact,
-    records_for_symbol: impl FnOnce(&str) -> Result<Vec<OwnedCalleeRecord>, CodeGraphError>,
-) -> CodeGraphResult {
-    let request = code_traversal_request(args)?;
-    let symbol_id = match resolve_code_selector(args, resolver_artifact)? {
-        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
-        CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(candidates));
-        }
-    };
-
-    let records = records_for_symbol(&symbol_id)?;
+    let records = client.find_callee_edges(&symbol_id);
     let summary = owned_callee_summary(&records);
     let callees = records
         .into_iter()
         .filter(|record| request.include_unresolved || record.is_resolved())
         .map(owned_callee_row)
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "callees": callees,
-        "include_unresolved": request.include_unresolved,
-        "counts_by_kind": summary.counts_by_kind,
-        "unresolved_sample": summary.unresolved_sample,
-    }))
-}
-
-fn code_callees_with_loaded_artifact(
-    args: &Value,
-    loaded: &LoadedGraphArtifact,
-) -> CodeGraphResult {
-    let artifact = loaded.artifact();
-    let request = code_traversal_request(args)?;
-    let symbol_id = match resolve_code_selector(args, artifact)? {
-        CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
-        CodeSelectorResolution::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(candidates));
-        }
-    };
-    let temporal_index = temporal_index_for_as_of(args, loaded)?;
-    let symbol_id = resolve_symbol_for_optional_as_of_current_worktree(
-        artifact,
-        temporal_index,
-        &symbol_id,
-        args,
-    )?;
-
-    let records = find_callee_edges(artifact, &symbol_id);
-    let summary = callee_summary(&records);
-    let callees = records
-        .into_iter()
-        .filter(|record| request.include_unresolved || record.is_resolved())
-        .map(callee_row)
         .collect::<Vec<_>>();
     Ok(json!({
         "callees": callees,
@@ -1524,56 +1207,31 @@ fn code_subgraph_with_artifact_and_temporal(
 }
 
 pub(crate) async fn code_symbol_history(args: &Value) -> Result<Value, McpHandlerError> {
-    let worktree = current_worktree()?;
-    let artifact = Arc::new(load_graph_artifact_for_worktree(&worktree)?);
-    let commits = load_commit_index_for_request(&worktree)?;
-    let symbol_id = symbol_id_arg(args)?;
-    let temporal_index = Arc::new(TemporalIndex::new(Arc::clone(&artifact)));
-    let events =
-        code_symbol_history_events(args, &artifact, &temporal_index, &commits, &symbol_id)?;
-    let files = response_file_set_for_symbol_ids(&artifact, [symbol_id.as_str()]);
-    Ok(with_graph_metadata_with_files(
-        &artifact,
-        json!({
-            "symbol": symbol_uri(&symbol_id),
-            "events": events,
-        }),
-        &files,
-    )
-    .await)
+    code_graph_backend_value(args, code_symbol_history_with_client).await
 }
 
 async fn code_symbol_history_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    let worktree = current_worktree()?;
-    let commits =
-        load_commit_index_for_request(&worktree).map_err(CodeGraphError::without_metadata)?;
-    let symbol_id = symbol_id_arg(args)
-        .map_err(CodeGraphError::without_metadata)?
-        .to_string();
+    code_graph_backend_response(args, rebuild_coordinator, code_symbol_history_with_client).await
+}
 
-    with_loaded_graph_artifact_for_worktree(&worktree, Some(rebuild_coordinator), |loaded| {
-        let artifact = loaded.artifact();
-        let temporal_index = loaded.temporal_index();
-        let events =
-            code_symbol_history_events(args, artifact, &temporal_index, &commits, &symbol_id)?;
-        let files = response_file_set_for_symbol_ids(artifact, [symbol_id.as_str()]);
-        Ok(GraphResponsePayload::with_files(
-            json!({
-                "symbol": symbol_uri(&symbol_id),
-                "events": events,
-            }),
-            files,
-        ))
-    })
-    .await
+fn code_symbol_history_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let worktree = current_worktree()?;
+    let commits = load_commit_index_for_request(&worktree)?;
+    let symbol_id = symbol_id_arg(args)?.to_string();
+    let temporal_index = client.temporal_index();
+    let events = code_symbol_history_events(args, &temporal_index, &commits, &symbol_id)?;
+
+    Ok(json!({
+        "symbol": symbol_uri(&symbol_id),
+        "events": events,
+    }))
 }
 
 fn code_symbol_history_events(
     args: &Value,
-    artifact: &GraphIndexArtifact,
     temporal_index: &TemporalIndex,
     commits: &CommitIndexArtifact,
     symbol_id: &str,
@@ -1581,7 +1239,7 @@ fn code_symbol_history_events(
     let reachable = parse_as_of(args)?
         .map(|as_of| reachable_commits(commits, &as_of))
         .transpose()?;
-    if artifact.symbol_snapshots.is_empty() {
+    if temporal_index.artifact().symbol_snapshots.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -1651,7 +1309,15 @@ fn temporal_index_for_as_of(
     args: &Value,
     loaded: &LoadedGraphArtifact,
 ) -> Result<Option<Arc<TemporalIndex>>, McpHandlerError> {
-    Ok(parse_as_of(args)?.map(|_| loaded.temporal_index()))
+    if parse_as_of(args)?.is_none() {
+        return Ok(None);
+    }
+    if let Ok(backend) = open_code_search_backend_for_request() {
+        if backend.metadata_source().graph_content_hash == loaded.artifact().graph_content_hash {
+            return Ok(Some(backend.client().temporal_index()));
+        }
+    }
+    Ok(Some(loaded.temporal_index()))
 }
 
 #[derive(Debug)]
@@ -1663,13 +1329,6 @@ struct GraphResponsePayload {
 impl GraphResponsePayload {
     fn body(body: Value) -> Self {
         Self { body, files: None }
-    }
-
-    fn with_files(body: Value, files: Vec<(String, String)>) -> Self {
-        Self {
-            body,
-            files: Some(files),
-        }
     }
 
     fn files_for_metadata(&self, artifact: &GraphIndexArtifact) -> Vec<(String, String)> {
@@ -2027,18 +1686,6 @@ async fn with_loaded_graph_artifact(
         handler(loaded).map(GraphResponsePayload::body)
     })
     .await
-}
-
-async fn with_loaded_graph_artifact_for_worktree(
-    worktree: &Path,
-    rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
-    handler: impl Fn(LoadedGraphArtifact) -> CodeGraphPayloadResult,
-) -> CodeGraphResult {
-    let artifact = Arc::new(
-        load_graph_artifact_for_worktree(worktree).map_err(CodeGraphError::without_metadata)?,
-    );
-    let rebuild_key = rebuild_key_for_loaded_artifact(worktree, &artifact).await;
-    with_loaded_graph_payload(rebuild_coordinator, artifact, rebuild_key, handler).await
 }
 
 async fn with_loaded_graph_payload(
@@ -2475,17 +2122,6 @@ fn open_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandle
     }
 }
 
-fn parquet_resolver_artifact(
-    client: &ParquetClient,
-) -> Result<GraphIndexArtifact, McpHandlerError> {
-    load_artifact_slim(client.dir()).map_err(|error| {
-        McpHandlerError::Internal(format!(
-            "failed to load graph symbol index from `{}`: {error}",
-            client.dir().display()
-        ))
-    })
-}
-
 #[allow(clippy::result_large_err)]
 fn load_graph_artifact_for_request() -> Result<GraphIndexArtifact, McpHandlerError> {
     let worktree = current_worktree()?;
@@ -2503,31 +2139,6 @@ fn load_graph_artifact_for_request() -> Result<GraphIndexArtifact, McpHandlerErr
             Err(graph_artifact_missing(&worktree))
         }
         Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(&worktree)),
-        Err(error) => Err(McpHandlerError::Internal(format!(
-            "failed to load graph artifact `{}`: {error}",
-            artifact_path.display()
-        ))),
-    }
-}
-
-#[allow(clippy::result_large_err)]
-fn load_graph_artifact_for_worktree(
-    worktree: &Path,
-) -> Result<GraphIndexArtifact, McpHandlerError> {
-    let resolved =
-        resolve_artifact_location(worktree, None).map_err(|_| graph_artifact_missing(worktree))?;
-    let artifact_path = resolved.path;
-
-    match load_artifact(&artifact_path) {
-        Ok(artifact) => Ok(artifact),
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == ErrorKind::NotFound) =>
-        {
-            Err(graph_artifact_missing(worktree))
-        }
-        Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(worktree)),
         Err(error) => Err(McpHandlerError::Internal(format!(
             "failed to load graph artifact `{}`: {error}",
             artifact_path.display()
@@ -2594,6 +2205,30 @@ fn resolve_symbol_for_optional_as_of_current_worktree(
     }
     let worktree = current_worktree()?;
     resolve_symbol_for_optional_as_of(artifact, temporal_index, &worktree, symbol_id, args)
+}
+
+fn resolve_symbol_for_optional_as_of_current_worktree_with_client(
+    client: &dyn GraphQueryClient,
+    symbol_id: &str,
+    args: &Value,
+) -> Result<String, CodeGraphError> {
+    let Some(as_of) = parse_as_of(args)? else {
+        return Ok(symbol_id.to_string());
+    };
+    let worktree = current_worktree()?;
+    let commits = load_commit_index_for_request(&worktree)?;
+    let temporal_index = client.temporal_index();
+    temporal_resolution_symbol_id(
+        symbol_id,
+        &as_of,
+        resolve_symbol_as_of(
+            temporal_index.artifact(),
+            Some(Arc::clone(&temporal_index)),
+            &commits,
+            symbol_id,
+            &as_of,
+        )?,
+    )
 }
 
 fn parse_as_of(args: &Value) -> Result<Option<String>, McpHandlerError> {
@@ -3577,24 +3212,21 @@ async fn with_graph_metadata(artifact: &GraphIndexArtifact, mut body: Value) -> 
     body
 }
 
-async fn with_graph_metadata_with_files(
-    artifact: &GraphIndexArtifact,
-    mut body: Value,
-    files: &[(String, String)],
-) -> Value {
-    GraphResponseMetadata::from_artifact_with_files(artifact, files)
-        .await
-        .insert_into(&mut body);
-    body
-}
-
 fn response_file_set_from_body(
     artifact: &GraphIndexArtifact,
     body: &Value,
 ) -> Vec<(String, String)> {
     let mut paths = Vec::new();
     collect_response_file_paths(body, &mut paths);
-    response_file_set_for_paths(artifact, paths)
+    let mut files = response_file_set_for_paths(artifact, paths);
+    if files.is_empty() {
+        if let Some(symbol_id) = response_symbol_id(body) {
+            if let Ok(symbol) = symbol_by_id(artifact, symbol_id) {
+                files = response_file_set_for_paths(artifact, [symbol.file_path.as_str()]);
+            }
+        }
+    }
+    files
 }
 
 fn search_response_file_set_for_parquet(
@@ -3665,17 +3297,6 @@ fn all_indexed_file_set(artifact: &GraphIndexArtifact) -> Vec<(String, String)> 
         .collect()
 }
 
-fn response_file_set_for_symbol_ids<'a>(
-    artifact: &GraphIndexArtifact,
-    symbol_ids: impl IntoIterator<Item = &'a str>,
-) -> Vec<(String, String)> {
-    let paths = symbol_ids
-        .into_iter()
-        .filter_map(|symbol_id| symbol_by_id(artifact, symbol_id).ok())
-        .map(|symbol| symbol.file_path.as_str());
-    response_file_set_for_paths(artifact, paths)
-}
-
 fn response_file_set_for_paths<'a>(
     artifact: &GraphIndexArtifact,
     paths: impl IntoIterator<Item = &'a str>,
@@ -3711,6 +3332,13 @@ fn collect_response_file_paths<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
         }
         _ => {}
     }
+}
+
+fn response_symbol_id(value: &Value) -> Option<&str> {
+    value
+        .get("symbol")
+        .and_then(Value::as_str)
+        .map(missing_symbol_label)
 }
 
 fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -> Option<&'a str> {
@@ -3845,22 +3473,6 @@ struct TraversalSummary {
     unresolved_sample: Vec<String>,
 }
 
-fn caller_summary(records: &[CallerRecord<'_>]) -> TraversalSummary {
-    let unresolved = records.iter().filter_map(|record| match record {
-        CallerRecord::Unresolved { target_label, .. } => Some(target_label.as_str()),
-        CallerRecord::Resolved { .. } => None,
-    });
-    traversal_summary(records.iter().map(CallerRecord::edge), unresolved)
-}
-
-fn callee_summary(records: &[CalleeRecord<'_>]) -> TraversalSummary {
-    let unresolved = records.iter().filter_map(|record| match record {
-        CalleeRecord::Unresolved { target_label, .. } => Some(target_label.as_str()),
-        CalleeRecord::Resolved { .. } => None,
-    });
-    traversal_summary(records.iter().map(CalleeRecord::edge), unresolved)
-}
-
 fn owned_caller_summary(records: &[OwnedCallerRecord]) -> TraversalSummary {
     let unresolved = records.iter().filter_map(|record| match record {
         OwnedCallerRecord::Unresolved { target_label, .. } => Some(target_label.as_str()),
@@ -3929,45 +3541,6 @@ fn unresolved_sample<'a>(labels: impl IntoIterator<Item = &'a str>) -> Vec<Strin
     }
 
     sample
-}
-
-fn caller_row(caller: CallerRecord<'_>) -> Value {
-    match caller {
-        CallerRecord::Resolved { caller, edge } => {
-            let mut row = symbol_row(caller);
-            add_edge_metadata(&mut row, edge, true, None);
-            row
-        }
-        CallerRecord::Unresolved {
-            caller,
-            edge,
-            target_label,
-        } => {
-            let mut row = symbol_row(caller);
-            add_edge_metadata(&mut row, edge, false, Some(target_label));
-            row
-        }
-    }
-}
-
-fn callee_row(callee: CalleeRecord<'_>) -> Value {
-    match callee {
-        CalleeRecord::Resolved { symbol, edge } => {
-            let mut row = symbol_row(symbol);
-            add_edge_metadata(&mut row, edge, true, None);
-            row
-        }
-        CalleeRecord::Unresolved { edge, target_label } => {
-            let entity_name = target_label.clone();
-            let mut row = json!({
-                "resolved": false,
-                "entity_name": entity_name,
-                "target_label": target_label,
-            });
-            add_edge_metadata(&mut row, edge, false, None);
-            row
-        }
-    }
 }
 
 fn owned_caller_row(caller: OwnedCallerRecord) -> Value {
