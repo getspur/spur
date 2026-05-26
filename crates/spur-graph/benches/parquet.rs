@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use serde::Deserialize;
+use spur_graph::store::parquet::read_artifact_parquet_slim;
 use spur_graph::{
     artifact_from_facts, build_facts, read_artifact_parquet, write_artifact_parquet,
     GraphIndexArtifact, WriteOptions,
@@ -41,6 +42,22 @@ fn bench_read_artifact_parquet(c: &mut Criterion) {
         b.iter(|| {
             let artifact =
                 read_artifact_parquet(black_box(&parquet_dir)).expect("read parquet artifact");
+            black_box(artifact);
+        })
+    });
+}
+
+fn bench_read_artifact_parquet_slim(c: &mut Criterion) {
+    let fixture = load_fixture();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let parquet_dir =
+        write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
+            .expect("write parquet artifact");
+
+    c.bench_function("read_artifact_parquet_slim", |b| {
+        b.iter(|| {
+            let artifact = read_artifact_parquet_slim(black_box(&parquet_dir))
+                .expect("read parquet artifact (slim)");
             black_box(artifact);
         })
     });
@@ -103,6 +120,7 @@ fn median_f64(mut values: Vec<f64>) -> f64 {
 criterion_group!(
     benches,
     bench_write_artifact_parquet,
-    bench_read_artifact_parquet
+    bench_read_artifact_parquet,
+    bench_read_artifact_parquet_slim
 );
 criterion_main!(benches);
