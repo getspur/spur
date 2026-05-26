@@ -4,6 +4,7 @@ import { useSearch } from "wouter";
 import { setActiveAgentNotebook } from "@/agent/bridge";
 import { listenForNotebookEvents } from "@/agent/events";
 import { Notebook, NotebookContext } from "@/stores/notebook";
+import HtmlScriptsNotice from "@/ui/notebook/HtmlScriptsNotice";
 import NotebookCommandMenu from "@/ui/notebook/NotebookCommandMenu";
 import NotebookFooter from "@/ui/notebook/NotebookFooter";
 import NotebookHeader from "@/ui/notebook/NotebookHeader";
@@ -47,6 +48,7 @@ export default function NotebookPage() {
     <main className="h-screen bg-white">
       <NotebookContext.Provider value={notebook}>
         <NotebookHeader kernelName="Local Kernel (Python 3.11.7)" />
+        <HtmlScriptsNotice />
         <NotebookView />
         <NotebookFooter />
         <NotebookCommandMenu />
