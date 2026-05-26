@@ -145,6 +145,7 @@ pub enum DaemonControlCommand {
         kind: CellKind,
         after_id: Option<String>,
         source: String,
+        last_edited_by: Option<String>,
     },
     /// Delete one cell.
     DeleteCell {
@@ -650,6 +651,7 @@ async fn handle_daemon_control_inner(
             kind,
             after_id,
             source,
+            last_edited_by,
         } => {
             if matches!(after_id.as_deref(), Some("")) {
                 return Err(DaemonControlResponse::failure(
@@ -662,7 +664,7 @@ async fn handle_daemon_control_inner(
                     kind,
                     after_id,
                     source,
-                    last_edited_by: None,
+                    last_edited_by,
                 })
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
@@ -1650,6 +1652,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_insert_cell_preserves_last_edited_by() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_source("initial", 1));
+        let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "insert_cell",
+            "kind": "markdown",
+            "after_id": "550e8400-e29b-41d4-a716-446655440000",
+            "source": "notes",
+            "last_edited_by": "brain"
+        }))
+        .unwrap();
+
+        let response = handle_daemon_control_request(request, &state).await;
+        let result = response.into_result().unwrap();
+        let DaemonControlResult::Delta(NotebookDelta {
+            kind: DeltaKind::CellInserted { id, .. },
+            ..
+        }) = result
+        else {
+            panic!("expected insert delta");
+        };
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        let inserted = snapshot
+            .cells
+            .iter()
+            .find(|cell| cell_id(cell) == Some(id.as_str()))
+            .expect("inserted cell is present");
+        let Cell::Markdown(cell) = inserted else {
+            panic!("expected markdown cell");
+        };
+        assert_eq!(
+            cell.metadata
+                .spur
+                .as_ref()
+                .and_then(|spur| spur.last_edited_by.as_deref()),
+            Some("brain")
+        );
+    }
+
+    #[tokio::test]
     async fn discard_scratch_notebooks_skips_active_notebook() {
         let scratch_dir = std::env::temp_dir().join(format!("jute-scratch-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&scratch_dir).unwrap();
@@ -1752,6 +1798,7 @@ mod tests {
                 kind: CellKind::Markdown,
                 after_id: Some(cell_id.clone()),
                 source: "notes".to_string(),
+                last_edited_by: Some("brain".to_string()),
             }),
         )
         .await

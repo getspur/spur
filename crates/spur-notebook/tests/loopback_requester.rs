@@ -37,7 +37,7 @@ mod unix {
         let listener = UnixListener::bind(&socket_path).expect("bind temp daemon socket");
         let server_state = Arc::clone(&state);
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let (mut stream, _addr) = listener.accept().await.expect("accept daemon client");
                 let value = read_frame_value(&mut stream)
                     .await
@@ -90,6 +90,43 @@ mod unix {
                 "status": "idle",
                 "outputs": []
             })
+        );
+
+        let insert = requester
+            .request(
+                "notebook.insert_cell",
+                json!({
+                    "kind": "markdown",
+                    "after_id": CELL_ID,
+                    "source": "notes",
+                    "last_edited_by": "brain"
+                }),
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("insert_cell succeeds");
+        assert_eq!(insert["version"], 3);
+        let inserted_id = insert["id"].as_str().expect("inserted id").to_string();
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        let inserted = snapshot
+            .cells
+            .iter()
+            .find(|cell| match cell {
+                Cell::Raw(cell) => cell.id.as_deref() == Some(inserted_id.as_str()),
+                Cell::Markdown(cell) => cell.id.as_deref() == Some(inserted_id.as_str()),
+                Cell::Code(cell) => cell.id.as_deref() == Some(inserted_id.as_str()),
+            })
+            .expect("inserted cell is present");
+        let Cell::Markdown(cell) = inserted else {
+            panic!("expected markdown cell");
+        };
+        assert_eq!(
+            cell.metadata
+                .spur
+                .as_ref()
+                .and_then(|spur| spur.last_edited_by.as_deref()),
+            Some("brain")
         );
 
         requester.drain_on_shutdown().await;

@@ -107,6 +107,8 @@ struct InsertCellParams {
     #[serde(default, alias = "afterId")]
     after_id: Option<String>,
     source: String,
+    #[serde(default, alias = "lastEditedBy")]
+    last_edited_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +175,7 @@ fn command_from_bridge_method(
                 kind: bridge_cell_kind(&params.kind)?,
                 after_id: params.after_id,
                 source: params.source,
+                last_edited_by: params.last_edited_by,
             })
         }
         "notebook.delete_cell" => {
