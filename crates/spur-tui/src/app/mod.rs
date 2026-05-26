@@ -103,7 +103,7 @@ pub enum UserInput {
     /// Retire any attached brain and eagerly spawn a fresh brain session
     /// with no first prompt. Used by the picker's `[+ Start new session]`
     /// row so the TUI lands directly on the new session's `SessionDetail`
-    /// view via the `SessionCreated` auto-navigate, rather than the
+    /// view via the `BrainSpawned` auto-navigate, rather than the
     /// Dashboard compose view.
     NewSession,
     ListSessions,
