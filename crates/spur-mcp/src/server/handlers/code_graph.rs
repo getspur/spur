@@ -20,10 +20,10 @@ use spur_graph::{
     find_caller_edges, load_artifact, load_artifact_slim, resolve_artifact_location,
     resolve_selector, resolve_worktree_root_from, ArtifactFormat, CalleeRecord, CallerRecord,
     CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
-    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexPointer, GraphQueryClient,
-    GraphSymbolArtifact, InMemoryClient, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient,
-    SearchFilters, SearchMode, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
-    SnapshotKey, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
+    GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
+    OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode, SearchOptions,
+    SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget,
+    CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -460,6 +460,10 @@ impl McpCallbackServer {
 }
 
 pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
+    if parse_as_of(args)?.is_none() {
+        return code_graph_backend_value(args, code_resolve_with_client).await;
+    }
+
     let artifact = load_graph_artifact_for_request()?;
     let body =
         code_resolve_with_artifact(args, &artifact).map_err(CodeGraphError::into_handler_error)?;
@@ -547,6 +551,86 @@ fn code_search_with_artifact(
     client: &dyn GraphQueryClient,
 ) -> Result<Value, McpHandlerError> {
     Ok(code_search_body_for_client(args, client)?.body)
+}
+
+async fn code_graph_backend_value(
+    args: &Value,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> Result<Value, McpHandlerError> {
+    let backend = open_code_search_backend_for_request()?;
+    let mut body = handler(args, backend.client()).map_err(CodeGraphError::into_handler_error)?;
+    let files = backend.response_file_set_from_body(&body)?;
+    GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
+        .await
+        .insert_into(&mut body);
+    Ok(body)
+}
+
+async fn code_graph_backend_response(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> CodeGraphResult {
+    let backend =
+        open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
+    let source = backend.metadata_source();
+    let mut body = handler(args, backend.client()).map_err(|mut error| {
+        if error.metadata.is_none() && error.temporal_code.is_none() {
+            error.metadata = Some(Box::new(source.clone()));
+        }
+        error
+    })?;
+    let files = backend
+        .response_file_set_from_body(&body)
+        .map_err(CodeGraphError::from)?;
+    let mut analysis = GraphResponseMetadata::analyze_source_inner(source, Some(&files)).await;
+
+    if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
+        let rebuild = match &backend {
+            CodeSearchBackend::Parquet(_) => {
+                try_rebuild_artifact_from_worktree(
+                    Arc::clone(&rebuild_coordinator),
+                    rebuild_candidate,
+                )
+                .await
+            }
+            CodeSearchBackend::LegacyJson { artifact, .. } => {
+                try_rebuild_artifact(
+                    Arc::clone(&rebuild_coordinator),
+                    Arc::clone(artifact),
+                    rebuild_candidate,
+                )
+                .await
+            }
+        };
+        match rebuild {
+            RebuildAttempt::Fresh(rebuilt_artifact) => {
+                let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
+                let mut fresh_body = handler(args, &client)
+                    .map_err(|error| error.with_artifact_metadata(&rebuilt_artifact))?;
+                let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
+                GraphResponseMetadata::analyze_artifact_with_files(&rebuilt_artifact, &fresh_files)
+                    .await
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::Fresh)
+                    .insert_into(&mut fresh_body);
+                return Ok(fresh_body);
+            }
+            RebuildAttempt::StaleBudgetExceeded => {
+                analysis.metadata = analysis
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
+            }
+            RebuildAttempt::StaleRebuildFailed => {
+                analysis.metadata = analysis
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
+            }
+        }
+    }
+
+    analysis.metadata.insert_into(&mut body);
+    Ok(body)
 }
 
 struct CodeSearchBody {
@@ -655,10 +739,25 @@ async fn code_resolve_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
+    if parse_as_of(args)?.is_none() {
+        return code_graph_backend_response(args, rebuild_coordinator, code_resolve_with_client)
+            .await;
+    }
+
     with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
         code_resolve_with_loaded_artifact(args, &loaded)
     })
     .await
+}
+
+fn code_resolve_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let selector = selector_arg(args)?;
+    let candidates = resolve_candidate_rows_for_client(client, selector)?
+        .into_iter()
+        .map(candidate_row)
+        .collect::<Vec<_>>();
+
+    Ok(json!({ "candidates": candidates }))
 }
 
 fn code_resolve_with_artifact(args: &Value, artifact: &GraphIndexArtifact) -> CodeGraphResult {
@@ -799,98 +898,71 @@ fn code_resolve_temporal_response(
 }
 
 pub(crate) async fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
-    let artifact = load_graph_artifact_for_request()?;
-    let body = code_file_symbols_with_artifact(args, &artifact)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    code_graph_backend_value(args, code_file_symbols_with_client).await
 }
 
 async fn code_file_symbols_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_file_symbols_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
-    })
-    .await
+    code_graph_backend_response(args, rebuild_coordinator, code_file_symbols_with_client).await
 }
 
-fn code_file_symbols_with_artifact(
-    args: &Value,
-    artifact: &GraphIndexArtifact,
-) -> Result<Value, McpHandlerError> {
+fn code_file_symbols_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
     let file = file_arg(args)?;
     let file = validate_file_path_arg(file)?;
-    if !artifact.files.iter().any(|entry| entry.file_path == file) {
+    if !client.file_exists(&file).map_err(graph_query_error)? {
         return Err(McpHandlerError::NotFound(format!(
             "file `{file}` not found in graph artifact"
-        )));
+        ))
+        .into());
     }
 
-    let symbols = candidate_rows_for_symbols(
-        artifact
-            .symbols
-            .iter()
-            .filter(|symbol| symbol.file_path == file),
-    )
-    .into_iter()
-    .map(candidate_row)
-    .collect::<Vec<_>>();
+    let file_symbols = client.symbols_by_file(&file).map_err(graph_query_error)?;
+    let symbols = candidate_rows_for_symbols(file_symbols.iter())
+        .into_iter()
+        .map(candidate_row)
+        .collect::<Vec<_>>();
 
     Ok(json!({ "symbols": symbols }))
 }
 
 pub(crate) async fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
-    let artifact = load_graph_artifact_for_request()?;
-    let body = code_symbol_info_with_artifact(args, &artifact)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    code_graph_backend_value(args, code_symbol_info_with_client).await
 }
 
 async fn code_symbol_info_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_symbol_info_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
-    })
-    .await
+    code_graph_backend_response(args, rebuild_coordinator, code_symbol_info_with_client).await
 }
 
-fn code_symbol_info_with_artifact(
-    args: &Value,
-    artifact: &GraphIndexArtifact,
-) -> Result<Value, McpHandlerError> {
-    let symbol_id = match resolve_code_selector(args, artifact)? {
+fn code_symbol_info_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let symbol_id = match resolve_code_selector_with_client(args, client)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
         CodeSelectorResolution::Ambiguous(candidates) => {
             return Ok(ambiguous_response(candidates));
         }
     };
-    let symbol = symbol_by_id(artifact, &symbol_id)?;
+    let symbol = symbol_by_id_for_client(client, &symbol_id)?;
 
-    Ok(json!({ "symbol": symbol_info_row(symbol) }))
+    Ok(json!({ "symbol": symbol_info_row(&symbol) }))
 }
 
 pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerError> {
-    let artifact = load_graph_artifact_for_request()?;
-    let body = code_read_symbol_with_artifact(args, &artifact)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    code_graph_backend_value(args, code_read_symbol_with_client).await
 }
 
 async fn code_read_symbol_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_read_symbol_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
-    })
-    .await
+    code_graph_backend_response(args, rebuild_coordinator, code_read_symbol_with_client).await
 }
 
-fn code_read_symbol_with_artifact(
-    args: &Value,
-    artifact: &GraphIndexArtifact,
-) -> Result<Value, McpHandlerError> {
-    let symbol = match code_read_symbol_target(args, artifact)? {
+fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let symbol = match code_read_symbol_target(args, client)? {
         CodeReadSymbolTarget::Resolved(symbol) => symbol,
         CodeReadSymbolTarget::Ambiguous(candidates) => {
             return Ok(ambiguous_response(candidates));
@@ -903,7 +975,15 @@ fn code_read_symbol_with_artifact(
         0,
         MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES,
     )?;
-    let manifest = file_manifest_for_symbol(artifact, symbol)?;
+    let manifest = client
+        .file_manifest_by_path(&symbol.file_path)
+        .map_err(graph_query_error)?
+        .ok_or_else(|| {
+            McpHandlerError::Internal(format!(
+                "graph artifact has no file manifest for `{}`",
+                symbol.file_path
+            ))
+        })?;
     let worktree = current_worktree_root().ok_or_else(|| {
         McpHandlerError::Internal("failed to resolve current worktree root".into())
     })?;
@@ -915,13 +995,13 @@ fn code_read_symbol_with_artifact(
             manifest.content_oid, symbol.file_path
         ))
     })?;
-    let source_range = source_range_with_context(&indexed_source, symbol, context_lines.value);
+    let source_range = source_range_with_context(&indexed_source, &symbol, context_lines.value);
     let source = source_for_line_range(&indexed_source, source_range);
     let current_oid = current_file_oid(&worktree, &symbol.file_path)?;
     let stale = current_oid.as_deref() != Some(manifest.content_oid.as_str());
 
     let mut body = json!({
-        "symbol": symbol_info_row(symbol),
+        "symbol": symbol_info_row(&symbol),
         "source": source,
         "line_range": {
             "start": source_range[0],
@@ -2648,8 +2728,8 @@ enum CodeSelectorResolution {
     Ambiguous(Vec<CandidateRow>),
 }
 
-enum CodeReadSymbolTarget<'a> {
-    Resolved(&'a GraphSymbolArtifact),
+enum CodeReadSymbolTarget {
+    Resolved(GraphSymbolArtifact),
     Ambiguous(Vec<CandidateRow>),
 }
 
@@ -2667,6 +2747,37 @@ fn resolve_code_selector(
     let on_ambiguous = on_ambiguous_mode(args)?;
 
     match resolve_selector(artifact, selector) {
+        SelectorResolution::Resolved(resolved) => {
+            Ok(CodeSelectorResolution::Resolved(resolved.stable_symbol_id))
+        }
+        SelectorResolution::Ambiguous { candidates: _ }
+            if on_ambiguous == OnAmbiguousMode::Error =>
+        {
+            Err(McpHandlerError::InvalidParams(format!(
+                "selector `{selector}` is ambiguous; choose one candidate selector or uri"
+            )))
+        }
+        SelectorResolution::Ambiguous { candidates } => {
+            Ok(CodeSelectorResolution::Ambiguous(candidates))
+        }
+        SelectorResolution::NotFound => Err(McpHandlerError::NotFound(format!(
+            "symbol {} not found in graph artifact",
+            missing_symbol_label(selector)
+        ))),
+    }
+}
+
+fn resolve_code_selector_with_client(
+    args: &Value,
+    client: &dyn GraphQueryClient,
+) -> Result<CodeSelectorResolution, McpHandlerError> {
+    let selector = selected_code_selector(args)?;
+    let on_ambiguous = on_ambiguous_mode(args)?;
+
+    match client
+        .resolve_selector(selector)
+        .map_err(graph_query_error)?
+    {
         SelectorResolution::Resolved(resolved) => {
             Ok(CodeSelectorResolution::Resolved(resolved.stable_symbol_id))
         }
@@ -2719,10 +2830,10 @@ fn file_arg(args: &Value) -> Result<&str, McpHandlerError> {
         .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'file'".into()))
 }
 
-fn code_read_symbol_target<'a>(
+fn code_read_symbol_target(
     args: &Value,
-    artifact: &'a GraphIndexArtifact,
-) -> Result<CodeReadSymbolTarget<'a>, McpHandlerError> {
+    client: &dyn GraphQueryClient,
+) -> Result<CodeReadSymbolTarget, McpHandlerError> {
     let stable_symbol_id = string_arg(args, "stable_symbol_id")?;
     let path = string_arg(args, "path")?;
     let name = string_arg(args, "name")?;
@@ -2730,11 +2841,12 @@ fn code_read_symbol_target<'a>(
     match (stable_symbol_id, path, name) {
         (Some(stable_symbol_id), None, None) => {
             let symbol_id = missing_symbol_label(stable_symbol_id);
-            symbol_by_id(artifact, symbol_id).map(CodeReadSymbolTarget::Resolved)
+            let symbol = symbol_by_id_for_client(client, symbol_id)?;
+            Ok(CodeReadSymbolTarget::Resolved(symbol))
         }
         (None, Some(path), Some(name)) => {
             let path = validate_worktree_relative_path_arg("path", path)?;
-            resolve_symbol_by_path_name(artifact, &path, name)
+            resolve_symbol_by_path_name_for_client(client, &path, name)
         }
         (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(McpHandlerError::InvalidParams(
             "field 'stable_symbol_id' is mutually exclusive with fields 'path' and 'name'".into(),
@@ -2748,27 +2860,22 @@ fn code_read_symbol_target<'a>(
     }
 }
 
-fn resolve_symbol_by_path_name<'a>(
-    artifact: &'a GraphIndexArtifact,
+fn resolve_symbol_by_path_name_for_client(
+    client: &dyn GraphQueryClient,
     path: &str,
     name: &str,
-) -> Result<CodeReadSymbolTarget<'a>, McpHandlerError> {
-    let matches = artifact
-        .symbols
-        .iter()
-        .filter(|symbol| {
-            symbol.file_path == path
-                && (symbol.entity_name == name || symbol.qualified_name == name)
-        })
-        .collect::<Vec<_>>();
+) -> Result<CodeReadSymbolTarget, McpHandlerError> {
+    let matches = client
+        .symbols_by_path_name(path, name)
+        .map_err(graph_query_error)?;
 
     match matches.as_slice() {
         [] => Err(McpHandlerError::NotFound(format!(
             "symbol `{name}` in file `{path}` not found in graph artifact"
         ))),
-        [symbol] => Ok(CodeReadSymbolTarget::Resolved(symbol)),
+        [symbol] => Ok(CodeReadSymbolTarget::Resolved(symbol.clone())),
         _ => Ok(CodeReadSymbolTarget::Ambiguous(candidate_rows_for_symbols(
-            matches,
+            matches.iter(),
         ))),
     }
 }
@@ -3249,6 +3356,44 @@ fn resolve_candidate_rows(
     }
 }
 
+fn resolve_candidate_rows_for_client(
+    client: &dyn GraphQueryClient,
+    selector: &str,
+) -> Result<Vec<CandidateRow>, McpHandlerError> {
+    match client
+        .resolve_selector(selector)
+        .map_err(graph_query_error)?
+    {
+        SelectorResolution::Resolved(resolved) => {
+            let symbol = symbol_by_id_for_client(client, &resolved.stable_symbol_id)?;
+            Ok(vec![candidate_row_for_symbol(&symbol)])
+        }
+        SelectorResolution::Ambiguous { candidates } => Ok(candidates),
+        SelectorResolution::NotFound => Err(McpHandlerError::NotFound(format!(
+            "symbol {} not found in graph artifact",
+            missing_symbol_label(selector)
+        ))),
+    }
+}
+
+fn symbol_by_id_for_client(
+    client: &dyn GraphQueryClient,
+    symbol_id: &str,
+) -> Result<GraphSymbolArtifact, McpHandlerError> {
+    client
+        .symbol_by_id(symbol_id)
+        .map_err(graph_query_error)?
+        .ok_or_else(|| {
+            McpHandlerError::Internal(format!(
+                "resolved symbol id `{symbol_id}` missing from graph artifact"
+            ))
+        })
+}
+
+fn graph_query_error(error: anyhow::Error) -> McpHandlerError {
+    McpHandlerError::Internal(format!("failed to query graph artifact: {error}"))
+}
+
 fn symbol_by_id<'a>(
     artifact: &'a GraphIndexArtifact,
     symbol_id: &str,
@@ -3260,22 +3405,6 @@ fn symbol_by_id<'a>(
         .ok_or_else(|| {
             McpHandlerError::Internal(format!(
                 "resolved symbol id `{symbol_id}` missing from graph artifact"
-            ))
-        })
-}
-
-fn file_manifest_for_symbol<'a>(
-    artifact: &'a GraphIndexArtifact,
-    symbol: &GraphSymbolArtifact,
-) -> Result<&'a GraphFileManifestEntry, McpHandlerError> {
-    artifact
-        .file_manifests
-        .iter()
-        .find(|entry| entry.path == symbol.file_path)
-        .ok_or_else(|| {
-            McpHandlerError::Internal(format!(
-                "graph artifact has no file manifest for `{}`",
-                symbol.file_path
             ))
         })
 }
@@ -4131,6 +4260,26 @@ mod tests {
     }
 
     fn write_current_parquet_fixture(dir: &TempDir) {
+        std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+        std::fs::write(
+            dir.path().join("src/parquet.rs"),
+            [
+                "fn prelude() {}",
+                "fn spacer() {}",
+                "fn parquet_root() {",
+                "    parquet_child();",
+                "}",
+                "fn gap() {}",
+                "fn gap2() {}",
+                "fn parquet_child() {}",
+                "fn done() {}",
+            ]
+            .join("\n"),
+        )
+        .expect("write parquet source");
+        let content_oid = super::current_file_oid(dir.path(), "src/parquet.rs")
+            .expect("read parquet source oid")
+            .expect("parquet source oid");
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
                 graph_index_version: "parquet-test".to_string(),
@@ -4141,7 +4290,7 @@ mod tests {
             file_manifests: vec![GraphFileManifestEntry {
                 stable_file_id: "file-src-parquet".to_string(),
                 path: "src/parquet.rs".to_string(),
-                content_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                content_oid,
                 node_ids: vec![NodeId(11), NodeId(12)],
             }],
             files: vec![GraphFileArtifact {
@@ -4792,6 +4941,86 @@ mod tests {
         assert_eq!(symbols[0]["uri"], "graph://symbol/parquet-root");
         assert_eq!(symbols[1]["selector"], "src/parquet.rs::parquet_child");
         assert_eq!(symbols[1]["uri"], "graph://symbol/parquet-child");
+        assert_eq!(body["graph_content_hash"], "parquet-handler-test");
+        assert_eq!(body["graph_index_version"], "parquet-test");
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_resolve_reads_parquet_artifact_from_current_pointer() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_current_parquet_fixture(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_resolve(
+                Value::from(1),
+                json!({ "selector": "src/parquet.rs::parquet_root" }),
+            )
+            .await;
+        let body = response_json(response);
+        let candidates = body["candidates"].as_array().expect("candidates");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["uri"], "graph://symbol/parquet-root");
+        assert_eq!(candidates[0]["file_path"], "src/parquet.rs");
+        assert_eq!(body["graph_content_hash"], "parquet-handler-test");
+        assert_eq!(body["graph_index_version"], "parquet-test");
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_symbol_info_reads_parquet_artifact_from_current_pointer() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_current_parquet_fixture(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_symbol_info(
+                Value::from(1),
+                json!({ "selector": "graph://symbol/parquet-child" }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["symbol"]["uri"], "graph://symbol/parquet-child");
+        assert_eq!(body["symbol"]["entity_name"], "parquet_child");
+        assert_eq!(body["symbol"]["file_path"], "src/parquet.rs");
+        assert_eq!(body["graph_content_hash"], "parquet-handler-test");
+        assert_eq!(body["graph_index_version"], "parquet-test");
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_read_symbol_reads_parquet_artifact_from_current_pointer() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_current_parquet_fixture(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_read_symbol(
+                Value::from(1),
+                json!({
+                    "stable_symbol_id": "graph://symbol/parquet-root",
+                    "context_lines": 0
+                }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(body["symbol"]["uri"], "graph://symbol/parquet-root");
+        assert_eq!(
+            body["source"],
+            "fn parquet_root() {\n    parquet_child();\n}\n"
+        );
+        assert_eq!(body["line_range"], json!({ "start": 3, "end": 5 }));
+        assert_eq!(body["file_oid"].as_str().expect("file oid").len(), 40);
         assert_eq!(body["graph_content_hash"], "parquet-handler-test");
         assert_eq!(body["graph_index_version"], "parquet-test");
         assert_unavailable_freshness_metadata(&body);
