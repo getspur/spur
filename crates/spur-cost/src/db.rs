@@ -74,6 +74,9 @@ pub struct TokenSummary {
 /// Open (or create) the SQLite database at `path` and ensure the schema exists.
 pub fn init_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     conn.execute_batch(
         "
