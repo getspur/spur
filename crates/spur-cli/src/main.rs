@@ -1417,6 +1417,7 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         spur_tui::UserInput::NewSessionWithMessage { blocks, interrupt } => {
             spur_core::InteractiveInput::NewSessionWithMessage { blocks, interrupt }
         }
+        spur_tui::UserInput::NewSession => spur_core::InteractiveInput::NewSession,
         spur_tui::UserInput::ListSessions => spur_core::InteractiveInput::ListSessions,
         spur_tui::UserInput::ResumeSession { session_id } => {
             spur_core::InteractiveInput::ResumeSession { session_id }
