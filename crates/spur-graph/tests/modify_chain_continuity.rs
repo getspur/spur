@@ -41,7 +41,8 @@ fn add_modify_modify_rename_preserves_pre_rename_symbol_identity() {
     let rename_sha = commit_at(dir.path(), "rename alpha file", 4);
 
     let (graph, commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default()).unwrap();
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+            .unwrap();
     let stable_id_at_tip = stable_id_for_snapshot(&graph, &rename_sha, "alpha");
     let history = symbol_history(&graph, &commits, &stable_id_at_tip);
     let commit_times: HashMap<_, _> = commits
