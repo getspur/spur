@@ -1,10 +1,12 @@
 import { encode } from "html-entities";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import { MultilineString, OutputDisplayData } from "@/bindings";
 import { CellResult } from "@/stores/notebook";
+import { useOutputActiveContentEnabled } from "@/stores/settings";
+
+import MarkdownRenderer from "./MarkdownRenderer";
+import { htmlOutputSandbox } from "./rendering";
 
 type Props = {
   value: CellResult | undefined;
@@ -86,7 +88,12 @@ const OutputViewDisplayData = memo(
 function HtmlOutput({ html }: { html: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(IFRAME_MIN_HEIGHT);
+  const activeContent = useOutputActiveContentEnabled();
   const srcDoc = useMemo(() => withHeightReporter(html), [html]);
+
+  useEffect(() => {
+    setHeight(IFRAME_MIN_HEIGHT);
+  }, [activeContent, html]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -111,10 +118,12 @@ function HtmlOutput({ html }: { html: string }) {
 
   return (
     <iframe
+      key={activeContent ? "active" : "static"}
       ref={iframeRef}
       title="Notebook HTML output"
       srcDoc={srcDoc}
-      sandbox="allow-scripts"
+      // TODO: per-notebook trust (Jupyter-style signature) deferred.
+      sandbox={htmlOutputSandbox(activeContent)}
       className="block w-full border-0"
       style={{ height, minHeight: IFRAME_MIN_HEIGHT }}
     />
@@ -124,7 +133,7 @@ function HtmlOutput({ html }: { html: string }) {
 function MarkdownOutput({ source }: { source: string }) {
   return (
     <div className="text-sm">
-      <Markdown remarkPlugins={[remarkGfm]}>{source}</Markdown>
+      <MarkdownRenderer source={source} />
     </div>
   );
 }

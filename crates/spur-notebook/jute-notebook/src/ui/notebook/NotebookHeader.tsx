@@ -5,6 +5,7 @@ import {
   PlayIcon,
   PlusIcon,
   RefreshCwIcon,
+  SettingsIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
@@ -12,6 +13,7 @@ import { useStore } from "zustand";
 
 import { type KernelSlotInfo, useNotebook } from "@/stores/notebook";
 
+import SettingsPanel from "../settings/SettingsPanel";
 import Header from "../shared/Header";
 
 const KERNEL_STATS_POLL_MS = 2000;
@@ -33,6 +35,7 @@ export default function NotebookHeader({ kernelName }: Props) {
     (state) => state.kernelGeneration,
   );
   const [statsOpen, setStatsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [kernelStats, setKernelStats] = useState<KernelSlotInfo | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
 
@@ -152,6 +155,16 @@ export default function NotebookHeader({ kernelName }: Props) {
 
       {/* Top-right UI components: home and open notebooks. */}
       <div className="flex items-center">
+        <div className="relative">
+          <button
+            className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110"
+            title="Settings"
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            <SettingsIcon size={20} strokeWidth={1.5} />
+          </button>
+          {settingsOpen && <SettingsPanel />}
+        </div>
         <Link to="/">
           <button className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110">
             <HomeIcon size={20} strokeWidth={1.5} />

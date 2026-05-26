@@ -1,7 +1,6 @@
 import { Edit3Icon } from "lucide-react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
+import MarkdownRenderer from "./MarkdownRenderer";
 import styles from "./RenderMarkdownCell.module.css";
 
 type Props = {
@@ -16,17 +15,7 @@ export default function RenderMarkdownCell({ source, onStartEdit }: Props) {
       className="group relative ml-14 max-w-full overflow-hidden py-2 pr-4 text-sm"
       onDoubleClick={onStartEdit}
     >
-      <Markdown
-        className={styles.markdown}
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer" />
-          ),
-        }}
-      >
-        {source}
-      </Markdown>
+      <MarkdownRenderer className={styles.markdown} source={source} />
 
       <button
         className="absolute right-2 top-2 flex items-center rounded text-gray-500 opacity-0 transition-all hover:text-black group-hover:opacity-100"
