@@ -49,8 +49,8 @@ Update this file's pin (commit SHA + date) on every successful pull. Conflicts a
 ## SPUR drift
 
 - `src-tauri/src/backend/notebook.rs`: added typed `metadata.spur.version` per-cell metadata so SPUR's optimistic cell version survives `.ipynb` parse/serialize.
-- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: added the `save_to_disk` Tauri command, process-local save coalescing, and same-directory atomic temp-file rename for autosave.
-- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `src-tauri/src/main.rs`: replaced upstream's per-start local kernel ID map with stable notebook path-derived kernel slots and in-memory slot generations, while keeping the existing JS-facing command argument names compatible.
+- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `../src/main.rs`: added the `save_to_disk` Tauri command, process-local save coalescing, and same-directory atomic temp-file rename for autosave.
+- `src-tauri/src/commands.rs`, `src-tauri/src/state.rs`, `../src/main.rs`: replaced upstream's per-start local kernel ID map with stable notebook path-derived kernel slots and in-memory slot generations, while keeping the existing JS-facing command argument names compatible.
 - `src/stores/notebook.ts`, `src/ui/notebook/CellInput.tsx`: made Zustand track per-cell `source` and monotonic `version`, bumped versions on source/type edits, generated UUIDv4 cell ids on insert, and wired 5 second debounced autosave.
 - `src-tauri/src/bin/ts-rs-export.rs`: resolves generated TypeScript bindings from the vendored app root so `scripts/spur-cargo run -p jute --bin ts-rs-export` can be rerun from the SPUR workspace.
 
