@@ -622,7 +622,7 @@ impl App {
             Action::NewSessionRequested => {
                 // Retire the current brain AND eagerly spawn a fresh session so
                 // the user lands directly on the new SessionDetail view (via the
-                // SessionCreated auto-navigate at events.rs). Distinct from
+                // BrainSpawned auto-navigate at events.rs). Distinct from
                 // ClearSession, which uses NewSessionWithMessage{empty} to defer
                 // spawn until the next Message — that path preserves the open
                 // SessionDetail for the `/clear` reset banner.
