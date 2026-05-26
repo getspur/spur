@@ -21,7 +21,7 @@ pub enum InteractiveInput {
         interrupt: bool,
     },
     /// Retire any attached brain and eagerly spawn a fresh brain session
-    /// with no first prompt. Emits `SessionCreated` so the TUI can land
+    /// with no first prompt. Emits `BrainSpawned` so the TUI can land
     /// directly on the new session's `SessionDetail` view. Distinct from
     /// `NewSessionWithMessage { blocks: [] }`, which defers spawn until the
     /// next `Message` (the `/clear` semantics).
