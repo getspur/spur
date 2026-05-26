@@ -8,6 +8,7 @@ use spur_graph::{
     artifact_from_facts, build_facts, read_artifact_parquet, write_artifact_parquet,
     GraphIndexArtifact, WriteOptions,
 };
+use spur_graph::store::parquet::read_artifact_parquet_slim;
 
 #[derive(Debug, Deserialize)]
 struct Baselines {
