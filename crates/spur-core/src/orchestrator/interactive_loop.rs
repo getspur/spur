@@ -287,7 +287,7 @@ impl Orchestrator {
                     }
                     // NewSession — retire brain, then eagerly spawn a fresh
                     // session with no first prompt so the TUI can land on the
-                    // new SessionDetail (via the SessionCreated auto-navigate).
+                    // new SessionDetail (via the BrainSpawned auto-navigate).
                     InteractiveInput::NewSession => {
                         self.retire_active_brain(
                             &mut brain,
