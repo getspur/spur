@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{check_response, daemon_unavailable, emit_recents_changed, parse_no_args};
+use super::{check_response, daemon_unavailable, parse_no_args};
 use crate::mcp::{DaemonControlRequest, NotebookDaemonControl, ServerDeps};
 
 fn require_daemon(deps: &ServerDeps) -> Result<&NotebookDaemonControl, McpError> {
@@ -50,7 +50,6 @@ pub async fn call_new(deps: &ServerDeps, arguments: Value) -> Result<CallToolRes
             Some(json!({ "code": "daemon_missing_path" })),
         )
     })?;
-    emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "path": path })))
 }
 
@@ -98,7 +97,6 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
         .await;
     let response = check_response(response)?;
     let path = response.path.unwrap_or(fallback_path);
-    emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "path": path })))
 }
 
@@ -130,7 +128,6 @@ pub async fn call_close(deps: &ServerDeps, arguments: Value) -> Result<CallToolR
         })
         .await;
     check_response(response)?;
-    emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "ok": true })))
 }
 
@@ -168,7 +165,6 @@ pub async fn call_reopen(deps: &ServerDeps, arguments: Value) -> Result<CallTool
             Some(json!({ "code": "daemon_missing_path" })),
         )
     })?;
-    emit_recents_changed(deps);
     Ok(CallToolResult::structured(json!({ "path": path })))
 }
 

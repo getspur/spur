@@ -116,6 +116,8 @@ impl DaemonControlRequest {
 pub enum DaemonControlCommand {
     /// Open a notebook file.
     Open { path: String },
+    /// Rename a notebook file.
+    Rename { from: String, to: String },
     /// Create a scratch notebook.
     New {},
     /// Reopen the current notebook window.
@@ -538,6 +540,33 @@ async fn send_daemon_control(
     _command: &str,
     _path: Option<&Path>,
     _pinned: Option<bool>,
+) -> Result<DaemonControlResponse, Error> {
+    Err(Error::NotebookDaemon(
+        "notebook daemon socket commands are only available on Unix platforms".to_string(),
+    ))
+}
+
+fn daemon_control_rename_request(from: &Path, to: &Path) -> DaemonControlRequest {
+    DaemonControlRequest::new(DaemonControlCommand::Rename {
+        from: from.display().to_string(),
+        to: to.display().to_string(),
+    })
+}
+
+#[cfg(unix)]
+async fn send_daemon_control_rename(
+    from: &Path,
+    to: &Path,
+) -> Result<DaemonControlResponse, Error> {
+    let socket_path = daemon_socket_path_from_args()?;
+    let request = daemon_control_rename_request(from, to);
+    send_daemon_control_to(&socket_path, &request).await
+}
+
+#[cfg(not(unix))]
+async fn send_daemon_control_rename(
+    _from: &Path,
+    _to: &Path,
 ) -> Result<DaemonControlResponse, Error> {
     Err(Error::NotebookDaemon(
         "notebook daemon socket commands are only available on Unix platforms".to_string(),
@@ -1171,6 +1200,24 @@ pub async fn set_notebook_pinned(path: String, pinned: bool) -> Result<(), Error
         .map(|_| ())
 }
 
+/// Open an existing notebook through the daemon and return its path.
+#[tauri::command]
+pub async fn open_notebook_via_daemon(path: String) -> Result<String, Error> {
+    send_daemon_control("open", Some(Path::new(&path)), None)
+        .await?
+        .path
+        .ok_or_else(|| Error::NotebookDaemon("daemon open response did not include path".into()))
+}
+
+/// Rename a notebook through the daemon and return the new path.
+#[tauri::command]
+pub async fn rename_notebook(from: String, to: String) -> Result<String, Error> {
+    send_daemon_control_rename(Path::new(&from), Path::new(&to))
+        .await?
+        .path
+        .ok_or_else(|| Error::NotebookDaemon("daemon rename response did not include path".into()))
+}
+
 /// Create a new scratch notebook through the daemon and return its path.
 #[tauri::command]
 pub async fn new_notebook_via_daemon() -> Result<String, Error> {
@@ -1534,6 +1581,36 @@ mod tests {
             MultilineString::Single(source) => source.clone(),
             MultilineString::Multi(lines) => lines.join(""),
         }
+    }
+
+    #[test]
+    fn open_notebook_via_daemon_command_is_exported() {
+        fn assert_open_command<F, Fut>(_command: F)
+        where
+            F: Fn(String) -> Fut,
+            Fut: std::future::Future<Output = Result<String, Error>>,
+        {
+        }
+
+        assert_open_command(open_notebook_via_daemon);
+    }
+
+    #[test]
+    fn rename_daemon_control_request_contains_from_and_to() {
+        let request = daemon_control_rename_request(
+            Path::new("/tmp/old-name.ipynb"),
+            Path::new("/tmp/new-name.ipynb"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "rename",
+                "from": "/tmp/old-name.ipynb",
+                "to": "/tmp/new-name.ipynb"
+            })
+        );
     }
 
     #[tokio::test]

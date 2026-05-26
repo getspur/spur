@@ -6,6 +6,7 @@ import type { CellKind } from "./CellKind";
  */
 export type DaemonControlCommand =
   | { command: "open"; path: string }
+  | { command: "rename"; from: string; to: string }
   | { command: "new" }
   | { command: "reopen" }
   | { command: "close" }
