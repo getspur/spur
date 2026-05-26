@@ -147,6 +147,10 @@ pub enum DaemonControlCommand {
         source: String,
         last_edited_by: Option<String>,
     },
+    /// Load a notebook from disk into the authoritative store.
+    #[serde(rename = "load")]
+    #[ts(rename = "load")]
+    LoadNotebook { path: String },
     /// Delete one cell.
     DeleteCell {
         id: String,
@@ -669,6 +673,16 @@ async fn handle_daemon_control_inner(
                 })
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
+        }
+        DaemonControlCommand::LoadNotebook { path } => {
+            let contents = tokio::fs::read_to_string(&path).await.map_err(|error| {
+                DaemonControlResponse::failure("load_failed", error.to_string())
+            })?;
+            let root: NotebookRoot = serde_json::from_str(&contents).map_err(|error| {
+                DaemonControlResponse::failure("load_failed", error.to_string())
+            })?;
+            let delta = notebook.load(PathBuf::from(path), root);
+            Ok(DaemonControlResult::Delta(delta))
         }
         DaemonControlCommand::DeleteCell {
             id,
@@ -1697,6 +1711,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn daemon_load_notebook_seeds_store_from_disk() {
+        let dir = std::env::temp_dir().join(format!("jute-daemon-load-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loaded.ipynb");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&notebook_with_source("loaded from disk", 7)).unwrap(),
+        )
+        .unwrap();
+
+        let state = Arc::new(State::new());
+        let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "load",
+            "path": path
+        }))
+        .unwrap();
+
+        let response = handle_daemon_control_request(request, &state).await;
+        let result = response.into_result().unwrap();
+        let DaemonControlResult::Delta(NotebookDelta {
+            kind: DeltaKind::Loaded,
+            ..
+        }) = result
+        else {
+            panic!("expected load delta");
+        };
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        assert_eq!(first_source(&snapshot), "loaded from disk");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn read_daemon_cell_includes_inserted_last_edited_by() {
         let state = State::new();
@@ -1755,7 +1804,7 @@ mod tests {
     async fn daemon_control_cell_commands_round_trip_through_temp_socket() {
         use tokio::net::UnixListener;
 
-        let dir = std::env::temp_dir().join(format!("jute-daemon-control-{}", Uuid::new_v4()));
+        let dir = PathBuf::from(format!("/tmp/jute-dc-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket_path = dir.join("notebook.sock");
         let notebook_path = dir.join("notebook.ipynb");

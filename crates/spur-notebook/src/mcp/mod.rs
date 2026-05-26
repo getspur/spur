@@ -38,6 +38,7 @@ use self::{
 };
 
 const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
+const NOTEBOOK_LOAD_READY_POLL: Duration = Duration::from_millis(25);
 
 pub mod bridge;
 pub mod loopback_requester;
@@ -838,10 +839,45 @@ impl NotebookDaemonControl {
             state.current_path = Some(path.clone());
             state.window_label = Some(label);
         }
+        self.load_open_notebook(&path).await?;
         if let Err(error) = self.persist_last_notebook(&path).await {
             warn!(%error, path = %path.display(), "failed to persist last notebook record");
         }
         Ok(path)
+    }
+
+    async fn load_open_notebook(&self, path: &Path) -> Result<(), BridgeError> {
+        self.wait_for_notebook_store(FLUSH_PENDING_TIMEOUT).await?;
+        self.requester
+            .request(
+                "notebook.load",
+                json!({ "path": path }),
+                FLUSH_PENDING_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+    }
+
+    async fn wait_for_notebook_store(&self, timeout: Duration) -> Result<(), BridgeError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if !self.requester.window_alive() {
+                return Err(BridgeError::WindowClosed);
+            }
+            if self.requester.listener_registered() && self.requester.notebook_open() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                if !self.requester.notebook_open() {
+                    return Err(BridgeError::NotebookNotOpen);
+                }
+                if !self.requester.listener_registered() {
+                    return Err(BridgeError::NoListener);
+                }
+                return Err(BridgeError::Timeout);
+            }
+            tokio::time::sleep(NOTEBOOK_LOAD_READY_POLL).await;
+        }
     }
 
     pub async fn reopen(&self) -> Result<PathBuf, BridgeError> {
@@ -918,6 +954,7 @@ fn is_notebook_store_command(command: &str) -> bool {
             | "delete_cell"
             | "snapshot"
             | "apply_edit"
+            | "load"
             | "flush_notebook"
     )
 }
@@ -943,6 +980,14 @@ fn notebook_store_request_from_daemon(
             source: required_string(&request.source, "insert_cell requires source")?,
             last_edited_by: request.last_edited_by,
         },
+        "load" => {
+            let path = request
+                .path
+                .ok_or_else(|| invalid_params("load requires path"))?;
+            jute::commands::DaemonControlCommand::LoadNotebook {
+                path: path.to_string_lossy().into_owned(),
+            }
+        }
         "delete_cell" => jute::commands::DaemonControlCommand::DeleteCell {
             id: required_cell_id(&request)?,
             expected_version: request
@@ -1421,6 +1466,7 @@ mod tests {
                             .push(cell);
                         Ok(json!({ "id": id, "version": 1 }))
                     }
+                    "notebook.load" => Ok(Value::Null),
                     _ => Err(BridgeError::Handler {
                         code: "unknown_method".to_string(),
                         message: format!("unexpected method: {method}"),
@@ -1559,7 +1605,11 @@ mod tests {
         assert_eq!(windows.opened(), vec![other_path]);
         assert_eq!(
             buffered_bridge.calls().await,
-            vec!["notebook.insert_cell", "notebook.flush_pending"]
+            vec![
+                "notebook.insert_cell",
+                "notebook.flush_pending",
+                "notebook.load"
+            ]
         );
 
         let saved: Value = serde_json::from_slice(

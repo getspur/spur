@@ -181,6 +181,13 @@ impl BridgeRequester for MockNotebook {
                     self.order.lock().await.retain(|cell_id| cell_id != id);
                     Ok(json!({ "deleted": true }))
                 }
+                "notebook.load" => {
+                    let path = PathBuf::from(params["path"].as_str().unwrap());
+                    let contents = tokio::fs::read_to_string(&path).await.unwrap();
+                    let root: NotebookRoot = serde_json::from_str(&contents).unwrap();
+                    self.load_notebook(path, root).await;
+                    Ok(Value::Null)
+                }
                 _ => unreachable!("unexpected method {method}"),
             }
         })
@@ -219,6 +226,58 @@ impl MockNotebook {
             },
         );
         self.order.lock().await.push(id.to_string());
+    }
+
+    async fn load_notebook(&self, path: PathBuf, root: NotebookRoot) {
+        let mut loaded_cells = HashMap::new();
+        let mut loaded_order = Vec::new();
+        for (index, cell) in root.cells.into_iter().enumerate() {
+            let (kind, id, source, version, last_edited_by) = match cell {
+                Cell::Raw(cell) => (
+                    "raw",
+                    cell.id,
+                    source_text(&cell.source),
+                    cell.metadata.spur.as_ref().map_or(1, |spur| spur.version),
+                    cell.metadata
+                        .spur
+                        .and_then(|spur| spur.last_edited_by.clone()),
+                ),
+                Cell::Markdown(cell) => (
+                    "markdown",
+                    cell.id,
+                    source_text(&cell.source),
+                    cell.metadata.spur.as_ref().map_or(1, |spur| spur.version),
+                    cell.metadata
+                        .spur
+                        .and_then(|spur| spur.last_edited_by.clone()),
+                ),
+                Cell::Code(cell) => (
+                    "code",
+                    cell.id,
+                    source_text(&cell.source),
+                    cell.metadata.spur.as_ref().map_or(1, |spur| spur.version),
+                    cell.metadata
+                        .spur
+                        .and_then(|spur| spur.last_edited_by.clone()),
+                ),
+            };
+            let id = id.unwrap_or_else(|| format!("loaded-{index}"));
+            loaded_order.push(id.clone());
+            loaded_cells.insert(
+                id,
+                MockCell {
+                    kind: kind.to_string(),
+                    source,
+                    version,
+                    last_edited_by,
+                },
+            );
+        }
+        let next_id = loaded_order.len() as u64;
+        *self.cells.lock().await = loaded_cells;
+        *self.order.lock().await = loaded_order;
+        *self.next_id.lock().await = next_id;
+        self.flush_path.lock().await.replace(path);
     }
 
     async fn calls(&self) -> Vec<String> {
@@ -338,7 +397,11 @@ fn first_source(contents: &NotebookRoot) -> String {
     let Cell::Code(cell) = &contents.cells[0] else {
         panic!("expected code cell");
     };
-    match &cell.source {
+    source_text(&cell.source)
+}
+
+fn source_text(source: &MultilineString) -> String {
+    match source {
         MultilineString::Single(source) => source.clone(),
         MultilineString::Multi(lines) => lines.join(""),
     }
@@ -510,6 +573,11 @@ async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook()
     assert_eq!(first_source_on_disk(&notebook_a), "edited before switch");
     assert_eq!(
         notebook.calls().await,
-        vec!["notebook.write_cell", "notebook.flush_pending"]
+        vec![
+            "notebook.load",
+            "notebook.write_cell",
+            "notebook.flush_pending",
+            "notebook.load"
+        ]
     );
 }
