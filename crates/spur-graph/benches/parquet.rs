@@ -155,6 +155,35 @@ fn bench_find_callee_edges_parquet_vs_inmemory(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_resolve_selector_parquet_vs_inmemory(c: &mut Criterion) {
+    let artifact = traversal_benchmark_artifact();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let selector = "target";
+    let in_memory = InMemoryClient::new(Arc::new(artifact));
+    let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+    let mut group = c.benchmark_group("bench_resolve_selector_parquet_vs_inmemory");
+
+    group.bench_function("inmemory", |b| {
+        b.iter(|| {
+            let resolution = in_memory
+                .resolve_selector(black_box(selector))
+                .expect("in-memory resolve selector");
+            black_box(resolution);
+        })
+    });
+    group.bench_function("parquet", |b| {
+        b.iter(|| {
+            let resolution = parquet
+                .resolve_selector(black_box(selector))
+                .expect("parquet resolve selector");
+            black_box(resolution);
+        })
+    });
+    group.finish();
+}
+
 fn load_fixture() -> Fixture {
     let baselines = baselines();
     let fixture_path = std::env::var_os("SPUR_GRAPH_PERF_FIXTURE")
@@ -300,6 +329,7 @@ criterion_group!(
     bench_read_artifact_parquet_slim,
     bench_search_symbols_parquet_vs_inmemory,
     bench_find_caller_edges_parquet_vs_inmemory,
-    bench_find_callee_edges_parquet_vs_inmemory
+    bench_find_callee_edges_parquet_vs_inmemory,
+    bench_resolve_selector_parquet_vs_inmemory
 );
 criterion_main!(benches);

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use spur_graph::{
-    write_artifact_parquet, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact,
-    GraphIndexHeader, GraphQueryClient, GraphSymbolArtifact, InMemoryClient, NodeId,
-    OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, RelationKind, SearchFilters, SearchMode,
-    SearchOptions, WriteOptions,
+    write_artifact_parquet, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
+    GraphSymbolArtifact, InMemoryClient, NodeId, OwnedCalleeRecord, OwnedCallerRecord,
+    ParquetClient, RelationKind, SearchFilters, SearchMode, SearchOptions, WriteOptions,
 };
 
 fn artifact() -> GraphIndexArtifact {
@@ -42,6 +42,13 @@ fn artifact() -> GraphIndexArtifact {
         symbol("z-def-long", "src/lib.rs", [30, 31], "zdeflong", "zdeflong"),
         symbol("a-def", "src/lib.rs", [20, 21], "adef", "adef"),
         symbol("def", "src/lib.rs", [10, 11], "def", "def"),
+        symbol(
+            "aaaaaaaaaaaaaaaa",
+            "src/hex.rs",
+            [1, 2],
+            "hex_target",
+            "hex_target",
+        ),
         symbol(
             "foo-lib",
             "crates/foo/src/lib.rs",
@@ -84,9 +91,9 @@ fn artifact() -> GraphIndexArtifact {
         },
         manifest_version: "test".to_string(),
         graph_content_hash: "query-client-parity".to_string(),
-        file_manifests: Vec::new(),
-        files: Vec::new(),
-        file_node_ids: Vec::new(),
+        file_manifests: file_manifests(),
+        files: files(),
+        file_node_ids: (101..=107).map(NodeId).collect(),
         symbols,
         symbol_node_ids,
         edges: vec![
@@ -101,6 +108,38 @@ fn artifact() -> GraphIndexArtifact {
         symbol_snapshots: Vec::new(),
         temporal_edges: Vec::new(),
     }
+}
+
+fn files() -> Vec<GraphFileArtifact> {
+    [
+        "src/a.rs",
+        "src/b.rs",
+        "src/lib.rs",
+        "crates/foo/src/lib.rs",
+        "crates/foo/src/nested/mod.rs",
+        "crates/bar/src/lib.rs",
+        "src/hex.rs",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, path)| GraphFileArtifact {
+        stable_file_id: format!("file-{index}"),
+        file_path: path.to_string(),
+    })
+    .collect()
+}
+
+fn file_manifests() -> Vec<GraphFileManifestEntry> {
+    files()
+        .into_iter()
+        .enumerate()
+        .map(|(index, file)| GraphFileManifestEntry {
+            stable_file_id: file.stable_file_id,
+            path: file.file_path,
+            content_oid: format!("{:040x}", index + 1),
+            node_ids: vec![NodeId((index as u64) + 1), NodeId((index as u64) + 50)],
+        })
+        .collect()
 }
 
 fn symbol(
@@ -208,6 +247,64 @@ fn parquet_client_find_callee_edges_matches_in_memory_client() {
     let actual = callee_records(parquet.find_callee_edges("root"));
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn parquet_client_resolve_selector_matches_in_memory_client() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact();
+    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let in_memory = InMemoryClient::new(Arc::new(artifact));
+    let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+    for selector in [
+        "graph://symbol/entity-match",
+        "aaaaaaaaaaaaaaaa",
+        "module::target",
+        "src/a.rs::module::target",
+        "submit_plan",
+        "run_query",
+    ] {
+        assert_eq!(
+            parquet
+                .resolve_selector(selector)
+                .expect("parquet resolve selector succeeds"),
+            in_memory
+                .resolve_selector(selector)
+                .expect("in-memory resolve selector succeeds"),
+            "selector: {selector}"
+        );
+    }
+}
+
+#[test]
+fn parquet_client_file_manifest_by_path_matches_in_memory_client() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact();
+    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let in_memory = InMemoryClient::new(Arc::new(artifact));
+    let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+    let expected = in_memory
+        .file_manifest_by_path("src/a.rs")
+        .expect("in-memory manifest query succeeds");
+    let actual = parquet
+        .file_manifest_by_path("src/a.rs")
+        .expect("parquet manifest query succeeds");
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.expect("manifest is present").node_ids,
+        vec![NodeId(1), NodeId(50)]
+    );
+    assert_eq!(
+        parquet
+            .file_manifest_by_path("src/missing.rs")
+            .expect("missing manifest query succeeds"),
+        None
+    );
 }
 
 fn caller_records(records: Vec<OwnedCallerRecord>) -> Vec<(String, String, bool, Option<String>)> {
