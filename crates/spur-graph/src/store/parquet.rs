@@ -440,6 +440,60 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
     Ok(artifact)
 }
 
+pub fn read_artifact_parquet_slim(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
+        || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
+    let nodes_path = dir.join("nodes.parquet");
+    let files_path = dir.join("files.parquet");
+    let tombstones_path = dir.join("tombstones.parquet");
+    let row_counts = manifest.row_counts.clone();
+
+    let ((symbols, symbol_node_ids), (files, file_node_ids), tombstones) =
+        std::thread::scope(|scope| {
+            let nodes = scope.spawn(|| read_nodes(&nodes_path, row_counts.nodes));
+            let files = scope.spawn(|| read_files(&files_path, row_counts.files));
+            let tombstones =
+                scope.spawn(|| read_tombstones(&tombstones_path, row_counts.tombstones));
+
+            Ok::<_, anyhow::Error>((
+                join_scoped(nodes, "read nodes.parquet")?,
+                join_scoped(files, "read files.parquet")?,
+                join_scoped(tombstones, "read tombstones.parquet")?,
+            ))
+        })?;
+
+    let mut artifact = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: manifest.graph_index_version,
+            content_hash_blake3: None,
+        },
+        manifest_version: manifest.manifest_version,
+        graph_content_hash: manifest.graph_content_hash,
+        file_manifests: Vec::new(),
+        files,
+        file_node_ids,
+        symbols,
+        symbol_node_ids,
+        edges: Vec::new(),
+        tombstones,
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    };
+    if legacy_snapshot_ids {
+        crate::schema::rehash_legacy_snapshot_ids(&mut artifact);
+    }
+    Ok(artifact)
+}
+
 fn join_scoped<T>(
     handle: ScopedJoinHandle<'_, anyhow::Result<T>>,
     label: &str,
@@ -2726,6 +2780,108 @@ mod parquet_temporal_test {
         assert_eq!(decoded.commits, artifact.commits);
         assert_eq!(decoded.symbol_snapshots, artifact.symbol_snapshots);
         assert_eq!(decoded.temporal_edges, artifact.temporal_edges);
+        Ok(())
+    }
+
+    #[test]
+    fn parquet_slim_reader_skips_heavy_tables_but_loads_files_and_symbols() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut artifact = empty_artifact("slim-reader-skips-heavy-tables");
+        let snapshot = snapshot_key("sym-a", "c1");
+
+        artifact.files = vec![GraphFileArtifact {
+            stable_file_id: "file-a".to_string(),
+            file_path: "src/lib.rs".to_string(),
+        }];
+        artifact.file_node_ids = vec![NodeId(1)];
+        artifact.file_manifests = vec![GraphFileManifestEntry {
+            stable_file_id: "file-a".to_string(),
+            path: "src/lib.rs".to_string(),
+            content_oid: "content-a".to_string(),
+            node_ids: vec![NodeId(2)],
+        }];
+        artifact.symbols = vec![GraphSymbolArtifact {
+            stable_symbol_id: "sym-a".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            byte_range: [0, 12],
+            line_range: [1, 2],
+            entity_name: "alpha".to_string(),
+            qualified_name: "crate::alpha".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-a".to_string(),
+            enclosing_scope: None,
+        }];
+        artifact.symbol_node_ids = vec![NodeId(2)];
+        artifact.edges = vec![GraphEdgeArtifact {
+            source_stable_symbol_id: "sym-a".to_string(),
+            target_stable_symbol_id: Some("sym-a".to_string()),
+            target_label: Some("alpha".to_string()),
+            relation: RelationKind::Calls,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: Some(GraphEdgeKind::Calls),
+            bind_method: None,
+        }];
+        artifact.tombstones = vec![GraphTombstoneEntry {
+            path: "src/deleted.rs".to_string(),
+            stable_file_id: "file-deleted".to_string(),
+        }];
+        artifact.diagnostics = vec!["diagnostic skipped by slim reader".to_string()];
+        artifact.commits = vec![CommitArtifact {
+            sha: "c1".to_string(),
+            parents: Vec::new(),
+            author_time: 1_700_000_001,
+            summary: "initial import".to_string(),
+        }];
+        artifact.symbol_snapshots = vec![SymbolSnapshotArtifact {
+            key: snapshot.clone(),
+            file_path: GitPath::from_bytes(b"src/lib.rs".to_vec()),
+            entity_name: "alpha".to_string(),
+            symbol_kind: "function".to_string(),
+            enclosing_scope: None,
+            byte_range: [0, 12],
+            line_range: [1, 2],
+            anchor_hash: "anchor-a".to_string(),
+            tokens: vec!["alpha".to_string()],
+        }];
+        artifact.temporal_edges = vec![TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "c1".to_string(),
+            },
+            target: EdgeEndpoint::Snapshot { key: snapshot },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(ChangeKind::Added),
+        }];
+
+        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        for table in [
+            "edges.parquet",
+            "edges_unresolved.parquet",
+            "edges_by_dst.parquet",
+            "file_manifests.parquet",
+            "commits.parquet",
+            "symbol_snapshots.parquet",
+            "temporal_edges.parquet",
+            "diagnostics.parquet",
+        ] {
+            fs::remove_file(dir.join(table))?;
+        }
+
+        let decoded = read_artifact_parquet_slim(&dir)?;
+
+        assert_eq!(decoded.files, artifact.files);
+        assert_eq!(decoded.file_node_ids, artifact.file_node_ids);
+        assert_eq!(decoded.symbols, artifact.symbols);
+        assert_eq!(decoded.symbol_node_ids, artifact.symbol_node_ids);
+        assert_eq!(decoded.tombstones, artifact.tombstones);
+        assert!(decoded.file_manifests.is_empty());
+        assert!(decoded.edges.is_empty());
+        assert!(decoded.diagnostics.is_empty());
+        assert!(decoded.commits.is_empty());
+        assert!(decoded.symbol_snapshots.is_empty());
+        assert!(decoded.temporal_edges.is_empty());
         Ok(())
     }
 
