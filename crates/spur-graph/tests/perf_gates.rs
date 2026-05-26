@@ -220,7 +220,7 @@ fn gate_3_6_duckdb_peak_rss_under_500_mb() {
 fn gate_t5_git_path_as_ref_inbound_calls_under_20() {
     let _guard = perf_gate_guard();
     let repo_root = workspace_root();
-    let (facts, _counts) = build_facts(&repo_root).unwrap_or_else(|err| {
+    let (facts, _counts) = build_facts(&repo_root, None).unwrap_or_else(|err| {
         panic!(
             "failed to build facts for `{}`: {err:#}",
             repo_root.display()
@@ -320,7 +320,7 @@ fn perf_fixture(baselines: &Baselines) -> &'static PerfFixture {
                     fixture_path.display()
                 )
             });
-        let (facts, _counts) = build_facts(&repo_root).unwrap_or_else(|err| {
+        let (facts, _counts) = build_facts(&repo_root, None).unwrap_or_else(|err| {
             panic!(
                 "failed to build facts for `{}`: {err:#}",
                 repo_root.display()

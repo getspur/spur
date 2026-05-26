@@ -51,7 +51,7 @@ fn snapshot_symbol_keys(
 }
 
 fn structural_symbol_keys(root: &Path, file_path: &str) -> std::collections::BTreeSet<SymbolKey> {
-    let facts = build_facts(root).expect("extract graph facts").0;
+    let facts = build_facts(root, None).expect("extract graph facts").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
     artifact
         .symbols

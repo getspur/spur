@@ -29,7 +29,8 @@ fn parse_failure_downgrades_file_to_file_level_with_diagnostic() {
     let fix_sha = commit(dir.path(), "replace corrupt rust file");
 
     let (graph, _commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default()).unwrap();
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+            .unwrap();
 
     assert!(graph.temporal_edges.iter().any(|edge| {
         edge.source

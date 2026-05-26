@@ -479,7 +479,7 @@ fn artifact_from_sources(files: &[(&str, &str)]) -> GraphIndexArtifact {
             panic!("write `{}`: {err}", path.display());
         });
     }
-    let (facts, _counts) = build_facts(root).expect("build facts");
+    let (facts, _counts) = build_facts(root, None).expect("build facts");
     artifact_from_facts(&facts, root).expect("build artifact")
 }
 
