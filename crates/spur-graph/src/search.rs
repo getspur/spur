@@ -24,17 +24,39 @@ pub struct SearchOptions {
     pub limit: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct SearchResult<'a> {
-    pub candidates: Vec<&'a GraphSymbolArtifact>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchSymbol {
+    pub stable_symbol_id: String,
+    pub entity_name: String,
+    pub qualified_name: String,
+    pub file_path: String,
+    pub line_range: [usize; 2],
+    pub symbol_kind: String,
+    pub enclosing_scope: Option<String>,
+}
+
+impl From<&GraphSymbolArtifact> for SearchSymbol {
+    fn from(symbol: &GraphSymbolArtifact) -> Self {
+        Self {
+            stable_symbol_id: symbol.stable_symbol_id.clone(),
+            entity_name: symbol.entity_name.clone(),
+            qualified_name: symbol.qualified_name.clone(),
+            file_path: symbol.file_path.clone(),
+            line_range: symbol.line_range,
+            symbol_kind: symbol.symbol_kind.clone(),
+            enclosing_scope: symbol.enclosing_scope.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub candidates: Vec<SearchSymbol>,
     pub total_matches: usize,
     pub truncated: bool,
 }
 
-pub fn search_symbols<'a>(
-    artifact: &'a GraphIndexArtifact,
-    options: &SearchOptions,
-) -> SearchResult<'a> {
+pub fn search_symbols(artifact: &GraphIndexArtifact, options: &SearchOptions) -> SearchResult {
     let glob = options
         .filters
         .file_glob
@@ -44,6 +66,7 @@ pub fn search_symbols<'a>(
     let mut candidates = artifact
         .symbols
         .iter()
+        .map(SearchSymbol::from)
         .filter(|symbol| matches_query(symbol, options))
         .filter(|symbol| matches_filters(symbol, &options.filters, glob.as_ref()))
         .collect::<Vec<_>>();
@@ -62,7 +85,7 @@ pub fn search_symbols<'a>(
     }
 }
 
-fn matches_query(symbol: &GraphSymbolArtifact, options: &SearchOptions) -> bool {
+pub(crate) fn matches_query(symbol: &SearchSymbol, options: &SearchOptions) -> bool {
     match options.mode {
         SearchMode::Exact => {
             symbol.entity_name == options.query || symbol.qualified_name == options.query
@@ -72,8 +95,8 @@ fn matches_query(symbol: &GraphSymbolArtifact, options: &SearchOptions) -> bool 
     }
 }
 
-fn matches_filters(
-    symbol: &GraphSymbolArtifact,
+pub(crate) fn matches_filters(
+    symbol: &SearchSymbol,
     filters: &SearchFilters,
     glob: Option<&GlobMatcher>,
 ) -> bool {
@@ -102,9 +125,9 @@ fn matches_filters(
     true
 }
 
-fn compare_symbols(
-    left: &&GraphSymbolArtifact,
-    right: &&GraphSymbolArtifact,
+pub(crate) fn compare_symbols(
+    left: &SearchSymbol,
+    right: &SearchSymbol,
     options: &SearchOptions,
 ) -> Ordering {
     match options.mode {
@@ -114,11 +137,7 @@ fn compare_symbols(
     }
 }
 
-fn compare_exact(
-    left: &&GraphSymbolArtifact,
-    right: &&GraphSymbolArtifact,
-    query: &str,
-) -> Ordering {
+fn compare_exact(left: &SearchSymbol, right: &SearchSymbol, query: &str) -> Ordering {
     let left_rank = exact_rank(left, query);
     let right_rank = exact_rank(right, query);
     left_rank
@@ -126,7 +145,7 @@ fn compare_exact(
         .then_with(|| compare_location(left, right))
 }
 
-fn exact_rank(symbol: &GraphSymbolArtifact, query: &str) -> u8 {
+fn exact_rank(symbol: &SearchSymbol, query: &str) -> u8 {
     if symbol.entity_name == query {
         0
     } else {
@@ -134,18 +153,14 @@ fn exact_rank(symbol: &GraphSymbolArtifact, query: &str) -> u8 {
     }
 }
 
-fn compare_prefix(left: &&GraphSymbolArtifact, right: &&GraphSymbolArtifact) -> Ordering {
+fn compare_prefix(left: &SearchSymbol, right: &SearchSymbol) -> Ordering {
     left.entity_name
         .len()
         .cmp(&right.entity_name.len())
         .then_with(|| compare_location(left, right))
 }
 
-fn compare_substring(
-    left: &&GraphSymbolArtifact,
-    right: &&GraphSymbolArtifact,
-    query: &str,
-) -> Ordering {
+fn compare_substring(left: &SearchSymbol, right: &SearchSymbol, query: &str) -> Ordering {
     let left_position = left
         .entity_name
         .find(query)
@@ -161,7 +176,7 @@ fn compare_substring(
         .then_with(|| compare_location(left, right))
 }
 
-fn compare_location(left: &&GraphSymbolArtifact, right: &&GraphSymbolArtifact) -> Ordering {
+fn compare_location(left: &SearchSymbol, right: &SearchSymbol) -> Ordering {
     left.file_path
         .cmp(&right.file_path)
         .then_with(|| left.line_range[0].cmp(&right.line_range[0]))
@@ -239,7 +254,7 @@ mod tests {
         }
     }
 
-    fn entity_names(result: &SearchResult<'_>) -> Vec<String> {
+    fn entity_names(result: &SearchResult) -> Vec<String> {
         result
             .candidates
             .iter()
@@ -247,7 +262,7 @@ mod tests {
             .collect()
     }
 
-    fn ids(result: &SearchResult<'_>) -> Vec<String> {
+    fn ids(result: &SearchResult) -> Vec<String> {
         result
             .candidates
             .iter()
