@@ -298,7 +298,7 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     ]
 }
 
-pub(crate) fn all_supported_extensions() -> Vec<&'static str> {
+pub fn all_supported_extensions() -> Vec<&'static str> {
     language_registry()
         .iter()
         .flat_map(|descriptor| descriptor.extensions.iter().copied())

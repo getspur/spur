@@ -223,13 +223,13 @@ fn node_kind_discriminators_are_stable_contracts() {
 fn structural_symbol_ids_match_temporal_snapshot_ids_for_fixture_corpora() {
     for fixture_root in [sample_corpus_root(), nested_fn_corpus_root()] {
         let repo = committed_fixture_repo(&fixture_root);
-        let facts = spur_graph::build_facts(repo.path())
+        let facts = spur_graph::build_facts(repo.path(), None)
             .expect("extract structural facts")
             .0;
         let structural =
             spur_graph::store::build::artifact_from_facts(&facts, repo.path()).expect("artifact");
         let (temporal, _) =
-            spur_graph::git_walk::run_full_walk_into(repo.path(), &Default::default())
+            spur_graph::git_walk::run_full_walk_into(repo.path(), &Default::default(), None)
                 .expect("temporal walk");
 
         for symbol in &structural.symbols {

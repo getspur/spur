@@ -182,7 +182,7 @@ fn commit_fixture(worktree: &Path) {
 }
 
 fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
-    let (facts, _file_counts) = build_facts(worktree).expect("build graph facts");
+    let (facts, _file_counts) = build_facts(worktree, None).expect("build graph facts");
     let artifact = artifact_from_facts(&facts, worktree).expect("build graph artifact");
     write_graph_artifact(worktree, &artifact);
     artifact
