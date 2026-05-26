@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -177,6 +177,7 @@ pub struct Orchestrator {
     /// insertion order. The task itself is still tracked in
     /// `background_tasks` for `Drop` to abort.
     pub(crate) peer_mailbox_reconciler_abort: Option<tokio::task::AbortHandle>,
+    seeded_session_ids: HashSet<SessionId>,
 }
 
 impl Drop for Orchestrator {
@@ -277,6 +278,7 @@ impl Orchestrator {
             notebook_sockets: Arc::new(RwLock::new(HashMap::new())),
             fault_injection_hooks: FaultInjectionHooks::default(),
             peer_mailbox_reconciler_abort: None,
+            seeded_session_ids: HashSet::new(),
         };
 
         let ttl_days: u64 = match std::env::var("SPUR_OUTCOME_TTL_DAYS") {

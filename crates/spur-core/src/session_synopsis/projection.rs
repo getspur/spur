@@ -138,6 +138,27 @@ impl SessionSynopsisProjection {
                 }
                 s.last_user_msg = Some(last.to_owned());
             }
+            SpurEventBody::SessionSynopsisSeed {
+                session,
+                first,
+                last,
+            } => {
+                if self.by_session.get(session).is_some() {
+                    return;
+                }
+
+                self.pending.remove(session);
+                let synopsis = SessionSynopsis {
+                    first_user_msg: first.clone().filter(|s| !s.starts_with('/')),
+                    last_user_msg: last.clone(),
+                };
+
+                if synopsis.first_user_msg.is_none() && synopsis.last_user_msg.is_none() {
+                    return;
+                }
+
+                self.by_session.insert(session.clone(), synopsis);
+            }
             _ => {}
         }
     }
@@ -204,6 +225,14 @@ mod tests {
             role: role.into(),
             text: text.into(),
         }
+    }
+
+    fn seed_event(session: &str, first: Option<&str>, last: Option<&str>) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::SessionSynopsisSeed {
+            session: SessionId(session.into()),
+            first: first.map(str::to_owned),
+            last: last.map(str::to_owned),
+        })
     }
 
     #[test]
@@ -459,6 +488,74 @@ mod tests {
             "all-slash history has no real first"
         );
         assert_eq!(s.last_user_msg.as_deref(), Some("/help"));
+    }
+
+    #[test]
+    fn seed_populates_empty_projection() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&seed_event("S1", Some("hello"), Some("bye")));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("hello"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("bye"));
+    }
+
+    #[test]
+    fn seed_does_not_overwrite_committed() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "real"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+        proj.apply(&seed_event("S1", Some("seed first"), Some("seed last")));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("real"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("real"));
+    }
+
+    #[test]
+    fn seed_skips_slash_command_for_first_user_msg() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&seed_event("S1", Some("/clear"), Some("/clear")));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert!(s.first_user_msg.is_none());
+        assert_eq!(s.last_user_msg.as_deref(), Some("/clear"));
+    }
+
+    #[test]
+    fn seed_with_both_none_is_noop() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&seed_event("S1", None, None));
+
+        assert!(proj.get(&SessionId("S1".into())).is_none());
+    }
+
+    #[test]
+    fn seed_clears_stale_pending() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "stale partial"));
+        proj.apply(&seed_event("S1", Some("seed first"), Some("seed last")));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("seed first"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("seed last"));
+        assert!(!proj.pending.contains_key(&SessionId("S1".into())));
+    }
+
+    #[test]
+    fn duplicate_seeds_are_idempotent() {
+        let mut once = SessionSynopsisProjection::new();
+        once.apply(&seed_event("S1", Some("hello"), Some("bye")));
+
+        let mut twice = SessionSynopsisProjection::new();
+        let event = seed_event("S1", Some("hello"), Some("bye"));
+        twice.apply(&event);
+        twice.apply(&event);
+
+        assert_eq!(
+            twice.get(&SessionId("S1".into())),
+            once.get(&SessionId("S1".into()))
+        );
     }
 
     #[test]
