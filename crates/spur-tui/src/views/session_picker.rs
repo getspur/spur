@@ -1031,35 +1031,11 @@ impl SessionPickerView {
 
                     let mut rows: Vec<PreviewRow> = Vec::new();
 
-                    // 1. Last user message (state-first: what was just said)
-                    if let Some(last) = synopsis.as_ref().and_then(|s| s.last_user_msg.clone()) {
-                        rows.push(PreviewRow {
-                            label: "Last".into(),
-                            value_lines: vec![truncate_for_row(&last, value_width)],
-                            value_style: None,
-                        });
-                    }
-
-                    // 2. Draft (state-first: what's pending)
-                    if !draft.is_empty() {
-                        rows.push(PreviewRow {
-                            label: "Draft".into(),
-                            value_lines: vec![truncate_for_row(&draft, value_width)],
-                            value_style: Some(
-                                Style::default()
-                                    .fg(token(ctx.theme, "session_picker.preview.draft.fg")),
-                            ),
-                        });
-                    }
-
-                    // 3. Blank separator between state-first and original-intent
-                    rows.push(PreviewRow::default());
-
-                    // 4. Intent (original first message, dim/wrapped)
+                    // 1. Intent (original first message, dim/wrapped)
                     if let Some(first) = synopsis.as_ref().and_then(|s| s.first_user_msg.clone()) {
                         rows.push(PreviewRow {
                             label: "Intent".into(),
-                            value_lines: wrap_value(&first, value_width, 3),
+                            value_lines: wrap_value(&first, value_width, 2),
                             value_style: Some(
                                 Style::default()
                                     .fg(token(ctx.theme, "session_picker.preview.intent.fg")),
@@ -1080,8 +1056,54 @@ impl SessionPickerView {
                         });
                     }
 
-                    // 5. Blank separator
+                    if let Some(reply) = synopsis.as_ref().and_then(|s| s.first_agent_reply.clone())
+                    {
+                        rows.push(PreviewRow {
+                            label: "Reply ".into(),
+                            value_lines: vec![truncate_for_row(&reply, value_width)],
+                            value_style: Some(
+                                Style::default()
+                                    .fg(token(ctx.theme, "session_picker.preview.intent.fg")),
+                            ),
+                        });
+                    }
+
+                    // 2. Blank separator between original intent and latest state.
                     rows.push(PreviewRow::default());
+
+                    // 3. Last user message and optional agent reply.
+                    if let Some(last) = synopsis.as_ref().and_then(|s| s.last_user_msg.clone()) {
+                        rows.push(PreviewRow {
+                            label: "Last  ".into(),
+                            value_lines: wrap_value(&last, value_width, 2),
+                            value_style: None,
+                        });
+
+                        if let Some(reply) =
+                            synopsis.as_ref().and_then(|s| s.last_agent_reply.clone())
+                        {
+                            rows.push(PreviewRow {
+                                label: "Reply ".into(),
+                                value_lines: vec![truncate_for_row(&reply, value_width)],
+                                value_style: None,
+                            });
+                        }
+
+                        // 4. Blank separator before pending draft/footer metadata.
+                        rows.push(PreviewRow::default());
+                    }
+
+                    // 5. Draft (state-first: what's pending)
+                    if !draft.is_empty() {
+                        rows.push(PreviewRow {
+                            label: "Draft ".into(),
+                            value_lines: vec![truncate_for_row(&draft, value_width)],
+                            value_style: Some(
+                                Style::default()
+                                    .fg(token(ctx.theme, "session_picker.preview.draft.fg")),
+                            ),
+                        });
+                    }
 
                     // 6. Footer (cwd · brain · short id)
                     rows.push(PreviewRow {
@@ -1096,10 +1118,10 @@ impl SessionPickerView {
                         ),
                     });
 
-                    // Bounded by construction: Last <= 1, Draft <= 1, then
-                    // either Intent <= 3 or placeholder <= 1, footer <= 1,
-                    // plus two blank separators = <= 8 visual lines, leaving
-                    // slack under PREVIEW_MAX_LINES for the preview border.
+                    // Bounded by construction: Intent <= 2 (or placeholder <= 1),
+                    // first Reply <= 1, Last <= 2, last Reply <= 1, Draft <= 1,
+                    // footer <= 1, plus up to two blank separators = <= 10 visual
+                    // lines, leaving slack under PREVIEW_MAX_LINES for the border.
 
                     PreviewContent {
                         rows,
@@ -2144,12 +2166,91 @@ mod preview_render_tests {
             .unwrap();
 
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("Last: latest request"));
-        assert!(text.contains("Draft: unsent edit"));
+        assert!(text.contains("Last  : latest request"));
+        assert!(text.contains("Draft : unsent edit"));
         assert!(text.contains("Intent: original goal"));
         assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
         assert!(!text.contains("Session: a1xxxxxx"));
         assert!(!text.contains("CWD: /work/spur"));
+    }
+
+    #[test]
+    fn preview_renders_agent_replies_and_keeps_footer_visible() {
+        let mut synopsis = spur_core::SessionSynopsisProjection::new();
+        synopsis.insert_for_test(
+            SessionId("a1xxxxxx".into()),
+            spur_core::SessionSynopsis {
+                first_user_msg: Some("original goal".into()),
+                first_agent_reply: Some("first assistant response".into()),
+                last_user_msg: Some("latest request".into()),
+                last_agent_reply: Some("final assistant response".into()),
+                ..spur_core::SessionSynopsis::default()
+            },
+        );
+
+        let lineage = spur_core::lineage::projection::ExecutorLineage::new();
+        let plan_projection = spur_core::PlanProjectionStore::new();
+        let brain_status = crate::app::BrainStatus::Idle;
+        let ctx = crate::views::ViewContext {
+            lineage: &lineage,
+            plan_projection: &plan_projection,
+            synopsis: &synopsis,
+            brain_status: &brain_status,
+            license_badge: None,
+            flag_summary: None,
+            tombstone: None,
+            transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
+        };
+
+        let mut metadata = SessionMetadata::default();
+        metadata.sessions.insert(
+            "a1xxxxxx".into(),
+            SessionEntry {
+                brain_name: Some("claude".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        let mut picker = SessionPickerView::new();
+        picker.set_metadata(metadata);
+        picker.set_sessions(
+            "claude".into(),
+            vec![SessionInfo::new(
+                "a1xxxxxx".to_string(),
+                PathBuf::from("/work/spur"),
+            )],
+            ctx.synopsis,
+        );
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
+            .unwrap();
+
+        let rows = buffer_rows(term.backend().buffer());
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("Reply : first assistant response"));
+        assert!(text.contains("Reply : final assistant response"));
+
+        let preview_border_row = rows
+            .iter()
+            .position(|row| row.contains(" Preview "))
+            .expect("preview border should be visible");
+        let footer_row = rows
+            .iter()
+            .enumerate()
+            .skip(preview_border_row + 1)
+            .find_map(|(y, row)| {
+                row.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx")
+                    .then_some(y)
+            })
+            .expect("footer should be visible in preview");
+        assert!(
+            footer_row - preview_border_row < PREVIEW_MAX_LINES as usize,
+            "footer must fit inside the 12-row preview area"
+        );
     }
 
     #[test]
@@ -2200,7 +2301,7 @@ mod preview_render_tests {
         let text = buffer_text(term.backend().buffer());
         assert!(text.contains("(resume to load message history)"));
         assert!(!text.contains("Intent:"));
-        assert!(!text.contains("Last:"));
+        assert!(!text.contains("Last  :"));
         assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
         let preview_border_row = rows
             .iter()
@@ -2295,20 +2396,20 @@ mod preview_render_tests {
 
         let rows = buffer_rows(term.backend().buffer());
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("Draft: unsent edit"));
+        assert!(text.contains("Draft : unsent edit"));
         assert!(text.contains("(resume to load message history)"));
 
         let draft_row = rows
             .iter()
-            .position(|row| row.contains("Draft: unsent edit"))
+            .position(|row| row.contains("Draft : unsent edit"))
             .expect("draft should be visible in preview");
         let placeholder_row = rows
             .iter()
             .position(|row| row.contains("(resume to load message history)"))
             .expect("placeholder should be visible in preview");
         assert!(
-            draft_row < placeholder_row,
-            "draft should render above the empty-state placeholder"
+            placeholder_row < draft_row,
+            "draft should render below the empty-state placeholder"
         );
     }
 
@@ -2376,7 +2477,7 @@ mod preview_render_tests {
 
         let rows = buffer_rows(term.backend().buffer());
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("Last: /help"));
+        assert!(text.contains("Last  : /help"));
         assert!(text.contains("(resume to load message history)"));
 
         let preview_border_row = rows
@@ -2461,7 +2562,7 @@ mod preview_render_tests {
             .unwrap();
 
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("Last: latest request"));
+        assert!(text.contains("Last  : latest request"));
         assert!(text.contains("Intent: intent intent"));
         assert!(text.contains('…'));
         assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
@@ -2482,8 +2583,8 @@ mod preview_render_tests {
             .count();
 
         assert_eq!(
-            intent_value_rows, 3,
-            "long intent should emit exactly three styled value lines"
+            intent_value_rows, 2,
+            "long intent should emit exactly two styled value lines"
         );
         assert!(
             footer_row >= preview_content_start,
