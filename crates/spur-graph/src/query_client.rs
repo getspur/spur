@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context};
 use arrow_array::{
-    Array, BooleanArray, Float32Array, Int32Array, Int64Array, RecordBatch, StringArray,
+    Array, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
 };
 use arrow_schema::ArrowError;
 use globset::Glob;
@@ -24,8 +24,9 @@ use crate::{
     resolve_selector, search_symbols, GraphArtifactManifest, GraphEdgeArtifact,
     GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact, OwnedCalleeRecord,
     OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
+    CODE_SYMBOL_URI_PREFIX,
 };
-use crate::{SearchFilters, SearchMode};
+use crate::{CandidateRow, NodeId, ResolvedSymbol, SearchFilters, SearchMode};
 
 pub type CodeSelectorResolution = SelectorResolution;
 
@@ -33,8 +34,16 @@ pub trait GraphQueryClient {
     fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult>;
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord>;
     fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord>;
-    fn resolve_selector(&self, selector: &str) -> CodeSelectorResolution;
-    fn file_manifest_by_path(&self, path: &str) -> Option<&GraphFileManifestEntry>;
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution>;
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>>;
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>>;
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>>;
+    fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>>;
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool>;
     fn temporal_index(&self) -> Arc<TemporalIndex>;
 }
 
@@ -72,15 +81,66 @@ impl GraphQueryClient for InMemoryClient {
             .collect()
     }
 
-    fn resolve_selector(&self, selector: &str) -> CodeSelectorResolution {
-        resolve_selector(&self.artifact, selector)
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        Ok(resolve_selector(&self.artifact, selector))
     }
 
-    fn file_manifest_by_path(&self, path: &str) -> Option<&GraphFileManifestEntry> {
-        self.artifact
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        Ok(self
+            .artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.stable_symbol_id == sid)
+            .cloned())
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        Ok(self
+            .artifact
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.file_path == path)
+            .cloned()
+            .collect())
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        Ok(self
+            .artifact
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.file_path == path
+                    && (symbol.entity_name == name || symbol.qualified_name == name)
+            })
+            .cloned()
+            .collect())
+    }
+
+    fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+        Ok(self
+            .artifact
             .file_manifests
             .iter()
             .find(|entry| entry.path == path)
+            .cloned())
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .artifact
+            .files
+            .iter()
+            .any(|entry| entry.file_path == path)
+            || self
+                .artifact
+                .file_manifests
+                .iter()
+                .any(|entry| entry.path == path))
     }
 
     fn temporal_index(&self) -> Arc<TemporalIndex> {
@@ -101,6 +161,7 @@ const SEARCH_COLUMNS: [&str; 8] = [
 const SEARCH_PREDICATE_COLUMNS: [&str; 4] =
     ["entity_name", "qualified_name", "file_path", "symbol_kind"];
 const FILE_OID_COLUMNS: [&str; 2] = ["path", "content_oid"];
+const FILE_MANIFEST_COLUMNS: [&str; 4] = ["stable_file_id", "path", "content_oid", "node_ids"];
 const SYMBOL_COLUMNS: [&str; 11] = [
     "stable_symbol_id",
     "file_path",
@@ -252,7 +313,7 @@ impl ParquetClient {
     }
 
     fn find_caller_edges_inner(&self, target_sid: &str) -> anyhow::Result<Vec<OwnedCallerRecord>> {
-        let Some(target_symbol) = self.symbol_by_id(target_sid)? else {
+        let Some(target_symbol) = self.symbol_by_stable_id(target_sid)? else {
             return Ok(Vec::new());
         };
         let unresolved_labels = unresolved_target_labels_for_symbol(&target_symbol);
@@ -298,7 +359,7 @@ impl ParquetClient {
     }
 
     fn find_callee_edges_inner(&self, source_sid: &str) -> anyhow::Result<Vec<OwnedCalleeRecord>> {
-        if self.symbol_by_id(source_sid)?.is_none() {
+        if self.symbol_by_stable_id(source_sid)?.is_none() {
             return Ok(Vec::new());
         }
 
@@ -340,7 +401,7 @@ impl ParquetClient {
         Ok(records)
     }
 
-    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+    fn symbol_by_stable_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
         let ids = HashSet::from([sid.to_string()]);
         Ok(self.symbols_by_ids(&ids)?.remove(sid))
     }
@@ -364,6 +425,200 @@ impl ParquetClient {
             }
         }
         Ok(symbols)
+    }
+
+    fn symbols_where_string_eq(
+        &self,
+        column: &str,
+        value: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        let batches = filtered_projected_batches(
+            &self.dir.join("nodes.parquet"),
+            SYMBOL_COLUMNS,
+            |schema| string_eq_row_filter(schema, column, value.to_string()),
+        )?;
+        symbols_from_batches(batches)
+    }
+
+    fn symbols_where_all_string_eq(
+        &self,
+        expected: Vec<(&str, String)>,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        let batches = filtered_projected_batches(
+            &self.dir.join("nodes.parquet"),
+            SYMBOL_COLUMNS,
+            |schema| string_eq_all_row_filter(schema, expected),
+        )?;
+        symbols_from_batches(batches)
+    }
+
+    fn symbols_by_file_path(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.symbols_where_string_eq("file_path", path)
+    }
+
+    fn symbols_by_file_qualified_name(
+        &self,
+        path: &str,
+        qualified_name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.symbols_where_all_string_eq(vec![
+            ("file_path", path.to_string()),
+            ("qualified_name", qualified_name.to_string()),
+        ])
+    }
+
+    fn symbols_by_file_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        let batches = filtered_projected_batches(
+            &self.dir.join("nodes.parquet"),
+            SYMBOL_COLUMNS,
+            |schema| path_name_row_filter(schema, path.to_string(), name.to_string()),
+        )?;
+        symbols_from_batches(batches)
+    }
+
+    fn file_manifest_by_path_inner(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+        let batches = filtered_projected_batches(
+            &self.dir.join("file_manifests.parquet"),
+            FILE_MANIFEST_COLUMNS,
+            |schema| string_eq_row_filter(schema, "path", path.to_string()),
+        )?;
+        let mut manifests = file_manifests_from_batches(batches)?;
+        Ok(manifests.pop())
+    }
+
+    fn resolve_selector_inner(&self, selector: &str) -> anyhow::Result<SelectorResolution> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Ok(SelectorResolution::NotFound);
+        }
+
+        if let Some(symbol_id) = selector.strip_prefix(CODE_SYMBOL_URI_PREFIX) {
+            return Ok(self
+                .resolve_symbol_by_id(symbol_id)?
+                .map(SelectorResolution::Resolved)
+                .unwrap_or(SelectorResolution::NotFound));
+        }
+
+        if is_bare_stable_symbol_id(selector) {
+            if let Some(symbol) = self.resolve_symbol_by_id(selector)? {
+                return Ok(SelectorResolution::Resolved(symbol));
+            }
+        }
+
+        if let Some(file_scoped) = selector
+            .strip_prefix("file:")
+            .or_else(|| selector.strip_prefix("path:"))
+        {
+            return self.resolve_file_scoped(file_scoped);
+        }
+
+        if let Some(line_resolution) = self.resolve_line_locator(selector)? {
+            return Ok(line_resolution);
+        }
+
+        if let Some(file_resolution) = self.resolve_file_qualified(selector)? {
+            return Ok(file_resolution);
+        }
+
+        if !first_token_contains_path_separator(selector) {
+            let resolution =
+                resolution_from_symbols(self.symbols_where_string_eq("qualified_name", selector)?);
+            if !matches!(resolution, SelectorResolution::NotFound) {
+                return Ok(resolution);
+            }
+        }
+
+        if selector.contains("::") {
+            return Ok(SelectorResolution::NotFound);
+        }
+
+        Ok(resolution_from_symbols(
+            self.symbols_where_string_eq("entity_name", selector)?,
+        ))
+    }
+
+    fn resolve_symbol_by_id(&self, symbol_id: &str) -> anyhow::Result<Option<ResolvedSymbol>> {
+        if symbol_id.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .symbol_by_stable_id(symbol_id)?
+            .as_ref()
+            .map(resolved_symbol))
+    }
+
+    fn resolve_file_scoped(&self, selector: &str) -> anyhow::Result<SelectorResolution> {
+        if let Some(resolution) = self.resolve_line_locator(selector)? {
+            return Ok(resolution);
+        }
+        Ok(self
+            .resolve_file_qualified(selector)?
+            .unwrap_or(SelectorResolution::NotFound))
+    }
+
+    fn resolve_line_locator(&self, selector: &str) -> anyhow::Result<Option<SelectorResolution>> {
+        for (file_path, line) in split_file_prefixes(selector, ":") {
+            if line.starts_with(':') {
+                continue;
+            }
+            if line.is_empty() || !line.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            if !self.file_exists_inner(file_path)? {
+                continue;
+            }
+            let Ok(line) = line.parse::<usize>() else {
+                continue;
+            };
+            let symbol = self
+                .symbols_by_file_path(file_path)?
+                .into_iter()
+                .filter(|symbol| symbol.line_range[0] <= line && line <= symbol.line_range[1])
+                .max_by(compare_innermost);
+            return Ok(Some(
+                symbol
+                    .as_ref()
+                    .map(resolved_symbol)
+                    .map(SelectorResolution::Resolved)
+                    .unwrap_or(SelectorResolution::NotFound),
+            ));
+        }
+        Ok(None)
+    }
+
+    fn resolve_file_qualified(&self, selector: &str) -> anyhow::Result<Option<SelectorResolution>> {
+        for (file_path, chain) in split_file_prefixes(selector, "::")
+            .into_iter()
+            .chain(split_file_prefixes(selector, ":"))
+        {
+            if !self.file_exists_inner(file_path)? {
+                continue;
+            }
+            let resolution =
+                resolution_from_symbols(self.symbols_by_file_qualified_name(file_path, chain)?);
+            if !matches!(resolution, SelectorResolution::NotFound) {
+                return Ok(Some(resolution));
+            }
+
+            let fallback_matches = self
+                .symbols_by_file_path(file_path)?
+                .into_iter()
+                .filter(|symbol| enclosing_scope_entity_name(symbol).as_deref() == Some(chain))
+                .collect();
+            return Ok(Some(resolution_from_symbols(fallback_matches)));
+        }
+        Ok(None)
+    }
+
+    fn file_exists_inner(&self, path: &str) -> anyhow::Result<bool> {
+        Ok(self.file_manifest_by_path_inner(path)?.is_some())
     }
 
     fn resolved_edges_by_source(&self, source_sid: &str) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
@@ -440,12 +695,32 @@ impl GraphQueryClient for ParquetClient {
             .unwrap_or_else(|error| panic!("failed to query Parquet callee edges: {error:#}"))
     }
 
-    fn resolve_selector(&self, _selector: &str) -> CodeSelectorResolution {
-        unimplemented!("PR4")
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        self.resolve_selector_inner(selector)
     }
 
-    fn file_manifest_by_path(&self, _path: &str) -> Option<&GraphFileManifestEntry> {
-        unimplemented!("PR4")
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        self.symbol_by_stable_id(sid)
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.symbols_by_file_path(path)
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.symbols_by_file_path_name(path, name)
+    }
+
+    fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+        self.file_manifest_by_path_inner(path)
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        self.file_exists_inner(path)
     }
 
     fn temporal_index(&self) -> Arc<TemporalIndex> {
@@ -646,6 +921,61 @@ fn string_in_row_filter(
     RowFilter::new(vec![Box::new(ArrowPredicateFn::new(projection, predicate))])
 }
 
+fn string_eq_all_row_filter(
+    parquet_schema: &SchemaDescriptor,
+    expected: Vec<(&str, String)>,
+) -> RowFilter {
+    let columns = expected
+        .iter()
+        .map(|(column, _)| *column)
+        .collect::<Vec<_>>();
+    let projection = ProjectionMask::columns(parquet_schema, columns);
+    let expected = expected
+        .into_iter()
+        .map(|(column, value)| (column.to_string(), value))
+        .collect::<Vec<_>>();
+    let predicate = move |batch: RecordBatch| -> Result<BooleanArray, ArrowError> {
+        let arrays = expected
+            .iter()
+            .map(|(column, _)| string_array_by_name(&batch, column))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut keep = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            keep.push(arrays.iter().zip(&expected).all(|(values, (_, expected))| {
+                !values.is_null(row) && values.value(row) == expected
+            }));
+        }
+        Ok(BooleanArray::from(keep))
+    };
+    RowFilter::new(vec![Box::new(ArrowPredicateFn::new(projection, predicate))])
+}
+
+fn path_name_row_filter(
+    parquet_schema: &SchemaDescriptor,
+    expected_path: String,
+    expected_name: String,
+) -> RowFilter {
+    let projection = ProjectionMask::columns(
+        parquet_schema,
+        ["file_path", "entity_name", "qualified_name"],
+    );
+    let predicate = move |batch: RecordBatch| -> Result<BooleanArray, ArrowError> {
+        let file_path = string_array_by_name(&batch, "file_path")?;
+        let entity_name = string_array_by_name(&batch, "entity_name")?;
+        let qualified_name = string_array_by_name(&batch, "qualified_name")?;
+        let mut keep = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let path_matches = !file_path.is_null(row) && file_path.value(row) == expected_path;
+            let name_matches = (!entity_name.is_null(row)
+                && entity_name.value(row) == expected_name)
+                || (!qualified_name.is_null(row) && qualified_name.value(row) == expected_name);
+            keep.push(path_matches && name_matches);
+        }
+        Ok(BooleanArray::from(keep))
+    };
+    RowFilter::new(vec![Box::new(ArrowPredicateFn::new(projection, predicate))])
+}
+
 fn unresolved_target_labels_for_symbol(symbol: &GraphSymbolArtifact) -> HashSet<String> {
     HashSet::from([
         symbol.entity_name.clone(),
@@ -656,6 +986,116 @@ fn unresolved_target_labels_for_symbol(symbol: &GraphSymbolArtifact) -> HashSet<
 
 fn is_caller_relation(relation: RelationKind) -> bool {
     matches!(relation, RelationKind::Calls | RelationKind::References)
+}
+
+fn is_bare_stable_symbol_id(selector: &str) -> bool {
+    selector.len() >= 16
+        && selector
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn split_file_prefixes<'a>(selector: &'a str, separator: &str) -> Vec<(&'a str, &'a str)> {
+    let mut prefixes = selector
+        .match_indices(separator)
+        .filter_map(|(index, _)| {
+            let file_path = &selector[..index];
+            let tail = &selector[index + separator.len()..];
+            (!file_path.is_empty()).then_some((file_path, tail))
+        })
+        .collect::<Vec<_>>();
+    prefixes.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    prefixes
+}
+
+fn first_token_contains_path_separator(selector: &str) -> bool {
+    selector
+        .split("::")
+        .next()
+        .is_some_and(|token| token.contains('/'))
+}
+
+fn compare_innermost(
+    left: &GraphSymbolArtifact,
+    right: &GraphSymbolArtifact,
+) -> std::cmp::Ordering {
+    left.line_range[0]
+        .cmp(&right.line_range[0])
+        .then_with(|| right.line_range[1].cmp(&left.line_range[1]))
+        .then_with(|| left.stable_symbol_id.cmp(&right.stable_symbol_id))
+}
+
+fn resolution_from_symbols(symbols: Vec<GraphSymbolArtifact>) -> SelectorResolution {
+    let mcp_tool_matches = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_kind == "mcp_tool")
+        .collect::<Vec<_>>();
+    if let [symbol] = mcp_tool_matches.as_slice() {
+        return SelectorResolution::Resolved(resolved_symbol(symbol));
+    }
+
+    match symbols.as_slice() {
+        [] => SelectorResolution::NotFound,
+        [symbol] => SelectorResolution::Resolved(resolved_symbol(symbol)),
+        _ => SelectorResolution::Ambiguous {
+            candidates: candidate_rows(symbols),
+        },
+    }
+}
+
+fn resolved_symbol(symbol: &GraphSymbolArtifact) -> ResolvedSymbol {
+    ResolvedSymbol {
+        stable_symbol_id: symbol.stable_symbol_id.clone(),
+    }
+}
+
+fn candidate_rows(symbols: Vec<GraphSymbolArtifact>) -> Vec<CandidateRow> {
+    let mut candidates = symbols.iter().map(candidate_row).collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.file_path
+            .cmp(&right.file_path)
+            .then_with(|| left.line_range[0].cmp(&right.line_range[0]))
+            .then_with(|| left.line_range[1].cmp(&right.line_range[1]))
+            .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    candidates
+}
+
+fn candidate_row(symbol: &GraphSymbolArtifact) -> CandidateRow {
+    let uri = format!("{CODE_SYMBOL_URI_PREFIX}{}", symbol.stable_symbol_id);
+    let selector = if symbol.qualified_name.is_empty() {
+        uri.clone()
+    } else {
+        format!("{}::{}", symbol.file_path, symbol.qualified_name)
+    };
+
+    CandidateRow {
+        selector,
+        uri,
+        id: symbol.stable_symbol_id.clone(),
+        entity_name: symbol.entity_name.clone(),
+        qualified_name: symbol.qualified_name.clone(),
+        file_path: symbol.file_path.clone(),
+        line_range: symbol.line_range,
+        symbol_kind: symbol.symbol_kind.clone(),
+        enclosing_scope: symbol.enclosing_scope.clone(),
+    }
+}
+
+fn enclosing_scope_entity_name(symbol: &GraphSymbolArtifact) -> Option<String> {
+    symbol
+        .enclosing_scope
+        .as_ref()
+        .map(|scope| format!("{scope}::{}", symbol.entity_name))
+}
+
+fn symbols_from_batches(batches: Vec<RecordBatch>) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+    let mut symbols = Vec::new();
+    for batch in batches {
+        symbols.extend(symbols_from_batch(&batch)?);
+    }
+    Ok(symbols)
 }
 
 fn search_symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<SearchSymbol>> {
@@ -724,6 +1164,35 @@ fn symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphSymbolArti
         });
     }
     Ok(symbols)
+}
+
+fn file_manifests_from_batches(
+    batches: Vec<RecordBatch>,
+) -> anyhow::Result<Vec<GraphFileManifestEntry>> {
+    let mut manifests = Vec::new();
+    for batch in batches {
+        manifests.extend(file_manifests_from_batch(&batch)?);
+    }
+    Ok(manifests)
+}
+
+fn file_manifests_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphFileManifestEntry>> {
+    let stable_file_id = string_array_by_name(batch, "stable_file_id")?;
+    let path = string_array_by_name(batch, "path")?;
+    let content_oid = string_array_by_name(batch, "content_oid")?;
+    let node_ids = list_array_by_name(batch, "node_ids")?;
+
+    let mut manifests = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        manifests.push(GraphFileManifestEntry {
+            stable_file_id: required_string_value(stable_file_id, row, "stable_file_id")?
+                .to_string(),
+            path: required_string_value(path, row, "path")?.to_string(),
+            content_oid: required_string_value(content_oid, row, "content_oid")?.to_string(),
+            node_ids: required_node_id_list_value(node_ids, row, "node_ids")?,
+        });
+    }
+    Ok(manifests)
 }
 
 fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
@@ -837,6 +1306,15 @@ fn f32_array_by_name<'a>(
         .ok_or_else(|| ArrowError::CastError(format!("expected float32 column `{name}`")))
 }
 
+fn list_array_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray, ArrowError> {
+    let index = batch.schema().index_of(name)?;
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| ArrowError::CastError(format!("expected list column `{name}`")))
+}
+
 fn required_string_value<'a>(
     values: &'a StringArray,
     index: usize,
@@ -854,12 +1332,36 @@ fn optional_string_value(values: &StringArray, index: usize) -> Option<String> {
     (!values.is_null(index)).then(|| values.value(index).to_string())
 }
 
+fn required_node_id_list_value(
+    values: &ListArray,
+    index: usize,
+    name: &str,
+) -> anyhow::Result<Vec<NodeId>> {
+    if values.is_null(index) {
+        return Ok(Vec::new());
+    }
+    let item_values = values.value(index);
+    let node_ids = item_values
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| anyhow!("expected int64 elements in list column `{name}`"))?;
+    (0..node_ids.len())
+        .map(|item_index| i64_to_node_id(node_ids.value(item_index), name))
+        .collect()
+}
+
 fn i32_to_usize(value: i32, name: &str) -> anyhow::Result<usize> {
     usize::try_from(value).map_err(|_| anyhow!("column `{name}` has negative value {value}"))
 }
 
 fn i64_to_usize(value: i64, name: &str) -> anyhow::Result<usize> {
     usize::try_from(value).map_err(|_| anyhow!("column `{name}` has negative value {value}"))
+}
+
+fn i64_to_node_id(value: i64, name: &str) -> anyhow::Result<NodeId> {
+    u64::try_from(value)
+        .map(NodeId)
+        .map_err(|_| anyhow!("column `{name}` has negative value {value}"))
 }
 
 #[cfg(test)]
