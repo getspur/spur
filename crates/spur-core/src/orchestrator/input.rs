@@ -20,6 +20,12 @@ pub enum InteractiveInput {
         blocks: Vec<ContentBlock>,
         interrupt: bool,
     },
+    /// Retire any attached brain and eagerly spawn a fresh brain session
+    /// with no first prompt. Emits `SessionCreated` so the TUI can land
+    /// directly on the new session's `SessionDetail` view. Distinct from
+    /// `NewSessionWithMessage { blocks: [] }`, which defers spawn until the
+    /// next `Message` (the `/clear` semantics).
+    NewSession,
     ListSessions,
     ResumeSession {
         session_id: String,
