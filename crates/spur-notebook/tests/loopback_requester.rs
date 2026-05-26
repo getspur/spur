@@ -85,6 +85,7 @@ mod unix {
                 "id": CELL_ID,
                 "kind": "code",
                 "version": 2,
+                "lastEditedBy": "brain",
                 "source": "updated",
                 "exec_count": null,
                 "status": "idle",

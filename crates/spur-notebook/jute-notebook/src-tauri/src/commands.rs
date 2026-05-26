@@ -245,6 +245,7 @@ pub struct DaemonCell {
     pub kind: String,
     #[ts(type = "number")]
     pub version: u64,
+    pub last_edited_by: Option<String>,
     pub source: String,
     pub exec_count: Option<u32>,
     pub status: String,
@@ -751,52 +752,53 @@ fn read_daemon_cell(root: &NotebookRoot, id: &str) -> Result<DaemonCell, DaemonC
             DaemonControlResponse::failure("cell_not_found", format!("cell not found: {id}"))
         })?;
 
-    let (kind, source, version, exec_count, outputs) = match cell {
-        Cell::Raw(cell) => (
-            "raw",
-            multiline_to_string(&cell.source),
-            cell.metadata
-                .spur
-                .as_ref()
-                .map(|spur| spur.version)
-                .unwrap_or_default(),
-            None,
-            Vec::new(),
-        ),
-        Cell::Markdown(cell) => (
-            "markdown",
-            multiline_to_string(&cell.source),
-            cell.metadata
-                .spur
-                .as_ref()
-                .map(|spur| spur.version)
-                .unwrap_or_default(),
-            None,
-            Vec::new(),
-        ),
-        Cell::Code(cell) => (
-            "code",
-            multiline_to_string(&cell.source),
-            cell.metadata
-                .spur
-                .as_ref()
-                .map(|spur| spur.version)
-                .unwrap_or_default(),
-            cell.execution_count,
-            cell.outputs
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| {
-                    DaemonControlResponse::failure("cell_encode_failed", error.to_string())
-                })?,
-        ),
+    let (kind, source, version, last_edited_by, exec_count, outputs) = match cell {
+        Cell::Raw(cell) => {
+            let spur = cell.metadata.spur.as_ref();
+            (
+                "raw",
+                multiline_to_string(&cell.source),
+                spur.map(|spur| spur.version).unwrap_or_default(),
+                spur.and_then(|spur| spur.last_edited_by.clone()),
+                None,
+                Vec::new(),
+            )
+        }
+        Cell::Markdown(cell) => {
+            let spur = cell.metadata.spur.as_ref();
+            (
+                "markdown",
+                multiline_to_string(&cell.source),
+                spur.map(|spur| spur.version).unwrap_or_default(),
+                spur.and_then(|spur| spur.last_edited_by.clone()),
+                None,
+                Vec::new(),
+            )
+        }
+        Cell::Code(cell) => {
+            let spur = cell.metadata.spur.as_ref();
+            (
+                "code",
+                multiline_to_string(&cell.source),
+                spur.map(|spur| spur.version).unwrap_or_default(),
+                spur.and_then(|spur| spur.last_edited_by.clone()),
+                cell.execution_count,
+                cell.outputs
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        DaemonControlResponse::failure("cell_encode_failed", error.to_string())
+                    })?,
+            )
+        }
     };
 
     Ok(DaemonCell {
         id: id.to_string(),
         kind: kind.to_string(),
         version,
+        last_edited_by,
         source,
         exec_count,
         status: "idle".to_string(),
@@ -1693,6 +1695,29 @@ mod tests {
                 .and_then(|spur| spur.last_edited_by.as_deref()),
             Some("brain")
         );
+    }
+
+    #[test]
+    fn read_daemon_cell_includes_inserted_last_edited_by() {
+        let state = State::new();
+        let store = state.get_notebook();
+        store.load("/tmp/test.ipynb", notebook_with_source("initial", 1));
+        let delta = store
+            .apply(NotebookOp::InsertCell {
+                kind: CellKind::Markdown,
+                after_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                source: "notes".to_string(),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+        let DeltaKind::CellInserted { id, .. } = delta.kind else {
+            panic!("expected inserted cell delta");
+        };
+
+        let (snapshot, _version) = store.snapshot();
+        let cell = read_daemon_cell(&snapshot, &id).unwrap();
+
+        assert_eq!(cell.last_edited_by.as_deref(), Some("brain"));
     }
 
     #[tokio::test]

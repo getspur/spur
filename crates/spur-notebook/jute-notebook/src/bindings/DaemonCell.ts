@@ -8,6 +8,7 @@ export type DaemonCell = {
   id: string;
   kind: string;
   version: number;
+  lastEditedBy: string | null;
   source: string;
   execCount: number | null;
   status: string;

@@ -180,6 +180,7 @@ function notebookStoreActions(
             initialText: cell.source,
             source: cell.source,
             version: cell.version,
+            lastEditedBy: cell.lastEditedBy ?? undefined,
           };
           return;
         }
@@ -187,7 +188,7 @@ function notebookStoreActions(
         existing.type = type;
         existing.source = cell.source;
         existing.version = cell.version;
-        existing.lastEditedBy = undefined;
+        existing.lastEditedBy = cell.lastEditedBy ?? undefined;
       }),
 
     /** Delete a cell from the notebook. */
