@@ -348,6 +348,8 @@ pub struct App {
     user_warning: Option<String>,
     upgrade_rx: Option<UpgradeReceiver>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
+    background_action_tx: mpsc::UnboundedSender<Action>,
+    background_action_rx: mpsc::UnboundedReceiver<Action>,
     #[cfg(any(test, debug_assertions))]
     user_input_rx_for_test: Option<mpsc::Receiver<UserInput>>,
     brain_status: BrainStatus,
@@ -463,6 +465,9 @@ impl App {
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
         let now = Instant::now();
+        while let Ok(action) = self.background_action_rx.try_recv() {
+            self.process_action(action);
+        }
         // Drive tombstone expiry. Expired reversible tombstones are silently
         // dropped; expired QueuedRemote tombstones dispatch through App.
         let expired_queued = self.tombstones.tick(now);
