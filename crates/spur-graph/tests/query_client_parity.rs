@@ -1,10 +1,15 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
+use spur_graph::temporal::symbol_history;
 use spur_graph::{
-    write_artifact_parquet, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+    read_artifact_parquet, write_artifact_parquet, ChangeKind, CommitArtifact, CommitIndexArtifact,
+    Confidence, EdgeEndpoint, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
     GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
     GraphSymbolArtifact, InMemoryClient, NodeId, OwnedCalleeRecord, OwnedCallerRecord,
-    ParquetClient, RelationKind, SearchFilters, SearchMode, SearchOptions, WriteOptions,
+    ParquetClient, RelationKind, RenamePrev, SearchFilters, SearchMode, SearchOptions, SnapshotKey,
+    SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy, WriteOptions,
 };
 
 fn artifact() -> GraphIndexArtifact {
@@ -176,6 +181,91 @@ fn edge(source: &str, target: Option<&str>, target_label: Option<&str>) -> Graph
     }
 }
 
+fn temporal_artifact() -> GraphIndexArtifact {
+    let old_snapshot = snapshot("old-root", "commit-a", "foo");
+    let new_snapshot = snapshot("new-root", "commit-b", "bar");
+    let mut artifact = artifact();
+    artifact.header.graph_index_version = GRAPH_INDEX_VERSION_TEMPORAL.to_string();
+    artifact.commits = commits();
+    artifact.symbol_snapshots = vec![old_snapshot.clone(), new_snapshot.clone()];
+    artifact.temporal_edges = vec![
+        temporal_touch("commit-a", old_snapshot.key.clone(), ChangeKind::Added),
+        temporal_touch(
+            "commit-b",
+            new_snapshot.key.clone(),
+            ChangeKind::RenamedFrom(RenamePrev::Symbol(old_snapshot.key.clone())),
+        ),
+        temporal_rename(old_snapshot.key, new_snapshot.key),
+    ];
+    artifact
+}
+
+fn commits() -> Vec<CommitArtifact> {
+    vec![
+        CommitArtifact {
+            sha: "commit-a".to_string(),
+            parents: Vec::new(),
+            author_time: 1,
+            summary: "add foo".to_string(),
+        },
+        CommitArtifact {
+            sha: "commit-b".to_string(),
+            parents: vec!["commit-a".to_string()],
+            author_time: 2,
+            summary: "rename foo to bar".to_string(),
+        },
+    ]
+}
+
+fn commit_index(commits: Vec<CommitArtifact>) -> CommitIndexArtifact {
+    CommitIndexArtifact {
+        schema_version: 7,
+        commits,
+        refs: BTreeMap::from([("HEAD".to_string(), "commit-b".to_string())]),
+        indexed_at: "2026-05-26T00:00:00Z".to_string(),
+        walk_strategy: WalkStrategy::Reachable,
+    }
+}
+
+fn snapshot(id: &str, commit: &str, entity_name: &str) -> SymbolSnapshotArtifact {
+    SymbolSnapshotArtifact {
+        key: SnapshotKey {
+            stable_symbol_id: id.to_string(),
+            commit: commit.to_string(),
+        },
+        file_path: "src/temporal.rs".to_string().into(),
+        entity_name: entity_name.to_string(),
+        symbol_kind: "function".to_string(),
+        enclosing_scope: None,
+        byte_range: [0, 8],
+        line_range: [1, 2],
+        anchor_hash: format!("hash-{id}-{commit}"),
+        tokens: vec![entity_name.to_string()],
+    }
+}
+
+fn temporal_touch(commit: &str, key: SnapshotKey, change_kind: ChangeKind) -> TemporalEdgeArtifact {
+    TemporalEdgeArtifact {
+        source: EdgeEndpoint::Commit {
+            sha: commit.to_string(),
+        },
+        target: EdgeEndpoint::Snapshot { key },
+        relation: RelationKind::Touches,
+        parent: None,
+        change_kind: Some(change_kind),
+    }
+}
+
+fn temporal_rename(from: SnapshotKey, to: SnapshotKey) -> TemporalEdgeArtifact {
+    TemporalEdgeArtifact {
+        source: EdgeEndpoint::Snapshot { key: from.clone() },
+        target: EdgeEndpoint::Snapshot { key: to },
+        relation: RelationKind::Touches,
+        parent: None,
+        change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(from))),
+    }
+}
+
 fn options(query: &str, mode: SearchMode) -> SearchOptions {
     SearchOptions {
         query: query.to_string(),
@@ -304,6 +394,49 @@ fn parquet_client_file_manifest_by_path_matches_in_memory_client() {
             .file_manifest_by_path("src/missing.rs")
             .expect("missing manifest query succeeds"),
         None
+    );
+}
+
+#[test]
+fn parquet_client_temporal_index_matches_in_memory_client() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = temporal_artifact();
+    let commits = commit_index(artifact.commits.clone());
+    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let in_memory = InMemoryClient::new(Arc::new(
+        read_artifact_parquet(&parquet_dir).expect("read full parquet artifact"),
+    ));
+    let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+    let expected_index = in_memory.temporal_index();
+    let actual_index = parquet.temporal_index();
+    let cached_index = parquet.temporal_index();
+
+    assert!(Arc::ptr_eq(&actual_index, &cached_index));
+    assert_eq!(
+        actual_index
+            .edges_for_stable_symbol_id("old-root")
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected_index
+            .edges_for_stable_symbol_id("old-root")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        actual_index
+            .edges_for_commit_sha("commit-b")
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected_index
+            .edges_for_commit_sha("commit-b")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        symbol_history(actual_index.as_ref(), &commits, "new-root"),
+        symbol_history(expected_index.as_ref(), &commits, "new-root")
     );
 }
 
