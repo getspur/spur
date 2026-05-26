@@ -1,5 +1,26 @@
 use super::*;
 
+fn compute_first_last_user(entries: &[spur_acp::HistoryEntry]) -> (Option<String>, Option<String>) {
+    let user_texts: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.role == "user")
+        .map(|entry| entry.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect();
+
+    if user_texts.is_empty() {
+        return (None, None);
+    }
+
+    let first = user_texts
+        .iter()
+        .copied()
+        .find(|text| !text.starts_with('/'))
+        .map(str::to_owned);
+    let last = user_texts.last().map(|text| (*text).to_owned());
+    (first, last)
+}
+
 fn take_rendered_batch(
     drained_batch: &mut Option<crate::scheduler::DrainedBatch>,
     render_outcome: &mut Option<crate::continuation_bridge::RenderOutcome>,
@@ -60,6 +81,49 @@ fn commit_rendered_batch(
 }
 
 impl Orchestrator {
+    fn emit_listed_sessions(
+        &mut self,
+        brain_name: &str,
+        sessions: Vec<agent_client_protocol::schema::SessionInfo>,
+    ) {
+        let (brain_sessions, worker_sessions) = classify_sessions(sessions, &self.repo_root);
+        if !worker_sessions.is_empty() {
+            debug!(
+                count = worker_sessions.len(),
+                "Worker sessions excluded from brain picker"
+            );
+        }
+        self.emit(SpurEvent::now(SpurEventBody::SessionsListed {
+            agent: brain_name.to_string(),
+            sessions: brain_sessions.clone(),
+        }));
+        self.emit_session_synopsis_seeds(&brain_sessions);
+    }
+
+    fn emit_session_synopsis_seeds(
+        &mut self,
+        sessions: &[agent_client_protocol::schema::SessionInfo],
+    ) {
+        for session in sessions {
+            let spur_session_id = SessionId(session.session_id.0.to_string());
+            if !self.seeded_session_ids.insert(spur_session_id.clone()) {
+                continue;
+            }
+
+            let entries = Self::read_session_history_from_disk(&session.session_id.0);
+            let (first, last) = compute_first_last_user(&entries);
+            if first.is_none() && last.is_none() {
+                continue;
+            }
+
+            self.emit(SpurEvent::now(SpurEventBody::SessionSynopsisSeed {
+                session: spur_session_id,
+                first,
+                last,
+            }));
+        }
+    }
+
     /// Run an interactive session: multi-turn loop that accepts user input
     /// between brain turns. Used by `spur watch`.
     pub async fn run_interactive(
@@ -287,18 +351,7 @@ impl Orchestrator {
 
                         match sessions_result {
                             Ok(sessions) => {
-                                let (brain_sessions, worker_sessions) =
-                                    classify_sessions(sessions, &self.repo_root);
-                                if !worker_sessions.is_empty() {
-                                    debug!(
-                                        count = worker_sessions.len(),
-                                        "Worker sessions excluded from brain picker"
-                                    );
-                                }
-                                self.emit(SpurEvent::now(SpurEventBody::SessionsListed {
-                                    agent: brain_name.clone(),
-                                    sessions: brain_sessions,
-                                }));
+                                self.emit_listed_sessions(&brain_name, sessions);
                             }
                             Err(e) => {
                                 error!(error = %e, "list_sessions failed (no fallback available)");
@@ -1463,6 +1516,8 @@ mod list_sessions_tests {
     use futures::Stream;
     use std::collections::VecDeque;
     use std::pin::Pin;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
 
     struct NonProgressingCursorConnection {
         calls: usize,
@@ -1471,6 +1526,75 @@ mod list_sessions_tests {
     struct TwoPhaseConnection {
         requests: Vec<ListSessionsRequest>,
         responses: VecDeque<Vec<SessionInfo>>,
+    }
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl HomeOverride {
+        fn new(home: &Path) -> Self {
+            let guard = HOME_LOCK.lock().unwrap();
+            let original = std::env::var_os("HOME");
+            std::env::set_var("HOME", home);
+            Self {
+                _guard: guard,
+                original,
+            }
+        }
+    }
+
+    impl Drop for HomeOverride {
+        fn drop(&mut self) {
+            if let Some(home) = self.original.take() {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn write_kiro_history(home: &Path, session_id: &str, content: &str) {
+        let sessions_dir = home.join(".kiro/sessions/cli");
+        std::fs::create_dir_all(&sessions_dir).expect("create kiro sessions dir");
+        std::fs::write(sessions_dir.join(format!("{session_id}.jsonl")), content)
+            .expect("write kiro session history");
+    }
+
+    async fn collect_until_two_session_lists(
+        rx: &mut broadcast::Receiver<SpurEvent>,
+    ) -> Vec<SpurEventBody> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut bodies = Vec::new();
+        let mut listed_count = 0usize;
+
+        while std::time::Instant::now() < deadline {
+            let wait = if listed_count >= 2 {
+                std::time::Duration::from_millis(50)
+            } else {
+                deadline.saturating_duration_since(std::time::Instant::now())
+            };
+
+            match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Ok(event)) => {
+                    if matches!(event.body, SpurEventBody::SessionsListed { .. }) {
+                        listed_count += 1;
+                    }
+                    bodies.push(event.body);
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => {
+                    if listed_count >= 2 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        bodies
     }
 
     #[async_trait]
@@ -1626,6 +1750,87 @@ mod list_sessions_tests {
         assert_eq!(conn.calls, 4);
         assert!(conn.calls <= 6);
         assert_eq!(sessions.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn emits_synopsis_seed_once_per_session() {
+        let repo = TempDir::new().expect("repo tempdir");
+        let history_home = TempDir::new().expect("home tempdir");
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), SpurConfig::default(), None)
+                .expect("orchestrator");
+        let mut event_rx = orchestrator.subscribe();
+
+        let session_a = SessionInfo::new("seed-a", repo.path());
+        let session_b = SessionInfo::new("seed-b", repo.path());
+        let mut conn = TwoPhaseConnection {
+            requests: Vec::new(),
+            responses: VecDeque::from([
+                vec![session_a.clone(), session_b.clone()],
+                Vec::new(),
+                vec![session_a.clone(), session_b.clone()],
+                Vec::new(),
+            ]),
+        };
+        let first_sessions = Orchestrator::list_sessions_from_rpc(&mut conn, repo.path())
+            .await
+            .expect("first list sessions");
+        let second_sessions = Orchestrator::list_sessions_from_rpc(&mut conn, repo.path())
+            .await
+            .expect("second list sessions");
+        assert_eq!(conn.requests.len(), 4);
+
+        write_kiro_history(
+            history_home.path(),
+            "seed-a",
+            r#"{"kind":"Prompt","data":{"content":[{"kind":"text","data":"/clear"}]}}
+{"kind":"Prompt","data":{"content":[{"kind":"text","data":"  first a  "}]}}
+{"kind":"Prompt","data":{"content":[{"kind":"text","data":"  /last-a  "}]}}"#,
+        );
+        write_kiro_history(
+            history_home.path(),
+            "seed-b",
+            r#"{"kind":"Prompt","data":{"content":[{"kind":"text","data":"hello b"}]}}
+{"kind":"Prompt","data":{"content":[{"kind":"text","data":"last b"}]}}"#,
+        );
+
+        {
+            let _home = HomeOverride::new(history_home.path());
+            orchestrator.emit_listed_sessions("test-brain", first_sessions);
+            orchestrator.emit_listed_sessions("test-brain", second_sessions);
+        }
+
+        let bodies = collect_until_two_session_lists(&mut event_rx).await;
+        let listed_count = bodies
+            .iter()
+            .filter(|body| matches!(body, SpurEventBody::SessionsListed { .. }))
+            .count();
+        assert_eq!(listed_count, 2);
+
+        let mut seeds = std::collections::HashMap::new();
+        for body in bodies {
+            if let SpurEventBody::SessionSynopsisSeed {
+                session,
+                first,
+                last,
+            } = body
+            {
+                assert!(
+                    seeds.insert(session.0, (first, last)).is_none(),
+                    "duplicate seed emitted for session"
+                );
+            }
+        }
+
+        assert_eq!(seeds.len(), 2);
+        assert_eq!(
+            seeds.get("seed-a"),
+            Some(&(Some("first a".to_string()), Some("/last-a".to_string())))
+        );
+        assert_eq!(
+            seeds.get("seed-b"),
+            Some(&(Some("hello b".to_string()), Some("last b".to_string())))
+        );
     }
 }
 
