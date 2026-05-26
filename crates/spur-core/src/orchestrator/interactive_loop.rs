@@ -285,6 +285,69 @@ impl Orchestrator {
                         }
                         continue;
                     }
+                    // NewSession — retire brain, then eagerly spawn a fresh
+                    // session with no first prompt so the TUI can land on the
+                    // new SessionDetail (via the SessionCreated auto-navigate).
+                    InteractiveInput::NewSession => {
+                        self.retire_active_brain(
+                            &mut brain,
+                            &mut agent_connection,
+                            &mut scheduler,
+                            &overflow_continuations,
+                            spur_acp::domain::events::BrainRetireReason::UserClear,
+                            None,
+                        )
+                        .await;
+                        let result = match agent_connection.take() {
+                            Some(ActiveConnection {
+                                transport: connection,
+                                brain_name,
+                                attach_guard,
+                                fs_unsafe,
+                                init_response,
+                            }) => {
+                                self.create_brain_session(
+                                    connection,
+                                    brain_name,
+                                    permission_tx.clone(),
+                                    attach_guard,
+                                    fs_unsafe,
+                                    init_response,
+                                )
+                                .await
+                            }
+                            None => {
+                                self.spawn_brain_session(
+                                    brain_override.as_deref(),
+                                    permission_tx.clone(),
+                                )
+                                .await
+                            }
+                        };
+                        match result {
+                            Ok(b) => {
+                                let new_sid = Some(b.spur_session_id.clone().into());
+                                scheduler.note_session_swap(new_sid, &overflow_continuations);
+                                brain = Some(b);
+                            }
+                            Err(e) => {
+                                let error_message = format_error_chain(&e);
+                                error!(error = %error_message, "NewSession: failed to spawn brain");
+                                if Self::is_auth_required_error(&e) {
+                                    self.emit(SpurEvent::now(SpurEventBody::AuthRequired {
+                                        session: SessionId(String::new()),
+                                        message: Self::auth_required_banner(),
+                                    }));
+                                } else {
+                                    self.emit(SpurEvent::now(SpurEventBody::BrainError {
+                                        session: SessionId::new(),
+                                        message: error_message,
+                                    }));
+                                }
+                            }
+                        }
+                        continue;
+                    }
 
                     // ── ListSessions ──────────────────────────────────────
                     InteractiveInput::ListSessions => {
