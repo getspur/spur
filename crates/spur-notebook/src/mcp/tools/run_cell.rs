@@ -16,7 +16,8 @@ const RUN_CELL_EVENT_NAME: &str = "notebook://run_cell_event";
 #[derive(Debug, Deserialize)]
 struct RunCellParams {
     cell_id: String,
-    kernel_id: String,
+    #[serde(default)]
+    kernel_id: Option<String>,
     code: String,
 }
 
@@ -26,14 +27,15 @@ pub fn tool() -> Tool {
         concat!(
             "Run a code cell synchronously: the call blocks until the kernel emits Finished or ",
             "Disconnect, then returns aggregated outputs. Long-running cells will hold the MCP ",
-            "request open for their full duration."
+            "request open for their full duration. kernel_id is optional when a notebook is ",
+            "open; defaults to the UI-shared slot."
         ),
         rmcp_object(json!({
             "type": "object",
-            "required": ["cell_id", "kernel_id", "code"],
+            "required": ["cell_id", "code"],
             "properties": {
                 "cell_id": { "type": "string", "minLength": 1 },
-                "kernel_id": { "type": "string", "minLength": 1 },
+                "kernel_id": { "type": "string" },
                 "code": { "type": "string" }
             },
             "additionalProperties": false
@@ -44,7 +46,7 @@ pub fn tool() -> Tool {
 pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
     let params: RunCellParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
-            "notebook.run_cell requires { cell_id, kernel_id, code }",
+            "notebook.run_cell requires { cell_id, kernel_id?, code }",
             Some(json!({ "error": error.to_string() })),
         )
     })?;
@@ -54,17 +56,12 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             None,
         ));
     }
-    if params.kernel_id.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook.run_cell kernel_id must not be empty",
-            None,
-        ));
-    }
     let state = deps.state.as_ref().ok_or_else(|| {
         McpError::internal_error("notebook.run_cell requires notebook daemon state", None)
     })?;
+    let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
 
-    let rx = run_cell_events(&params.kernel_id, &params.code, state)
+    let rx = run_cell_events(&kernel_id, &params.code, state)
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -73,7 +70,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             )
         })?;
 
-    let summary = drain_run_cell_events(deps, state, &params, rx).await;
+    let summary = drain_run_cell_events(deps, state, &params.cell_id, &kernel_id, rx).await;
 
     Ok(CallToolResult::structured(json!({
         "id": params.cell_id,
@@ -81,6 +78,22 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         "exec_count": summary.exec_count,
         "outputs": summary.outputs,
     })))
+}
+
+async fn resolve_kernel_id(
+    deps: &ServerDeps,
+    explicit_kernel_id: Option<&str>,
+) -> Result<String, McpError> {
+    if let Some(kernel_id) = explicit_kernel_id.filter(|kernel_id| !kernel_id.is_empty()) {
+        return Ok(kernel_id.to_string());
+    }
+
+    super::current_notebook_slot_id(deps).await.ok_or_else(|| {
+        McpError::invalid_params(
+            "notebook.run_cell requires kernel_id when no notebook is open",
+            None,
+        )
+    })
 }
 
 struct RunCellSummary {
@@ -92,7 +105,8 @@ struct RunCellSummary {
 async fn drain_run_cell_events(
     deps: &ServerDeps,
     state: &State,
-    params: &RunCellParams,
+    cell_id: &str,
+    kernel_id: &str,
     rx: async_channel::Receiver<RunCellEvent>,
 ) -> RunCellSummary {
     let mut outputs: Vec<Value> = Vec::new();
@@ -105,18 +119,15 @@ async fn drain_run_cell_events(
             let _ = app.emit(
                 RUN_CELL_EVENT_NAME,
                 json!({
-                    "cell_id": params.cell_id,
-                    "kernel_id": params.kernel_id,
+                    "cell_id": cell_id,
+                    "kernel_id": kernel_id,
                     "event": event_value.clone(),
                 }),
             );
         }
-        if let Err(error) = state
-            .get_notebook()
-            .apply_run_event(&params.cell_id, event.clone())
-        {
+        if let Err(error) = state.get_notebook().apply_run_event(cell_id, event.clone()) {
             warn!(
-                cell_id = %params.cell_id,
+                cell_id = %cell_id,
                 error = %error,
                 "failed to apply run cell event to notebook store"
             );
@@ -233,15 +244,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_params_rejects_empty_kernel_id() {
+    async fn empty_kernel_id_requires_open_notebook() {
         let deps = deps_with_state(Arc::new(State::new()));
         let error = call(
             &deps,
             json!({ "cell_id": "code-1", "kernel_id": "", "code": "" }),
         )
         .await
-        .expect_err("empty kernel_id rejected");
-        assert!(error.message.contains("must not be empty"));
+        .expect_err("empty kernel_id needs a default notebook slot");
+        assert!(
+            error
+                .message
+                .contains("requires kernel_id when no notebook is open"),
+            "{:?}",
+            error.message
+        );
     }
 
     #[tokio::test]
@@ -253,7 +270,7 @@ mod tests {
         let deps = deps_with_state(Arc::clone(&state));
         let params = RunCellParams {
             cell_id: "code-1".to_string(),
-            kernel_id: "kernel-1".to_string(),
+            kernel_id: Some("kernel-1".to_string()),
             code: "print('new')".to_string(),
         };
         let (tx, rx) = async_channel::unbounded();
@@ -270,7 +287,7 @@ mod tests {
         .unwrap();
         drop(tx);
 
-        let summary = drain_run_cell_events(&deps, &state, &params, rx).await;
+        let summary = drain_run_cell_events(&deps, &state, &params.cell_id, "kernel-1", rx).await;
 
         assert_eq!(summary.status, "ok");
         assert_eq!(summary.exec_count, Some(2));

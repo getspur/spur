@@ -75,6 +75,16 @@ pub(super) fn daemon_unavailable() -> McpError {
     )
 }
 
+pub(super) async fn current_notebook_slot_id(deps: &ServerDeps) -> Option<String> {
+    let daemon = deps.daemon.as_ref()?;
+    let path = daemon.current_path().await?;
+    let path = path.to_string_lossy();
+    // Omitted MCP kernel IDs must resolve to the same notebook:<path> slot the
+    // UI uses; otherwise MCP-created variables land in a separate mcp:<uuid>
+    // LocalKernel and disappear from later UI executions.
+    Some(jute::state::notebook_slot_id(path.as_ref()))
+}
+
 pub(super) fn parse_no_args(method: &str, arguments: Value) -> Result<(), McpError> {
     let value = if arguments.is_null() {
         json!({})
