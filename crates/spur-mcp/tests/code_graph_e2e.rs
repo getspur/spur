@@ -1900,7 +1900,7 @@ async fn code_symbol_history_returns_rename_chain() {
 }
 
 #[tokio::test]
-async fn code_symbol_history_reuses_temporal_index_for_same_worktree() {
+async fn code_symbol_history_uses_parquet_temporal_index_cache() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
     std::fs::write(worktree.path().join("README.md"), "fixture\n").expect("write fixture file");
@@ -1917,7 +1917,7 @@ async fn code_symbol_history_reuses_temporal_index_for_same_worktree() {
     assert_eq!(second["events"].as_array().expect("second events").len(), 2);
     assert_eq!(
         server.__test_code_graph_temporal_index_build_invocation_count(),
-        1
+        0
     );
 }
 
