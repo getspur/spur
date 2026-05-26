@@ -16,12 +16,14 @@ use spur_graph::temporal::{
     resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
 use spur_graph::{
-    bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
-    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, CalleeRecord,
-    CallerRecord, CandidateRow, CommitIndexArtifact, GraphEdgeArtifact, GraphEdgeKind,
+    artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, find_callee_edges,
+    find_caller_edges, load_artifact, resolve_artifact_location, resolve_selector,
+    resolve_worktree_root_from, ArtifactFormat, CalleeRecord, CallerRecord, CandidateRow,
+    CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
     GraphFileManifestEntry, GraphIndexArtifact, GraphIndexPointer, GraphQueryClient,
-    GraphSymbolArtifact, InMemoryClient, SearchFilters, SearchMode, SearchOptions,
-    SelectorResolution, SnapshotKey, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
+    GraphSymbolArtifact, InMemoryClient, ParquetClient, SearchFilters, SearchMode, SearchOptions,
+    SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget,
+    CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -465,43 +467,155 @@ pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError>
 }
 
 pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
-    let artifact = Arc::new(load_graph_artifact_for_request()?);
-    let client = InMemoryClient::new(Arc::clone(&artifact));
-    let body = code_search_with_artifact(args, &client)?;
-    Ok(with_graph_metadata(&artifact, body).await)
+    let backend = open_code_search_backend_for_request()?;
+    let search = code_search_body_for_client(args, backend.client())?;
+    let files = backend.search_response_file_set(&search)?;
+    let source = backend.metadata_source();
+    let mut body = search.body;
+    GraphResponseMetadata::from_source_inner(source, Some(&files))
+        .await
+        .insert_into(&mut body);
+    Ok(body)
 }
 
 async fn code_search_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        let client = InMemoryClient::new(Arc::clone(&loaded.artifact));
-        code_search_with_artifact(args, &client).map_err(CodeGraphError::from)
-    })
-    .await
+    let backend =
+        open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
+    let search =
+        code_search_body_for_client(args, backend.client()).map_err(CodeGraphError::from)?;
+    let files = backend
+        .search_response_file_set(&search)
+        .map_err(CodeGraphError::from)?;
+    let source = backend.metadata_source();
+    let mut analysis = GraphResponseMetadata::analyze_source_inner(source, Some(&files)).await;
+
+    if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
+        let rebuild = match &backend {
+            CodeSearchBackend::Parquet(_) => {
+                try_rebuild_artifact_from_worktree(
+                    Arc::clone(&rebuild_coordinator),
+                    rebuild_candidate,
+                )
+                .await
+            }
+            CodeSearchBackend::LegacyJson { artifact, .. } => {
+                try_rebuild_artifact(
+                    Arc::clone(&rebuild_coordinator),
+                    Arc::clone(artifact),
+                    rebuild_candidate,
+                )
+                .await
+            }
+        };
+        match rebuild {
+            RebuildAttempt::Fresh(rebuilt_artifact) => {
+                let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
+                let mut fresh_body = code_search_with_artifact(args, &client).map_err(|error| {
+                    CodeGraphError::from(error).with_artifact_metadata(&rebuilt_artifact)
+                })?;
+                let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
+                GraphResponseMetadata::analyze_artifact_with_files(&rebuilt_artifact, &fresh_files)
+                    .await
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::Fresh)
+                    .insert_into(&mut fresh_body);
+                return Ok(fresh_body);
+            }
+            RebuildAttempt::StaleBudgetExceeded => {
+                analysis.metadata = analysis
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
+            }
+            RebuildAttempt::StaleRebuildFailed => {
+                analysis.metadata = analysis
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
+            }
+        }
+    }
+
+    let mut body = search.body;
+    analysis.metadata.insert_into(&mut body);
+    Ok(body)
 }
 
 fn code_search_with_artifact(
     args: &Value,
     client: &dyn GraphQueryClient,
 ) -> Result<Value, McpHandlerError> {
+    Ok(code_search_body_for_client(args, client)?.body)
+}
+
+struct CodeSearchBody {
+    body: Value,
+    result: SearchResult,
+    options: SearchOptions,
+}
+
+enum CodeSearchBackend {
+    Parquet(ParquetClient),
+    LegacyJson {
+        artifact: Arc<GraphIndexArtifact>,
+        client: InMemoryClient,
+    },
+}
+
+impl CodeSearchBackend {
+    fn client(&self) -> &dyn GraphQueryClient {
+        match self {
+            Self::Parquet(client) => client,
+            Self::LegacyJson { client, .. } => client,
+        }
+    }
+
+    fn metadata_source(&self) -> GraphMetadataSource {
+        match self {
+            Self::Parquet(client) => GraphMetadataSource::from_parquet_manifest(client.manifest()),
+            Self::LegacyJson { artifact, .. } => GraphMetadataSource::from_artifact(artifact),
+        }
+    }
+
+    fn search_response_file_set(
+        &self,
+        search: &CodeSearchBody,
+    ) -> Result<Vec<(String, String)>, McpHandlerError> {
+        match self {
+            Self::Parquet(client) => {
+                search_response_file_set_for_parquet(client, &search.result, &search.options)
+            }
+            Self::LegacyJson { artifact, .. } => {
+                Ok(empty_code_search_file_set(artifact, &search.body)
+                    .unwrap_or_else(|| response_file_set_from_body(artifact, &search.body)))
+            }
+        }
+    }
+}
+
+fn code_search_body_for_client(
+    args: &Value,
+    client: &dyn GraphQueryClient,
+) -> Result<CodeSearchBody, McpHandlerError> {
     let request = code_search_options(args)?;
     let options = request.options;
-    let result = client.search_symbols(&options);
+    let result = client.search_symbols(&options).map_err(|error| {
+        McpHandlerError::Internal(format!("failed to search graph artifact: {error}"))
+    })?;
     let candidates = result
         .candidates
-        .into_iter()
-        .map(candidate_row_for_symbol)
+        .iter()
+        .map(candidate_row_for_search_symbol)
         .map(candidate_row)
         .collect::<Vec<_>>();
 
     let mut body = json!({
-        "query": options.query,
+        "query": options.query.clone(),
         "mode": search_mode_str(options.mode),
-        "symbol_kind": options.filters.symbol_kind,
-        "file": options.filters.file,
-        "file_glob": options.filters.file_glob,
+        "symbol_kind": options.filters.symbol_kind.clone(),
+        "file": options.filters.file.clone(),
+        "file_glob": options.filters.file_glob.clone(),
         "limit": options.limit,
         "total_matches": result.total_matches,
         "truncated": result.truncated,
@@ -510,7 +624,11 @@ fn code_search_with_artifact(
     if let Some(requested_limit) = request.requested_limit {
         body["requested_limit"] = requested_limit;
     }
-    Ok(body)
+    Ok(CodeSearchBody {
+        body,
+        result,
+        options,
+    })
 }
 
 async fn code_resolve_response(
@@ -1349,6 +1467,14 @@ impl GraphMetadataSource {
             manifest_version: artifact.manifest_version.clone(),
         }
     }
+
+    fn from_parquet_manifest(manifest: &GraphArtifactManifest) -> Self {
+        Self {
+            graph_content_hash: manifest.graph_content_hash.clone(),
+            graph_index_version: manifest.graph_index_version.clone(),
+            manifest_version: manifest.manifest_version.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1832,6 +1958,73 @@ async fn try_rebuild_artifact(
     }
 }
 
+async fn try_rebuild_artifact_from_worktree(
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    rebuild_candidate: RebuildCandidate,
+) -> RebuildAttempt {
+    let RebuildCandidate { worktree, key } = rebuild_candidate;
+    let mut task = tokio::spawn(async move {
+        rebuild_coordinator
+            .get_or_build(key, move || {
+                let worktree = worktree.clone();
+                async move {
+                    #[cfg(any(test, feature = "test-support"))]
+                    apply_graph_rebuild_delay_for_test().await;
+                    tokio::task::spawn_blocking(move || {
+                        let (facts, _file_counts) = build_facts(&worktree)?;
+                        let artifact = artifact_from_facts(&facts, &worktree)?;
+                        Ok(Arc::new(artifact))
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("graph rebuild task failed: {error}"))?
+                }
+            })
+            .await
+    });
+
+    match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
+        Ok(Ok(Ok(artifact))) => RebuildAttempt::Fresh(artifact),
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                target: "spur_mcp::path_a",
+                error = %error,
+                "code graph rebuild failed; serving stale response"
+            );
+            RebuildAttempt::StaleRebuildFailed
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: "spur_mcp::path_a",
+                error = %error,
+                "code graph rebuild task failed; serving stale response"
+            );
+            RebuildAttempt::StaleRebuildFailed
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                match task.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: "spur_mcp::path_a",
+                            error = %error,
+                            "code graph rebuild failed after response budget elapsed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "spur_mcp::path_a",
+                            error = %error,
+                            "code graph rebuild task failed after response budget elapsed"
+                        );
+                    }
+                }
+            });
+            RebuildAttempt::StaleBudgetExceeded
+        }
+    }
+}
+
 async fn code_graph_response(id: Value, result: CodeGraphResult) -> JsonRpcResponse {
     match result {
         Ok(body) => json_success(id, body),
@@ -1892,6 +2085,50 @@ fn current_worktree() -> Result<PathBuf, McpHandlerError> {
         McpHandlerError::Internal(format!("failed to read current directory: {error}"))
     })?;
     Ok(resolve_worktree_root_from(current_dir))
+}
+
+#[allow(clippy::result_large_err)]
+fn open_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandlerError> {
+    let worktree = current_worktree()?;
+    let resolved = resolve_artifact_location(&worktree, None)
+        .map_err(|_| graph_artifact_missing(&worktree))?;
+    let artifact_path = resolved.path;
+
+    match resolved.format {
+        ArtifactFormat::Parquet => ParquetClient::open(&artifact_path)
+            .map(CodeSearchBackend::Parquet)
+            .map_err(|error| {
+                if !artifact_path.exists() {
+                    graph_artifact_missing(&worktree)
+                } else {
+                    McpHandlerError::Internal(format!(
+                        "failed to open graph artifact `{}`: {error}",
+                        artifact_path.display()
+                    ))
+                }
+            }),
+        ArtifactFormat::LegacyJson => match load_artifact(&artifact_path) {
+            Ok(artifact) => {
+                let artifact = Arc::new(artifact);
+                Ok(CodeSearchBackend::LegacyJson {
+                    client: InMemoryClient::new(Arc::clone(&artifact)),
+                    artifact,
+                })
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == ErrorKind::NotFound) =>
+            {
+                Err(graph_artifact_missing(&worktree))
+            }
+            Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(&worktree)),
+            Err(error) => Err(McpHandlerError::Internal(format!(
+                "failed to load graph artifact `{}`: {error}",
+                artifact_path.display()
+            ))),
+        },
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -2900,6 +3137,27 @@ fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
     }
 }
 
+fn candidate_row_for_search_symbol(symbol: &SearchSymbol) -> CandidateRow {
+    let uri = format!("{CODE_SYMBOL_URI_PREFIX}{}", symbol.stable_symbol_id);
+    let selector = if symbol.qualified_name.is_empty() {
+        uri.clone()
+    } else {
+        format!("{}::{}", symbol.file_path, symbol.qualified_name)
+    };
+
+    CandidateRow {
+        selector,
+        uri,
+        id: symbol.stable_symbol_id.clone(),
+        entity_name: symbol.entity_name.clone(),
+        qualified_name: symbol.qualified_name.clone(),
+        file_path: symbol.file_path.clone(),
+        line_range: symbol.line_range,
+        symbol_kind: symbol.symbol_kind.clone(),
+        enclosing_scope: symbol.enclosing_scope.clone(),
+    }
+}
+
 fn ambiguous_response(candidates: Vec<CandidateRow>) -> Value {
     json!({
         "ambiguous": true,
@@ -2933,6 +3191,49 @@ fn response_file_set_from_body(
     let mut paths = Vec::new();
     collect_response_file_paths(body, &mut paths);
     response_file_set_for_paths(artifact, paths)
+}
+
+fn search_response_file_set_for_parquet(
+    client: &ParquetClient,
+    result: &SearchResult,
+    options: &SearchOptions,
+) -> Result<Vec<(String, String)>, McpHandlerError> {
+    let file_oids = client.file_oids().map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "failed to read graph file manifests from `{}`: {error}",
+            client.dir().display()
+        ))
+    })?;
+    if result.candidates.is_empty() {
+        if let Some(file) = options.filters.file.as_deref() {
+            return Ok(file_oid_subset(&file_oids, [file]));
+        }
+        return Ok(file_oids);
+    }
+    Ok(file_oid_subset(
+        &file_oids,
+        result
+            .candidates
+            .iter()
+            .map(|symbol| symbol.file_path.as_str()),
+    ))
+}
+
+fn file_oid_subset<'a>(
+    file_oids: &[(String, String)],
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for path in paths {
+        if !seen.insert(path.to_string()) {
+            continue;
+        }
+        if let Some((path, oid)) = file_oids.iter().find(|(candidate, _)| candidate == path) {
+            files.push((path.clone(), oid.clone()));
+        }
+    }
+    files
 }
 
 fn empty_code_search_file_set(
