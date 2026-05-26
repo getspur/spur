@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use serde::Deserialize;
+use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use spur_graph::store::parquet::read_artifact_parquet_slim;
 use spur_graph::{
-    artifact_from_facts, build_facts, read_artifact_parquet, write_artifact_parquet, Confidence,
-    GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
-    GraphSymbolArtifact, InMemoryClient, NodeId, ParquetClient, RelationKind, SearchFilters,
-    SearchMode, SearchOptions, WriteOptions,
+    artifact_from_facts, build_facts, read_artifact_parquet, write_artifact_parquet, ChangeKind,
+    CommitArtifact, Confidence, EdgeEndpoint, GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact,
+    GraphIndexHeader, GraphQueryClient, GraphSymbolArtifact, InMemoryClient, NodeId, ParquetClient,
+    RelationKind, RenamePrev, SearchFilters, SearchMode, SearchOptions, SnapshotKey,
+    SymbolSnapshotArtifact, TemporalEdgeArtifact, WriteOptions,
 };
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +186,41 @@ fn bench_resolve_selector_parquet_vs_inmemory(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_temporal_index_first_call_parquet_vs_inmemory(c: &mut Criterion) {
+    let artifact = temporal_benchmark_artifact();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+    let persisted_artifact =
+        Arc::new(read_artifact_parquet(&parquet_dir).expect("read full parquet artifact"));
+    let steady_parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+    black_box(steady_parquet.temporal_index());
+    let mut group = c.benchmark_group("bench_temporal_index_first_call_parquet_vs_inmemory");
+
+    group.bench_function("inmemory_first_call", |b| {
+        b.iter(|| {
+            let in_memory = InMemoryClient::new(Arc::clone(&persisted_artifact));
+            let index = in_memory.temporal_index();
+            black_box(index);
+        })
+    });
+    group.bench_function("parquet_first_call", |b| {
+        b.iter(|| {
+            let parquet =
+                ParquetClient::open(black_box(parquet_dir.as_path())).expect("open parquet client");
+            let index = parquet.temporal_index();
+            black_box(index);
+        })
+    });
+    group.bench_function("parquet_steady_state", |b| {
+        b.iter(|| {
+            let index = steady_parquet.temporal_index();
+            black_box(index);
+        })
+    });
+    group.finish();
+}
+
 fn load_fixture() -> Fixture {
     let baselines = baselines();
     let fixture_path = std::env::var_os("SPUR_GRAPH_PERF_FIXTURE")
@@ -263,6 +300,65 @@ fn traversal_benchmark_artifact() -> GraphIndexArtifact {
     }
 }
 
+fn temporal_benchmark_artifact() -> GraphIndexArtifact {
+    let symbol_count = 512usize;
+    let mut artifact = traversal_benchmark_artifact();
+    artifact.header.graph_index_version = GRAPH_INDEX_VERSION_TEMPORAL.to_string();
+    artifact.graph_content_hash = "temporal-benchmark".to_string();
+    artifact.commits.clear();
+    artifact.symbol_snapshots.clear();
+    artifact.temporal_edges.clear();
+
+    for index in 0..symbol_count {
+        let old_commit = format!("commit-{:04}", index * 2);
+        let new_commit = format!("commit-{:04}", index * 2 + 1);
+        artifact.commits.push(CommitArtifact {
+            sha: old_commit.clone(),
+            parents: if index == 0 {
+                Vec::new()
+            } else {
+                vec![format!("commit-{:04}", index * 2 - 1)]
+            },
+            author_time: (index * 2) as i64,
+            summary: format!("add temporal {index}"),
+        });
+        artifact.commits.push(CommitArtifact {
+            sha: new_commit.clone(),
+            parents: vec![old_commit.clone()],
+            author_time: (index * 2 + 1) as i64,
+            summary: format!("rename temporal {index}"),
+        });
+
+        let old = snapshot(
+            &format!("temporal-old-{index:04}"),
+            &old_commit,
+            &format!("temporal_old_{index:04}"),
+        );
+        let new = snapshot(
+            &format!("temporal-new-{index:04}"),
+            &new_commit,
+            &format!("temporal_new_{index:04}"),
+        );
+        artifact.symbol_snapshots.push(old.clone());
+        artifact.symbol_snapshots.push(new.clone());
+        artifact.temporal_edges.push(temporal_touch(
+            &old_commit,
+            old.key.clone(),
+            ChangeKind::Added,
+        ));
+        artifact.temporal_edges.push(temporal_touch(
+            &new_commit,
+            new.key.clone(),
+            ChangeKind::RenamedFrom(RenamePrev::Symbol(old.key.clone())),
+        ));
+        artifact
+            .temporal_edges
+            .push(temporal_rename(old.key, new.key));
+    }
+
+    artifact
+}
+
 fn symbol(id: &str, file_path: &str, entity_name: &str) -> GraphSymbolArtifact {
     GraphSymbolArtifact {
         stable_symbol_id: id.to_string(),
@@ -274,6 +370,45 @@ fn symbol(id: &str, file_path: &str, entity_name: &str) -> GraphSymbolArtifact {
         symbol_kind: "function".to_string(),
         anchor_hash: format!("hash-{id}"),
         enclosing_scope: None,
+    }
+}
+
+fn snapshot(id: &str, commit: &str, entity_name: &str) -> SymbolSnapshotArtifact {
+    SymbolSnapshotArtifact {
+        key: SnapshotKey {
+            stable_symbol_id: id.to_string(),
+            commit: commit.to_string(),
+        },
+        file_path: "src/temporal.rs".to_string().into(),
+        entity_name: entity_name.to_string(),
+        symbol_kind: "function".to_string(),
+        enclosing_scope: None,
+        byte_range: [0, 8],
+        line_range: [1, 2],
+        anchor_hash: format!("hash-{id}-{commit}"),
+        tokens: vec![entity_name.to_string()],
+    }
+}
+
+fn temporal_touch(commit: &str, key: SnapshotKey, change_kind: ChangeKind) -> TemporalEdgeArtifact {
+    TemporalEdgeArtifact {
+        source: EdgeEndpoint::Commit {
+            sha: commit.to_string(),
+        },
+        target: EdgeEndpoint::Snapshot { key },
+        relation: RelationKind::Touches,
+        parent: None,
+        change_kind: Some(change_kind),
+    }
+}
+
+fn temporal_rename(from: SnapshotKey, to: SnapshotKey) -> TemporalEdgeArtifact {
+    TemporalEdgeArtifact {
+        source: EdgeEndpoint::Snapshot { key: from.clone() },
+        target: EdgeEndpoint::Snapshot { key: to },
+        relation: RelationKind::Touches,
+        parent: None,
+        change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(from))),
     }
 }
 
@@ -330,6 +465,7 @@ criterion_group!(
     bench_search_symbols_parquet_vs_inmemory,
     bench_find_caller_edges_parquet_vs_inmemory,
     bench_find_callee_edges_parquet_vs_inmemory,
-    bench_resolve_selector_parquet_vs_inmemory
+    bench_resolve_selector_parquet_vs_inmemory,
+    bench_temporal_index_first_call_parquet_vs_inmemory
 );
 criterion_main!(benches);

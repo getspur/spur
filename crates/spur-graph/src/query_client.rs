@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Context};
 use arrow_array::{
@@ -16,7 +16,8 @@ use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::store::parquet::{
-    confidence_from_str, edge_kind_from_str, relation_from_str, PARQUET_ROW_GROUP_SIZE,
+    confidence_from_str, edge_kind_from_str, read_temporal_artifact_parquet, relation_from_str,
+    PARQUET_ROW_GROUP_SIZE,
 };
 use crate::temporal::TemporalIndex;
 use crate::{
@@ -200,6 +201,7 @@ pub struct ParquetClient {
     manifest: GraphArtifactManifest,
     nodes_metadata: ArrowReaderMetadata,
     search_projection: ProjectionMask,
+    temporal_index: OnceLock<Arc<TemporalIndex>>,
 }
 
 impl ParquetClient {
@@ -232,6 +234,7 @@ impl ParquetClient {
             manifest,
             nodes_metadata,
             search_projection,
+            temporal_index: OnceLock::new(),
         })
     }
 
@@ -724,7 +727,15 @@ impl GraphQueryClient for ParquetClient {
     }
 
     fn temporal_index(&self) -> Arc<TemporalIndex> {
-        unimplemented!("PR5")
+        Arc::clone(self.temporal_index.get_or_init(|| {
+            let artifact = read_temporal_artifact_parquet(&self.dir).unwrap_or_else(|error| {
+                panic!(
+                    "failed to build Parquet temporal index from `{}`: {error:#}",
+                    self.dir.display()
+                )
+            });
+            Arc::new(TemporalIndex::new(Arc::new(artifact)))
+        }))
     }
 }
 
