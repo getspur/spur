@@ -32,6 +32,31 @@ pub enum CallerRecord<'a> {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnedCalleeRecord {
+    Resolved {
+        symbol: GraphSymbolArtifact,
+        edge: GraphEdgeArtifact,
+    },
+    Unresolved {
+        edge: GraphEdgeArtifact,
+        target_label: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnedCallerRecord {
+    Resolved {
+        caller: GraphSymbolArtifact,
+        edge: GraphEdgeArtifact,
+    },
+    Unresolved {
+        caller: GraphSymbolArtifact,
+        edge: GraphEdgeArtifact,
+        target_label: String,
+    },
+}
+
 impl CalleeRecord<'_> {
     pub fn edge(&self) -> &GraphEdgeArtifact {
         match self {
@@ -61,6 +86,75 @@ impl CallerRecord<'_> {
 
     pub fn is_resolved(&self) -> bool {
         matches!(self, CallerRecord::Resolved { .. })
+    }
+}
+
+impl OwnedCalleeRecord {
+    pub fn edge(&self) -> &GraphEdgeArtifact {
+        match self {
+            OwnedCalleeRecord::Resolved { edge, .. }
+            | OwnedCalleeRecord::Unresolved { edge, .. } => edge,
+        }
+    }
+
+    pub fn edge_kind(&self) -> GraphEdgeKind {
+        edge_kind(self.edge())
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, OwnedCalleeRecord::Resolved { .. })
+    }
+}
+
+impl OwnedCallerRecord {
+    pub fn edge(&self) -> &GraphEdgeArtifact {
+        match self {
+            OwnedCallerRecord::Resolved { edge, .. }
+            | OwnedCallerRecord::Unresolved { edge, .. } => edge,
+        }
+    }
+
+    pub fn edge_kind(&self) -> GraphEdgeKind {
+        edge_kind(self.edge())
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, OwnedCallerRecord::Resolved { .. })
+    }
+}
+
+impl From<CalleeRecord<'_>> for OwnedCalleeRecord {
+    fn from(record: CalleeRecord<'_>) -> Self {
+        match record {
+            CalleeRecord::Resolved { symbol, edge } => OwnedCalleeRecord::Resolved {
+                symbol: symbol.clone(),
+                edge: edge.clone(),
+            },
+            CalleeRecord::Unresolved { edge, target_label } => OwnedCalleeRecord::Unresolved {
+                edge: edge.clone(),
+                target_label,
+            },
+        }
+    }
+}
+
+impl From<CallerRecord<'_>> for OwnedCallerRecord {
+    fn from(record: CallerRecord<'_>) -> Self {
+        match record {
+            CallerRecord::Resolved { caller, edge } => OwnedCallerRecord::Resolved {
+                caller: caller.clone(),
+                edge: edge.clone(),
+            },
+            CallerRecord::Unresolved {
+                caller,
+                edge,
+                target_label,
+            } => OwnedCallerRecord::Unresolved {
+                caller: caller.clone(),
+                edge: edge.clone(),
+                target_label,
+            },
+        }
     }
 }
 
