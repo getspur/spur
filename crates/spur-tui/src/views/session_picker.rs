@@ -2636,7 +2636,7 @@ mod resolve_label_tests {
     fn synopsis_with_first(t: Option<&str>) -> SessionSynopsis {
         SessionSynopsis {
             first_user_msg: t.map(|s| s.to_string()),
-            last_user_msg: None,
+            ..SessionSynopsis::default()
         }
     }
 
@@ -2732,6 +2732,7 @@ mod filter_haystack_tests {
             SessionSynopsis {
                 first_user_msg: Some("refactor auth callers".into()),
                 last_user_msg: Some("ack".into()),
+                ..SessionSynopsis::default()
             },
         );
 
@@ -2753,6 +2754,7 @@ mod filter_haystack_tests {
             SessionSynopsis {
                 first_user_msg: Some("alpha tag".into()),
                 last_user_msg: None,
+                ..SessionSynopsis::default()
             },
         );
 
@@ -2763,6 +2765,7 @@ mod filter_haystack_tests {
             SessionSynopsis {
                 first_user_msg: Some("beta tag".into()),
                 last_user_msg: None,
+                ..SessionSynopsis::default()
             },
         );
 
