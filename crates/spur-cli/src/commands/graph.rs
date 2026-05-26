@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 use anyhow::Context;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
@@ -44,10 +46,15 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         reject_legacy_output_path(&output)?;
     }
 
-    if !options.quiet {
-        println!("[spur] Building code graph index for {}", root.display());
-    }
     let use_temporal = should_use_temporal(options.with_temporal);
+    let warmup_stats = if !options.quiet {
+        println!("[spur] Building code graph index for {}", root.display());
+        let stats = WarmupStats::collect(&root, use_temporal)?;
+        println!("{}", stats.line());
+        Some(stats)
+    } else {
+        None
+    };
     tracing::debug!(
         with_temporal = options.with_temporal,
         use_temporal,
@@ -91,15 +98,32 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
             }
             Err(error) => {
                 tracing::info!(error = %error, "spur-graph: incremental rebuild failed; falling back to full");
-                build_full_artifact_for_graph_build(&root)?
+                build_full_artifact_for_graph_build(
+                    &root,
+                    warmup_stats
+                        .as_ref()
+                        .map(|stats| extraction_progress_bar(stats.file_count)),
+                )?
             }
         },
-        None => build_full_artifact_for_graph_build(&root)?,
+        None => build_full_artifact_for_graph_build(
+            &root,
+            warmup_stats
+                .as_ref()
+                .map(|stats| extraction_progress_bar(stats.file_count)),
+        )?,
     };
 
     if use_temporal {
         let config = temporal_walk_config();
-        match run_full_walk_into(&root, &config) {
+        let progress = warmup_stats
+            .as_ref()
+            .and_then(|stats| stats.temporal_commit_count().map(temporal_progress_bar));
+        let result = run_full_walk_into(&root, &config, progress.clone());
+        if let Some(progress) = progress {
+            progress.finish_and_clear();
+        }
+        match result {
             Ok((temporal_artifact, commit_index)) => {
                 persist_commit_index_for_graph_build(&root, &commit_index)?;
                 merge_temporal_artifact(&mut artifact, temporal_artifact);
@@ -278,6 +302,122 @@ fn temporal_walk_config() -> GitWalkConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WarmupStats {
+    file_count: usize,
+    commit_count: WarmupCommitCount,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WarmupCommitCount {
+    Disabled,
+    Known(usize),
+    Unknown,
+}
+
+impl WarmupStats {
+    fn collect(root: &Path, use_temporal: bool) -> anyhow::Result<Self> {
+        let allowed_extensions = spur_graph::extract::languages::all_supported_extensions();
+        let file_count = spur_graph::discovery::discover_files(root, &allowed_extensions)?.len();
+        let commit_count = if use_temporal {
+            count_first_parent_commits(root)
+                .map(WarmupCommitCount::Known)
+                .unwrap_or(WarmupCommitCount::Unknown)
+        } else {
+            WarmupCommitCount::Disabled
+        };
+
+        Ok(Self {
+            file_count,
+            commit_count,
+        })
+    }
+
+    fn line(self) -> String {
+        match self.commit_count {
+            WarmupCommitCount::Disabled => format_warmup_stats_line(self.file_count, None),
+            WarmupCommitCount::Known(commits) => {
+                format_warmup_stats_line(self.file_count, Some(commits))
+            }
+            WarmupCommitCount::Unknown => {
+                format_warmup_stats_line_with_unknown_commits(self.file_count)
+            }
+        }
+    }
+
+    fn temporal_commit_count(self) -> Option<usize> {
+        match self.commit_count {
+            WarmupCommitCount::Known(commits) => Some(commits),
+            WarmupCommitCount::Disabled | WarmupCommitCount::Unknown => None,
+        }
+    }
+}
+
+fn count_first_parent_commits(root: &Path) -> Option<usize> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--count", "--first-parent", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn format_warmup_stats_line(file_count: usize, commit_count: Option<usize>) -> String {
+    let mut line = format!("[spur]   files: {}", fmt_thousands(file_count));
+    if let Some(commit_count) = commit_count {
+        line.push_str(&format!(
+            "   commits: {} (temporal)",
+            fmt_thousands(commit_count)
+        ));
+    }
+    line
+}
+
+fn format_warmup_stats_line_with_unknown_commits(file_count: usize) -> String {
+    format!(
+        "[spur]   files: {}   commits: ? (temporal)",
+        fmt_thousands(file_count)
+    )
+}
+
+fn fmt_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
+}
+
+fn extraction_progress_bar(total: usize) -> ProgressBar {
+    let progress = ProgressBar::new(u64::try_from(total).unwrap_or(u64::MAX));
+    progress.set_style(
+        ProgressStyle::with_template("{spinner} extracting [{bar:30}] {pos}/{len} {wide_msg}")
+            .expect("valid extraction progress template"),
+    );
+    progress
+}
+
+fn temporal_progress_bar(total: usize) -> ProgressBar {
+    let progress = ProgressBar::new(u64::try_from(total).unwrap_or(u64::MAX));
+    progress.set_style(
+        ProgressStyle::with_template("{spinner} temporal  [{bar:30}] {pos}/{len} commits")
+            .expect("valid temporal progress template"),
+    );
+    progress
+}
+
 fn merge_temporal_artifact(artifact: &mut GraphIndexArtifact, temporal: GraphIndexArtifact) {
     artifact.commits = temporal.commits;
     artifact.symbol_snapshots = temporal.symbol_snapshots;
@@ -356,13 +496,18 @@ fn load_previous_artifact_for_graph_build(path: &Path) -> anyhow::Result<GraphIn
 
 fn build_full_artifact_for_graph_build(
     root: &Path,
+    progress: Option<ProgressBar>,
 ) -> anyhow::Result<(
     GraphIndexArtifact,
     BTreeMap<&'static str, usize>,
     usize,
     usize,
 )> {
-    let (facts, file_counts) = build_facts_for_graph_build(root)?;
+    let facts_result = build_facts_for_graph_build(root, progress.clone());
+    if let Some(progress) = progress {
+        progress.finish_and_clear();
+    }
+    let (facts, file_counts) = facts_result?;
     let artifact = artifact_from_facts_for_graph_build(&facts, root)?;
     let node_count = artifact.symbols.len() + artifact.files.len();
     Ok((artifact, file_counts, node_count, facts.edges.len()))
@@ -370,6 +515,7 @@ fn build_full_artifact_for_graph_build(
 
 fn build_facts_for_graph_build(
     root: &Path,
+    progress: Option<ProgressBar>,
 ) -> anyhow::Result<(GraphFacts, BTreeMap<&'static str, usize>)> {
     let extract_started = Instant::now();
     let extract_span = tracing::info_span!(
@@ -379,7 +525,7 @@ fn build_facts_for_graph_build(
     );
     let result = {
         let _entered = extract_span.enter();
-        let result = build_facts(root);
+        let result = build_facts(root, progress);
         match &result {
             Ok((facts, file_counts)) => {
                 tracing::info!(
@@ -530,5 +676,37 @@ mod tests {
             let _env = EnvGuard::set("SPUR_GRAPH_WITH_TEMPORAL", "true");
             assert!(!super::should_use_temporal(false));
         }
+    }
+
+    #[test]
+    fn fmt_thousands_inserts_commas() {
+        assert_eq!(super::fmt_thousands(0), "0");
+        assert_eq!(super::fmt_thousands(12), "12");
+        assert_eq!(super::fmt_thousands(1_234), "1,234");
+        assert_eq!(super::fmt_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn format_warmup_stats_line_includes_temporal_commit_count_when_present() {
+        assert_eq!(
+            super::format_warmup_stats_line(1_234, Some(5_678)),
+            "[spur]   files: 1,234   commits: 5,678 (temporal)"
+        );
+    }
+
+    #[test]
+    fn format_warmup_stats_line_omits_commit_count_without_temporal() {
+        assert_eq!(
+            super::format_warmup_stats_line(1_234, None),
+            "[spur]   files: 1,234"
+        );
+    }
+
+    #[test]
+    fn format_warmup_stats_line_marks_unknown_temporal_commits() {
+        assert_eq!(
+            super::format_warmup_stats_line_with_unknown_commits(1_234),
+            "[spur]   files: 1,234   commits: ? (temporal)"
+        );
     }
 }

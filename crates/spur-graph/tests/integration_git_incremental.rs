@@ -428,7 +428,7 @@ impl GitRepo {
 }
 
 fn build_full(root: &Path) -> GraphIndexArtifact {
-    let (facts, _counts) = build_facts(root).expect("build facts");
+    let (facts, _counts) = build_facts(root, None).expect("build facts");
     artifact_from_facts(&facts, root).expect("build artifact")
 }
 

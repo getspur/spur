@@ -250,7 +250,7 @@ pub fn artifact_from_facts_incremental(
         );
         let facts = {
             let _entered = extract_span.enter();
-            let result = crate::build_facts(&root);
+            let result = crate::build_facts(&root, None);
             match &result {
                 Ok((facts, file_counts)) => {
                     tracing::info!(
@@ -1693,7 +1693,7 @@ fn submit_plan_def() -> ToolDefinition {
         let root = dir.path();
         fs::create_dir_all(root.join("src")).expect("mkdir src");
         fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
-        let facts = build_facts(root).expect("extract").0;
+        let facts = build_facts(root, None).expect("extract").0;
         let subscriber = RecordingSubscriber::default();
         let _guard = tracing::subscriber::set_default(subscriber.clone());
         tracing::callsite::rebuild_interest_cache();
@@ -1716,8 +1716,8 @@ fn submit_plan_def() -> ToolDefinition {
         let subscriber = RecordingSubscriber::default();
         let _guard = tracing::subscriber::set_default(subscriber.clone());
         tracing::callsite::rebuild_interest_cache();
-        let prev =
-            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+        let prev = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+            .expect("artifact");
         subscriber.clear();
         fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n").expect("rewrite a.rs");
 
@@ -1742,8 +1742,8 @@ fn submit_plan_def() -> ToolDefinition {
         fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
         fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
 
-        let mut prev =
-            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+        let mut prev = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+            .expect("artifact");
         let b_content_oid = prev
             .file_manifests
             .iter()
@@ -1800,8 +1800,8 @@ fn submit_plan_def() -> ToolDefinition {
         git(root, &["add", "src/a.rs"]);
         git(root, &["commit", "-m", "add a"]);
 
-        let prev =
-            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+        let prev = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+            .expect("artifact");
 
         let dirty_bytes = b"pub fn alpha_dirty() {}\n";
         fs::write(root.join("src/a.rs"), dirty_bytes).expect("dirty a.rs");
@@ -1831,8 +1831,8 @@ fn submit_plan_def() -> ToolDefinition {
         fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
         fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
 
-        let prev =
-            artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("artifact");
+        let prev = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+            .expect("artifact");
         let removed_stable_file_id = prev
             .file_manifests
             .iter()

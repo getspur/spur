@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str;
 
 use anyhow::{anyhow, Context};
+use indicatif::ProgressBar;
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -949,7 +950,10 @@ fn confidence_for_edge(
     }
 }
 
-pub fn build_facts(root: &Path) -> anyhow::Result<(GraphFacts, BTreeMap<&'static str, usize>)> {
+pub fn build_facts(
+    root: &Path,
+    progress: Option<ProgressBar>,
+) -> anyhow::Result<(GraphFacts, BTreeMap<&'static str, usize>)> {
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
@@ -958,7 +962,7 @@ pub fn build_facts(root: &Path) -> anyhow::Result<(GraphFacts, BTreeMap<&'static
         .into_iter()
         .map(|group| (group.language, group.label, group.config, group.files))
         .collect();
-    let facts = extract_files(&root, extract_groups)?;
+    let facts = extract_files(&root, extract_groups, progress.as_ref())?;
     Ok((facts, file_counts))
 }
 
@@ -971,12 +975,13 @@ pub fn build_facts_for_paths(root: &Path, files: &[PathBuf]) -> anyhow::Result<G
         .into_iter()
         .map(|group| (group.language, group.label, group.config, group.files))
         .collect();
-    extract_files(&root, extract_groups)
+    extract_files(&root, extract_groups, None)
 }
 
 fn extract_files(
     root: &Path,
     groups: Vec<(Language, &'static str, LanguageConfig, Vec<PathBuf>)>,
+    progress: Option<&ProgressBar>,
 ) -> anyhow::Result<GraphFacts> {
     let mut builder = FactBuilder::new(root);
 
@@ -985,6 +990,9 @@ fn extract_files(
             anyhow!("failed to configure tree-sitter parser for `{label}`: {err}")
         })?;
         for path in files {
+            if let Some(progress) = progress {
+                progress.set_message(progress_file_message(root, &path));
+            }
             let source_bytes = match fs::read(&path) {
                 Ok(source) => source,
                 Err(err) => {
@@ -993,6 +1001,9 @@ fn extract_files(
                         error = %err,
                         "spur-graph: skipping file (read failed)"
                     );
+                    if let Some(progress) = progress {
+                        progress.inc(1);
+                    }
                     continue;
                 }
             };
@@ -1003,10 +1014,39 @@ fn extract_files(
                     "spur-graph: skipping file (extraction failed)"
                 );
             }
+            if let Some(progress) = progress {
+                progress.inc(1);
+            }
         }
     }
     builder.resolve_pending_edges();
     Ok(builder.facts)
+}
+
+fn progress_file_message(root: &Path, path: &Path) -> String {
+    let display_path = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    truncate_progress_message(&display_path)
+}
+
+fn truncate_progress_message(message: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    if message.chars().count() <= MAX_CHARS {
+        return message.to_string();
+    }
+
+    let tail: String = message
+        .chars()
+        .rev()
+        .take(MAX_CHARS.saturating_sub(3))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{tail}")
 }
 
 fn extract_file_from_tree(
