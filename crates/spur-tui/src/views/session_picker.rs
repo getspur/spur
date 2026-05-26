@@ -1529,8 +1529,6 @@ impl View for SessionPickerView {
                         match key.code {
                             KeyCode::Esc => {
                                 *search_focused = false;
-                                filter.clear();
-                                *cursor = 0;
                                 None
                             }
                             KeyCode::Enter => {
@@ -2022,7 +2020,7 @@ mod current_session_shortcut_tests {
     }
 
     #[test]
-    fn session_picker_esc_from_search_clears_filter() {
+    fn session_picker_esc_from_search_preserves_filter_until_second_esc() {
         let mut picker = SessionPickerView::new();
         picker.set_sessions(
             "test-brain".into(),
@@ -2044,12 +2042,14 @@ mod current_session_shortcut_tests {
         }
         assert_eq!(picker.filter(), "foo");
 
-        // Esc should both exit search focus and discard the filter string,
-        // matching IssueBrowser's filter_mode Esc convention.
+        // Spec: docs/rca/2026-04-28-spur-tui-keybindings-mapping.md:386
+        // Esc from search exits focus but preserves the filter; a second Esc clears it.
         picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
         assert!(!picker.is_search_focused());
+        assert_eq!(picker.filter(), "foo");
+
+        picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
         assert_eq!(picker.filter(), "");
-        assert_eq!(picker.cursor(), 0);
     }
 }
 
