@@ -56,13 +56,13 @@ pub enum CellKind {
 /// Mutation operations accepted by [`NotebookStore`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotebookOp {
-    /// Replace the source of an existing cell, optionally checking document version.
+    /// Replace the source of an existing cell, optionally checking cell version.
     WriteCell {
         /// Cell identifier.
         id: String,
         /// New cell source.
         source: String,
-        /// Expected store version for optimistic concurrency.
+        /// Expected cell version for optimistic concurrency.
         expected_version: Option<u64>,
         /// Agent that last edited the cell.
         last_edited_by: Option<String>,
@@ -78,11 +78,11 @@ pub enum NotebookOp {
         /// Agent that created the cell.
         last_edited_by: Option<String>,
     },
-    /// Delete an existing cell after checking document version.
+    /// Delete an existing cell after checking cell version.
     DeleteCell {
         /// Cell identifier.
         id: String,
-        /// Expected store version for optimistic concurrency.
+        /// Expected cell version for optimistic concurrency.
         expected_version: u64,
     },
     /// Replace the source of an existing cell without concurrency checks.
@@ -223,7 +223,7 @@ impl NotebookStore {
                 last_edited_by,
             } => {
                 if let Some(expected) = expected_version {
-                    self.ensure_version(expected)?;
+                    self.ensure_cell_version(&root, &id, expected)?;
                 }
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
@@ -257,7 +257,7 @@ impl NotebookStore {
                 id,
                 expected_version,
             } => {
-                self.ensure_version(expected_version)?;
+                self.ensure_cell_version(&root, &id, expected_version)?;
                 let index = find_cell_index(&root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 root.cells.remove(index);
@@ -342,8 +342,16 @@ impl NotebookStore {
         self.broadcast.subscribe()
     }
 
-    fn ensure_version(&self, expected: u64) -> Result<(), StoreError> {
-        let actual = self.version.load(Ordering::SeqCst);
+    fn ensure_cell_version(
+        &self,
+        root: &NotebookRoot,
+        cell_id: &str,
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let cell = find_cell(root, cell_id).ok_or_else(|| StoreError::CellNotFound {
+            id: cell_id.to_string(),
+        })?;
+        let actual = cell_spur_version(cell).unwrap_or_default();
         if expected == actual {
             Ok(())
         } else {
@@ -413,6 +421,12 @@ fn find_cell_index(root: &NotebookRoot, id: &str) -> Option<usize> {
         .position(|cell| cell_id(cell).is_some_and(|cell_id| cell_id == id))
 }
 
+fn find_cell<'a>(root: &'a NotebookRoot, id: &str) -> Option<&'a Cell> {
+    root.cells
+        .iter()
+        .find(|cell| cell_id(cell).is_some_and(|cell_id| cell_id == id))
+}
+
 fn find_cell_mut<'a>(root: &'a mut NotebookRoot, id: &str) -> Option<&'a mut Cell> {
     root.cells
         .iter_mut()
@@ -424,6 +438,14 @@ fn cell_id(cell: &Cell) -> Option<&str> {
         Cell::Raw(cell) => cell.id.as_deref(),
         Cell::Markdown(cell) => cell.id.as_deref(),
         Cell::Code(cell) => cell.id.as_deref(),
+    }
+}
+
+fn cell_spur_version(cell: &Cell) -> Option<u64> {
+    match cell {
+        Cell::Raw(cell) => cell.metadata.spur.as_ref().map(|spur| spur.version),
+        Cell::Markdown(cell) => cell.metadata.spur.as_ref().map(|spur| spur.version),
+        Cell::Code(cell) => cell.metadata.spur.as_ref().map(|spur| spur.version),
     }
 }
 
@@ -529,9 +551,27 @@ mod tests {
     use super::*;
     use crate::backend::notebook::{
         Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, Output, OutputStream,
+        SpurCellMetadata,
     };
 
     const CELL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const OTHER_CELL_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
+
+    fn code_cell(id: &str, source: &str, version: u64) -> Cell {
+        Cell::Code(CodeCell {
+            id: Some(id.to_string()),
+            metadata: CellMetadata {
+                spur: Some(SpurCellMetadata {
+                    version,
+                    last_edited_by: None,
+                }),
+                other: Map::new(),
+            },
+            source: MultilineString::Single(source.to_string()),
+            execution_count: None,
+            outputs: Vec::new(),
+        })
+    }
 
     fn notebook_with_source(source: &str) -> NotebookRoot {
         NotebookRoot {
@@ -545,16 +585,26 @@ mod tests {
             },
             nbformat_minor: 5,
             nbformat: 4,
-            cells: vec![Cell::Code(CodeCell {
-                id: Some(CELL_ID.to_string()),
-                metadata: CellMetadata {
-                    spur: None,
-                    other: Map::new(),
-                },
-                source: MultilineString::Single(source.to_string()),
-                execution_count: None,
-                outputs: Vec::new(),
-            })],
+            cells: vec![code_cell(CELL_ID, source, 1)],
+        }
+    }
+
+    fn notebook_with_two_code_cells() -> NotebookRoot {
+        NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: vec![
+                code_cell(CELL_ID, "first", 1),
+                code_cell(OTHER_CELL_ID, "second", 1),
+            ],
         }
     }
 
@@ -678,6 +728,74 @@ mod tests {
                 actual: 2,
             }
         );
+    }
+
+    #[test]
+    fn write_cell_expected_version_is_per_cell() {
+        let store = NotebookStore::new(Arc::new(SaveCoordinator::default()));
+        store.load("/tmp/test.ipynb", notebook_with_two_code_cells());
+
+        store
+            .apply(NotebookOp::WriteCell {
+                id: CELL_ID.to_string(),
+                source: "first updated".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+
+        let delta = store
+            .apply(NotebookOp::WriteCell {
+                id: OTHER_CELL_ID.to_string(),
+                source: "second updated".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            delta.kind,
+            DeltaKind::CellWritten { id } if id == OTHER_CELL_ID
+        ));
+        let (snapshot, _version) = store.snapshot();
+        let Cell::Code(cell) = &snapshot.cells[1] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(cell.metadata.spur.as_ref().unwrap().version, delta.version);
+        assert_eq!(
+            cell.source,
+            MultilineString::Single("second updated".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_cell_expected_version_is_per_cell() {
+        let store = NotebookStore::new(Arc::new(SaveCoordinator::default()));
+        store.load("/tmp/test.ipynb", notebook_with_two_code_cells());
+
+        store
+            .apply(NotebookOp::WriteCell {
+                id: CELL_ID.to_string(),
+                source: "first updated".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+
+        let delta = store
+            .apply(NotebookOp::DeleteCell {
+                id: OTHER_CELL_ID.to_string(),
+                expected_version: 1,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            delta.kind,
+            DeltaKind::CellDeleted { id } if id == OTHER_CELL_ID
+        ));
+        let (snapshot, _version) = store.snapshot();
+        assert_eq!(snapshot.cells.len(), 1);
+        assert_eq!(cell_id(&snapshot.cells[0]), Some(CELL_ID));
     }
 
     #[test]

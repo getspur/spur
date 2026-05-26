@@ -1,5 +1,4 @@
-use jute::backend::commands::RunCellEvent;
-use jute::commands::run_cell_events;
+use jute::{backend::commands::RunCellEvent, commands::run_cell_events, state::State};
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -7,6 +6,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::Emitter;
+use tracing::warn;
 
 use crate::mcp::ServerDeps;
 
@@ -73,6 +73,28 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             )
         })?;
 
+    let summary = drain_run_cell_events(deps, state, &params, rx).await;
+
+    Ok(CallToolResult::structured(json!({
+        "id": params.cell_id,
+        "status": summary.status,
+        "exec_count": summary.exec_count,
+        "outputs": summary.outputs,
+    })))
+}
+
+struct RunCellSummary {
+    outputs: Vec<Value>,
+    exec_count: Option<u32>,
+    status: String,
+}
+
+async fn drain_run_cell_events(
+    deps: &ServerDeps,
+    state: &State,
+    params: &RunCellParams,
+    rx: async_channel::Receiver<RunCellEvent>,
+) -> RunCellSummary {
     let mut outputs: Vec<Value> = Vec::new();
     let mut exec_count: Option<u32> = None;
     let mut status: String = "error".to_string();
@@ -87,6 +109,16 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
                     "kernel_id": params.kernel_id,
                     "event": event_value.clone(),
                 }),
+            );
+        }
+        if let Err(error) = state
+            .get_notebook()
+            .apply_run_event(&params.cell_id, event.clone())
+        {
+            warn!(
+                cell_id = %params.cell_id,
+                error = %error,
+                "failed to apply run cell event to notebook store"
             );
         }
         match &event {
@@ -113,19 +145,25 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         }
     }
 
-    Ok(CallToolResult::structured(json!({
-        "id": params.cell_id,
-        "status": status,
-        "exec_count": exec_count,
-        "outputs": outputs,
-    })))
+    RunCellSummary {
+        outputs,
+        exec_count,
+        status,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use jute::state::State;
+    use jute::{
+        backend::notebook::{
+            Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, NotebookRoot, Output,
+            OutputStream,
+        },
+        state::State,
+    };
+    use serde_json::Map;
 
     use super::*;
     use crate::mcp::{
@@ -141,6 +179,35 @@ mod tests {
             state: Some(state),
             app: None,
             daemon: None,
+        }
+    }
+
+    fn notebook_with_code_cell() -> NotebookRoot {
+        NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: vec![Cell::Code(CodeCell {
+                id: Some("code-1".to_string()),
+                metadata: CellMetadata {
+                    spur: None,
+                    other: Map::new(),
+                },
+                source: MultilineString::Single("print('old')".to_string()),
+                execution_count: Some(1),
+                outputs: vec![Output::Stream(OutputStream {
+                    name: "stdout".to_string(),
+                    text: MultilineString::Single("old".to_string()),
+                    other: Map::new(),
+                })],
+            })],
         }
     }
 
@@ -175,5 +242,50 @@ mod tests {
         .await
         .expect_err("empty kernel_id rejected");
         assert!(error.message.contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn event_drain_updates_notebook_store_cell_outputs() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_code_cell());
+        let deps = deps_with_state(Arc::clone(&state));
+        let params = RunCellParams {
+            cell_id: "code-1".to_string(),
+            kernel_id: "kernel-1".to_string(),
+            code: "print('new')".to_string(),
+        };
+        let (tx, rx) = async_channel::unbounded();
+
+        tx.send(RunCellEvent::Started).await.unwrap();
+        tx.send(RunCellEvent::Stdout("new".to_string()))
+            .await
+            .unwrap();
+        tx.send(RunCellEvent::Finished {
+            exec_count: Some(2),
+            status: "ok".to_string(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let summary = drain_run_cell_events(&deps, &state, &params, rx).await;
+
+        assert_eq!(summary.status, "ok");
+        assert_eq!(summary.exec_count, Some(2));
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(cell.execution_count, Some(2));
+        assert_eq!(
+            cell.outputs,
+            vec![Output::Stream(OutputStream {
+                name: "stdout".to_string(),
+                text: MultilineString::Single("new".to_string()),
+                other: Map::new(),
+            })]
+        );
     }
 }

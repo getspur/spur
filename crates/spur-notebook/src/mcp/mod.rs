@@ -941,6 +941,7 @@ fn notebook_store_request_from_daemon(
                 .ok_or_else(|| invalid_params("insert_cell requires kind"))?,
             after_id: request.after_id,
             source: required_string(&request.source, "insert_cell requires source")?,
+            last_edited_by: request.last_edited_by,
         },
         "delete_cell" => jute::commands::DaemonControlCommand::DeleteCell {
             id: required_cell_id(&request)?,
