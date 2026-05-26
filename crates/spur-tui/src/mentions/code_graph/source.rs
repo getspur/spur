@@ -5,11 +5,11 @@ use std::time::SystemTime;
 
 use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
 use spur_graph::{
-    load_artifact, read_artifact_header, read_artifact_header_parquet, resolve_artifact_location,
-    ArtifactFormat, CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints,
-    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphFileArtifact,
-    GraphIndexArtifact, GraphSymbolArtifact, ResolvedArtifact, CODE_FILE_URI_PREFIX,
-    CODE_SYMBOL_URI_PREFIX,
+    load_artifact_slim, read_artifact_header, read_artifact_header_parquet,
+    resolve_artifact_location, ArtifactFormat, CodeMentionAuthoritative, CodeMentionDisplayMeta,
+    CodeMentionExtractionHints, CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec,
+    GraphFileArtifact, GraphIndexArtifact, GraphSymbolArtifact, ResolvedArtifact,
+    CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
 };
 
 struct CodeGraphCacheKey {
@@ -159,7 +159,7 @@ impl MentionSource for CodeGraphMentionSource {
         let _guard = span.enter();
 
         let artifact = match tracing::debug_span!("load_artifact")
-            .in_scope(|| load_artifact(&resolved.path))
+            .in_scope(|| load_artifact_slim(&resolved.path))
         {
             Ok(artifact) => artifact,
             Err(error) => {
