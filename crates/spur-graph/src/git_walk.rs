@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use anyhow::{anyhow, bail, Context, Result};
 use gix::object::tree::diff::{Action, Change};
 use gix::objs::tree::EntryMode;
+use indicatif::ProgressBar;
 
 use crate::extract::languages::Language;
 use crate::extract::tree_sitter::{BytesExtractor, ExtractError, ExtractedSymbol};
@@ -187,6 +188,7 @@ pub fn plan_incremental_walk(
 pub fn run_full_walk_into(
     worktree: &Path,
     config: &GitWalkConfig,
+    progress: Option<ProgressBar>,
 ) -> Result<(GraphIndexArtifact, CommitIndexArtifact)> {
     ensure_not_shallow(worktree)?;
     check_replace_refs(worktree, config.allow_replace_refs)?;
@@ -284,6 +286,9 @@ pub fn run_full_walk_into(
                     change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous_key))),
                 });
             }
+        }
+        if let Some(progress) = progress.as_ref() {
+            progress.inc(1);
         }
     }
 

@@ -170,7 +170,7 @@ fn load_fixture() -> Fixture {
                 fixture_path.display()
             )
         });
-    let (facts, _counts) = build_facts(&repo_root).unwrap_or_else(|err| {
+    let (facts, _counts) = build_facts(&repo_root, None).unwrap_or_else(|err| {
         panic!(
             "failed to build facts for `{}`: {err:#}",
             repo_root.display()

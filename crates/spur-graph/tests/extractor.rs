@@ -180,7 +180,7 @@ impl Service for Store {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract").0;
+    let facts = build_facts(root, None).expect("extract").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
     let artifact_json = serde_json::to_value(&artifact).expect("artifact json");
     let symbols = artifact_json["symbols"]
@@ -233,7 +233,7 @@ impl App {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract").0;
+    let facts = build_facts(root, None).expect("extract").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
 
     let app_struct = artifact
@@ -288,7 +288,7 @@ fn submit_plan_def() -> ToolDefinition {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract").0;
+    let facts = build_facts(root, None).expect("extract").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
     let submit_plan_def = artifact
         .symbols
@@ -341,7 +341,7 @@ impl Store {}
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract").0;
+    let facts = build_facts(root, None).expect("extract").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
 
     let trait_impl = artifact
@@ -384,7 +384,7 @@ enum EditStep {
 #[test]
 fn rust_extractor_matches_sample_corpus_golden_artifact() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
@@ -400,7 +400,7 @@ fn rust_extractor_matches_sample_corpus_golden_artifact() {
 #[test]
 fn python_extractor_matches_sample_corpus_golden_artifact() {
     let root = python_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
@@ -416,7 +416,7 @@ fn python_extractor_matches_sample_corpus_golden_artifact() {
 #[test]
 fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
     let root = typescript_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
@@ -432,7 +432,7 @@ fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
 #[test]
 fn cpp_extractor_matches_corpus_golden_artifact() {
     let root = cpp_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
@@ -448,7 +448,7 @@ fn cpp_extractor_matches_corpus_golden_artifact() {
 #[test]
 fn cpp_extractor_captures_duckdb_style_surface() {
     let root = cpp_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
 
     let symbol_names: BTreeSet<String> = artifact
@@ -523,7 +523,7 @@ fn cpp_extractor_captures_duckdb_style_surface() {
 #[test]
 fn markdown_extractor_matches_corpus_golden_artifact() {
     let root = markdown_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
@@ -539,7 +539,7 @@ fn markdown_extractor_matches_corpus_golden_artifact() {
 #[test]
 fn markdown_extractor_builds_section_hierarchy_and_link_edges() {
     let root = markdown_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
 
     assert!(facts
         .nodes
@@ -567,7 +567,7 @@ fn markdown_extractor_builds_section_hierarchy_and_link_edges() {
 #[test]
 fn rust_extractor_keeps_nested_functions_inside_methods_as_functions() {
     let root = nested_fn_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
 
     let baz = facts
         .nodes
@@ -581,7 +581,7 @@ fn rust_extractor_keeps_nested_functions_inside_methods_as_functions() {
 #[test]
 fn python_extractor_keeps_nested_functions_inside_methods_as_functions() {
     let root = python_nested_fn_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
 
     let outer = facts
         .nodes
@@ -601,7 +601,7 @@ fn python_extractor_keeps_nested_functions_inside_methods_as_functions() {
 #[test]
 fn python_extractor_classifies_decorated_methods_as_methods() {
     let root = python_decorated_method_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
 
     for method_name in ["name", "helper", "from_str"] {
@@ -632,7 +632,7 @@ fn python_extractor_classifies_decorated_methods_as_methods() {
 #[test]
 fn rust_extractor_finds_expected_nodes_edges_and_spans() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
 
     let labels: BTreeSet<_> = facts.nodes.iter().map(|node| node.label.as_str()).collect();
     assert!(labels.contains("src/lib.rs"));
@@ -732,7 +732,7 @@ fn rust_extractor_does_not_leak_nested_call_captures_into_outer_call() {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
     let caller = facts
         .nodes
         .iter()
@@ -752,7 +752,7 @@ fn rust_extractor_does_not_leak_nested_call_captures_into_outer_call() {
 #[test]
 fn typescript_extractor_finds_expected_nodes_and_edges() {
     let root = typescript_fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let node_labels_by_id: std::collections::HashMap<_, _> = facts
         .nodes
         .iter()
@@ -836,8 +836,8 @@ fn typescript_extractor_finds_expected_nodes_and_edges() {
 #[test]
 fn rust_extractor_stable_keys_are_deterministic_across_runs() {
     let root = fixture_root();
-    let first = build_facts(&root).expect("first extract").0;
-    let second = build_facts(&root).expect("second extract").0;
+    let first = build_facts(&root, None).expect("first extract").0;
+    let second = build_facts(&root, None).expect("second extract").0;
 
     let first_keys: Vec<_> = first
         .nodes
@@ -867,7 +867,7 @@ impl Bar { fn a(&self) {} }
 impl Bar { fn b(&self) {} }
 "#;
     fs::write(root.join("src/lib.rs"), base_source).expect("write base source");
-    let base_facts = build_facts(root).expect("extract base").0;
+    let base_facts = build_facts(root, None).expect("extract base").0;
     let base_keys: Vec<_> = base_facts
         .nodes
         .iter()
@@ -876,7 +876,7 @@ impl Bar { fn b(&self) {} }
         .collect();
 
     fs::write(root.join("src/lib.rs"), format!("\n{base_source}")).expect("write shifted source");
-    let shifted_facts = build_facts(root).expect("extract shifted").0;
+    let shifted_facts = build_facts(root, None).expect("extract shifted").0;
     let shifted_keys: Vec<_> = shifted_facts
         .nodes
         .iter()
@@ -919,7 +919,7 @@ impl Baz for Bar { fn b(&self) {} }
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract").0;
+    let facts = build_facts(root, None).expect("extract").0;
     let impl_nodes: Vec<_> = facts
         .nodes
         .iter()
@@ -957,7 +957,7 @@ impl Bar { fn b(&self) {} }
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract").0;
+    let facts = build_facts(root, None).expect("extract").0;
     let impl_nodes: Vec<_> = facts
         .nodes
         .iter()
@@ -979,7 +979,7 @@ impl Bar { fn b(&self) {} }
 #[test]
 fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
 
     let contains_edge = facts
         .edges
@@ -1033,7 +1033,7 @@ impl Drop for McpCallbackServer {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
 
     let scope_for = |name: &str| {
@@ -1052,7 +1052,7 @@ impl Drop for McpCallbackServer {
 #[test]
 fn petgraph_builder_preserves_typed_fact_counts() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let graph = build_petgraph(&facts).expect("build petgraph");
 
     assert_eq!(graph.node_count(), facts.nodes.len());
@@ -1086,7 +1086,7 @@ fn build_skips_files_with_invalid_utf8_and_continues() {
     )
     .expect("write bad.rs");
 
-    let (facts, file_counts) = build_facts(root).expect("build must not abort on bad UTF-8");
+    let (facts, file_counts) = build_facts(root, None).expect("build must not abort on bad UTF-8");
 
     assert!(
         facts.nodes.iter().any(|node| node.label == "good_function"),
@@ -1116,7 +1116,7 @@ fn discover_files_skips_unreadable_entries_and_continues() {
     symlink("/nonexistent/target.rs", root.join("src/broken_link.rs"))
         .expect("create broken symlink");
 
-    let (facts, _) = build_facts(root).expect("build must continue after walker errors");
+    let (facts, _) = build_facts(root, None).expect("build must continue after walker errors");
 
     assert!(
         facts.nodes.iter().any(|node| node.label == "ok"),
@@ -1132,7 +1132,7 @@ fn artifact_uses_sentinel_anchor_when_source_drifts_after_extraction() {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(root.join("src/lib.rs"), "pub fn run() {}\n").expect("write lib.rs");
 
-    let facts = build_facts(root).expect("build facts").0;
+    let facts = build_facts(root, None).expect("build facts").0;
 
     fs::write(root.join("src/lib.rs"), "pub fn").expect("truncate lib.rs");
 
@@ -1149,7 +1149,7 @@ fn artifact_uses_sentinel_anchor_when_source_drifts_after_extraction() {
 #[test]
 fn artifact_writer_round_trips_through_existing_reader() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let dir = tempfile::tempdir().expect("tempdir");
     let path = write_artifact_parquet(&artifact, dir.path(), WriteOptions::default())
@@ -1216,7 +1216,7 @@ fn sorted_edges(
 #[test]
 fn artifact_writer_hash_is_deterministic_for_identical_content() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
 
     let first = content_hash(&artifact);
@@ -1232,7 +1232,7 @@ fn artifact_writer_hash_is_deterministic_for_identical_content() {
 #[test]
 fn artifact_writer_hash_changes_when_symbol_content_changes() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let mut mutated = artifact.clone();
     let symbol = mutated
@@ -1252,7 +1252,7 @@ fn artifact_writer_hash_changes_when_symbol_content_changes() {
 #[test]
 fn artifact_writer_hash_changes_when_edge_content_changes() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let mut mutated = artifact.clone();
     let edge = mutated
@@ -1275,7 +1275,7 @@ fn artifact_writer_hash_changes_when_edge_content_changes() {
 #[test]
 fn artifact_persists_in_file_contains_edges() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
 
     let file = artifact
@@ -1328,7 +1328,7 @@ fn artifact_persists_in_file_contains_edges() {
 #[test]
 fn artifact_persists_cross_file_calls_edge_with_label() {
     let root = fixture_root();
-    let facts = build_facts(&root).expect("extract fixture").0;
+    let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
 
     let helper_symbol = artifact
@@ -1372,7 +1372,7 @@ fn resolve_pending_edges_surfaces_ambiguous_labels() {
     )
     .expect("write caller.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
 
     let process_nodes = facts
         .nodes
@@ -1412,7 +1412,7 @@ fn rust_extractor_emits_resolved_references_for_hof_function_values() {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
     let labels_by_id: std::collections::HashMap<_, _> = facts
         .nodes
         .iter()
@@ -1458,7 +1458,7 @@ fn rust_extractor_drops_unresolved_hof_function_value_references() {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
 
     assert!(!facts.edges.iter().any(|edge| {
         edge.relation == RelationKind::References
@@ -1481,7 +1481,7 @@ fn rust_extractor_drops_references_resolved_to_non_callable_symbols() {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
     assert!(facts
         .nodes
         .iter()
@@ -1510,7 +1510,7 @@ fn rust_extractor_drops_ambiguous_hof_function_value_references() {
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
     let helper_nodes = facts
         .nodes
         .iter()
@@ -1538,7 +1538,7 @@ fn rust_extractor_ignores_identifier_shaped_strings_when_resolving_references() 
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
     let submit_plan_def = artifact
         .symbols
@@ -1598,7 +1598,7 @@ fn rust_extractor_resolves_explicit_dyn_trait_receiver_calls_to_trait_methods() 
     )
     .expect("write lib.rs");
 
-    let facts = build_facts(root).expect("extract fixture").0;
+    let facts = build_facts(root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, root).expect("artifact");
     let worker_run = artifact
         .symbols
@@ -1626,7 +1626,8 @@ fn rust_extractor_resolves_explicit_dyn_trait_receiver_calls_to_trait_methods() 
 #[test]
 fn incremental_round_trip_noop_matches_full_artifact() {
     let root = fixture_root();
-    let full = artifact_from_facts(&build_facts(&root).expect("extract").0, &root).expect("full");
+    let full =
+        artifact_from_facts(&build_facts(&root, None).expect("extract").0, &root).expect("full");
     let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     assert_eq!(next, full);
@@ -1635,7 +1636,8 @@ fn incremental_round_trip_noop_matches_full_artifact() {
 #[test]
 fn incremental_round_trip_preserves_edges() {
     let root = fixture_root();
-    let full = artifact_from_facts(&build_facts(&root).expect("extract").0, &root).expect("full");
+    let full =
+        artifact_from_facts(&build_facts(&root, None).expect("extract").0, &root).expect("full");
     let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     assert_eq!(next.edges, full.edges);
@@ -1693,7 +1695,7 @@ fn incremental_matches_full_under_edit_sequence() {
     }
 
     let mut prev_incremental = artifact_from_facts(
-        &build_facts(root)
+        &build_facts(root, None)
             .expect("extract baseline after steps 1-2")
             .0,
         root,
@@ -1722,8 +1724,8 @@ fn incremental_matches_full_under_edit_sequence() {
                 fs::remove_file(root.join(path)).expect("delete step file");
             }
         }
-        let full =
-            artifact_from_facts(&build_facts(root).expect("extract full").0, root).expect("full");
+        let full = artifact_from_facts(&build_facts(root, None).expect("extract full").0, root)
+            .expect("full");
         let (incremental, mode) =
             artifact_from_facts_incremental(&prev_incremental, root).expect("extract incremental");
         assert_eq!(mode, BuildMode::Incremental);
@@ -1745,7 +1747,8 @@ fn incremental_modify_one_file_replaces_only_that_bucket() {
     fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
     fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
 
-    let full = artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full");
+    let full =
+        artifact_from_facts(&build_facts(root, None).expect("extract").0, root).expect("full");
     let before_a = full
         .symbols
         .iter()
@@ -1788,7 +1791,8 @@ fn incremental_delete_file_drops_bucket_and_preserves_others() {
     fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
     fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
 
-    let full = artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full");
+    let full =
+        artifact_from_facts(&build_facts(root, None).expect("extract").0, root).expect("full");
     let before_b = full
         .symbols
         .iter()
@@ -1814,7 +1818,7 @@ fn incremental_delete_file_drops_bucket_and_preserves_others() {
 fn incremental_manifest_mismatch_falls_back_to_full() {
     let root = fixture_root();
     let mut full =
-        artifact_from_facts(&build_facts(&root).expect("extract").0, &root).expect("full");
+        artifact_from_facts(&build_facts(&root, None).expect("extract").0, &root).expect("full");
     full.manifest_version = "stale-manifest".to_string();
 
     let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
@@ -1833,8 +1837,8 @@ fn incremental_rebinds_call_edge_after_callee_file_changed() {
         .expect("write caller.rs");
     fs::write(root.join("src/callee.rs"), "pub fn callee() {}\n").expect("write callee.rs");
 
-    let full_before =
-        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full before");
+    let full_before = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+        .expect("full before");
     let old_target = call_edge_target_for(&full_before, "calls").expect("initial calls target");
 
     sleep(Duration::from_millis(5));
@@ -1861,8 +1865,8 @@ fn incremental_rebinds_call_edge_when_caller_file_changed() {
     fs::write(root.join("src/caller.rs"), "pub fn calls() { callee(); }\n")
         .expect("write caller.rs");
 
-    let full_before =
-        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full before");
+    let full_before = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+        .expect("full before");
     let before_target = call_edge_target_for(&full_before, "calls").expect("initial calls target");
 
     sleep(Duration::from_millis(5));
@@ -1891,7 +1895,8 @@ fn full_and_incremental_emit_byte_identical_edges_for_same_state() {
     fs::write(root.join("src/caller.rs"), "pub fn calls() { callee(); }\n")
         .expect("write caller.rs");
     fs::write(root.join("src/callee.rs"), "pub fn callee() {}\n").expect("write callee.rs");
-    let y = artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full y");
+    let y =
+        artifact_from_facts(&build_facts(root, None).expect("extract").0, root).expect("full y");
 
     sleep(Duration::from_millis(5));
     fs::write(
@@ -1901,7 +1906,7 @@ fn full_and_incremental_emit_byte_identical_edges_for_same_state() {
     .expect("rewrite callee.rs");
 
     let full_x = normalize_for_comparison(
-        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full x"),
+        artifact_from_facts(&build_facts(root, None).expect("extract").0, root).expect("full x"),
     );
     let (incremental_x, mode) = artifact_from_facts_incremental(&y, root).expect("incremental x");
     assert_eq!(mode, BuildMode::Incremental);
@@ -1922,8 +1927,8 @@ fn incremental_drops_removed_cross_file_call_edge() {
     fs::write(root.join("src/caller.rs"), "pub fn calls() { callee(); }\n")
         .expect("write caller.rs");
 
-    let baseline =
-        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full baseline");
+    let baseline = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+        .expect("full baseline");
 
     sleep(Duration::from_millis(5));
     fs::write(
@@ -1952,7 +1957,8 @@ fn incremental_drops_removed_cross_file_call_edge() {
     );
 
     let full_after = normalize_for_comparison(
-        artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full after"),
+        artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+            .expect("full after"),
     );
     let incremental = normalize_for_comparison(incremental);
     assert_eq!(
