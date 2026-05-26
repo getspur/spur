@@ -11,6 +11,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_tui::action::Action;
+use spur_tui::app::App;
 use spur_tui::views::{session_detail::SessionDetailView, View};
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
@@ -45,6 +46,14 @@ fn ctrl_press(v: &mut SessionDetailView, c: char) -> Option<Action> {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
         &test_ctx(),
     )
+}
+
+fn app_press(app: &mut App, code: KeyCode) {
+    app.handle_crossterm_event_for_test(KeyEvent::new(code, KeyModifiers::NONE));
+}
+
+fn app_ctrl_press(app: &mut App, c: char) {
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
 }
 
 #[test]
@@ -212,4 +221,72 @@ fn trigger_picker_blocks_ctrl_p_ctrl_n_from_reaching_input_bar_history() {
         }
         other => panic!("expected SendMessage, got {:?}", other),
     }
+}
+
+#[test]
+fn dashboard_ctrl_p_with_open_picker_moves_picker_not_history() {
+    let mut app = App::new_for_tests();
+    app.dashboard_mut_for_test().seed_input_history(vec![
+        spur_tui::input_history::InputHistoryEntry::from_text("previous history entry"),
+    ]);
+    app.open_dashboard_slash_picker_for_test();
+
+    assert!(app.dashboard_for_test().completion_active_for_test());
+    assert_eq!(app.dashboard_for_test().input_bar_text_for_test(), "/");
+
+    app_ctrl_press(&mut app, 'p');
+
+    assert_eq!(
+        app.dashboard_for_test().input_bar_text_for_test(),
+        "/",
+        "Ctrl+P must move the picker, not recall input history"
+    );
+    assert!(app.dashboard_for_test().completion_active_for_test());
+
+    app_press(&mut app, KeyCode::Enter);
+    let accepted = app.dashboard_for_test().input_bar_text_for_test();
+    assert!(
+        accepted.starts_with('/'),
+        "picker accept should insert a slash command, got {:?}",
+        accepted
+    );
+    assert_ne!(
+        accepted, "/help ",
+        "Ctrl+P should move off the initial /help row before accept"
+    );
+    assert_ne!(accepted, "previous history entry");
+}
+
+#[test]
+fn dashboard_ctrl_n_with_open_picker_moves_picker_not_history() {
+    let mut app = App::new_for_tests();
+    app.dashboard_mut_for_test().seed_input_history(vec![
+        spur_tui::input_history::InputHistoryEntry::from_text("previous history entry"),
+    ]);
+    app.open_dashboard_slash_picker_for_test();
+
+    assert!(app.dashboard_for_test().completion_active_for_test());
+    assert_eq!(app.dashboard_for_test().input_bar_text_for_test(), "/");
+
+    app_ctrl_press(&mut app, 'n');
+
+    assert_eq!(
+        app.dashboard_for_test().input_bar_text_for_test(),
+        "/",
+        "Ctrl+N must move the picker, not recall input history"
+    );
+    assert!(app.dashboard_for_test().completion_active_for_test());
+
+    app_press(&mut app, KeyCode::Enter);
+    let accepted = app.dashboard_for_test().input_bar_text_for_test();
+    assert!(
+        accepted.starts_with('/'),
+        "picker accept should insert a slash command, got {:?}",
+        accepted
+    );
+    assert_ne!(
+        accepted, "/help ",
+        "Ctrl+N should move off the initial /help row before accept"
+    );
+    assert_ne!(accepted, "previous history entry");
 }
