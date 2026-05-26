@@ -115,6 +115,7 @@ impl App {
 
         #[cfg(feature = "markdown")]
         let mermaid_picker = Picker::from_query_stdio().ok();
+        let (background_action_tx, background_action_rx) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(feature = "markdown")]
         let (mermaid_tx, mermaid_rx) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(feature = "analytics")]
@@ -145,6 +146,8 @@ impl App {
             user_warning: None,
             upgrade_rx: None,
             user_input_tx,
+            background_action_tx,
+            background_action_rx,
             #[cfg(any(test, debug_assertions))]
             user_input_rx_for_test: None,
             brain_status: BrainStatus::Idle,
