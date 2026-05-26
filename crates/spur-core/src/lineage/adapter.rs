@@ -243,6 +243,11 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                         AttemptStatus::Cancelled,
                         Some(reason.clone()),
                     ),
+                    DelegationStatus::SetupFailed { error } => (
+                        LifecycleState::Failed,
+                        AttemptStatus::Failed,
+                        Some(error.to_string()),
+                    ),
                     _ => {
                         tracing::warn!(
                             "unknown DelegationStatus variant — projection needs updating"
@@ -251,6 +256,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                     }
                 };
                 n.phase = phase;
+                n.last_error = error.clone();
                 if let Some(a) = n.current_attempt_mut() {
                     a.ended_at = Some(event.occurred_at);
                     a.status = attempt_status;
