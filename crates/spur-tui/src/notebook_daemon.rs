@@ -1,12 +1,20 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
+    time::sleep,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
+const CONNECT_ATTEMPTS: usize = 5;
+const CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const CONNECT_MAX_DELAY: Duration = Duration::from_millis(800);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,7 +58,7 @@ async fn send_control(
     path: Option<PathBuf>,
     socket_path: &Path,
 ) -> anyhow::Result<ControlResponse> {
-    let mut stream = UnixStream::connect(socket_path).await?;
+    let mut stream = connect_control_socket(socket_path).await?;
     let request = ControlRequest {
         daemon: "notebook.v1",
         command,
@@ -60,6 +68,31 @@ async fn send_control(
     write_frame(&mut stream, &bytes).await?;
     let response = read_frame(&mut stream).await?;
     Ok(serde_json::from_slice(&response)?)
+}
+
+async fn connect_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
+    let mut delay = CONNECT_INITIAL_DELAY;
+    for attempt in 0..CONNECT_ATTEMPTS {
+        match UnixStream::connect(socket_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) if should_retry_connect_error(&error) && attempt + 1 < CONNECT_ATTEMPTS => {
+                sleep(delay).await;
+                delay = delay.saturating_mul(2).min(CONNECT_MAX_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::other("notebook daemon connect retry exhausted"))
+}
+
+fn should_retry_connect_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::AddrNotAvailable
+    )
 }
 
 async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
