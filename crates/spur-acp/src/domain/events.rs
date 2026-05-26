@@ -1020,6 +1020,11 @@ pub enum SpurEventBody {
         session: SessionId,
         entries: Vec<HistoryEntry>,
     },
+    SessionSynopsisSeed {
+        session: SessionId,
+        first: Option<String>,
+        last: Option<String>,
+    },
 
     // ── Worker _spur/* ExtNotification vocabulary (S5) ─────────────
     /// Worker emitted `_spur/heartbeat` — periodic alive signal.
