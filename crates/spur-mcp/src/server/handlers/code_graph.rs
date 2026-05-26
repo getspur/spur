@@ -17,11 +17,11 @@ use spur_graph::temporal::{
 };
 use spur_graph::{
     bounded_subgraph_with_budget, edge_kind, find_callee_edges, find_caller_edges, load_artifact,
-    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, search_symbols,
-    CalleeRecord, CallerRecord, CandidateRow, CommitIndexArtifact, GraphEdgeArtifact,
-    GraphEdgeKind, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexPointer,
-    GraphSymbolArtifact, SearchFilters, SearchMode, SearchOptions, SelectorResolution, SnapshotKey,
-    SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
+    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, CalleeRecord,
+    CallerRecord, CandidateRow, CommitIndexArtifact, GraphEdgeArtifact, GraphEdgeKind,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexPointer, GraphQueryClient,
+    GraphSymbolArtifact, InMemoryClient, SearchFilters, SearchMode, SearchOptions,
+    SelectorResolution, SnapshotKey, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -465,8 +465,9 @@ pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError>
 }
 
 pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
-    let artifact = load_graph_artifact_for_request()?;
-    let body = code_search_with_artifact(args, &artifact)?;
+    let artifact = Arc::new(load_graph_artifact_for_request()?);
+    let client = InMemoryClient::new(Arc::clone(&artifact));
+    let body = code_search_with_artifact(args, &client)?;
     Ok(with_graph_metadata(&artifact, body).await)
 }
 
@@ -475,18 +476,19 @@ async fn code_search_response(
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
     with_loaded_graph_artifact(Some(rebuild_coordinator), |loaded| {
-        code_search_with_artifact(args, loaded.artifact()).map_err(CodeGraphError::from)
+        let client = InMemoryClient::new(Arc::clone(&loaded.artifact));
+        code_search_with_artifact(args, &client).map_err(CodeGraphError::from)
     })
     .await
 }
 
 fn code_search_with_artifact(
     args: &Value,
-    artifact: &GraphIndexArtifact,
+    client: &dyn GraphQueryClient,
 ) -> Result<Value, McpHandlerError> {
     let request = code_search_options(args)?;
     let options = request.options;
-    let result = search_symbols(artifact, &options);
+    let result = client.search_symbols(&options);
     let candidates = result
         .candidates
         .into_iter()
