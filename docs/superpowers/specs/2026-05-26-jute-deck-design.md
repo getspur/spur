@@ -6,7 +6,7 @@
 
 ## Summary
 
-A presentation feature built into `jute-notebook` where **each notebook cell renders as one slide**. The `.ipynb` file is the single source of truth — no new file format. Slide-specific config lives in cell metadata. v1 ships **present mode + PDF export**. A small agent layer reuses Spur's existing worker delegation to draft, restructure, polish, and annotate decks via the notebook MCP.
+A presentation feature built into `jute-notebook` where **each notebook cell renders as one slide**. The `.ipynb` file is the single source of truth — no new file format. Slide-specific config lives in cell metadata. v1 ships **present mode only**, viewed inside jute. No export. A small agent layer reuses Spur's existing worker delegation to draft, restructure, polish, and annotate decks via the notebook MCP.
 
 Inspired by [Presenton](https://github.com/presenton/presenton), but inverted: instead of an AI-first generator that emits HTML decks, this is a notebook-first authoring surface where the deck is a *view* of the notebook, optionally shaped by an agent.
 
@@ -14,13 +14,13 @@ Inspired by [Presenton](https://github.com/presenton/presenton), but inverted: i
 
 **Goals**
 - Cell = slide, 1:1. The notebook is the deck.
-- Live code outputs (charts, dataframes, generated images) embed in slides natively, with no export step.
-- Present mode and PDF export, both deterministic and fast.
+- Live code outputs (charts, dataframes, generated images) embed in slides natively.
+- Present mode inside jute — deterministic and fast.
 - Optional agent assistance (draft / restructure / polish / speaker-notes) using existing Spur infrastructure — no new MCP server, no new worker type.
 - `.ipynb` files stay compatible with other Jupyter tooling (unknown metadata is ignored).
 
 **Non-goals (v1)**
-- PPTX export. Rendering to PowerPoint either requires shape-level translation (lossy) or pictures-per-slide (fake editability). Both promise more than they deliver. Revisit only with a concrete user demand.
+- **No export of any kind.** No PDF, no PPTX, no HTML bundle. The deck is viewed inside jute. Sharing = share the `.ipynb`.
 - A new `.jdeck` artifact format. The notebook is the artifact.
 - A template/layout library system (Presenton-style `layouts/*.html`). Convention + cell metadata covers v1.
 - User-supplied custom themes at runtime. Three built-in themes; user themes are a v2 extension point.
@@ -34,7 +34,7 @@ Inspired by [Presenton](https://github.com/presenton/presenton), but inverted: i
 | Q1 | **Hybrid**: notebook is the working surface; "compile to deck" produces a slide view of the same file. | User picked C. Keeps notebook authoring intact, lets the deck be a non-destructive projection. |
 | Q2 | **Manual-first + optional agent pass.** The agent writes the same cell + metadata shape a human would. | User picked C. Deterministic core; agent is a power tool, not a dependency. |
 | Q3 | **Cell = slide, 1:1.** `.ipynb` is the source of truth. No new file format. | User confirmed. Eliminates an entire schema, persistence, sync, and migration surface. |
-| Q4 | **Present mode + PDF export.** No PPTX, no HTML bundle in v1. | User picked B. Covers the dominant share-the-deck case; avoids PPTX trap. |
+| Q4 | **Present mode only, inside jute.** No export of any kind in v1. | User scoped down from B to view-only. Smallest possible surface; eliminates headless-print risk; ships fastest. |
 | Q5 | **Convention over config**, with cell-metadata override as escape hatch. | User picked A-with-B-escape-hatch. Most cells get a correct layout for free; full control when needed. |
 | Q6 | Agent does **Draft (A) + Restructure (B) + Polish (C) + Speaker notes (E)**. No layout suggestions queue (D) in v1. | User approved. All four share one tool surface; the suggestion queue needs a separate UX. |
 
@@ -57,10 +57,9 @@ Three layers, all inside the existing `crates/spur-notebook/jute-notebook` direc
                        │  read on load + edit subscription
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Render layer (one transform, two renderers)            │
+│  Render layer                                           │
 │    cellToSlide(cell, deckMeta) → SlideSpec              │
-│      ├─► Present mode (Tauri webview, /present/:id)     │
-│      └─► PDF export   (headless print of same renderer) │
+│      └─► Present mode (Tauri webview, /present/:id)     │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -112,7 +111,7 @@ Three built-in: `minimal-light`, `minimal-dark`, `spur-brand`. Each is a Tailwin
 
 ## Render layer
 
-### One transform, two renderers
+### Pure transform + present-mode renderer
 
 ```ts
 function cellToSlide(cell: Cell, deckMeta: JuteDeckNotebookMeta): SlideSpec | null;
@@ -152,17 +151,6 @@ Returns `null` if the cell has `hidden: true`. Layout templates are plain React 
   - `Esc` — exit present mode
 - **Mouse:** click anywhere advances; corner overlay shows slide N / total.
 - **Live outputs:** if the kernel is running and a code cell re-executes, the slide's output updates in place. Free feature of cell-as-slide.
-
-### PDF export
-
-- "Export PDF" menu item → Rust command in `src-tauri/src/` that:
-  1. Spawns a hidden Tauri webview pointed at `/present/:id?mode=print&aspect=16:9`.
-  2. Print CSS: `@page { size: 1280px 720px; margin: 0 }`, `section.slide { page-break-after: always }`.
-  3. Calls Chromium's `printToPDF` via the appropriate Tauri pathway (see implementation risks below).
-  4. Writes to user-chosen path.
-- Speaker notes excluded.
-- Fragments collapsed (every fragment-bullet visible on the printed slide).
-- Plotly and other interactive outputs render via their static-image fallback.
 
 ## Agent layer
 
@@ -207,16 +195,14 @@ Merge-patches `cell.metadata.jute_deck`. Lives in the existing notebook MCP crat
 
 These are explicitly carried into the implementation plan.
 
-1. **Tauri headless PDF print pathway.** Need to confirm jute's current Tauri version supports printing a hidden webview to PDF on macOS without a visible window. Candidates: `tauri-plugin-printing`, direct CDP via the webview, or a `wkhtmltopdf`/Chromium-headless fallback. **Biggest unknown in the design.** The plan must front-load a spike on this.
-2. **Cell-as-slide-output rendering of Plotly/widgets in print mode.** Interactive outputs print via static-image fallback; need to confirm jute's existing output renderer flips to static when `?mode=print` is set. May require a `prefersReducedMotion`-style flag plumbed into the renderer.
-3. **Notebook MCP metadata merge.** Verify whether a new `set_cell_metadata` tool is required or whether existing `write_cell` already merges metadata cleanly.
-4. **Layout inference false positives.** Markdown cells with mixed content (`# H1` plus paragraphs plus bullets) need a clear precedence rule. Current spec: first-matching-rule-wins by table order. Confirm during implementation that real notebooks classify intuitively.
-5. **Aspect-ratio/asset paths for image outputs.** Generated images saved by code cells use kernel-side paths; the render layer must resolve them against jute's existing image-asset pipeline. Confirm path resolution in present mode and in print mode (which spawns a separate webview).
+1. **Notebook MCP metadata merge.** Verify whether a new `set_cell_metadata` tool is required or whether existing `write_cell` already merges metadata cleanly.
+2. **Layout inference false positives.** Markdown cells with mixed content (`# H1` plus paragraphs plus bullets) need a clear precedence rule. Current spec: first-matching-rule-wins by table order. Confirm during implementation that real notebooks classify intuitively.
+3. **Asset paths for image outputs in present mode.** Generated images saved by code cells use kernel-side paths; the render layer must resolve them against jute's existing image-asset pipeline. Confirm path resolution works when the present-mode route renders the slide.
+4. **Output renderer reuse.** Present mode reuses jute's existing output renderer for code-cell outputs (Plotly, dataframes, etc.). Confirm it can be embedded inside the slide layout without notebook-specific chrome (cell number, exec count, toolbar).
 
 ## Out of scope (v2 candidates)
 
-- PPTX export (only if a concrete user requirement emerges).
-- HTML+assets bundle export.
+- **Any export** — PDF, PPTX, HTML bundle. Sharing in v1 = share the `.ipynb`.
 - User-supplied themes / CSS.
 - Agent-driven layout-suggestion review queue (Q6/D).
 - Multi-user collaborative editing of the deck view.
@@ -225,16 +211,13 @@ These are explicitly carried into the implementation plan.
 
 ## Files touched (rough)
 
-- `crates/spur-notebook/jute-notebook/src/ui/deck/` (new) — layout components, present-mode route, PDF-export trigger.
+- `crates/spur-notebook/jute-notebook/src/ui/deck/` (new) — layout components, present-mode route, keyboard nav.
 - `crates/spur-notebook/jute-notebook/src/bindings/` — TS types for cell + notebook metadata.
-- `crates/spur-notebook/jute-notebook/src-tauri/src/` — PDF export command, headless webview wiring.
-- `crates/spur-notebook/jute-notebook/src-tauri/Cargo.toml` — possible new Tauri plugin dep for printing.
 - Notebook MCP crate (location to confirm in plan) — optional `set_cell_metadata` tool.
 - `crates/spur-notebook/jute-notebook/src/agent/` — four command entry points, prompt templates, delegation dispatcher.
 
 ## Open questions for planning
 
-- Exact Tauri-print pathway (see risk #1).
-- Notebook MCP crate location and metadata-merge support (risk #3).
+- Notebook MCP crate location and metadata-merge support (risk #1).
 - Whether agent prompt templates live in jute TS or in `crates/spur-core/src/skills/`. Lean: TS in jute for v1 to iterate faster; move to skills if prompts stabilize.
 - Whether the command palette already exists in jute or needs a small addition.
