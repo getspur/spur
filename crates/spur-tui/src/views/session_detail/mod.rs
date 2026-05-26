@@ -24,6 +24,9 @@ use crate::input_history::InputHistoryEntry;
 
 use super::View;
 
+#[cfg(any(test, debug_assertions))]
+mod test_accessors;
+
 const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
 const CANCEL_HINT_TEXT: &str = "Esc cancelled the active turn. Press Esc again to go back.";
 
@@ -2656,58 +2659,6 @@ impl SessionDetailView {
         if self.cancel_confirm_open {
             render_cancel_confirm_modal(frame, area, ctx.theme);
         }
-    }
-
-    /// Test-only: read current InputBar text.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn input_bar_text_for_test(&self) -> String {
-        self.input_bar.text()
-    }
-
-    /// Test-only: mutable InputBar access for seeding history in tests.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn input_bar_mut_for_test(&mut self) -> &mut crate::components::input_bar::InputBar {
-        &mut self.input_bar
-    }
-
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn completion_active_for_test(&self) -> bool {
-        self.completion.is_active()
-    }
-
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn cancel_hint_until_for_test(&self) -> Option<Instant> {
-        self.cancel_hint_until
-    }
-
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn set_cancel_hint_until_for_test(&mut self, value: Option<Instant>) {
-        self.cancel_hint_until = value;
-    }
-
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn set_stream_in_flight_for_test(&mut self, value: bool) {
-        self.stream_in_flight = value;
-    }
-
-    /// Test-only: read tool_depth map.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn tool_depth_for_test(&self) -> &std::collections::HashMap<String, u8> {
-        &self.tool_depth
-    }
-
-    /// Test-only: mutable tool_depth map for seeding tests.
-    #[cfg(any(test, debug_assertions))]
-    #[doc(hidden)]
-    pub fn tool_depth_for_test_mut(&mut self) -> &mut std::collections::HashMap<String, u8> {
-        &mut self.tool_depth
     }
 }
 
