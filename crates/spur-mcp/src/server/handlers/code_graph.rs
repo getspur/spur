@@ -2235,7 +2235,7 @@ async fn try_rebuild_artifact_from_worktree(
                     #[cfg(any(test, feature = "test-support"))]
                     apply_graph_rebuild_delay_for_test().await;
                     tokio::task::spawn_blocking(move || {
-                        let (facts, _file_counts) = build_facts(&worktree)?;
+                        let (facts, _file_counts) = build_facts(&worktree, None)?;
                         let artifact = artifact_from_facts(&facts, &worktree)?;
                         Ok(Arc::new(artifact))
                     })
