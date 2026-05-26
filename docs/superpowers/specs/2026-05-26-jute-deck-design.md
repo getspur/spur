@@ -174,15 +174,13 @@ Each command builds a delegation via `mcp__spur-mcp__delegate_to_worker` with:
 - **Worker type:** the existing default coder worker (confirm during planning by inspecting `crates/spur-core/src/workers/`).
 - **Tool allowlist:** `mcp__notebook__*` only. No shell, no filesystem outside the notebook, no kernel execution. The agent can only mutate the notebook.
 
-### One new MCP tool (to be verified)
+### One new MCP tool — confirmed required
 
 ```
-mcp__notebook__set_cell_metadata(notebook_id, cell_id, patch: object, merge: bool = true)
+mcp__notebook__set_cell_metadata(id, patch: JuteDeckCellMetadata, expected_version)
 ```
 
-Merge-patches `cell.metadata.jute_deck`. Lives in the existing notebook MCP crate. Small addition.
-
-**Verify during planning:** whether `mcp__notebook__write_cell` already supports a metadata-only merge mode. If yes, skip the new tool. The design assumes it does not, based on the current MCP surface.
+Atomic check-and-merge into `cell.metadata.jute_deck`. Follows the same `expected_version` protocol as `write_cell` (per the atomic-handler invariant in `handlers.ts:14-17`). Requires changes at three layers: Rust MCP tool, TS agent handler, daemon notebook store (see Codebase cross-map).
 
 ### Why this design works
 
@@ -191,14 +189,67 @@ Merge-patches `cell.metadata.jute_deck`. Lives in the existing notebook MCP crat
 - **Reviewable.** Worker mutations land as real cell edits in the notebook. The user sees each insert/edit as it happens. Undo = jute's existing cell-level history.
 - **Safe.** Tool allowlist + no shell means the agent can only edit the notebook.
 
+## Codebase cross-map (verified 2026-05-27 against indexed graph)
+
+This section replaces several "to verify" placeholders in the original draft. Every claim below is grounded to a concrete file path.
+
+### Notebook MCP layer — confirmed
+
+- **Tool registration:** `crates/spur-notebook/src/mcp/tools/mod.rs` — one module per tool. Existing tools: `read_cell`, `write_cell`, `insert_cell`, `delete_cell`, `get_notebook`, `save`, `snapshot`, `run_cell`, `interrupt`, `kernel_info`, `start_kernel`, `stop_kernel`, `restart_kernel`, `venv_*`, `daemon_*`.
+- **`write_cell` does NOT accept metadata.** `WriteCellParams` at `crates/spur-notebook/src/mcp/tools/write_cell.rs:15` is `{ id, source, expected_version }`. The bridge call sends those plus `last_edited_by`. **The spec's "needs a new tool" assumption holds.**
+- **Three layers to extend** (not just one) when adding `set_cell_metadata`:
+  1. **Rust MCP tool**: new file `crates/spur-notebook/src/mcp/tools/set_cell_metadata.rs` + register in `mod.rs::tools()`.
+  2. **TS agent handler**: extend the `notebook.*` dispatch switch in `crates/spur-notebook/jute-notebook/src/agent/handlers.ts` (currently routes `notebook.snapshot|export|flush_pending|read_cell|insert_cell|write_cell|delete_cell`).
+  3. **Daemon notebook store**: `crates/spur-notebook/jute-notebook/src-tauri/src/notebook_store.rs` — currently only `set_cell_spur_metadata` writes the `spur` namespace; needs a sibling op for the `jute_deck` namespace, or a generic metadata-merge op gated by namespace.
+
+### Cell-metadata schema — already structured, extend it
+
+- `crates/spur-notebook/jute-notebook/src-tauri/src/backend/notebook.rs:198` —
+  ```rust
+  pub struct CellMetadata {
+      pub spur: Option<SpurCellMetadata>,
+      #[serde(flatten)] #[ts(skip)]
+      pub other: Map<String, Value>,
+  }
+  ```
+- **Add `jute_deck: Option<JuteDeckCellMetadata>` as a typed sibling to `spur`.** Follows the existing pattern; auto-generates TS bindings via `ts-rs` (`crates/spur-notebook/jute-notebook/src/bindings/CellMetadata.ts` is auto-generated).
+- Constructor `empty_cell_metadata()` at `notebook_store.rs:411` needs the new field set to `None`.
+
+### Routing — wouter, not React Router
+
+- `crates/spur-notebook/jute-notebook/src/App.tsx:18` uses **`wouter`** with `<Switch>` + `<Route>`. Single existing route: `<Route path="/notebook" component={NotebookPage}>`. `NotebookPage` reads `path` / `inline` via query string (`useSearch`), not URL params.
+- **Spec update:** the proposed `/present/:notebookId` should be `<Route path="/present" component={PresentPage}>` with `?path=...` matching the existing `NotebookPage` pattern. No need for path params.
+
+### Command palette — already exists, just add items
+
+- `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCommandMenu.tsx:18` is a full cmdk-based palette bound to ⌘K, with grouped `Command.Item`s ("Execution", etc.). Mounted by `NotebookPage`.
+- **Big win:** the four agent commands (Draft / Restructure / Polish / Speaker notes) and "Enter present mode" become new `<Command.Item>` entries under a new "Deck" group. No new palette infrastructure.
+
+### Output renderer — reusable
+
+- `crates/spur-notebook/jute-notebook/src/ui/notebook/OutputView.tsx` exists, alongside `MarkdownRenderer.tsx` and `RenderMarkdownCell.tsx`. These cover the rendering surface present-mode needs.
+- **Open question for planning** (now scoped, not unknown): confirm whether `OutputView` carries notebook-specific chrome (cell number, execution count, toolbar). If yes, add a `chromeless` prop. If no, drop in directly.
+
+### Spur worker delegation — confirmed
+
+- `mcp__spur-mcp__delegate_to_worker` resolved to `crates/spur-mcp/src/tools.rs:371`. Use as-is from the agent commands.
+
+### Existing agent bridge — the integration surface
+
+- `crates/spur-notebook/jute-notebook/src/agent/` is the existing seam for "Spur agent talks to jute's in-memory notebook." Files: `bridge.ts`, `types.ts`, `handlers.ts`, `events.ts`, `events.contract.ts`. The four deck-AI commands plug in here (new request types, new handler cases, new dispatch entries from the command menu).
+
+## Updated open questions for planning (narrowed)
+
+1. **`OutputView` chrome.** Read the component; decide between `chromeless` prop vs. wrapping.
+2. **Image-asset path resolution in present mode.** Confirm that generated-image outputs (kernel-saved files) resolve correctly when rendered from the new `/present` route. Most likely fine since the asset pipeline is route-agnostic, but worth a one-cell smoke test.
+3. **Layout inference precedence on mixed-content markdown.** First-matching-rule-wins by table order; verify on real notebooks.
+
 ## Implementation risks
 
 These are explicitly carried into the implementation plan.
 
-1. **Notebook MCP metadata merge.** Verify whether a new `set_cell_metadata` tool is required or whether existing `write_cell` already merges metadata cleanly.
+1. **Three-layer metadata write** (Rust MCP tool + TS handler + daemon store). Spec originally framed this as "one new MCP tool"; reality is one tool entry plus matching changes at the TS handler layer and the daemon notebook store. Each layer has its own concurrency invariants (the TS handler comment in `handlers.ts:14-17` explicitly warns "Atomic-handler invariant: handlers that perform version checks and mutations must keep check + mutation synchronous, with no await between them"). Follow the same pattern for metadata writes.
 2. **Layout inference false positives.** Markdown cells with mixed content (`# H1` plus paragraphs plus bullets) need a clear precedence rule. Current spec: first-matching-rule-wins by table order. Confirm during implementation that real notebooks classify intuitively.
-3. **Asset paths for image outputs in present mode.** Generated images saved by code cells use kernel-side paths; the render layer must resolve them against jute's existing image-asset pipeline. Confirm path resolution works when the present-mode route renders the slide.
-4. **Output renderer reuse.** Present mode reuses jute's existing output renderer for code-cell outputs (Plotly, dataframes, etc.). Confirm it can be embedded inside the slide layout without notebook-specific chrome (cell number, exec count, toolbar).
 
 ## Out of scope (v2 candidates)
 
@@ -211,13 +262,31 @@ These are explicitly carried into the implementation plan.
 
 ## Files touched (rough)
 
-- `crates/spur-notebook/jute-notebook/src/ui/deck/` (new) — layout components, present-mode route, keyboard nav.
-- `crates/spur-notebook/jute-notebook/src/bindings/` — TS types for cell + notebook metadata.
-- Notebook MCP crate (location to confirm in plan) — optional `set_cell_metadata` tool.
-- `crates/spur-notebook/jute-notebook/src/agent/` — four command entry points, prompt templates, delegation dispatcher.
+### New
+- `crates/spur-notebook/jute-notebook/src/ui/deck/` — layout components (`TitleLayout.tsx`, `BulletsLayout.tsx`, `OutputLayout.tsx`, `CodeOutputLayout.tsx`, `TwoColLayout.tsx`, `ImageLayout.tsx`, `BlankLayout.tsx`), the `cellToSlide` transform, present-mode keyboard handler.
+- `crates/spur-notebook/jute-notebook/src/pages/PresentPage.tsx` — the `/present` route component.
+- `crates/spur-notebook/src/mcp/tools/set_cell_metadata.rs` — new MCP tool.
+- `crates/spur-notebook/jute-notebook/src/agent/deck/` — four deck-command entry points, prompt templates, delegation dispatcher.
 
-## Open questions for planning
+### Modified
+- `crates/spur-notebook/jute-notebook/src/App.tsx` — add `<Route path="/present" component={PresentPage}>`.
+- `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCommandMenu.tsx` — add "Deck" `Command.Group` with five items (4 AI commands + "Enter present mode").
+- `crates/spur-notebook/jute-notebook/src-tauri/src/backend/notebook.rs` — add `JuteDeckCellMetadata` struct + `JuteDeckNotebookMeta`; add `jute_deck` fields to `CellMetadata` and notebook-root metadata.
+- `crates/spur-notebook/jute-notebook/src-tauri/src/notebook_store.rs` — update `empty_cell_metadata()`; add metadata-merge op for the `jute_deck` namespace following the `set_cell_spur_metadata` pattern.
+- `crates/spur-notebook/jute-notebook/src/agent/handlers.ts` — add `notebook.set_cell_metadata` case to the dispatch switch, with the same atomic-handler invariant as existing write paths.
+- `crates/spur-notebook/jute-notebook/src/agent/types.ts` — add `AgentSetCellMetadata` type.
+- `crates/spur-notebook/src/mcp/tools/mod.rs` — register the new tool module.
+- TS bindings (`crates/spur-notebook/jute-notebook/src/bindings/`) — auto-regenerated by `ts-rs`; no hand edits.
 
-- Notebook MCP crate location and metadata-merge support (risk #1).
-- Whether agent prompt templates live in jute TS or in `crates/spur-core/src/skills/`. Lean: TS in jute for v1 to iterate faster; move to skills if prompts stabilize.
-- Whether the command palette already exists in jute or needs a small addition.
+### Possibly modified (decide during planning)
+- `crates/spur-notebook/jute-notebook/src/ui/notebook/OutputView.tsx` — add `chromeless` prop only if it currently renders notebook-specific chrome.
+
+## Resolved during cross-map
+
+- ~~Notebook MCP crate location~~ → `crates/spur-notebook/src/mcp/tools/`.
+- ~~Whether the command palette exists~~ → yes, `NotebookCommandMenu.tsx`, cmdk-based, ⌘K-bound. Add a "Deck" group.
+- ~~Whether `write_cell` already supports metadata merging~~ → no. New tool needed across all three layers.
+
+## Remaining open question
+
+- Agent prompt templates: live in jute TS (`agent/deck/prompts/`) or in `crates/spur-core/src/skills/`? Lean: TS in jute for v1 to iterate faster; promote to skills if prompts stabilize.
