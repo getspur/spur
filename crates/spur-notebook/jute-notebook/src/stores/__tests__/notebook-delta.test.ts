@@ -32,6 +32,7 @@ describe("reconcileNotebookDelta", () => {
       kind: "code",
       version: 2,
       source: "answer = 42",
+      lastEditedBy: "brain",
       execCount: null,
       status: "idle",
       outputs: [],
@@ -70,6 +71,7 @@ describe("reconcileNotebookDelta", () => {
     const selectSource = (state: NotebookStoreState) =>
       state.cells[cellId]?.source;
     expect(selectSource(notebook.store.getState())).toBe("answer = 42");
+    expect(notebook.store.getState().cells[cellId]?.lastEditedBy).toBe("brain");
   });
 });
 
