@@ -48,6 +48,10 @@ pub async fn set_pinned(path: &Path, pinned: bool) -> Result<()> {
     set_pinned_at(&recents_record_path()?, path, pinned).await
 }
 
+pub async fn rename_path(from: &Path, to: &Path) -> Result<()> {
+    rename_path_at(&recents_record_path()?, from, to).await
+}
+
 fn notebooks_dir() -> Result<PathBuf> {
     let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
     Ok(base_dirs.home_dir().join(".spur").join("notebooks"))
@@ -62,7 +66,11 @@ fn recents_record_path() -> Result<PathBuf> {
     Ok(notebooks_dir()?.join("recents.json"))
 }
 
-async fn record_open_at(record_path: &Path, scratch_dir: &Path, path: &Path) -> Result<()> {
+pub(crate) async fn record_open_at(
+    record_path: &Path,
+    scratch_dir: &Path,
+    path: &Path,
+) -> Result<()> {
     let path = canonicalize_or_normalize(path).await?;
     let scratch_dir = canonicalize_or_normalize(scratch_dir).await?;
     let is_scratch = path.starts_with(&scratch_dir);
@@ -133,6 +141,26 @@ async fn set_pinned_at(record_path: &Path, path: &Path, pinned: bool) -> Result<
     if let Some(entry) = record.entries.iter_mut().find(|entry| entry.path == path) {
         if entry.pinned != pinned {
             entry.pinned = pinned;
+            changed = true;
+        }
+    }
+    if changed {
+        sort_recents(&mut record.entries);
+        prune_unpinned_cap(&mut record.entries);
+        write_recents_at(record_path, &record).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn rename_path_at(record_path: &Path, from: &Path, to: &Path) -> Result<()> {
+    let from = canonicalize_or_normalize(from).await?;
+    let to = canonicalize_or_normalize(to).await?;
+    let _guard = RECENTS_LOCK.lock().await;
+    let mut record = read_recents_at(record_path).await?;
+    let mut changed = false;
+    for entry in &mut record.entries {
+        if entry.path == from {
+            entry.path = to.clone();
             changed = true;
         }
     }

@@ -282,6 +282,8 @@ fn main() {
             jute::commands::set_notebook_pinned,
             jute::commands::move_notebook_to_trash,
             jute::commands::reveal_notebook_in_finder,
+            jute::commands::open_notebook_via_daemon,
+            jute::commands::rename_notebook,
             jute::commands::new_notebook_via_daemon,
             jute::commands::reopen_notebook_via_daemon,
             jute::commands::close_notebook_via_daemon,
