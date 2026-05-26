@@ -105,7 +105,9 @@ fn extracted_graph_index_resolves_symbol_payload_through_registry() {
         "pub struct Engine;\n\npub fn run() -> Engine {\n    Engine\n}\n",
     )
     .unwrap();
-    let facts = build_facts(dir.path()).expect("extract fixture worktree").0;
+    let facts = build_facts(dir.path(), None)
+        .expect("extract fixture worktree")
+        .0;
     let artifact = artifact_from_facts(&facts, dir.path()).expect("build artifact");
     let artifact_path = write_artifact_parquet(
         &artifact,
