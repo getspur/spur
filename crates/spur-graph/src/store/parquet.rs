@@ -2128,7 +2128,7 @@ fn relation_to_str(relation: RelationKind) -> &'static str {
     }
 }
 
-fn relation_from_str(value: &str) -> anyhow::Result<RelationKind> {
+pub(crate) fn relation_from_str(value: &str) -> anyhow::Result<RelationKind> {
     match value {
         "imports" => Ok(RelationKind::Imports),
         "calls" => Ok(RelationKind::Calls),
@@ -2152,7 +2152,7 @@ fn confidence_to_str(confidence: Confidence) -> &'static str {
     }
 }
 
-fn confidence_from_str(value: &str) -> anyhow::Result<Confidence> {
+pub(crate) fn confidence_from_str(value: &str) -> anyhow::Result<Confidence> {
     match value {
         "syntax_exact" => Ok(Confidence::SyntaxExact),
         "heuristic" => Ok(Confidence::Heuristic),
@@ -2170,7 +2170,7 @@ fn edge_kind_to_str(edge_kind: GraphEdgeKind) -> &'static str {
     }
 }
 
-fn edge_kind_from_str(value: &str) -> anyhow::Result<GraphEdgeKind> {
+pub(crate) fn edge_kind_from_str(value: &str) -> anyhow::Result<GraphEdgeKind> {
     match value {
         "calls" => Ok(GraphEdgeKind::Calls),
         "calls_dyn" => Ok(GraphEdgeKind::CallsDyn),
