@@ -8,20 +8,37 @@ use std::collections::HashMap;
 
 use spur_acp::SessionId;
 
-/// First and last user-authored message text for a session, derived
-/// from observed events. Stored raw; render-side consumers do their
-/// own truncation.
+/// First and last user-authored message text for a session, plus the
+/// agent's reply that followed each, derived from observed events.
+/// Stored values are capped at write-time so the projection never holds
+/// arbitrarily large strings; render-side consumers do their own wrap
+/// and per-row truncation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionSynopsis {
     pub first_user_msg: Option<String>,
     pub last_user_msg: Option<String>,
+    pub first_agent_reply: Option<String>,
+    pub last_agent_reply: Option<String>,
 }
+
+/// Max stored characters per user-message field.
+const USER_MSG_CAP: usize = 200;
+/// Max stored characters per agent-reply field.
+const AGENT_REPLY_CAP: usize = 100;
 
 /// In-memory projection of session synopses, fed by `apply(&event)`.
 #[derive(Debug, Default)]
 pub struct SessionSynopsisProjection {
     by_session: HashMap<SessionId, SessionSynopsis>,
     pending: HashMap<SessionId, String>,
+    pending_agent: HashMap<SessionId, String>,
+}
+
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    s.chars().take(max).collect()
 }
 
 impl SessionSynopsisProjection {
@@ -44,12 +61,14 @@ impl SessionSynopsisProjection {
         match (committed, pending_trimmed) {
             (Some(c), _) => Some(c.clone()),
             (None, Some(p)) => Some(SessionSynopsis {
-                first_user_msg: if p.starts_with('/') {
+                first_user_msg: if is_slash_command_like(p) {
                     None
                 } else {
-                    Some(p.to_owned())
+                    Some(cap_chars(p, USER_MSG_CAP))
                 },
-                last_user_msg: Some(p.to_owned()),
+                last_user_msg: Some(cap_chars(p, USER_MSG_CAP)),
+                first_agent_reply: None,
+                last_agent_reply: None,
             }),
             (None, None) => None,
         }
@@ -81,15 +100,28 @@ impl SessionSynopsisProjection {
                 notification,
             } => match &notification.update {
                 SessionUpdate::UserMessageChunk(chunk) => {
+                    // A new user turn closes out any in-flight agent reply.
+                    self.flush_pending_agent(session);
                     let text = content_block_text(&chunk.content);
                     self.pending
                         .entry(session.clone())
                         .or_default()
                         .push_str(text);
                 }
-                // Any non-user agent update flushes the pending buffer.
-                SessionUpdate::AgentMessageChunk(_)
-                | SessionUpdate::AgentThoughtChunk(_)
+                SessionUpdate::AgentMessageChunk(chunk) => {
+                    // Agent turn started — finalize any pending user buffer
+                    // first, then accumulate the agent reply text.
+                    self.flush_pending(session);
+                    let text = content_block_text(&chunk.content);
+                    self.pending_agent
+                        .entry(session.clone())
+                        .or_default()
+                        .push_str(text);
+                }
+                // Non-text agent updates still close out a pending user buffer
+                // but do NOT flush the agent reply — agent text can resume
+                // streaming after a thought/tool-call within the same turn.
+                SessionUpdate::AgentThoughtChunk(_)
                 | SessionUpdate::ToolCall(_)
                 | SessionUpdate::ToolCallUpdate(_)
                 | SessionUpdate::Plan(_)
@@ -101,42 +133,77 @@ impl SessionSynopsisProjection {
             },
             SpurEventBody::TurnComplete { session } => {
                 self.flush_pending(session);
+                self.flush_pending_agent(session);
             }
             SpurEventBody::BrainRetired { session, .. }
             | SpurEventBody::SessionCompleted { session, .. } => {
                 self.flush_pending(session);
+                self.flush_pending_agent(session);
             }
             SpurEventBody::SessionAttachRejected { acp_session_id, .. } => {
-                self.flush_pending(&SessionId(acp_session_id.clone()));
+                let key = SessionId(acp_session_id.clone());
+                self.flush_pending(&key);
+                self.flush_pending_agent(&key);
             }
             SpurEventBody::SessionHistory { session, entries } => {
-                // Drop any stale pending buffer for this session — the history
-                // is authoritative.
+                // Drop any stale pending buffers for this session — history is
+                // authoritative.
                 self.pending.remove(session);
+                self.pending_agent.remove(session);
 
-                let user_texts: Vec<&str> = entries
-                    .iter()
-                    .filter(|e| e.role == "user")
-                    .map(|e| e.text.trim())
-                    .filter(|t| !t.is_empty())
-                    .collect();
+                // Locate the first non-slash user entry and the most recent
+                // user entry, then take the immediately-following assistant
+                // entry (if any) as the agent reply for each.
+                let mut first_user_idx: Option<usize> = None;
+                let mut last_user_idx: Option<usize> = None;
+                let mut last_user_text: Option<&str> = None;
+                for (i, e) in entries.iter().enumerate() {
+                    if e.role != "user" {
+                        continue;
+                    }
+                    let t = e.text.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    if first_user_idx.is_none() && !is_slash_command_like(t) {
+                        first_user_idx = Some(i);
+                    }
+                    last_user_idx = Some(i);
+                    last_user_text = Some(t);
+                }
 
-                if user_texts.is_empty() {
+                if last_user_idx.is_none() {
                     return;
                 }
 
-                // Mirror live-flow semantics: skip slash-commands when picking
-                // first_user_msg, so `/clear` followed by a real message replays
-                // the same way as a live session.
-                let first_non_slash = user_texts.iter().copied().find(|t| !t.starts_with('/'));
-                let last = user_texts.last().copied().unwrap();
+                let next_assistant_text = |after_idx: usize| -> Option<&str> {
+                    entries
+                        .iter()
+                        .skip(after_idx + 1)
+                        .find(|e| e.role == "assistant")
+                        .map(|e| e.text.trim())
+                        .filter(|t| !t.is_empty())
+                };
+
                 let s = self.by_session.entry(session.clone()).or_default();
-                if let Some(first) = first_non_slash {
+                if let Some(idx) = first_user_idx {
                     if s.first_user_msg.is_none() {
-                        s.first_user_msg = Some(first.to_owned());
+                        s.first_user_msg = Some(cap_chars(entries[idx].text.trim(), USER_MSG_CAP));
+                    }
+                    if s.first_agent_reply.is_none() {
+                        if let Some(reply) = next_assistant_text(idx) {
+                            s.first_agent_reply = Some(cap_chars(reply, AGENT_REPLY_CAP));
+                        }
                     }
                 }
-                s.last_user_msg = Some(last.to_owned());
+                if let Some(t) = last_user_text {
+                    s.last_user_msg = Some(cap_chars(t, USER_MSG_CAP));
+                }
+                if let Some(idx) = last_user_idx {
+                    if let Some(reply) = next_assistant_text(idx) {
+                        s.last_agent_reply = Some(cap_chars(reply, AGENT_REPLY_CAP));
+                    }
+                }
             }
             SpurEventBody::SessionSynopsisSeed {
                 session,
@@ -148,9 +215,15 @@ impl SessionSynopsisProjection {
                 }
 
                 self.pending.remove(session);
+                self.pending_agent.remove(session);
                 let synopsis = SessionSynopsis {
-                    first_user_msg: first.clone().filter(|s| !s.starts_with('/')),
-                    last_user_msg: last.clone(),
+                    first_user_msg: first
+                        .clone()
+                        .filter(|s| !is_slash_command_like(s))
+                        .map(|s| cap_chars(&s, USER_MSG_CAP)),
+                    last_user_msg: last.clone().map(|s| cap_chars(&s, USER_MSG_CAP)),
+                    first_agent_reply: None,
+                    last_agent_reply: None,
                 };
 
                 if synopsis.first_user_msg.is_none() && synopsis.last_user_msg.is_none() {
@@ -172,12 +245,45 @@ impl SessionSynopsisProjection {
         if trimmed.is_empty() {
             return;
         }
+        let capped = cap_chars(trimmed, USER_MSG_CAP);
         let s = self.by_session.entry(session.clone()).or_default();
-        if s.first_user_msg.is_none() && !trimmed.starts_with('/') {
-            s.first_user_msg = Some(trimmed.to_owned());
+        if s.first_user_msg.is_none() && !is_slash_command_like(trimmed) {
+            s.first_user_msg = Some(capped.clone());
         }
-        s.last_user_msg = Some(trimmed.to_owned());
+        s.last_user_msg = Some(capped);
     }
+
+    fn flush_pending_agent(&mut self, session: &SessionId) {
+        let buf = match self.pending_agent.remove(session) {
+            Some(b) => b,
+            None => return,
+        };
+        let trimmed = buf.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let capped = cap_chars(trimmed, AGENT_REPLY_CAP);
+        // Only attribute a reply when we already have a real first_user_msg
+        // committed — that way slash-command-prefixed sessions don't get a
+        // misleading "agent reply" attached to the control-input turn.
+        let s = match self.by_session.get_mut(session) {
+            Some(s) if s.first_user_msg.is_some() || s.last_user_msg.is_some() => s,
+            _ => return,
+        };
+        if s.first_user_msg.is_some() && s.first_agent_reply.is_none() {
+            s.first_agent_reply = Some(capped.clone());
+        }
+        s.last_agent_reply = Some(capped);
+    }
+}
+
+/// Returns true if `text` is a slash-command submission or a Claude Code
+/// slash-command wrapper (`<command-name>/foo</command-name>...`). These
+/// should be skipped when picking a session's `first_user_msg` so the
+/// rendered "Intent" reflects the real first request, not control input.
+fn is_slash_command_like(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with('/') || t.starts_with("<command-name>")
 }
 
 fn content_block_text(content: &agent_client_protocol::schema::ContentBlock) -> &str {
@@ -593,6 +699,196 @@ mod tests {
         let s = proj.get(&SessionId("S1".into())).unwrap();
         assert_eq!(s.first_user_msg.as_deref(), Some("committed msg"));
         assert_eq!(s.last_user_msg.as_deref(), Some("committed msg"));
+    }
+
+    #[test]
+    fn first_agent_reply_captured_after_first_user_turn_completes() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "fix the auth bug"));
+        proj.apply(&agent_chunk_event("S1", "I'll take a look."));
+        // Second user turn triggers the flush of the pending agent buffer.
+        proj.apply(&user_chunk_event("S1", "thanks"));
+        proj.apply(&agent_chunk_event("S1", "done"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("fix the auth bug"));
+        assert_eq!(s.first_agent_reply.as_deref(), Some("I'll take a look."));
+        assert_eq!(s.last_user_msg.as_deref(), Some("thanks"));
+        // last_agent_reply for "done" only commits at TurnComplete / next turn.
+        assert_eq!(s.last_agent_reply.as_deref(), Some("I'll take a look."));
+
+        proj.apply(&SpurEvent::now(SpurEventBody::TurnComplete {
+            session: SessionId("S1".into()),
+        }));
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.last_agent_reply.as_deref(), Some("done"));
+        // first_agent_reply must not be overwritten by later turns.
+        assert_eq!(s.first_agent_reply.as_deref(), Some("I'll take a look."));
+    }
+
+    #[test]
+    fn multi_chunk_agent_reply_accumulates_then_flushes_as_one() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "hi"));
+        proj.apply(&agent_chunk_event("S1", "hello "));
+        proj.apply(&agent_chunk_event("S1", "there"));
+        proj.apply(&SpurEvent::now(SpurEventBody::TurnComplete {
+            session: SessionId("S1".into()),
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_agent_reply.as_deref(), Some("hello there"));
+        assert_eq!(s.last_agent_reply.as_deref(), Some("hello there"));
+    }
+
+    #[test]
+    fn agent_thought_or_tool_call_does_not_split_agent_reply() {
+        use agent_client_protocol::schema::{ContentChunk, TextContent};
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "do thing"));
+        proj.apply(&agent_chunk_event("S1", "step 1 "));
+        // A thought chunk arrives mid-turn — must not finalize the reply.
+        proj.apply(&SpurEvent::now(SpurEventBody::AgentNotification {
+            session: SessionId("S1".into()),
+            notification: Box::new(SessionNotification::new(
+                agent_client_protocol::schema::SessionId::new("S1"),
+                SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new("thinking..."),
+                ))),
+            )),
+        }));
+        proj.apply(&agent_chunk_event("S1", "step 2"));
+        proj.apply(&SpurEvent::now(SpurEventBody::TurnComplete {
+            session: SessionId("S1".into()),
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_agent_reply.as_deref(), Some("step 1 step 2"));
+    }
+
+    #[test]
+    fn agent_reply_caps_at_100_chars() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "go"));
+        proj.apply(&agent_chunk_event("S1", &"x".repeat(250)));
+        proj.apply(&SpurEvent::now(SpurEventBody::TurnComplete {
+            session: SessionId("S1".into()),
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_agent_reply.as_deref().map(str::len), Some(100));
+    }
+
+    #[test]
+    fn user_msg_caps_at_200_chars() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", &"a".repeat(500)));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref().map(str::len), Some(200));
+        assert_eq!(s.last_user_msg.as_deref().map(str::len), Some(200));
+    }
+
+    #[test]
+    fn agent_reply_not_attributed_when_only_slash_command_user_history() {
+        // Slash-only user submissions should not lock in a first_agent_reply.
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "/clear"));
+        proj.apply(&agent_chunk_event("S1", "cleared"));
+        proj.apply(&SpurEvent::now(SpurEventBody::TurnComplete {
+            session: SessionId("S1".into()),
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert!(s.first_user_msg.is_none());
+        assert!(
+            s.first_agent_reply.is_none(),
+            "agent reply must not lock in without a real first_user_msg"
+        );
+    }
+
+    #[test]
+    fn session_history_captures_agent_replies_for_first_and_last() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![
+                history_entry("user", "/clear"),
+                history_entry("assistant", "cleared"),
+                history_entry("user", "real first"),
+                history_entry("assistant", "first reply"),
+                history_entry("user", "second"),
+                history_entry("assistant", "second reply"),
+                history_entry("user", "third"),
+                history_entry("assistant", "third reply"),
+            ],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("real first"));
+        assert_eq!(s.first_agent_reply.as_deref(), Some("first reply"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("third"));
+        assert_eq!(s.last_agent_reply.as_deref(), Some("third reply"));
+    }
+
+    #[test]
+    fn session_history_handles_missing_trailing_assistant_reply() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![
+                history_entry("user", "hello"),
+                history_entry("assistant", "hi back"),
+                history_entry("user", "follow up"),
+                // No assistant reply after the last user entry.
+            ],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_agent_reply.as_deref(), Some("hi back"));
+        // last_agent_reply falls back to the only assistant entry, which is
+        // also the next-after-last-user lookup result (none after "follow up").
+        // We treat the missing trailing reply as "none" rather than reusing
+        // the first reply — keeps the semantics honest.
+        assert!(s.last_agent_reply.is_none());
+    }
+
+    #[test]
+    fn claude_code_command_wrapper_is_treated_as_slash_command() {
+        // Claude Code wraps slash commands like `/model` into a structured
+        // user message starting with `<command-name>/model</command-name>...`.
+        // That wrapper text should not become the session's first_user_msg.
+        let wrapper = "<command-name>/model</command-name>\n            \
+                       <command-message>model</command-message>\n            \
+                       <command-args>claude-opus-4-7[1m]</command-args>";
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", wrapper));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+        proj.apply(&user_chunk_event("S1", "real first message"));
+        proj.apply(&agent_chunk_event("S1", "ack"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("real first message"));
+
+        // Same protection via SessionHistory replay.
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S2".into()),
+            entries: vec![
+                history_entry("user", wrapper),
+                history_entry("assistant", "ok"),
+                history_entry("user", "real first via history"),
+            ],
+        }));
+        let s = proj.get(&SessionId("S2".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("real first via history"));
+
+        // And via SessionSynopsisSeed.
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&seed_event("S3", Some(wrapper), Some(wrapper)));
+        let s = proj.get(&SessionId("S3".into())).unwrap();
+        assert!(s.first_user_msg.is_none());
     }
 
     #[test]

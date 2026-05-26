@@ -123,6 +123,8 @@ fn synopsis_seed_replays_into_fresh_projection() {
         Some(SessionSynopsis {
             first_user_msg: Some("hello world".into()),
             last_user_msg: Some("bye now".into()),
+            first_agent_reply: None,
+            last_agent_reply: None,
         })
     );
     assert_eq!(stats.events_applied, 1);
@@ -162,6 +164,8 @@ fn committed_synopsis_survives_subsequent_seed_replay() {
         Some(SessionSynopsis {
             first_user_msg: Some("real first".into()),
             last_user_msg: Some("real first".into()),
+            first_agent_reply: None,
+            last_agent_reply: None,
         })
     );
     assert_eq!(stats.events_applied, 3);
