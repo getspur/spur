@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use base64::Engine as _;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::EncodePrivateKey;
-use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::pkcs8::EncodePrivateKey as _;
+use ed25519_dalek::{Signature, Verifier as _};
 use spur_license::policy::SignedPolicy;
 
 const TEST_SEED: [u8; 32] = [0x42u8; 32];

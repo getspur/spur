@@ -3,7 +3,7 @@
 //! issuance side; ship a later binary that removes the old key.
 
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 

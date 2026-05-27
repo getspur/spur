@@ -50,7 +50,7 @@ fn write_crash_file(anonymous_id: Uuid, panic_info: &std::panic::PanicHookInfo<'
     };
 
     let payload = panic_payload_to_string(panic_info.payload());
-    let panic_type = panic_type_name(classify_panic(&payload)).to_string();
+    let panic_type = panic_type_name(classify_panic(&payload)).to_owned();
     let payload_hash = payload_hash(&payload, &anonymous_id.to_string());
     let sanitized_stack = scrub_stack(&Backtrace::force_capture().to_string());
     let (crate_, module, line) = panic_location_parts(
@@ -116,7 +116,7 @@ where
         };
 
         let event = PosthogEvent {
-            event: "$exception".to_string(),
+            event: "$exception".to_owned(),
             distinct_id: anonymous_id.to_string(),
             properties: json!({
                 "panic_type": report.panic_type,
@@ -156,12 +156,12 @@ fn panic_type_name(kind: PanicType) -> &'static str {
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(msg) = payload.downcast_ref::<&'static str>() {
-        return (*msg).to_string();
+        return (*msg).to_owned();
     }
     if let Some(msg) = payload.downcast_ref::<String>() {
         return msg.clone();
     }
-    "non_string_panic_payload".to_string()
+    "non_string_panic_payload".to_owned()
 }
 
 fn panic_location_parts(

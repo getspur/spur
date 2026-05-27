@@ -5,7 +5,7 @@ use crate::events::Tier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     Crash,
     Perf,
     Usage,

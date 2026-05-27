@@ -52,7 +52,7 @@ impl Default for RefreshPolicy {
 /// could produce stale-allow over-permissioning, and serialize
 /// accordingly. See
 /// `docs/superpowers/specs/2026-04-29-bd-22q-15-licenseseat-cross-method-serialization-design.md`
-/// for the LicenseSeatProvider design.
+/// for the `LicenseSeatProvider` design.
 #[async_trait]
 pub trait LicenseProvider: Send + Sync {
     fn current_state(&self) -> LicenseState;

@@ -98,7 +98,7 @@ pub fn from_env_or_disabled() -> Arc<dyn LicenseProvider> {
 /// observe a best-effort snapshot:
 ///
 /// - `current_state()` reads `sdk.current_license()` BEFORE the
-///   provider RwLock, so during an in-flight mutator it can
+///   provider `RwLock`, so during an in-flight mutator it can
 ///   observe SDK-cache-post-mutation mixed with provider-state-
 ///   pre-mutation. Eventually consistent on commit.
 /// - `has_entitlement(feature)` reads the SDK cache directly;
@@ -123,7 +123,7 @@ pub struct LicenseSeatProvider {
     sdk: LicenseSeat,
     state: Arc<RwLock<LicenseState>>,
     /// Cross-method operation serialization (bd-22q.15). Acquired at
-    /// entry of every mutating method; held across SDK + replace_state.
+    /// entry of every mutating method; held across SDK + `replace_state`.
     /// Reads do NOT acquire this lock.
     operation_lock: Arc<tokio::sync::Mutex<()>>,
     events_tx: broadcast::Sender<LicenseEvent>,
@@ -232,7 +232,7 @@ impl LicenseSeatProvider {
 #[cfg(test)]
 impl LicenseSeatProvider {
     /// In-crate-test-only handle to the operation lock for bd-22q.15
-    /// cross_method_race tests. NEVER expose `pub`: external crates
+    /// `cross_method_race` tests. NEVER expose `pub`: external crates
     /// could acquire the lock and stall production mutations.
     pub(crate) fn operation_lock_handle(&self) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(&self.operation_lock)
@@ -560,8 +560,7 @@ mod dedup_tests {
         ] {
             assert!(
                 is_handler_originated(&kind),
-                "expected {:?} to be classified as handler-originated",
-                kind,
+                "expected {kind:?} to be classified as handler-originated",
             );
         }
     }
@@ -578,8 +577,7 @@ mod dedup_tests {
         ] {
             assert!(
                 !is_handler_originated(&kind),
-                "autonomous kind {:?} must NOT be classified as handler-originated",
-                kind,
+                "autonomous kind {kind:?} must NOT be classified as handler-originated",
             );
         }
     }
@@ -604,8 +602,8 @@ mod cross_method_race {
     use std::sync::Arc;
     use std::time::Duration;
 
-    /// Test 1: tokio::sync::Mutex primitive sanity. Decoupled from
-    /// LicenseSeatProvider; verifies that two clones of an
+    /// Test 1: `tokio::sync::Mutex` primitive sanity. Decoupled from
+    /// `LicenseSeatProvider`; verifies that two clones of an
     /// `Arc<Mutex<()>>` serialize.
     #[tokio::test(start_paused = true)]
     async fn mutex_serializes_concurrent_acquirers() {
@@ -635,10 +633,10 @@ mod cross_method_race {
         );
     }
 
-    /// Test 2: activate() acquires operation_lock at entry.
+    /// Test 2: `activate()` acquires `operation_lock` at entry.
     #[tokio::test(start_paused = true)]
     async fn activate_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
+        let provider = LicenseSeatProvider::new("test-key".to_owned(), "test-product".to_owned());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
@@ -661,10 +659,10 @@ mod cross_method_race {
         let _ = activate_task.await;
     }
 
-    /// Test 3: validate() acquires operation_lock at entry.
+    /// Test 3: `validate()` acquires `operation_lock` at entry.
     #[tokio::test(start_paused = true)]
     async fn validate_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
+        let provider = LicenseSeatProvider::new("test-key".to_owned(), "test-product".to_owned());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
@@ -683,10 +681,10 @@ mod cross_method_race {
         let _ = task.await;
     }
 
-    /// Test 4: heartbeat() acquires operation_lock at entry.
+    /// Test 4: `heartbeat()` acquires `operation_lock` at entry.
     #[tokio::test(start_paused = true)]
     async fn heartbeat_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
+        let provider = LicenseSeatProvider::new("test-key".to_owned(), "test-product".to_owned());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
@@ -705,10 +703,10 @@ mod cross_method_race {
         let _ = task.await;
     }
 
-    /// Test 5: deactivate() acquires operation_lock at entry.
+    /// Test 5: `deactivate()` acquires `operation_lock` at entry.
     #[tokio::test(start_paused = true)]
     async fn deactivate_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
+        let provider = LicenseSeatProvider::new("test-key".to_owned(), "test-product".to_owned());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
@@ -728,7 +726,7 @@ mod cross_method_race {
     }
 
     /// Test 6: tokio FIFO discipline regression canary. Uses virtual
-    /// time staggering (NOT tokio::sync::Barrier — barrier release is
+    /// time staggering (NOT `tokio::sync::Barrier` — barrier release is
     /// non-deterministic in waker-queue order) to ensure three tasks
     /// queue on the lock in a known order, then asserts the lock
     /// releases in that order under FIFO.
