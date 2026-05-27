@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::schema::{
     ChangeKind, CommitIndexArtifact, EdgeEndpoint, GraphIndexArtifact, RelationKind, RenamePrev,
@@ -23,6 +23,58 @@ pub enum ResolutionFailure {
 
 pub type GitSha = String;
 
+const MAX_ANCESTOR_CACHE_ENTRIES: usize = 256;
+
+#[derive(Debug, Default)]
+struct AncestorCache {
+    sets: HashMap<String, Arc<HashSet<String>>>,
+    lru: VecDeque<String>,
+}
+
+impl AncestorCache {
+    fn get(&mut self, commit: &str) -> Option<Arc<HashSet<String>>> {
+        let ancestors = Arc::clone(self.sets.get(commit)?);
+        self.touch(commit);
+        Some(ancestors)
+    }
+
+    fn insert(&mut self, commit: String, ancestors: Arc<HashSet<String>>) -> Arc<HashSet<String>> {
+        if self.sets.contains_key(&commit) {
+            self.sets.insert(commit.clone(), Arc::clone(&ancestors));
+            self.touch(&commit);
+            return ancestors;
+        }
+
+        self.sets.insert(commit.clone(), Arc::clone(&ancestors));
+        self.lru.push_back(commit);
+        while self.sets.len() > MAX_ANCESTOR_CACHE_ENTRIES {
+            if let Some(expired) = self.lru.pop_front() {
+                self.sets.remove(&expired);
+            }
+        }
+        ancestors
+    }
+
+    fn touch(&mut self, commit: &str) {
+        self.lru.retain(|cached| cached != commit);
+        self.lru.push_back(commit.to_owned());
+    }
+
+    fn size_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        let map_bytes =
+            self.sets.capacity() * (size_of::<String>() + size_of::<Arc<HashSet<String>>>());
+        let lru_bytes = self.lru.capacity() * size_of::<String>();
+        let set_bytes = self
+            .sets
+            .values()
+            .map(|ancestors| ancestors.capacity() * size_of::<String>())
+            .sum::<usize>();
+        map_bytes + lru_bytes + set_bytes
+    }
+}
+
 #[derive(Debug)]
 pub struct TemporalIndex {
     code: Arc<GraphIndexArtifact>,
@@ -35,6 +87,7 @@ pub struct TemporalIndex {
     rename_edges: Vec<(SnapshotKey, SnapshotKey)>,
     rename_neighbors_by_snapshot: HashMap<SnapshotKey, Vec<SnapshotKey>>,
     referenced_snapshot_count: usize,
+    ancestor_cache: Mutex<AncestorCache>,
 }
 
 impl TemporalIndex {
@@ -157,6 +210,8 @@ impl TemporalIndex {
             rename_edges,
             rename_neighbors_by_snapshot,
             referenced_snapshot_count,
+            // Bounded LRU avoids the worst-case O(commits^2) memory growth of all ancestor sets.
+            ancestor_cache: Mutex::new(AncestorCache::default()),
         }
     }
 
@@ -166,6 +221,16 @@ impl TemporalIndex {
 
     pub fn commit_graph(&self) -> CommitGraph<'_> {
         CommitGraph::from_borrowed(&self.commit_positions, &self.commit_parents)
+    }
+
+    pub fn ancestors_of(&self, commit: &str) -> Option<Arc<HashSet<String>>> {
+        let graph = self.commit_graph();
+        self.ancestors_of_with_graph(&graph, commit)
+    }
+
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
+        let graph = self.commit_graph();
+        self.is_ancestor_with_graph(&graph, ancestor, descendant)
     }
 
     pub fn edges_for_stable_symbol_id(
@@ -217,6 +282,8 @@ impl TemporalIndex {
             * (size_of::<SnapshotKey>() + size_of::<Vec<SnapshotKey>>());
         let rename_edges_bytes =
             self.rename_edges.capacity() * size_of::<(SnapshotKey, SnapshotKey)>();
+        let ancestor_cache_bytes =
+            size_of::<Mutex<AncestorCache>>() + self.lock_ancestor_cache().size_bytes();
 
         edges_by_id
             + edges_by_sha
@@ -225,6 +292,7 @@ impl TemporalIndex {
             + deleted_snapshot_keys
             + rename_neighbors
             + rename_edges_bytes
+            + ancestor_cache_bytes
     }
 
     pub fn is_deleted_snapshot(&self, snapshot: &SnapshotKey) -> bool {
@@ -236,6 +304,50 @@ impl TemporalIndex {
             .get(commit)
             .copied()
             .unwrap_or(usize::MAX)
+    }
+
+    fn ancestors_of_with_graph(
+        &self,
+        graph: &CommitGraph<'_>,
+        commit: &str,
+    ) -> Option<Arc<HashSet<String>>> {
+        if let Some(ancestors) = self.lock_ancestor_cache().get(commit) {
+            return Some(ancestors);
+        }
+
+        let ancestors = Arc::new(graph.ancestors_of(commit)?);
+        let mut cache = self.lock_ancestor_cache();
+        Some(cache.insert(commit.to_owned(), ancestors))
+    }
+
+    fn is_ancestor_with_graph(
+        &self,
+        graph: &CommitGraph<'_>,
+        ancestor: &str,
+        descendant: &str,
+    ) -> bool {
+        if ancestor == descendant {
+            return graph.contains(ancestor);
+        }
+        if !graph.contains(ancestor) || !graph.contains(descendant) {
+            return false;
+        }
+
+        // Commits are indexed oldest-first via `git rev-list --topo-order --reverse`,
+        // so an ancestor with a higher position than its descendant cannot precede it.
+        // Keep this fast-reject before cache lookup to avoid storing impossible pairs.
+        if graph.position(ancestor) > graph.position(descendant) {
+            return false;
+        }
+
+        self.ancestors_of_with_graph(graph, descendant)
+            .is_some_and(|ancestors| ancestors.contains(ancestor))
+    }
+
+    fn lock_ancestor_cache(&self) -> MutexGuard<'_, AncestorCache> {
+        self.ancestor_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -397,7 +509,7 @@ pub fn resolve_symbol_at_indexed(
         CommitGraph::new(commits)
     };
 
-    let Some(target_ancestors) = graph.ancestors_of(target) else {
+    let Some(target_ancestors) = index.ancestors_of_with_graph(&graph, target) else {
         return Resolution::Unknown {
             reason: ResolutionFailure::IndexCorrupt(format!(
                 "target commit `{target}` is not indexed"
@@ -657,7 +769,7 @@ fn latest_anchor_snapshots_indexed(
     stable_symbol_id: &str,
     anchor: &str,
 ) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
-    let Some(anchor_ancestors) = graph.ancestors_of(anchor) else {
+    let Some(anchor_ancestors) = index.ancestors_of_with_graph(graph, anchor) else {
         return Err(ResolutionFailure::AnchorCommitNotIndexed(anchor.to_owned()));
     };
 
@@ -666,7 +778,7 @@ fn latest_anchor_snapshots_indexed(
     sort_snapshot_keys(&mut candidates, graph);
     candidates.dedup();
 
-    latest_from_candidates(candidates, graph)
+    latest_from_candidates(index, candidates, graph)
 }
 
 fn latest_reachable_snapshots_indexed(
@@ -678,15 +790,17 @@ fn latest_reachable_snapshots_indexed(
 ) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
     let mut candidates = snapshot_keys_for_symbol_indexed(index, stable_symbol_id);
     candidates.retain(|key| {
-        target_ancestors.contains(&key.commit) && graph.is_ancestor(after_commit, &key.commit)
+        target_ancestors.contains(&key.commit)
+            && index.is_ancestor_with_graph(graph, after_commit, &key.commit)
     });
     sort_snapshot_keys(&mut candidates, graph);
     candidates.dedup();
 
-    latest_from_candidates(candidates, graph)
+    latest_from_candidates(index, candidates, graph)
 }
 
 fn latest_from_candidates(
+    index: &TemporalIndex,
     candidates: Vec<SnapshotKey>,
     graph: &CommitGraph<'_>,
 ) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
@@ -703,7 +817,7 @@ fn latest_from_candidates(
             if candidate == other {
                 continue;
             }
-            if graph.is_ancestor(&candidate.commit, &other.commit) {
+            if index.is_ancestor_with_graph(graph, &candidate.commit, &other.commit) {
                 continue 'candidate;
             }
         }
@@ -721,6 +835,7 @@ fn forward_rename_candidates_indexed(
     after_commit: &str,
 ) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
     forward_rename_candidates_from_edges(
+        index,
         index.edges_for_stable_symbol_id(stable_symbol_id),
         graph,
         target_ancestors,
@@ -730,6 +845,7 @@ fn forward_rename_candidates_indexed(
 }
 
 fn forward_rename_candidates_from_edges<'a>(
+    index: &TemporalIndex,
     edges: impl IntoIterator<Item = &'a TemporalEdgeArtifact>,
     graph: &CommitGraph<'_>,
     target_ancestors: &HashSet<String>,
@@ -757,7 +873,7 @@ fn forward_rename_candidates_from_edges<'a>(
                 prev.stable_symbol_id, prev.commit
             )));
         }
-        if !graph.is_ancestor(after_commit, &prev.commit) {
+        if !index.is_ancestor_with_graph(graph, after_commit, &prev.commit) {
             continue;
         }
 
@@ -773,7 +889,7 @@ fn forward_rename_candidates_from_edges<'a>(
                 next.stable_symbol_id, next.commit
             )));
         }
-        if !graph.is_ancestor(&prev.commit, &next.commit) {
+        if !index.is_ancestor_with_graph(graph, &prev.commit, &next.commit) {
             return Err(ResolutionFailure::IndexCorrupt(format!(
                 "rename target `{}`@`{}` predates predecessor `{}`@`{}`",
                 next.stable_symbol_id, next.commit, prev.stable_symbol_id, prev.commit
@@ -919,6 +1035,7 @@ impl<'a> CommitGraph<'a> {
         Some(seen)
     }
 
+    #[cfg(test)]
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
         if ancestor == descendant {
             return self.contains(ancestor);
@@ -1134,6 +1251,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn temporal_index_cached_is_ancestor_matches_dfs_with_merge_and_fast_reject() {
+        let (mut graph, _) = fixture();
+        graph.commits = vec![
+            CommitArtifact {
+                sha: "root".into(),
+                parents: vec![],
+                author_time: 0,
+                summary: "root".into(),
+            },
+            CommitArtifact {
+                sha: "left".into(),
+                parents: vec!["root".into()],
+                author_time: 1,
+                summary: "left".into(),
+            },
+            CommitArtifact {
+                sha: "right".into(),
+                parents: vec!["root".into()],
+                author_time: 2,
+                summary: "right".into(),
+            },
+            CommitArtifact {
+                sha: "merge".into(),
+                parents: vec!["left".into(), "right".into()],
+                author_time: 3,
+                summary: "merge".into(),
+            },
+        ];
+        let index = TemporalIndex::new(Arc::new(graph));
+        let graph = index.commit_graph();
+
+        for ancestor in ["root", "left", "right", "merge"] {
+            for descendant in ["root", "left", "right", "merge"] {
+                let dfs_result = graph
+                    .ancestors_of(descendant)
+                    .is_some_and(|ancestors| ancestors.contains(ancestor));
+                assert_eq!(
+                    index.is_ancestor(ancestor, descendant),
+                    dfs_result,
+                    "ancestor={ancestor}, descendant={descendant}",
+                );
+            }
+        }
+
+        assert!(!index.is_ancestor("merge", "left"));
     }
 
     #[test]
