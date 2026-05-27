@@ -355,7 +355,7 @@ fn sample_parquet_incremental_build_ms(
 ) -> f64 {
     let started = Instant::now();
     let prev = read_artifact_parquet(prev_dir).expect("read previous parquet artifact");
-    let (next, mode) =
+    let (next, mode, _stats) =
         artifact_from_facts_incremental(&prev, repo_root).expect("full incremental build");
     std::hint::black_box(mode);
     let written = write_artifact_parquet(&next, output_dir, WriteOptions::default())
