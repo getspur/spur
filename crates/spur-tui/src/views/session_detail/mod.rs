@@ -1984,9 +1984,11 @@ mod tests {
         view.reset_for_clear();
         view.input_bar.set_text("new text".into(), 8);
         // Simulate a debounce trigger: set last_draft_change_at 600ms ago.
-        view.test_set_last_draft_change(
-            std::time::Instant::now() - std::time::Duration::from_millis(600),
-        );
+        view.test_set_last_draft_change({
+            let now = std::time::Instant::now();
+            now.checked_sub(std::time::Duration::from_millis(600))
+                .unwrap_or(now)
+        });
         assert!(
             view.draft_save_action().is_none(),
             "cleared view must suppress draft_save_action (debounce tick)"

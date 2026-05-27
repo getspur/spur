@@ -30,7 +30,7 @@ struct MockConn {
 #[async_trait]
 impl AgentConnection for MockConn {
     async fn initialize(&mut self, _r: InitializeRequest) -> anyhow::Result<InitializeResponse> {
-        unimplemented!()
+        panic!("MockConn::initialize must not be called")
     }
 
     async fn new_session(
@@ -53,11 +53,11 @@ impl AgentConnection for MockConn {
         &mut self,
         _r: PromptRequest,
     ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
-        unimplemented!()
+        panic!("MockConn::prompt must not be called")
     }
 
     async fn cancel(&mut self, _s: &str) -> anyhow::Result<()> {
-        unimplemented!()
+        panic!("MockConn::cancel must not be called")
     }
     async fn shutdown(&mut self) -> anyhow::Result<()> {
         Ok(())

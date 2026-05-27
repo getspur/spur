@@ -214,7 +214,7 @@ async fn run_variant_test(variant: Variant) -> Result<()> {
         );
         // Reproduced hangs leave detached workers holding DB/PM locks, so fail fast
         // before another variant runs in a contaminated process.
-        std::process::exit(101);
+        anyhow::bail!("completion collector hang reproduced for {}", hung.task_id);
     }
 
     if let Some(run) = runs.iter().find(|run| !run.background_hangs.is_empty()) {
@@ -224,7 +224,10 @@ async fn run_variant_test(variant: Variant) -> Result<()> {
         );
         // Reproduced hangs leave detached workers holding DB/PM locks, so fail fast
         // before another variant runs in a contaminated process.
-        std::process::exit(101);
+        anyhow::bail!(
+            "background completion collector hang reproduced for workers {:?}",
+            run.background_hangs
+        );
     }
 
     Ok(())

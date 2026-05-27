@@ -18,7 +18,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
-            unimplemented!()
+            panic!("NoopConnection::initialize must not be called")
         }
 
         async fn new_session(
@@ -26,7 +26,7 @@ mod session_attach_guard_transfer_tests {
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
         ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
-            unimplemented!()
+            panic!("NoopConnection::new_session must not be called")
         }
 
         async fn prompt(
@@ -61,7 +61,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
-            unimplemented!()
+            panic!("RecordingCancelConnection::initialize must not be called")
         }
 
         async fn new_session(
@@ -69,7 +69,7 @@ mod session_attach_guard_transfer_tests {
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
         ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
-            unimplemented!()
+            panic!("RecordingCancelConnection::new_session must not be called")
         }
 
         async fn prompt(
@@ -110,7 +110,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
-            unimplemented!("NewSessionConnection: initialize")
+            panic!("NewSessionConnection::initialize must not be called")
         }
 
         async fn new_session(
@@ -744,14 +744,14 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
-            unimplemented!()
+            panic!("TrackingConnection::initialize must not be called")
         }
         async fn new_session(
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
         ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
-            unimplemented!()
+            panic!("TrackingConnection::new_session must not be called")
         }
         async fn prompt(
             &mut self,
