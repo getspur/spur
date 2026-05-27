@@ -1,0 +1,17 @@
+[package]
+name = "spur-test-madsim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Shared helpers for SPUR's cfg(madsim) deterministic concurrency tests."
+
+# Only pulled in under `--cfg madsim`. Under default builds the lib is empty
+# (gated by `#![cfg(madsim)]` in src/lib.rs) and has no transitive cost.
+[target.'cfg(madsim)'.dependencies]
+madsim = "0.2"
+madsim-tokio = { version = "0.2", features = ["full", "test-util"] }
+
+[lints]
+workspace = true
