@@ -6,11 +6,14 @@
 
 use beads_rust::storage::sqlite::SqliteStorage;
 use beads_rust::sync;
+use serde::Serialize;
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::beads_crate::{wal_checkpoint, write_lock};
 
 const SKIP_PROBE_ENV: &str = "SPUR_BEADS_SKIP_PROBE";
+const NO_QUARANTINE_ENV: &str = "SPUR_BEADS_NO_QUARANTINE";
 
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
@@ -113,6 +116,173 @@ fn pre_open_quick_check(db_path: &Path) -> Result<(), InitError> {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct QuarantineManifest {
+    created_at_epoch_ms: u64,
+    entries: Vec<QuarantineEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct QuarantineEntry {
+    original_path: String,
+    quarantined_path: String,
+    size: u64,
+    mtime_epoch_ms: Option<u64>,
+    classifier_match: &'static str,
+    reason: &'static str,
+}
+
+pub(crate) fn quarantine_stale_siblings(beads_dir: &Path) {
+    if std::env::var(NO_QUARANTINE_ENV).is_ok_and(|value| value == "1") {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(beads_dir) else {
+        return;
+    };
+    let startup_ts = current_epoch_ms();
+    let quarantine_dir = beads_dir.join("quarantine").join(startup_ts.to_string());
+    let mut manifest_entries = Vec::new();
+
+    for entry in entries {
+        let Ok(entry) = entry else {
+            tracing::warn!(
+                beads_dir = %beads_dir.display(),
+                "failed to inspect beads directory entry during startup quarantine"
+            );
+            continue;
+        };
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            tracing::warn!(
+                path = %path.display(),
+                "failed to inspect beads directory entry type during startup quarantine"
+            );
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((classifier_match, reason)) = quarantine_classifier(name) else {
+            continue;
+        };
+
+        if let Err(err) = std::fs::create_dir_all(&quarantine_dir) {
+            tracing::warn!(
+                error = %err,
+                quarantine_dir = %quarantine_dir.display(),
+                "failed to create beads startup quarantine directory"
+            );
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "failed to stat stale beads sibling before quarantine"
+                );
+                continue;
+            }
+        };
+        let quarantined_path = quarantine_dir.join(name);
+        match std::fs::rename(&path, &quarantined_path) {
+            Ok(()) => manifest_entries.push(QuarantineEntry {
+                original_path: path.display().to_string(),
+                quarantined_path: quarantined_path.display().to_string(),
+                size: metadata.len(),
+                mtime_epoch_ms: metadata.modified().ok().and_then(system_time_epoch_ms),
+                classifier_match,
+                reason,
+            }),
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                quarantine_dir = %quarantine_dir.display(),
+                "failed to move stale beads sibling into startup quarantine"
+            ),
+        }
+    }
+
+    if manifest_entries.is_empty() {
+        return;
+    }
+
+    let manifest = QuarantineManifest {
+        created_at_epoch_ms: startup_ts,
+        entries: manifest_entries,
+    };
+    let manifest_path = quarantine_dir.join("quarantine.json");
+    match serde_json::to_vec_pretty(&manifest) {
+        Ok(bytes) => {
+            if let Err(err) = std::fs::write(&manifest_path, bytes) {
+                tracing::warn!(
+                    error = %err,
+                    manifest_path = %manifest_path.display(),
+                    "failed to write beads startup quarantine manifest"
+                );
+            }
+        }
+        Err(err) => tracing::warn!(
+            error = %err,
+            manifest_path = %manifest_path.display(),
+            "failed to serialize beads startup quarantine manifest"
+        ),
+    }
+}
+
+fn quarantine_classifier(name: &str) -> Option<(&'static str, &'static str)> {
+    if name == "beads.recovered.db" {
+        return Some(("beads.recovered.db", "top-level recovered SQLite database"));
+    }
+    if name == "data.db" {
+        return Some(("data.db", "top-level legacy SQLite database"));
+    }
+    if name.contains("-shm.broken-") {
+        return Some((
+            "*-shm.broken-*",
+            "stale SQLite shared-memory sidecar from prior repair path",
+        ));
+    }
+    if name.contains("-wal.broken-") {
+        return Some((
+            "*-wal.broken-*",
+            "stale SQLite WAL sidecar from prior repair path",
+        ));
+    }
+
+    const MARKERS: [(&str, &str); 7] = [
+        (".broken-", "*.broken-*"),
+        (".stale-", "*.stale-*"),
+        (".btree-corrupt-", "*.btree-corrupt-*"),
+        (".frankenwal-broken-", "*.frankenwal-broken-*"),
+        (".pre-vacuum-", "*.pre-vacuum-*"),
+        (".pre-13003-fix-", "*.pre-13003-fix-*"),
+        (".reserved12-", "*.reserved12-*"),
+    ];
+    for (marker, pattern) in MARKERS {
+        if name.contains(marker) {
+            return Some((pattern, "stale DB-like sibling from prior repair path"));
+        }
+    }
+    None
+}
+
+fn current_epoch_ms() -> u64 {
+    system_time_epoch_ms(SystemTime::now()).unwrap_or(0)
+}
+
+fn system_time_epoch_ms(time: SystemTime) -> Option<u64> {
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    duration.as_millis().try_into().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,8 +324,6 @@ mod tests {
         assert_ne!(direct, via_u32);
     }
 }
-
-use std::time::{Duration, SystemTime};
 
 /// Pattern matching the temp files beads_rust creates during atomic JSONL writes.
 /// Per beads_rust 0.2.1 `sync::export_temp_path`:
@@ -387,6 +555,8 @@ pub(crate) fn init_writer_with_flush(
     lock_timeout_ms: u64,
     stale_tmp_min_age: Duration,
 ) -> anyhow::Result<()> {
+    quarantine_stale_siblings(beads_dir);
+
     if can_skip_init_flush(beads_dir) {
         tracing::debug!(
             beads_dir = %beads_dir.display(),
@@ -418,6 +588,81 @@ mod migration_tests {
         let dir = TempDir::new().unwrap();
         init_writer_with_flush(dir.path(), 5_000, Duration::ZERO)
             .expect("fresh dir init should succeed");
+    }
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    use super::*;
+    use serde_json::Value;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::TempDir;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn quarantines_stale_db_like_top_level_files_with_manifest() {
+        let _guard = env_lock();
+        std::env::remove_var("SPUR_BEADS_NO_QUARANTINE");
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("beads.db"), b"live").unwrap();
+        fs::write(dir.path().join("issues.jsonl"), b"live").unwrap();
+        fs::write(dir.path().join("beads.db.broken-123"), b"broken").unwrap();
+        fs::write(dir.path().join("data.db"), b"old").unwrap();
+        fs::create_dir(dir.path().join(".br_history")).unwrap();
+
+        quarantine_stale_siblings(dir.path());
+
+        assert!(dir.path().join("beads.db").exists());
+        assert!(dir.path().join("issues.jsonl").exists());
+        assert!(dir.path().join(".br_history").is_dir());
+        assert!(!dir.path().join("beads.db.broken-123").exists());
+        assert!(!dir.path().join("data.db").exists());
+
+        let quarantine_root = dir.path().join("quarantine");
+        let batch_dir = fs::read_dir(&quarantine_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(batch_dir.join("beads.db.broken-123").exists());
+        assert!(batch_dir.join("data.db").exists());
+
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(batch_dir.join("quarantine.json")).unwrap()).unwrap();
+        let entries = manifest["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry["original_path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("beads.db.broken-123"))
+                && entry["classifier_match"] == "*.broken-*"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry["original_path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("data.db"))
+                && entry["classifier_match"] == "data.db"
+        }));
+    }
+
+    #[test]
+    fn quarantine_can_be_disabled_by_env() {
+        let _guard = env_lock();
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("beads.db.stale-123"), b"stale").unwrap();
+        std::env::set_var("SPUR_BEADS_NO_QUARANTINE", "1");
+
+        quarantine_stale_siblings(dir.path());
+
+        assert!(dir.path().join("beads.db.stale-123").exists());
+        assert!(!dir.path().join("quarantine").exists());
+        std::env::remove_var("SPUR_BEADS_NO_QUARANTINE");
     }
 }
 

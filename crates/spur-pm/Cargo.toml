@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
+sysinfo = "0.30.13"
 beads_rust = { git = "https://github.com/getspur/beads_rust", rev = "beff256b491e20508eab0319b23547ff145cfd04", default-features = false }
 petgraph = { workspace = true }
 regex = { workspace = true }
@@ -39,6 +40,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 filetime = "0.2"
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[target.'cfg(madsim)'.dev-dependencies]
+madsim = "0.2"
+madsim-tokio = { version = "0.2", features = ["full", "test-util"] }
+spur-test-madsim = { path = "../spur-test-madsim" }
+
+[[test]]
+name = "beads_durability_madsim"
+path = "tests/beads_durability_madsim.rs"
+required-features = ["test-helpers"]
 
 [lints]
 workspace = true
