@@ -61,6 +61,7 @@ fn analyst_build_emits_temporal_and_diagnostics_views_when_parquets_exist() {
         &artifact,
         tempdir.path(),
         WriteOptions::default(),
+        Vec::new(),
     )
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");
@@ -99,6 +100,7 @@ fn analyst_build_skips_temporal_and_diagnostics_views_without_optional_parquets(
         &artifact,
         tempdir.path(),
         WriteOptions::default(),
+        Vec::new(),
     )
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");
@@ -130,6 +132,7 @@ fn analyst_build_rejects_low_direct_symbol_snapshot_coverage() {
         &artifact,
         tempdir.path(),
         WriteOptions::default(),
+        Vec::new(),
     )
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");
@@ -163,6 +166,7 @@ fn analyst_views_map_temporal_churn_by_direct_symbol_ids() {
         &artifact,
         tempdir.path(),
         WriteOptions::default(),
+        Vec::new(),
     )
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");

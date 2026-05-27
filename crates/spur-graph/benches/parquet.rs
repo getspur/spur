@@ -29,6 +29,7 @@ fn bench_write_artifact_parquet(c: &mut Criterion) {
                 black_box(&fixture.artifact),
                 tempdir.path(),
                 WriteOptions::default(),
+                Vec::new(),
             )
             .expect("write parquet artifact");
             black_box(dir);
@@ -39,9 +40,13 @@ fn bench_write_artifact_parquet(c: &mut Criterion) {
 fn bench_read_artifact_parquet(c: &mut Criterion) {
     let fixture = load_fixture();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir =
-        write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
-            .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &fixture.artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
 
     c.bench_function("read_artifact_parquet", |b| {
         b.iter(|| {
@@ -55,9 +60,13 @@ fn bench_read_artifact_parquet(c: &mut Criterion) {
 fn bench_read_artifact_parquet_slim(c: &mut Criterion) {
     let fixture = load_fixture();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir =
-        write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
-            .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &fixture.artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
 
     c.bench_function("read_artifact_parquet_slim", |b| {
         b.iter(|| {
@@ -71,9 +80,13 @@ fn bench_read_artifact_parquet_slim(c: &mut Criterion) {
 fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
     let fixture = load_fixture();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir =
-        write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
-            .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &fixture.artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let query = search_benchmark_query(&fixture.artifact);
     let options = SearchOptions {
         query,
@@ -110,8 +123,13 @@ fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
 fn bench_find_caller_edges_parquet_vs_inmemory(c: &mut Criterion) {
     let artifact = traversal_benchmark_artifact();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let target_sid = "target";
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
@@ -135,8 +153,13 @@ fn bench_find_caller_edges_parquet_vs_inmemory(c: &mut Criterion) {
 fn bench_find_callee_edges_parquet_vs_inmemory(c: &mut Criterion) {
     let artifact = traversal_benchmark_artifact();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let source_sid = "source";
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
@@ -160,8 +183,13 @@ fn bench_find_callee_edges_parquet_vs_inmemory(c: &mut Criterion) {
 fn bench_resolve_selector_parquet_vs_inmemory(c: &mut Criterion) {
     let artifact = traversal_benchmark_artifact();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let selector = "target";
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
@@ -189,8 +217,13 @@ fn bench_resolve_selector_parquet_vs_inmemory(c: &mut Criterion) {
 fn bench_temporal_index_first_call_parquet_vs_inmemory(c: &mut Criterion) {
     let artifact = temporal_benchmark_artifact();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let persisted_artifact =
         Arc::new(read_artifact_parquet(&parquet_dir).expect("read full parquet artifact"));
     let steady_parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
@@ -224,9 +257,13 @@ fn bench_temporal_index_first_call_parquet_vs_inmemory(c: &mut Criterion) {
 fn bench_end_to_end_mcp_latency_session(c: &mut Criterion) {
     let fixture = load_fixture();
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let parquet_dir =
-        write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
-            .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &fixture.artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let options = SearchOptions {
         query: search_benchmark_query(&fixture.artifact),
         mode: SearchMode::Exact,
