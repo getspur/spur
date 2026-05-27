@@ -20,6 +20,7 @@ use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
 use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::ColumnPath;
 
+use super::ShardIndexEntry;
 use crate::store::build::{EXTRACTOR_VERSION, SCHEMA_VERSION};
 use crate::{
     ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GitPath, GraphEdgeArtifact,
@@ -59,6 +60,8 @@ pub struct GraphArtifactManifest {
     pub row_counts: GraphArtifactRowCounts,
     pub parquet_writer: GraphArtifactParquetWriter,
     pub edges_by_dst_present: bool,
+    #[serde(default)]
+    pub temporal_shards: Vec<ShardIndexEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -324,6 +327,7 @@ pub fn write_artifact_parquet(
             row_group_size: PARQUET_ROW_GROUP_SIZE,
         },
         edges_by_dst_present: options.emit_edges_by_dst,
+        temporal_shards: Vec::new(),
     };
     let manifest_json =
         serde_json::to_string_pretty(&manifest).context("failed to encode Parquet manifest")?;
@@ -3127,6 +3131,38 @@ mod parquet_temporal_test {
         assert!(decoded.symbol_snapshots.is_empty());
         assert!(decoded.temporal_edges.is_empty());
         assert!(decoded.diagnostics.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_defaults_missing_temporal_shards() -> anyhow::Result<()> {
+        let manifest_json = serde_json::json!({
+            "graph_index_version": "2",
+            "schema_version": "spur-graph-schema-v6",
+            "manifest_version": "manifest-version",
+            "graph_content_hash": "content-hash",
+            "indexed_commit_oid": null,
+            "extractor_version": "extractor-version",
+            "complete": true,
+            "row_counts": {
+                "nodes": 0,
+                "edges": 0,
+                "edges_by_dst": null,
+                "edges_unresolved": 0,
+                "files": 0,
+                "file_manifests": 0,
+                "tombstones": 0
+            },
+            "parquet_writer": {
+                "compression": "zstd-3",
+                "row_group_size": PARQUET_ROW_GROUP_SIZE
+            },
+            "edges_by_dst_present": false
+        });
+
+        let manifest: GraphArtifactManifest = serde_json::from_value(manifest_json)?;
+
+        assert!(manifest.temporal_shards.is_empty());
         Ok(())
     }
 
