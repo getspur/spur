@@ -343,7 +343,8 @@ impl MarkdownStream {
     /// dirty by time. Used when external state (mermaid registry errors)
     /// changes so the placeholder reflects the new state on the next tick.
     pub fn mark_dirty_now(&mut self) {
-        self.dirty_since = Some(Instant::now() - DEBOUNCE);
+        let now = Instant::now();
+        self.dirty_since = Some(now.checked_sub(DEBOUNCE).unwrap_or(now));
     }
 
     pub fn items(&self) -> &[StreamItem] {
