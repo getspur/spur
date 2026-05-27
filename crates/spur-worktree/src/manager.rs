@@ -37,6 +37,62 @@ const GIT_ABORT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_OP_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Backoff schedule for retrying git invocations that fail on transient
+/// `index.lock` / `cannot lock ref` errors. Cumulative ceiling ≈1.9s.
+const GIT_RETRY_DELAYS_MS: [u64; 5] = [50, 100, 250, 500, 1000];
+
+/// Wrap a git exec block in the transient-lock retry loop. The block must
+/// return `Result<T>` and is re-evaluated per attempt (so the inner future is
+/// rebuilt fresh — the previous failed `Command` is dropped before the next
+/// try). On `is_transient_git_error`, sleeps per `GIT_RETRY_DELAYS_MS` and
+/// retries. Non-transient errors short-circuit.
+///
+/// Locking is intentionally NOT applied here — see WorktreeManager::git_mutex
+/// docs for the reentrancy hazard with helpers that call other helpers.
+macro_rules! retry_on_transient_lock {
+    ($args:expr, $exec_block:block) => {{
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut result: Option<anyhow::Result<_>> = None;
+        for (attempt, base_ms) in GIT_RETRY_DELAYS_MS.iter().enumerate() {
+            match async { $exec_block }.await {
+                Ok(v) => {
+                    if attempt > 0 {
+                        tracing::warn!(
+                            target: "spur.worktree.retry",
+                            attempt,
+                            args = ?$args,
+                            "git command succeeded after retry",
+                        );
+                    }
+                    result = Some(Ok(v));
+                    break;
+                }
+                Err(e)
+                    if attempt < GIT_RETRY_DELAYS_MS.len() - 1
+                        && Self::is_transient_git_error(&e) =>
+                {
+                    tracing::debug!(
+                        target: "spur.worktree.retry",
+                        attempt,
+                        error = %e,
+                        args = ?$args,
+                        "transient git error, retrying",
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(*base_ms)).await;
+                }
+                Err(e) => {
+                    result = Some(Err(e));
+                    break;
+                }
+            }
+        }
+        result.unwrap_or_else(|| {
+            Err(last_err.unwrap_or_else(|| anyhow!("retry exhausted with no error captured")))
+        })
+    }};
+}
+
 async fn wait_for_git_output_bounded(
     child: &mut tokio::process::Child,
     args: &[&str],
@@ -227,34 +283,34 @@ impl WorktreeManager {
 
     /// Run a git command with the given args, optionally in a specific directory.
     /// Returns stdout on success, or an error containing stderr on failure.
+    /// Retries automatically on transient lock errors (`index.lock`, `cannot
+    /// lock ref`) per `GIT_RETRY_DELAYS_MS`.
     async fn run_git(&self, args: &[&str], cwd: Option<&Path>) -> Result<String> {
         let work_dir = cwd.unwrap_or(&self.repo_root);
-
-        debug!(
-            command = %format!("git {}", args.join(" ")),
-            cwd = %work_dir.display(),
-            "running git command"
-        );
-
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(work_dir)
-            .output()
-            .await
-            .context("failed to execute git command")?;
-
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok(stdout)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(anyhow!(
-                "git {} failed (exit {}): {}",
-                args.first().unwrap_or(&""),
-                output.status.code().unwrap_or(-1),
-                stderr,
-            ))
-        }
+        retry_on_transient_lock!(args, {
+            debug!(
+                command = %format!("git {}", args.join(" ")),
+                cwd = %work_dir.display(),
+                "running git command"
+            );
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(work_dir)
+                .output()
+                .await
+                .context("failed to execute git command")?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                Err(anyhow!(
+                    "git {} failed (exit {}): {}",
+                    args.first().unwrap_or(&""),
+                    output.status.code().unwrap_or(-1),
+                    stderr,
+                ))
+            }
+        })
     }
 
     async fn run_git_bounded(
@@ -264,151 +320,116 @@ impl WorktreeManager {
         timeout_duration: Duration,
     ) -> Result<String> {
         let work_dir = cwd.unwrap_or(&self.repo_root);
-
-        debug!(
-            command = %format!("git {}", args.join(" ")),
-            cwd = %work_dir.display(),
-            "running git command"
-        );
-
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            // Ensures cancellation of this future also terminates the child.
-            .kill_on_drop(true);
-        let mut child = command.spawn().context("failed to execute git command")?;
-
-        let output = wait_for_git_output_bounded(&mut child, args, timeout_duration).await?;
-
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok(stdout)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(anyhow!(
-                "git {} failed (exit {}): {}",
-                args.first().unwrap_or(&""),
-                output.status.code().unwrap_or(-1),
-                stderr,
-            ))
-        }
+        retry_on_transient_lock!(args, {
+            debug!(
+                command = %format!("git {}", args.join(" ")),
+                cwd = %work_dir.display(),
+                "running git command"
+            );
+            let mut command = Command::new("git");
+            command
+                .args(args)
+                .current_dir(work_dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = command.spawn().context("failed to execute git command")?;
+            let output = wait_for_git_output_bounded(&mut child, args, timeout_duration).await?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                Err(anyhow!(
+                    "git {} failed (exit {}): {}",
+                    args.first().unwrap_or(&""),
+                    output.status.code().unwrap_or(-1),
+                    stderr,
+                ))
+            }
+        })
     }
 
     async fn run_git_bytes(&self, args: &[&str], cwd: Option<&Path>) -> Result<Vec<u8>> {
         let work_dir = cwd.unwrap_or(&self.repo_root);
-        debug!(
-            command = %format!("git {}", args.join(" ")),
-            cwd = %work_dir.display(),
-            "running git command (bytes)"
-        );
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(work_dir)
-            .output()
-            .await
-            .context("failed to execute git command")?;
-        if output.status.success() {
-            Ok(output.stdout)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(anyhow!(
-                "git {} failed (exit {}): {}",
-                args.first().unwrap_or(&""),
-                output.status.code().unwrap_or(-1),
-                stderr,
-            ))
-        }
+        retry_on_transient_lock!(args, {
+            debug!(
+                command = %format!("git {}", args.join(" ")),
+                cwd = %work_dir.display(),
+                "running git command (bytes)"
+            );
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(work_dir)
+                .output()
+                .await
+                .context("failed to execute git command")?;
+            if output.status.success() {
+                Ok(output.stdout)
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                Err(anyhow!(
+                    "git {} failed (exit {}): {}",
+                    args.first().unwrap_or(&""),
+                    output.status.code().unwrap_or(-1),
+                    stderr,
+                ))
+            }
+        })
     }
 
     async fn run_git_with_stdin(&self, args: &[&str], cwd: &Path, stdin: &[u8]) -> Result<String> {
-        debug!(
-            command = %format!("git {}", args.join(" ")),
-            cwd = %cwd.display(),
-            "running git command with stdin"
-        );
-
-        let mut child = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("failed to execute git command")?;
-
-        if let Some(mut child_stdin) = child.stdin.take() {
-            child_stdin
-                .write_all(stdin)
+        retry_on_transient_lock!(args, {
+            debug!(
+                command = %format!("git {}", args.join(" ")),
+                cwd = %cwd.display(),
+                "running git command with stdin"
+            );
+            let mut child = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to execute git command")?;
+            if let Some(mut child_stdin) = child.stdin.take() {
+                child_stdin
+                    .write_all(stdin)
+                    .await
+                    .context("failed to write stdin to git command")?;
+            }
+            let output = child
+                .wait_with_output()
                 .await
-                .context("failed to write stdin to git command")?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .await
-            .context("failed to wait for git command")?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(anyhow!(
-                "git {} failed (exit {}): {}",
-                args.first().unwrap_or(&""),
-                output.status.code().unwrap_or(-1),
-                stderr,
-            ))
-        }
+                .context("failed to wait for git command")?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                Err(anyhow!(
+                    "git {} failed (exit {}): {}",
+                    args.first().unwrap_or(&""),
+                    output.status.code().unwrap_or(-1),
+                    stderr,
+                ))
+            }
+        })
     }
 
+    /// Back-compat wrapper preserved for existing call sites. Retry is now
+    /// intrinsic to `run_git` (and every other `run_git_*` helper) via the
+    /// `retry_on_transient_lock!` macro, so this is a thin alias. The `lock`
+    /// parameter is ignored — re-introducing a serializing mutex here would
+    /// deadlock on the `snapshot_brain_state` path that already nests
+    /// `run_git` calls within this retry wrapper.
     async fn run_git_with_retry(
         &self,
         args: &[&str],
         cwd: Option<&Path>,
-        lock: bool,
+        _lock: bool,
     ) -> Result<String> {
-        const DELAYS_MS: [u64; 5] = [50, 100, 250, 500, 1000];
-        let mut last_err: Option<anyhow::Error> = None;
-
-        for (attempt, base_ms) in DELAYS_MS.iter().enumerate() {
-            let res = if lock {
-                let _g = self.git_mutex.lock().await;
-                self.run_git(args, cwd).await
-            } else {
-                self.run_git(args, cwd).await
-            };
-
-            match res {
-                Ok(output) => {
-                    if attempt > 0 {
-                        tracing::warn!(
-                            target: "spur.worktree.retry",
-                            attempt,
-                            args = ?args,
-                            "git command succeeded after retry",
-                        );
-                    }
-                    return Ok(output);
-                }
-                Err(e) if attempt < DELAYS_MS.len() - 1 && Self::is_transient_git_error(&e) => {
-                    tracing::debug!(
-                        target: "spur.worktree.retry",
-                        attempt,
-                        error = %e,
-                        args = ?args,
-                        "transient git error, retrying",
-                    );
-                    last_err = Some(e);
-                    tokio::time::sleep(Duration::from_millis(*base_ms)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| anyhow!("retry exhausted with no error captured")))
+        let _ = &self.git_mutex; // retained for future per-repo serialization work
+        self.run_git(args, cwd).await
     }
 
     fn is_transient_git_error(e: &anyhow::Error) -> bool {
