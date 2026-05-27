@@ -1841,6 +1841,7 @@ fn record_call(
 /// Maximum time to wait for an audit sentinel comment to be written before
 /// giving up and returning success to the worker. Slow beads must not stall
 /// the worker indefinitely.
+#[allow(dead_code)]
 const AUDIT_EMIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn a dedicated background task that owns the `flush_rx` half of the
@@ -2008,6 +2009,7 @@ async fn emit_read_aggregate(
 /// was just mutated by a worker write tool. Called synchronously before the
 /// handler result is returned to the worker so the audit trail is durable even
 /// if the worker process dies immediately after the call.
+#[allow(dead_code)]
 async fn emit_worker_write_audit(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
@@ -2030,6 +2032,7 @@ async fn emit_worker_write_audit(
     emit_worker_write_audit_inner(pm.advanced(), delegation_id, tool, issue_id).await;
 }
 
+#[allow(dead_code)]
 async fn emit_worker_write_audit_inner(
     advanced: Option<&dyn spur_pm::BeadsAdvanced>,
     delegation_id: &str,

@@ -1024,7 +1024,7 @@ fn split_file_prefixes<'a>(selector: &'a str, separator: &str) -> Vec<(&'a str, 
             (!file_path.is_empty()).then_some((file_path, tail))
         })
         .collect::<Vec<_>>();
-    prefixes.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    prefixes.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
     prefixes
 }
 

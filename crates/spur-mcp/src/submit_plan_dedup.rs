@@ -41,7 +41,7 @@ pub(crate) async fn lookup(pm: &PmService, key: &str) -> anyhow::Result<Option<D
             .with_context(|| format!("load dedup entry {}", summary.id))?;
         issues.push(issue);
     }
-    issues.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    issues.sort_by_key(|issue| std::cmp::Reverse(issue.created_at));
 
     let now = Utc::now();
     for issue in issues {

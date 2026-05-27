@@ -135,18 +135,14 @@ pub fn parse_sync_sentinel(body: &str) -> Result<SyncSentinel, ParseError> {
         match k {
             "source_system" => source_system = Some(v.to_string()),
             "remote_id" => remote_id = Some(v.to_string()),
-            "remote_number" => {
-                if !v.is_empty() {
-                    remote_number = Some(
-                        v.parse()
-                            .map_err(|_| ParseError::BadValue("remote_number"))?,
-                    );
-                }
+            "remote_number" if !v.is_empty() => {
+                remote_number = Some(
+                    v.parse()
+                        .map_err(|_| ParseError::BadValue("remote_number"))?,
+                );
             }
-            "remote_etag" => {
-                if !v.is_empty() {
-                    remote_etag = Some(v.to_string());
-                }
+            "remote_etag" if !v.is_empty() => {
+                remote_etag = Some(v.to_string());
             }
             "remote_updated_at" => {
                 remote_updated_at =

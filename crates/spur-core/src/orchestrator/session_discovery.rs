@@ -898,9 +898,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             temp.path().join(".kimi/kimi.json"),
-            format!(
-                r#"{{"work_dirs":[{{"path":"/repo/spur","kaos":"local","last_session_id":"uuid-abc"}}]}}"#
-            ),
+            r#"{"work_dirs":[{"path":"/repo/spur","kaos":"local","last_session_id":"uuid-abc"}]}"#,
         )
         .unwrap();
 
@@ -945,9 +943,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             temp.path().join(".kimi/kimi.json"),
-            format!(
-                r#"{{"work_dirs":[{{"path":"/repo/spur","kaos":"local","last_session_id":"uuid-archived"}}]}}"#
-            ),
+            r#"{"work_dirs":[{"path":"/repo/spur","kaos":"local","last_session_id":"uuid-archived"}]}"#,
         )
         .unwrap();
 

@@ -100,6 +100,7 @@ pub struct InteractiveFrontendHost {
     pub(crate) data_rx: Option<mpsc::Receiver<DataQuery>>,
     pub(crate) orch_handle: tokio::task::JoinHandle<()>,
     data_loop_handle: Option<DataLoopTask>,
+    shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 struct DataLoopTask(tokio::task::JoinHandle<()>);
@@ -130,6 +131,7 @@ impl InteractiveFrontendHost {
             data_rx: Some(data_rx),
             orch_handle,
             data_loop_handle: None,
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -171,6 +173,7 @@ impl InteractiveFrontendHost {
 
         let overflow = spur_core::continuation_bridge::new_overflow_buf();
         orch.set_continuation_tx(user_tx.clone(), overflow.clone());
+        let shutdown_token = orch.shutdown_token();
 
         let orch_handle = tokio::spawn(async move {
             if let Err(error) = orch
@@ -192,6 +195,7 @@ impl InteractiveFrontendHost {
             data_rx: None,
             orch_handle,
             data_loop_handle: Some(DataLoopTask(data_loop_handle)),
+            shutdown_token,
         }
     }
 
@@ -200,13 +204,14 @@ impl InteractiveFrontendHost {
         self.permission_rx.take();
         self.data_rx.take();
         self.data_loop_handle.take();
+        self.shutdown_token.cancel();
         drop(self.handle);
         let mut handle = self.orch_handle;
-        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle).await {
             Ok(_) => Ok(()),
             Err(_) => {
                 handle.abort();
-                anyhow::bail!("interactive host shutdown timed out")
+                anyhow::bail!("interactive host shutdown timed out after 30s")
             }
         }
     }
