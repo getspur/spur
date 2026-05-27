@@ -584,6 +584,7 @@ pub async fn run_tui(
         None,
         repo_root,
         None,
+        None,
     )
     .await
 }
@@ -600,6 +601,7 @@ pub async fn run_tui_with_license(
     config_path: Option<std::path::PathBuf>,
     repo_root: std::path::PathBuf,
     upgrade_rx: Option<tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>>,
+    shutdown_token: Option<tokio_util::sync::CancellationToken>,
 ) -> anyhow::Result<()> {
     let mut terminal = crate::tui::setup()?;
     let mut app = App::build_with_license_state(
@@ -823,6 +825,16 @@ pub async fn run_tui_with_license(
         }
 
         if app.should_quit {
+            // Notify the orchestrator BEFORE we break and the function returns
+            // (which drops `perm_rx`). If the agent is mid-tool-call awaiting a
+            // permission decision, dropping `perm_rx` first strands the request
+            // and the orchestrator's `connection.prompt().await` never returns.
+            // Firing the shared cancel here lets the orchestrator break out of
+            // its guarded select arms while the permission channel is still
+            // alive to deliver the (synthetic-Denied) tail-of-flight response.
+            if let Some(token) = shutdown_token.as_ref() {
+                token.cancel();
+            }
             break;
         }
     }
@@ -856,6 +868,7 @@ pub async fn run_tui_with_config(
         crate::landing::LandingDecision::ShowDashboard,
         config_path,
         repo_root,
+        None,
         None,
     )
     .await
