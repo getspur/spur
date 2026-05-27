@@ -325,10 +325,13 @@ fn warn_if_outside_expected_ranges(baselines: &Baselines) {
 #[cfg(unix)]
 fn peak_rss_kb() -> Result<u64> {
     let mut usage = std::mem::MaybeUninit::<RUsage>::zeroed();
+    // SAFETY: `usage` points to writable storage for `RUsage`, and
+    // `getrusage` initializes it when returning 0.
     let status = unsafe { getrusage(RUSAGE_SELF, usage.as_mut_ptr()) };
     if status != 0 {
         rss_kb_via_ps()
     } else {
+        // SAFETY: successful `getrusage` initialized `usage`.
         let usage = unsafe { usage.assume_init() };
         let raw = usage.ru_maxrss;
         if raw < 0 {
