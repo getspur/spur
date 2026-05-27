@@ -139,7 +139,7 @@ impl Reporter {
             })
             .collect();
 
-        reports.sort_by(|a, b| b.date.cmp(&a.date));
+        reports.sort_by_key(|report| std::cmp::Reverse(report.date));
         Ok(reports)
     }
 
@@ -169,7 +169,7 @@ impl Reporter {
             })
             .collect();
 
-        reports.sort_by(|a, b| b.week_start.cmp(&a.week_start));
+        reports.sort_by_key(|report| std::cmp::Reverse(report.week_start));
         Ok(reports)
     }
 
@@ -257,7 +257,7 @@ impl Reporter {
 
         let mut blocks = Vec::new();
         for (sid, mut sess_events) in by_session {
-            sess_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+            sess_events.sort_by_key(|event| event.timestamp);
             let first = sess_events.first().unwrap();
             let last = sess_events.last().unwrap();
             let totals = Totals::from_entries(&sess_events);

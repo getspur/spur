@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod session_attach_guard_transfer_tests {
     use super::*;

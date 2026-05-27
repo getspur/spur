@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, warn};
 
@@ -159,6 +160,7 @@ pub struct Orchestrator {
     /// Overflow buffer for detached continuations.  Mirrors the buffer
     /// passed to `run_interactive`; set alongside `continuation_tx`.
     continuation_overflow: Option<crate::continuation_bridge::OverflowBuf>,
+    shutdown_token: CancellationToken,
     /// Feature gate for dynamic quota/feature enforcement.
     feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     pub(crate) peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
@@ -272,6 +274,7 @@ impl Orchestrator {
             cancellation_control: CancellationControl::new(),
             continuation_tx: None,
             continuation_overflow: None,
+            shutdown_token: CancellationToken::new(),
             feature_gate,
             peer_mailbox: None,
             worker_mcp_servers: Arc::new(DashMap::new()),
@@ -442,6 +445,10 @@ impl Orchestrator {
     /// emit through the same sequencing path as the orchestrator.
     pub fn event_funnel_handle(&self) -> crate::event_funnel::FunnelHandle {
         self.funnel.clone()
+    }
+
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown_token.clone()
     }
 
     pub fn with_fault_injection_hooks(mut self, hooks: FaultInjectionHooks) -> Self {
