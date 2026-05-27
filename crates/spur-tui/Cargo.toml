@@ -21,6 +21,7 @@ spur-pm = { workspace = true }
 spur-license = { workspace = true }
 agent-client-protocol = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 anyhow = { workspace = true }
