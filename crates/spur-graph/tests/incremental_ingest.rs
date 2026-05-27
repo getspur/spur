@@ -6,24 +6,29 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
 use spur_graph::store::{
-    write_artifact_parquet, write_current_pointer, ArtifactStagingDir, WriteOptions,
+    write_artifact_parquet, write_current_pointer, ArtifactStagingDir, TemporalShardSink,
+    WriteOptions,
 };
+use spur_graph::{load_artifact, TemporalShardConfig};
 use tempfile::TempDir;
 
 #[test]
 fn incremental_run_full_walk_uses_prior_pointer_to_ingest_only_new_commits() {
+    let _guard = test_env_lock();
     let repo = TempDir::new().unwrap();
     init_repo(repo.path());
     let mut config = GitWalkConfig::default();
     config.use_gix_diff = false;
 
     append_commits(repo.path(), 1..=5);
-    let (first_graph, first_commits) = run_full_walk_into(repo.path(), &config, None).unwrap();
+    let (first_graph, first_commits) =
+        run_full_walk_into(repo.path(), &config, None, None).unwrap();
     save_temporal_artifacts(repo.path(), &first_graph, &first_commits);
 
     let git_log = repo.path().join("git-show.log");
@@ -33,7 +38,7 @@ fn incremental_run_full_walk_uses_prior_pointer_to_ingest_only_new_commits() {
     fs::write(&git_log, "").unwrap();
     append_commits(repo.path(), 6..=8);
     let (incremental_graph, incremental_commits) =
-        run_full_walk_into(repo.path(), &config, None).unwrap();
+        run_full_walk_into(repo.path(), &config, None, None).unwrap();
 
     let ingested_commits = logged_show_calls(&git_log);
     assert_eq!(
@@ -45,7 +50,7 @@ fn incremental_run_full_walk_uses_prior_pointer_to_ingest_only_new_commits() {
     let spur_dir = repo.path().join(".spur");
     let saved_spur_dir = repo.path().join(".spur.saved");
     fs::rename(&spur_dir, &saved_spur_dir).unwrap();
-    let (cold_graph, cold_commits) = run_full_walk_into(repo.path(), &config, None).unwrap();
+    let (cold_graph, cold_commits) = run_full_walk_into(repo.path(), &config, None, None).unwrap();
     fs::rename(&saved_spur_dir, &spur_dir).unwrap();
 
     assert_eq!(incremental_graph, cold_graph);
@@ -55,6 +60,117 @@ fn incremental_run_full_walk_uses_prior_pointer_to_ingest_only_new_commits() {
         incremental_commits.walk_strategy,
         cold_commits.walk_strategy
     );
+}
+
+#[test]
+fn run_full_walk_with_sink_drains_temporal_rows_into_shards() {
+    let _guard = test_env_lock();
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+    let mut config = GitWalkConfig::default();
+    config.use_gix_diff = false;
+
+    append_commits(repo.path(), 1..=3);
+
+    let artifact_dir = TempDir::new().unwrap();
+    let mut sink = TemporalShardSink::new(
+        artifact_dir.path().to_path_buf(),
+        TemporalShardConfig {
+            max_rows_per_shard: 2,
+            max_commits_per_shard: 10,
+        },
+    )
+    .unwrap();
+
+    let (graph, _commits) =
+        run_full_walk_into(repo.path(), &config, None, Some(&mut sink)).unwrap();
+    assert!(graph.temporal_edges.is_empty());
+    assert!(graph.symbol_snapshots.is_empty());
+
+    let shards = sink.finalize().unwrap();
+    assert!(!shards.is_empty());
+    let temporal_edges: usize = shards.iter().map(|entry| entry.row_count_edges).sum();
+    let symbol_snapshots: usize = shards.iter().map(|entry| entry.row_count_snapshots).sum();
+    assert!(temporal_edges > 0);
+    assert!(symbol_snapshots > 0);
+
+    write_artifact_parquet(&graph, artifact_dir.path(), WriteOptions::default(), shards)
+        .expect("write sharded graph parquet artifact");
+    let reloaded = load_artifact(artifact_dir.path()).expect("read sharded graph parquet artifact");
+    assert_eq!(reloaded.temporal_edges.len(), temporal_edges);
+    assert_eq!(reloaded.symbol_snapshots.len(), symbol_snapshots);
+}
+
+#[test]
+fn incremental_run_full_walk_with_sink_streams_prior_temporal_rows() {
+    let _guard = test_env_lock();
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+    let mut config = GitWalkConfig::default();
+    config.use_gix_diff = false;
+
+    append_commits(repo.path(), 1..=5);
+    let (first_graph, first_commits) =
+        run_full_walk_into(repo.path(), &config, None, None).unwrap();
+    save_temporal_artifacts(repo.path(), &first_graph, &first_commits);
+
+    append_commits(repo.path(), 6..=8);
+    let artifact_dir = TempDir::new().unwrap();
+    let mut sink = TemporalShardSink::new(
+        artifact_dir.path().to_path_buf(),
+        TemporalShardConfig {
+            max_rows_per_shard: 3,
+            max_commits_per_shard: 10,
+        },
+    )
+    .unwrap();
+
+    let (incremental_graph, incremental_commits) =
+        run_full_walk_into(repo.path(), &config, None, Some(&mut sink)).unwrap();
+    assert!(incremental_graph.temporal_edges.is_empty());
+    assert!(incremental_graph.symbol_snapshots.is_empty());
+    let shards = sink.finalize().unwrap();
+    assert!(shards.len() > 1);
+
+    write_artifact_parquet(
+        &incremental_graph,
+        artifact_dir.path(),
+        WriteOptions::default(),
+        shards,
+    )
+    .expect("write streamed incremental graph parquet artifact");
+    let streamed = load_artifact(artifact_dir.path())
+        .expect("read streamed incremental graph parquet artifact");
+
+    let spur_dir = repo.path().join(".spur");
+    let saved_spur_dir = repo.path().join(".spur.saved");
+    fs::rename(&spur_dir, &saved_spur_dir).unwrap();
+    let (cold_graph, cold_commits) = run_full_walk_into(repo.path(), &config, None, None).unwrap();
+    fs::rename(&saved_spur_dir, &spur_dir).unwrap();
+
+    assert_eq!(incremental_commits.commits, cold_commits.commits);
+    assert_eq!(streamed.commits, cold_graph.commits);
+    assert_debug_set_eq(&streamed.temporal_edges, &cold_graph.temporal_edges);
+    assert_debug_set_eq(&streamed.symbol_snapshots, &cold_graph.symbol_snapshots);
+}
+
+fn assert_debug_set_eq<T: std::fmt::Debug>(left: &[T], right: &[T]) {
+    let mut left_debug = left
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>();
+    let mut right_debug = right
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>();
+    left_debug.sort();
+    right_debug.sort();
+    assert_eq!(left_debug, right_debug);
+}
+
+fn test_env_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 fn save_temporal_artifacts(
