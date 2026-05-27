@@ -12,7 +12,8 @@ use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPo
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
     resolve_artifact_location, resolve_worktree_root_from, write_artifact_parquet, BuildMode,
-    CommitIndexArtifact, GraphFacts, GraphIndexArtifact, WalkStrategy, WriteOptions,
+    CommitIndexArtifact, GraphFacts, GraphIndexArtifact, TemporalShardConfig, WalkStrategy,
+    WriteOptions,
 };
 
 pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph";
@@ -26,6 +27,7 @@ pub struct GraphBuildOptions {
     pub quiet: bool,
     pub skip_analyst: bool,
     pub with_temporal: bool,
+    pub temporal_shard_config: TemporalShardConfig,
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
@@ -46,6 +48,7 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         reject_legacy_output_path(&output)?;
     }
 
+    let temporal_shard_config = options.temporal_shard_config;
     let use_temporal = should_use_temporal(options.with_temporal);
     let warmup_stats = if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
@@ -58,6 +61,8 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     tracing::debug!(
         with_temporal = options.with_temporal,
         use_temporal,
+        temporal_max_rows_per_shard = temporal_shard_config.max_rows_per_shard,
+        temporal_max_commits_per_shard = temporal_shard_config.max_commits_per_shard,
         "spur-graph: temporal walk option evaluated"
     );
 
