@@ -141,7 +141,9 @@ pub(crate) fn quarantine_stale_siblings(beads_dir: &Path) {
         return;
     };
     let startup_ts = current_epoch_ms();
-    let quarantine_dir = beads_dir.join("quarantine").join(startup_ts.to_string());
+    let quarantine_dir = beads_dir
+        .join("quarantine")
+        .join(format!("{startup_ts}-{}", std::process::id()));
     let mut manifest_entries = Vec::new();
 
     for entry in entries {
@@ -649,6 +651,29 @@ mod quarantine_tests {
                 .is_some_and(|path| path.ends_with("data.db"))
                 && entry["classifier_match"] == "data.db"
         }));
+    }
+
+    #[test]
+    fn quarantine_batch_dir_includes_pid() {
+        let _guard = env_lock();
+        std::env::remove_var("SPUR_BEADS_NO_QUARANTINE");
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("beads.db.stale-123"), b"stale").unwrap();
+
+        quarantine_stale_siblings(dir.path());
+
+        let quarantine_root = dir.path().join("quarantine");
+        let batch_dir = fs::read_dir(&quarantine_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let batch_name = batch_dir.file_name().unwrap().to_str().unwrap();
+        assert!(
+            batch_name.ends_with(&format!("-{}", std::process::id())),
+            "quarantine batch dir should include process id: {batch_name}"
+        );
     }
 
     #[test]
