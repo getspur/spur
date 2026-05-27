@@ -6,6 +6,7 @@
 //! The subprocess test simulates a process crash via `SIGKILL` after Drop
 //! has run. If checkpointing loses data because the main DB wasn't fsync'd,
 //! the parent re-open will see no issue rows.
+#![allow(unsafe_code)] // libc::kill SIGKILL to simulate hard crash mid-test.
 
 use beads_rust::model::{Issue, IssueType, Priority, Status};
 use chrono::Utc;
