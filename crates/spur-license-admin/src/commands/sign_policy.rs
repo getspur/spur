@@ -2,13 +2,13 @@ use std::fs;
 use std::path::Path;
 
 use base64::Engine as _;
-use ed25519_dalek::pkcs8::DecodePrivateKey;
-use ed25519_dalek::Verifier;
+use ed25519_dalek::pkcs8::DecodePrivateKey as _;
+use ed25519_dalek::Verifier as _;
 use spur_license::policy::SignedPolicy;
 
-/// Sign a PolicyDocument JSON file and write a SignedPolicy JSON file.
+/// Sign a `PolicyDocument` JSON file and write a `SignedPolicy` JSON file.
 ///
-/// If the input already has a SignedPolicy wrapper, extracts the inner
+/// If the input already has a `SignedPolicy` wrapper, extracts the inner
 /// payload and re-signs it. Accepts either a 32-byte raw seed file or a
 /// PKCS#8 PEM-encoded Ed25519 private key.
 pub async fn run(
@@ -24,7 +24,7 @@ pub async fn run(
     let payload = if let Ok(wrapped) = serde_json::from_str::<SignedPolicy>(&input_raw) {
         wrapped.payload
     } else {
-        input_raw.trim().to_string()
+        input_raw.trim().to_owned()
     };
 
     let signing_key = load_signing_key(signing_key_path)?;

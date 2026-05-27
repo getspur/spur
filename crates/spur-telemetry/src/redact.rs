@@ -1,7 +1,7 @@
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub enum PanicType {
     Bounds,
     Unwrap,
@@ -11,7 +11,7 @@ pub enum PanicType {
     Other,
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn scrub_stack(raw: &str) -> String {
     raw.lines()
         .map(scrub_stack_line)
@@ -27,7 +27,7 @@ fn scrub_stack_line(line: &str) -> String {
         let tail = &stripped[idx..];
         format!("<external>::{}", tail.trim_start_matches(':'))
     } else if looks_like_path_or_frame(&stripped) {
-        "<external>".to_string()
+        "<external>".to_owned()
     } else {
         stripped
     }
@@ -88,7 +88,7 @@ fn looks_like_path_or_frame(s: &str) -> bool {
 }
 
 fn strip_home_prefixes(s: &str) -> String {
-    let mut out = s.to_string();
+    let mut out = s.to_owned();
     out = strip_prefix_family(&out, "/Users/", '/');
     out = strip_prefix_family(&out, "/home/", '/');
     out = strip_prefix_family(&out, "C:\\Users\\", '\\');
@@ -114,7 +114,7 @@ fn strip_prefix_family(input: &str, prefix: &str, sep: char) -> String {
     out
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn bucket_model(name: &str) -> &'static str {
     let normalized = name.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -148,7 +148,7 @@ pub fn bucket_model(name: &str) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn classify_panic(msg: &str) -> PanicType {
     if msg.contains("index out of bounds") {
         return PanicType::Bounds;
@@ -168,7 +168,7 @@ pub fn classify_panic(msg: &str) -> PanicType {
     PanicType::Other
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn payload_hash(msg: &str, anonymous_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(msg.as_bytes());
@@ -190,7 +190,7 @@ pub fn sha256_prefix(value: &str) -> String {
         .collect::<String>()
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn classify_server(server_name: &str) -> crate::tier2_events::McpServerName {
     match server_name.trim().to_ascii_lowercase().as_str() {
         "github" => crate::tier2_events::McpServerName::Github,
@@ -207,7 +207,7 @@ pub fn classify_server(server_name: &str) -> crate::tier2_events::McpServerName 
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn classify_tool(server_name: &str, tool_name: &str) -> crate::tier2_events::McpToolName {
     let server = classify_server(server_name);
     if matches!(server, crate::tier2_events::McpServerName::Custom(_)) {
@@ -236,18 +236,18 @@ mod tests {
     fn scrub_stack_cross_platform_fixtures() {
         let fixtures = [
             (
-                r#"0: /Users/alice/work/spur/crates/spur_core/src/lib.rs:42:7 (spur_core::engine::run::42)
-1: /Users/alice/.cargo/registry/src/foo.rs:11:2 (serde::de::impl::11)"#,
+                r"0: /Users/alice/work/spur/crates/spur_core/src/lib.rs:42:7 (spur_core::engine::run::42)
+1: /Users/alice/.cargo/registry/src/foo.rs:11:2 (serde::de::impl::11)",
                 "<external>::spur_core::engine::run::42\n<external>",
             ),
             (
-                r#"0: /home/bob/spur/crates/spur_tui/src/app.rs:101:9 (spur_tui::app::tick::101)
-1: /home/bob/.rustup/toolchains/stable/libstd/panicking.rs:200:1"#,
+                r"0: /home/bob/spur/crates/spur_tui/src/app.rs:101:9 (spur_tui::app::tick::101)
+1: /home/bob/.rustup/toolchains/stable/libstd/panicking.rs:200:1",
                 "<external>::spur_tui::app::tick::101\n<external>",
             ),
             (
-                r#"0: C:\\Users\\carol\\spur\\crates\\spur_acp\\src\\client.rs:77:3 (spur_acp::client::poll::77)
-1: C:\\Users\\carol\\.cargo\\registry\\src\\bar.rs:4:1"#,
+                r"0: C:\\Users\\carol\\spur\\crates\\spur_acp\\src\\client.rs:77:3 (spur_acp::client::poll::77)
+1: C:\\Users\\carol\\.cargo\\registry\\src\\bar.rs:4:1",
                 "<external>::spur_acp::client::poll::77\n<external>",
             ),
         ];

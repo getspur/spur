@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::Parser as _;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

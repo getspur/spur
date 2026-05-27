@@ -107,7 +107,7 @@ mod tests {
     use super::{
         config_path_for_root, load_or_default_at, save_atomic_at, TelemetryConfig, SCHEMA_VERSION,
     };
-    use chrono::{TimeZone, Utc};
+    use chrono::{TimeZone as _, Utc};
     use tempfile::tempdir;
     use uuid::Uuid;
 

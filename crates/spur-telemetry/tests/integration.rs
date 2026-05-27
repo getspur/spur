@@ -470,7 +470,7 @@ fn assert_all_batches_schema(requests: &[wiremock::Request]) {
                 .get("event")
                 .and_then(Value::as_str)
                 .expect("event name");
-            seen.insert(name.to_string());
+            seen.insert(name.to_owned());
         }
     }
 
