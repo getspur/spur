@@ -66,3 +66,6 @@ harness = false
 [[bench]]
 name = "compact_render"
 harness = false
+
+[lints]
+workspace = true
