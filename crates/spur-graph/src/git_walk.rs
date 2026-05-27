@@ -29,7 +29,8 @@ use crate::schema::{
     GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
     TemporalEdgeArtifact, WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
 };
-use crate::store::{commit_index, resolve_artifact_location};
+use crate::store::pointer::ArtifactFormat;
+use crate::store::{commit_index, load_temporal_artifact_parquet, resolve_artifact_location};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
@@ -340,7 +341,22 @@ fn load_incremental_base(
         }
     };
 
-    let mut graph = crate::schema::load_artifact(&graph_location.path)?;
+    let mut graph = match graph_location.format {
+        ArtifactFormat::Parquet => {
+            tracing::debug!(
+                path = %graph_location.path.display(),
+                "spur-graph: loading temporal-only Parquet graph artifact for incremental walk"
+            );
+            load_temporal_artifact_parquet(&graph_location.path)?
+        }
+        ArtifactFormat::LegacyJson => {
+            tracing::debug!(
+                path = %graph_location.path.display(),
+                "spur-graph: loading full legacy JSON graph artifact for incremental walk"
+            );
+            crate::schema::load_artifact(&graph_location.path)?
+        }
+    };
     graph.header.content_hash_blake3 = None;
     if !graph.commits.iter().any(|commit| commit.sha == stored_tip) {
         tracing::info!(
