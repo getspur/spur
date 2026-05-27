@@ -12,7 +12,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use spur_graph::git_blob_oid;
-use spur_graph::store::cache::load_base_artifact_for_worktree;
+use spur_graph::store::cache::{emit_base_seed_stats, load_base_seed_for_worktree};
 use spur_graph::temporal::{
     resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
@@ -506,6 +506,7 @@ async fn code_search_response(
                     Arc::clone(&rebuild_coordinator),
                     Arc::clone(artifact),
                     rebuild_candidate,
+                    None,
                 )
                 .await
             }
@@ -595,6 +596,7 @@ async fn code_graph_backend_response(
                     Arc::clone(&rebuild_coordinator),
                     Arc::clone(artifact),
                     rebuild_candidate,
+                    None,
                 )
                 .await
             }
@@ -1960,6 +1962,7 @@ async fn with_graph_metadata_for_payload(
             Arc::clone(&rebuild_coordinator),
             Arc::clone(&artifact),
             rebuild_candidate,
+            None,
         )
         .await
         {
@@ -2084,6 +2087,7 @@ async fn try_rebuild_artifact(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     previous_artifact: Arc<GraphIndexArtifact>,
     rebuild_candidate: RebuildCandidate,
+    base_seed: Option<&'static str>,
 ) -> RebuildAttempt {
     let RebuildCandidate { worktree, key } = rebuild_candidate;
     let mut task = tokio::spawn(async move {
@@ -2095,11 +2099,14 @@ async fn try_rebuild_artifact(
                     #[cfg(any(test, feature = "test-support"))]
                     apply_graph_rebuild_delay_for_test().await;
                     tokio::task::spawn_blocking(move || {
-                        let (artifact, _mode) =
+                        let (artifact, _mode, stats) =
                             spur_graph::store::build::artifact_from_facts_incremental(
                                 &previous_artifact,
                                 &worktree,
                             )?;
+                        if let Some(base) = base_seed {
+                            emit_base_seed_stats(base, stats);
+                        }
                         Ok(Arc::new(artifact))
                     })
                     .await
@@ -2158,9 +2165,14 @@ async fn try_rebuild_artifact_from_worktree(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     rebuild_candidate: RebuildCandidate,
 ) -> RebuildAttempt {
-    if let Some(previous_artifact) = load_base_artifact_for_worktree(&rebuild_candidate.worktree) {
-        return try_rebuild_artifact(rebuild_coordinator, previous_artifact, rebuild_candidate)
-            .await;
+    if let Some(seed) = load_base_seed_for_worktree(&rebuild_candidate.worktree) {
+        return try_rebuild_artifact(
+            rebuild_coordinator,
+            seed.artifact,
+            rebuild_candidate,
+            Some(seed.base),
+        )
+        .await;
     }
 
     let RebuildCandidate { worktree, key } = rebuild_candidate;
