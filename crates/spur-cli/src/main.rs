@@ -960,6 +960,7 @@ async fn run() -> Result<()> {
                 quiet,
                 skip_analyst: no_analyst,
                 with_temporal,
+                temporal_shard_config: spur_graph::TemporalShardConfig::default(),
             }),
         },
         Commands::Gc {

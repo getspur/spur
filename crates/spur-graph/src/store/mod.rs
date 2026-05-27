@@ -1,3 +1,4 @@
+pub mod artifact_staging;
 pub mod build;
 pub mod cache;
 pub mod canonical_hash;
@@ -5,6 +6,7 @@ pub mod commit_index;
 pub mod parquet;
 pub mod pointer;
 pub mod snapshot;
+pub mod temporal_shards;
 
 pub use build::{
     artifact_from_facts, artifact_from_facts_incremental, current_manifest_version, BuildMode,
@@ -19,3 +21,4 @@ pub use pointer::{
     read_current_pointer, resolve_artifact_location, write_current_pointer, ArtifactCacheKey,
     ArtifactFormat, ResolvedArtifact,
 };
+pub use temporal_shards::{ShardIndexEntry, TemporalShardConfig};
