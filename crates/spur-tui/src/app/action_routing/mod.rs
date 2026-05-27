@@ -1,7 +1,13 @@
 use super::*;
 
+pub mod mermaid;
+pub mod nav;
+pub mod permissions;
+pub mod scroll;
+pub mod slash_commands;
+
 impl App {
-    fn build_execute_prompt(&self, id: &str) -> String {
+    pub(super) fn build_execute_prompt(&self, id: &str) -> String {
         let issue = self
             .dashboard
             .tracked_issues()
@@ -49,140 +55,15 @@ impl App {
             self.last_action = Some(action.clone());
         }
         match action {
-            Action::Quit => {
-                self.request_quit();
-            }
-
-            Action::NavigateTo(ViewId::SessionDetail(ref session_id)) => {
-                if self.session_detail.is_some() {
-                    // Just switch view — don't recreate. BrainSpawned is the only creator.
-                    self.navigate_to(ViewId::SessionDetail(session_id.clone()));
+            action @ (Action::Quit
+            | Action::NavigateTo(_)
+            | Action::NavigateBack
+            | Action::OpenInsights
+            | Action::InspectPlan { .. }
+            | Action::OpenPlanInBrowser { .. }) => {
+                if let Some(action) = self.process_nav(action) {
+                    self.process_action(action);
                 }
-                // If no session_detail exists (no brain spawned), ignore.
-            }
-
-            Action::NavigateTo(ViewId::Dashboard) => {
-                // navigate_to(Dashboard) clears view_history (canonical root).
-                // session_detail kept alive (same as NavigateBack).
-                self.navigate_to(ViewId::Dashboard);
-            }
-
-            Action::NavigateTo(ViewId::SessionPicker) => {
-                self.navigate_to(ViewId::SessionPicker);
-            }
-
-            Action::NavigateTo(ViewId::PlanInspector(ref session)) => {
-                self.plan_inspector = Some(PlanInspectorView::new(session.clone()));
-                self.navigate_to(ViewId::PlanInspector(session.clone()));
-            }
-
-            Action::InspectPlan {
-                ref session_id,
-                ref plan_id,
-            } => {
-                if self.plan_projection.plan(plan_id).is_none() {
-                    if let Some(ref tx) = self.user_input_tx {
-                        let _ = tx.try_send(UserInput::InspectPlan {
-                            plan_id: plan_id.clone(),
-                        });
-                    }
-                }
-                self.plan_inspector = Some(PlanInspectorView::new_for_plan(
-                    session_id.clone(),
-                    plan_id.clone(),
-                ));
-                self.navigate_to(ViewId::PlanInspector(session_id.clone()));
-            }
-
-            Action::OpenPlanInBrowser { ref plan_id } => {
-                let Some(current_session) = self
-                    .session_detail
-                    .as_ref()
-                    .map(|detail| detail.session_id().clone())
-                else {
-                    return self.process_action(Action::FlashHint {
-                        message: "Select a brain session first (S)".into(),
-                    });
-                };
-                let just_created = self.plan_browser.is_none();
-                let mut session_changed = false;
-                if self.plan_browser.is_none() {
-                    self.plan_browser = Some(PlanBrowserView::new(current_session.clone()));
-                }
-                if let Some(browser) = self.plan_browser.as_mut() {
-                    session_changed = browser.set_current_session(current_session);
-                    browser.focus_plan_id(plan_id.clone());
-                }
-                self.navigate_to(ViewId::PlanBrowser);
-                if just_created || session_changed {
-                    self.process_action(Action::RefreshPlans);
-                }
-            }
-
-            Action::NavigateTo(ViewId::PlanBrowser) => {
-                // Inc 1 (bd-d587.1): without an active brain session, no plan can ever
-                // classify as Mine (every row is Unowned/Other), so Inspect/Resume have
-                // no actionable target. Block-with-hint instead of opening an empty browser.
-                let Some(current_session) = self
-                    .session_detail
-                    .as_ref()
-                    .map(|detail| detail.session_id().clone())
-                else {
-                    return self.process_action(Action::FlashHint {
-                        message: "Select a brain session first (S)".into(),
-                    });
-                };
-                let just_created = self.plan_browser.is_none();
-                let mut session_changed = false;
-                if self.plan_browser.is_none() {
-                    self.plan_browser = Some(PlanBrowserView::new(current_session.clone()));
-                }
-                if let Some(browser) = self.plan_browser.as_mut() {
-                    session_changed = browser.set_current_session(current_session);
-                }
-                self.navigate_to(ViewId::PlanBrowser);
-                if just_created || session_changed {
-                    self.process_action(Action::RefreshPlans);
-                }
-            }
-
-            Action::NavigateTo(ViewId::IssueBrowser) => {
-                let just_created = self.issue_browser.is_none();
-                if just_created {
-                    let mut view = IssueBrowserView::new();
-                    view.seed_issues(self.dashboard.tracked_issues().to_vec());
-                    self.issue_browser = Some(view);
-                }
-                self.navigate_to(ViewId::IssueBrowser);
-                if just_created {
-                    // Background refresh - guarantees user sees fresh data after the
-                    // dashboard's startup snapshot. No-op when pm_service is None
-                    // (orchestrator returns an error which is logged, not surfaced).
-                    self.process_action(Action::RefreshIssues);
-                }
-            }
-
-            Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
-                #[cfg(feature = "analytics")]
-                self.start_insights_init();
-                self.navigate_to(ViewId::Insights);
-            }
-
-            #[cfg(feature = "markdown")]
-            Action::NavigateTo(ViewId::MermaidOverlay(ref session)) => {
-                use crate::views::mermaid_viewer::MermaidViewerView;
-                self.mermaid_viewer = Some(MermaidViewerView::new(session.clone()));
-                self.navigate_to(ViewId::MermaidOverlay(session.clone()));
-            }
-
-            Action::NavigateBack => {
-                // Inc 2 (bd-d587.2): pop view_history. When empty, falls back to
-                // Dashboard (or to active SessionDetail if leaving Dashboard).
-                // Overlay state (PlanInspector, MermaidOverlay) is nulled
-                // automatically when leaving those views.
-                self.navigate_back();
-                // Note: session_detail is intentionally kept alive so it
-                // continues accumulating events while the Dashboard is shown.
             }
 
             Action::SendMessage {
@@ -731,40 +612,9 @@ impl App {
             }
 
             Action::PermissionGrant(choice) => {
-                use crate::action::PermissionChoice;
-                if let Some((perm, _)) = self.pending_permission.take() {
-                    match choice {
-                        PermissionChoice::Allow => {
-                            let id = perm
-                                .args
-                                .options
-                                .first()
-                                .map(|o| o.option_id.to_string())
-                                .unwrap_or_else(|| "allow".to_string());
-                            let _ = perm
-                                .reply_tx
-                                .send(spur_acp::types::PermissionResponse { option_id: id });
-                        }
-                        PermissionChoice::AlwaysAllow => {
-                            let id = perm
-                                .args
-                                .options
-                                .iter()
-                                .find(|o| o.name.to_lowercase().contains("always"))
-                                .or(perm.args.options.first())
-                                .map(|o| o.option_id.to_string())
-                                .unwrap_or_else(|| "allow".to_string());
-                            let _ = perm
-                                .reply_tx
-                                .send(spur_acp::types::PermissionResponse { option_id: id });
-                        }
-                        PermissionChoice::Deny => {
-                            // Drop reply_tx (signals denial to ACP thread)
-                            drop(perm);
-                        }
-                    }
+                if let Some(action) = self.process_permission(choice) {
+                    self.process_action(action);
                 }
-                self.clear_pending_permission_trace();
             }
 
             Action::SelectNextBy(n) => {
@@ -925,51 +775,16 @@ impl App {
             }
 
             #[cfg(feature = "markdown")]
-            Action::MermaidRenderRequest {
-                session,
-                ref_id,
-                code,
-                target_width,
-            } => {
-                let tx = self.mermaid_tx.clone();
-                let session_cloned = session.clone();
-                tokio::task::spawn_blocking(move || {
-                    let result =
-                        crate::components::mermaid::render_mermaid_hybrid(&code, target_width)
-                            .map(|rendered| match rendered {
-                                crate::components::mermaid::MermaidRendered::Image(image) => {
-                                    crate::components::mermaid::MermaidRenderOutput::Image(
-                                        std::sync::Arc::new(image),
-                                    )
-                                }
-                                crate::components::mermaid::MermaidRendered::Text { text } => {
-                                    crate::components::mermaid::MermaidRenderOutput::Text(
-                                        std::sync::Arc::<str>::from(text),
-                                    )
-                                }
-                            })
-                            .map_err(|e| e.to_string());
-                    let _ = tx.send(Action::MermaidRenderCompleted {
-                        session: session_cloned,
-                        ref_id,
-                        target_width,
-                        result,
-                    });
-                });
+            action @ Action::MermaidRenderRequest { .. } => {
+                if let Some(action) = self.process_mermaid(action) {
+                    self.process_action(action);
+                }
             }
             #[cfg(feature = "markdown")]
-            Action::MermaidRenderCompleted {
-                session,
-                ref_id,
-                target_width,
-                result,
-            } => {
-                if let Some(ref mut detail) = self.session_detail {
-                    if detail.session_id().0 == session.0 {
-                        detail.handle_mermaid_completed(ref_id, target_width, result);
-                    }
+            action @ Action::MermaidRenderCompleted { .. } => {
+                if let Some(action) = self.process_mermaid(action) {
+                    self.process_action(action);
                 }
-                self.dirty = true;
             }
 
             Action::FocusWorkerInDashboard { executor_id, tab } => {
@@ -985,12 +800,16 @@ impl App {
             }
 
             // Scroll actions are already handled inside the views' handle_key methods.
-            Action::ScrollUp
+            action @ (Action::ScrollUp
             | Action::ScrollDown
             | Action::ScrollToTop
             | Action::ScrollToBottom
             | Action::CycleFocus
-            | Action::Tick => {}
+            | Action::Tick) => {
+                if let Some(action) = self.process_scroll(action) {
+                    self.process_action(action);
+                }
+            }
 
             // Issue actions — wired to the PM backend; IssuesPanel not yet implemented.
             Action::RefreshIssues => {
@@ -1072,61 +891,14 @@ impl App {
                 self.flash_hint_short(message);
             }
             Action::ThemeCommand { arg } => {
-                self.handle_theme_command(arg);
+                if let Some(action) = self.process_theme_cmd(arg) {
+                    self.process_action(action);
+                }
             }
             Action::NotebookCommand { arg } => {
-                let Some(session_id) = self
-                    .session_detail
-                    .as_ref()
-                    .map(|detail| detail.session_id().clone())
-                else {
-                    self.flash_hint_short("/notebook: no active brain session in focus");
-                    return;
-                };
-                let Some(socket_nonce) = self.notebook_socket_nonces.get(&session_id.0).cloned()
-                else {
-                    self.flash_hint_short("/notebook: notebook socket not ready");
-                    return;
-                };
-                let socket_path = spur_core::notebook::control_socket_path(&socket_nonce);
-                let label = notebook_command_label(&arg);
-                let command_action = notebook_command_action(&arg);
-                let tx = self.background_action_tx.clone();
-                self.flash_hint_short(format!("{label}..."));
-                tokio::spawn(async move {
-                    match crate::notebook_daemon::send_notebook_command(&arg, &socket_path).await {
-                        Ok(response) if response.ok => {
-                            tracing::info!(
-                                path = response.path.as_deref(),
-                                socket = %socket_path.display(),
-                                "notebook daemon command completed"
-                            );
-                        }
-                        Ok(response) => {
-                            let detail = notebook_control_failure_detail(response.error.as_ref());
-                            if let Some(error) = response.error.as_ref() {
-                                tracing::warn!(
-                                    code = %error.code,
-                                    message = %error.message,
-                                    "notebook daemon command failed"
-                                );
-                            } else {
-                                tracing::warn!("notebook daemon command failed");
-                            }
-                            let _ = tx.send(Action::FlashHint {
-                                message: format!(
-                                    "notebook daemon command failed ({command_action} failed): {detail}"
-                                ),
-                            });
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "notebook daemon command failed");
-                            let _ = tx.send(Action::FlashHint {
-                                message: notebook_daemon_failure_message(command_action, &error),
-                            });
-                        }
-                    }
-                });
+                if let Some(action) = self.process_notebook_cmd(arg) {
+                    self.process_action(action);
+                }
             }
             Action::PrefillInput { text } => {
                 match &self.current_view {
@@ -1316,105 +1088,31 @@ impl App {
             }
         }
     }
-
-    pub(super) fn handle_permission_request(
-        &mut self,
-        request: spur_acp::types::PermissionRequest,
-    ) {
-        // Auto-deny any existing pending permission (drops old reply_tx)
-        self.pending_permission.take();
-
-        // Extract description from SDK args
-        let description = request
-            .args
-            .tool_call
-            .fields
-            .title
-            .clone()
-            .unwrap_or_else(|| "Tool call".to_string());
-
-        // Push permission entry to the active session's trace
-        if let Some(ref mut detail) = self.session_detail {
-            detail.push_permission(&description, 30);
-        }
-
-        // Store with deadline
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        self.pending_permission = Some((request, deadline));
-        self.dirty = true;
-    }
-
-    /// Mark all pending permission trace entries as resolved.
-    pub(super) fn clear_pending_permission_trace(&mut self) {
-        if let Some(ref mut detail) = self.session_detail {
-            detail.resolve_pending_permissions();
-        }
-    }
 }
 
-fn notebook_command_label(arg: &str) -> &'static str {
-    match arg.trim() {
-        "" => "Reopening notebook",
-        "new" => "Creating notebook",
-        "close" => "Closing notebook",
-        _ => "Opening notebook",
-    }
+pub(super) fn to_wire_decision(d: &spur_core::ReviewDecision) -> spur_acp::ReviewDecision {
+    d.clone()
 }
 
-fn notebook_command_action(arg: &str) -> &'static str {
-    match arg.trim() {
-        "" => "reopen",
-        "new" => "new",
-        "close" => "close",
-        _ => "open",
-    }
-}
+#[cfg(test)]
+mod action_routing_split_tests {
+    use super::*;
 
-fn notebook_control_failure_detail(error: Option<&crate::notebook_daemon::ControlError>) -> String {
-    match error {
-        Some(error) if error.message.is_empty() => error.code.clone(),
-        Some(error) if error.code.is_empty() => error.message.clone(),
-        Some(error) => format!("{}: {}", error.code, error.message),
-        None => "unknown error".to_string(),
-    }
-}
-
-fn notebook_daemon_failure_message(action: &str, error: &anyhow::Error) -> String {
-    if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
-        let prefix = if matches!(
-            io_error.kind(),
-            std::io::ErrorKind::ConnectionRefused
-                | std::io::ErrorKind::NotFound
-                | std::io::ErrorKind::AddrNotAvailable
-        ) {
-            "notebook daemon unavailable"
-        } else {
-            "notebook daemon command failed"
-        };
-        return format!(
-            "{prefix} ({action} failed): {}",
-            notebook_io_error_class(io_error)
+    #[test]
+    fn notebook_command_helpers_live_in_slash_commands_module() {
+        assert_eq!(
+            slash_commands::notebook_command_label(""),
+            "Reopening notebook"
+        );
+        assert_eq!(slash_commands::notebook_command_action("new"), "new");
+        assert_eq!(
+            slash_commands::notebook_io_error_class(&std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused"
+            )),
+            "connection refused"
         );
     }
-
-    format!("notebook daemon command failed ({action} failed): {error}")
-}
-
-fn notebook_io_error_class(error: &std::io::Error) -> String {
-    match error.kind() {
-        std::io::ErrorKind::ConnectionRefused => "connection refused".to_string(),
-        std::io::ErrorKind::NotFound => "socket not found".to_string(),
-        std::io::ErrorKind::AddrNotAvailable => "address not available".to_string(),
-        std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
-        std::io::ErrorKind::TimedOut => "timed out".to_string(),
-        std::io::ErrorKind::UnexpectedEof => "unexpected end of file".to_string(),
-        std::io::ErrorKind::InvalidData => "invalid protocol data".to_string(),
-        _ => error.to_string(),
-    }
-}
-
-fn to_wire_decision(d: &spur_core::ReviewDecision) -> spur_acp::ReviewDecision {
-    d.clone()
 }
 
 #[cfg(test)]
