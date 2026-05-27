@@ -14,6 +14,11 @@ fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
 
+fn instant_ago(duration: Duration) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    now.checked_sub(duration).unwrap_or(now)
+}
+
 #[test]
 fn tick_emits_save_draft_after_debounce() {
     let sid = spur_acp::SessionId("sess-1".to_string());
@@ -32,7 +37,7 @@ fn tick_emits_save_draft_after_debounce() {
     }
 
     // Advance the debounce clock past 500ms via a test helper.
-    view.test_set_last_draft_change(std::time::Instant::now() - Duration::from_millis(600));
+    view.test_set_last_draft_change(instant_ago(Duration::from_millis(600)));
 
     // draft_save_action emits SaveDraft when debounce elapsed and text changed.
     let action = view.draft_save_action();
@@ -77,7 +82,7 @@ fn save_draft_only_fires_once_per_change() {
     for c in "abc".chars() {
         let _ = view.handle_key(key(c), &test_ctx());
     }
-    view.test_set_last_draft_change(std::time::Instant::now() - Duration::from_millis(600));
+    view.test_set_last_draft_change(instant_ago(Duration::from_millis(600)));
     assert!(view.draft_save_action().is_some());
     // Second call without new typing: no-op.
     assert!(view.draft_save_action().is_none());
@@ -166,7 +171,7 @@ fn force_save_draft_clears_debounce_timer() {
     }
     // Force-flush now, then advance the clock past the debounce window.
     assert!(view.force_save_draft().is_some());
-    view.test_set_last_draft_change(std::time::Instant::now() - Duration::from_millis(600));
+    view.test_set_last_draft_change(instant_ago(Duration::from_millis(600)));
     // draft_save_action should NOT re-emit — force_save_draft already cleared the timer
     // and updated last_persisted_draft, so there's nothing new to save.
     assert!(view.draft_save_action().is_none());

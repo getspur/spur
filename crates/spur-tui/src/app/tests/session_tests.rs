@@ -955,9 +955,11 @@ mod brain_retired_tests {
         app.session_detail
             .as_mut()
             .unwrap()
-            .test_set_last_draft_change(
-                std::time::Instant::now() - std::time::Duration::from_millis(600),
-            );
+            .test_set_last_draft_change({
+                let now = std::time::Instant::now();
+                now.checked_sub(std::time::Duration::from_millis(600))
+                    .unwrap_or(now)
+            });
         let action = app.session_detail.as_mut().unwrap().draft_save_action();
         assert!(
             action.is_none(),
