@@ -83,7 +83,7 @@ fn acquire_write_lock_with_backoff(
     backoff: &BackoffPolicy,
     lock_timeout_ms: u64,
     metrics: &ContentionMetrics,
-) -> anyhow::Result<std::fs::File> {
+) -> anyhow::Result<write_lock::WriteLockGuard> {
     let start = Instant::now();
     let mut attempt: u32 = 0;
     loop {
@@ -116,7 +116,7 @@ async fn acquire_write_lock_async(
     backoff: BackoffPolicy,
     lock_timeout_ms: u64,
     metrics: Arc<ContentionMetrics>,
-) -> anyhow::Result<std::fs::File> {
+) -> anyhow::Result<write_lock::WriteLockGuard> {
     let start = Instant::now();
     let timeout = Duration::from_millis(lock_timeout_ms);
     let mut attempt: u32 = 0;
@@ -133,12 +133,23 @@ async fn acquire_write_lock_async(
                 metrics.record_lock_wait(start.elapsed());
                 return Ok(file);
             }
-            write_lock::WriteLockAttempt::Busy => {
+            write_lock::WriteLockAttempt::Busy(holder) => {
                 metrics.incr_busy();
                 let elapsed = start.elapsed();
                 if elapsed >= timeout {
                     metrics.incr_ceiling();
-                    anyhow::bail!("write lock acquisition timed out after {lock_timeout_ms}ms");
+                    if let Some(holder) = holder.as_ref() {
+                        tracing::warn!(
+                            holder = %write_lock::format_lock_holder(holder, lock_timeout_ms),
+                            "write lock acquisition timed out"
+                        );
+                    }
+                    return Err(write_lock::WriteLockError::Busy {
+                        path: beads_dir.join(".write.lock"),
+                        timeout_ms: lock_timeout_ms,
+                        holder,
+                    }
+                    .into());
                 }
                 let rand = fastrand_unit();
                 let Some(delay) = backoff.step(attempt, elapsed, rand) else {
