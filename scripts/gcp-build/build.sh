@@ -134,7 +134,13 @@ rsync -az --delete -0 --files-from="$FILE_LIST" \
     "$GIT_TOPLEVEL/" "$VM_NAME:$REMOTE_DIR/"
 
 # ---- run cargo on the VM ---------------------------------------------------
-log "Running: cargo $CARGO_ARGS  -j$JOBS"
+# Forward caller's $RUSTFLAGS so cfg/lint flags survive the SSH hop. The
+# remote bash re-parses `cargo $CARGO_ARGS` and would strip quotes from a
+# `--config build.rustflags=[...]` arg, so we propagate via env instead and
+# escape with %q to survive both the local→gcloud quoting and the remote
+# bash -lc re-parse.
+REMOTE_RUSTFLAGS_QUOTED=$(printf '%q' "${RUSTFLAGS:-}")
+log "Running: cargo $CARGO_ARGS  -j$JOBS${RUSTFLAGS:+  RUSTFLAGS=$RUSTFLAGS}"
 gcloud compute ssh "$VM_NAME" \
     --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
     --tunnel-through-iap --quiet \
@@ -148,6 +154,7 @@ gcloud compute ssh "$VM_NAME" \
         # SCCACHE_BASEDIRS is set per rustc invocation by the
         # sccache-worktree wrapper (RUSTC_WRAPPER in profile.d).
         export CARGO_BUILD_JOBS=$JOBS
+        export RUSTFLAGS=$REMOTE_RUSTFLAGS_QUOTED
         sccache --start-server >/dev/null 2>&1 || true
         cargo $CARGO_ARGS
         echo
