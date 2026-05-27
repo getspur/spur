@@ -3,7 +3,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -72,7 +72,7 @@ fn save_temporal_artifacts(
         worktree,
         &CommitIndexPointer {
             schema_version: current_schema_version(),
-            artifact_relative_path: ".spur/commit-index.json".to_string(),
+            artifact_relative_path: ".spur/commit-index.json".to_owned(),
             indexed_at: commits.indexed_at.clone(),
             refs: commits.refs.clone(),
         },
@@ -205,7 +205,7 @@ fn rev_parse(dir: &Path, rev: &str) -> String {
         "git rev-parse {rev} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap().trim().to_string()
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn git(dir: &Path, args: &[&str]) {

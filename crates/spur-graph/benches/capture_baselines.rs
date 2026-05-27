@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitCode};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context as _, Result};
 use serde::Serialize;
 use spur_graph::{artifact_content_hash_blake3_hex, load_artifact, GraphIndexArtifact};
 
@@ -292,7 +292,7 @@ fn git_rev() -> Result<String> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn warn_if_outside_expected_ranges(baselines: &Baselines) {

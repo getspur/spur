@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 
 use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::{write_artifact_parquet, write_current_pointer, WriteOptions};
@@ -115,7 +115,7 @@ fn write_pointer(
     }
 
     let pointer = GraphIndexPointer {
-        schema: POINTER_SCHEMA.to_string(),
+        schema: POINTER_SCHEMA.to_owned(),
         graph_content_hash: artifact.graph_content_hash.clone(),
         manifest_version: artifact.manifest_version.clone(),
         source_kind: SourceKind::Git,
@@ -185,7 +185,7 @@ mod tests {
     use std::fs::{self, File};
     use std::sync::atomic::Ordering;
 
-    use fs2::FileExt;
+    use fs2::FileExt as _;
     use tempfile::TempDir;
 
     use super::{lookup_canonical, write_with_dedup};
@@ -314,7 +314,7 @@ mod tests {
             let ctx = GitCtx {
                 worktree_root: worktree.path().to_path_buf(),
                 git_common_dir: common.path().to_path_buf(),
-                head_oid: "head-a".to_string(),
+                head_oid: "head-a".to_owned(),
             };
             Self {
                 common,
@@ -327,20 +327,20 @@ mod tests {
     fn artifact(hash: &str, file_path: &str) -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "spur-graph-phase2".to_string(),
+                graph_index_version: "spur-graph-phase2".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "manifest-a".to_string(),
-            graph_content_hash: hash.to_string(),
+            manifest_version: "manifest-a".to_owned(),
+            graph_content_hash: hash.to_owned(),
             file_manifests: vec![GraphFileManifestEntry {
                 stable_file_id: format!("file:{file_path}"),
-                path: file_path.to_string(),
-                content_oid: "oid-a".to_string(),
+                path: file_path.to_owned(),
+                content_oid: "oid-a".to_owned(),
                 node_ids: Vec::new(),
             }],
             files: vec![GraphFileArtifact {
                 stable_file_id: format!("file:{file_path}"),
-                file_path: file_path.to_string(),
+                file_path: file_path.to_owned(),
             }],
             file_node_ids: vec![NodeId(1)],
             symbols: Vec::new(),

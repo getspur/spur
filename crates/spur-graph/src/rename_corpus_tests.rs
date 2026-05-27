@@ -199,7 +199,7 @@ fn run_fixture(
     let file_change = FileChange {
         path: logical_fixture_path(stem, "new", extension).into(),
         kind: FileChangeKind::Modified,
-        parent_sha: Some("old".to_string()),
+        parent_sha: Some("old".to_owned()),
     };
 
     let (changes, diagnostics) =
@@ -209,7 +209,7 @@ fn run_fixture(
     let predicted_deleted = predicted_names(&changes, |kind| matches!(kind, ChangeKind::Deleted));
 
     FixtureOutcome {
-        stem: stem.to_string(),
+        stem: stem.to_owned(),
         expected,
         predicted_renames,
         predicted_added,
@@ -296,7 +296,7 @@ fn snapshot_from(commit: &str, path: &Path, symbol: &ExtractedSymbol) -> SymbolS
                 &symbol.symbol_kind,
                 symbol.byte_range[0] as u64,
             ),
-            commit: commit.to_string(),
+            commit: commit.to_owned(),
         },
         file_path: GitPath::from(path),
         entity_name: symbol.entity_name.clone(),

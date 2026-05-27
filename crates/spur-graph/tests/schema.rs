@@ -11,8 +11,8 @@ use tempfile::TempDir;
 fn graph_facts_round_trip_through_json() {
     let node = GraphNode {
         node_id: NodeId(7),
-        stable_key: "rust:src/lib.rs:run".to_string(),
-        label: "run".to_string(),
+        stable_key: "rust:src/lib.rs:run".to_owned(),
+        label: "run".to_owned(),
         kind: NodeKind::Function,
         file_id: Some(FileId(3)),
         source_span_id: Some(SpanId(11)),
@@ -23,7 +23,7 @@ fn graph_facts_round_trip_through_json() {
         source_node_id: NodeId(7),
         target_node_id: Some(NodeId(8)),
         relation: RelationKind::Calls,
-        target_label: Some("callee".to_string()),
+        target_label: Some("callee".to_owned()),
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
         change_kind: None,
@@ -67,9 +67,9 @@ fn graph_edge_kind_round_trips_all_public_values_and_legacy_omission() {
         GraphEdgeKind::ReferencesOther,
     ] {
         let edge = GraphEdgeArtifact {
-            source_stable_symbol_id: "source".to_string(),
-            target_stable_symbol_id: Some("target".to_string()),
-            target_label: Some("target".to_string()),
+            source_stable_symbol_id: "source".to_owned(),
+            target_stable_symbol_id: Some("target".to_owned()),
+            target_label: Some("target".to_owned()),
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,

@@ -32,7 +32,7 @@ fn bench_write_artifact_parquet(c: &mut Criterion) {
             )
             .expect("write parquet artifact");
             black_box(dir);
-        })
+        });
     });
 }
 
@@ -48,7 +48,7 @@ fn bench_read_artifact_parquet(c: &mut Criterion) {
             let artifact =
                 read_artifact_parquet(black_box(&parquet_dir)).expect("read parquet artifact");
             black_box(artifact);
-        })
+        });
     });
 }
 
@@ -64,7 +64,7 @@ fn bench_read_artifact_parquet_slim(c: &mut Criterion) {
             let artifact = read_artifact_parquet_slim(black_box(&parquet_dir))
                 .expect("read parquet artifact (slim)");
             black_box(artifact);
-        })
+        });
     });
 }
 
@@ -92,7 +92,7 @@ fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
                 .search_symbols(black_box(&options))
                 .expect("in-memory search symbols");
             black_box(result);
-        })
+        });
     });
     group.bench_function("parquet_open_then_search", |b| {
         b.iter(|| {
@@ -102,7 +102,7 @@ fn bench_search_symbols_parquet_vs_inmemory(c: &mut Criterion) {
                 .search_symbols(black_box(&options))
                 .expect("parquet search symbols");
             black_box(result);
-        })
+        });
     });
     group.finish();
 }
@@ -121,13 +121,13 @@ fn bench_find_caller_edges_parquet_vs_inmemory(c: &mut Criterion) {
         b.iter(|| {
             let records = in_memory.find_caller_edges(black_box(target_sid));
             black_box(records);
-        })
+        });
     });
     group.bench_function("parquet", |b| {
         b.iter(|| {
             let records = parquet.find_caller_edges(black_box(target_sid));
             black_box(records);
-        })
+        });
     });
     group.finish();
 }
@@ -146,13 +146,13 @@ fn bench_find_callee_edges_parquet_vs_inmemory(c: &mut Criterion) {
         b.iter(|| {
             let records = in_memory.find_callee_edges(black_box(source_sid));
             black_box(records);
-        })
+        });
     });
     group.bench_function("parquet", |b| {
         b.iter(|| {
             let records = parquet.find_callee_edges(black_box(source_sid));
             black_box(records);
-        })
+        });
     });
     group.finish();
 }
@@ -173,7 +173,7 @@ fn bench_resolve_selector_parquet_vs_inmemory(c: &mut Criterion) {
                 .resolve_selector(black_box(selector))
                 .expect("in-memory resolve selector");
             black_box(resolution);
-        })
+        });
     });
     group.bench_function("parquet", |b| {
         b.iter(|| {
@@ -181,7 +181,7 @@ fn bench_resolve_selector_parquet_vs_inmemory(c: &mut Criterion) {
                 .resolve_selector(black_box(selector))
                 .expect("parquet resolve selector");
             black_box(resolution);
-        })
+        });
     });
     group.finish();
 }
@@ -202,7 +202,7 @@ fn bench_temporal_index_first_call_parquet_vs_inmemory(c: &mut Criterion) {
             let in_memory = InMemoryClient::new(Arc::clone(&persisted_artifact));
             let index = in_memory.temporal_index();
             black_box(index);
-        })
+        });
     });
     group.bench_function("parquet_first_call", |b| {
         b.iter(|| {
@@ -210,13 +210,13 @@ fn bench_temporal_index_first_call_parquet_vs_inmemory(c: &mut Criterion) {
                 ParquetClient::open(black_box(parquet_dir.as_path())).expect("open parquet client");
             let index = parquet.temporal_index();
             black_box(index);
-        })
+        });
     });
     group.bench_function("parquet_steady_state", |b| {
         b.iter(|| {
             let index = steady_parquet.temporal_index();
             black_box(index);
-        })
+        });
     });
     group.finish();
 }
@@ -240,7 +240,7 @@ fn bench_end_to_end_mcp_latency_session(c: &mut Criterion) {
             let parquet =
                 ParquetClient::open(black_box(parquet_dir.as_path())).expect("open parquet client");
             run_mcp_latency_session(black_box(&parquet), black_box(&options));
-        })
+        });
     });
     group.finish();
 }
@@ -326,11 +326,11 @@ fn traversal_benchmark_artifact() -> GraphIndexArtifact {
 
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: "bench".to_string(),
+            graph_index_version: "bench".to_owned(),
             content_hash_blake3: None,
         },
-        manifest_version: "bench".to_string(),
-        graph_content_hash: "traversal-benchmark".to_string(),
+        manifest_version: "bench".to_owned(),
+        graph_content_hash: "traversal-benchmark".to_owned(),
         file_manifests: Vec::new(),
         files: Vec::new(),
         file_node_ids: Vec::new(),
@@ -348,8 +348,8 @@ fn traversal_benchmark_artifact() -> GraphIndexArtifact {
 fn temporal_benchmark_artifact() -> GraphIndexArtifact {
     let symbol_count = 512usize;
     let mut artifact = traversal_benchmark_artifact();
-    artifact.header.graph_index_version = GRAPH_INDEX_VERSION_TEMPORAL.to_string();
-    artifact.graph_content_hash = "temporal-benchmark".to_string();
+    artifact.header.graph_index_version = GRAPH_INDEX_VERSION_TEMPORAL.to_owned();
+    artifact.graph_content_hash = "temporal-benchmark".to_owned();
     artifact.commits.clear();
     artifact.symbol_snapshots.clear();
     artifact.temporal_edges.clear();
@@ -406,13 +406,13 @@ fn temporal_benchmark_artifact() -> GraphIndexArtifact {
 
 fn symbol(id: &str, file_path: &str, entity_name: &str) -> GraphSymbolArtifact {
     GraphSymbolArtifact {
-        stable_symbol_id: id.to_string(),
-        file_path: file_path.to_string(),
+        stable_symbol_id: id.to_owned(),
+        file_path: file_path.to_owned(),
         byte_range: [0, 8],
         line_range: [1, 2],
-        entity_name: entity_name.to_string(),
-        qualified_name: entity_name.to_string(),
-        symbol_kind: "function".to_string(),
+        entity_name: entity_name.to_owned(),
+        qualified_name: entity_name.to_owned(),
+        symbol_kind: "function".to_owned(),
         anchor_hash: format!("hash-{id}"),
         enclosing_scope: None,
     }
@@ -421,24 +421,24 @@ fn symbol(id: &str, file_path: &str, entity_name: &str) -> GraphSymbolArtifact {
 fn snapshot(id: &str, commit: &str, entity_name: &str) -> SymbolSnapshotArtifact {
     SymbolSnapshotArtifact {
         key: SnapshotKey {
-            stable_symbol_id: id.to_string(),
-            commit: commit.to_string(),
+            stable_symbol_id: id.to_owned(),
+            commit: commit.to_owned(),
         },
-        file_path: "src/temporal.rs".to_string().into(),
-        entity_name: entity_name.to_string(),
-        symbol_kind: "function".to_string(),
+        file_path: "src/temporal.rs".to_owned().into(),
+        entity_name: entity_name.to_owned(),
+        symbol_kind: "function".to_owned(),
         enclosing_scope: None,
         byte_range: [0, 8],
         line_range: [1, 2],
         anchor_hash: format!("hash-{id}-{commit}"),
-        tokens: vec![entity_name.to_string()],
+        tokens: vec![entity_name.to_owned()],
     }
 }
 
 fn temporal_touch(commit: &str, key: SnapshotKey, change_kind: ChangeKind) -> TemporalEdgeArtifact {
     TemporalEdgeArtifact {
         source: EdgeEndpoint::Commit {
-            sha: commit.to_string(),
+            sha: commit.to_owned(),
         },
         target: EdgeEndpoint::Snapshot { key },
         relation: RelationKind::Touches,
@@ -459,7 +459,7 @@ fn temporal_rename(from: SnapshotKey, to: SnapshotKey) -> TemporalEdgeArtifact {
 
 fn edge(source: &str, target: Option<&str>, target_label: Option<&str>) -> GraphEdgeArtifact {
     GraphEdgeArtifact {
-        source_stable_symbol_id: source.to_string(),
+        source_stable_symbol_id: source.to_owned(),
         target_stable_symbol_id: target.map(str::to_string),
         target_label: target_label.map(str::to_string),
         relation: RelationKind::Calls,
@@ -489,13 +489,13 @@ fn baselines() -> Baselines {
         .unwrap_or_else(|err| panic!("failed to parse `{}`: {err}", path.display()))
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct Fixture {
     artifact: GraphIndexArtifact,
     fixture_path: PathBuf,
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn median_f64(mut values: Vec<f64>) -> f64 {
     assert!(!values.is_empty(), "median requires at least one sample");
     values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));

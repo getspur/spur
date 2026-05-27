@@ -12,12 +12,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Context as _, Result};
 use gix::object::tree::diff::{Action, Change};
 use gix::objs::tree::EntryMode;
 use indicatif::ProgressBar;
@@ -42,7 +42,7 @@ pub struct GitWalkConfig {
 impl Default for GitWalkConfig {
     fn default() -> Self {
         Self {
-            target_refs: vec!["main".to_string()],
+            target_refs: vec!["main".to_owned()],
             walk_strategy: WalkStrategy::Reachable,
             allow_replace_refs: false,
             use_gix_diff: true,
@@ -65,7 +65,7 @@ pub fn snapshot_refs(worktree: &Path, refs: &[&str]) -> Result<BTreeMap<String, 
         let stdout = run_git(worktree, &["rev-parse", "--verify", rev]).with_context(|| {
             format!("target ref `{target_ref}` does not exist; refusing to fall back")
         })?;
-        snapshot.insert((*target_ref).to_string(), stdout.trim().to_string());
+        snapshot.insert((*target_ref).to_owned(), stdout.trim().to_owned());
     }
 
     Ok(snapshot)
@@ -155,8 +155,8 @@ pub fn plan_incremental_walk(
 
     if ancestor.success() {
         return Ok(IncrementalPlan::FastForward {
-            from: stored.to_string(),
-            to: new_tip.to_string(),
+            from: stored.to_owned(),
+            to: new_tip.to_owned(),
         });
     }
 
@@ -167,7 +167,7 @@ pub fn plan_incremental_walk(
         "spur-graph: stored commit is not an ancestor of new tip; force-push recovery will re-walk the diverged range"
     );
     let merge_base = run_git(worktree, &["merge-base", stored, new_tip])
-        .map(|stdout| stdout.trim().to_string())
+        .map(|stdout| stdout.trim().to_owned())
         .inspect_err(|error| {
             tracing::warn!(
                 stored_tip = stored,
@@ -181,7 +181,7 @@ pub fn plan_incremental_walk(
 
     Ok(IncrementalPlan::ForcePushRecover {
         merge_base,
-        to: new_tip.to_string(),
+        to: new_tip.to_owned(),
     })
 }
 
@@ -443,10 +443,10 @@ fn read_commit(worktree: &Path, sha: &str) -> Result<CommitArtifact> {
         .with_context(|| format!("git show omitted author time for commit `{sha}`"))?
         .parse::<i64>()
         .with_context(|| format!("git show emitted invalid author time for commit `{sha}`"))?;
-    let summary = fields.next().unwrap_or_default().to_string();
+    let summary = fields.next().unwrap_or_default().to_owned();
 
     Ok(CommitArtifact {
-        sha: actual_sha.to_string(),
+        sha: actual_sha.to_owned(),
         parents,
         author_time,
         summary,
@@ -504,7 +504,7 @@ fn commit_subject(commit: &gix::Commit<'_>) -> String {
 fn file_change_to_temporal_edge(commit_sha: &str, change: &FileChange) -> TemporalEdgeArtifact {
     TemporalEdgeArtifact {
         source: EdgeEndpoint::Commit {
-            sha: commit_sha.to_string(),
+            sha: commit_sha.to_owned(),
         },
         target: EdgeEndpoint::File {
             path: change.path.clone(),
@@ -525,7 +525,7 @@ fn file_change_to_temporal_edge(commit_sha: &str, change: &FileChange) -> Tempor
 fn empty_graph_artifact() -> GraphIndexArtifact {
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
             content_hash_blake3: None,
         },
         manifest_version: String::new(),
@@ -656,7 +656,7 @@ fn root_commit_changes_gix(commit: &gix::Commit<'_>) -> Result<Vec<FileChange>> 
 }
 
 fn gix_change_to_file_change(change: Change<'_, '_, '_>, parent_sha: &str) -> Option<FileChange> {
-    let parent_sha = Some(parent_sha.to_string());
+    let parent_sha = Some(parent_sha.to_owned());
     match change {
         Change::Addition {
             location,
@@ -1428,7 +1428,7 @@ impl CatFileBatch {
             .next()
             .filter(|part| !part.is_empty())
             .with_context(|| format!("git cat-file --batch header `{header}` missing oid"))?;
-        let oid = oid.to_string();
+        let oid = oid.to_owned();
         let object_type = parts
             .next()
             .with_context(|| format!("git cat-file --batch header `{header}` missing type"))?;
@@ -1590,7 +1590,7 @@ fn blob_oid_for_path(worktree: &Path, sha: &str, path: &Path) -> Result<String> 
     let oid = String::from_utf8(output.stdout)
         .with_context(|| format!("git rev-parse `{spec_display}` emitted non-UTF-8 stdout"))?
         .trim()
-        .to_string();
+        .to_owned();
     if oid.is_empty() {
         bail!("git rev-parse `{spec_display}` returned an empty oid");
     }
@@ -1600,7 +1600,7 @@ fn blob_oid_for_path(worktree: &Path, sha: &str, path: &Path) -> Result<String> 
 
 #[cfg(unix)]
 fn blob_spec(sha: &str, path: &Path) -> OsString {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
     let mut bytes = Vec::with_capacity(sha.len() + 1 + path.as_os_str().as_bytes().len());
     bytes.extend_from_slice(sha.as_bytes());
@@ -1617,7 +1617,7 @@ fn blob_spec(sha: &str, path: &Path) -> OsString {
 fn write_blob_query(stdin: &mut ChildStdin, spec: &OsString) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::ffi::OsStrExt as _;
 
         stdin.write_all(spec.as_os_str().as_bytes())?;
     }
@@ -1653,7 +1653,7 @@ fn cached_extract(
     path: &Path,
     bytes: &[u8],
 ) -> Result<std::result::Result<Vec<ExtractedSymbol>, ExtractError>> {
-    let key = (language, oid.to_string());
+    let key = (language, oid.to_owned());
     if let Some(cached) = ctx.parse_cache.get(&key) {
         return Ok(Ok(cached.clone()));
     }
@@ -1696,7 +1696,7 @@ fn snapshot_from(commit: &str, path: &GitPath, symbol: &ExtractedSymbol) -> Symb
                 &symbol.symbol_kind,
                 symbol.byte_range[0] as u64,
             ),
-            commit: commit.to_string(),
+            commit: commit.to_owned(),
         },
         file_path: path.clone(),
         entity_name: symbol.entity_name.clone(),
@@ -1857,7 +1857,7 @@ fn parse_raw_diff(
 }
 
 fn oid_option(oid: &str) -> Option<String> {
-    (!oid.as_bytes().iter().all(|byte| *byte == b'0')).then(|| oid.to_string())
+    (!oid.as_bytes().iter().all(|byte| *byte == b'0')).then(|| oid.to_owned())
 }
 
 fn split_once(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
@@ -1948,7 +1948,7 @@ mod tests {
         run_git(dir, &["rev-parse", "HEAD"])
             .unwrap()
             .trim()
-            .to_string()
+            .to_owned()
     }
 
     #[test]
@@ -2313,7 +2313,7 @@ mod tests {
         let sha = run_git(dir.path(), &["rev-parse", "HEAD"])
             .unwrap()
             .trim()
-            .to_string();
+            .to_owned();
 
         let changes = file_changes_for_commit(dir.path(), &sha).unwrap();
 
@@ -2359,7 +2359,7 @@ mod tests {
         let sha2 = run_git(dir.path(), &["rev-parse", "HEAD"])
             .unwrap()
             .trim()
-            .to_string();
+            .to_owned();
 
         let mut ctx = SymbolDiffCtx::new();
         let file_changes1 = file_changes_for_commit(dir.path(), &sha1).unwrap();
@@ -2417,7 +2417,7 @@ mod tests {
         let blob_oid = run_git(dir.path(), &["rev-parse", &format!("{sha}:lib.rs")])
             .unwrap()
             .trim()
-            .to_string();
+            .to_owned();
         let object_path = git_dir(dir.path())
             .unwrap()
             .join("objects")
@@ -2438,8 +2438,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn non_utf8_path_does_not_panic() {
-        use std::io::Write;
-        use std::os::unix::ffi::OsStrExt;
+        use std::io::Write as _;
+        use std::os::unix::ffi::OsStrExt as _;
 
         let dir = TempDir::new().unwrap();
         init_repo(dir.path());
@@ -2461,7 +2461,7 @@ mod tests {
         let blob_oid = String::from_utf8(blob_output.stdout)
             .unwrap()
             .trim()
-            .to_string();
+            .to_owned();
 
         let mut tree_entry = Vec::new();
         tree_entry.extend_from_slice(b"100644 blob ");
@@ -2482,14 +2482,14 @@ mod tests {
         let tree_oid = String::from_utf8(tree_output.stdout)
             .unwrap()
             .trim()
-            .to_string();
+            .to_owned();
         let sha = run_git(
             dir.path(),
             &["commit-tree", &tree_oid, "-m", "non-utf8 path"],
         )
         .unwrap()
         .trim()
-        .to_string();
+        .to_owned();
 
         let changes = file_changes_for_commit(dir.path(), &sha).unwrap();
         assert_eq!(changes.len(), 1);

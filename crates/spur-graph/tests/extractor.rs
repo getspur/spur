@@ -73,7 +73,7 @@ fn markdown_golden_path() -> PathBuf {
 fn normalize_for_golden(
     mut artifact: spur_graph::GraphIndexArtifact,
 ) -> spur_graph::GraphIndexArtifact {
-    artifact.manifest_version = "<normalized>".to_string();
+    artifact.manifest_version = "<normalized>".to_owned();
     artifact
 }
 
@@ -150,7 +150,7 @@ fn artifact_symbols_persist_qualified_names() {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(
         root.join("src/lib.rs"),
-        r#"
+        r"
 pub fn top() {}
 
 mod a {
@@ -176,7 +176,7 @@ struct Store;
 impl Service for Store {
     fn method(&self) {}
 }
-"#,
+",
     )
     .expect("write lib.rs");
 
@@ -223,13 +223,13 @@ fn artifact_distinguishes_struct_and_inherent_impl_qualified_names() {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(
         root.join("src/lib.rs"),
-        r#"
+        r"
 struct App;
 
 impl App {
     fn run(&self) {}
 }
-"#,
+",
     )
     .expect("write lib.rs");
 
@@ -325,7 +325,7 @@ fn trait_impl_qualified_name_includes_trait_for_type() {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(
         root.join("src/lib.rs"),
-        r#"
+        r"
 trait Service {
     fn handle(&self);
 }
@@ -337,7 +337,7 @@ impl Service for Store {
 }
 
 impl Store {}
-"#,
+",
     )
     .expect("write lib.rs");
 
@@ -859,13 +859,13 @@ fn stable_key_changes_when_byte_start_changes() {
     let root = dir.path();
     fs::create_dir_all(root.join("src")).expect("mkdir src");
 
-    let base_source = r#"
+    let base_source = r"
 trait Foo { fn f(&self); }
 struct Bar;
 impl Foo for Bar { fn f(&self) {} }
 impl Bar { fn a(&self) {} }
 impl Bar { fn b(&self) {} }
-"#;
+";
     fs::write(root.join("src/lib.rs"), base_source).expect("write base source");
     let base_facts = build_facts(root, None).expect("extract base").0;
     let base_keys: Vec<_> = base_facts
@@ -909,13 +909,13 @@ fn rust_extractor_distinguishes_trait_impls_of_same_self_type() {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(
         root.join("src/lib.rs"),
-        r#"
+        r"
 trait Foo { fn f(&self); }
 trait Baz { fn b(&self); }
 struct Bar;
 impl Foo for Bar { fn f(&self) {} }
 impl Baz for Bar { fn b(&self) {} }
-"#,
+",
     )
     .expect("write lib.rs");
 
@@ -949,11 +949,11 @@ fn rust_extractor_distinguishes_multiple_inherent_impls_in_one_file() {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(
         root.join("src/lib.rs"),
-        r#"
+        r"
 struct Bar;
 impl Bar { fn a(&self) {} }
 impl Bar { fn b(&self) {} }
-"#,
+",
     )
     .expect("write lib.rs");
 
@@ -1015,7 +1015,7 @@ fn rust_extractor_keeps_methods_in_their_nearest_impl_scope() {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(
         root.join("src/lib.rs"),
-        r#"
+        r"
 pub struct McpCallbackServer;
 
 impl McpCallbackServer {
@@ -1029,7 +1029,7 @@ impl McpCallbackServer {
 impl Drop for McpCallbackServer {
     fn drop(&mut self) {}
 }
-"#,
+",
     )
     .expect("write lib.rs");
 
@@ -1261,7 +1261,7 @@ fn artifact_writer_hash_changes_when_edge_content_changes() {
         .expect("fixture should contain at least one edge");
     edge.target_label = Some(match edge.target_label.take() {
         Some(label) => format!("{label}_mutated"),
-        None => "mutated_target".to_string(),
+        None => "mutated_target".to_owned(),
     });
     let original_hash = content_hash(&artifact);
     let mutated_hash = content_hash(&mutated);
@@ -1819,7 +1819,7 @@ fn incremental_manifest_mismatch_falls_back_to_full() {
     let root = fixture_root();
     let mut full =
         artifact_from_facts(&build_facts(&root, None).expect("extract").0, &root).expect("full");
-    full.manifest_version = "stale-manifest".to_string();
+    full.manifest_version = "stale-manifest".to_owned();
 
     let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Full);

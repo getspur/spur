@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 use crate::{GraphFileArtifact, GraphSymbolArtifact};
 
@@ -205,13 +205,13 @@ mod tests {
         anchor_hash: u64,
     ) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
-            stable_symbol_id: "symbol-run".to_string(),
-            file_path: "src/lib.rs".to_string(),
+            stable_symbol_id: "symbol-run".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
             byte_range,
             line_range: [1, 1],
-            entity_name: entity_name.to_string(),
-            qualified_name: entity_name.to_string(),
-            symbol_kind: "fn".to_string(),
+            entity_name: entity_name.to_owned(),
+            qualified_name: entity_name.to_owned(),
+            symbol_kind: "fn".to_owned(),
             anchor_hash: anchor_hash.to_string(),
             enclosing_scope: None,
         }
