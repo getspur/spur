@@ -158,6 +158,13 @@ impl OutcomeMaterializer {
             kind: OutcomeBlobKind::ResultJson,
         };
 
+        tracing::info!(
+            target: "spur.metrics.outcome_materialize_entry",
+            delegation_id = %delegation_id,
+            attempt,
+            "OutcomeMaterializer::materialize entered"
+        );
+
         let bytes = match serde_json::to_vec(&result) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -193,7 +200,16 @@ impl OutcomeMaterializer {
             .catch_unwind()
             .await;
         let outcome_ref = match put_result {
-            Ok(Ok(outcome_ref)) => outcome_ref,
+            Ok(Ok(outcome_ref)) => {
+                tracing::info!(
+                    target: "spur.metrics.outcome_persisted",
+                    delegation_id = %delegation_id,
+                    attempt,
+                    envelope_bytes = bytes.len(),
+                    "ResultJson outcome persisted"
+                );
+                outcome_ref
+            }
             Ok(Err(error)) => {
                 tracing::error!(
                     target: "spur.metrics.outcome_persist_failed",
