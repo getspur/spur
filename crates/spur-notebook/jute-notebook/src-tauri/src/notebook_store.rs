@@ -376,6 +376,7 @@ fn empty_notebook() -> NotebookRoot {
             orig_nbformat: None,
             title: None,
             authors: None,
+            jute_deck: None,
             other: Map::new(),
         },
         nbformat_minor: 5,
@@ -411,6 +412,7 @@ fn make_cell(kind: CellKind, id: String, source: String) -> Cell {
 fn empty_cell_metadata() -> CellMetadata {
     CellMetadata {
         spur: None,
+        jute_deck: None,
         other: Map::new(),
     }
 }
@@ -565,6 +567,7 @@ mod tests {
                     version,
                     last_edited_by: None,
                 }),
+                jute_deck: None,
                 other: Map::new(),
             },
             source: MultilineString::Single(source.to_string()),
@@ -581,6 +584,7 @@ mod tests {
                 orig_nbformat: None,
                 title: None,
                 authors: None,
+                jute_deck: None,
                 other: Map::new(),
             },
             nbformat_minor: 5,
@@ -597,6 +601,7 @@ mod tests {
                 orig_nbformat: None,
                 title: None,
                 authors: None,
+                jute_deck: None,
                 other: Map::new(),
             },
             nbformat_minor: 5,

@@ -201,6 +201,7 @@ mod tests {
                 orig_nbformat: None,
                 title: None,
                 authors: None,
+                jute_deck: None,
                 other: Map::new(),
             },
             nbformat_minor: 5,
@@ -209,6 +210,7 @@ mod tests {
                 id: Some("code-1".to_string()),
                 metadata: CellMetadata {
                     spur: None,
+                    jute_deck: None,
                     other: Map::new(),
                 },
                 source: MultilineString::Single("print('old')".to_string()),
