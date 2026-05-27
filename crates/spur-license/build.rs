@@ -8,7 +8,7 @@
 //! Re-runs only when the policy or key file changes.
 
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -34,12 +34,11 @@ fn main() {
     let signed: SignedPolicy =
         serde_json::from_str(&policy_raw).expect("default_policy.json must be a SignedPolicy JSON");
 
-    if signed.key_id != "spur-policy-2026-04" {
-        panic!(
-            "embedded policy uses unknown key_id '{}'; expected 'spur-policy-2026-04'",
-            signed.key_id
-        );
-    }
+    assert!(
+        signed.key_id == "spur-policy-2026-04",
+        "embedded policy uses unknown key_id '{}'; expected 'spur-policy-2026-04'",
+        signed.key_id
+    );
 
     let key_bytes = std::fs::read("resources/keys/spur-policy-2026-04.pub")
         .expect("spur-policy-2026-04.pub must exist");
@@ -59,10 +58,10 @@ fn main() {
 
     let doc: PolicyDocumentMin = serde_json::from_str(&signed.payload)
         .expect("inner payload must be a valid PolicyDocument JSON");
-    if doc.schema_version > SUPPORTED_MAJOR {
-        panic!(
-            "embedded policy schema_version {} exceeds supported major {}",
-            doc.schema_version, SUPPORTED_MAJOR
-        );
-    }
+    assert!(
+        doc.schema_version <= SUPPORTED_MAJOR,
+        "embedded policy schema_version {} exceeds supported major {}",
+        doc.schema_version,
+        SUPPORTED_MAJOR
+    );
 }

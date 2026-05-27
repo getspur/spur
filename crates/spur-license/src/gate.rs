@@ -12,7 +12,7 @@ use crate::snapshot::{EntitlementSnapshot, SourceMetadata};
 use crate::tier::Tier;
 use crate::{LicenseState, Plan};
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct FeatureGate {
     snapshot: ArcSwap<EntitlementSnapshot>,
     policy: Arc<PolicyResolver>,
@@ -271,14 +271,13 @@ fn apply_test_strip_keys(features: AHashSet<FeatureKey>) -> AHashSet<FeatureKey>
         if let Ok(csv) = std::env::var("SPUR_LICENSE_TEST_STRIP_KEYS") {
             let mut features = features;
             for raw in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                match FeatureKey::from_known(raw) {
-                    Some(key) => {
-                        features.remove(&key);
-                    }
-                    None => tracing::debug!(
+                if let Some(key) = FeatureKey::from_known(raw) {
+                    features.remove(&key);
+                } else {
+                    tracing::debug!(
                         unknown_key = raw,
                         "SPUR_LICENSE_TEST_STRIP_KEYS contains unknown feature key; ignoring"
-                    ),
+                    );
                 }
             }
             return features;
@@ -399,7 +398,7 @@ mod tests {
 
         // Update to Pro with a Pro-only feature.
         let mut features = BTreeSet::new();
-        features.insert("pm_pro_beads_advanced".to_string());
+        features.insert("pm_pro_beads_advanced".to_owned());
         let pro_state = LicenseState::active_validated(Plan::Pro, features);
         gate.update_state(&pro_state);
 
@@ -457,9 +456,9 @@ mod tests {
             let gate = FeatureGate::new(policy);
 
             let features = BTreeSet::from([
-                "parallel_workers".to_string(),
-                "auto_review_policies".to_string(),
-                "tui_dashboard".to_string(),
+                "parallel_workers".to_owned(),
+                "auto_review_policies".to_owned(),
+                "tui_dashboard".to_owned(),
             ]);
             let pro_state = LicenseState::active_validated(Plan::Pro, features);
             gate.update_state(&pro_state);

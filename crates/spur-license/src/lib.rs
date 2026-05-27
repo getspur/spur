@@ -130,7 +130,7 @@ impl LicenseState {
     pub fn config_error(message: impl Into<String>) -> Self {
         let mut state = Self::inactive(message);
         state.status = LicenseStatus::ConfigError;
-        state.status_text = state.status_text.trim().to_string();
+        state.status_text = state.status_text.trim().to_owned();
         state
     }
 
@@ -249,7 +249,7 @@ pub type Result<T> = std::result::Result<T, LicenseError>;
 /// `feature_gate`) are unsynchronized with mutations and return
 /// a best-effort snapshot. In particular, `current_state()` may
 /// observe a mix of SDK-cache state (post-mutation) and provider
-/// RwLock state (pre-mutation) during an in-flight mutation
+/// `RwLock` state (pre-mutation) during an in-flight mutation
 /// because the SDK mutates its own cache before SPUR's
 /// `replace_state` runs. The mismatch closes on commit. Callers
 /// that require strict coherence should subscribe to
@@ -398,8 +398,8 @@ mod tests {
     fn active_community_state_has_correct_shape() {
         use std::collections::BTreeSet;
         let mut features = BTreeSet::new();
-        features.insert("chat".to_string());
-        features.insert("watch_loop".to_string());
+        features.insert("chat".to_owned());
+        features.insert("watch_loop".to_owned());
         let state = LicenseState::active_community(features.clone());
         assert!(matches!(state.status, LicenseStatus::Active));
         assert!(matches!(state.plan, Plan::Community));

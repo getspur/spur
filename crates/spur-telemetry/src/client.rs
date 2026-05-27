@@ -37,7 +37,7 @@ impl Default for PosthogClient {
 impl PosthogClient {
     pub(crate) fn new() -> Self {
         let endpoint = std::env::var(POSTHOG_ENDPOINT_ENV)
-            .unwrap_or_else(|_| DEFAULT_POSTHOG_ENDPOINT.to_string());
+            .unwrap_or_else(|_| DEFAULT_POSTHOG_ENDPOINT.to_owned());
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -85,8 +85,8 @@ mod tests {
 
     fn sample_event() -> PosthogEvent {
         PosthogEvent {
-            event: "spur_test_event".to_string(),
-            distinct_id: "user-123".to_string(),
+            event: "spur_test_event".to_owned(),
+            distinct_id: "user-123".to_owned(),
             properties: json!({"source":"test"}),
             timestamp: Utc::now(),
         }

@@ -1,6 +1,6 @@
-//! Emission-count audit test. Runs only when live LicenseSeat credentials
+//! Emission-count audit test. Runs only when live `LicenseSeat` credentials
 //! are present. Records the number of `LicenseEvent`s observed on the
-//! facade's subscribe() channel for a single explicit handler cycle.
+//! facade's `subscribe()` channel for a single explicit handler cycle.
 //!
 //! Expected counts after Phase 2 Task 7 (C9 dedup):
 //! - activate: 1
