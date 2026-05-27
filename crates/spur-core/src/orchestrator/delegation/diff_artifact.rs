@@ -227,6 +227,7 @@ pub(crate) async fn build_diff_summary(
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // std::env::set_var is unsafe in Rust 2024; test-only setup.
 mod truncate_summary_tests {
     use super::truncate_summary;
 

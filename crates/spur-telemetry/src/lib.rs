@@ -242,6 +242,7 @@ pub fn shutdown_sync() {
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code)] // libc signal FFI to restore default SIGINT and re-raise.
 fn re_raise_sigint() {
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
