@@ -9,11 +9,11 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use spur_graph::{
     load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,
-    write_artifact_parquet, ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GitPath,
-    GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
-    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
-    GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey, SymbolSnapshotArtifact,
-    TemporalEdgeArtifact, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
+    write_artifact_parquet, ArtifactStagingDir, ChangeKind, CommitArtifact, Confidence,
+    EdgeEndpoint, GitPath, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
+    GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
+    GraphSymbolArtifact, GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey,
+    SymbolSnapshotArtifact, TemporalEdgeArtifact, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 
 #[test]
@@ -29,6 +29,7 @@ fn parquet_artifact_round_trips_all_tables_with_exact_node_ids() {
         WriteOptions {
             emit_edges_by_dst: true,
         },
+        Vec::new(),
     )
     .expect("write parquet artifact");
 
@@ -55,8 +56,13 @@ fn parquet_artifact_round_trips_all_tables_with_exact_node_ids() {
 fn temporal_parquet_loader_reads_only_temporal_tables_and_metadata() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = temporal_fixture_artifact();
-    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
 
     let actual = load_temporal_artifact_parquet(&dir).expect("read temporal parquet artifact");
 
@@ -80,8 +86,13 @@ fn temporal_parquet_loader_reads_only_temporal_tables_and_metadata() {
 fn default_write_emits_edges_by_dst_with_edges_schema_and_dst_src_order() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = fixture_artifact_with_unsorted_resolved_edges();
-    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let edges_path = dir.join("edges.parquet");
     let edges_by_dst_path = dir.join("edges_by_dst.parquet");
 
@@ -124,8 +135,13 @@ fn reads_symbol_snapshot_file_path_b64_with_padding_and_url_safe_alphabet() {
         symbol_snapshot("sym-standard-padded", b"x"),
         symbol_snapshot("sym-url-safe-padded", &[0xff]),
     ];
-    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
 
     rewrite_symbol_snapshot_b64_values(&dir, &["eA==", "_w=="])
         .expect("rewrite symbol_snapshots.parquet file_path_b64 values");
@@ -142,8 +158,13 @@ fn reads_v5_edge_tables_without_bind_method_column_as_none() {
         .edges
         .iter_mut()
         .for_each(|edge| edge.bind_method = Some("macro_body_singleton".to_owned()));
-    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
 
     rewrite_manifest_schema_version(&dir, "spur-graph-schema-v5")
         .expect("rewrite manifest schema version");
@@ -164,8 +185,13 @@ fn reads_v5_edge_tables_without_bind_method_column_as_none() {
 #[test]
 fn rejects_directory_without_manifest() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let dir = write_artifact_parquet(&fixture_artifact(), tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let dir = write_artifact_parquet(
+        &fixture_artifact(),
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     std::fs::remove_file(dir.join("manifest.json")).expect("remove manifest");
 
     let err = read_artifact_parquet(&dir).expect_err("missing manifest must be rejected");
@@ -179,8 +205,13 @@ fn rejects_directory_without_manifest() {
 #[test]
 fn rejects_directory_with_incomplete_manifest() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let dir = write_artifact_parquet(&fixture_artifact(), tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let dir = write_artifact_parquet(
+        &fixture_artifact(),
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let manifest_path = dir.join("manifest.json");
     let mut manifest: GraphArtifactManifest =
         serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
@@ -204,19 +235,33 @@ fn rejects_directory_with_incomplete_manifest() {
 fn write_replaces_existing_hash_directory_before_publish() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = fixture_artifact();
-    let dir = write_artifact_parquet(
+    let staging = ArtifactStagingDir::new(tempdir.path(), &artifact.graph_content_hash)
+        .expect("create staging dir");
+    write_artifact_parquet(
         &artifact,
-        tempdir.path(),
+        staging.path(),
         WriteOptions {
             emit_edges_by_dst: true,
         },
+        Vec::new(),
     )
     .expect("write parquet artifact");
+    let dir = staging.commit().expect("commit parquet artifact");
     let stale = dir.join("stale-file");
     std::fs::write(&stale, b"stale").expect("write stale file");
 
-    let rewritten = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("rewrite parquet artifact");
+    let staging = ArtifactStagingDir::new(tempdir.path(), &artifact.graph_content_hash)
+        .expect("create replacement staging dir");
+    write_artifact_parquet(
+        &artifact,
+        staging.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("rewrite parquet artifact");
+    let rewritten = staging
+        .commit()
+        .expect("commit replacement parquet artifact");
 
     assert_eq!(rewritten, dir);
     assert!(
@@ -300,7 +345,7 @@ fn rewrite_symbol_snapshot_b64_values(dir: &Path, encoded_paths: &[&str]) -> any
             Arc::new(tokens),
         ],
     )?;
-    let file = File::create(dir.join("symbol_snapshots.parquet"))?;
+    let file = File::create(dir.join("symbol_snapshots/00000.parquet"))?;
     let mut writer = ArrowWriter::try_new(file, schema, None)?;
     writer.write(&batch)?;
     writer.close()?;

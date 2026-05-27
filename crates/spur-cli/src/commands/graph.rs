@@ -9,10 +9,12 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
+use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
     resolve_artifact_location, resolve_worktree_root_from, write_artifact_parquet, BuildMode,
-    CommitIndexArtifact, GraphFacts, GraphIndexArtifact, WalkStrategy, WriteOptions,
+    CommitIndexArtifact, GraphFacts, GraphIndexArtifact, TemporalShardConfig, WalkStrategy,
+    WriteOptions,
 };
 
 pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph";
@@ -26,6 +28,7 @@ pub struct GraphBuildOptions {
     pub quiet: bool,
     pub skip_analyst: bool,
     pub with_temporal: bool,
+    pub temporal_shard_config: TemporalShardConfig,
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
@@ -46,6 +49,7 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         reject_legacy_output_path(&output)?;
     }
 
+    let temporal_shard_config = options.temporal_shard_config;
     let use_temporal = should_use_temporal(options.with_temporal);
     let warmup_stats = if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
@@ -58,6 +62,8 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     tracing::debug!(
         with_temporal = options.with_temporal,
         use_temporal,
+        temporal_max_rows_per_shard = temporal_shard_config.max_rows_per_shard,
+        temporal_max_commits_per_shard = temporal_shard_config.max_commits_per_shard,
         "spur-graph: temporal walk option evaluated"
     );
 
@@ -114,19 +120,24 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         )?,
     };
 
+    let mut temporal_write_stage = None;
     if use_temporal {
         let config = temporal_walk_config();
         let progress = warmup_stats
             .as_ref()
             .and_then(|stats| stats.temporal_commit_count().map(temporal_progress_bar));
-        let result = run_full_walk_into(&root, &config, progress.clone());
+        let staging = ArtifactStagingDir::new(&output, &artifact.graph_content_hash)?;
+        let mut sink = TemporalShardSink::new(staging.path().to_path_buf(), temporal_shard_config)?;
+        let result = run_full_walk_into(&root, &config, progress.clone(), Some(&mut sink));
         if let Some(progress) = progress {
             progress.finish_and_clear();
         }
         match result {
             Ok((temporal_artifact, commit_index)) => {
+                let shard_index = sink.finalize()?;
                 persist_commit_index_for_graph_build(&root, &commit_index)?;
                 merge_temporal_artifact(&mut artifact, temporal_artifact);
+                temporal_write_stage = Some((staging, shard_index));
             }
             Err(error) => {
                 tracing::warn!(
@@ -142,7 +153,53 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         }
     }
 
-    let canonical_output = if uses_output_override {
+    let canonical_output = if let Some((staging, temporal_shards)) = temporal_write_stage {
+        let write_started = Instant::now();
+        let write_span = tracing::info_span!(
+            target: "spur_graph::build::write",
+            "write_artifact_parquet",
+            path = %output.display(),
+            files = artifact.files.len(),
+            symbols = artifact.symbols.len(),
+            edges = artifact.edges.len(),
+            temporal_shards = temporal_shards.len()
+        );
+        {
+            let _entered = write_span.enter();
+            let result = (|| {
+                write_artifact_parquet(
+                    &artifact,
+                    staging.path(),
+                    WriteOptions::default(),
+                    temporal_shards,
+                )?;
+                let written_dir = staging.commit()?;
+                if !uses_output_override {
+                    spur_graph::write_current_pointer(&root, &written_dir)?;
+                }
+                Ok::<_, anyhow::Error>(written_dir)
+            })();
+            match &result {
+                Ok(_) => {
+                    tracing::info!(
+                        target: "spur_graph::build::write",
+                        elapsed_ms = elapsed_ms(write_started),
+                        "spur-graph build phase completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::info!(
+                        target: "spur_graph::build::write",
+                        error = %error,
+                        elapsed_ms = elapsed_ms(write_started),
+                        "spur-graph build phase failed"
+                    );
+                }
+            }
+            result?;
+        }
+        None
+    } else if uses_output_override {
         let write_started = Instant::now();
         let write_span = tracing::info_span!(
             target: "spur_graph::build::write",
@@ -154,7 +211,16 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         );
         {
             let _entered = write_span.enter();
-            let result = write_artifact_parquet(&artifact, &output, WriteOptions::default());
+            let result = (|| {
+                let staging = ArtifactStagingDir::new(&output, &artifact.graph_content_hash)?;
+                write_artifact_parquet(
+                    &artifact,
+                    staging.path(),
+                    WriteOptions::default(),
+                    Vec::new(),
+                )?;
+                staging.commit()
+            })();
             match &result {
                 Ok(_) => {
                     tracing::info!(
@@ -224,7 +290,16 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         );
         {
             let _entered = write_span.enter();
-            let result = write_artifact_parquet(&artifact, &output, WriteOptions::default());
+            let result = (|| {
+                let staging = ArtifactStagingDir::new(&output, &artifact.graph_content_hash)?;
+                write_artifact_parquet(
+                    &artifact,
+                    staging.path(),
+                    WriteOptions::default(),
+                    Vec::new(),
+                )?;
+                staging.commit()
+            })();
             match &result {
                 Ok(written_dir) => {
                     if !uses_output_override {

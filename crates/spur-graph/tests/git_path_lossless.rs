@@ -25,7 +25,7 @@ fn walker_preserves_non_utf8_filename_through_artifact() {
     let sha = fast_import_file(dir.path(), path, b"pub fn non_utf8_path() -> u32 { 1 }\n");
 
     let (graph, _commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None)
             .unwrap();
 
     assert!(graph.temporal_edges.iter().any(|edge| {

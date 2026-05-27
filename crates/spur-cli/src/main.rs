@@ -398,7 +398,17 @@ mod cli_parse_tests {
     #[test]
     fn cli_accepts_graph_build_with_temporal_flag() {
         Cli::command()
-            .try_get_matches_from(["spur", "graph", "build", "--workspace", "--with-temporal"])
+            .try_get_matches_from([
+                "spur",
+                "graph",
+                "build",
+                "--workspace",
+                "--with-temporal",
+                "--temporal-max-rows-per-shard",
+                "10",
+                "--temporal-max-commits-per-shard",
+                "2",
+            ])
             .expect("graph build --with-temporal should parse");
     }
 }
@@ -518,6 +528,12 @@ enum GraphCommands {
         /// Also honored via SPUR_GRAPH_WITH_TEMPORAL=1.
         #[arg(long)]
         with_temporal: bool,
+        /// Maximum temporal rows per shard.
+        #[arg(long, hide = true, default_value_t = 100_000, value_name = "N")]
+        temporal_max_rows_per_shard: usize,
+        /// Maximum commits per temporal shard.
+        #[arg(long, hide = true, default_value_t = 5_000, value_name = "N")]
+        temporal_max_commits_per_shard: usize,
     },
 }
 
@@ -953,6 +969,8 @@ async fn run() -> Result<()> {
                 quiet,
                 no_analyst,
                 with_temporal,
+                temporal_max_rows_per_shard,
+                temporal_max_commits_per_shard,
             } => commands::graph::build(commands::graph::GraphBuildOptions {
                 root,
                 workspace,
@@ -960,6 +978,10 @@ async fn run() -> Result<()> {
                 quiet,
                 skip_analyst: no_analyst,
                 with_temporal,
+                temporal_shard_config: spur_graph::TemporalShardConfig {
+                    max_rows_per_shard: temporal_max_rows_per_shard,
+                    max_commits_per_shard: temporal_max_commits_per_shard,
+                },
             }),
         },
         Commands::Gc {

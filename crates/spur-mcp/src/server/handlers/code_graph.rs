@@ -4443,9 +4443,13 @@ mod tests {
             temporal_edges: Vec::new(),
         };
         let artifact_base = dir.path().join(".git/spur-graph/artifacts/parquet-test");
-        let parquet_dir =
-            write_artifact_parquet(&artifact, &artifact_base, WriteOptions::default())
-                .expect("write parquet artifact");
+        let parquet_dir = write_artifact_parquet(
+            &artifact,
+            &artifact_base,
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
         write_current_pointer(dir.path(), &parquet_dir).expect("write CURRENT pointer");
     }
 

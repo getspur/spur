@@ -29,8 +29,13 @@ use crate::schema::{
     GraphIndexHeader, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
     TemporalEdgeArtifact, WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL,
 };
+use crate::store::parquet::{
+    load_temporal_artifact_metadata_parquet, stream_temporal_artifact_parquet_into_sink,
+};
 use crate::store::pointer::ArtifactFormat;
-use crate::store::{commit_index, load_temporal_artifact_parquet, resolve_artifact_location};
+use crate::store::{
+    commit_index, load_temporal_artifact_parquet, resolve_artifact_location, TemporalShardSink,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWalkConfig {
@@ -190,6 +195,7 @@ pub fn run_full_walk_into(
     worktree: &Path,
     config: &GitWalkConfig,
     progress: Option<ProgressBar>,
+    mut sink: Option<&mut TemporalShardSink>,
 ) -> Result<(GraphIndexArtifact, CommitIndexArtifact)> {
     ensure_not_shallow(worktree)?;
     check_replace_refs(worktree, config.allow_replace_refs)?;
@@ -208,7 +214,12 @@ pub fn run_full_walk_into(
     let tip = refs
         .get(first_ref)
         .with_context(|| format!("target ref `{first_ref}` was not present after ref snapshot"))?;
-    let base = load_incremental_base(worktree, first_ref, config.walk_strategy)?;
+    let base = load_incremental_base(
+        worktree,
+        first_ref,
+        config.walk_strategy,
+        sink.as_deref_mut(),
+    )?;
     let plan = plan_incremental_walk(
         worktree,
         base.as_ref().map(|base| base.stored_tip.as_str()),
@@ -248,7 +259,7 @@ pub fn run_full_walk_into(
             None => read_commit(worktree, &sha)?,
         };
         graph.commits.push(commit.clone());
-        commits.commits.push(commit);
+        commits.commits.push(commit.clone());
 
         let file_changes = match &gix_repo {
             Some(repo) => file_changes_for_commit_gix(repo, &sha)?,
@@ -291,6 +302,13 @@ pub fn run_full_walk_into(
         if let Some(progress) = progress.as_ref() {
             progress.inc(1);
         }
+        if let Some(sink) = sink.as_deref_mut() {
+            sink.append_commit(
+                &commit,
+                &mut graph.temporal_edges,
+                &mut graph.symbol_snapshots,
+            )?;
+        }
     }
 
     graph.diagnostics.extend(ctx.diagnostics().iter().cloned());
@@ -307,6 +325,7 @@ fn load_incremental_base(
     worktree: &Path,
     first_ref: &str,
     walk_strategy: WalkStrategy,
+    mut sink: Option<&mut TemporalShardSink>,
 ) -> Result<Option<IncrementalBase>> {
     let Some(pointer) = commit_index::load_pointer(worktree)? else {
         return Ok(None);
@@ -347,7 +366,11 @@ fn load_incremental_base(
                 path = %graph_location.path.display(),
                 "spur-graph: loading temporal-only Parquet graph artifact for incremental walk"
             );
-            load_temporal_artifact_parquet(&graph_location.path)?
+            if sink.is_some() {
+                load_temporal_artifact_metadata_parquet(&graph_location.path)?
+            } else {
+                load_temporal_artifact_parquet(&graph_location.path)?
+            }
         }
         ArtifactFormat::LegacyJson => {
             tracing::debug!(
@@ -367,11 +390,79 @@ fn load_incremental_base(
         return Ok(None);
     }
 
+    if let Some(sink) = sink.as_deref_mut() {
+        match graph_location.format {
+            ArtifactFormat::Parquet => {
+                stream_temporal_artifact_parquet_into_sink(&graph_location.path, sink)?
+            }
+            ArtifactFormat::LegacyJson => drain_temporal_graph_into_sink(&mut graph, sink)?,
+        }
+    }
+
     Ok(Some(IncrementalBase {
         graph,
         commits,
         stored_tip,
     }))
+}
+
+#[derive(Default)]
+struct TemporalRowsForCommit {
+    edges: Vec<TemporalEdgeArtifact>,
+    snapshots: Vec<SymbolSnapshotArtifact>,
+}
+
+fn drain_temporal_graph_into_sink(
+    graph: &mut GraphIndexArtifact,
+    sink: &mut TemporalShardSink,
+) -> Result<()> {
+    let commits_by_sha: HashMap<_, _> = graph
+        .commits
+        .iter()
+        .cloned()
+        .map(|commit| (commit.sha.clone(), commit))
+        .collect();
+    let mut rows_by_commit: BTreeMap<String, TemporalRowsForCommit> = BTreeMap::new();
+
+    for edge in std::mem::take(&mut graph.temporal_edges) {
+        let commit_sha = temporal_edge_commit(&edge)
+            .context("legacy temporal edge has no commit endpoint")?
+            .to_owned();
+        rows_by_commit
+            .entry(commit_sha)
+            .or_default()
+            .edges
+            .push(edge);
+    }
+
+    for snapshot in std::mem::take(&mut graph.symbol_snapshots) {
+        rows_by_commit
+            .entry(snapshot.key.commit.clone())
+            .or_default()
+            .snapshots
+            .push(snapshot);
+    }
+
+    for (commit_sha, mut rows) in rows_by_commit {
+        let commit = commits_by_sha
+            .get(&commit_sha)
+            .with_context(|| format!("temporal row references unknown commit `{commit_sha}`"))?;
+        sink.append_commit(commit, &mut rows.edges, &mut rows.snapshots)?;
+    }
+
+    Ok(())
+}
+
+fn temporal_edge_commit(edge: &TemporalEdgeArtifact) -> Option<&str> {
+    match &edge.target {
+        EdgeEndpoint::Snapshot { key } => Some(&key.commit),
+        EdgeEndpoint::Commit { sha } => Some(sha),
+        EdgeEndpoint::File { .. } | EdgeEndpoint::Symbol { .. } => match &edge.source {
+            EdgeEndpoint::Snapshot { key } => Some(&key.commit),
+            EdgeEndpoint::Commit { sha } => Some(sha),
+            EdgeEndpoint::File { .. } | EdgeEndpoint::Symbol { .. } => None,
+        },
+    }
 }
 
 fn planned_commits(

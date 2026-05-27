@@ -590,6 +590,7 @@ fn bench_full_walk_1k(c: &mut Criterion) {
                 dir.path(),
                 &spur_graph::git_walk::GitWalkConfig::default(),
                 None,
+                None,
             )
             .unwrap();
             black_box((
@@ -791,9 +792,14 @@ fn measure_full_walk_once(
         worktree,
         &spur_graph::git_walk::GitWalkConfig::default(),
         None,
+        None,
     )?;
-    let artifact_dir =
-        spur_graph::store::write_artifact_parquet(&graph, artifact_base, WriteOptions::default())?;
+    let artifact_dir = spur_graph::store::write_artifact_parquet(
+        &graph,
+        artifact_base,
+        WriteOptions::default(),
+        Vec::new(),
+    )?;
     spur_graph::store::write_current_pointer(worktree, &artifact_dir)?;
     let artifact_bytes = artifact_dir_size(&artifact_dir)?;
     let peak_rss_bytes = [rss_before, peak_rss_bytes()].into_iter().flatten().max();
@@ -1494,12 +1500,12 @@ fn snapshot_growth_budget() {
     build_synthetic_repo(d1.path(), small_commits, SYNTHETIC_BUDGET_MERGE_DENSITY);
     let budget_config = snapshot_growth_budget_config();
     let (g1, _) =
-        spur_graph::git_walk::run_full_walk_into(d1.path(), &budget_config, None).unwrap();
+        spur_graph::git_walk::run_full_walk_into(d1.path(), &budget_config, None, None).unwrap();
 
     let d2 = tempfile::TempDir::new().unwrap();
     build_synthetic_repo(d2.path(), large_commits, SYNTHETIC_BUDGET_MERGE_DENSITY);
     let (g2, _) =
-        spur_graph::git_walk::run_full_walk_into(d2.path(), &budget_config, None).unwrap();
+        spur_graph::git_walk::run_full_walk_into(d2.path(), &budget_config, None, None).unwrap();
 
     let ratio = g2.symbol_snapshots.len() as f64 / g1.symbol_snapshots.len() as f64;
     let commit_ratio = large_commits as f64 / small_commits as f64;
