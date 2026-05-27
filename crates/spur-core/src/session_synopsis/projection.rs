@@ -210,7 +210,7 @@ impl SessionSynopsisProjection {
                 first,
                 last,
             } => {
-                if self.by_session.get(session).is_some() {
+                if self.by_session.contains_key(session) {
                     return;
                 }
 
