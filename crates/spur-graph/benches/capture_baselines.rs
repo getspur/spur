@@ -19,6 +19,7 @@ const DEFAULT_SAMPLE_COUNT: usize = 10;
 #[derive(Debug)]
 enum Mode {
     Capture(CaptureOptions),
+    Help,
     SampleLoad { fixture_path: PathBuf },
 }
 
@@ -51,6 +52,10 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     match parse_args(env::args_os().skip(1))? {
         Mode::Capture(options) => capture_baselines(&options),
+        Mode::Help => {
+            print_usage();
+            Ok(())
+        }
         Mode::SampleLoad { fixture_path } => {
             let (elapsed_ms, peak_rss_kb) = sample_load_artifact(&fixture_path)?;
             println!("{elapsed_ms:.6} {peak_rss_kb}");
@@ -85,8 +90,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Mode> {
                 });
             }
             "--help" | "-h" => {
-                print_usage();
-                process::exit(0);
+                return Ok(Mode::Help);
             }
             other => bail!("unknown argument `{other}`"),
         }
