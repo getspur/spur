@@ -46,7 +46,7 @@ impl Reconciler {
                     if let Some(dispatch) = self.dispatch.as_ref() {
                         match crate::plan::ownership::classify_owner(
                             &epic.labels,
-                            dispatch.brain_session_id.as_session_id(),
+                            dispatch.brain_session_id().as_session_id(),
                         ) {
                             crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {}
                             crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
@@ -178,7 +178,7 @@ impl Reconciler {
 
         match crate::plan::ownership::classify_owner(
             labels,
-            dispatch.brain_session_id.as_session_id(),
+            dispatch.brain_session_id().as_session_id(),
         ) {
             crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => PlanDispatchState::Allowed,
             crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
