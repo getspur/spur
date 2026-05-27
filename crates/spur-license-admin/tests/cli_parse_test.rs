@@ -1,6 +1,6 @@
 //! Tests for CLI argument parsing.
 
-use clap::Parser;
+use clap::Parser as _;
 
 #[test]
 fn parse_sign_policy_with_short_flags() {
@@ -92,7 +92,7 @@ fn parse_license_create_with_all_args() {
     } = cli.command
     {
         assert_eq!(plan, "pro");
-        assert_eq!(email, Some("user@example.com".to_string()));
+        assert_eq!(email, Some("user@example.com".to_owned()));
         assert_eq!(seats, Some(5));
         assert_eq!(secret_key, "sk_test_xxx");
         assert_eq!(product, "my-product");
@@ -116,7 +116,7 @@ fn parsed_create_command_redacts_secret_key_in_debug_output() {
     ])
     .expect("should parse");
 
-    let debug = format!("{:?}", cli);
+    let debug = format!("{cli:?}");
     assert!(
         !debug.contains("sk_test_xxx"),
         "Debug output must not leak secret key, but got: {debug}"

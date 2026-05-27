@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 /// String wrapper that redacts its contents in `Debug` output.
 ///
-/// Used for the LicenseSeat `sk_*` secret key so it never leaks via
+/// Used for the `LicenseSeat` `sk_*` secret key so it never leaks via
 /// logged or panicked CLI structs.
 #[derive(Clone)]
 pub struct RedactedString(String);
@@ -19,7 +19,7 @@ impl FromStr for RedactedString {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.to_string()))
+        Ok(Self(s.to_owned()))
     }
 }
 
@@ -53,7 +53,7 @@ pub struct Cli {
 pub enum Commands {
     /// Sign a SPUR policy document with an Ed25519 key
     SignPolicy {
-        /// Path to the policy JSON file (raw PolicyDocument or existing SignedPolicy)
+        /// Path to the policy JSON file (raw `PolicyDocument` or existing `SignedPolicy`)
         input: PathBuf,
 
         /// Output path for the signed policy (prints to stdout if omitted)
@@ -69,7 +69,7 @@ pub enum Commands {
         signing_key: PathBuf,
     },
 
-    /// Manage LicenseSeat licenses
+    /// Manage `LicenseSeat` licenses
     License {
         #[command(subcommand)]
         action: LicenseAction,
@@ -78,7 +78,7 @@ pub enum Commands {
 
 #[derive(Subcommand, Debug)]
 pub enum LicenseAction {
-    /// Create a new LicenseSeat license
+    /// Create a new `LicenseSeat` license
     Create {
         /// Plan key (e.g., pro, team, enterprise)
         #[arg(short, long)]
@@ -92,7 +92,7 @@ pub enum LicenseAction {
         #[arg(long)]
         seats: Option<u32>,
 
-        /// LicenseSeat secret key (sk_*)
+        /// `LicenseSeat` secret key (sk_*)
         #[arg(short, long, env = "SPUR_LICENSESEAT_SECRET_KEY")]
         secret_key: RedactedString,
 
@@ -101,13 +101,13 @@ pub enum LicenseAction {
         product: String,
     },
 
-    /// Revoke a LicenseSeat license
+    /// Revoke a `LicenseSeat` license
     Revoke {
         /// License key to revoke
         #[arg(short, long)]
         key: String,
 
-        /// LicenseSeat secret key (sk_*)
+        /// `LicenseSeat` secret key (sk_*)
         #[arg(short, long, env = "SPUR_LICENSESEAT_SECRET_KEY")]
         secret_key: RedactedString,
 
@@ -122,7 +122,7 @@ pub enum LicenseAction {
         #[arg(short, long)]
         key: String,
 
-        /// LicenseSeat secret key (sk_*)
+        /// `LicenseSeat` secret key (sk_*)
         #[arg(short, long, env = "SPUR_LICENSESEAT_SECRET_KEY")]
         secret_key: RedactedString,
 

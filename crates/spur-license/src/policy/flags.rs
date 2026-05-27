@@ -13,7 +13,7 @@ impl FlagEvaluator {
     }
 
     /// Evaluate whether a flag is enabled for the given tier.
-    /// Deterministic: same (install_id, flag_key) always yields same result.
+    /// Deterministic: same (`install_id`, `flag_key`) always yields same result.
     pub fn evaluate(&self, key: FlagKey, flag: &FlagSpec, tier: Tier) -> bool {
         // 1. Kill switch
         if !flag.enabled {

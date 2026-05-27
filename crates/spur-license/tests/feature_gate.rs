@@ -74,7 +74,7 @@ fn policy_doc_with_tiers(
     spur_license::policy::PolicyDocument {
         schema_version,
         issued_at: chrono::Utc::now(),
-        policy_version: (schema_version >= 2).then(|| "2026-04-27".to_string()),
+        policy_version: (schema_version >= 2).then(|| "2026-04-27".to_owned()),
         expires_at: None,
         tier_policies,
         v1_1_q3_roadmap: None,
