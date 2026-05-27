@@ -33,7 +33,7 @@ fn snapshot_rename_edges_drive_symbol_history() {
     let rename_symbol_sha = commit(dir.path(), "rename symbol");
 
     let (graph, commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None)
             .unwrap();
 
     let add_key = snapshot_key(&graph, &add_sha, "alpha");

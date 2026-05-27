@@ -229,7 +229,7 @@ fn structural_symbol_ids_match_temporal_snapshot_ids_for_fixture_corpora() {
         let structural =
             spur_graph::store::build::artifact_from_facts(&facts, repo.path()).expect("artifact");
         let (temporal, _) =
-            spur_graph::git_walk::run_full_walk_into(repo.path(), &Default::default(), None)
+            spur_graph::git_walk::run_full_walk_into(repo.path(), &Default::default(), None, None)
                 .expect("temporal walk");
 
         for symbol in &structural.symbols {
