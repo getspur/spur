@@ -77,3 +77,6 @@ required-features = ["test-support"]
 [[bench]]
 name = "event_replay"
 harness = false
+
+[lints]
+workspace = true
