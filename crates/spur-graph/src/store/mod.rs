@@ -5,6 +5,7 @@ pub mod canonical_hash;
 pub mod commit_index;
 pub mod parquet;
 pub mod pointer;
+pub mod shard_writer;
 pub mod snapshot;
 pub mod temporal_shards;
 
@@ -21,4 +22,5 @@ pub use pointer::{
     read_current_pointer, resolve_artifact_location, write_current_pointer, ArtifactCacheKey,
     ArtifactFormat, ResolvedArtifact,
 };
+pub use shard_writer::TemporalShardSink;
 pub use temporal_shards::{ShardIndexEntry, TemporalShardConfig};
