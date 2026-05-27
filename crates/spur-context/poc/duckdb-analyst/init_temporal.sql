@@ -5,14 +5,14 @@ CREATE OR REPLACE MACRO b64_decode_lenient(s) AS (
 INSERT INTO node_dense_id_map (stable_symbol_id, dense_id)
 WITH referenced_ids AS (
   SELECT key_stable_symbol_id AS stable_symbol_id
-  FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/symbol_snapshots.parquet')
+  FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/symbol_snapshots/*.parquet')
   UNION
   SELECT source_stable_symbol_id AS stable_symbol_id
-  FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/temporal_edges.parquet')
+  FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/temporal_edges/*.parquet')
   WHERE source_stable_symbol_id IS NOT NULL
   UNION
   SELECT target_stable_symbol_id AS stable_symbol_id
-  FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/temporal_edges.parquet')
+  FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/temporal_edges/*.parquet')
   WHERE target_stable_symbol_id IS NOT NULL
 ),
 missing_ids AS (
@@ -61,7 +61,7 @@ SELECT
   s.line_range_end,
   s.anchor_hash,
   s.tokens
-FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/symbol_snapshots.parquet') s
+FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/symbol_snapshots/*.parquet') s
 LEFT JOIN node_dense_id_map m ON m.stable_symbol_id = s.key_stable_symbol_id;
 
 CREATE OR REPLACE VIEW temporal_edges AS
@@ -69,6 +69,6 @@ SELECT
   e.*,
   s.dense_id AS source_node_id,
   t.dense_id AS target_node_id
-FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/temporal_edges.parquet') e
+FROM read_parquet('__SPUR_GRAPH_ARTIFACT_DIR__/temporal_edges/*.parquet') e
 LEFT JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_symbol_id
 LEFT JOIN node_dense_id_map t ON t.stable_symbol_id = e.target_stable_symbol_id;
