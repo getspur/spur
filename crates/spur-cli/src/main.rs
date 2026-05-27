@@ -1263,7 +1263,13 @@ async fn run() -> Result<()> {
                 None
             };
 
-            let tui_result = spur_tui::app::run_tui_with_license(
+            // Race the TUI future against an OS signal so the user can escape
+            // even when the TUI render loop is wedged (e.g. blocked on a
+            // contended Tokio mutex). On SIGINT we cancel the shared shutdown
+            // token immediately so the orchestrator's guarded select arms can
+            // observe it, then give the TUI a brief grace to restore the
+            // terminal before dropping its future.
+            let tui_fut = spur_tui::app::run_tui_with_license(
                 event_rx,
                 Some(tui_tx),
                 perm_rx,
@@ -1274,8 +1280,28 @@ async fn run() -> Result<()> {
                 config_path,
                 repo_root.clone(),
                 upgrade_rx,
-            )
-            .await;
+            );
+            tokio::pin!(tui_fut);
+
+            let tui_result = tokio::select! {
+                res = &mut tui_fut => res,
+                sig = tokio::signal::ctrl_c() => {
+                    if let Err(e) = sig {
+                        tracing::warn!(%e, "ctrl_c handler failed; falling through to TUI await");
+                        (&mut tui_fut).await
+                    } else {
+                        tracing::info!("SIGINT received; initiating shutdown");
+                        host.cancel_token().cancel();
+                        match tokio::time::timeout(Duration::from_millis(500), &mut tui_fut).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                tracing::warn!("TUI did not return within 500ms of SIGINT; dropping future");
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+            };
 
             // Structured shutdown through the shared host.
             if let Err(e) = host.shutdown().await {
