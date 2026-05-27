@@ -40,6 +40,7 @@ fn graph_build_with_temporal_writes_temporal_parquets_and_manifest_counts() {
         quiet: true,
         skip_analyst: true,
         with_temporal: true,
+        temporal_shard_config: spur_graph::TemporalShardConfig::default(),
     })
     .expect("graph build with temporal");
 
@@ -89,6 +90,7 @@ fn graph_build_without_temporal_leaves_temporal_parquets_absent() {
         quiet: true,
         skip_analyst: true,
         with_temporal: false,
+        temporal_shard_config: spur_graph::TemporalShardConfig::default(),
     })
     .expect("graph build without temporal");
 
