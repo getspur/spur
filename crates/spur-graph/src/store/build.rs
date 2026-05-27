@@ -5,8 +5,8 @@ use std::path::Path;
 use std::str;
 use std::time::Instant;
 
-use anyhow::Context;
-use sha2::{Digest, Sha256};
+use anyhow::Context as _;
+use sha2::{Digest as _, Sha256};
 
 use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
 use crate::discovery::discover_files;
@@ -569,7 +569,7 @@ fn buckets_from_facts(
                     line_range: [span.start_line as usize, span.end_line as usize],
                     entity_name: symbol_entity_name(&node.label),
                     qualified_name: qualified_name(&parent_by_target, &nodes_by_id, node),
-                    symbol_kind: symbol_kind(node.kind).to_string(),
+                    symbol_kind: symbol_kind(node.kind).to_owned(),
                     anchor_hash,
                     enclosing_scope: enclosing_scope(&parent_by_target, &nodes_by_id, node),
                 };
@@ -862,7 +862,7 @@ fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, File
     let mut buckets = BTreeMap::new();
     for (path, manifest) in manifest_by_path {
         buckets.insert(
-            path.to_string(),
+            path.to_owned(),
             FileBucket {
                 file: file_by_path.get(path).copied().cloned().unwrap_or_else(|| {
                     GraphFileArtifact {
@@ -926,13 +926,13 @@ fn empty_bucket(path: &str, content_oid: &str) -> FileBucket {
     FileBucket {
         file: GraphFileArtifact {
             stable_file_id: stable_file_id.clone(),
-            file_path: path.to_string(),
+            file_path: path.to_owned(),
         },
         file_node_id: None,
         manifest: GraphFileManifestEntry {
             stable_file_id,
-            path: path.to_string(),
-            content_oid: content_oid.to_string(),
+            path: path.to_owned(),
+            content_oid: content_oid.to_owned(),
             node_ids: Vec::new(),
         },
         symbols: Vec::new(),
@@ -1039,7 +1039,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                     edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
                     if edge.relation == RelationKind::Calls && resolved.symbol_kind == "function" {
                         edge.bind_method
-                            .get_or_insert_with(|| "singleton".to_string());
+                            .get_or_insert_with(|| "singleton".to_owned());
                     }
                 }
             }
@@ -1137,7 +1137,7 @@ fn rebuild_from_buckets(
 
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
             // Content hash is stamped at write time, after body serialization input is finalized.
             content_hash_blake3: None,
         },
@@ -1270,7 +1270,7 @@ fn anchor_hash(root: &Path, file_path: &str, span: &SourceSpan) -> String {
                 error = %error,
                 "spur-graph anchor hash fallback to sentinel: source read failed"
             );
-            return "0".to_string();
+            return "0".to_owned();
         }
     };
     let start = span.start_byte as usize;
@@ -1283,20 +1283,19 @@ fn anchor_hash(root: &Path, file_path: &str, span: &SourceSpan) -> String {
             span_end = end,
             "spur-graph anchor hash fallback to sentinel: byte range mismatch"
         );
-        return "0".to_string();
+        return "0".to_owned();
     };
-    let slice = match str::from_utf8(bytes) {
-        Ok(slice) => slice,
-        Err(_) => {
-            tracing::warn!(
-                file_path,
-                full_path = %full_path.display(),
-                span_start = start,
-                span_end = end,
-                "spur-graph anchor hash fallback to sentinel: UTF-8 boundary mismatch"
-            );
-            return "0".to_string();
-        }
+    let slice = if let Ok(slice) = str::from_utf8(bytes) {
+        slice
+    } else {
+        tracing::warn!(
+            file_path,
+            full_path = %full_path.display(),
+            span_start = start,
+            span_end = end,
+            "spur-graph anchor hash fallback to sentinel: UTF-8 boundary mismatch"
+        );
+        return "0".to_owned();
     };
     compute_anchor_hash(slice).to_string()
 }
@@ -1306,7 +1305,7 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
 }
 
 fn symbol_entity_name(label: &str) -> String {
-    label.strip_prefix("impl ").unwrap_or(label).to_string()
+    label.strip_prefix("impl ").unwrap_or(label).to_owned()
 }
 
 fn parent_by_target(facts: &GraphFacts) -> HashMap<crate::NodeId, crate::NodeId> {
@@ -1330,9 +1329,8 @@ fn containing_parent<'a>(
     nodes_by_id: &HashMap<crate::NodeId, &'a GraphNode>,
     node: &GraphNode,
 ) -> Option<&'a GraphNode> {
-    parent_by_target
-        .get(&node.node_id)
-        .and_then(|parent_id| nodes_by_id.get(parent_id).copied())
+    let parent_id = parent_by_target.get(&node.node_id)?;
+    nodes_by_id.get(parent_id).copied()
 }
 
 fn qualified_name(
@@ -1377,11 +1375,12 @@ fn enclosing_scope(
     nodes_by_id: &HashMap<crate::NodeId, &GraphNode>,
     node: &GraphNode,
 ) -> Option<String> {
-    containing_parent(parent_by_target, nodes_by_id, node).and_then(|parent| match parent.kind {
+    let parent = containing_parent(parent_by_target, nodes_by_id, node)?;
+    match parent.kind {
         NodeKind::File => None,
         NodeKind::Impl => Some(format!("impl {}", parent.label)),
         _ => Some(parent.label.clone()),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1493,11 +1492,11 @@ mod tests {
     fn buckets_from_artifact_rebuckets_edges_by_file_or_symbol_source() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+                graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test-manifest".to_string(),
-            graph_content_hash: "test-hash".to_string(),
+            manifest_version: "test-manifest".to_owned(),
+            graph_content_hash: "test-hash".to_owned(),
             file_manifests: vec![
                 manifest("file:a", "src/a.rs"),
                 manifest("file:b", "src/b.rs"),
@@ -1559,22 +1558,22 @@ mod tests {
         let mut buckets = BTreeMap::new();
         let mut lib_bucket = empty_bucket("src/lib.rs", "oid-lib");
         lib_bucket.file_node_id = Some(NodeId(10));
-        buckets.insert("src/lib.rs".to_string(), lib_bucket);
+        buckets.insert("src/lib.rs".to_owned(), lib_bucket);
 
         let current_entries = BTreeMap::from([
             (
-                "README.txt".to_string(),
+                "README.txt".to_owned(),
                 CurrentFileEntry {
-                    path: "README.txt".to_string(),
-                    content_oid: "oid-readme".to_string(),
+                    path: "README.txt".to_owned(),
+                    content_oid: "oid-readme".to_owned(),
                     extractable: false,
                 },
             ),
             (
-                "src/lib.rs".to_string(),
+                "src/lib.rs".to_owned(),
                 CurrentFileEntry {
-                    path: "src/lib.rs".to_string(),
-                    content_oid: "oid-lib".to_string(),
+                    path: "src/lib.rs".to_owned(),
+                    content_oid: "oid-lib".to_owned(),
                     extractable: true,
                 },
             ),
@@ -1583,7 +1582,7 @@ mod tests {
         let artifact = compose_artifact(
             buckets,
             &current_entries,
-            "test-manifest".to_string(),
+            "test-manifest".to_owned(),
             Vec::new(),
         );
 
@@ -1648,8 +1647,8 @@ fn submit_plan_def() -> ToolDefinition {
             nodes: vec![
                 GraphNode {
                     node_id: NodeId(1),
-                    stable_key: "file:src/lib.rs".to_string(),
-                    label: "src/lib.rs".to_string(),
+                    stable_key: "file:src/lib.rs".to_owned(),
+                    label: "src/lib.rs".to_owned(),
                     kind: NodeKind::File,
                     file_id: Some(FileId(1)),
                     source_span_id: Some(SpanId(1)),
@@ -1657,8 +1656,8 @@ fn submit_plan_def() -> ToolDefinition {
                 },
                 GraphNode {
                     node_id: NodeId(2),
-                    stable_key: "commit:abc123".to_string(),
-                    label: "abc123".to_string(),
+                    stable_key: "commit:abc123".to_owned(),
+                    label: "abc123".to_owned(),
                     kind: NodeKind::Commit,
                     file_id: None,
                     source_span_id: Some(SpanId(1)),
@@ -1756,7 +1755,7 @@ fn submit_plan_def() -> ToolDefinition {
             "full build must stamp content_oid"
         );
 
-        let marker = "reused-bucket-marker".to_string();
+        let marker = "reused-bucket-marker".to_owned();
         prev.symbols
             .iter_mut()
             .find(|symbol| symbol.file_path == "src/b.rs")
@@ -1967,41 +1966,41 @@ fn submit_plan_def() -> ToolDefinition {
     impl Visit for FieldVisitor {
         fn record_str(&mut self, field: &Field, value: &str) {
             self.fields
-                .insert(field.name().to_string(), value.to_string());
+                .insert(field.name().to_owned(), value.to_owned());
         }
 
         fn record_bool(&mut self, field: &Field, value: bool) {
             self.fields
-                .insert(field.name().to_string(), value.to_string());
+                .insert(field.name().to_owned(), value.to_string());
         }
 
         fn record_i64(&mut self, field: &Field, value: i64) {
             self.fields
-                .insert(field.name().to_string(), value.to_string());
+                .insert(field.name().to_owned(), value.to_string());
         }
 
         fn record_u64(&mut self, field: &Field, value: u64) {
             self.fields
-                .insert(field.name().to_string(), value.to_string());
+                .insert(field.name().to_owned(), value.to_string());
         }
 
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
             self.fields
-                .insert(field.name().to_string(), format!("{value:?}"));
+                .insert(field.name().to_owned(), format!("{value:?}"));
         }
     }
 
     fn file(stable_file_id: &str, path: &str) -> GraphFileArtifact {
         GraphFileArtifact {
-            stable_file_id: stable_file_id.to_string(),
-            file_path: path.to_string(),
+            stable_file_id: stable_file_id.to_owned(),
+            file_path: path.to_owned(),
         }
     }
 
     fn manifest(stable_file_id: &str, path: &str) -> GraphFileManifestEntry {
         GraphFileManifestEntry {
-            stable_file_id: stable_file_id.to_string(),
-            path: path.to_string(),
+            stable_file_id: stable_file_id.to_owned(),
+            path: path.to_owned(),
             content_oid: format!("oid:{path}"),
             node_ids: Vec::new(),
         }
@@ -2009,13 +2008,13 @@ fn submit_plan_def() -> ToolDefinition {
 
     fn symbol(stable_symbol_id: &str, path: &str) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
-            stable_symbol_id: stable_symbol_id.to_string(),
-            file_path: path.to_string(),
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            file_path: path.to_owned(),
             byte_range: [0, 8],
             line_range: [1, 1],
-            entity_name: stable_symbol_id.to_string(),
-            qualified_name: stable_symbol_id.to_string(),
-            symbol_kind: "function".to_string(),
+            entity_name: stable_symbol_id.to_owned(),
+            qualified_name: stable_symbol_id.to_owned(),
+            symbol_kind: "function".to_owned(),
             anchor_hash: format!("hash:{stable_symbol_id}"),
             enclosing_scope: None,
         }
@@ -2027,7 +2026,7 @@ fn submit_plan_def() -> ToolDefinition {
         relation: RelationKind,
     ) -> GraphEdgeArtifact {
         GraphEdgeArtifact {
-            source_stable_symbol_id: source_stable_symbol_id.to_string(),
+            source_stable_symbol_id: source_stable_symbol_id.to_owned(),
             target_stable_symbol_id: target_stable_symbol_id.map(str::to_string),
             target_label: None,
             relation,

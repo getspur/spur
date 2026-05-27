@@ -394,14 +394,13 @@ fn run_helper_sample(mode: &str, parquet_dir: &Path) -> HelperSample {
         .output()
         .expect("spawn perf helper sample");
 
-    if !output.status.success() {
-        panic!(
-            "perf helper `{mode}` failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "perf helper `{mode}` failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8(output.stdout).expect("helper stdout UTF-8");
     stdout
@@ -448,14 +447,13 @@ fn helper_duckdb_query(parquet_dir: &Path) -> HelperSample {
         .expect("spawn duckdb");
     let elapsed_ms = duration_ms(started.elapsed());
 
-    if !output.status.success() {
-        panic!(
-            "duckdb query failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "duckdb query failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     HelperSample {
         elapsed_ms,

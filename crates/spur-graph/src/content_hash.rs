@@ -1,4 +1,4 @@
-use sha1::{Digest, Sha1};
+use sha1::{Digest as _, Sha1};
 
 pub fn git_blob_oid(bytes: &[u8]) -> String {
     let mut hasher = Sha1::new();
@@ -17,7 +17,7 @@ where
 {
     let mut entries: Vec<(String, String)> = entries
         .into_iter()
-        .map(|(path, oid)| (path.as_ref().to_string(), oid.as_ref().to_string()))
+        .map(|(path, oid)| (path.as_ref().to_owned(), oid.as_ref().to_owned()))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
@@ -32,7 +32,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::Write as _;
     use std::process::{Command, Stdio};
 
     use super::{compute_graph_content_hash, git_blob_oid};

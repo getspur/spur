@@ -30,7 +30,7 @@ fn init_repo(dir: &Path) {
 fn commit(dir: &Path, message: &str) -> String {
     run_git(dir, &["add", "-A"]);
     run_git(dir, &["commit", "-q", "-m", message]);
-    run_git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+    run_git(dir, &["rev-parse", "HEAD"]).trim().to_owned()
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn rename_low_jaccard_emits_ambiguous_rename_on_both_endpoints() {
     init_repo(dir.path());
     std::fs::write(
         dir.path().join("lib.rs"),
-        br#"
+        br"
 pub fn process_chunk(input: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     for byte in input {
@@ -51,7 +51,7 @@ pub fn process_chunk(input: &[u8]) -> Vec<u8> {
     }
     output
 }
-"#,
+",
     )
     .unwrap();
     commit(dir.path(), "c1");

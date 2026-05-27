@@ -19,15 +19,14 @@ pub fn resolve_worktree_root_from(start: impl Into<PathBuf>) -> PathBuf {
             return candidate.to_path_buf();
         }
 
-        match candidate.parent() {
-            Some(parent) => candidate = parent,
-            None => {
-                tracing::warn!(
-                    cwd = %start.display(),
-                    "no .git marker found while resolving worktree root; using current directory"
-                );
-                return start;
-            }
+        if let Some(parent) = candidate.parent() {
+            candidate = parent
+        } else {
+            tracing::warn!(
+                cwd = %start.display(),
+                "no .git marker found while resolving worktree root; using current directory"
+            );
+            return start;
         }
     }
 }

@@ -80,7 +80,7 @@ fn field_name(field: Node<'_>, source: &str) -> Option<String> {
         .child_by_field_name("field")
         .or_else(|| field.child_by_field_name("name"))
         .or_else(|| named_child_of_kind(field, "field_identifier"))
-        .map(|node| node_text(node, source).trim().to_string())
+        .map(|node| node_text(node, source).trim().to_owned())
         .filter(|name| !name.is_empty())
 }
 

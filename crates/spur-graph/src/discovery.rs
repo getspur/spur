@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::Context as _;
 use ignore::{DirEntry, Error as IgnoreError, WalkBuilder};
 
 pub fn discover_files(root: &Path, allowed_extensions: &[&str]) -> anyhow::Result<Vec<PathBuf>> {
@@ -19,7 +19,7 @@ pub fn discover_files(root: &Path, allowed_extensions: &[&str]) -> anyhow::Resul
             Err(err) => {
                 let path = walk_error_path(&err)
                     .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
+                    .unwrap_or_else(|| "<unknown>".to_owned());
                 tracing::warn!(
                     root = %root.display(),
                     path = %path,
