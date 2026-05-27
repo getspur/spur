@@ -1,15 +1,20 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 
+use crate::extract::languages::all_supported_extensions;
 use crate::locking::try_lock_exclusive_with_timeout;
-use crate::store::{write_artifact_parquet, write_current_pointer, WriteOptions};
-use crate::{git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
+use crate::store::{
+    read_artifact_parquet, write_artifact_parquet, write_current_pointer, WriteOptions,
+};
+use crate::{git, git::GitCtx, git_blob_oid, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
 const CACHE_DIR_NAME: &str = "spur-graph";
 const ARTIFACTS_DIR_NAME: &str = "artifacts";
@@ -76,6 +81,41 @@ pub fn lookup_canonical(common_dir: &Path, manifest_version: &str, hash: &str) -
     path.exists().then_some(path)
 }
 
+pub fn load_base_artifact_for_worktree(worktree_root: &Path) -> Option<Arc<GraphIndexArtifact>> {
+    let worktree_root = match worktree_root.canonicalize() {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                path = %worktree_root.display(),
+                error = %error,
+                "spur-graph: skipping base artifact; worktree root is not canonicalizable"
+            );
+            emit_base_seed("none", 0, 0);
+            return None;
+        }
+    };
+
+    if let Some(artifact) = load_pointer_artifact(&worktree_root, &worktree_root, "self_pointer") {
+        emit_base_seed_for_artifact("self_pointer", &worktree_root, &artifact);
+        return Some(artifact);
+    }
+
+    if let Some(main_root) = main_worktree_root(&worktree_root) {
+        if main_root != worktree_root {
+            if let Some(artifact) =
+                load_pointer_artifact(&worktree_root, &main_root, "main_worktree")
+            {
+                emit_base_seed_for_artifact("main_worktree", &worktree_root, &artifact);
+                return Some(artifact);
+            }
+        }
+    }
+
+    emit_base_seed("none", 0, 0);
+    None
+}
+
 fn canonical_base_dir(common_dir: &Path, manifest_version: &str) -> PathBuf {
     common_dir
         .join(CACHE_DIR_NAME)
@@ -92,6 +132,281 @@ fn write_canonical_atomically(
     canonical_dir: &Path,
 ) -> Result<PathBuf> {
     write_artifact_parquet(artifact, canonical_dir, WriteOptions::default())
+}
+
+fn load_pointer_artifact(
+    worktree_root: &Path,
+    pointer_root: &Path,
+    source: &'static str,
+) -> Option<Arc<GraphIndexArtifact>> {
+    let pointer_path = pointer_root.join(POINTER_PATH);
+    let pointer = match read_pointer_file(&pointer_path) {
+        Ok(Some(pointer)) => pointer,
+        Ok(None) => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                source,
+                path = %pointer_path.display(),
+                "spur-graph: base pointer missing"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                source,
+                path = %pointer_path.display(),
+                error = %error,
+                "spur-graph: base pointer unreadable"
+            );
+            return None;
+        }
+    };
+    if pointer.schema != POINTER_SCHEMA {
+        tracing::debug!(
+            target: "spur_graph::base_seed",
+            source,
+            path = %pointer_path.display(),
+            schema = %pointer.schema,
+            "spur-graph: base pointer schema is incompatible"
+        );
+        return None;
+    }
+
+    let ctx = match git::detect(worktree_root) {
+        Some(ctx) => ctx,
+        None => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                source,
+                worktree = %worktree_root.display(),
+                "spur-graph: base artifact unavailable outside git worktree"
+            );
+            return None;
+        }
+    };
+    let canonical = match lookup_canonical(
+        &ctx.git_common_dir,
+        &pointer.manifest_version,
+        &pointer.graph_content_hash,
+    ) {
+        Some(path) => path,
+        None => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                source,
+                manifest_version = %pointer.manifest_version,
+                graph_content_hash = %pointer.graph_content_hash,
+                "spur-graph: canonical base artifact missing"
+            );
+            return None;
+        }
+    };
+    let artifact = match read_artifact_parquet(&canonical) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                source,
+                path = %canonical.display(),
+                error = %error,
+                "spur-graph: canonical base artifact unreadable"
+            );
+            return None;
+        }
+    };
+    if artifact.graph_content_hash != pointer.graph_content_hash
+        || artifact.manifest_version != pointer.manifest_version
+    {
+        tracing::debug!(
+            target: "spur_graph::base_seed",
+            source,
+            path = %canonical.display(),
+            pointer_hash = %pointer.graph_content_hash,
+            artifact_hash = %artifact.graph_content_hash,
+            pointer_manifest_version = %pointer.manifest_version,
+            artifact_manifest_version = %artifact.manifest_version,
+            "spur-graph: base artifact does not match pointer"
+        );
+        return None;
+    }
+
+    Some(Arc::new(artifact))
+}
+
+fn read_pointer_file(path: &Path) -> Result<Option<GraphIndexPointer>> {
+    match File::open(path) {
+        Ok(file) => {
+            let pointer = serde_json::from_reader(file)
+                .with_context(|| format!("invalid graph index pointer `{}`", path.display()))?;
+            Ok(Some(pointer))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
+    }
+}
+
+fn main_worktree_root(worktree_root: &Path) -> Option<PathBuf> {
+    let common_dir = match git::rev_parse_common_dir(worktree_root) {
+        Ok(common_dir) => common_dir,
+        Err(error) => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                worktree = %worktree_root.display(),
+                error = %error,
+                "spur-graph: unable to resolve git common dir for base artifact"
+            );
+            return None;
+        }
+    };
+    let root = common_dir.parent()?.canonicalize().ok()?;
+    Some(root)
+}
+
+fn emit_base_seed_for_artifact(
+    base: &'static str,
+    worktree_root: &Path,
+    artifact: &GraphIndexArtifact,
+) {
+    let (reused_buckets, changed_paths) = match base_seed_stats(worktree_root, artifact) {
+        Ok(stats) => stats,
+        Err(error) => {
+            tracing::debug!(
+                target: "spur_graph::base_seed",
+                base,
+                worktree = %worktree_root.display(),
+                error = %error,
+                "spur-graph: failed to compute base seed stats"
+            );
+            (0, 0)
+        }
+    };
+    emit_base_seed(base, reused_buckets, changed_paths);
+}
+
+fn emit_base_seed(base: &'static str, reused_buckets: usize, changed_paths: usize) {
+    tracing::info!(
+        target: "spur_graph::base_seed",
+        base,
+        reused_buckets,
+        changed_paths,
+        "worker base seed selected"
+    );
+}
+
+fn base_seed_stats(worktree_root: &Path, artifact: &GraphIndexArtifact) -> Result<(usize, usize)> {
+    let allowed_extensions = all_supported_extensions();
+    let entries = current_supported_entries(worktree_root, &allowed_extensions)?;
+    let prev_content_oids: BTreeMap<_, _> = artifact
+        .file_manifests
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
+        .collect();
+    let mut reused_buckets = 0_usize;
+    let mut changed_paths = 0_usize;
+    for entry in entries.values() {
+        if prev_content_oids
+            .get(entry.path.as_str())
+            .is_some_and(|content_oid| *content_oid == entry.content_oid)
+        {
+            reused_buckets += 1;
+        } else if entry.extractable {
+            changed_paths += 1;
+        }
+    }
+    Ok((reused_buckets, changed_paths))
+}
+
+#[derive(Debug)]
+struct CurrentSupportedEntry {
+    path: String,
+    content_oid: String,
+    extractable: bool,
+}
+
+fn current_supported_entries(
+    root: &Path,
+    allowed_extensions: &[&str],
+) -> Result<BTreeMap<String, CurrentSupportedEntry>> {
+    let dirty_entries = git::status_dirty_paths(root)?;
+    let dirty_paths: BTreeSet<String> = dirty_entries
+        .into_iter()
+        .filter(|entry| is_supported_path(&entry.path, allowed_extensions))
+        .map(|entry| entry.path)
+        .collect();
+    let mut entries = BTreeMap::new();
+
+    for tracked in git::ls_files_with_oids(root)? {
+        if !is_supported_path(&tracked.path, allowed_extensions) {
+            continue;
+        }
+
+        let content_oid = if tracked.is_gitlink {
+            tracked.content_oid
+        } else if dirty_paths.contains(&tracked.path) {
+            let Some(content_oid) = read_worktree_content_oid(root, &tracked.path)? else {
+                continue;
+            };
+            content_oid
+        } else {
+            tracked.content_oid
+        };
+        entries.insert(
+            tracked.path.clone(),
+            CurrentSupportedEntry {
+                path: tracked.path,
+                content_oid,
+                extractable: !tracked.is_gitlink,
+            },
+        );
+    }
+
+    for path in dirty_paths {
+        if entries.contains_key(&path) {
+            continue;
+        }
+        let Some(content_oid) = read_worktree_content_oid(root, &path)? else {
+            continue;
+        };
+        entries.insert(
+            path.clone(),
+            CurrentSupportedEntry {
+                path,
+                content_oid,
+                extractable: true,
+            },
+        );
+    }
+
+    Ok(entries)
+}
+
+fn read_worktree_content_oid(root: &Path, path: &str) -> Result<Option<String>> {
+    match fs::read(root.join(path)) {
+        Ok(bytes) => Ok(Some(git_blob_oid(&bytes))),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::IsADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read `{}`", root.join(path).display()))
+        }
+    }
+}
+
+fn is_supported_path(path: &str, allowed_extensions: &[&str]) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            allowed_extensions
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
 }
 
 fn write_artifact_to_worktree(

@@ -47,6 +47,7 @@ libc = "0.2"
 parquet = { workspace = true, features = ["arrow"] }
 pretty_assertions = "1"
 tempfile = "3"
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "incremental"
