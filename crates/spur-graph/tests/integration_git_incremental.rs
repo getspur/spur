@@ -6,7 +6,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use spur_graph::store::cache::{
-    load_base_artifact_for_worktree, lookup_canonical, write_with_dedup,
+    emit_base_seed_stats, load_base_artifact_for_worktree, load_base_seed_for_worktree,
+    lookup_canonical, write_with_dedup,
 };
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, git,
@@ -111,7 +112,7 @@ fn inrust_manifest_diff_handles_add_modify_delete() {
     repo.write("src/a.rs", "pub fn alpha_changed() {}\n");
     repo.write("src/c.rs", "pub fn gamma() {}\n");
     fs::remove_file(repo.path().join("src/b.rs")).expect("remove b.rs");
-    let (next, mode) =
+    let (next, mode, _stats) =
         artifact_from_facts_incremental(&baseline, repo.path()).expect("incremental build");
 
     assert_eq!(mode, BuildMode::Incremental);
@@ -232,7 +233,7 @@ fn delete_emits_value_level_tombstone() {
     let baseline = build_full(repo.path());
 
     fs::remove_file(repo.path().join("src/delete_me.rs")).expect("remove delete_me.rs");
-    let (next, mode) =
+    let (next, mode, _stats) =
         artifact_from_facts_incremental(&baseline, repo.path()).expect("incremental delete");
 
     assert_eq!(mode, BuildMode::Incremental);
@@ -269,7 +270,7 @@ fn legacy_artifact_triggers_full_rebuild() {
 
     let mut legacy = build_full(repo.path());
     legacy.manifest_version = "legacy-manifest-version".to_owned();
-    let (rebuilt, mode) =
+    let (rebuilt, mode, _stats) =
         artifact_from_facts_incremental(&legacy, repo.path()).expect("legacy rebuild");
 
     assert_eq!(mode, BuildMode::Full);
@@ -386,14 +387,15 @@ fn fresh_linked_worktree_seeds_incremental_from_main_with_no_changes() {
     assert!(!worker.join(".spur/graph-index.pointer.json").exists());
 
     let (base, lines) = capture_base_seed_trace(|| {
-        load_base_artifact_for_worktree(&worker).expect("main worktree base artifact")
+        let seed = load_base_seed_for_worktree(&worker).expect("main worktree base artifact");
+        let (rebuilt, mode, stats) =
+            artifact_from_facts_incremental(&seed.artifact, &worker).expect("incremental rebuild");
+        assert_eq!(seed.base, "main_worktree");
+        assert_eq!(mode, BuildMode::Incremental);
+        emit_base_seed_stats(seed.base, stats);
+        rebuilt
     });
     assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
-
-    let (rebuilt, mode) =
-        artifact_from_facts_incremental(&base, &worker).expect("incremental rebuild");
-    assert_eq!(mode, BuildMode::Incremental);
-    assert_eq!(rebuilt.graph_content_hash, main_artifact.graph_content_hash);
     assert_base_seed_trace(&lines, "main_worktree", 0, 2);
 }
 
@@ -412,14 +414,15 @@ fn fresh_linked_worktree_seeds_incremental_from_main_with_one_modified_file() {
     repo.git(&["worktree", "add", path_str(&worker), "worker"]);
     fs::write(worker.join("src/lib.rs"), "pub fn lib_changed() {}\n").expect("modify worker lib");
 
-    let (base, lines) = capture_base_seed_trace(|| {
-        load_base_artifact_for_worktree(&worker).expect("main worktree base artifact")
+    let (rebuilt, lines) = capture_base_seed_trace(|| {
+        let seed = load_base_seed_for_worktree(&worker).expect("main worktree base artifact");
+        let (rebuilt, mode, stats) =
+            artifact_from_facts_incremental(&seed.artifact, &worker).expect("incremental rebuild");
+        assert_eq!(seed.base, "main_worktree");
+        assert_eq!(mode, BuildMode::Incremental);
+        emit_base_seed_stats(seed.base, stats);
+        rebuilt
     });
-    assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
-
-    let (rebuilt, mode) =
-        artifact_from_facts_incremental(&base, &worker).expect("incremental rebuild");
-    assert_eq!(mode, BuildMode::Incremental);
     assert!(rebuilt
         .symbols
         .iter()
@@ -439,10 +442,136 @@ fn main_worktree_uses_self_pointer_as_incremental_seed() {
     write_git_cache(repo.path(), &main_artifact);
 
     let (base, lines) = capture_base_seed_trace(|| {
-        load_base_artifact_for_worktree(repo.path()).expect("self base artifact")
+        let seed = load_base_seed_for_worktree(repo.path()).expect("self base artifact");
+        let (rebuilt, mode, stats) = artifact_from_facts_incremental(&seed.artifact, repo.path())
+            .expect("incremental rebuild");
+        assert_eq!(seed.base, "self_pointer");
+        assert_eq!(mode, BuildMode::Incremental);
+        emit_base_seed_stats(seed.base, stats);
+        rebuilt
     });
     assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
     assert_base_seed_trace(&lines, "self_pointer", 0, 2);
+}
+
+#[test]
+fn load_base_artifact_reuses_process_local_cache_entry() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.git(&["add", "src/lib.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+
+    let main_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &main_artifact);
+
+    let first = load_base_artifact_for_worktree(repo.path()).expect("first base artifact");
+    let second = load_base_artifact_for_worktree(repo.path()).expect("second base artifact");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "repeated base loads should return the cached artifact Arc"
+    );
+}
+
+#[test]
+fn missing_self_and_main_pointers_returns_none_and_full_rebuild_still_works() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.git(&["add", "src/lib.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+    repo.git(&["branch", "worker"]);
+    let worker = repo.temp.path().join("worker");
+    repo.git(&["worktree", "add", path_str(&worker), "worker"]);
+
+    let (base, lines) = capture_base_seed_trace(|| load_base_artifact_for_worktree(&worker));
+
+    assert!(base.is_none());
+    assert_base_seed_trace(&lines, "none", 0, 0);
+    let rebuilt = build_full(&worker);
+    assert!(rebuilt
+        .symbols
+        .iter()
+        .any(|symbol| symbol.entity_name == "lib"));
+}
+
+#[test]
+fn main_pointer_manifest_mismatch_returns_none_and_full_rebuild_still_works() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.git(&["add", "src/lib.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+    repo.git(&["branch", "worker"]);
+
+    let main_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &main_artifact);
+    let canonical = canonical_artifact_path(repo.path(), &main_artifact);
+    write_pointer_file(
+        repo.path(),
+        GraphIndexPointer {
+            manifest_version: "0".to_owned(),
+            canonical_artifact_path: canonical,
+            ..read_pointer(repo.path())
+        },
+    );
+
+    let worker = repo.temp.path().join("worker");
+    repo.git(&["worktree", "add", path_str(&worker), "worker"]);
+
+    let base = load_base_artifact_for_worktree(&worker);
+
+    assert!(base.is_none());
+    let rebuilt = build_full(&worker);
+    assert_eq!(rebuilt.graph_content_hash, main_artifact.graph_content_hash);
+}
+
+#[test]
+fn corrupted_self_pointer_falls_back_to_main_worktree_pointer() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.git(&["add", "src/lib.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+    repo.git(&["branch", "worker"]);
+
+    let main_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &main_artifact);
+    let worker = repo.temp.path().join("worker");
+    repo.git(&["worktree", "add", path_str(&worker), "worker"]);
+    let worker_pointer = worker.join(".spur/graph-index.pointer.json");
+    fs::create_dir_all(worker_pointer.parent().expect("worker pointer parent"))
+        .expect("create worker pointer parent");
+    fs::write(&worker_pointer, "{not valid json").expect("write corrupt worker pointer");
+
+    let (base, lines) = capture_base_seed_trace(|| {
+        let seed = load_base_seed_for_worktree(&worker).expect("main worktree base artifact");
+        let (rebuilt, mode, stats) =
+            artifact_from_facts_incremental(&seed.artifact, &worker).expect("incremental rebuild");
+        assert_eq!(seed.base, "main_worktree");
+        assert_eq!(mode, BuildMode::Incremental);
+        emit_base_seed_stats(seed.base, stats);
+        rebuilt
+    });
+
+    assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
+    assert_base_seed_trace(&lines, "main_worktree", 0, 1);
+}
+
+#[test]
+fn missing_canonical_artifact_returns_none_and_full_rebuild_still_works() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.git(&["add", "src/lib.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+
+    let main_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &main_artifact);
+    let canonical = canonical_artifact_path(repo.path(), &main_artifact);
+    fs::remove_dir_all(&canonical).expect("remove canonical artifact");
+
+    let base = load_base_artifact_for_worktree(repo.path());
+
+    assert!(base.is_none());
+    let rebuilt = build_full(repo.path());
+    assert_eq!(rebuilt.graph_content_hash, main_artifact.graph_content_hash);
 }
 
 #[test]
@@ -529,6 +658,12 @@ fn canonical_artifact_path(root: &Path, artifact: &GraphIndexArtifact) -> PathBu
 fn read_pointer(root: &Path) -> GraphIndexPointer {
     let bytes = fs::read(root.join(".spur/graph-index.pointer.json")).expect("read pointer");
     serde_json::from_slice(&bytes).expect("parse pointer")
+}
+
+fn write_pointer_file(root: &Path, pointer: GraphIndexPointer) {
+    let path = root.join(".spur/graph-index.pointer.json");
+    let bytes = serde_json::to_vec_pretty(&pointer).expect("serialize pointer");
+    fs::write(path, bytes).expect("write pointer");
 }
 
 fn manifest_entry<'a>(
@@ -678,7 +813,9 @@ fn assert_base_seed_trace(
 ) {
     let line = lines
         .iter()
-        .find(|line| line.contains("spur_graph::base_seed"))
+        .find(|line| {
+            line.contains("spur_graph::base_seed") && line.contains("worker base seed selected")
+        })
         .unwrap_or_else(|| panic!("missing base seed trace event in {lines:?}"));
     assert!(
         line.contains(&format!("base=\"{expected_base}\""))

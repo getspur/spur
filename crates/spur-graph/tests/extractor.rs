@@ -1628,7 +1628,7 @@ fn incremental_round_trip_noop_matches_full_artifact() {
     let root = fixture_root();
     let full =
         artifact_from_facts(&build_facts(&root, None).expect("extract").0, &root).expect("full");
-    let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
+    let (next, mode, _stats) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     assert_eq!(next, full);
 }
@@ -1638,7 +1638,7 @@ fn incremental_round_trip_preserves_edges() {
     let root = fixture_root();
     let full =
         artifact_from_facts(&build_facts(&root, None).expect("extract").0, &root).expect("full");
-    let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
+    let (next, mode, _stats) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     assert_eq!(next.edges, full.edges);
 }
@@ -1726,7 +1726,7 @@ fn incremental_matches_full_under_edit_sequence() {
         }
         let full = artifact_from_facts(&build_facts(root, None).expect("extract full").0, root)
             .expect("full");
-        let (incremental, mode) =
+        let (incremental, mode, _stats) =
             artifact_from_facts_incremental(&prev_incremental, root).expect("extract incremental");
         assert_eq!(mode, BuildMode::Incremental);
 
@@ -1765,7 +1765,7 @@ fn incremental_modify_one_file_replaces_only_that_bucket() {
     sleep(Duration::from_millis(5));
     fs::write(root.join("src/a.rs"), "pub fn alpha2() {}\n").expect("rewrite a.rs");
 
-    let (next, mode) = artifact_from_facts_incremental(&full, root).expect("incremental");
+    let (next, mode, _stats) = artifact_from_facts_incremental(&full, root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     let after_a = next
         .symbols
@@ -1801,7 +1801,7 @@ fn incremental_delete_file_drops_bucket_and_preserves_others() {
         .collect::<Vec<_>>();
 
     fs::remove_file(root.join("src/a.rs")).expect("delete a.rs");
-    let (next, mode) = artifact_from_facts_incremental(&full, root).expect("incremental");
+    let (next, mode, _stats) = artifact_from_facts_incremental(&full, root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     assert!(!next.files.iter().any(|f| f.file_path == "src/a.rs"));
     assert!(!next.symbols.iter().any(|s| s.file_path == "src/a.rs"));
@@ -1821,7 +1821,7 @@ fn incremental_manifest_mismatch_falls_back_to_full() {
         artifact_from_facts(&build_facts(&root, None).expect("extract").0, &root).expect("full");
     full.manifest_version = "stale-manifest".to_owned();
 
-    let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
+    let (next, mode, _stats) = artifact_from_facts_incremental(&full, &root).expect("incremental");
     assert_eq!(mode, BuildMode::Full);
     assert_ne!(next.manifest_version, "stale-manifest");
 }
@@ -1848,7 +1848,7 @@ fn incremental_rebinds_call_edge_after_callee_file_changed() {
     )
     .expect("rewrite callee.rs");
 
-    let (incremental, mode) =
+    let (incremental, mode, _stats) =
         artifact_from_facts_incremental(&full_before, root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     let new_target = call_edge_target_for(&incremental, "calls").expect("rebound calls target");
@@ -1876,7 +1876,7 @@ fn incremental_rebinds_call_edge_when_caller_file_changed() {
     )
     .expect("rewrite caller.rs");
 
-    let (incremental, mode) =
+    let (incremental, mode, _stats) =
         artifact_from_facts_incremental(&full_before, root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
     let after_target =
@@ -1908,7 +1908,8 @@ fn full_and_incremental_emit_byte_identical_edges_for_same_state() {
     let full_x = normalize_for_comparison(
         artifact_from_facts(&build_facts(root, None).expect("extract").0, root).expect("full x"),
     );
-    let (incremental_x, mode) = artifact_from_facts_incremental(&y, root).expect("incremental x");
+    let (incremental_x, mode, _stats) =
+        artifact_from_facts_incremental(&y, root).expect("incremental x");
     assert_eq!(mode, BuildMode::Incremental);
     let incremental_x = normalize_for_comparison(incremental_x);
 
@@ -1937,7 +1938,7 @@ fn incremental_drops_removed_cross_file_call_edge() {
     )
     .expect("rewrite caller.rs");
 
-    let (incremental, mode) =
+    let (incremental, mode, _stats) =
         artifact_from_facts_incremental(&baseline, root).expect("incremental");
     assert_eq!(mode, BuildMode::Incremental);
 
