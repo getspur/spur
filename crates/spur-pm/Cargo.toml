@@ -39,3 +39,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 filetime = "0.2"
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

@@ -52,3 +52,6 @@ tauri-build = { version = "2", features = [] }
 # ourselves. Despite the v2 migration guide claiming this feature is ignored,
 # 2.0.4 source clearly checks it (`cfg!(feature = "custom-protocol")`).
 custom-protocol = ["tauri/custom-protocol"]
+
+[lints]
+workspace = true
