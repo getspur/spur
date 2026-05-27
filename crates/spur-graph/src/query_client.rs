@@ -61,11 +61,15 @@ pub trait GraphQueryClient {
 #[derive(Clone)]
 pub struct InMemoryClient {
     artifact: Arc<GraphIndexArtifact>,
+    temporal_index: Arc<OnceLock<Arc<TemporalIndex>>>,
 }
 
 impl InMemoryClient {
     pub fn new(artifact: Arc<GraphIndexArtifact>) -> Self {
-        Self { artifact }
+        Self {
+            artifact,
+            temporal_index: Arc::new(OnceLock::new()),
+        }
     }
 
     pub fn artifact(&self) -> &GraphIndexArtifact {
@@ -155,7 +159,10 @@ impl GraphQueryClient for InMemoryClient {
     }
 
     fn temporal_index(&self) -> Arc<TemporalIndex> {
-        Arc::new(TemporalIndex::new(Arc::clone(&self.artifact)))
+        Arc::clone(
+            self.temporal_index
+                .get_or_init(|| Arc::new(TemporalIndex::new(Arc::clone(&self.artifact)))),
+        )
     }
 }
 
@@ -1455,5 +1462,15 @@ mod tests {
         assert_eq!(ids(&actual), ids(&expected));
         assert_eq!(actual.total_matches, expected.total_matches);
         assert_eq!(actual.truncated, expected.truncated);
+    }
+
+    #[test]
+    fn in_memory_client_temporal_index_is_cached() {
+        let client = InMemoryClient::new(Arc::new(artifact(Vec::new())));
+
+        let first = client.temporal_index();
+        let second = client.temporal_index();
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }

@@ -31,6 +31,7 @@ pub struct TemporalIndex {
     commit_positions: HashMap<String, usize>,
     commit_parents: HashMap<String, Vec<String>>,
     snapshot_keys_by_stable_symbol_id: HashMap<String, Vec<SnapshotKey>>,
+    deleted_snapshot_keys: HashSet<SnapshotKey>,
     rename_edges: Vec<(SnapshotKey, SnapshotKey)>,
     rename_neighbors_by_snapshot: HashMap<SnapshotKey, Vec<SnapshotKey>>,
     referenced_snapshot_count: usize,
@@ -52,6 +53,7 @@ impl TemporalIndex {
             .map(|commit| (commit.sha.clone(), commit.parents.clone()))
             .collect();
         let mut snapshot_key_sets: HashMap<String, HashSet<SnapshotKey>> = HashMap::new();
+        let mut deleted_snapshot_keys = HashSet::new();
         let mut referenced_snapshot_count = 0;
         let mut rename_edges = Vec::new();
 
@@ -110,6 +112,14 @@ impl TemporalIndex {
                     .or_default()
                     .push(edge_index);
             }
+            if let (
+                EdgeEndpoint::Commit { .. },
+                EdgeEndpoint::Snapshot { key },
+                Some(ChangeKind::Deleted),
+            ) = (&edge.source, &edge.target, &edge.change_kind)
+            {
+                deleted_snapshot_keys.insert(key.clone());
+            }
         }
 
         let mut snapshot_keys_by_stable_symbol_id = HashMap::new();
@@ -143,6 +153,7 @@ impl TemporalIndex {
             commit_positions,
             commit_parents,
             snapshot_keys_by_stable_symbol_id,
+            deleted_snapshot_keys,
             rename_edges,
             rename_neighbors_by_snapshot,
             referenced_snapshot_count,
@@ -200,6 +211,8 @@ impl TemporalIndex {
             self.commit_positions.capacity() * (size_of::<String>() + size_of::<usize>());
         let snapshot_keys = self.snapshot_keys_by_stable_symbol_id.capacity()
             * (size_of::<String>() + size_of::<Vec<SnapshotKey>>());
+        let deleted_snapshot_keys =
+            self.deleted_snapshot_keys.capacity() * size_of::<SnapshotKey>();
         let rename_neighbors = self.rename_neighbors_by_snapshot.capacity()
             * (size_of::<SnapshotKey>() + size_of::<Vec<SnapshotKey>>());
         let rename_edges_bytes =
@@ -209,8 +222,13 @@ impl TemporalIndex {
             + edges_by_sha
             + positions
             + snapshot_keys
+            + deleted_snapshot_keys
             + rename_neighbors
             + rename_edges_bytes
+    }
+
+    pub fn is_deleted_snapshot(&self, snapshot: &SnapshotKey) -> bool {
+        self.deleted_snapshot_keys.contains(snapshot)
     }
 
     fn commit_position(&self, commit: &str) -> usize {
@@ -373,7 +391,6 @@ pub fn resolve_symbol_at_indexed(
     anchor: &str,
     target: &str,
 ) -> Resolution<StableSymbolId> {
-    let code = index.artifact();
     let graph = if index.has_commit_positions() {
         index.commit_graph()
     } else {
@@ -400,7 +417,8 @@ pub fn resolve_symbol_at_indexed(
         };
     }
 
-    let mut anchor_candidates = match latest_anchor_snapshots(code, &graph, symbol, anchor) {
+    let mut anchor_candidates = match latest_anchor_snapshots_indexed(index, &graph, symbol, anchor)
+    {
         Ok(candidates) => candidates,
         Err(reason) => return Resolution::Unknown { reason },
     };
@@ -558,7 +576,6 @@ fn resolve_from_anchor_key_indexed(
     target_ancestors: &HashSet<String>,
     anchor_key: SnapshotKey,
 ) -> Resolution<StableSymbolId> {
-    let code = index.artifact();
     let mut current = anchor_key;
     let anchor = current.clone();
     let mut chain = Vec::new();
@@ -601,7 +618,7 @@ fn resolve_from_anchor_key_indexed(
                 Ok(latest) => {
                     if latest
                         .iter()
-                        .any(|snapshot| is_deleted_snapshot(code, snapshot))
+                        .any(|snapshot| index.is_deleted_snapshot(snapshot))
                     {
                         if let [last_seen] = latest.as_slice() {
                             return Resolution::Deleted {
@@ -634,8 +651,8 @@ fn resolve_from_anchor_key_indexed(
     }
 }
 
-fn latest_anchor_snapshots(
-    code: &GraphIndexArtifact,
+fn latest_anchor_snapshots_indexed(
+    index: &TemporalIndex,
     graph: &CommitGraph<'_>,
     stable_symbol_id: &str,
     anchor: &str,
@@ -644,15 +661,8 @@ fn latest_anchor_snapshots(
         return Err(ResolutionFailure::AnchorCommitNotIndexed(anchor.to_owned()));
     };
 
-    let mut candidates: Vec<_> = code
-        .symbol_snapshots
-        .iter()
-        .filter(|snapshot| {
-            snapshot.key.stable_symbol_id == stable_symbol_id
-                && anchor_ancestors.contains(&snapshot.key.commit)
-        })
-        .map(|snapshot| snapshot.key.clone())
-        .collect();
+    let mut candidates = snapshot_keys_for_symbol_indexed(index, stable_symbol_id);
+    candidates.retain(|key| anchor_ancestors.contains(&key.commit));
     sort_snapshot_keys(&mut candidates, graph);
     candidates.dedup();
 
@@ -801,19 +811,6 @@ fn snapshot_keys_for_symbol_indexed(
         .get(stable_symbol_id)
         .cloned()
         .unwrap_or_default()
-}
-
-fn is_deleted_snapshot(code: &GraphIndexArtifact, snapshot: &SnapshotKey) -> bool {
-    code.temporal_edges.iter().any(|edge| {
-        matches!(
-            (&edge.source, &edge.target, &edge.change_kind),
-            (
-                EdgeEndpoint::Commit { .. },
-                EdgeEndpoint::Snapshot { key },
-                Some(ChangeKind::Deleted)
-            ) if key == snapshot
-        )
-    })
 }
 
 fn stable_symbol_ids(mut keys: Vec<SnapshotKey>) -> Vec<StableSymbolId> {
@@ -1235,6 +1232,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn latest_anchor_snapshots_indexed_uses_snapshot_key_index() {
+        let (mut graph, commits) = fixture();
+        let key = SnapshotKey {
+            stable_symbol_id: "edge-only".into(),
+            commit: "c3".into(),
+        };
+        graph.temporal_edges.push(TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit { sha: "c3".into() },
+            target: EdgeEndpoint::Snapshot { key: key.clone() },
+            relation: RelationKind::Touches,
+            parent: Some("c2".into()),
+            change_kind: Some(ChangeKind::Added),
+        });
+        let index = TemporalIndex::new(Arc::new(graph));
+        let commit_graph = CommitGraph::new(&commits);
+
+        assert_eq!(
+            latest_anchor_snapshots_indexed(&index, &commit_graph, "edge-only", "c3")
+                .expect("anchor is indexed"),
+            vec![key]
+        );
+    }
+
+    #[test]
+    fn temporal_index_tracks_deleted_snapshot_keys_by_identity() {
+        let (mut graph, _) = fixture();
+        let deleted = SnapshotKey {
+            stable_symbol_id: "old".into(),
+            commit: "c3".into(),
+        };
+        let same_symbol_other_commit = SnapshotKey {
+            stable_symbol_id: "old".into(),
+            commit: "c2".into(),
+        };
+        graph.temporal_edges.push(TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit { sha: "c3".into() },
+            target: EdgeEndpoint::Snapshot {
+                key: deleted.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: Some("c2".into()),
+            change_kind: Some(ChangeKind::Deleted),
+        });
+
+        let index = TemporalIndex::new(Arc::new(graph));
+
+        assert!(index.is_deleted_snapshot(&deleted));
+        assert!(!index.is_deleted_snapshot(&same_symbol_other_commit));
     }
 
     #[test]

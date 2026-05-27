@@ -508,8 +508,11 @@ fn duration_ms(duration: Duration) -> f64 {
 
 fn peak_rss_kb(who: libc::c_int) -> u64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `usage` points to writable storage for `libc::rusage`, and
+    // `getrusage` initializes it when returning 0.
     let status = unsafe { libc::getrusage(who, usage.as_mut_ptr()) };
     assert_eq!(status, 0, "getrusage failed for who={who}");
+    // SAFETY: the assertion above guarantees `getrusage` initialized `usage`.
     let usage = unsafe { usage.assume_init() };
     let raw = usage.ru_maxrss;
     assert!(raw >= 0, "getrusage returned negative ru_maxrss {raw}");
