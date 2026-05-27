@@ -38,6 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use futures::future::BoxFuture;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
@@ -107,13 +108,13 @@ pub(crate) struct CompletionCollectorLogContext {
 }
 
 pub(crate) fn spawn_completion_collector<F>(
-    task_tracker: &TaskTracker,
+    dispatch: &dyn ReconcilerDispatch,
     context: CompletionCollectorLogContext,
     future: F,
 ) where
     F: Future<Output = ()> + Send + 'static,
 {
-    task_tracker.spawn(async move {
+    dispatch.track_task(Box::pin(async move {
         use futures::FutureExt;
 
         match std::panic::AssertUnwindSafe(future).catch_unwind().await {
@@ -123,7 +124,7 @@ pub(crate) fn spawn_completion_collector<F>(
                 std::panic::resume_unwind(payload);
             }
         }
-    });
+    }));
 }
 
 fn log_completion_collector_panic(
@@ -164,6 +165,7 @@ struct CompletionProjectionLogContext<'a> {
 }
 
 async fn project_completion_snapshot_and_deliver<F>(
+    clock: &dyn Clock,
     projection: F,
     outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
     event_sink: Option<&dyn crate::events::McpEventSink>,
@@ -173,7 +175,11 @@ async fn project_completion_snapshot_and_deliver<F>(
 ) where
     F: Future<Output = anyhow::Result<crate::plan::PlanState>>,
 {
-    match tokio::time::timeout(COMPLETION_PROJECTION_TIMEOUT, projection).await {
+    tokio::pin!(projection);
+    match tokio::select! {
+        result = &mut projection => Ok(result),
+        _ = clock.sleep(COMPLETION_PROJECTION_TIMEOUT) => Err(()),
+    } {
         Ok(Ok(projected)) => {
             tracing::info!(
                 target: "spur.reconciler.completion_collector",
@@ -673,6 +679,61 @@ pub struct ReconcilerDispatchCtx {
     pub continuation_ctx: Arc<crate::server::DetachedContinuationCtx>,
 }
 
+#[async_trait::async_trait]
+pub trait ReconcilerDispatch: Send + Sync {
+    async fn send_delegation(&self, request: crate::tools::DelegationRequest)
+        -> anyhow::Result<()>;
+
+    fn track_task(&self, fut: BoxFuture<'static, ()>);
+
+    fn event_sink(&self) -> Option<&Arc<dyn crate::events::McpEventSink>>;
+
+    fn materializer(&self) -> &Arc<crate::outcome_materializer::OutcomeMaterializer>;
+
+    fn continuation_ctx(&self) -> &Arc<crate::server::DetachedContinuationCtx>;
+
+    fn brain_session_id(&self) -> &spur_acp::BrainSessionId;
+}
+
+#[async_trait::async_trait]
+impl ReconcilerDispatch for ReconcilerDispatchCtx {
+    async fn send_delegation(
+        &self,
+        request: crate::tools::DelegationRequest,
+    ) -> anyhow::Result<()> {
+        self.delegation_tx
+            .send(request)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    fn track_task(&self, fut: BoxFuture<'static, ()>) {
+        let _ = self.task_tracker.spawn(fut);
+    }
+
+    fn event_sink(&self) -> Option<&Arc<dyn crate::events::McpEventSink>> {
+        self.event_sink.as_ref()
+    }
+
+    fn materializer(&self) -> &Arc<crate::outcome_materializer::OutcomeMaterializer> {
+        &self.materializer
+    }
+
+    fn continuation_ctx(&self) -> &Arc<crate::server::DetachedContinuationCtx> {
+        &self.continuation_ctx
+    }
+
+    fn brain_session_id(&self) -> &spur_acp::BrainSessionId {
+        &self.brain_session_id
+    }
+}
+
+impl ReconcilerDispatchCtx {
+    pub fn into_dispatch(self) -> Arc<dyn ReconcilerDispatch> {
+        Arc::new(self)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HydratedReady {
     pub summary: spur_pm::IssueSummary,
@@ -718,6 +779,10 @@ impl Default for ReconcilerConfig {
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> SystemTime;
+
+    fn sleep<'a>(&'a self, duration: Duration) -> BoxFuture<'a, ()> {
+        Box::pin(tokio::time::sleep(duration))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -758,7 +823,7 @@ pub struct Reconciler {
     pub(super) config: ReconcilerConfig,
     pub(super) pm: Arc<dyn crate::plan::PmLike>,
     pub(super) fast_forward: Arc<Notify>,
-    pub(super) dispatch: Option<ReconcilerDispatchCtx>,
+    pub(super) dispatch: Option<Arc<dyn ReconcilerDispatch>>,
     pub(super) plan_id: Option<String>,
     pub(super) auto_merge_approved_plans: bool,
     pub(super) automation: Option<Arc<dyn ReconcilerAutomation>>,
@@ -781,7 +846,7 @@ impl Reconciler {
             config,
             pm as Arc<dyn crate::plan::PmLike>,
             fast_forward,
-            dispatch,
+            dispatch.map(|dispatch| Arc::new(dispatch) as Arc<dyn ReconcilerDispatch>),
             plan_id,
             feature_gate,
         )
@@ -791,7 +856,7 @@ impl Reconciler {
         config: ReconcilerConfig,
         pm: Arc<dyn crate::plan::PmLike>,
         fast_forward: Arc<Notify>,
-        dispatch: Option<ReconcilerDispatchCtx>,
+        dispatch: Option<Arc<dyn ReconcilerDispatch>>,
         plan_id: Option<String>,
         feature_gate: Arc<spur_license::FeatureGate>,
     ) -> Self {
@@ -963,13 +1028,15 @@ impl Reconciler {
         let Some(sink) = self
             .dispatch
             .as_ref()
-            .and_then(|dispatch| dispatch.event_sink.as_deref())
+            .and_then(|dispatch| dispatch.event_sink())
         else {
             return;
         };
 
         match self.project_plan_from_beads(plan_id).await {
-            Ok(projected) => crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected),
+            Ok(projected) => {
+                crate::plan::snapshot::emit_plan_snapshot(Some(sink.as_ref()), &projected)
+            }
             Err(error) => tracing::warn!(%plan_id, "failed to project plan snapshot: {error}"),
         }
     }
@@ -1000,7 +1067,7 @@ impl Reconciler {
                     tracing::debug!("reconciler journal append triggered");
                     interval = self.config.base_interval;
                 }
-                _ = tokio::time::sleep(interval) => {}
+                _ = self.clock.sleep(interval) => {}
             }
             // Race tick_once against cancel so shutdown cannot hang behind
             // stuck PM I/O (bv.triage / br ready). Partial persisted writes are
@@ -1046,7 +1113,9 @@ impl Reconciler {
             return Ok(did_work || !ready_ids.is_empty());
         };
 
-        did_work |= self.sweep_expired_dispatch_leases(dispatch).await?;
+        did_work |= self
+            .sweep_expired_dispatch_leases(dispatch.as_ref())
+            .await?;
 
         let ready = self.observe_ready_summaries().await?;
 
@@ -1234,8 +1303,8 @@ impl Reconciler {
                         dep_task_id: &conflict.dep_task_id,
                         files: &conflict.files,
                         summary: "Predispatch overlay preview predicted a setup conflict.",
-                        event_sink: dispatch.event_sink.as_deref(),
-                        continuation_ctx: dispatch.continuation_ctx.as_ref(),
+                        event_sink: dispatch.event_sink().map(|sink| sink.as_ref()),
+                        continuation_ctx: dispatch.continuation_ctx().as_ref(),
                     })
                     .await;
                 }
@@ -1291,7 +1360,7 @@ impl Reconciler {
                 context_files: task.spec.context_files.clone(),
                 prior_branch_for_reuse: prior_branch_for_reuse(task),
                 respond_to,
-                brain_session_id: dispatch.brain_session_id.clone(),
+                brain_session_id: dispatch.brain_session_id().clone(),
                 delegation_plan: None,
                 issue_id: task.spec.issue_id.clone(),
                 base: Some(base_spec),
@@ -1304,7 +1373,7 @@ impl Reconciler {
 
             // INV-S3 audit: dispatch intent is durable in beads before this
             // in-process request becomes observable by the orchestrator.
-            if let Err(error) = dispatch.delegation_tx.send(request).await {
+            if let Err(error) = dispatch.send_delegation(request).await {
                 self.record_skipped(
                     Some(plan_id),
                     &task.spec.task_id,
@@ -1364,12 +1433,13 @@ impl Reconciler {
             let delegation_id_for_completion = delegation_id.clone();
             let repo_root = self.config.repo_root.clone();
             let fast_forward = Arc::clone(&self.fast_forward);
-            let event_sink = dispatch.event_sink.clone();
-            let brain_session_id = dispatch.brain_session_id.clone();
-            let materializer = Arc::clone(&dispatch.materializer);
-            let continuation_ctx = Arc::clone(&dispatch.continuation_ctx);
+            let event_sink = dispatch.event_sink().cloned();
+            let brain_session_id = dispatch.brain_session_id().clone();
+            let materializer = Arc::clone(dispatch.materializer());
+            let continuation_ctx = Arc::clone(dispatch.continuation_ctx());
             let feature_gate = Arc::clone(&self.feature_gate);
             let outcomes = Arc::clone(&self.outcomes);
+            let clock = Arc::clone(&self.clock);
             let completion_log_context = CompletionCollectorLogContext {
                 plan_id: plan_id.clone(),
                 task_id: task_id.clone(),
@@ -1377,181 +1447,175 @@ impl Reconciler {
                 brain_session_id: brain_session_id.to_string(),
                 attempt: task_attempt,
             };
-            spawn_completion_collector(
-                &dispatch.task_tracker,
-                completion_log_context,
-                async move {
-                    let result = match rx.await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            tracing::warn!(
-                                %plan_id,
-                                %task_id,
-                                %issue_id,
-                                %delegation_id_for_completion,
-                                "reconciler completion receiver dropped before result persisted"
-                            );
-                            let error = "orchestrator disconnected".to_string();
-                            spur_acp::DelegationResult {
-                                status: spur_acp::DelegationStatus::Failed {
-                                    error: error.clone(),
-                                },
-                                diff: None,
-                                diff_summary: None,
-                                summary: Some(error),
-                                estimated_cost_usd: 0.0,
-                                worker_branch: None,
-                                artifact: None,
-                            }
+            spawn_completion_collector(dispatch.as_ref(), completion_log_context, async move {
+                let result = match rx.await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            %issue_id,
+                            %delegation_id_for_completion,
+                            "reconciler completion receiver dropped before result persisted"
+                        );
+                        let error = "orchestrator disconnected".to_string();
+                        spur_acp::DelegationResult {
+                            status: spur_acp::DelegationStatus::Failed {
+                                error: error.clone(),
+                            },
+                            diff: None,
+                            diff_summary: None,
+                            summary: Some(error),
+                            estimated_cost_usd: 0.0,
+                            worker_branch: None,
+                            artifact: None,
                         }
-                    };
-
-                    if let Some((source_task_id, files)) =
-                        conflict::setup_overlay_conflict(&result.status)
-                    {
-                        if let Err(error) = conflict::persist_setup_overlay_conflict(
-                            pm.as_ref(),
-                            &issue_id,
-                            feature_gate.as_ref(),
-                            &plan_id,
-                            &delegation_id_for_completion,
-                            source_task_id,
-                            files,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                %plan_id,
-                                %task_id,
-                                %issue_id,
-                                %delegation_id_for_completion,
-                                "reconciler setup conflict persistence failed: {error}"
-                            );
-                        } else {
-                            fast_forward.notify_one();
-                        }
-
-                        match crate::plan::projector::project_plan_from_beads(
-                            pm.as_ref(),
-                            &plan_id,
-                            feature_gate.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(projected) => {
-                                if let Some(sink) = event_sink.as_deref() {
-                                    crate::plan::snapshot::emit_plan_snapshot(
-                                        Some(sink),
-                                        &projected,
-                                    );
-                                }
-                                emit_setup_conflict_continuation(SetupConflictContinuation {
-                                    plan: &projected,
-                                    repo_root: &repo_root,
-                                    task_id: &task_id,
-                                    delegation_id: &delegation_id_for_completion,
-                                    attempt: task_attempt,
-                                    dep_task_id: source_task_id,
-                                    files,
-                                    summary: "Worker setup failed with an overlay conflict.",
-                                    event_sink: event_sink.as_deref(),
-                                    continuation_ctx: continuation_ctx.as_ref(),
-                                })
-                                .await;
-                            }
-                            Err(error) => tracing::warn!(
-                                %plan_id,
-                                %task_id,
-                                "failed to project plan snapshot after setup conflict: {error}"
-                            ),
-                        }
-                        return;
                     }
+                };
 
-                    // INV-S3 audit: the worker result and base-OID watch value are
-                    // consumed only by this completion writer; events,
-                    // continuations, and projected state are emitted after the
-                    // completion audit/update below succeeds.
-                    let dispatched_base_oid = dispatched_base_oid_rx.borrow().clone();
-
-                    tracing::info!(
-                        target: "spur.reconciler.completion_collector",
-                        %plan_id,
-                        %task_id,
-                        delegation_id = %delegation_id_for_completion,
-                        brain_session_id = %brain_session_id,
-                        attempt = task_attempt,
-                        "stage_entered_persist"
-                    );
-                    let deferred = match crate::plan::persist_worker_completion_and_notify(
+                if let Some((source_task_id, files)) =
+                    conflict::setup_overlay_conflict(&result.status)
+                {
+                    if let Err(error) = conflict::persist_setup_overlay_conflict(
                         pm.as_ref(),
                         &issue_id,
                         feature_gate.as_ref(),
                         &plan_id,
                         &delegation_id_for_completion,
-                        &Some(Arc::clone(&fast_forward)),
-                        &result,
-                        &brain_session_id,
-                        task_attempt,
-                        &materializer,
-                        dispatched_base_oid,
-                        Some(&task_id),
+                        source_task_id,
+                        files,
                     )
                     .await
                     {
-                        Ok(payload) => payload,
-                        Err(error) => {
-                            tracing::warn!(
-                                %plan_id,
-                                %task_id,
-                                %issue_id,
-                                %delegation_id_for_completion,
-                                "reconciler completion persistence failed: {error}"
-                            );
-                            None
-                        }
-                    };
-                    tracing::info!(
-                        target: "spur.reconciler.completion_collector",
-                        %plan_id,
-                        %task_id,
-                        delegation_id = %delegation_id_for_completion,
-                        brain_session_id = %brain_session_id,
-                        attempt = task_attempt,
-                        deferred_is_some = deferred.is_some(),
-                        "stage_completed_persist"
-                    );
+                        tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            %issue_id,
+                            %delegation_id_for_completion,
+                            "reconciler setup conflict persistence failed: {error}"
+                        );
+                    } else {
+                        fast_forward.notify_one();
+                    }
 
-                    tracing::info!(
-                        target: "spur.reconciler.completion_collector",
-                        %plan_id,
-                        %task_id,
-                        delegation_id = %delegation_id_for_completion,
-                        brain_session_id = %brain_session_id,
-                        attempt = task_attempt,
-                        "stage_entered_project"
-                    );
-                    project_completion_snapshot_and_deliver(
-                        crate::plan::projector::project_plan_from_beads(
-                            pm.as_ref(),
-                            &plan_id,
-                            feature_gate.as_ref(),
-                        ),
-                        &outcomes,
-                        event_sink.as_deref(),
-                        continuation_ctx.as_ref(),
-                        deferred,
-                        CompletionProjectionLogContext {
-                            plan_id: &plan_id,
-                            task_id: &task_id,
-                            delegation_id: &delegation_id_for_completion,
-                            brain_session_id: &brain_session_id,
-                            attempt: task_attempt,
-                        },
+                    match crate::plan::projector::project_plan_from_beads(
+                        pm.as_ref(),
+                        &plan_id,
+                        feature_gate.as_ref(),
                     )
-                    .await;
-                },
-            );
+                    .await
+                    {
+                        Ok(projected) => {
+                            if let Some(sink) = event_sink.as_deref() {
+                                crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected);
+                            }
+                            emit_setup_conflict_continuation(SetupConflictContinuation {
+                                plan: &projected,
+                                repo_root: &repo_root,
+                                task_id: &task_id,
+                                delegation_id: &delegation_id_for_completion,
+                                attempt: task_attempt,
+                                dep_task_id: source_task_id,
+                                files,
+                                summary: "Worker setup failed with an overlay conflict.",
+                                event_sink: event_sink.as_deref(),
+                                continuation_ctx: continuation_ctx.as_ref(),
+                            })
+                            .await;
+                        }
+                        Err(error) => tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            "failed to project plan snapshot after setup conflict: {error}"
+                        ),
+                    }
+                    return;
+                }
+
+                // INV-S3 audit: the worker result and base-OID watch value are
+                // consumed only by this completion writer; events,
+                // continuations, and projected state are emitted after the
+                // completion audit/update below succeeds.
+                let dispatched_base_oid = dispatched_base_oid_rx.borrow().clone();
+
+                tracing::info!(
+                    target: "spur.reconciler.completion_collector",
+                    %plan_id,
+                    %task_id,
+                    delegation_id = %delegation_id_for_completion,
+                    brain_session_id = %brain_session_id,
+                    attempt = task_attempt,
+                    "stage_entered_persist"
+                );
+                let deferred = match crate::plan::persist_worker_completion_and_notify(
+                    pm.as_ref(),
+                    &issue_id,
+                    feature_gate.as_ref(),
+                    &plan_id,
+                    &delegation_id_for_completion,
+                    &Some(Arc::clone(&fast_forward)),
+                    &result,
+                    &brain_session_id,
+                    task_attempt,
+                    &materializer,
+                    dispatched_base_oid,
+                    Some(&task_id),
+                )
+                .await
+                {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            %issue_id,
+                            %delegation_id_for_completion,
+                            "reconciler completion persistence failed: {error}"
+                        );
+                        None
+                    }
+                };
+                tracing::info!(
+                    target: "spur.reconciler.completion_collector",
+                    %plan_id,
+                    %task_id,
+                    delegation_id = %delegation_id_for_completion,
+                    brain_session_id = %brain_session_id,
+                    attempt = task_attempt,
+                    deferred_is_some = deferred.is_some(),
+                    "stage_completed_persist"
+                );
+
+                tracing::info!(
+                    target: "spur.reconciler.completion_collector",
+                    %plan_id,
+                    %task_id,
+                    delegation_id = %delegation_id_for_completion,
+                    brain_session_id = %brain_session_id,
+                    attempt = task_attempt,
+                    "stage_entered_project"
+                );
+                project_completion_snapshot_and_deliver(
+                    clock.as_ref(),
+                    crate::plan::projector::project_plan_from_beads(
+                        pm.as_ref(),
+                        &plan_id,
+                        feature_gate.as_ref(),
+                    ),
+                    &outcomes,
+                    event_sink.as_deref(),
+                    continuation_ctx.as_ref(),
+                    deferred,
+                    CompletionProjectionLogContext {
+                        plan_id: &plan_id,
+                        task_id: &task_id,
+                        delegation_id: &delegation_id_for_completion,
+                        brain_session_id: &brain_session_id,
+                        attempt: task_attempt,
+                    },
+                )
+                .await;
+            });
 
             did_work = true;
         }
