@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // std::env::set_var is unsafe in Rust 2024; test-only setup.
+
 use std::sync::Mutex;
 
 use spur_license::{LicenseState, LicenseStatus, Plan, SpurLicense};
