@@ -54,6 +54,10 @@ fs4 = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
 rmcp = { workspace = true }
 
+[target.'cfg(madsim)'.dev-dependencies]
+madsim = "0.2"
+madsim-tokio = { version = "0.2", features = ["full", "test-util"] }
+
 [[test]]
 name = "shutdown_mcp_server_bounded"
 path = "tests/shutdown_mcp_server_bounded.rs"
