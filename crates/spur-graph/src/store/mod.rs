@@ -12,8 +12,8 @@ pub use build::{
 };
 pub use canonical_hash::artifact_content_hash_blake3_hex;
 pub use parquet::{
-    read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
-    GraphArtifactManifest, WriteOptions,
+    load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,
+    write_artifact_parquet, GraphArtifactManifest, WriteOptions,
 };
 pub use pointer::{
     read_current_pointer, resolve_artifact_location, write_current_pointer, ArtifactCacheKey,
