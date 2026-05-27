@@ -17,3 +17,6 @@ spur-pm = { workspace = true }
 [dev-dependencies]
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
