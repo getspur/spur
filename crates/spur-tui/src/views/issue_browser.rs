@@ -2694,7 +2694,9 @@ mod tests {
             .expect("rapid navigation should arm a pending prefetch");
         view.pending_prefetch = Some((
             id,
-            scheduled_at - std::time::Duration::from_millis(PREFETCH_DEBOUNCE_MS),
+            scheduled_at
+                .checked_sub(std::time::Duration::from_millis(PREFETCH_DEBOUNCE_MS))
+                .unwrap_or(scheduled_at),
         ));
 
         view.flush_due_prefetch();

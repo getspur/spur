@@ -298,14 +298,14 @@ impl AgentConnection for TestStubConnection {
         &mut self,
         _request: InitializeRequest,
     ) -> anyhow::Result<InitializeResponse> {
-        unimplemented!("TestStubConnection: initialize")
+        panic!("TestStubConnection: initialize must not be called")
     }
     async fn new_session(
         &mut self,
         _cwd: PathBuf,
         _mcp: Vec<McpServer>,
     ) -> anyhow::Result<NewSessionResponse> {
-        unimplemented!("TestStubConnection: new_session")
+        panic!("TestStubConnection: new_session must not be called")
     }
     async fn prompt(
         &mut self,
@@ -339,30 +339,30 @@ mod agent_connection_defaults {
             &mut self,
             _r: InitializeRequest,
         ) -> anyhow::Result<InitializeResponse> {
-            unimplemented!()
+            panic!("NullConn::initialize must not be called")
         }
         async fn new_session(
             &mut self,
             _cwd: PathBuf,
             _mcp: Vec<McpServer>,
         ) -> anyhow::Result<NewSessionResponse> {
-            unimplemented!()
+            panic!("NullConn::new_session must not be called")
         }
         async fn prompt(
             &mut self,
             _r: PromptRequest,
         ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>>
         {
-            unimplemented!()
+            panic!("NullConn::prompt must not be called")
         }
         async fn cancel(&mut self, _s: &str) -> anyhow::Result<()> {
-            unimplemented!()
+            panic!("NullConn::cancel must not be called")
         }
         async fn shutdown(&mut self) -> anyhow::Result<()> {
-            unimplemented!()
+            panic!("NullConn::shutdown must not be called")
         }
         fn health(&self) -> crate::types::AgentHealth {
-            unimplemented!()
+            panic!("NullConn::health must not be called")
         }
     }
 

@@ -108,7 +108,10 @@ fn second_esc_after_cancel_emits_navigate_back_and_clears_hint() {
 #[test]
 fn hint_expires_after_2_seconds() {
     let mut detail = mk_view();
-    detail.set_cancel_hint_until_for_test(Some(Instant::now() - Duration::from_millis(1)));
+    let now = Instant::now();
+    detail.set_cancel_hint_until_for_test(Some(
+        now.checked_sub(Duration::from_millis(1)).unwrap_or(now),
+    ));
 
     let rendered = render_session_detail(&mut detail);
 
