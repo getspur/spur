@@ -38,10 +38,10 @@ fn gix_diff_matches_cli_for_linear_rename_and_merge_history() {
 
     let mut cli_config = GitWalkConfig::default();
     cli_config.use_gix_diff = false;
-    let (cli_graph, cli_commits) = run_full_walk_into(dir.path(), &cli_config, None).unwrap();
+    let (cli_graph, cli_commits) = run_full_walk_into(dir.path(), &cli_config, None, None).unwrap();
     let mut gix_config = GitWalkConfig::default();
     gix_config.use_gix_diff = true;
-    let (gix_graph, gix_commits) = run_full_walk_into(dir.path(), &gix_config, None).unwrap();
+    let (gix_graph, gix_commits) = run_full_walk_into(dir.path(), &gix_config, None, None).unwrap();
 
     assert_eq!(cli_commits.commits, gix_commits.commits);
     assert_eq!(

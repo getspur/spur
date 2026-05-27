@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::fs::File;
 use std::io::Write as _;
@@ -19,7 +19,7 @@ use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
 use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::ColumnPath;
 
-use super::ShardIndexEntry;
+use super::{ShardIndexEntry, TemporalShardSink};
 use crate::store::build::{EXTRACTOR_VERSION, SCHEMA_VERSION};
 use crate::{
     ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GitPath, GraphEdgeArtifact,
@@ -531,6 +531,137 @@ pub fn read_artifact_parquet_slim(dir: &Path) -> anyhow::Result<GraphIndexArtifa
 
 pub fn load_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
     read_temporal_artifact_parquet(dir)
+}
+
+pub(crate) fn load_temporal_artifact_metadata_parquet(
+    dir: &Path,
+) -> anyhow::Result<GraphIndexArtifact> {
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
+        || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
+    let commits_path = dir.join("commits.parquet");
+    let diagnostics_path = dir.join("diagnostics.parquet");
+    let row_counts = manifest.row_counts.clone();
+
+    let (commits, diagnostics) = std::thread::scope(|scope| {
+        let commits = scope.spawn(|| read_commits(&commits_path, row_counts.commits));
+        let diagnostics =
+            scope.spawn(|| read_diagnostics(&diagnostics_path, row_counts.diagnostics));
+
+        Ok::<_, anyhow::Error>((
+            join_scoped(commits, "read commits.parquet")?,
+            join_scoped(diagnostics, "read diagnostics.parquet")?,
+        ))
+    })?;
+
+    let mut artifact = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: manifest.graph_index_version,
+            content_hash_blake3: None,
+        },
+        manifest_version: manifest.manifest_version,
+        graph_content_hash: manifest.graph_content_hash,
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: Vec::new(),
+        symbol_node_ids: Vec::new(),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics,
+        commits,
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    };
+    if legacy_snapshot_ids {
+        crate::schema::rehash_legacy_snapshot_ids(&mut artifact);
+    }
+    Ok(artifact)
+}
+
+pub(crate) fn stream_temporal_artifact_parquet_into_sink(
+    dir: &Path,
+    sink: &mut TemporalShardSink,
+) -> anyhow::Result<()> {
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    ensure_temporal_shards_layout(dir, &manifest)?;
+
+    let commits = read_commits(&dir.join("commits.parquet"), manifest.row_counts.commits)?;
+    let commits_by_sha: HashMap<_, _> = commits
+        .iter()
+        .map(|commit| (commit.sha.as_str(), commit))
+        .collect();
+
+    for shard in &manifest.temporal_shards {
+        let mut rows_by_commit: BTreeMap<String, TemporalRowsForCommit> = BTreeMap::new();
+
+        let temporal_edges_path = temporal_shard_path(dir, "temporal_edges", shard.shard_idx);
+        for edge in read_temporal_edges_file(&temporal_edges_path, shard.row_count_edges)? {
+            let commit_sha = temporal_edge_commit(&edge)
+                .with_context(|| {
+                    format!(
+                        "temporal edge in shard {} has no commit endpoint",
+                        shard.shard_idx
+                    )
+                })?
+                .to_owned();
+            rows_by_commit
+                .entry(commit_sha)
+                .or_default()
+                .edges
+                .push(edge);
+        }
+
+        let symbol_snapshots_path = temporal_shard_path(dir, "symbol_snapshots", shard.shard_idx);
+        for snapshot in
+            read_symbol_snapshots_file(&symbol_snapshots_path, shard.row_count_snapshots)?
+        {
+            rows_by_commit
+                .entry(snapshot.key.commit.clone())
+                .or_default()
+                .snapshots
+                .push(snapshot);
+        }
+
+        for (commit_sha, mut rows) in rows_by_commit {
+            let commit = commits_by_sha.get(commit_sha.as_str()).with_context(|| {
+                format!("temporal shard row references unknown commit `{commit_sha}`")
+            })?;
+            sink.append_commit(commit, &mut rows.edges, &mut rows.snapshots)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct TemporalRowsForCommit {
+    edges: Vec<TemporalEdgeArtifact>,
+    snapshots: Vec<SymbolSnapshotArtifact>,
+}
+
+fn temporal_edge_commit(edge: &TemporalEdgeArtifact) -> Option<&str> {
+    match &edge.target {
+        EdgeEndpoint::Snapshot { key } => Some(&key.commit),
+        EdgeEndpoint::Commit { sha } => Some(sha),
+        EdgeEndpoint::File { .. } | EdgeEndpoint::Symbol { .. } => match &edge.source {
+            EdgeEndpoint::Snapshot { key } => Some(&key.commit),
+            EdgeEndpoint::Commit { sha } => Some(sha),
+            EdgeEndpoint::File { .. } | EdgeEndpoint::Symbol { .. } => None,
+        },
+    }
 }
 
 pub(crate) fn read_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
