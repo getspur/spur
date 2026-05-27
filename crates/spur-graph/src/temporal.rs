@@ -390,7 +390,7 @@ pub fn resolve_symbol_at_indexed(
     if !target_ancestors.contains(anchor) {
         if !graph.contains(anchor) {
             return Resolution::Unknown {
-                reason: ResolutionFailure::AnchorCommitNotIndexed(anchor.to_string()),
+                reason: ResolutionFailure::AnchorCommitNotIndexed(anchor.to_owned()),
             };
         }
         return Resolution::Unknown {
@@ -641,9 +641,7 @@ fn latest_anchor_snapshots(
     anchor: &str,
 ) -> Result<Vec<SnapshotKey>, ResolutionFailure> {
     let Some(anchor_ancestors) = graph.ancestors_of(anchor) else {
-        return Err(ResolutionFailure::AnchorCommitNotIndexed(
-            anchor.to_string(),
-        ));
+        return Err(ResolutionFailure::AnchorCommitNotIndexed(anchor.to_owned()));
     };
 
     let mut candidates: Vec<_> = code
@@ -912,7 +910,7 @@ impl<'a> CommitGraph<'a> {
         }
 
         let mut seen = HashSet::new();
-        let mut stack = vec![commit.to_string()];
+        let mut stack = vec![commit.to_owned()];
         while let Some(current) = stack.pop() {
             if !seen.insert(current.clone()) {
                 continue;

@@ -126,11 +126,11 @@ fn extracted_symbol_tokens_include_leaf_identifiers_and_literals_except_own_name
         .expect("extract");
 
     let tokens = &symbols[0].tokens;
-    assert!(tokens.contains(&"user_id".to_string()));
-    assert!(tokens.contains(&"answer".to_string()));
-    assert!(tokens.contains(&"i32".to_string()));
-    assert!(tokens.contains(&"42".to_string()));
-    assert!(!tokens.contains(&"hello".to_string()));
+    assert!(tokens.contains(&"user_id".to_owned()));
+    assert!(tokens.contains(&"answer".to_owned()));
+    assert!(tokens.contains(&"i32".to_owned()));
+    assert!(tokens.contains(&"42".to_owned()));
+    assert!(!tokens.contains(&"hello".to_owned()));
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn snapshot_symbol_captures_match_structural_tags_for_signature_methods() {
     let root = dir.path();
     std::fs::create_dir_all(root.join("src")).expect("mkdir src");
 
-    let rust_source = br#"
+    let rust_source = br"
 pub trait Runner {
     fn run(&self);
 }
@@ -149,10 +149,10 @@ pub struct App;
 impl App {
     pub fn run(&self) {}
 }
-"#;
+";
     std::fs::write(root.join("src/lib.rs"), rust_source).expect("write rust fixture");
 
-    let typescript_source = br#"
+    let typescript_source = br"
 export interface Runner {
   run(): void;
 }
@@ -160,7 +160,7 @@ export interface Runner {
 export class App implements Runner {
   run(): void {}
 }
-"#;
+";
     std::fs::write(root.join("src/app.ts"), typescript_source).expect("write typescript fixture");
 
     let rust_structural = structural_symbol_keys(root, "src/lib.rs");
@@ -168,9 +168,9 @@ export class App implements Runner {
     assert_eq!(rust_snapshot, rust_structural);
     assert!(
         rust_snapshot.contains(&SymbolKey {
-            symbol_kind: "method".to_string(),
-            entity_name: "run".to_string(),
-            enclosing_scope: Some("Runner".to_string()),
+            symbol_kind: "method".to_owned(),
+            entity_name: "run".to_owned(),
+            enclosing_scope: Some("Runner".to_owned()),
             line_range: [3, 3],
         }),
         "rust trait function signatures must be present in snapshots"
@@ -185,9 +185,9 @@ export class App implements Runner {
     assert_eq!(typescript_snapshot, typescript_structural);
     assert!(
         typescript_snapshot.contains(&SymbolKey {
-            symbol_kind: "method".to_string(),
-            entity_name: "run".to_string(),
-            enclosing_scope: Some("Runner".to_string()),
+            symbol_kind: "method".to_owned(),
+            entity_name: "run".to_owned(),
+            enclosing_scope: Some("Runner".to_owned()),
             line_range: [3, 3],
         }),
         "typescript interface method signatures must be present in snapshots"

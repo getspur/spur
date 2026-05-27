@@ -6,7 +6,7 @@ use spur_graph::temporal::symbol_history;
 use spur_graph::{
     read_artifact_parquet, write_artifact_parquet, ChangeKind, CommitArtifact, CommitIndexArtifact,
     Confidence, EdgeEndpoint, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
-    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient as _,
     GraphSymbolArtifact, InMemoryClient, NodeId, OwnedCalleeRecord, OwnedCallerRecord,
     ParquetClient, RelationKind, RenamePrev, SearchFilters, SearchMode, SearchOptions, SnapshotKey,
     SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy, WriteOptions,
@@ -91,11 +91,11 @@ fn artifact() -> GraphIndexArtifact {
 
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: "test".to_string(),
+            graph_index_version: "test".to_owned(),
             content_hash_blake3: None,
         },
-        manifest_version: "test".to_string(),
-        graph_content_hash: "query-client-parity".to_string(),
+        manifest_version: "test".to_owned(),
+        graph_content_hash: "query-client-parity".to_owned(),
         file_manifests: file_manifests(),
         files: files(),
         file_node_ids: (101..=107).map(NodeId).collect(),
@@ -129,7 +129,7 @@ fn files() -> Vec<GraphFileArtifact> {
     .enumerate()
     .map(|(index, path)| GraphFileArtifact {
         stable_file_id: format!("file-{index}"),
-        file_path: path.to_string(),
+        file_path: path.to_owned(),
     })
     .collect()
 }
@@ -155,13 +155,13 @@ fn symbol(
     qualified_name: &str,
 ) -> GraphSymbolArtifact {
     GraphSymbolArtifact {
-        stable_symbol_id: id.to_string(),
-        file_path: file_path.to_string(),
+        stable_symbol_id: id.to_owned(),
+        file_path: file_path.to_owned(),
         byte_range: [0, 8],
         line_range,
-        entity_name: entity_name.to_string(),
-        qualified_name: qualified_name.to_string(),
-        symbol_kind: "function".to_string(),
+        entity_name: entity_name.to_owned(),
+        qualified_name: qualified_name.to_owned(),
+        symbol_kind: "function".to_owned(),
         anchor_hash: format!("hash-{id}"),
         enclosing_scope: None,
     }
@@ -169,7 +169,7 @@ fn symbol(
 
 fn edge(source: &str, target: Option<&str>, target_label: Option<&str>) -> GraphEdgeArtifact {
     GraphEdgeArtifact {
-        source_stable_symbol_id: source.to_string(),
+        source_stable_symbol_id: source.to_owned(),
         target_stable_symbol_id: target.map(str::to_string),
         target_label: target_label.map(str::to_string),
         relation: RelationKind::Calls,
@@ -185,7 +185,7 @@ fn temporal_artifact() -> GraphIndexArtifact {
     let old_snapshot = snapshot("old-root", "commit-a", "foo");
     let new_snapshot = snapshot("new-root", "commit-b", "bar");
     let mut artifact = artifact();
-    artifact.header.graph_index_version = GRAPH_INDEX_VERSION_TEMPORAL.to_string();
+    artifact.header.graph_index_version = GRAPH_INDEX_VERSION_TEMPORAL.to_owned();
     artifact.commits = commits();
     artifact.symbol_snapshots = vec![old_snapshot.clone(), new_snapshot.clone()];
     artifact.temporal_edges = vec![
@@ -203,16 +203,16 @@ fn temporal_artifact() -> GraphIndexArtifact {
 fn commits() -> Vec<CommitArtifact> {
     vec![
         CommitArtifact {
-            sha: "commit-a".to_string(),
+            sha: "commit-a".to_owned(),
             parents: Vec::new(),
             author_time: 1,
-            summary: "add foo".to_string(),
+            summary: "add foo".to_owned(),
         },
         CommitArtifact {
-            sha: "commit-b".to_string(),
-            parents: vec!["commit-a".to_string()],
+            sha: "commit-b".to_owned(),
+            parents: vec!["commit-a".to_owned()],
             author_time: 2,
-            summary: "rename foo to bar".to_string(),
+            summary: "rename foo to bar".to_owned(),
         },
     ]
 }
@@ -221,8 +221,8 @@ fn commit_index(commits: Vec<CommitArtifact>) -> CommitIndexArtifact {
     CommitIndexArtifact {
         schema_version: 7,
         commits,
-        refs: BTreeMap::from([("HEAD".to_string(), "commit-b".to_string())]),
-        indexed_at: "2026-05-26T00:00:00Z".to_string(),
+        refs: BTreeMap::from([("HEAD".to_owned(), "commit-b".to_owned())]),
+        indexed_at: "2026-05-26T00:00:00Z".to_owned(),
         walk_strategy: WalkStrategy::Reachable,
     }
 }
@@ -230,24 +230,24 @@ fn commit_index(commits: Vec<CommitArtifact>) -> CommitIndexArtifact {
 fn snapshot(id: &str, commit: &str, entity_name: &str) -> SymbolSnapshotArtifact {
     SymbolSnapshotArtifact {
         key: SnapshotKey {
-            stable_symbol_id: id.to_string(),
-            commit: commit.to_string(),
+            stable_symbol_id: id.to_owned(),
+            commit: commit.to_owned(),
         },
-        file_path: "src/temporal.rs".to_string().into(),
-        entity_name: entity_name.to_string(),
-        symbol_kind: "function".to_string(),
+        file_path: "src/temporal.rs".to_owned().into(),
+        entity_name: entity_name.to_owned(),
+        symbol_kind: "function".to_owned(),
         enclosing_scope: None,
         byte_range: [0, 8],
         line_range: [1, 2],
         anchor_hash: format!("hash-{id}-{commit}"),
-        tokens: vec![entity_name.to_string()],
+        tokens: vec![entity_name.to_owned()],
     }
 }
 
 fn temporal_touch(commit: &str, key: SnapshotKey, change_kind: ChangeKind) -> TemporalEdgeArtifact {
     TemporalEdgeArtifact {
         source: EdgeEndpoint::Commit {
-            sha: commit.to_string(),
+            sha: commit.to_owned(),
         },
         target: EdgeEndpoint::Snapshot { key },
         relation: RelationKind::Touches,
@@ -268,7 +268,7 @@ fn temporal_rename(from: SnapshotKey, to: SnapshotKey) -> TemporalEdgeArtifact {
 
 fn options(query: &str, mode: SearchMode) -> SearchOptions {
     SearchOptions {
-        query: query.to_string(),
+        query: query.to_owned(),
         mode,
         filters: SearchFilters::default(),
         limit: 200,
@@ -289,10 +289,10 @@ fn parquet_client_search_symbols_matches_in_memory_client() {
         options("sub", SearchMode::Prefix),
         options("def", SearchMode::Substring),
         SearchOptions {
-            query: "run".to_string(),
+            query: "run".to_owned(),
             mode: SearchMode::Substring,
             filters: SearchFilters {
-                file_glob: Some("crates/foo/**/*.rs".to_string()),
+                file_glob: Some("crates/foo/**/*.rs".to_owned()),
                 ..SearchFilters::default()
             },
             limit: 200,

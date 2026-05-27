@@ -5,7 +5,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context as _};
 
 use crate::{GraphIndexArtifact, GraphIndexPointer};
 

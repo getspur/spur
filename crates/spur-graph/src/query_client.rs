@@ -12,9 +12,10 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail, Context as _};
 use arrow_array::{
-    Array, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    Array as _, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch,
+    StringArray,
 };
 use arrow_schema::ArrowError;
 use globset::Glob;
@@ -264,8 +265,8 @@ impl ParquetClient {
             let content_oid = string_array_by_name(&batch, "content_oid")?;
             for row in 0..batch.num_rows() {
                 rows.push((
-                    required_string_value(path, row, "path")?.to_string(),
-                    required_string_value(content_oid, row, "content_oid")?.to_string(),
+                    required_string_value(path, row, "path")?.to_owned(),
+                    required_string_value(content_oid, row, "content_oid")?.to_owned(),
                 ));
             }
         }
@@ -414,7 +415,7 @@ impl ParquetClient {
     }
 
     fn symbol_by_stable_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
-        let ids = HashSet::from([sid.to_string()]);
+        let ids = HashSet::from([sid.to_owned()]);
         Ok(self.symbols_by_ids(&ids)?.remove(sid))
     }
 
@@ -447,7 +448,7 @@ impl ParquetClient {
         let batches = filtered_projected_batches(
             &self.dir.join("nodes.parquet"),
             SYMBOL_COLUMNS,
-            |schema| string_eq_row_filter(schema, column, value.to_string()),
+            |schema| string_eq_row_filter(schema, column, value.to_owned()),
         )?;
         symbols_from_batches(batches)
     }
@@ -474,8 +475,8 @@ impl ParquetClient {
         qualified_name: &str,
     ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
         self.symbols_where_all_string_eq(vec![
-            ("file_path", path.to_string()),
-            ("qualified_name", qualified_name.to_string()),
+            ("file_path", path.to_owned()),
+            ("qualified_name", qualified_name.to_owned()),
         ])
     }
 
@@ -487,7 +488,7 @@ impl ParquetClient {
         let batches = filtered_projected_batches(
             &self.dir.join("nodes.parquet"),
             SYMBOL_COLUMNS,
-            |schema| path_name_row_filter(schema, path.to_string(), name.to_string()),
+            |schema| path_name_row_filter(schema, path.to_owned(), name.to_owned()),
         )?;
         symbols_from_batches(batches)
     }
@@ -499,7 +500,7 @@ impl ParquetClient {
         let batches = filtered_projected_batches(
             &self.dir.join("file_manifests.parquet"),
             FILE_MANIFEST_COLUMNS,
-            |schema| string_eq_row_filter(schema, "path", path.to_string()),
+            |schema| string_eq_row_filter(schema, "path", path.to_owned()),
         )?;
         let mut manifests = file_manifests_from_batches(batches)?;
         Ok(manifests.pop())
@@ -649,7 +650,7 @@ impl ParquetClient {
     ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
         let path = self.dir.join(file_name);
         let batches = filtered_projected_batches(&path, RESOLVED_EDGE_COLUMNS, |schema| {
-            string_eq_row_filter(schema, column, value.to_string())
+            string_eq_row_filter(schema, column, value.to_owned())
         })?;
         let mut edges = Vec::new();
         for batch in batches {
@@ -664,7 +665,7 @@ impl ParquetClient {
     ) -> anyhow::Result<Vec<GraphEdgeArtifact>> {
         let path = self.dir.join("edges_unresolved.parquet");
         let batches = filtered_projected_batches(&path, UNRESOLVED_EDGE_COLUMNS, |schema| {
-            string_eq_row_filter(schema, "source_stable_id", source_sid.to_string())
+            string_eq_row_filter(schema, "source_stable_id", source_sid.to_owned())
         })?;
         let mut edges = Vec::new();
         for batch in batches {
@@ -929,7 +930,7 @@ fn string_in_row_filter(
     expected: HashSet<String>,
 ) -> RowFilter {
     let projection = ProjectionMask::columns(parquet_schema, [column]);
-    let column = column.to_string();
+    let column = column.to_owned();
     let predicate = move |batch: RecordBatch| -> Result<BooleanArray, ArrowError> {
         let values = string_array_by_name(&batch, &column)?;
         let mut keep = Vec::with_capacity(batch.num_rows());
@@ -952,7 +953,7 @@ fn string_eq_all_row_filter(
     let projection = ProjectionMask::columns(parquet_schema, columns);
     let expected = expected
         .into_iter()
-        .map(|(column, value)| (column.to_string(), value))
+        .map(|(column, value)| (column.to_owned(), value))
         .collect::<Vec<_>>();
     let predicate = move |batch: RecordBatch| -> Result<BooleanArray, ArrowError> {
         let arrays = expected
@@ -1132,16 +1133,16 @@ fn search_symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<SearchSy
     for row in 0..batch.num_rows() {
         symbols.push(SearchSymbol {
             stable_symbol_id: required_string_value(stable_symbol_id, row, "stable_symbol_id")?
-                .to_string(),
-            entity_name: required_string_value(entity_name, row, "entity_name")?.to_string(),
+                .to_owned(),
+            entity_name: required_string_value(entity_name, row, "entity_name")?.to_owned(),
             qualified_name: required_string_value(qualified_name, row, "qualified_name")?
-                .to_string(),
-            file_path: required_string_value(file_path, row, "file_path")?.to_string(),
+                .to_owned(),
+            file_path: required_string_value(file_path, row, "file_path")?.to_owned(),
             line_range: [
                 i32_to_usize(line_start.value(row), "line_start")?,
                 i32_to_usize(line_end.value(row), "line_end")?,
             ],
-            symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?.to_string(),
+            symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?.to_owned(),
             enclosing_scope: optional_string_value(enclosing_scope, row),
         });
     }
@@ -1165,8 +1166,8 @@ fn symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphSymbolArti
     for row in 0..batch.num_rows() {
         symbols.push(GraphSymbolArtifact {
             stable_symbol_id: required_string_value(stable_symbol_id, row, "stable_symbol_id")?
-                .to_string(),
-            file_path: required_string_value(file_path, row, "file_path")?.to_string(),
+                .to_owned(),
+            file_path: required_string_value(file_path, row, "file_path")?.to_owned(),
             byte_range: [
                 i64_to_usize(byte_range_start.value(row), "byte_range_start")?,
                 i64_to_usize(byte_range_end.value(row), "byte_range_end")?,
@@ -1175,11 +1176,11 @@ fn symbols_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphSymbolArti
                 i32_to_usize(line_start.value(row), "line_start")?,
                 i32_to_usize(line_end.value(row), "line_end")?,
             ],
-            entity_name: required_string_value(entity_name, row, "entity_name")?.to_string(),
+            entity_name: required_string_value(entity_name, row, "entity_name")?.to_owned(),
             qualified_name: required_string_value(qualified_name, row, "qualified_name")?
-                .to_string(),
-            symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?.to_string(),
-            anchor_hash: required_string_value(anchor_hash, row, "anchor_hash")?.to_string(),
+                .to_owned(),
+            symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?.to_owned(),
+            anchor_hash: required_string_value(anchor_hash, row, "anchor_hash")?.to_owned(),
             enclosing_scope: optional_string_value(enclosing_scope, row),
         });
     }
@@ -1206,9 +1207,9 @@ fn file_manifests_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphFil
     for row in 0..batch.num_rows() {
         manifests.push(GraphFileManifestEntry {
             stable_file_id: required_string_value(stable_file_id, row, "stable_file_id")?
-                .to_string(),
-            path: required_string_value(path, row, "path")?.to_string(),
-            content_oid: required_string_value(content_oid, row, "content_oid")?.to_string(),
+                .to_owned(),
+            path: required_string_value(path, row, "path")?.to_owned(),
+            content_oid: required_string_value(content_oid, row, "content_oid")?.to_owned(),
             node_ids: required_node_id_list_value(node_ids, row, "node_ids")?,
         });
     }
@@ -1233,9 +1234,9 @@ fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdg
                 row,
                 "source_stable_id",
             )?
-            .to_string(),
+            .to_owned(),
             target_stable_symbol_id: Some(
-                required_string_value(target_stable_id, row, "target_stable_id")?.to_string(),
+                required_string_value(target_stable_id, row, "target_stable_id")?.to_owned(),
             ),
             target_label: optional_string_value(target_label, row),
             relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
@@ -1268,7 +1269,7 @@ fn unresolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphE
                 row,
                 "source_stable_id",
             )?
-            .to_string(),
+            .to_owned(),
             target_stable_symbol_id: None,
             target_label: optional_string_value(target_label, row),
             relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
@@ -1349,7 +1350,7 @@ fn required_string_value<'a>(
 }
 
 fn optional_string_value(values: &StringArray, index: usize) -> Option<String> {
-    (!values.is_null(index)).then(|| values.value(index).to_string())
+    (!values.is_null(index)).then(|| values.value(index).to_owned())
 }
 
 fn required_node_id_list_value(
@@ -1392,11 +1393,11 @@ mod tests {
     fn artifact(symbols: Vec<GraphSymbolArtifact>) -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -1413,13 +1414,13 @@ mod tests {
 
     fn symbol(id: &str, entity_name: &str) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
-            stable_symbol_id: id.to_string(),
-            file_path: "src/lib.rs".to_string(),
+            stable_symbol_id: id.to_owned(),
+            file_path: "src/lib.rs".to_owned(),
             byte_range: [0, 8],
             line_range: [1, 2],
-            entity_name: entity_name.to_string(),
+            entity_name: entity_name.to_owned(),
             qualified_name: format!("crate::{entity_name}"),
-            symbol_kind: "function".to_string(),
+            symbol_kind: "function".to_owned(),
             anchor_hash: format!("hash-{id}"),
             enclosing_scope: None,
         }
@@ -1441,7 +1442,7 @@ mod tests {
             symbol("s3", "other"),
         ]));
         let options = SearchOptions {
-            query: "target".to_string(),
+            query: "target".to_owned(),
             mode: SearchMode::Prefix,
             filters: SearchFilters::default(),
             limit: 20,

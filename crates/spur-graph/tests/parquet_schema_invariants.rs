@@ -3,8 +3,8 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context};
-use arrow_array::{Array, Int64Array, ListArray, RecordBatch};
+use anyhow::{anyhow, bail, Context as _};
+use arrow_array::{Array as _, Int64Array, ListArray, RecordBatch};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use spur_graph::{
     read_artifact_header_parquet, write_artifact_parquet, Confidence, GraphEdgeArtifact,
@@ -255,66 +255,66 @@ fn assert_fixture_has_file_source_contains_edge(artifact: &GraphIndexArtifact) {
 fn fixture_artifact() -> GraphIndexArtifact {
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: "spur-graph-phase2".to_string(),
+            graph_index_version: "spur-graph-phase2".to_owned(),
             content_hash_blake3: None,
         },
-        manifest_version: "test-manifest-version".to_string(),
-        graph_content_hash: "test-graph-content-hash".to_string(),
+        manifest_version: "test-manifest-version".to_owned(),
+        graph_content_hash: "test-graph-content-hash".to_owned(),
         file_manifests: vec![
             GraphFileManifestEntry {
-                stable_file_id: "file-a".to_string(),
-                path: "src/a.rs".to_string(),
-                content_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                stable_file_id: "file-a".to_owned(),
+                path: "src/a.rs".to_owned(),
+                content_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 node_ids: vec![NodeId(11)],
             },
             GraphFileManifestEntry {
-                stable_file_id: "file-b".to_string(),
-                path: "src/b.rs".to_string(),
-                content_oid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                stable_file_id: "file-b".to_owned(),
+                path: "src/b.rs".to_owned(),
+                content_oid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
                 node_ids: vec![NodeId(21)],
             },
         ],
         files: vec![
             GraphFileArtifact {
-                stable_file_id: "file-a".to_string(),
-                file_path: "src/a.rs".to_string(),
+                stable_file_id: "file-a".to_owned(),
+                file_path: "src/a.rs".to_owned(),
             },
             GraphFileArtifact {
-                stable_file_id: "file-b".to_string(),
-                file_path: "src/b.rs".to_string(),
+                stable_file_id: "file-b".to_owned(),
+                file_path: "src/b.rs".to_owned(),
             },
         ],
         file_node_ids: vec![NodeId(10), NodeId(20)],
         symbols: vec![
             GraphSymbolArtifact {
-                stable_symbol_id: "sym-a-fn".to_string(),
-                file_path: "src/a.rs".to_string(),
+                stable_symbol_id: "sym-a-fn".to_owned(),
+                file_path: "src/a.rs".to_owned(),
                 byte_range: [10, 42],
                 line_range: [2, 5],
-                entity_name: "a_fn".to_string(),
-                qualified_name: "crate::a::a_fn".to_string(),
-                symbol_kind: "function".to_string(),
-                anchor_hash: "anchor-a".to_string(),
-                enclosing_scope: Some("mod a".to_string()),
+                entity_name: "a_fn".to_owned(),
+                qualified_name: "crate::a::a_fn".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-a".to_owned(),
+                enclosing_scope: Some("mod a".to_owned()),
             },
             GraphSymbolArtifact {
-                stable_symbol_id: "sym-b-fn".to_string(),
-                file_path: "src/b.rs".to_string(),
+                stable_symbol_id: "sym-b-fn".to_owned(),
+                file_path: "src/b.rs".to_owned(),
                 byte_range: [3, 19],
                 line_range: [1, 3],
-                entity_name: "b_fn".to_string(),
-                qualified_name: "crate::b::b_fn".to_string(),
-                symbol_kind: "function".to_string(),
-                anchor_hash: "anchor-b".to_string(),
+                entity_name: "b_fn".to_owned(),
+                qualified_name: "crate::b::b_fn".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-b".to_owned(),
                 enclosing_scope: None,
             },
         ],
         symbol_node_ids: vec![NodeId(11), NodeId(21)],
         edges: vec![
             GraphEdgeArtifact {
-                source_stable_symbol_id: "file-a".to_string(),
-                target_stable_symbol_id: Some("sym-a-fn".to_string()),
-                target_label: Some("a_fn".to_string()),
+                source_stable_symbol_id: "file-a".to_owned(),
+                target_stable_symbol_id: Some("sym-a-fn".to_owned()),
+                target_label: Some("a_fn".to_owned()),
                 relation: RelationKind::Contains,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 1.0,
@@ -324,21 +324,21 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 bind_method: None,
             },
             GraphEdgeArtifact {
-                source_stable_symbol_id: "sym-a-fn".to_string(),
-                target_stable_symbol_id: Some("sym-b-fn".to_string()),
-                target_label: Some("b_fn".to_string()),
+                source_stable_symbol_id: "sym-a-fn".to_owned(),
+                target_stable_symbol_id: Some("sym-b-fn".to_owned()),
+                target_label: Some("b_fn".to_owned()),
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 0.875,
                 change_kind: None,
 
                 edge_kind: Some(GraphEdgeKind::Calls),
-                bind_method: Some("macro_body_singleton".to_string()),
+                bind_method: Some("macro_body_singleton".to_owned()),
             },
             GraphEdgeArtifact {
-                source_stable_symbol_id: "sym-b-fn".to_string(),
+                source_stable_symbol_id: "sym-b-fn".to_owned(),
                 target_stable_symbol_id: None,
-                target_label: Some("missing_fn".to_string()),
+                target_label: Some("missing_fn".to_owned()),
                 relation: RelationKind::Calls,
                 confidence: Confidence::Heuristic,
                 confidence_score: 0.5,

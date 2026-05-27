@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context as _};
 use indicatif::ProgressBar;
 use thiserror::Error;
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator as _};
 
 use crate::discovery::discover_files;
 use crate::extract::languages::{
@@ -278,8 +278,8 @@ impl<'a> FactBuilder<'a> {
     ) -> NodeId {
         self.add_node(
             relative_path,
-            relative_path.to_string(),
-            relative_path.to_string(),
+            relative_path.to_owned(),
+            relative_path.to_owned(),
             NodeKind::File,
             file_id,
             root_node,
@@ -827,7 +827,7 @@ fn method_scope_text_matches(matched_scope: &str, enclosing_scope: &str) -> bool
 fn canonical_method_scope_text(scope_text: &str) -> String {
     let trimmed = scope_text.trim();
     if trimmed.starts_with("impl ") {
-        return trimmed.to_string();
+        return trimmed.to_owned();
     }
     if let Some((self_ty, trait_ty)) = qualified_trait_scope(trimmed) {
         return format!("impl {trait_ty} for {self_ty}");
@@ -1035,7 +1035,7 @@ fn progress_file_message(root: &Path, path: &Path) -> String {
 fn truncate_progress_message(message: &str) -> String {
     const MAX_CHARS: usize = 96;
     if message.chars().count() <= MAX_CHARS {
-        return message.to_string();
+        return message.to_owned();
     }
 
     let tail: String = message
@@ -1243,7 +1243,7 @@ pub(crate) fn run_query<'tree>(
                 continue;
             }
             hits.push(CaptureHit {
-                name: capture_names[capture.index as usize].to_string(),
+                name: capture_names[capture.index as usize].to_owned(),
                 node: capture.node,
                 pattern_index: query_match.pattern_index,
                 match_index: current_match_index,
@@ -1277,7 +1277,7 @@ fn impl_identity_fqn(fqn: &str) -> String {
             return format!("{prefix}::{stripped}");
         }
     }
-    fqn.strip_prefix("impl ").unwrap_or(fqn).to_string()
+    fqn.strip_prefix("impl ").unwrap_or(fqn).to_owned()
 }
 
 fn qualified_symbols_by_name_from_maps(
@@ -1347,7 +1347,7 @@ fn qualified_node_segment(node: &GraphNode) -> String {
             .label
             .strip_prefix("impl ")
             .unwrap_or(&node.label)
-            .to_string(),
+            .to_owned(),
     }
 }
 
@@ -1477,31 +1477,31 @@ mod tests {
         let file_id = FileId(builder.next_file_id());
         let source = builder.add_node(
             "src/lib.rs",
-            "caller".to_string(),
-            "caller".to_string(),
+            "caller".to_owned(),
+            "caller".to_owned(),
             NodeKind::Function,
             file_id,
             root_node,
         );
         builder.add_node(
             "src/lib.rs",
-            "flush".to_string(),
-            "flush".to_string(),
+            "flush".to_owned(),
+            "flush".to_owned(),
             NodeKind::Function,
             file_id,
             root_node,
         );
         builder.add_node(
             "src/lib.rs",
-            "flush".to_string(),
-            "inner::flush".to_string(),
+            "flush".to_owned(),
+            "inner::flush".to_owned(),
             NodeKind::Function,
             file_id,
             root_node,
         );
         builder.pending_edges.push(PendingEdge {
             source,
-            target_name: "flush".to_string(),
+            target_name: "flush".to_owned(),
             relation: RelationKind::Calls,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -1536,23 +1536,23 @@ mod tests {
         let file_id = FileId(builder.next_file_id());
         let source = builder.add_node(
             "src/lib.rs",
-            "caller".to_string(),
-            "caller".to_string(),
+            "caller".to_owned(),
+            "caller".to_owned(),
             NodeKind::Function,
             file_id,
             root_node,
         );
         let target = builder.add_node(
             "src/lib.rs",
-            "helper".to_string(),
-            "helper".to_string(),
+            "helper".to_owned(),
+            "helper".to_owned(),
             NodeKind::Function,
             file_id,
             root_node,
         );
         builder.pending_edges.push(PendingEdge {
             source,
-            target_name: "helper".to_string(),
+            target_name: "helper".to_owned(),
             relation: RelationKind::Calls,
             edge_kind: None,
             origin: CallOrigin::MacroBody,
