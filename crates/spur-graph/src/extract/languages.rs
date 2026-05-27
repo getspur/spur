@@ -515,10 +515,7 @@ fn receiver_scope_text(
 
 fn receiver_type_scope_text(type_text: &str) -> String {
     let mut ty = type_text.trim();
-    loop {
-        let Some(rest) = ty.strip_prefix('&') else {
-            break;
-        };
+    while let Some(rest) = ty.strip_prefix('&') {
         ty = rest.trim_start();
         if let Some(rest) = ty.strip_prefix("mut ") {
             ty = rest.trim_start();

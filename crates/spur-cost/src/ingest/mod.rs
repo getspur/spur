@@ -177,7 +177,7 @@ impl IngestionPipeline {
         }
 
         // Sort chronologically
-        all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        all_events.sort_by_key(|event| event.timestamp);
         Ok(all_events)
     }
 

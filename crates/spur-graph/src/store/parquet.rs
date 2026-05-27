@@ -216,7 +216,7 @@ pub fn write_artifact_parquet(
             .cmp(&b.src_id.get())
             .then(a.dst_id.get().cmp(&b.dst_id.get()))
     });
-    unresolved_edges.sort_by(|a, b| a.src_id.get().cmp(&b.src_id.get()));
+    unresolved_edges.sort_by_key(|edge| edge.src_id.get());
 
     let mut file_manifests = artifact.file_manifests.clone();
     file_manifests.sort_by(|a, b| a.path.cmp(&b.path));

@@ -284,7 +284,7 @@ pub fn build_session_tree(entries: Vec<TokenEvent>) -> Vec<SessionNode> {
 
     let mut roots = Vec::new();
     for (_sid, mut session_entries) in by_session {
-        session_entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        session_entries.sort_by_key(|entry| entry.timestamp);
         // Merge all entries for this session into a single aggregated node
         let first = session_entries.first().cloned().unwrap();
         let totals = Totals::from_entries(&session_entries);

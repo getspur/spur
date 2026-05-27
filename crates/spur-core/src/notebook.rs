@@ -120,7 +120,7 @@ pub fn brain_mcp_servers(spur_mcp_url: &str, socket_nonce: &str) -> Vec<McpServe
     ]
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::sync::Mutex;
 
@@ -156,7 +156,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn notebook_binary_path_prefers_user_app_bundle_on_macos() {
         let _lock = ENV_LOCK.lock().unwrap();
