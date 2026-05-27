@@ -1188,7 +1188,7 @@ fn write_commits(
     Ok(rows.len())
 }
 
-fn write_symbol_snapshots(
+pub(crate) fn write_symbol_snapshots(
     path: &Path,
     rows: &[SymbolSnapshotArtifact],
     _options: &WriteOptions,
@@ -1278,7 +1278,7 @@ fn write_symbol_snapshots(
     Ok(rows.len())
 }
 
-fn write_temporal_edges(
+pub(crate) fn write_temporal_edges(
     path: &Path,
     rows: &[TemporalEdgeArtifact],
     _options: &WriteOptions,
