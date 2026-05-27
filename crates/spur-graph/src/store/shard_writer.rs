@@ -18,6 +18,8 @@ pub struct TemporalShardSink {
     current_edges: Vec<TemporalEdgeArtifact>,
     current_snapshots: Vec<SymbolSnapshotArtifact>,
     shard_index_entries: Vec<ShardIndexEntry>,
+    #[cfg(any(test, debug_assertions))]
+    max_resident_rows: usize,
 }
 
 impl TemporalShardSink {
@@ -40,7 +42,19 @@ impl TemporalShardSink {
             current_edges: Vec::new(),
             current_snapshots: Vec::new(),
             shard_index_entries: Vec::new(),
+            #[cfg(any(test, debug_assertions))]
+            max_resident_rows: 0,
         })
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn resident_rows(&self) -> usize {
+        self.current_edges.len() + self.current_snapshots.len()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn max_resident_rows(&self) -> usize {
+        self.max_resident_rows
     }
 
     pub fn append_commit(
@@ -64,6 +78,8 @@ impl TemporalShardSink {
         self.rows_in_current_shard += rows_for_commit;
         self.current_edges.append(edges);
         self.current_snapshots.append(snapshots);
+        #[cfg(any(test, debug_assertions))]
+        self.observe_resident_rows();
 
         if self.rows_in_current_shard >= self.cfg.max_rows_per_shard
             || self.commits_in_current_shard >= self.cfg.max_commits_per_shard
@@ -124,6 +140,11 @@ impl TemporalShardSink {
         self.current_edges.clear();
         self.current_snapshots.clear();
         Ok(())
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn observe_resident_rows(&mut self) {
+        self.max_resident_rows = self.max_resident_rows.max(self.resident_rows());
     }
 }
 
