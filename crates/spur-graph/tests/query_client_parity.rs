@@ -279,8 +279,13 @@ fn options(query: &str, mode: SearchMode) -> SearchOptions {
 fn parquet_client_search_symbols_matches_in_memory_client() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact();
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
 
@@ -313,8 +318,13 @@ fn parquet_client_search_symbols_matches_in_memory_client() {
 fn parquet_client_find_caller_edges_matches_in_memory_client() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact();
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
 
@@ -328,8 +338,13 @@ fn parquet_client_find_caller_edges_matches_in_memory_client() {
 fn parquet_client_find_callee_edges_matches_in_memory_client() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact();
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
 
@@ -343,8 +358,13 @@ fn parquet_client_find_callee_edges_matches_in_memory_client() {
 fn parquet_client_resolve_selector_matches_in_memory_client() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact();
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
 
@@ -372,8 +392,13 @@ fn parquet_client_resolve_selector_matches_in_memory_client() {
 fn parquet_client_file_manifest_by_path_matches_in_memory_client() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact();
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let in_memory = InMemoryClient::new(Arc::new(artifact));
     let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
 
@@ -402,8 +427,13 @@ fn parquet_client_temporal_index_matches_in_memory_client() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = temporal_artifact();
     let commits = commit_index(artifact.commits.clone());
-    let parquet_dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     let in_memory = InMemoryClient::new(Arc::new(
         read_artifact_parquet(&parquet_dir).expect("read full parquet artifact"),
     ));

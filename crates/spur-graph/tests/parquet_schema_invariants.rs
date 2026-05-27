@@ -112,7 +112,7 @@ fn edges_by_dst_columns_match_edges_columns() -> anyhow::Result<()> {
 }
 
 fn write_fixture(artifact: &GraphIndexArtifact, base_dir: &Path) -> anyhow::Result<PathBuf> {
-    write_artifact_parquet(artifact, base_dir, WriteOptions::default())
+    write_artifact_parquet(artifact, base_dir, WriteOptions::default(), Vec::new())
         .context("write parquet artifact")
 }
 

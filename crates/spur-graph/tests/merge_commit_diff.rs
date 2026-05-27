@@ -27,7 +27,7 @@ fn full_walk_emits_merge_symbol_edges_against_each_parent() {
     let merge = rev_parse(dir.path(), "HEAD");
 
     let (graph, commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None)
             .unwrap();
     let merge_commit = commits
         .commits
