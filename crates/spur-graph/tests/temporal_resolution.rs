@@ -104,7 +104,7 @@ fn property_resolve_at_anchor_matches_script() {
     let history = build_history(dir.path());
 
     let (graph, commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None)
             .unwrap();
     let add_sha = history.sha("add");
     let merge_sha = history.sha("merge");
@@ -151,7 +151,7 @@ fn resolve_at_intermediate_commit_returns_latest_prior_snapshot() {
     let c3 = commit(dir.path(), "modify tracked");
 
     let (graph, commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None)
             .unwrap();
     let stable_id = stable_id_for_snapshot(&graph, &c1, "tracked");
 
@@ -204,7 +204,7 @@ fn shallow_clone_fails_closed() {
     std::fs::write(dir.path().join(".git/shallow"), format!("{sha}\n")).unwrap();
 
     let result =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None);
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None);
 
     assert!(result.is_err(), "shallow repo must fail closed");
 }
@@ -218,7 +218,7 @@ fn force_push_recovery_rebuilds_diverged_range() {
     write(dir.path(), "lib.rs", b"pub fn a() -> u32 { 2 }\n");
     let sha2 = commit(dir.path(), "c2");
     let (_old_graph, old_commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None)
             .unwrap();
     assert!(old_commits.commits.iter().any(|commit| commit.sha == sha2));
 
@@ -236,7 +236,7 @@ fn force_push_recovery_rebuilds_diverged_range() {
     ));
 
     let (_new_graph, new_commits) =
-        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None)
+        spur_graph::git_walk::run_full_walk_into(dir.path(), &GitWalkConfig::default(), None, None)
             .unwrap();
     assert!(new_commits
         .commits

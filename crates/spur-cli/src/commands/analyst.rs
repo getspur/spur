@@ -26,7 +26,7 @@ const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 /// Must match `manifest.json::schema_version` in the artifact dir. Hard-fail
 /// on mismatch to prevent silent miscompiles where `init.sql` view definitions
 /// parse but produce wrong results against a newer parquet schema.
-pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v6";
+pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v7";
 
 /// Default relative path to the analyst DuckDB inside a worktree.
 pub const DEFAULT_ANALYST_DB_REL: &str = ".spur/analyst.duckdb";
@@ -260,12 +260,6 @@ const REQUIRED_PARQUETS: &[&str] = &[
     "manifest.json",
 ];
 
-const TEMPORAL_PARQUETS: &[&str] = &[
-    "commits.parquet",
-    "symbol_snapshots.parquet",
-    "temporal_edges.parquet",
-];
-
 pub(crate) fn verify_required_files(artifact_dir: &Path) -> Result<()> {
     let missing: Vec<&str> = REQUIRED_PARQUETS
         .iter()
@@ -283,9 +277,17 @@ pub(crate) fn verify_required_files(artifact_dir: &Path) -> Result<()> {
 }
 
 pub(crate) fn temporal_files_present(artifact_dir: &Path) -> bool {
-    TEMPORAL_PARQUETS
-        .iter()
-        .any(|name| artifact_dir.join(name).is_file())
+    let manifest_path = artifact_dir.join("manifest.json");
+    let Ok(bytes) = std::fs::read(&manifest_path) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    parsed
+        .get("temporal_shards")
+        .and_then(|value| value.as_array())
+        .is_some_and(|shards| !shards.is_empty())
 }
 
 pub(crate) fn diagnostics_present(artifact_dir: &Path) -> bool {
@@ -475,7 +477,11 @@ mod tests {
     #[test]
     fn temporal_files_present_true_when_any_temporal_parquet_exists() {
         let dir = temp_root();
-        std::fs::write(dir.path().join("commits.parquet"), b"").unwrap();
+        std::fs::write(
+            dir.path().join("manifest.json"),
+            r#"{"temporal_shards":[{"shard_idx":0}]}"#,
+        )
+        .unwrap();
 
         assert!(temporal_files_present(dir.path()));
     }
