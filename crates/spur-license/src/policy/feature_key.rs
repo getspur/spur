@@ -1,7 +1,7 @@
 //! Typed const registry of G1 entitlement feature keys.
 //!
 //! Adding a feature = adding a `pub const` here. Underlying string is what
-//! the policy file and LicenseSeat catalog speak; this newtype exists to
+//! the policy file and `LicenseSeat` catalog speak; this newtype exists to
 //! make callers typo-safe.
 //!
 //! ## Naming convention (post-2026-04-26 tier revamp)
@@ -10,9 +10,9 @@
 //! - `<crate>` ∈ {acp, core, mcp, tui, cli, pm, cost, worktree, license, bot,
 //!   interactive, blob, ctx, skills, notif}
 //! - `<tier>` ∈ {core (Free baseline), pro (Pro upsell), team (Team v2-deferred)}
-//! - `<capability>` is a single atomic capability, lowercase snake_case
+//! - `<capability>` is a single atomic capability, lowercase `snake_case`
 //!
-//! Const name is UPPER_SNAKE_CASE of the underlying string. Grep
+//! Const name is `UPPER_SNAKE_CASE` of the underlying string. Grep
 //! `pm_pro_*` to find every Pro PM gate.
 //!
 //! See `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md`
@@ -365,7 +365,7 @@ mod tests {
     fn unknown_feature_key_display_and_access() {
         let unk = UnknownFeatureKey::new("experimental_thing");
         assert_eq!(unk.as_str(), "experimental_thing");
-        assert_eq!(format!("{}", unk), "experimental_thing");
+        assert_eq!(format!("{unk}"), "experimental_thing");
     }
 
     #[test]

@@ -25,20 +25,20 @@ impl crate::events::sealed::Sealed for ModelName {}
 impl IntoProp for ModelName {
     fn into_prop(self) -> serde_json::Value {
         let value = match self {
-            ModelName::ClaudeOpus47 => "claude-opus-4-7",
-            ModelName::ClaudeOpus46 => "claude-opus-4-6",
-            ModelName::ClaudeOpus45 => "claude-opus-4-5",
-            ModelName::ClaudeSonnet47 => "claude-sonnet-4-7",
-            ModelName::ClaudeSonnet46 => "claude-sonnet-4-6",
-            ModelName::ClaudeSonnet45 => "claude-sonnet-4-5",
-            ModelName::ClaudeHaiku45 => "claude-haiku-4-5",
-            ModelName::Gpt5 => "gpt-5",
-            ModelName::Gpt5Codex => "gpt-5-codex",
-            ModelName::Gpt4o => "gpt-4o",
-            ModelName::Gpt4oMini => "gpt-4o-mini",
-            ModelName::Gemini25Pro => "gemini-2.5-pro",
-            ModelName::Gemini25Flash => "gemini-2.5-flash",
-            ModelName::Other(name) => bucket_model(name),
+            Self::ClaudeOpus47 => "claude-opus-4-7",
+            Self::ClaudeOpus46 => "claude-opus-4-6",
+            Self::ClaudeOpus45 => "claude-opus-4-5",
+            Self::ClaudeSonnet47 => "claude-sonnet-4-7",
+            Self::ClaudeSonnet46 => "claude-sonnet-4-6",
+            Self::ClaudeSonnet45 => "claude-sonnet-4-5",
+            Self::ClaudeHaiku45 => "claude-haiku-4-5",
+            Self::Gpt5 => "gpt-5",
+            Self::Gpt5Codex => "gpt-5-codex",
+            Self::Gpt4o => "gpt-4o",
+            Self::Gpt4oMini => "gpt-4o-mini",
+            Self::Gemini25Pro => "gemini-2.5-pro",
+            Self::Gemini25Flash => "gemini-2.5-flash",
+            Self::Other(name) => bucket_model(name),
         };
         value.into()
     }
@@ -55,9 +55,9 @@ impl crate::events::sealed::Sealed for Outcome {}
 impl IntoProp for Outcome {
     fn into_prop(self) -> serde_json::Value {
         let value = match self {
-            Outcome::Ok => "ok",
-            Outcome::Timeout => "timeout",
-            Outcome::Error => "error",
+            Self::Ok => "ok",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
         };
         value.into()
     }
@@ -67,12 +67,12 @@ impl crate::events::sealed::Sealed for PanicType {}
 impl IntoProp for PanicType {
     fn into_prop(self) -> serde_json::Value {
         let value = match self {
-            PanicType::Bounds => "bounds",
-            PanicType::Unwrap => "unwrap",
-            PanicType::OptionUnwrap => "option_unwrap",
-            PanicType::ResultUnwrap => "result_unwrap",
-            PanicType::Assertion => "assertion",
-            PanicType::Other => "other",
+            Self::Bounds => "bounds",
+            Self::Unwrap => "unwrap",
+            Self::OptionUnwrap => "option_unwrap",
+            Self::ResultUnwrap => "result_unwrap",
+            Self::Assertion => "assertion",
+            Self::Other => "other",
         };
         value.into()
     }

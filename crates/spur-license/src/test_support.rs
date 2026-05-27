@@ -91,7 +91,7 @@ impl FakeProvider {
     }
 
     /// Enqueue a scripted heartbeat outcome that commits `state` to
-    /// the provider's internal state (and broadcasts a HeartbeatFailed
+    /// the provider's internal state (and broadcasts a `HeartbeatFailed`
     /// event) before returning `Err(err)`. Mirrors
     /// `LicenseSeatProvider::heartbeat` degrade-on-failure (`degrade_current`
     /// + `replace_state` + return Err). Required by bd-22q.1's

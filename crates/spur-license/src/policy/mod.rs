@@ -58,7 +58,7 @@ pub struct TierPolicy {
 
 /// G2 — runtime flag specification. Intentionally minimal in V1 (kill switch
 /// + rollout + tier targeting). Extensions (variants, segments, dependencies)
-///   flow into `extensions` until they earn typed fields with a schema_version
+///   flow into `extensions` until they earn typed fields with a `schema_version`
 ///   minor bump.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FlagSpec {
@@ -142,7 +142,7 @@ pub struct SignedPolicy {
     pub key_id: String,
 }
 
-/// Read-only accessor over a (possibly overlay-supplemented) PolicyDocument.
+/// Read-only accessor over a (possibly overlay-supplemented) `PolicyDocument`.
 /// V1 only loads the embedded baseline; remote overlays land in V2.
 pub struct PolicyResolver {
     document: Arc<PolicyDocument>,
@@ -241,7 +241,7 @@ impl PolicyResolver {
             return Ok(BTreeSet::new());
         };
 
-        stack.push(tier.to_string());
+        stack.push(tier.to_owned());
         let mut features = BTreeSet::new();
         for feature in &policy.features {
             if let Some(inherit_tier) = feature.strip_prefix("@inherit:") {
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn flagspec_defaults_to_enabled_true() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let spec: FlagSpec = serde_json::from_str(json).unwrap();
         assert!(
             spec.enabled,
@@ -594,9 +594,9 @@ mod tests {
             "pro".into(),
             test_tier(&["@inherit:community", "pm_pro_beads_advanced"]),
         );
-        let roadmap_feature = "core_pro_session_resume_event_replay".to_string();
+        let roadmap_feature = "core_pro_session_resume_event_replay".to_owned();
         let roadmap =
-            BTreeMap::from([("pro".to_string(), BTreeSet::from([roadmap_feature.clone()]))]);
+            BTreeMap::from([("pro".to_owned(), BTreeSet::from([roadmap_feature.clone()]))]);
         let resolver = PolicyResolver::from_document(test_document(tiers, Some(roadmap)));
 
         assert_eq!(

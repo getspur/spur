@@ -1,12 +1,12 @@
-//! LicenseSeat admin API client.
+//! `LicenseSeat` admin API client.
 //!
 //! Uses `sk_*` secret keys to perform administrative operations
 //! such as creating, revoking, and listing licenses.
 
-use anyhow::Context;
+use anyhow::Context as _;
 use serde_json::{json, Value};
 
-/// Admin client for LicenseSeat REST API.
+/// Admin client for `LicenseSeat` REST API.
 pub struct AdminClient {
     client: reqwest::Client,
     secret_key: String,
@@ -19,9 +19,9 @@ impl AdminClient {
     pub fn new(secret_key: &str, product_slug: &str, base_url: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
-            secret_key: secret_key.to_string(),
-            product_slug: product_slug.to_string(),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            secret_key: secret_key.to_owned(),
+            product_slug: product_slug.to_owned(),
+            base_url: base_url.trim_end_matches('/').to_owned(),
         }
     }
 

@@ -34,15 +34,15 @@ impl crate::events::sealed::Sealed for SkillName {}
 impl IntoProp for SkillName {
     fn into_prop(self) -> serde_json::Value {
         let value = match self {
-            SkillName::SpurWay => "spur-way",
-            SkillName::WorkerSignals => "worker-signals",
-            SkillName::PlanTaskDiscipline => "plan-task-discipline",
-            SkillName::BeadsLifecycle => "beads-lifecycle",
-            SkillName::BrainReviewGate => "brain-review-gate",
-            SkillName::SystematicDebugging => "systematic-debugging",
-            SkillName::TestDrivenDevelopment => "test-driven-development",
-            SkillName::VerificationBeforeCompletion => "verification-before-completion",
-            SkillName::Other => "other",
+            Self::SpurWay => "spur-way",
+            Self::WorkerSignals => "worker-signals",
+            Self::PlanTaskDiscipline => "plan-task-discipline",
+            Self::BeadsLifecycle => "beads-lifecycle",
+            Self::BrainReviewGate => "brain-review-gate",
+            Self::SystematicDebugging => "systematic-debugging",
+            Self::TestDrivenDevelopment => "test-driven-development",
+            Self::VerificationBeforeCompletion => "verification-before-completion",
+            Self::Other => "other",
         };
         value.into()
     }
@@ -65,15 +65,15 @@ impl crate::events::sealed::Sealed for McpServerName {}
 impl IntoProp for McpServerName {
     fn into_prop(self) -> serde_json::Value {
         match self {
-            McpServerName::Github => "github".into(),
-            McpServerName::Posthog => "posthog".into(),
-            McpServerName::SpurMcp => "spur-mcp".into(),
-            McpServerName::Stitch => "stitch".into(),
-            McpServerName::Playwright => "playwright".into(),
-            McpServerName::Context7 => "context7".into(),
-            McpServerName::Firebase => "firebase".into(),
-            McpServerName::SequentialThinking => "sequential-thinking".into(),
-            McpServerName::Custom(hash) => hash.into_prop(),
+            Self::Github => "github".into(),
+            Self::Posthog => "posthog".into(),
+            Self::SpurMcp => "spur-mcp".into(),
+            Self::Stitch => "stitch".into(),
+            Self::Playwright => "playwright".into(),
+            Self::Context7 => "context7".into(),
+            Self::Firebase => "firebase".into(),
+            Self::SequentialThinking => "sequential-thinking".into(),
+            Self::Custom(hash) => hash.into_prop(),
         }
     }
 }
@@ -92,12 +92,12 @@ impl crate::events::sealed::Sealed for McpToolName {}
 impl IntoProp for McpToolName {
     fn into_prop(self) -> serde_json::Value {
         match self {
-            McpToolName::SubmitPlan => "submit_plan".into(),
-            McpToolName::DispatchTask => "dispatch_task".into(),
-            McpToolName::ReviewTask => "review_task".into(),
-            McpToolName::GetTaskDiff => "get_task_diff".into(),
-            McpToolName::ListTools => "list_tools".into(),
-            McpToolName::Custom(hash) => hash.into_prop(),
+            Self::SubmitPlan => "submit_plan".into(),
+            Self::DispatchTask => "dispatch_task".into(),
+            Self::ReviewTask => "review_task".into(),
+            Self::GetTaskDiff => "get_task_diff".into(),
+            Self::ListTools => "list_tools".into(),
+            Self::Custom(hash) => hash.into_prop(),
         }
     }
 }
@@ -113,9 +113,9 @@ impl crate::events::sealed::Sealed for ReviewOutcome {}
 impl IntoProp for ReviewOutcome {
     fn into_prop(self) -> serde_json::Value {
         let value = match self {
-            ReviewOutcome::Accept => "accept",
-            ReviewOutcome::Reject => "reject",
-            ReviewOutcome::RequestChanges => "request_changes",
+            Self::Accept => "accept",
+            Self::Reject => "reject",
+            Self::RequestChanges => "request_changes",
         };
         value.into()
     }
@@ -135,12 +135,12 @@ impl crate::events::sealed::Sealed for ViewName {}
 impl IntoProp for ViewName {
     fn into_prop(self) -> serde_json::Value {
         let value = match self {
-            ViewName::Dashboard => "dashboard",
-            ViewName::SessionDetail => "session_detail",
-            ViewName::IssueBrowser => "issue_browser",
-            ViewName::PlanBrowser => "plan_browser",
-            ViewName::PlanInspector => "plan_inspector",
-            ViewName::Other => "other",
+            Self::Dashboard => "dashboard",
+            Self::SessionDetail => "session_detail",
+            Self::IssueBrowser => "issue_browser",
+            Self::PlanBrowser => "plan_browser",
+            Self::PlanInspector => "plan_inspector",
+            Self::Other => "other",
         };
         value.into()
     }

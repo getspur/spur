@@ -98,17 +98,14 @@ impl BatchSender {
             loop {
                 tokio::select! {
                     maybe_event = rx.recv() => {
-                        match maybe_event {
-                            Some(event) => {
-                                pending.push(event);
-                                if pending.len() >= FLUSH_SIZE {
-                                    flush_pending(&send_batch, &mut pending).await;
-                                }
-                            }
-                            None => {
+                        if let Some(event) = maybe_event {
+                            pending.push(event);
+                            if pending.len() >= FLUSH_SIZE {
                                 flush_pending(&send_batch, &mut pending).await;
-                                break;
                             }
+                        } else {
+                            flush_pending(&send_batch, &mut pending).await;
+                            break;
                         }
                     }
                     _ = tick.tick() => {
@@ -157,7 +154,7 @@ impl BatchSender {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
@@ -231,8 +228,8 @@ mod tests {
 
     fn mk_event(name: &str, source: &str) -> PosthogEvent {
         PosthogEvent {
-            event: name.to_string(),
-            distinct_id: "d1".to_string(),
+            event: name.to_owned(),
+            distinct_id: "d1".to_owned(),
             properties: json!({ "source": source }),
             timestamp: Utc::now(),
         }

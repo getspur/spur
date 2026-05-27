@@ -1,6 +1,6 @@
-//! Integration tests for the LicenseSeat admin API client.
+//! Integration tests for the `LicenseSeat` admin API client.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[tokio::test]
 async fn create_license_sends_post_with_bearer_auth() {

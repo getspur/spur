@@ -157,13 +157,13 @@ pub fn emit<E: Event>(event: E) {
     }
 
     let mut props = serde_json::Map::new();
-    props.insert("spur_version".to_string(), state.spur_version.into());
+    props.insert("spur_version".to_owned(), state.spur_version.into());
     for (key, value) in event.into_props() {
-        props.insert(key.to_string(), value);
+        props.insert(key.to_owned(), value);
     }
 
     state.batch.try_send(PosthogEvent {
-        event: E::NAME.to_string(),
+        event: E::NAME.to_owned(),
         distinct_id: state.anonymous_id.to_string(),
         properties: serde_json::Value::Object(props),
         timestamp: Utc::now(),

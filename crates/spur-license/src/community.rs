@@ -1,8 +1,8 @@
 //! `LicenseProvider` impl for the no-LicenseSeat-config case.
 //!
-//! Reads the embedded signed PolicyDocument; exposes the `community` tier's
+//! Reads the embedded signed `PolicyDocument`; exposes the `community` tier's
 //! entitlements; never emits events; rejects `activate` (the facade or CLI
-//! routes that to the LicenseSeat path under Option A).
+//! routes that to the `LicenseSeat` path under Option A).
 
 use async_trait::async_trait;
 use std::collections::BTreeSet;
@@ -76,7 +76,7 @@ fn apply_community_compatibility_feature_grants(tier: &str, features: &mut BTree
     if tier == "community" {
         // Compatibility grant for local beads-backed planning while the
         // embedded signed policy catches up to the Community product surface.
-        features.insert(FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string());
+        features.insert(FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_owned());
     }
 }
 
@@ -123,7 +123,7 @@ impl LicenseProvider for CommunityProvider {
 /// works without any runtime env-var setup because the publishable
 /// credentials are baked into the binary at build time.
 ///
-/// On successful activation, the underlying LicenseSeat SDK persists
+/// On successful activation, the underlying `LicenseSeat` SDK persists
 /// the license cache to disk; the NEXT process launch comes up as a
 /// bare `LicenseSeatProvider` directly via the `has_cached_license()`
 /// branch in `licenseseat::from_env_or_disabled`.

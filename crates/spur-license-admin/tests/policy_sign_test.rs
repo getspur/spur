@@ -1,10 +1,10 @@
 //! Integration tests for policy signing.
 //!
-//! These verify that the admin signing tooling produces SignedPolicy
+//! These verify that the admin signing tooling produces `SignedPolicy`
 //! artifacts that pass cryptographic verification.
 
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier as _};
 
 /// Helper: generate a deterministic test key from a seed.
 fn test_signing_key() -> ed25519_dalek::SigningKey {

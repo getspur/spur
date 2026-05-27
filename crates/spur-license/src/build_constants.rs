@@ -1,9 +1,9 @@
-//! Build-time-baked LicenseSeat publishable credentials (Option A from
+//! Build-time-baked `LicenseSeat` publishable credentials (Option A from
 //! the 2026-04-19 community-default-onboarding plan, Task 14b).
 //!
-//! These are NON-SECRET. The publishable key is the `pk_*` LicenseSeat
+//! These are NON-SECRET. The publishable key is the `pk_*` `LicenseSeat`
 //! issues for client embedding (analogous to a Stripe `pk_live_*`
-//! publishable key). The product slug is the LicenseSeat project name.
+//! publishable key). The product slug is the `LicenseSeat` project name.
 //! Together they tell the SDK *which project* to authenticate against —
 //! they do NOT grant any privilege beyond making activation /
 //! validation calls. The privileged admin secret (`sk_*`) lives only in
@@ -19,14 +19,14 @@
 //! ```
 //!
 //! Without overrides, the `DEFAULT_*` constants below are used (production
-//! credentials for the SPUR LicenseSeat tenant). Rotation requires a code
+//! credentials for the SPUR `LicenseSeat` tenant). Rotation requires a code
 //! change + rebuild + redistribution.
 
 const DEFAULT_PUBLISHABLE_KEY: &str = "pk_live_CUgszLVauUc1HjY4sxYebadzqmL2oHQPC";
 const DEFAULT_PRODUCT_SLUG: &str = "spur";
 
 /// Returns `(publishable_key, product_slug)` for activating the
-/// LicenseSeat provider in default builds (Option A path).
+/// `LicenseSeat` provider in default builds (Option A path).
 ///
 /// Prefers compile-time env-var overrides (`option_env!`) when set;
 /// falls back to baked-in [`DEFAULT_PUBLISHABLE_KEY`] /

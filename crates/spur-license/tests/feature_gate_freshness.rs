@@ -1,4 +1,4 @@
-//! Regression tests for bd-22q.1: SpurLicense::feature_gate() must
+//! Regression tests for bd-22q.1: `SpurLicense::feature_gate()` must
 //! return a fresh Arc<FeatureGate> after every successful mutating
 //! call. The tests capture the cached Arc once and assert its
 //! contents change in place — proving propagation through the
@@ -16,7 +16,7 @@ use spur_license::{FeatureGate, LicenseState, Plan, SpurLicense};
 
 fn build_license_with_community_seed() -> (Arc<FakeProvider>, SpurLicense, Arc<FeatureGate>) {
     let mut features = BTreeSet::new();
-    features.insert("chat".to_string());
+    features.insert("chat".to_owned());
     let community = LicenseState::active_community(features);
     let fake = Arc::new(FakeProvider::new(community.clone()));
     let policy = spur_license::policy::PolicyResolver::with_default_overlay();
@@ -29,7 +29,7 @@ fn build_license_with_community_seed() -> (Arc<FakeProvider>, SpurLicense, Arc<F
 fn pro_state() -> LicenseState {
     let mut feats = BTreeSet::new();
     // Real Pro-only feature key per spec; not in Community policy overlay.
-    feats.insert("blob_pro_namespace_deletion".to_string());
+    feats.insert("blob_pro_namespace_deletion".to_owned());
     LicenseState::active_validated(Plan::Pro, feats)
 }
 
