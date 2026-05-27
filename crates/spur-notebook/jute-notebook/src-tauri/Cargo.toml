@@ -8,6 +8,10 @@ repository = "https://github.com/ekzhang/jute.git"
 edition = "2021"
 autobins = false
 
+[[bin]]
+name = "ts-rs-export"
+path = "src/bin/ts-rs-export.rs"
+
 [dependencies]
 anyhow = "1.0.95"
 async-channel = "2.2.1"

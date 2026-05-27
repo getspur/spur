@@ -51,6 +51,11 @@ pub struct NotebookMetadata {
     #[ts(optional)]
     pub authors: Option<Vec<Author>>,
 
+    /// jute-deck notebook-level metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub jute_deck: Option<JuteDeckNotebookMetadata>,
+
     /// Additional unrecognized attributes in metadata.
     #[serde(flatten)]
     #[ts(skip)]
@@ -200,6 +205,11 @@ pub struct CellMetadata {
     #[ts(optional)]
     pub spur: Option<SpurCellMetadata>,
 
+    /// jute-deck per-cell metadata (layout, hidden, speaker_notes, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub jute_deck: Option<JuteDeckCellMetadata>,
+
     /// Additional unrecognized attributes in cell metadata.
     #[serde(flatten)]
     #[ts(skip)]
@@ -217,6 +227,97 @@ pub struct SpurCellMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_edited_by: Option<String>,
+}
+
+/// jute-deck per-cell metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub struct JuteDeckCellMetadata {
+    /// Explicit slide layout; omitted = inferred from cell content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub layout: Option<JuteDeckLayout>,
+
+    /// Skip this cell in deck/present mode while keeping it in the notebook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hidden: Option<bool>,
+
+    /// Markdown speaker notes shown only via the S key overlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub speaker_notes: Option<String>,
+
+    /// Per-slide theme override (theme id from the notebook-level theme list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub theme_override: Option<String>,
+
+    /// Bullet-by-bullet reveal in present mode (markdown bullets only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fragments: Option<bool>,
+
+    /// Per-slide background color or image URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub background: Option<String>,
+}
+
+/// Explicit slide-layout values.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum JuteDeckLayout {
+    /// Infer the layout from cell content.
+    Auto,
+    /// Title slide.
+    Title,
+    /// Section divider slide.
+    Section,
+    /// General markdown/content slide.
+    Content,
+    /// Bullet-list slide.
+    Bullets,
+    /// Source-code slide.
+    Code,
+    /// Output-only slide.
+    Output,
+    /// Code and output slide.
+    CodeOutput,
+    /// Two-column slide.
+    TwoCol,
+    /// Image-focused slide.
+    Image,
+    /// Blank/custom slide.
+    Blank,
+}
+
+/// jute-deck notebook-level metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub struct JuteDeckNotebookMetadata {
+    /// Theme id; defaults to "minimal-light".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub theme: Option<String>,
+
+    /// Slide aspect ratio; defaults to "16:9".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub aspect: Option<String>,
+
+    /// Deck title override (defaults to filename).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+
+    /// Deck author display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub author: Option<String>,
 }
 
 /// Attachments for a cell, represented as MIME bundles keyed by filenames.
@@ -494,6 +595,70 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000"
         );
         assert_eq!(serialized["cells"][0]["metadata"]["spur"]["version"], 7);
+    }
+
+    #[test]
+    fn jute_deck_metadata_survives_round_trip() {
+        let json = r##"
+            {
+                "metadata": {
+                    "jute_deck": {
+                        "theme": "minimal-dark",
+                        "aspect": "16:9",
+                        "title": "Quarterly Results",
+                        "author": "Analyst"
+                    }
+                },
+                "nbformat_minor": 5,
+                "nbformat": 4,
+                "cells": [
+                    {
+                        "cell_type": "markdown",
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "metadata": {
+                            "jute_deck": {
+                                "layout": "two-col",
+                                "hidden": true,
+                                "speaker_notes": "Pause here.",
+                                "theme_override": "spur-brand",
+                                "fragments": true,
+                                "background": "#101010"
+                            }
+                        },
+                        "source": "# Revenue"
+                    }
+                ]
+            }
+        "##;
+
+        let notebook: NotebookRoot = serde_json::from_str(json).unwrap();
+        let deck = notebook.metadata.jute_deck.as_ref().unwrap();
+        assert_eq!(deck.theme.as_deref(), Some("minimal-dark"));
+        assert_eq!(deck.aspect.as_deref(), Some("16:9"));
+        assert_eq!(deck.title.as_deref(), Some("Quarterly Results"));
+        assert_eq!(deck.author.as_deref(), Some("Analyst"));
+
+        let Cell::Markdown(cell) = &notebook.cells[0] else {
+            panic!("expected a markdown cell");
+        };
+        let cell_deck = cell.metadata.jute_deck.as_ref().unwrap();
+        assert_eq!(cell_deck.layout, Some(JuteDeckLayout::TwoCol));
+        assert_eq!(cell_deck.hidden, Some(true));
+        assert_eq!(cell_deck.speaker_notes.as_deref(), Some("Pause here."));
+        assert_eq!(cell_deck.theme_override.as_deref(), Some("spur-brand"));
+        assert_eq!(cell_deck.fragments, Some(true));
+        assert_eq!(cell_deck.background.as_deref(), Some("#101010"));
+
+        let serialized = serde_json::to_value(&notebook).unwrap();
+        assert_eq!(serialized["metadata"]["jute_deck"]["theme"], "minimal-dark");
+        assert_eq!(
+            serialized["cells"][0]["metadata"]["jute_deck"]["layout"],
+            "two-col"
+        );
+        assert_eq!(
+            serialized["cells"][0]["metadata"]["jute_deck"]["speaker_notes"],
+            "Pause here."
+        );
     }
 
     #[test]
