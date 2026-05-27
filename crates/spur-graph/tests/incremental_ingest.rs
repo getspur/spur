@@ -10,7 +10,9 @@ use std::process::Command;
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
-use spur_graph::store::{write_artifact_parquet, write_current_pointer, WriteOptions};
+use spur_graph::store::{
+    write_artifact_parquet, write_current_pointer, ArtifactStagingDir, WriteOptions,
+};
 use tempfile::TempDir;
 
 #[test]
@@ -60,12 +62,12 @@ fn save_temporal_artifacts(
     graph: &spur_graph::schema::GraphIndexArtifact,
     commits: &spur_graph::schema::CommitIndexArtifact,
 ) {
-    let artifact_dir = write_artifact_parquet(
-        graph,
-        &worktree.join(".spur/graph"),
-        WriteOptions::default(),
-    )
-    .expect("save graph parquet artifact");
+    let artifact_base = worktree.join(".spur/graph");
+    let staging =
+        ArtifactStagingDir::new(&artifact_base, &graph.graph_content_hash).expect("stage graph");
+    write_artifact_parquet(graph, staging.path(), WriteOptions::default(), Vec::new())
+        .expect("save graph parquet artifact");
+    let artifact_dir = staging.commit().expect("commit graph parquet artifact");
     write_current_pointer(worktree, &artifact_dir).expect("save graph CURRENT pointer");
     save_artifact(worktree, ".spur/commit-index.json", commits).expect("save commit index");
     save_pointer(

@@ -10,8 +10,13 @@ const GRAPH_CONTENT_HASH: &str = "dispatch-test-graph-content-hash";
 fn load_artifact_dispatches_directory_to_parquet_reader() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let expected = fixture_artifact();
-    let parquet_dir = write_artifact_parquet(&expected, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let parquet_dir = write_artifact_parquet(
+        &expected,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
 
     let loaded = load_artifact(&parquet_dir).expect("load parquet artifact through dispatcher");
 
