@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use spur_pm::IssueFilter;
 
-use super::{task_id_from_labels_or_issue, Reconciler, ReconcilerDispatchCtx};
+use super::{task_id_from_labels_or_issue, Reconciler, ReconcilerDispatch};
 use crate::plan::outcomes::SkipReason;
 
 impl Reconciler {
     pub(super) async fn sweep_expired_dispatch_leases(
         &self,
-        dispatch: &ReconcilerDispatchCtx,
+        dispatch: &dyn ReconcilerDispatch,
     ) -> anyhow::Result<bool> {
         crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
@@ -198,9 +198,9 @@ impl Reconciler {
                 crate::plan::audit_sentinel::CompletionState::Failed,
                 &Some(Arc::clone(&self.fast_forward)),
                 &result,
-                &dispatch.brain_session_id,
+                dispatch.brain_session_id(),
                 attempt,
-                &dispatch.materializer,
+                dispatch.materializer(),
                 None,
                 None,
                 Some(&task_id),
@@ -217,7 +217,7 @@ impl Reconciler {
                 age_secs,
                 "reclaimed expired dispatch lease"
             );
-            if let Some(sink) = dispatch.event_sink.as_deref() {
+            if let Some(sink) = dispatch.event_sink() {
                 sink.emit(spur_acp::SpurEventBody::DispatchLeaseExpired {
                     plan_id: plan_id.clone(),
                     task_id: task_id.clone(),
@@ -231,8 +231,8 @@ impl Reconciler {
             if let Some(deferred) = deferred {
                 deferred
                     .deliver(
-                        dispatch.event_sink.as_deref(),
-                        dispatch.continuation_ctx.as_ref(),
+                        dispatch.event_sink().map(|sink| sink.as_ref()),
+                        dispatch.continuation_ctx().as_ref(),
                     )
                     .await;
             }

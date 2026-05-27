@@ -333,7 +333,7 @@ impl super::Reconciler {
                     if let Some(sink) = self
                         .dispatch
                         .as_ref()
-                        .and_then(|dispatch| dispatch.event_sink.as_ref())
+                        .and_then(|dispatch| dispatch.event_sink())
                     {
                         sink.emit(spur_acp::SpurEventBody::PlanCompleted {
                             plan_id: plan_id.to_string(),
@@ -345,9 +345,9 @@ impl super::Reconciler {
                     }
                     if let Some(dispatch) = self.dispatch.as_ref() {
                         crate::plan::push_plan_completed_continuation(
-                            dispatch.continuation_ctx.as_ref(),
-                            &dispatch.materializer,
-                            &dispatch.brain_session_id,
+                            dispatch.continuation_ctx().as_ref(),
+                            dispatch.materializer(),
+                            dispatch.brain_session_id(),
                             plan_id,
                             outcome.approved_count,
                             outcome.rejected_count,
@@ -478,7 +478,7 @@ impl super::Reconciler {
                 if let Some(sink) = self
                     .dispatch
                     .as_ref()
-                    .and_then(|dispatch| dispatch.event_sink.as_ref())
+                    .and_then(|dispatch| dispatch.event_sink())
                 {
                     sink.emit(spur_acp::SpurEventBody::PlanCompleted {
                         plan_id: plan_id.to_string(),
@@ -490,9 +490,9 @@ impl super::Reconciler {
                 }
                 if let Some(dispatch) = self.dispatch.as_ref() {
                     crate::plan::push_plan_completed_continuation(
-                        dispatch.continuation_ctx.as_ref(),
-                        &dispatch.materializer,
-                        &dispatch.brain_session_id,
+                        dispatch.continuation_ctx().as_ref(),
+                        dispatch.materializer(),
+                        dispatch.brain_session_id(),
                         plan_id,
                         outcome.approved_count,
                         outcome.rejected_count,
@@ -506,7 +506,7 @@ impl super::Reconciler {
                 if let Some(sink) = self
                     .dispatch
                     .as_ref()
-                    .and_then(|dispatch| dispatch.event_sink.as_ref())
+                    .and_then(|dispatch| dispatch.event_sink())
                 {
                     sink.emit(spur_acp::SpurEventBody::PlanReadyToMerge {
                         plan_id: plan_id.to_string(),
