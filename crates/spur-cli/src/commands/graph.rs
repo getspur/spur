@@ -9,6 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
+use spur_graph::store::ArtifactStagingDir;
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
     resolve_artifact_location, resolve_worktree_root_from, write_artifact_parquet, BuildMode,
@@ -159,7 +160,16 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         );
         {
             let _entered = write_span.enter();
-            let result = write_artifact_parquet(&artifact, &output, WriteOptions::default());
+            let result = (|| {
+                let staging = ArtifactStagingDir::new(&output, &artifact.graph_content_hash)?;
+                write_artifact_parquet(
+                    &artifact,
+                    staging.path(),
+                    WriteOptions::default(),
+                    Vec::new(),
+                )?;
+                staging.commit()
+            })();
             match &result {
                 Ok(_) => {
                     tracing::info!(
@@ -229,7 +239,16 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         );
         {
             let _entered = write_span.enter();
-            let result = write_artifact_parquet(&artifact, &output, WriteOptions::default());
+            let result = (|| {
+                let staging = ArtifactStagingDir::new(&output, &artifact.graph_content_hash)?;
+                write_artifact_parquet(
+                    &artifact,
+                    staging.path(),
+                    WriteOptions::default(),
+                    Vec::new(),
+                )?;
+                staging.commit()
+            })();
             match &result {
                 Ok(written_dir) => {
                     if !uses_output_override {

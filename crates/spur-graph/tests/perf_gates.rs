@@ -58,16 +58,24 @@ fn gate_3_1_write_artifact_parquet_under_2x_json_baseline() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
     for _ in 0..WARMUP_COUNT {
-        let dir =
-            write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
-                .expect("warm up parquet writer");
+        let dir = write_artifact_parquet(
+            &fixture.artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("warm up parquet writer");
         std::hint::black_box(dir);
     }
     let median_ms = median_f64(samples(SAMPLE_COUNT, || {
         let started = Instant::now();
-        let dir =
-            write_artifact_parquet(&fixture.artifact, tempdir.path(), WriteOptions::default())
-                .expect("write parquet artifact");
+        let dir = write_artifact_parquet(
+            &fixture.artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
         std::hint::black_box(dir);
         duration_ms(started.elapsed())
     }));
@@ -343,8 +351,13 @@ fn perf_fixture(baselines: &Baselines) -> &'static PerfFixture {
 
 fn write_fixture_parquet(artifact: &GraphIndexArtifact) -> PathBuf {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let dir = write_artifact_parquet(artifact, tempdir.path(), WriteOptions::default())
-        .expect("write parquet artifact");
+    let dir = write_artifact_parquet(
+        artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     persist_tempdir_path(tempdir, dir)
 }
 
@@ -358,7 +371,7 @@ fn sample_parquet_incremental_build_ms(
     let (next, mode, _stats) =
         artifact_from_facts_incremental(&prev, repo_root).expect("full incremental build");
     std::hint::black_box(mode);
-    let written = write_artifact_parquet(&next, output_dir, WriteOptions::default())
+    let written = write_artifact_parquet(&next, output_dir, WriteOptions::default(), Vec::new())
         .expect("write incremental parquet artifact");
     std::hint::black_box(written);
     duration_ms(started.elapsed())
