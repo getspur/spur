@@ -34,6 +34,11 @@ impl McpCallbackServer {
         detached: Option<DetachedCompletionHandle>,
     ) {
         tracker.spawn(async move {
+            tracing::info!(
+                target: "spur.metrics.completion_task_entered",
+                delegation_id = %delegation_id,
+                "detached completion task entered"
+            );
             let result = tokio::select! {
                 res = rx => match res {
                     Ok(r) => r,
@@ -113,6 +118,12 @@ impl McpCallbackServer {
                     ..
                 } = h;
                 let attempt = attempt_tracker.load(Ordering::SeqCst);
+                tracing::info!(
+                    target: "spur.metrics.detached_continuation_dispatch",
+                    delegation_id = %delegation_id,
+                    attempt,
+                    "dispatching to build_detached_continuation"
+                );
                 let cont = build_detached_continuation(
                     &delegation_id,
                     &result,
