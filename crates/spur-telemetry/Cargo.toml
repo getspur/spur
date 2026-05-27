@@ -25,3 +25,6 @@ trybuild = "1"
 tempfile = "3"
 tokio = { workspace = true }
 wiremock = "0.6"
+
+[lints]
+workspace = true
