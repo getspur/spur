@@ -1,9 +1,13 @@
 use std::fs;
+use std::io;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
-use spur_graph::store::cache::{lookup_canonical, write_with_dedup};
+use spur_graph::store::cache::{
+    load_base_artifact_for_worktree, lookup_canonical, write_with_dedup,
+};
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, git,
     read_artifact_header_parquet, read_current_pointer, BuildMode, GraphIndexArtifact,
@@ -367,6 +371,81 @@ fn submodule_pointer_change_invalidates() {
 }
 
 #[test]
+fn fresh_linked_worktree_seeds_incremental_from_main_with_no_changes() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.write("src/keep.rs", "pub fn keep() {}\n");
+    repo.git(&["add", "src/lib.rs", "src/keep.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+    repo.git(&["branch", "worker"]);
+
+    let main_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &main_artifact);
+    let worker = repo.temp.path().join("worker");
+    repo.git(&["worktree", "add", path_str(&worker), "worker"]);
+    assert!(!worker.join(".spur/graph-index.pointer.json").exists());
+
+    let (base, lines) = capture_base_seed_trace(|| {
+        load_base_artifact_for_worktree(&worker).expect("main worktree base artifact")
+    });
+    assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
+
+    let (rebuilt, mode) =
+        artifact_from_facts_incremental(&base, &worker).expect("incremental rebuild");
+    assert_eq!(mode, BuildMode::Incremental);
+    assert_eq!(rebuilt.graph_content_hash, main_artifact.graph_content_hash);
+    assert_base_seed_trace(&lines, "main_worktree", 0, 2);
+}
+
+#[test]
+fn fresh_linked_worktree_seeds_incremental_from_main_with_one_modified_file() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.write("src/keep.rs", "pub fn keep() {}\n");
+    repo.git(&["add", "src/lib.rs", "src/keep.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+    repo.git(&["branch", "worker"]);
+
+    let main_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &main_artifact);
+    let worker = repo.temp.path().join("worker");
+    repo.git(&["worktree", "add", path_str(&worker), "worker"]);
+    fs::write(worker.join("src/lib.rs"), "pub fn lib_changed() {}\n").expect("modify worker lib");
+
+    let (base, lines) = capture_base_seed_trace(|| {
+        load_base_artifact_for_worktree(&worker).expect("main worktree base artifact")
+    });
+    assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
+
+    let (rebuilt, mode) =
+        artifact_from_facts_incremental(&base, &worker).expect("incremental rebuild");
+    assert_eq!(mode, BuildMode::Incremental);
+    assert!(rebuilt
+        .symbols
+        .iter()
+        .any(|symbol| symbol.entity_name == "lib_changed"));
+    assert_base_seed_trace(&lines, "main_worktree", 1, 1);
+}
+
+#[test]
+fn main_worktree_uses_self_pointer_as_incremental_seed() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.write("src/keep.rs", "pub fn keep() {}\n");
+    repo.git(&["add", "src/lib.rs", "src/keep.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+
+    let main_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &main_artifact);
+
+    let (base, lines) = capture_base_seed_trace(|| {
+        load_base_artifact_for_worktree(repo.path()).expect("self base artifact")
+    });
+    assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
+    assert_base_seed_trace(&lines, "self_pointer", 0, 2);
+}
+
+#[test]
 fn crlf_bom_dirty_hash_is_bytewise() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn baseline() {}\n");
@@ -538,4 +617,91 @@ fn git_stdout(root: &Path, args: &[&str]) -> String {
 
 fn path_str(path: &Path) -> &str {
     path.to_str().expect("path UTF-8")
+}
+
+type TraceLines = Arc<Mutex<Vec<String>>>;
+
+#[derive(Clone)]
+struct TraceMakeWriter {
+    lines: TraceLines,
+}
+
+struct TraceWriter {
+    lines: TraceLines,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceMakeWriter {
+    type Writer = TraceWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceWriter {
+            lines: Arc::clone(&self.lines),
+        }
+    }
+}
+
+impl io::Write for TraceWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let line = String::from_utf8_lossy(buf).to_string();
+        if line.contains("worker base seed selected") {
+            self.lines.lock().expect("trace lines lock").push(line);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture_base_seed_trace<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_target(true)
+        .with_level(true)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(TraceMakeWriter {
+            lines: Arc::clone(&lines),
+        })
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, f);
+    let captured = lines.lock().expect("trace lines lock").clone();
+    (result, captured)
+}
+
+fn assert_base_seed_trace(
+    lines: &[String],
+    expected_base: &str,
+    expected_changed_paths: usize,
+    minimum_reused_buckets: usize,
+) {
+    let line = lines
+        .iter()
+        .find(|line| line.contains("spur_graph::base_seed"))
+        .unwrap_or_else(|| panic!("missing base seed trace event in {lines:?}"));
+    assert!(
+        line.contains(&format!("base=\"{expected_base}\""))
+            || line.contains(&format!("base={expected_base}")),
+        "unexpected base seed trace line: {line}"
+    );
+    assert!(
+        line.contains(&format!("changed_paths={expected_changed_paths}")),
+        "unexpected changed_paths in trace line: {line}"
+    );
+    let reused = parse_trace_usize(line, "reused_buckets")
+        .unwrap_or_else(|| panic!("missing reused_buckets in trace line: {line}"));
+    assert!(
+        reused >= minimum_reused_buckets,
+        "expected reused_buckets >= {minimum_reused_buckets}, got {reused} in {line}"
+    );
+}
+
+fn parse_trace_usize(line: &str, key: &str) -> Option<usize> {
+    let start = line.find(&format!("{key}="))? + key.len() + 1;
+    let value = line[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    value.parse().ok()
 }
