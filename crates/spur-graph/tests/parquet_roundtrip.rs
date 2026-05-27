@@ -144,7 +144,7 @@ fn reads_symbol_snapshot_file_path_b64_with_padding_and_url_safe_alphabet() {
     .expect("write parquet artifact");
 
     rewrite_symbol_snapshot_b64_values(&dir, &["eA==", "_w=="])
-        .expect("rewrite symbol_snapshots.parquet file_path_b64 values");
+        .expect("rewrite symbol snapshot shard file_path_b64 values");
     let actual = read_artifact_parquet(&dir).expect("read parquet artifact");
 
     assert_eq!(actual.symbol_snapshots, artifact.symbol_snapshots);
