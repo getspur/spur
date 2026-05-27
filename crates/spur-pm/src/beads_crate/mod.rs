@@ -16,3 +16,32 @@ pub(crate) mod wal_checkpoint;
 pub(crate) mod write_lock;
 
 pub use adapter::{AdapterConfig, BeadsCrateAdapter};
+
+#[cfg(feature = "test-helpers")]
+pub mod test_helpers {
+    use std::path::Path;
+    use std::time::Duration;
+
+    #[allow(dead_code)]
+    pub struct TestWriteLockGuard(pub(crate) super::write_lock::WriteLockGuard);
+
+    pub fn blocking_write_lock_with_timeout(
+        beads_dir: &Path,
+        lock_timeout_ms: Option<u64>,
+    ) -> anyhow::Result<TestWriteLockGuard> {
+        super::write_lock::blocking_write_lock_with_timeout(beads_dir, lock_timeout_ms)
+            .map(TestWriteLockGuard)
+    }
+
+    pub fn lock_holder_pid(lock_path: &Path) -> Option<u32> {
+        super::write_lock::read_holder_payload(lock_path).and_then(|holder| holder.pid)
+    }
+
+    pub fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::Result<u64> {
+        super::init::sweep_stale_jsonl_temps(beads_dir, min_age)
+    }
+
+    pub fn checkpoint_wal_truncate_best_effort(db_path: &Path) {
+        super::wal_checkpoint::checkpoint_wal_truncate_best_effort(db_path);
+    }
+}
