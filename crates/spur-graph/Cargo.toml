@@ -60,10 +60,52 @@ harness = false
 name = "capture-baselines"
 path = "benches/capture_baselines.rs"
 
-# Lint quarantine: after the auto-fix sweep, spur-graph still carries
-# ~659 clippy warnings under the egui-derived workspace lint set. Opted
-# out until those are triaged so the rest of the workspace can stay
-# strict. To re-enable, swap this block for `[lints] workspace = true`
-# once `cargo clippy -p spur-graph` runs clean.
+# Narrow quarantine: keep workspace safety lints active for spur-graph while
+# suppressing the measured noisy backlog families. `exit`,
+# `undocumented_unsafe_blocks`, `dbg_macro`, `todo`, `unimplemented`,
+# `mem_forget`, `transmute_*`, and async-holding lints remain active.
+[lints.rust]
+unsafe_code = "deny"
+
 [lints.clippy]
-all = { level = "allow", priority = -1 }
+all = { level = "warn", priority = -1 }
+
+arc_with_non_send_sync = "deny"
+await_holding_invalid_type = "deny"
+await_holding_lock = "warn"
+await_holding_refcell_ref = "deny"
+dbg_macro = "warn"
+exit = "warn"
+future_not_send = "warn"
+if_let_mutex = "warn"
+infinite_loop = "warn"
+mem_forget = "warn"
+mutex_integer = "warn"
+rc_mutex = "warn"
+readonly_write_lock = "warn"
+suspicious_command_arg_space = "warn"
+todo = "warn"
+transmute_ptr_to_ptr = "warn"
+unchecked_time_subtraction = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+useless_transmute = "warn"
+
+allow_attributes = "allow"
+clone_on_ref_ptr = "allow"
+field_reassign_with_default = "allow"
+fn_params_excessive_bools = "allow"
+format_push_string = "allow"
+ignore_without_reason = "allow"
+iter_on_single_items = "allow"
+iter_over_hash_type = "allow"
+manual_let_else = "allow"
+map_err_ignore = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+missing_assert_message = "allow"
+needless_continue = "allow"
+ref_option = "allow"
+semicolon_if_nothing_returned = "allow"
+unnecessary_wraps = "allow"
+useless_let_if_seq = "allow"
