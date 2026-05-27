@@ -255,6 +255,178 @@ mod retirement_state_tests {
 }
 
 #[cfg(test)]
+mod inline_completion_materialization_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::Value;
+    use spur_acp::domain::{DelegationResult, DelegationStatus};
+    use spur_acp::{BrainSessionId, DelegationId, SessionId};
+    use spur_blob_store::{OutcomeBlobKind, OutcomeKey, OutcomeStore};
+
+    fn no_op_ctx() -> super::DetachedContinuationCtx {
+        super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }
+    }
+
+    fn result(summary: &str) -> DelegationResult {
+        DelegationResult {
+            status: DelegationStatus::Success,
+            diff: Some(format!("diff for {summary}")),
+            diff_summary: None,
+            summary: Some(summary.into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some(format!("spur/{summary}")),
+            artifact: None,
+        }
+    }
+
+    fn response_payload(response: &Value) -> Value {
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("success response text");
+        serde_json::from_str(text).expect("inline response payload JSON")
+    }
+
+    async fn assert_result_json_written(
+        store: &Arc<dyn OutcomeStore>,
+        brain_session: &BrainSessionId,
+        delegation_id: DelegationId,
+        payload: &Value,
+        expected: &DelegationResult,
+    ) {
+        let key = OutcomeKey {
+            brain_session_id: brain_session.clone(),
+            delegation_id,
+            attempt: 1,
+            kind: OutcomeBlobKind::ResultJson,
+        };
+        let artifact_key: OutcomeKey =
+            serde_json::from_value(payload["artifact_id"].clone()).expect("artifact_id key");
+        assert_eq!(artifact_key, key);
+
+        let content = store
+            .get(&key, None)
+            .await
+            .expect("inline completion should write ResultJson");
+        let stored: Value = serde_json::from_slice(&content.bytes).expect("stored result JSON");
+        assert_eq!(
+            stored,
+            serde_json::to_value(expected).expect("expected result JSON")
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_completion_writes_result_json_to_outcome_store() {
+        let brain_session = BrainSessionId::new(SessionId(
+            "550e8400-e29b-41d4-a716-446655440000".into(),
+        ));
+        let store: Arc<dyn OutcomeStore> = Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let (mut server, mut channel) = super::McpCallbackServer::new(
+            Some(&brain_session),
+            None,
+            None,
+            no_op_ctx(),
+            store.clone(),
+            super::community_feature_gate(),
+        );
+        server.set_inline_wait(Duration::from_secs(5));
+        let server = Arc::new(server);
+        let expected = result("single-inline");
+
+        let handler = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move {
+                server
+                    .__test_call_delegate_to_worker("codex", "complete inline")
+                    .await
+            }
+        });
+
+        let request = tokio::time::timeout(Duration::from_secs(1), channel.request_rx.recv())
+            .await
+            .expect("delegation request should arrive")
+            .expect("delegation request channel open");
+        let delegation_id = request.id.clone();
+        request
+            .respond_to
+            .send(expected.clone())
+            .expect("send inline result");
+
+        let response = handler.await.expect("handler join");
+        let payload = response_payload(&response);
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["delegation_id"], delegation_id.as_str());
+        assert_result_json_written(&store, &brain_session, delegation_id, &payload, &expected)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn delegate_parallel_inline_completions_write_result_json_to_outcome_store() {
+        let brain_session = BrainSessionId::new(SessionId(
+            "550e8400-e29b-41d4-a716-446655440001".into(),
+        ));
+        let store: Arc<dyn OutcomeStore> = Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let (mut server, mut channel) = super::McpCallbackServer::new(
+            Some(&brain_session),
+            None,
+            None,
+            no_op_ctx(),
+            store.clone(),
+            super::community_feature_gate(),
+        );
+        server.set_inline_wait(Duration::from_secs(5));
+        let server = Arc::new(server);
+        let expected = [result("parallel-a"), result("parallel-b")];
+
+        let handler = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move {
+                server
+                    .__test_call_delegate_parallel(vec![("codex", "task A"), ("codex", "task B")])
+                    .await
+            }
+        });
+
+        let mut delegation_ids = Vec::new();
+        for expected_result in expected.iter().cloned() {
+            let request = tokio::time::timeout(Duration::from_secs(1), channel.request_rx.recv())
+                .await
+                .expect("delegation request should arrive")
+                .expect("delegation request channel open");
+            delegation_ids.push(request.id.clone());
+            request
+                .respond_to
+                .send(expected_result)
+                .expect("send inline result");
+        }
+
+        let response = handler.await.expect("handler join");
+        let entries = response_payload(&response);
+        let entries = entries.as_array().expect("parallel response array");
+        assert_eq!(entries.len(), expected.len());
+
+        for ((entry, delegation_id), expected_result) in entries
+            .iter()
+            .zip(delegation_ids)
+            .zip(expected.iter())
+        {
+            assert_eq!(entry["status"], "completed");
+            assert_eq!(entry["delegation_id"], delegation_id.as_str());
+            assert_result_json_written(
+                &store,
+                &brain_session,
+                delegation_id,
+                entry,
+                expected_result,
+            )
+            .await;
+        }
+    }
+}
+
+#[cfg(test)]
 mod continuation_producer_tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::AtomicU32;
