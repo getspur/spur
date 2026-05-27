@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::debug;
 
@@ -31,6 +31,63 @@ fn log_worktree_op(op: &str, path: &str, branch: Option<&str>) {
 
 /// Monotonic counter to guarantee unique snapshot branch names under concurrency.
 static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const GIT_QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+const GIT_ABORT_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_WORKTREE_OP_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn wait_for_git_output_bounded(
+    child: &mut tokio::process::Child,
+    args: &[&str],
+    timeout_duration: Duration,
+) -> Result<std::process::Output> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stdout) = stdout {
+            stdout.read_to_end(&mut buf).await?;
+        }
+        Ok::<_, std::io::Error>(buf)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = stderr {
+            stderr.read_to_end(&mut buf).await?;
+        }
+        Ok::<_, std::io::Error>(buf)
+    });
+
+    let status = match tokio::time::timeout(timeout_duration, child.wait()).await {
+        Ok(status) => status.context("failed to execute git command")?,
+        Err(_) => {
+            let _ = child.start_kill();
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(anyhow!(
+                "git {:?} timed out after {:?}",
+                args,
+                timeout_duration
+            ));
+        }
+    };
+
+    let stdout = stdout_task
+        .await
+        .context("failed to join git stdout reader")?
+        .context("failed to read git stdout")?;
+    let stderr = stderr_task
+        .await
+        .context("failed to join git stderr reader")?
+        .context("failed to read git stderr")?;
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
 
 /// Manages git worktree lifecycle for concurrent agent isolation.
 pub struct WorktreeManager {
@@ -185,6 +242,46 @@ impl WorktreeManager {
             .output()
             .await
             .context("failed to execute git command")?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(anyhow!(
+                "git {} failed (exit {}): {}",
+                args.first().unwrap_or(&""),
+                output.status.code().unwrap_or(-1),
+                stderr,
+            ))
+        }
+    }
+
+    async fn run_git_bounded(
+        &self,
+        args: &[&str],
+        cwd: Option<&Path>,
+        timeout_duration: Duration,
+    ) -> Result<String> {
+        let work_dir = cwd.unwrap_or(&self.repo_root);
+
+        debug!(
+            command = %format!("git {}", args.join(" ")),
+            cwd = %work_dir.display(),
+            "running git command"
+        );
+
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(work_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            // Ensures cancellation of this future also terminates the child.
+            .kill_on_drop(true);
+        let mut child = command.spawn().context("failed to execute git command")?;
+
+        let output = wait_for_git_output_bounded(&mut child, args, timeout_duration).await?;
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -757,7 +854,7 @@ impl WorktreeManager {
         let case = match (commits_before, dirty_before) {
             (0, false) => FinalizeCase::NoOp,
             (0, true) => {
-                self.run_git(&["add", "-A"], Some(&info.path))
+                self.run_git_bounded(&["add", "-A"], Some(&info.path), GIT_COMMIT_TIMEOUT)
                     .await
                     .context("failed to stage dirty worker changes")?;
                 self.commit_with_message(&info.path, message, bypass_hooks)
@@ -767,7 +864,7 @@ impl WorktreeManager {
             }
             (1, false) => FinalizeCase::AlreadyAtomic,
             (1, true) => {
-                self.run_git(&["add", "-A"], Some(&info.path))
+                self.run_git_bounded(&["add", "-A"], Some(&info.path), GIT_COMMIT_TIMEOUT)
                     .await
                     .context("failed to stage dirty worker changes for amend")?;
                 self.amend_no_edit(&info.path, bypass_hooks)
@@ -777,15 +874,19 @@ impl WorktreeManager {
             }
             (n, _) => {
                 if dirty_before {
-                    self.run_git(&["add", "-A"], Some(&info.path))
+                    self.run_git_bounded(&["add", "-A"], Some(&info.path), GIT_COMMIT_TIMEOUT)
                         .await
                         .context("failed to stage dirty worker changes before squash")?;
                 }
-                self.run_git(&["reset", "--soft", &info.base_commit], Some(&info.path))
-                    .await
-                    .with_context(|| {
-                        format!("failed to soft-reset worker branch to {}", info.base_commit)
-                    })?;
+                self.run_git_bounded(
+                    &["reset", "--soft", &info.base_commit],
+                    Some(&info.path),
+                    GIT_COMMIT_TIMEOUT,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to soft-reset worker branch to {}", info.base_commit)
+                })?;
                 self.commit_with_message(&info.path, message, bypass_hooks)
                     .await
                     .context("failed to commit squashed worker changes")?;
@@ -829,7 +930,11 @@ impl WorktreeManager {
     async fn worker_commit_count(&self, worktree_path: &Path, base_commit: &str) -> Result<usize> {
         let range = format!("{base_commit}..HEAD");
         let out = self
-            .run_git(&["rev-list", "--count", &range], Some(worktree_path))
+            .run_git_bounded(
+                &["rev-list", "--count", &range],
+                Some(worktree_path),
+                GIT_QUICK_TIMEOUT,
+            )
             .await
             .with_context(|| format!("failed to count worker commits in {range}"))?;
         out.trim()
@@ -839,7 +944,11 @@ impl WorktreeManager {
 
     async fn worktree_dirty(&self, worktree_path: &Path) -> Result<bool> {
         let status = self
-            .run_git(&["status", "--porcelain"], Some(worktree_path))
+            .run_git_bounded(
+                &["status", "--porcelain"],
+                Some(worktree_path),
+                GIT_QUICK_TIMEOUT,
+            )
             .await
             .context("failed to inspect worker status")?;
         Ok(!status.is_empty())
@@ -852,20 +961,25 @@ impl WorktreeManager {
         bypass_hooks: bool,
     ) -> Result<String> {
         if bypass_hooks {
-            self.run_git(
+            self.run_git_bounded(
                 &["commit", "--no-verify", "--no-gpg-sign", "-m", message],
                 Some(worktree_path),
+                GIT_COMMIT_TIMEOUT,
             )
             .await
         } else {
-            self.run_git(&["commit", "-m", message], Some(worktree_path))
-                .await
+            self.run_git_bounded(
+                &["commit", "-m", message],
+                Some(worktree_path),
+                GIT_COMMIT_TIMEOUT,
+            )
+            .await
         }
     }
 
     async fn amend_no_edit(&self, worktree_path: &Path, bypass_hooks: bool) -> Result<String> {
         if bypass_hooks {
-            self.run_git(
+            self.run_git_bounded(
                 &[
                     "commit",
                     "--amend",
@@ -874,17 +988,26 @@ impl WorktreeManager {
                     "--no-gpg-sign",
                 ],
                 Some(worktree_path),
+                GIT_COMMIT_TIMEOUT,
             )
             .await
         } else {
-            self.run_git(&["commit", "--amend", "--no-edit"], Some(worktree_path))
-                .await
+            self.run_git_bounded(
+                &["commit", "--amend", "--no-edit"],
+                Some(worktree_path),
+                GIT_COMMIT_TIMEOUT,
+            )
+            .await
         }
     }
 
     async fn abort_in_progress_git_operations(&self, worktree_path: &Path) -> Result<()> {
         let git_dir = self
-            .run_git(&["rev-parse", "--git-dir"], Some(worktree_path))
+            .run_git_bounded(
+                &["rev-parse", "--git-dir"],
+                Some(worktree_path),
+                GIT_QUICK_TIMEOUT,
+            )
             .await
             .context("failed to resolve worker git dir")?;
         let git_dir = PathBuf::from(git_dir.trim());
@@ -895,27 +1018,43 @@ impl WorktreeManager {
         };
 
         if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-            self.run_git(&["rebase", "--abort"], Some(worktree_path))
-                .await
-                .context("failed to abort in-progress rebase")?;
+            self.run_git_bounded(
+                &["rebase", "--abort"],
+                Some(worktree_path),
+                GIT_ABORT_TIMEOUT,
+            )
+            .await
+            .context("failed to abort in-progress rebase")?;
         }
 
         if git_dir.join("MERGE_HEAD").exists() {
-            self.run_git(&["merge", "--abort"], Some(worktree_path))
-                .await
-                .context("failed to abort in-progress merge")?;
+            self.run_git_bounded(
+                &["merge", "--abort"],
+                Some(worktree_path),
+                GIT_ABORT_TIMEOUT,
+            )
+            .await
+            .context("failed to abort in-progress merge")?;
         }
 
         if git_dir.join("CHERRY_PICK_HEAD").exists() {
-            self.run_git(&["cherry-pick", "--abort"], Some(worktree_path))
-                .await
-                .context("failed to abort in-progress cherry-pick")?;
+            self.run_git_bounded(
+                &["cherry-pick", "--abort"],
+                Some(worktree_path),
+                GIT_ABORT_TIMEOUT,
+            )
+            .await
+            .context("failed to abort in-progress cherry-pick")?;
         }
 
         if git_dir.join("REVERT_HEAD").exists() {
-            self.run_git(&["revert", "--abort"], Some(worktree_path))
-                .await
-                .context("failed to abort in-progress revert")?;
+            self.run_git_bounded(
+                &["revert", "--abort"],
+                Some(worktree_path),
+                GIT_ABORT_TIMEOUT,
+            )
+            .await
+            .context("failed to abort in-progress revert")?;
         }
         Ok(())
     }
@@ -1032,13 +1171,14 @@ impl WorktreeManager {
 
         log_worktree_op("remove_worktree", &path_str, Some(&branch));
         // Run git operations; if any fail, return without mutating self.active.
-        self.run_git(
+        self.run_git_bounded(
             &["worktree", "remove", &path_str, "--force", "--force"],
             None,
+            GIT_WORKTREE_OP_TIMEOUT,
         )
         .await
         .with_context(|| format!("failed to remove worktree at {path_str}"))?;
-        self.run_git(&["branch", "-D", &branch], None)
+        self.run_git_bounded(&["branch", "-D", &branch], None, GIT_WORKTREE_OP_TIMEOUT)
             .await
             .with_context(|| format!("failed to delete branch '{branch}'"))?;
 
@@ -1066,9 +1206,10 @@ impl WorktreeManager {
 
         log_worktree_op("detach_worktree", &path_str, Some(&branch));
         // Run git operations; if any fail, return without mutating self.active.
-        self.run_git(
+        self.run_git_bounded(
             &["worktree", "remove", &path_str, "--force", "--force"],
             None,
+            GIT_WORKTREE_OP_TIMEOUT,
         )
         .await
         .with_context(|| format!("failed to detach worktree at {path_str}"))?;
@@ -1229,6 +1370,36 @@ impl WorktreeManager {
             .ok_or_else(|| anyhow::anyhow!("worktree for session {} not found", session_id))?;
         info.base_commit = base_commit;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod git_lock_recovery {
+    use super::*;
+    use std::process::Stdio;
+
+    #[tokio::test]
+    async fn detach_worktree_returns_timeout_on_stale_lock() {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sleeping child");
+        let timeout = Duration::from_millis(250);
+        let started = Instant::now();
+
+        let err = wait_for_git_output_bounded(&mut child, &["worktree", "remove"], timeout)
+            .await
+            .expect_err("sleeping child should time out");
+
+        assert!(
+            started.elapsed() < timeout * 2,
+            "timeout path took {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("timed out after"));
     }
 }
 
