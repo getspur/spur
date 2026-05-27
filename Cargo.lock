@@ -9231,6 +9231,7 @@ dependencies = [
  "spur-core",
  "spur-pm",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

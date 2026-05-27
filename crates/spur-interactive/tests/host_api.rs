@@ -1,6 +1,23 @@
 use spur_core::InteractiveInput;
 use spur_interactive::{validate_frontend_command, ReviewSubmission};
 
+#[tokio::test]
+async fn shutdown_completes_promptly_even_with_outstanding_continuation_sender() {
+    let repo_root =
+        std::env::temp_dir().join(format!("spur-interactive-host-api-{}", std::process::id()));
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let orch =
+        spur_core::Orchestrator::new(repo_root, spur_acp::config::SpurConfig::default(), None)
+            .unwrap();
+    let host = spur_interactive::InteractiveFrontendHost::spawn(orch, None);
+    let _outstanding_handle = host.handle();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), host.shutdown())
+        .await
+        .expect("shutdown should complete within 2 seconds")
+        .unwrap();
+}
+
 #[test]
 fn reject_submit_review_on_command_lane() {
     let err = validate_frontend_command(&InteractiveInput::SubmitReview {

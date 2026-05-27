@@ -219,7 +219,7 @@ fn enforce_event_cap(dir: &Path, cap_bytes: u64, protected: &Path) -> std::io::R
         entries.push((path, mtime, md.len()));
     }
     // Sort newest-first so we keep newest until we cross the cap.
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     let mut running = 0u64;
     let mut deleted = 0usize;

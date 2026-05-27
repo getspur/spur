@@ -135,6 +135,7 @@ impl Orchestrator {
         >,
         overflow_continuations: crate::continuation_bridge::OverflowBuf,
     ) -> Result<()> {
+        let shutdown_token = self.shutdown_token.clone();
         let mut brain: Option<BrainSession> = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
             None, // active_session set when first brain spawns
@@ -196,6 +197,7 @@ impl Orchestrator {
                     Some(deadline) => {
                         let deadline = tokio::time::Instant::from_std(deadline);
                         tokio::select! {
+                            _ = shutdown_token.cancelled() => break,
                             maybe = user_input_rx.recv() => match maybe {
                                 Some(input) => input,
                                 None => break,
@@ -203,9 +205,12 @@ impl Orchestrator {
                             _ = tokio::time::sleep_until(deadline) => continue,
                         }
                     }
-                    None => match user_input_rx.recv().await {
-                        Some(i) => i,
-                        None => break, // channel closed — shutdown
+                    None => tokio::select! {
+                        _ = shutdown_token.cancelled() => break,
+                        maybe = user_input_rx.recv() => match maybe {
+                            Some(i) => i,
+                            None => break, // channel closed — shutdown
+                        },
                     },
                 };
 
@@ -1426,6 +1431,7 @@ impl Orchestrator {
 
                 loop {
                     tokio::select! {
+                        _ = shutdown_token.cancelled() => break,
                         item = stream.next() => {
                             match item {
                                 Some(notification) => {
@@ -1468,7 +1474,10 @@ impl Orchestrator {
                                 None => break, // Turn complete
                             }
                         }
-                        Some(queued) = user_input_rx.recv() => {
+                        maybe = user_input_rx.recv() => {
+                            let Some(queued) = maybe else {
+                                break;
+                            };
                             match queued {
                                 InteractiveInput::Message { blocks: msg_blocks, interrupt: msg_interrupt } => {
                                     if msg_interrupt {

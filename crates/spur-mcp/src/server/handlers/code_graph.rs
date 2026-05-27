@@ -658,7 +658,7 @@ struct CodeSearchBody {
 }
 
 enum CodeSearchBackend {
-    Parquet(ParquetClient),
+    Parquet(Box<ParquetClient>),
     LegacyJson {
         artifact: Arc<GraphIndexArtifact>,
         client: InMemoryClient,
@@ -668,14 +668,16 @@ enum CodeSearchBackend {
 impl CodeSearchBackend {
     fn client(&self) -> &dyn GraphQueryClient {
         match self {
-            Self::Parquet(client) => client,
+            Self::Parquet(client) => client.as_ref(),
             Self::LegacyJson { client, .. } => client,
         }
     }
 
     fn metadata_source(&self) -> GraphMetadataSource {
         match self {
-            Self::Parquet(client) => GraphMetadataSource::from_parquet_manifest(client.manifest()),
+            Self::Parquet(client) => {
+                GraphMetadataSource::from_parquet_manifest(client.as_ref().manifest())
+            }
             Self::LegacyJson { artifact, .. } => GraphMetadataSource::from_artifact(artifact),
         }
     }
@@ -685,9 +687,11 @@ impl CodeSearchBackend {
         search: &CodeSearchBody,
     ) -> Result<Vec<(String, String)>, McpHandlerError> {
         match self {
-            Self::Parquet(client) => {
-                search_response_file_set_for_parquet(client, &search.result, &search.options)
-            }
+            Self::Parquet(client) => search_response_file_set_for_parquet(
+                client.as_ref(),
+                &search.result,
+                &search.options,
+            ),
             Self::LegacyJson { artifact, .. } => {
                 Ok(empty_code_search_file_set(artifact, &search.body)
                     .unwrap_or_else(|| response_file_set_from_body(artifact, &search.body)))
@@ -2287,7 +2291,7 @@ fn open_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandle
 
     match resolved.format {
         ArtifactFormat::Parquet => ParquetClient::open(&artifact_path)
-            .map(CodeSearchBackend::Parquet)
+            .map(|client| CodeSearchBackend::Parquet(Box::new(client)))
             .map_err(|error| {
                 if !artifact_path.exists() {
                     graph_artifact_missing(&worktree)
