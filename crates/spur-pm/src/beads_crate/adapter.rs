@@ -86,6 +86,7 @@ fn acquire_write_lock_with_backoff(
 ) -> anyhow::Result<write_lock::WriteLockGuard> {
     let start = Instant::now();
     let mut attempt: u32 = 0;
+    let mut last_holder = None;
     loop {
         let attempt_start = Instant::now();
         match write_lock::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms)) {
@@ -93,15 +94,23 @@ fn acquire_write_lock_with_backoff(
                 metrics.record_lock_wait(attempt_start.elapsed());
                 return Ok(file);
             }
-            Err(_) => {
+            Err(err) => {
+                if let Some(write_lock::WriteLockError::Busy { holder, .. }) =
+                    err.downcast_ref::<write_lock::WriteLockError>()
+                {
+                    last_holder = holder.clone();
+                }
                 metrics.incr_busy();
                 let elapsed = start.elapsed();
                 let rand = fastrand_unit();
                 let Some(delay) = backoff.step(attempt, elapsed, rand) else {
                     metrics.incr_ceiling();
+                    let holder_text = match &last_holder {
+                        Some(holder) => write_lock::format_lock_holder(holder, lock_timeout_ms),
+                        None => "unknown holder".to_owned(),
+                    };
                     anyhow::bail!(
-                        "write lock acquisition exceeded ceiling after {:?}",
-                        elapsed
+                        "write lock acquisition exceeded ceiling after {elapsed:?}; {holder_text}"
                     );
                 };
                 std::thread::sleep(delay);
@@ -154,10 +163,7 @@ async fn acquire_write_lock_async(
                 let rand = fastrand_unit();
                 let Some(delay) = backoff.step(attempt, elapsed, rand) else {
                     metrics.incr_ceiling();
-                    anyhow::bail!(
-                        "write lock acquisition exceeded ceiling after {:?}",
-                        elapsed
-                    );
+                    anyhow::bail!("write lock acquisition exceeded ceiling after {elapsed:?}");
                 };
                 let remaining = timeout.saturating_sub(start.elapsed());
                 tokio::time::sleep(
@@ -205,7 +211,7 @@ impl Default for AdapterConfig {
             stale_tmp_min_age: Duration::from_secs(3600),
             allow_non_local_fs: false,
             backoff: BackoffPolicy::default(),
-            actor: "spur".to_string(),
+            actor: "spur".to_owned(),
             cursor_path: None,
         }
     }
@@ -656,6 +662,28 @@ mod tests {
                 .write_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+    }
+
+    #[test]
+    fn backoff_ceiling_error_includes_last_lock_holder() {
+        let dir = TempDir::new().unwrap();
+        let _held = write_lock::blocking_write_lock_with_timeout(dir.path(), Some(50)).unwrap();
+        let backoff = BackoffPolicy {
+            initial: Duration::from_millis(1),
+            max_step: Duration::from_millis(1),
+            factor: 1.0,
+            jitter: 0.0,
+            ceiling: Duration::ZERO,
+        };
+        let metrics = ContentionMetrics::default();
+
+        let err = acquire_write_lock_with_backoff(dir.path(), &backoff, 5, &metrics).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains(&format!("PID {}", std::process::id())),
+            "ceiling error should include holder identity: {err:#}"
         );
     }
 
