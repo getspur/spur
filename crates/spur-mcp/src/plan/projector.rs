@@ -236,7 +236,8 @@ pub fn current_delegation_from_audits(audits: &[AuditSentinelKind]) -> Option<St
 
 /// Tier-1 index-maintenance reconciler consumer: derive whether the current
 /// attempt is awaiting review from durable audit comments only.
-pub(crate) fn project_status_from_audits(audits: &[AuditSentinelKind]) -> PlanTaskStatus {
+#[doc(hidden)]
+pub fn project_status_from_audits(audits: &[AuditSentinelKind]) -> PlanTaskStatus {
     let mut status = PlanTaskStatus::Pending;
     let mut summary = None;
 
