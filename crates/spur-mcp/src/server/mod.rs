@@ -45,7 +45,9 @@ use crate::outcome_materializer::OutcomeMaterializer;
 use crate::plan::proposers::{
     CompositeProposer, RetryExhaustedProposer, ScopeDriftSplitProposer, TrivialScorer,
 };
-use crate::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
+use crate::plan::reconciler::{
+    Reconciler, ReconcilerConfig, ReconcilerDispatch, ReconcilerDispatchCtx,
+};
 use crate::plan::signal_watcher::SignalWatcher;
 use crate::tools::{self, DelegationChannel, DelegationRequest};
 
@@ -519,14 +521,14 @@ impl McpCallbackServer {
             .cloned()
             .expect("reconciler_enabled must retain a fast-forward notify");
 
-        let dispatch = ReconcilerDispatchCtx {
+        let dispatch = Arc::new(ReconcilerDispatchCtx {
             delegation_tx: self.delegation_tx.clone(),
             task_tracker: self.task_tracker.clone(),
             brain_session_id,
             event_sink: self.event_sink.clone(),
             materializer: Arc::new(self.materializer.clone()),
             continuation_ctx: Arc::clone(&self.continuation_ctx),
-        };
+        }) as Arc<dyn ReconcilerDispatch>;
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         info!("spawning plan reconciler (beads backend detected)");
         let auto_merge = self.auto_merge_approved_plans;

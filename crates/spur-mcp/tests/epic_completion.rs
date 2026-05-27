@@ -241,7 +241,7 @@ fn mock_reconciler(
         ReconcilerConfig::default(),
         pm_like,
         Arc::new(Notify::new()),
-        dispatch,
+        dispatch.map(ReconcilerDispatchCtx::into_dispatch),
         Some(plan_id.to_string()),
         common::server_builder::pro_feature_gate(),
     )
