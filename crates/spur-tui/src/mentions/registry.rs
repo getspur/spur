@@ -1054,6 +1054,7 @@ mod tests {
             &graph_artifact("parquet-file", "src/parquet.rs", "parquet-hash"),
             &root.join(".git/spur-graph/artifacts/test"),
             WriteOptions::default(),
+            Vec::new(),
         )
         .expect("write parquet artifact");
         write_current_pointer(root, &parquet_dir).expect("write CURRENT pointer");

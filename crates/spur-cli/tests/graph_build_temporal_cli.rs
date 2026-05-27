@@ -40,15 +40,19 @@ fn graph_build_with_temporal_writes_temporal_parquets_and_manifest_counts() {
         quiet: true,
         skip_analyst: true,
         with_temporal: true,
+        temporal_shard_config: spur_graph::TemporalShardConfig::default(),
     })
     .expect("graph build with temporal");
 
     let artifact_dir = single_parquet_artifact_dir(&output);
     assert!(artifact_dir.join("commits.parquet").is_file());
-    assert!(artifact_dir.join("symbol_snapshots.parquet").is_file());
-    assert!(artifact_dir.join("temporal_edges.parquet").is_file());
+    assert!(artifact_dir
+        .join("symbol_snapshots/00000.parquet")
+        .is_file());
+    assert!(artifact_dir.join("temporal_edges/00000.parquet").is_file());
 
     let manifest = read_artifact_header_parquet(&artifact_dir).expect("read manifest");
+    assert!(!manifest.temporal_shards.is_empty());
     assert!(
         manifest.row_counts.commits >= 2,
         "expected at least two commits, got {}",
@@ -89,13 +93,14 @@ fn graph_build_without_temporal_leaves_temporal_parquets_absent() {
         quiet: true,
         skip_analyst: true,
         with_temporal: false,
+        temporal_shard_config: spur_graph::TemporalShardConfig::default(),
     })
     .expect("graph build without temporal");
 
     let artifact_dir = single_parquet_artifact_dir(&output);
     assert!(!artifact_dir.join("commits.parquet").exists());
-    assert!(!artifact_dir.join("symbol_snapshots.parquet").exists());
-    assert!(!artifact_dir.join("temporal_edges.parquet").exists());
+    assert!(!artifact_dir.join("symbol_snapshots").exists());
+    assert!(!artifact_dir.join("temporal_edges").exists());
 
     let manifest = read_artifact_header_parquet(&artifact_dir).expect("read manifest");
     assert_eq!(manifest.row_counts.commits, 0);
