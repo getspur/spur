@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use spur_graph::store::cache::{
     emit_base_seed_stats, load_base_artifact_for_worktree, load_base_seed_for_worktree,
     lookup_canonical, write_with_dedup,
@@ -14,7 +16,7 @@ use spur_graph::{
     read_artifact_header_parquet, read_current_pointer, BuildMode, GraphIndexArtifact,
     GraphIndexPointer, SourceKind,
 };
-use tempfile::TempDir;
+use support::git_repo::{path_str, GitRepo};
 
 #[test]
 fn discovery_uses_git_when_available() {
@@ -593,48 +595,6 @@ fn crlf_bom_dirty_hash_is_bytewise() {
     );
 }
 
-struct GitRepo {
-    temp: TempDir,
-    root: PathBuf,
-}
-
-impl GitRepo {
-    fn new() -> Self {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("repo");
-        fs::create_dir(&root).expect("create repo dir");
-        run_git(&root, &["init"]);
-        run_git(
-            &root,
-            &["config", "user.email", "spur-graph@example.invalid"],
-        );
-        run_git(&root, &["config", "user.name", "Spur Graph Test"]);
-        Self { temp, root }
-    }
-
-    fn path(&self) -> &Path {
-        &self.root
-    }
-
-    fn write(&self, relative: &str, content: &str) {
-        let path = self.root.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("mkdir parent");
-        }
-        fs::write(path, content).expect("write file");
-    }
-
-    fn git(&self, args: &[&str]) {
-        run_git(&self.root, args);
-    }
-
-    fn head(&self) -> String {
-        git_stdout(&self.root, &["rev-parse", "HEAD"])
-            .trim_end()
-            .to_owned()
-    }
-}
-
 fn build_full(root: &Path) -> GraphIndexArtifact {
     let (facts, _counts) = build_facts(root, None).expect("build facts");
     artifact_from_facts(&facts, root).expect("build artifact")
@@ -717,41 +677,6 @@ fn git_hash_object(bytes: &[u8]) -> String {
         .expect("hash-object stdout UTF-8")
         .trim_end()
         .to_owned()
-}
-
-fn run_git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
-    assert!(
-        output.status.success(),
-        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn git_stdout(root: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
-    assert!(
-        output.status.success(),
-        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("git stdout UTF-8")
-}
-
-fn path_str(path: &Path) -> &str {
-    path.to_str().expect("path UTF-8")
 }
 
 type TraceLines = Arc<Mutex<Vec<String>>>;
