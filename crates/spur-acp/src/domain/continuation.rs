@@ -24,6 +24,8 @@ pub enum ContinuationSource {
     BlockTimeout,
     /// Worker reached `DelegationStatus::Cancelled` (INV-6).
     Cancelled,
+    /// `delegate_to_worker` or `delegate_parallel` completed inside the inline wait window.
+    Inline,
     /// `SpurEventBody::PlanTaskFailed` fired for a plan task the brain dispatched.
     PlanTaskFailed,
     /// `SpurEventBody::PlanTaskAwaitingReview` fired for a plan task the brain dispatched.
