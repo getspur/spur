@@ -45,6 +45,10 @@ libproc = "0.14"
 spur-acp = { path = ".", features = ["test-support"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
+[target.'cfg(madsim)'.dev-dependencies]
+madsim = "0.2"
+madsim-tokio = { version = "0.2", features = ["full", "test-util"] }
+
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }
 
