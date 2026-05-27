@@ -465,6 +465,7 @@ impl NativeAcpConnection {
 ///
 /// Benign races (ESRCH on an already-reaped group, EPERM on a recycled pgid)
 /// are intentionally ignored; shutdown and Drop paths are best-effort cleanup.
+#[allow(unsafe_code)] // libc::kill FFI for process-group signal delivery.
 fn killpg(pgid: i32, signal: &str) {
     #[cfg(unix)]
     {

@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc::getrusage + MaybeUninit::assume_init for bench RSS metrics.
+
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::OsString;

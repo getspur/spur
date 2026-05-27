@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc::getrusage + MaybeUninit::assume_init for perf gate RSS metrics.
+
 use std::cmp::Ordering;
 use std::env;
 use std::path::{Path, PathBuf};
