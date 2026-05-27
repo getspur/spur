@@ -39,7 +39,7 @@ impl super::Reconciler {
             let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
             if let Some(dispatch) = self.dispatch.as_ref() {
                 labels.push(crate::plan::labels::plan_owner(
-                    &dispatch.brain_session_id.as_session_id().0,
+                    &dispatch.brain_session_id().as_session_id().0,
                 ));
             }
             let epics = self

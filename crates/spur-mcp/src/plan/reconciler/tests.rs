@@ -23,6 +23,27 @@ fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
     gate
 }
 
+fn test_completion_dispatch(
+    task_tracker: tokio_util::task::TaskTracker,
+    brain_session_id: impl Into<String>,
+) -> ReconcilerDispatchCtx {
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    ReconcilerDispatchCtx {
+        delegation_tx,
+        task_tracker,
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId(
+            brain_session_id.into(),
+        )),
+        event_sink: None,
+        materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        )),
+        continuation_ctx: Arc::new(crate::server::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }),
+    }
+}
+
 fn projected_test_state(plan_id: &str) -> crate::plan::PlanState {
     crate::plan::PlanState {
         plan_id: plan_id.to_string(),
@@ -122,6 +143,7 @@ impl Visit for CompletionCollectorVisitor {
 async fn completion_collector_logs_panic_with_structured_context() {
     let captured = CapturedCompletionCollectorErrors::default();
     let tracker = tokio_util::task::TaskTracker::new();
+    let dispatch = test_completion_dispatch(tracker.clone(), "brain-panic");
     let context = CompletionCollectorLogContext {
         plan_id: "plan-panic".into(),
         task_id: "task-panic".into(),
@@ -131,7 +153,7 @@ async fn completion_collector_logs_panic_with_structured_context() {
     };
 
     let guard = tracing::subscriber::set_default(captured.clone());
-    spawn_completion_collector(&tracker, context, async {
+    spawn_completion_collector(&dispatch, context, async {
         panic!("H1 simulated completion collector panic");
     });
     tracker.close();
@@ -310,6 +332,7 @@ async fn completion_collector_project_timeout_abandons_snapshot_and_continuation
     });
     let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
     let tracker = tokio_util::task::TaskTracker::new();
+    let dispatch = test_completion_dispatch(tracker.clone(), brain_session_id.to_string());
     let context = CompletionCollectorLogContext {
         plan_id: plan_id.to_string(),
         task_id: task_id.to_string(),
@@ -319,7 +342,7 @@ async fn completion_collector_project_timeout_abandons_snapshot_and_continuation
     };
 
     let guard = tracing::subscriber::set_default(captured.clone());
-    spawn_completion_collector(&tracker, context, {
+    spawn_completion_collector(&dispatch, context, {
         let pm = Arc::clone(&pm);
         let feature_gate = Arc::clone(&feature_gate);
         let sink = Arc::clone(&sink);
@@ -328,6 +351,7 @@ async fn completion_collector_project_timeout_abandons_snapshot_and_continuation
         let brain_session_id = brain_session_id.clone();
         async move {
             project_completion_snapshot_and_deliver(
+                &SystemClock,
                 crate::plan::projector::project_plan_from_beads(
                     pm.as_ref(),
                     plan_id,
@@ -984,7 +1008,7 @@ async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_
         ReconcilerConfig::default(),
         scripted_pm,
         Arc::new(Notify::new()),
-        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
         None,
         pro_feature_gate(),
     );
@@ -1045,7 +1069,7 @@ async fn global_reconciler_skips_other_brain_plan_without_emitting_no_ready() {
         ReconcilerConfig::default(),
         scripted_pm,
         Arc::new(Notify::new()),
-        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
         None,
         pro_feature_gate(),
     );
@@ -1099,7 +1123,7 @@ async fn global_reconciler_status_reports_plans_enumerated_and_dispatched_per_ti
         ReconcilerConfig::default(),
         scripted_pm,
         Arc::new(Notify::new()),
-        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
         None,
         pro_feature_gate(),
     );
@@ -1129,7 +1153,7 @@ async fn global_reconciler_status_reports_tasks_dispatched_per_tick() {
         ReconcilerConfig::default(),
         scripted_pm,
         Arc::new(Notify::new()),
-        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
         None,
         pro_feature_gate(),
     );
@@ -1163,7 +1187,7 @@ async fn last_tick_counters_reset_between_ticks() {
         ReconcilerConfig::default(),
         scripted_pm,
         Arc::new(Notify::new()),
-        Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
         None,
         pro_feature_gate(),
     );
