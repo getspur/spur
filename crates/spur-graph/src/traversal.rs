@@ -92,8 +92,7 @@ impl CallerRecord<'_> {
 impl OwnedCalleeRecord {
     pub fn edge(&self) -> &GraphEdgeArtifact {
         match self {
-            OwnedCalleeRecord::Resolved { edge, .. }
-            | OwnedCalleeRecord::Unresolved { edge, .. } => edge,
+            Self::Resolved { edge, .. } | Self::Unresolved { edge, .. } => edge,
         }
     }
 
@@ -102,15 +101,14 @@ impl OwnedCalleeRecord {
     }
 
     pub fn is_resolved(&self) -> bool {
-        matches!(self, OwnedCalleeRecord::Resolved { .. })
+        matches!(self, Self::Resolved { .. })
     }
 }
 
 impl OwnedCallerRecord {
     pub fn edge(&self) -> &GraphEdgeArtifact {
         match self {
-            OwnedCallerRecord::Resolved { edge, .. }
-            | OwnedCallerRecord::Unresolved { edge, .. } => edge,
+            Self::Resolved { edge, .. } | Self::Unresolved { edge, .. } => edge,
         }
     }
 
@@ -119,18 +117,18 @@ impl OwnedCallerRecord {
     }
 
     pub fn is_resolved(&self) -> bool {
-        matches!(self, OwnedCallerRecord::Resolved { .. })
+        matches!(self, Self::Resolved { .. })
     }
 }
 
 impl From<CalleeRecord<'_>> for OwnedCalleeRecord {
     fn from(record: CalleeRecord<'_>) -> Self {
         match record {
-            CalleeRecord::Resolved { symbol, edge } => OwnedCalleeRecord::Resolved {
+            CalleeRecord::Resolved { symbol, edge } => Self::Resolved {
                 symbol: symbol.clone(),
                 edge: edge.clone(),
             },
-            CalleeRecord::Unresolved { edge, target_label } => OwnedCalleeRecord::Unresolved {
+            CalleeRecord::Unresolved { edge, target_label } => Self::Unresolved {
                 edge: edge.clone(),
                 target_label,
             },
@@ -141,7 +139,7 @@ impl From<CalleeRecord<'_>> for OwnedCalleeRecord {
 impl From<CallerRecord<'_>> for OwnedCallerRecord {
     fn from(record: CallerRecord<'_>) -> Self {
         match record {
-            CallerRecord::Resolved { caller, edge } => OwnedCallerRecord::Resolved {
+            CallerRecord::Resolved { caller, edge } => Self::Resolved {
                 caller: caller.clone(),
                 edge: edge.clone(),
             },
@@ -149,7 +147,7 @@ impl From<CallerRecord<'_>> for OwnedCallerRecord {
                 caller,
                 edge,
                 target_label,
-            } => OwnedCallerRecord::Unresolved {
+            } => Self::Unresolved {
                 caller: caller.clone(),
                 edge: edge.clone(),
                 target_label,
@@ -378,9 +376,9 @@ impl<'a, 'k> SubgraphTraversal<'a, 'k> {
             return;
         }
 
-        self.visited_nodes.insert(root_id.to_string());
+        self.visited_nodes.insert(root_id.to_owned());
         self.nodes.push(root);
-        self.queue.push_back((root_id.to_string(), 0));
+        self.queue.push_back((root_id.to_owned(), 0));
     }
 
     fn run(&mut self, radius: u8) {
@@ -466,9 +464,9 @@ impl<'a, 'k> SubgraphTraversal<'a, 'k> {
 
         self.visited_edges.insert(edge_index);
         self.edges.push(edge);
-        self.visited_nodes.insert(neighbor_id.to_string());
+        self.visited_nodes.insert(neighbor_id.to_owned());
         self.nodes.push(symbol);
-        self.queue.push_back((neighbor_id.to_string(), depth));
+        self.queue.push_back((neighbor_id.to_owned(), depth));
     }
 
     fn try_add_edge(&mut self, edge_index: usize, edge: &'a GraphEdgeArtifact) -> bool {
@@ -499,8 +497,8 @@ impl<'a, 'k> SubgraphTraversal<'a, 'k> {
         if self.visited_nodes.contains(symbol_id) {
             return;
         }
-        if self.frontier_seen.insert(symbol_id.to_string()) {
-            self.truncated_frontier.push(symbol_id.to_string());
+        if self.frontier_seen.insert(symbol_id.to_owned()) {
+            self.truncated_frontier.push(symbol_id.to_owned());
         }
     }
 
@@ -557,13 +555,13 @@ mod tests {
 
     fn symbol(id: &str) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
-            stable_symbol_id: id.to_string(),
+            stable_symbol_id: id.to_owned(),
             file_path: format!("src/{id}.rs"),
             byte_range: [0, 8],
             line_range: [1, 1],
-            entity_name: id.to_string(),
-            qualified_name: id.to_string(),
-            symbol_kind: "function".to_string(),
+            entity_name: id.to_owned(),
+            qualified_name: id.to_owned(),
+            symbol_kind: "function".to_owned(),
             anchor_hash: format!("hash-{id}"),
             enclosing_scope: None,
         }
@@ -580,8 +578,8 @@ mod tests {
         edge_kind: Option<GraphEdgeKind>,
     ) -> GraphEdgeArtifact {
         GraphEdgeArtifact {
-            source_stable_symbol_id: source.to_string(),
-            target_stable_symbol_id: Some(target.to_string()),
+            source_stable_symbol_id: source.to_owned(),
+            target_stable_symbol_id: Some(target.to_owned()),
             target_label: None,
             relation,
             confidence: Confidence::SyntaxExact,
@@ -594,9 +592,9 @@ mod tests {
 
     fn unresolved_call_edge(source: &str, target_label: &str) -> GraphEdgeArtifact {
         GraphEdgeArtifact {
-            source_stable_symbol_id: source.to_string(),
+            source_stable_symbol_id: source.to_owned(),
             target_stable_symbol_id: None,
-            target_label: Some(target_label.to_string()),
+            target_label: Some(target_label.to_owned()),
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
@@ -609,11 +607,11 @@ mod tests {
     fn artifact() -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -650,11 +648,11 @@ mod tests {
 
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -709,11 +707,11 @@ mod tests {
     fn callee_edges_include_unresolved_target_labels() {
         let mut artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -748,7 +746,7 @@ mod tests {
             callees[1],
             CalleeRecord::Unresolved {
                 edge: &artifact.edges[1],
-                target_label: "into".to_string()
+                target_label: "into".to_owned()
             }
         );
         assert!(matches!(
@@ -849,11 +847,11 @@ mod tests {
     fn edge_budget_exhaustion_does_not_frontier_returned_nodes() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -965,11 +963,11 @@ mod tests {
     fn subgraph_filters_outgoing_unresolved_edges_by_default() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -1001,11 +999,11 @@ mod tests {
     fn subgraph_can_include_outgoing_unresolved_edges_without_enqueueing_neighbor() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -1040,11 +1038,11 @@ mod tests {
     fn subgraph_can_include_incoming_unresolved_caller_edges() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -1088,11 +1086,11 @@ mod tests {
     fn unresolved_edge_does_not_advance_radius_depth() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -1118,11 +1116,11 @@ mod tests {
     fn callers_and_callees_include_references_edges() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -1147,11 +1145,11 @@ mod tests {
     fn subgraph_edge_kind_filter_is_strict_for_static_calls() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -1211,11 +1209,11 @@ mod tests {
     fn caller_and_callee_records_carry_edge_kind_for_all_public_values() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),

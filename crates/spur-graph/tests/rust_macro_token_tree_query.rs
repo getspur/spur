@@ -1,6 +1,6 @@
-use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator as _};
 
-const PROPOSED_QUERY: &str = r#"
+const PROPOSED_QUERY: &str = r"
 (token_tree
   (identifier) @call.name
   .
@@ -11,7 +11,7 @@ const PROPOSED_QUERY: &str = r#"
     name: (identifier) @call.name)
   .
   (token_tree)) @call
-"#;
+";
 
 const PARENTHESIZED_ARG_QUERY: &str = r#"
 (token_tree
@@ -47,7 +47,7 @@ fn capture_texts(query_source: &str, source: &str, capture_name: &str) -> Vec<St
                     .node
                     .utf8_text(source.as_bytes())
                     .expect("capture text")
-                    .to_string(),
+                    .to_owned(),
             );
         }
     }
@@ -65,8 +65,8 @@ fn proposed_macro_token_tree_query_captures_macro_body_calls() {
 
     let names = call_names(PROPOSED_QUERY, source);
 
-    assert!(names.contains(&"mermaid_subgraph".to_string()));
-    assert!(names.contains(&"bar".to_string()));
+    assert!(names.contains(&"mermaid_subgraph".to_owned()));
+    assert!(names.contains(&"bar".to_owned()));
 }
 
 #[test]
@@ -75,11 +75,11 @@ fn parenthesized_arg_query_filters_common_macro_token_false_positives() {
 
     let names = call_names(PARENTHESIZED_ARG_QUERY, source);
 
-    assert!(names.contains(&"mermaid_subgraph".to_string()));
-    assert!(names.contains(&"Some".to_string()));
-    assert!(!names.contains(&"out".to_string()));
-    assert!(!names.contains(&"else".to_string()));
-    assert!(!names.contains(&"InspectPlan".to_string()));
+    assert!(names.contains(&"mermaid_subgraph".to_owned()));
+    assert!(names.contains(&"Some".to_owned()));
+    assert!(!names.contains(&"out".to_owned()));
+    assert!(!names.contains(&"else".to_owned()));
+    assert!(!names.contains(&"InspectPlan".to_owned()));
 }
 
 #[test]
@@ -88,6 +88,6 @@ fn rust_spur_edges_query_marks_macro_body_calls_with_macro_capture_names() {
 
     let names = capture_texts(SPUR_EDGES_QUERY, source, "macro_call.name");
 
-    assert!(names.contains(&"mermaid_subgraph".to_string()));
-    assert!(names.contains(&"bar".to_string()));
+    assert!(names.contains(&"mermaid_subgraph".to_owned()));
+    assert!(names.contains(&"bar".to_owned()));
 }

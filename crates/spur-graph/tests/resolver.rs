@@ -127,15 +127,15 @@ fn bare_as_ref_call_does_not_bind_to_singleton_gitpath_trait_method() {
     let artifact = artifact_from_sources(&[
         (
             "crates/caller/src/lib.rs",
-            r#"
+            r"
 pub fn caller(bytes: &[u8]) {
     let _ = bytes.as_ref();
 }
-"#,
+",
         ),
         (
             "crates/git-path/src/lib.rs",
-            r#"
+            r"
 pub struct GitPath(Vec<u8>);
 
 impl AsRef<[u8]> for GitPath {
@@ -143,7 +143,7 @@ impl AsRef<[u8]> for GitPath {
         &self.0
     }
 }
-"#,
+",
         ),
     ]);
     let caller = symbol(&artifact, "caller");
@@ -158,7 +158,7 @@ impl AsRef<[u8]> for GitPath {
 fn explicitly_scoped_gitpath_as_ref_binds_to_matching_impl_scope() {
     let artifact = artifact_from_sources(&[(
         "src/lib.rs",
-        r#"
+        r"
 pub struct GitPath(Vec<u8>);
 
 impl AsRef<[u8]> for GitPath {
@@ -170,7 +170,7 @@ impl AsRef<[u8]> for GitPath {
 pub fn caller(path: &GitPath) -> &[u8] {
     <GitPath as AsRef<[u8]>>::as_ref(path)
 }
-"#,
+",
     )]);
     let caller = symbol(&artifact, "caller");
     let as_ref = symbol(&artifact, "impl AsRef<[u8]> for GitPath::as_ref");
@@ -188,7 +188,7 @@ pub fn caller(path: &GitPath) -> &[u8] {
 fn typed_gitpath_receiver_as_ref_binds_to_matching_impl_scope() {
     let artifact = artifact_from_sources(&[(
         "src/lib.rs",
-        r#"
+        r"
 pub struct GitPath(Vec<u8>);
 
 impl AsRef<[u8]> for GitPath {
@@ -200,7 +200,7 @@ impl AsRef<[u8]> for GitPath {
 pub fn caller(path: &GitPath) -> &[u8] {
     path.as_ref()
 }
-"#,
+",
     )]);
     let caller = symbol(&artifact, "caller");
     let as_ref = symbol(&artifact, "impl AsRef<[u8]> for GitPath::as_ref");
@@ -219,23 +219,23 @@ fn bare_lock_call_does_not_bind_to_unrelated_singleton_method() {
     let artifact = artifact_from_sources(&[
         (
             "crates/caller/src/lib.rs",
-            r#"
+            r"
 use std::sync::Mutex;
 
 pub fn caller(mutex: &Mutex<u8>) {
     let _guard = mutex.lock();
 }
-"#,
+",
         ),
         (
             "crates/local-lock/src/lib.rs",
-            r#"
+            r"
 pub struct LocalLock;
 
 impl LocalLock {
     pub fn lock(&self) {}
 }
-"#,
+",
         ),
     ]);
     let caller = symbol(&artifact, "caller");
@@ -250,13 +250,13 @@ impl LocalLock {
 fn bare_free_function_singleton_still_resolves() {
     let artifact = artifact_from_sources(&[(
         "src/lib.rs",
-        r#"
+        r"
 pub fn caller() {
     helper();
 }
 
 fn helper() {}
-"#,
+",
     )]);
     let caller = symbol(&artifact, "caller");
     let helper = symbol(&artifact, "helper");
@@ -450,11 +450,11 @@ fn write_pointer_file(worktree: &Path, canonical_artifact_path: &Path) {
     let pointer_path = worktree.join(".spur/graph-index.pointer.json");
     fs::create_dir_all(pointer_path.parent().expect("pointer parent")).expect("mkdir .spur");
     let pointer = GraphIndexPointer {
-        schema: "spur-graph-pointer-v1".to_string(),
-        graph_content_hash: "pointer-hash".to_string(),
-        manifest_version: "manifest-test".to_string(),
+        schema: "spur-graph-pointer-v1".to_owned(),
+        graph_content_hash: "pointer-hash".to_owned(),
+        manifest_version: "manifest-test".to_owned(),
         source_kind: SourceKind::Git,
-        indexed_commit_oid: Some("test-head".to_string()),
+        indexed_commit_oid: Some("test-head".to_owned()),
         canonical_artifact_path: canonical_artifact_path.to_path_buf(),
     };
     fs::write(

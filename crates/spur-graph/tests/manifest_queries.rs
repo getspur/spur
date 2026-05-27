@@ -84,7 +84,7 @@ fn query_paths_from_source(source: &str, macro_name: &str) -> BTreeSet<String> {
             break;
         };
         if let Some(path) = normalize_query_include(&remaining[..end]) {
-            paths.insert(path.to_string());
+            paths.insert(path.to_owned());
         }
         remaining = &remaining[end + 1..];
     }
