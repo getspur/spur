@@ -573,6 +573,7 @@ mod tests {
             &graph_artifact("file-1", "src/main.rs", "hash-same"),
             temp.path(),
             WriteOptions::default(),
+            Vec::new(),
         )
         .expect("write parquet artifact");
         let mut source = CodeGraphMentionSource::new(&parquet_dir);

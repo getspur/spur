@@ -136,10 +136,10 @@ fn find_symbol_json<'a>(
 }
 
 #[test]
-fn graph_store_schema_version_is_v6() {
+fn graph_store_schema_version_is_v7() {
     assert_eq!(
         spur_graph::store::build::SCHEMA_VERSION,
-        "spur-graph-schema-v6"
+        "spur-graph-schema-v7"
     );
 }
 
@@ -1152,7 +1152,7 @@ fn artifact_writer_round_trips_through_existing_reader() {
     let facts = build_facts(&root, None).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_artifact_parquet(&artifact, dir.path(), WriteOptions::default())
+    let path = write_artifact_parquet(&artifact, dir.path(), WriteOptions::default(), Vec::new())
         .expect("write parquet artifact");
 
     let loaded = load_artifact(&path).expect("existing reader loads writer output");
