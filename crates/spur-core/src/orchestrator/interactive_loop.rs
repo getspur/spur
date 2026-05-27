@@ -1675,7 +1675,7 @@ mod list_sessions_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
-            unimplemented!("NonProgressingCursorConnection: initialize")
+            panic!("NonProgressingCursorConnection::initialize must not be called")
         }
 
         async fn new_session(
@@ -1683,7 +1683,7 @@ mod list_sessions_tests {
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
         ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
-            unimplemented!("NonProgressingCursorConnection: new_session")
+            panic!("NonProgressingCursorConnection::new_session must not be called")
         }
 
         async fn prompt(
@@ -1736,7 +1736,7 @@ mod list_sessions_tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
-            unimplemented!("TwoPhaseConnection: initialize")
+            panic!("TwoPhaseConnection::initialize must not be called")
         }
 
         async fn new_session(
@@ -1744,7 +1744,7 @@ mod list_sessions_tests {
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
         ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
-            unimplemented!("TwoPhaseConnection: new_session")
+            panic!("TwoPhaseConnection::new_session must not be called")
         }
 
         async fn prompt(
