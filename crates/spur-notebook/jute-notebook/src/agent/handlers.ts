@@ -7,6 +7,7 @@ import {
   AgentHandlerError,
   type AgentInsertCell,
   type AgentReadCell,
+  type AgentSetCellMetadata,
   type AgentSnapshotCell,
   type AgentWriteCell,
 } from "./types";
@@ -35,10 +36,12 @@ export async function dispatchAgentRequest(
       return writeCell(requireNotebook(notebook), request.params);
     case "notebook.delete_cell":
       return deleteCell(requireNotebook(notebook), request.params);
+    case "notebook.set_cell_metadata":
+      return setCellMetadata(requireNotebook(notebook), request.params);
     default:
       throw new AgentHandlerError(
         "unknown_method",
-        `Unknown notebook agent method: ${request.method}`,
+        `Unknown notebook agent method: ${(request as { method: string }).method}`,
       );
   }
 }
@@ -147,6 +150,40 @@ function deleteCell(notebook: Notebook, params: unknown): AgentDeleteCell {
 
   notebook.deleteCell(id);
   return { deleted: true };
+}
+
+function setCellMetadata(
+  notebook: Notebook,
+  params: AgentSetCellMetadata,
+): { ok: true; version: number } {
+  const { id, patch, expected_version } = params;
+  if (!id || typeof patch !== "object" || patch === null) {
+    throw new AgentHandlerError(
+      "invalid_params",
+      "notebook.set_cell_metadata requires { id, patch, expected_version }",
+    );
+  }
+  if (!Number.isInteger(expected_version) || expected_version < 1) {
+    throw new AgentHandlerError(
+      "invalid_params",
+      "notebook.set_cell_metadata expected_version must be >= 1",
+    );
+  }
+
+  // Atomic check + mutation: NO await between these two lines.
+  const cell = notebook.getCellSnapshotById(id);
+  if (!cell) {
+    throw new AgentHandlerError("cell_not_found", `cell ${id} not found`);
+  }
+  const currentVersion = cell.metadata?.spur?.version ?? 0;
+  if (currentVersion !== expected_version) {
+    throw new AgentHandlerError(
+      "stale_version",
+      `expected version ${expected_version}, actual ${currentVersion}`,
+    );
+  }
+  const nextVersion = notebook.mergeCellJuteDeckMetadata(id, patch);
+  return { ok: true, version: nextVersion };
 }
 
 function readCellId(params: unknown): string {
