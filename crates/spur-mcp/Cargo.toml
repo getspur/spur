@@ -43,6 +43,7 @@ test-support = []
 [dev-dependencies]
 agent-client-protocol = { workspace = true }
 proptest = { workspace = true }
+proptest-state-machine = "0.8"
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 spur-blob-store = { workspace = true, features = ["test-support"] }
