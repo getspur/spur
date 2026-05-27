@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context as _};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitCtx {
@@ -38,7 +38,7 @@ pub fn detect(worktree_root: &Path) -> Option<GitCtx> {
 }
 
 pub fn rev_parse_head(root: &Path) -> anyhow::Result<String> {
-    git_stdout(root, &["rev-parse", "HEAD"]).map(|out| out.trim_end().to_string())
+    git_stdout(root, &["rev-parse", "HEAD"]).map(|out| out.trim_end().to_owned())
 }
 
 pub fn rev_parse_common_dir(root: &Path) -> anyhow::Result<PathBuf> {
@@ -89,14 +89,14 @@ pub fn ls_files_with_oids(root: &Path) -> anyhow::Result<Vec<TrackedEntry>> {
         let content_oid = if is_gitlink {
             format!("gitlink:{oid}")
         } else {
-            oid.to_string()
+            oid.to_owned()
         };
         by_path.insert(
-            path.to_string(),
+            path.to_owned(),
             TrackedEntry {
-                path: path.to_string(),
-                oid: oid.to_string(),
-                mode: mode.to_string(),
+                path: path.to_owned(),
+                oid: oid.to_owned(),
+                mode: mode.to_owned(),
                 content_oid,
                 is_gitlink,
             },
@@ -150,7 +150,7 @@ fn sparse_paths(root: &Path) -> anyhow::Result<BTreeSet<String>> {
         let record =
             std::str::from_utf8(record).context("git ls-files -t emitted non-UTF-8 path")?;
         if let Some(path) = record.strip_prefix("S ") {
-            paths.insert(path.to_string());
+            paths.insert(path.to_owned());
         }
     }
     Ok(paths)
@@ -313,6 +313,6 @@ mod tests {
         String::from_utf8(output.stdout)
             .expect("branch name UTF-8")
             .trim_end()
-            .to_string()
+            .to_owned()
     }
 }

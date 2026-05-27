@@ -108,7 +108,7 @@ fn emit_sections<'tree>(
     sections
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn emit_markdown_links(
     builder: &mut FactBuilder<'_>,
     config: &LanguageConfig,
@@ -179,7 +179,7 @@ fn emit_markdown_links(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn emit_markdown_block_links(
     builder: &mut FactBuilder<'_>,
     config: &LanguageConfig,
@@ -253,7 +253,7 @@ fn source_section_for_inline(
 fn normalize_link_target(target: &str, relative_path: &str) -> Option<String> {
     let mut normalized = target.trim();
     if normalized.starts_with('#') {
-        return Some(relative_path.to_string());
+        return Some(relative_path.to_owned());
     }
     if let Some(inner) = normalized
         .strip_prefix('<')
@@ -275,7 +275,7 @@ fn normalize_link_target(target: &str, relative_path: &str) -> Option<String> {
     if normalized.is_empty() {
         None
     } else {
-        Some(normalized.to_string())
+        Some(normalized.to_owned())
     }
 }
 
@@ -329,7 +329,7 @@ fn heading_level(node: Node<'_>) -> Option<usize> {
 
 fn scoped_name(prefix: &str, label: &str) -> String {
     if prefix.is_empty() {
-        label.to_string()
+        label.to_owned()
     } else {
         format!("{prefix}::{label}")
     }
@@ -348,7 +348,7 @@ fn contained_capture_text(
                 && capture.pattern_index == parent.pattern_index
                 && capture.match_index == parent.match_index
         })
-        .map(|capture| child_text(capture.node, source).trim().to_string())
+        .map(|capture| child_text(capture.node, source).trim().to_owned())
         .filter(|text| !text.is_empty())
         .collect()
 }
@@ -356,5 +356,5 @@ fn contained_capture_text(
 fn child_text(node: Node<'_>, source: &str) -> String {
     node.utf8_text(source.as_bytes())
         .unwrap_or_default()
-        .to_string()
+        .to_owned()
 }

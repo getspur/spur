@@ -5,7 +5,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context as _};
 use serde::{Deserialize, Serialize};
 
 use crate::{EdgeId, EvidenceId, FileId, NodeId, RunId, SpanId};
@@ -187,7 +187,7 @@ pub struct GraphEdgeArtifact {
     pub bind_method: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
     pub node_id: NodeId,
@@ -255,23 +255,23 @@ pub enum NodeKind {
 impl NodeKind {
     pub fn discriminator(&self) -> &'static str {
         match self {
-            NodeKind::File => "file",
-            NodeKind::Module => "module",
-            NodeKind::Function => "function",
-            NodeKind::Class => "class",
-            NodeKind::Interface => "interface",
-            NodeKind::Method => "method",
-            NodeKind::Struct => "struct",
-            NodeKind::Enum => "enum",
-            NodeKind::Trait => "trait",
-            NodeKind::Impl => "impl",
-            NodeKind::Field => "field",
-            NodeKind::Constant => "constant",
-            NodeKind::TypeAlias => "type_alias",
-            NodeKind::Macro => "macro",
-            NodeKind::Section => "section",
-            NodeKind::Commit => "commit",
-            NodeKind::McpTool => "mcp_tool",
+            Self::File => "file",
+            Self::Module => "module",
+            Self::Function => "function",
+            Self::Class => "class",
+            Self::Interface => "interface",
+            Self::Method => "method",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Trait => "trait",
+            Self::Impl => "impl",
+            Self::Field => "field",
+            Self::Constant => "constant",
+            Self::TypeAlias => "type_alias",
+            Self::Macro => "macro",
+            Self::Section => "section",
+            Self::Commit => "commit",
+            Self::McpTool => "mcp_tool",
         }
     }
 }
@@ -425,16 +425,15 @@ impl Serialize for GitPath {
     where
         S: serde::Serializer,
     {
-        match std::str::from_utf8(&self.0) {
-            Ok(path) => serializer.serialize_str(path),
-            Err(_) => {
-                use serde::ser::SerializeStruct;
+        if let Ok(path) = std::str::from_utf8(&self.0) {
+            serializer.serialize_str(path)
+        } else {
+            use serde::ser::SerializeStruct as _;
 
-                let mut state = serializer.serialize_struct("GitPath", 2)?;
-                state.serialize_field("encoding", "base64")?;
-                state.serialize_field("bytes", &base64_encode(&self.0))?;
-                state.end()
-            }
+            let mut state = serializer.serialize_struct("GitPath", 2)?;
+            state.serialize_field("encoding", "base64")?;
+            state.serialize_field("bytes", &base64_encode(&self.0))?;
+            state.end()
         }
     }
 }
@@ -527,7 +526,7 @@ impl fmt::Display for GitPathDisplay<'_> {
 
 #[cfg(unix)]
 fn git_bytes_from_path(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::OsStrExt as _;
 
     path.as_os_str().as_bytes().to_vec()
 }
@@ -539,7 +538,7 @@ fn git_bytes_from_path(path: &Path) -> Vec<u8> {
 
 #[cfg(unix)]
 fn pathbuf_from_git_bytes(path: &[u8]) -> PathBuf {
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::OsStrExt as _;
 
     PathBuf::from(std::ffi::OsStr::from_bytes(path))
 }
@@ -580,19 +579,19 @@ fn base64_encode(bytes: &[u8]) -> String {
 fn base64_decode(encoded: &str) -> Result<Vec<u8>, String> {
     let bytes = encoded.as_bytes();
     if !bytes.len().is_multiple_of(4) {
-        return Err("base64 length must be a multiple of 4".to_string());
+        return Err("base64 length must be a multiple of 4".to_owned());
     }
 
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
     for chunk in bytes.chunks(4) {
         if chunk[0] == b'=' || chunk[1] == b'=' {
-            return Err("base64 padding cannot appear in the first two positions".to_string());
+            return Err("base64 padding cannot appear in the first two positions".to_owned());
         }
         let padding = match (chunk[2] == b'=', chunk[3] == b'=') {
             (false, false) => 0,
             (false, true) => 1,
             (true, true) => 2,
-            (true, false) => return Err("base64 padding must be contiguous".to_string()),
+            (true, false) => return Err("base64 padding must be contiguous".to_owned()),
         };
 
         let v0 = base64_value(chunk[0])?;
@@ -707,7 +706,7 @@ pub enum EdgeEndpoint {
     Commit { sha: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TemporalEdgeArtifact {
     pub source: EdgeEndpoint,
@@ -786,7 +785,7 @@ fn load_legacy_json(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
 /// Reads only the top-level graph index header from an artifact file.
 ///
 /// This intentionally avoids allocating large artifact arrays such as `files`
-/// and `symbols` in memory, but still parses the full JSON stream (O(file_size)
+/// and `symbols` in memory, but still parses the full JSON stream (`O(file_size)`
 /// I/O/CPU) to reach the header field.
 pub fn read_artifact_header(path: &Path) -> anyhow::Result<GraphIndexHeader> {
     #[derive(Deserialize)]
@@ -939,7 +938,7 @@ fn legacy_snapshot_identity_segment(snapshot: &SymbolSnapshotArtifact) -> String
         .entity_name
         .strip_prefix("impl ")
         .unwrap_or(&snapshot.entity_name)
-        .to_string()
+        .to_owned()
 }
 
 fn legacy_snapshot_scope_segment(snapshot: &SymbolSnapshotArtifact) -> String {
@@ -955,20 +954,20 @@ fn legacy_snapshot_scope_segment(snapshot: &SymbolSnapshotArtifact) -> String {
             .entity_name
             .strip_prefix("impl ")
             .unwrap_or(&snapshot.entity_name)
-            .to_string(),
+            .to_owned(),
     }
 }
 
 pub fn file_id_from_uri(uri: &str) -> String {
     uri.strip_prefix(CODE_FILE_URI_PREFIX)
         .unwrap_or(uri)
-        .to_string()
+        .to_owned()
 }
 
 pub fn symbol_id_from_uri(uri: &str) -> String {
     uri.strip_prefix(CODE_SYMBOL_URI_PREFIX)
         .unwrap_or(uri)
-        .to_string()
+        .to_owned()
 }
 
 fn deduplicate_symbols(artifact: &mut GraphIndexArtifact) {
@@ -1057,17 +1056,17 @@ mod temporal_artifact_tests {
     fn symbol_snapshot_round_trips() {
         let s = SymbolSnapshotArtifact {
             key: SnapshotKey {
-                stable_symbol_id: "graph://symbol/foo".to_string(),
-                commit: "abc123".to_string(),
+                stable_symbol_id: "graph://symbol/foo".to_owned(),
+                commit: "abc123".to_owned(),
             },
             file_path: "src/lib.rs".into(),
-            entity_name: "foo".to_string(),
-            symbol_kind: "function".to_string(),
+            entity_name: "foo".to_owned(),
+            symbol_kind: "function".to_owned(),
             enclosing_scope: None,
             byte_range: [0, 42],
             line_range: [1, 5],
-            anchor_hash: "deadbeef".to_string(),
-            tokens: vec!["foo".to_string()],
+            anchor_hash: "deadbeef".to_owned(),
+            tokens: vec!["foo".to_owned()],
         };
         let j = serde_json::to_string(&s).unwrap();
         let back: SymbolSnapshotArtifact = serde_json::from_str(&j).unwrap();

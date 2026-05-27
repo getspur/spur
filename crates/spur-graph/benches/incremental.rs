@@ -596,7 +596,7 @@ fn bench_full_walk_1k(c: &mut Criterion) {
                 commits.commits.len(),
                 shas.len(),
             ));
-        })
+        });
     });
 }
 
@@ -631,7 +631,7 @@ fn bench_full_walk_20k_merges(c: &mut Criterion) {
                 metrics.peak_rss_bytes,
             ));
             *latest_measurement.lock().expect("full walk measurement") = Some(metrics);
-        })
+        });
     });
     let metrics = latest_measurement
         .lock()
@@ -660,7 +660,7 @@ fn bench_history_walk_50k_snapshots(c: &mut Criterion) {
                 black_box(&commits),
                 black_box(&target_symbol),
             ))
-        })
+        });
     });
 }
 
@@ -687,7 +687,7 @@ fn bench_resolve_symbol_at(c: &mut Criterion) {
                 black_box(&anchor),
                 black_box(&target),
             ))
-        })
+        });
     });
     group.bench_function("indexed", |b| {
         b.iter(|| {
@@ -698,7 +698,7 @@ fn bench_resolve_symbol_at(c: &mut Criterion) {
                 black_box(&anchor),
                 black_box(&target),
             ))
-        })
+        });
     });
     group.finish();
 }
@@ -842,7 +842,7 @@ fn full_walk_20k_budget_violations(metrics: &FullWalkMeasurement) -> Vec<String>
             fmt_bytes(peak_rss_limit)
         )),
         Some(_) => {}
-        None => violations.push("peak RSS unavailable on this platform".to_string()),
+        None => violations.push("peak RSS unavailable on this platform".to_owned()),
     }
 
     if metrics.artifact_bytes > artifact_limit {
@@ -872,7 +872,7 @@ fn print_full_walk_measurement(bench_name: &str, metrics: &FullWalkMeasurement) 
         metrics
             .peak_rss_bytes
             .map(fmt_bytes)
-            .unwrap_or_else(|| "unavailable".to_string())
+            .unwrap_or_else(|| "unavailable".to_owned())
     );
 }
 
@@ -986,7 +986,7 @@ fn synthetic_history_artifact(
         temporal_edges: Vec::with_capacity(snapshot_count),
     };
     let mut commits = Vec::with_capacity(snapshot_count);
-    let target_symbol = "history-target".to_string();
+    let target_symbol = "history-target".to_owned();
     let mut previous_sha: Option<String> = None;
 
     for index in 0..snapshot_count {
@@ -1078,7 +1078,7 @@ fn synthetic_resolve_artifact(
         temporal_edges: Vec::with_capacity(snapshot_count + target_chain_len),
     };
     let mut commits = Vec::with_capacity(snapshot_count);
-    let initial_symbol = "resolve-target-r000".to_string();
+    let initial_symbol = "resolve-target-r000".to_owned();
     let mut previous_sha: Option<String> = None;
     let mut previous_target_key: Option<SnapshotKey> = None;
     let mut anchor = String::new();
@@ -1508,8 +1508,7 @@ fn snapshot_growth_budget() {
     );
     assert!(
         ratio <= 1.5 * commit_ratio,
-        "snapshot growth {} > 1.5x/{commit_ratio:.1}x budget; needs sharded persistence before merge",
-        ratio
+        "snapshot growth {ratio} > 1.5x/{commit_ratio:.1}x budget; needs sharded persistence before merge"
     );
 }
 

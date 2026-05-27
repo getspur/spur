@@ -373,7 +373,7 @@ impl TemporalEdgeArtifactBuilder {
     ) -> spur_graph::schema::TemporalEdgeArtifact {
         spur_graph::schema::TemporalEdgeArtifact {
             source: EdgeEndpoint::Commit {
-                sha: commit.to_string(),
+                sha: commit.to_owned(),
             },
             target: EdgeEndpoint::Snapshot { key },
             relation: RelationKind::Touches,
@@ -454,7 +454,7 @@ fn rev_parse(dir: &Path, rev: &str) -> String {
         "git rev-parse {rev} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap().trim().to_string()
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn git(dir: &Path, args: &[&str]) {

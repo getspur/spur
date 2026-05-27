@@ -146,11 +146,7 @@ fn compare_exact(left: &SearchSymbol, right: &SearchSymbol, query: &str) -> Orde
 }
 
 fn exact_rank(symbol: &SearchSymbol, query: &str) -> u8 {
-    if symbol.entity_name == query {
-        0
-    } else {
-        1
-    }
+    u8::from(symbol.entity_name != query)
 }
 
 fn compare_prefix(left: &SearchSymbol, right: &SearchSymbol) -> Ordering {
@@ -205,11 +201,11 @@ mod tests {
 
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files,
             file_node_ids: Vec::new(),
@@ -233,13 +229,13 @@ mod tests {
         symbol_kind: &str,
     ) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
-            stable_symbol_id: id.to_string(),
-            file_path: file_path.to_string(),
+            stable_symbol_id: id.to_owned(),
+            file_path: file_path.to_owned(),
             byte_range: [0, 8],
             line_range,
-            entity_name: entity_name.to_string(),
-            qualified_name: qualified_name.to_string(),
-            symbol_kind: symbol_kind.to_string(),
+            entity_name: entity_name.to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            symbol_kind: symbol_kind.to_owned(),
             anchor_hash: format!("hash-{id}"),
             enclosing_scope: None,
         }
@@ -247,7 +243,7 @@ mod tests {
 
     fn options(query: &str, mode: SearchMode) -> SearchOptions {
         SearchOptions {
-            query: query.to_string(),
+            query: query.to_owned(),
             mode,
             filters: SearchFilters::default(),
             limit: 20,
@@ -395,7 +391,7 @@ mod tests {
             ),
         ]);
         let mut options = options("submit", SearchMode::Substring);
-        options.filters.symbol_kind = Some("mcp_tool".to_string());
+        options.filters.symbol_kind = Some("mcp_tool".to_owned());
 
         let result = search_symbols(&artifact, &options);
 
@@ -424,7 +420,7 @@ mod tests {
             ),
         ]);
         let mut options = options("run", SearchMode::Substring);
-        options.filters.file = Some("src/b.rs".to_string());
+        options.filters.file = Some("src/b.rs".to_owned());
 
         let result = search_symbols(&artifact, &options);
 
@@ -461,7 +457,7 @@ mod tests {
             ),
         ]);
         let mut options = options("run", SearchMode::Substring);
-        options.filters.file_glob = Some("crates/foo/**/*.rs".to_string());
+        options.filters.file_glob = Some("crates/foo/**/*.rs".to_owned());
 
         let result = search_symbols(&artifact, &options);
 

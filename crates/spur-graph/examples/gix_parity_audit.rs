@@ -3,12 +3,12 @@
 //! HEAD in a target repository.
 //!
 //! Run with:
-//!   cargo run -p spur-graph --example gix_parity_audit -- /path/to/repo
+//!   cargo run -p spur-graph --example `gix_parity_audit` -- /path/to/repo
 //!
 //! Outputs:
 //!   - stdout: per-1k-commits progress and the final summary
-//!   - <repo>/.spur/gix_parity_report.json (machine-readable)
-//!   - <repo>/.spur/gix_parity_report.md  (human-readable summary)
+//!   - <repo>/.`spur/gix_parity_report.json` (machine-readable)
+//!   - <repo>/.`spur/gix_parity_report.md`  (human-readable summary)
 //!
 //! gix feature notes:
 //! - `revision` is kept from the migration spike request for commit APIs.
@@ -27,7 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context as _, Result};
 use gix::object::tree::diff::{Action, Change};
 use gix::objs::tree::EntryMode;
 use serde::Serialize;
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
 
     let head = git_stdout(&repo_path, &["rev-parse", "HEAD"])?
         .trim()
-        .to_string();
+        .to_owned();
     let commits = list_commits(&repo_path)?;
     println!(
         "auditing {} commits in {} at HEAD {}",
@@ -257,7 +257,7 @@ fn gix_root_commit_changes(commit: &gix::Commit<'_>) -> Result<Vec<FileChange>> 
 }
 
 fn gix_change_to_file_change(change: Change<'_, '_, '_>, parent_sha: &str) -> Option<FileChange> {
-    let parent_sha = Some(parent_sha.to_string());
+    let parent_sha = Some(parent_sha.to_owned());
     match change {
         Change::Addition {
             location,
@@ -1061,9 +1061,9 @@ fn format_change(change: &ChangeReport) -> String {
 
 fn format_kind(kind: &ChangeKindReport) -> String {
     match kind {
-        ChangeKindReport::Added => "added".to_string(),
-        ChangeKindReport::Modified => "modified".to_string(),
-        ChangeKindReport::Deleted => "deleted".to_string(),
+        ChangeKindReport::Added => "added".to_owned(),
+        ChangeKindReport::Modified => "modified".to_owned(),
+        ChangeKindReport::Deleted => "deleted".to_owned(),
         ChangeKindReport::Renamed { from } => format!("renamed from {}", from.display),
         ChangeKindReport::Gitlink { old_oid, new_oid } => {
             format!(

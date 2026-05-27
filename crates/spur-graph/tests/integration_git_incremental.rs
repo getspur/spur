@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -264,7 +264,7 @@ fn legacy_artifact_triggers_full_rebuild() {
     repo.git(&["commit", "-m", "add lib"]);
 
     let mut legacy = build_full(repo.path());
-    legacy.manifest_version = "legacy-manifest-version".to_string();
+    legacy.manifest_version = "legacy-manifest-version".to_owned();
     let (rebuilt, mode) =
         artifact_from_facts_incremental(&legacy, repo.path()).expect("legacy rebuild");
 
@@ -423,7 +423,7 @@ impl GitRepo {
     fn head(&self) -> String {
         git_stdout(&self.root, &["rev-parse", "HEAD"])
             .trim_end()
-            .to_string()
+            .to_owned()
     }
 }
 
@@ -502,7 +502,7 @@ fn git_hash_object(bytes: &[u8]) -> String {
     String::from_utf8(output.stdout)
         .expect("hash-object stdout UTF-8")
         .trim_end()
-        .to_string()
+        .to_owned()
 }
 
 fn run_git(root: &Path, args: &[&str]) {

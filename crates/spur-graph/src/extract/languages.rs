@@ -35,34 +35,34 @@ impl Language {
 
     pub fn tree_sitter_language(self) -> TsLanguage {
         match self {
-            Language::Rust => tree_sitter_rust::LANGUAGE.into(),
-            Language::Python => tree_sitter_python::LANGUAGE.into(),
-            Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-            Language::Markdown => tree_sitter_md::LANGUAGE.into(),
-            Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Self::Python => tree_sitter_python::LANGUAGE.into(),
+            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Self::Markdown => tree_sitter_md::LANGUAGE.into(),
+            Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         }
     }
 
     pub(crate) fn config(self) -> LanguageConfig {
         match self {
-            Language::Rust => rust_config(),
-            Language::Python => python_config(),
-            Language::TypeScript => typescript_config(),
-            Language::Tsx => tsx_config(),
-            Language::Markdown => markdown_config(),
-            Language::Cpp => cpp_config(),
+            Self::Rust => rust_config(),
+            Self::Python => python_config(),
+            Self::TypeScript => typescript_config(),
+            Self::Tsx => tsx_config(),
+            Self::Markdown => markdown_config(),
+            Self::Cpp => cpp_config(),
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Language::Rust => "rust",
-            Language::Python => "python",
-            Language::TypeScript => "typescript",
-            Language::Tsx => "tsx",
-            Language::Markdown => "markdown",
-            Language::Cpp => "cpp",
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
+            Self::Markdown => "markdown",
+            Self::Cpp => "cpp",
         }
     }
 }
@@ -355,7 +355,7 @@ pub(crate) fn extracted_symbols<'tree>(
         let symbol_text = child_text(node, source);
         symbols.push(ExtractedSymbol {
             entity_name: symbol_entity_name(&label),
-            symbol_kind: symbol_kind(kind).to_string(),
+            symbol_kind: symbol_kind(kind).to_owned(),
             enclosing_scope,
             byte_range: [range.start_byte, range.end_byte],
             line_range: [range.start_point.row + 1, range.end_point.row + 1],
@@ -440,7 +440,7 @@ pub(crate) fn emit_edges(
                 };
                 builder.pending_edges.push(PendingEdge {
                     source: source_id,
-                    target_name: target_name.to_string(),
+                    target_name: target_name.to_owned(),
                     relation: RelationKind::References,
                     edge_kind: Some(GraphEdgeKind::ReferencesHof),
                     origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -495,7 +495,7 @@ fn typed_binding(node: Node<'_>, source: &str) -> Option<(String, String)> {
     let pattern = node.child_by_field_name("pattern")?;
     let name = single_identifier_text(pattern, source)?;
     let type_node = node.child_by_field_name("type")?;
-    Some((name, child_text(type_node, source).trim().to_string()))
+    Some((name, child_text(type_node, source).trim().to_owned()))
 }
 
 fn receiver_scope_text(
@@ -505,7 +505,7 @@ fn receiver_scope_text(
 ) -> Option<String> {
     let receiver = receiver.trim();
     if receiver == "self" {
-        return Some("Self".to_string());
+        return Some("Self".to_owned());
     }
     typed_bindings_by_scope
         .get(&source_id)
@@ -527,7 +527,7 @@ fn receiver_type_scope_text(type_text: &str) -> String {
             }
         }
     }
-    ty.to_string()
+    ty.to_owned()
 }
 
 fn strip_lifetime_prefix(type_text: &str) -> Option<&str> {
@@ -638,7 +638,7 @@ fn trait_name_from_dynamic_type(dynamic: Node<'_>, source: &str) -> Option<Strin
     if primary.is_empty() || primary.contains(char::is_whitespace) || primary.contains('<') {
         return None;
     }
-    Some(primary.to_string())
+    Some(primary.to_owned())
 }
 
 fn direct_named_child_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
@@ -661,8 +661,8 @@ fn receiver_method_call(call: Node<'_>, source: &str) -> Option<(String, String)
         return None;
     }
     Some((
-        child_text(receiver, source).trim().to_string(),
-        child_text(method, source).trim().to_string(),
+        child_text(receiver, source).trim().to_owned(),
+        child_text(method, source).trim().to_owned(),
     ))
 }
 
@@ -679,12 +679,12 @@ fn collect_nodes_by_kind<'tree>(node: Node<'tree>, kind: &str, nodes: &mut Vec<N
 
 fn single_identifier_text(node: Node<'_>, source: &str) -> Option<String> {
     if node.kind() == "identifier" {
-        return Some(child_text(node, source).trim().to_string());
+        return Some(child_text(node, source).trim().to_owned());
     }
 
     let identifiers = named_descendants_by_kind(node, "identifier");
     match identifiers.as_slice() {
-        [identifier] => Some(child_text(*identifier, source).trim().to_string()),
+        [identifier] => Some(child_text(*identifier, source).trim().to_owned()),
         _ => None,
     }
 }
@@ -790,9 +790,9 @@ fn definition_name(
         .next()
 }
 
-fn nearest_parent<'a, 'tree>(
+fn nearest_parent<'a>(
     file_node_id: NodeId,
-    definitions: &'a [DefinitionBinding<'tree>],
+    definitions: &'a [DefinitionBinding<'_>],
     node: Node<'_>,
 ) -> Parent<'a> {
     definitions
@@ -932,7 +932,7 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
 }
 
 fn symbol_entity_name(label: &str) -> String {
-    label.strip_prefix("impl ").unwrap_or(label).to_string()
+    label.strip_prefix("impl ").unwrap_or(label).to_owned()
 }
 
 fn fqn_segment(kind: NodeKind, label: &str) -> String {
@@ -958,7 +958,7 @@ fn collect_symbol_tokens(
     if is_literal_kind(kind) || (node.named_child_count() == 0 && is_identifier_kind(kind)) {
         let text = child_text(node, source).trim();
         if !text.is_empty() && text != own_name {
-            tokens.insert(text.to_string());
+            tokens.insert(text.to_owned());
         }
         return;
     }
@@ -994,7 +994,7 @@ fn contained_capture_text(
                 && capture.pattern_index == parent.pattern_index
                 && capture.match_index == parent.match_index
         })
-        .map(|capture| child_text(capture.node, source).trim().to_string())
+        .map(|capture| child_text(capture.node, source).trim().to_owned())
         .filter(|text| !text.is_empty())
         .collect()
 }
@@ -1005,7 +1005,7 @@ fn child_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
 
 fn scoped_name(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
-        name.to_string()
+        name.to_owned()
     } else {
         format!("{prefix}::{name}")
     }
