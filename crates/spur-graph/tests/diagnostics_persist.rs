@@ -1,3 +1,4 @@
+use spur_graph::store::ArtifactStagingDir;
 use spur_graph::{
     load_artifact, read_current_pointer, write_artifact_parquet, write_current_pointer,
     CommitArtifact, EdgeEndpoint, GraphFileArtifact, GraphIndexArtifact, GraphIndexHeader, NodeId,
@@ -52,12 +53,17 @@ fn temporal_collections_round_trip_through_artifact_io() {
 }
 
 fn write_graph_artifact(worktree: &std::path::Path, artifact: &GraphIndexArtifact) {
-    let artifact_dir = write_artifact_parquet(
+    let artifact_base = worktree.join(".spur/graph");
+    let staging =
+        ArtifactStagingDir::new(&artifact_base, &artifact.graph_content_hash).expect("stage");
+    write_artifact_parquet(
         artifact,
-        &worktree.join(".spur/graph"),
+        staging.path(),
         WriteOptions::default(),
+        Vec::new(),
     )
     .expect("write parquet artifact");
+    let artifact_dir = staging.commit().expect("commit parquet artifact");
     write_current_pointer(worktree, &artifact_dir).expect("write CURRENT pointer");
 }
 

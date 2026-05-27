@@ -113,6 +113,7 @@ fn extracted_graph_index_resolves_symbol_payload_through_registry() {
         &artifact,
         &dir.path().join(".spur/graph"),
         WriteOptions::default(),
+        Vec::new(),
     )
     .expect("write parquet artifact");
 

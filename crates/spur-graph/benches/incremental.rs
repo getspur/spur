@@ -792,8 +792,12 @@ fn measure_full_walk_once(
         &spur_graph::git_walk::GitWalkConfig::default(),
         None,
     )?;
-    let artifact_dir =
-        spur_graph::store::write_artifact_parquet(&graph, artifact_base, WriteOptions::default())?;
+    let artifact_dir = spur_graph::store::write_artifact_parquet(
+        &graph,
+        artifact_base,
+        WriteOptions::default(),
+        Vec::new(),
+    )?;
     spur_graph::store::write_current_pointer(worktree, &artifact_dir)?;
     let artifact_bytes = artifact_dir_size(&artifact_dir)?;
     let peak_rss_bytes = [rss_before, peak_rss_bytes()].into_iter().flatten().max();
