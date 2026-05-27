@@ -86,7 +86,7 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
 
     let (mut artifact, file_counts, node_count, edge_count) = match previous_artifact {
         Some(prev) => match artifact_from_facts_incremental(&prev, &root) {
-            Ok((artifact, build_mode)) => {
+            Ok((artifact, build_mode, _stats)) => {
                 mode = build_mode;
                 let language_counts = language_counts_from_artifact(&root, &artifact);
                 (
