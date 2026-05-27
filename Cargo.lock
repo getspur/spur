@@ -9165,6 +9165,8 @@ dependencies = [
  "futures",
  "libc",
  "libproc",
+ "madsim",
+ "madsim-tokio",
  "nix 0.29.0",
  "pin-project-lite",
  "schemars 0.8.22",
@@ -9366,6 +9368,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-cpp",
  "tree-sitter-md",
@@ -9557,6 +9560,14 @@ dependencies = [
  "trybuild",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "spur-test-madsim"
+version = "1.1.20"
+dependencies = [
+ "madsim",
+ "madsim-tokio",
 ]
 
 [[package]]
