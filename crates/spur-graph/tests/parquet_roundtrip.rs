@@ -8,11 +8,12 @@ use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use spur_graph::{
-    read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet, Confidence,
-    GitPath, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+    load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,
+    write_artifact_parquet, ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GitPath,
+    GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
     GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
-    GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey, SymbolSnapshotArtifact, WriteOptions,
-    GRAPH_INDEX_VERSION_TEMPORAL,
+    GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey, SymbolSnapshotArtifact,
+    TemporalEdgeArtifact, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 
 #[test]
@@ -48,6 +49,31 @@ fn parquet_artifact_round_trips_all_tables_with_exact_node_ids() {
 
     let actual = read_artifact_parquet(&dir).expect("read parquet artifact");
     assert_artifact_eq(&actual, &artifact);
+}
+
+#[test]
+fn temporal_parquet_loader_reads_only_temporal_tables_and_metadata() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = temporal_fixture_artifact();
+    let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())
+        .expect("write parquet artifact");
+
+    let actual = load_temporal_artifact_parquet(&dir).expect("read temporal parquet artifact");
+
+    assert_eq!(actual.header, artifact.header);
+    assert_eq!(actual.manifest_version, artifact.manifest_version);
+    assert_eq!(actual.graph_content_hash, artifact.graph_content_hash);
+    assert_eq!(actual.commits, artifact.commits);
+    assert_eq!(actual.symbol_snapshots, artifact.symbol_snapshots);
+    assert_eq!(actual.temporal_edges, artifact.temporal_edges);
+    assert_eq!(actual.diagnostics, artifact.diagnostics);
+    assert!(actual.file_manifests.is_empty());
+    assert!(actual.files.is_empty());
+    assert!(actual.file_node_ids.is_empty());
+    assert!(actual.symbols.is_empty());
+    assert!(actual.symbol_node_ids.is_empty());
+    assert!(actual.edges.is_empty());
+    assert!(actual.tombstones.is_empty());
 }
 
 #[test]
@@ -462,6 +488,57 @@ fn fixture_artifact() -> GraphIndexArtifact {
 
         temporal_edges: Vec::new(),
     }
+}
+
+fn temporal_fixture_artifact() -> GraphIndexArtifact {
+    let mut artifact = fixture_artifact();
+    artifact.diagnostics = vec!["parser recovered from fixture warning".to_owned()];
+    artifact.commits = vec![
+        CommitArtifact {
+            sha: "commit-a".to_owned(),
+            parents: Vec::new(),
+            author_time: 1_700_000_001,
+            summary: "initial".to_owned(),
+        },
+        CommitArtifact {
+            sha: "commit-b".to_owned(),
+            parents: vec!["commit-a".to_owned()],
+            author_time: 1_700_000_002,
+            summary: "next".to_owned(),
+        },
+    ];
+    artifact.symbol_snapshots = vec![symbol_snapshot("sym-a-fn", b"src/a.rs")];
+    artifact.temporal_edges = vec![
+        TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "commit-a".to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: SnapshotKey {
+                    stable_symbol_id: "sym-a-fn".to_owned(),
+                    commit: "commit-a".to_owned(),
+                },
+            },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(ChangeKind::Added),
+        },
+        TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "commit-b".to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: SnapshotKey {
+                    stable_symbol_id: "sym-a-fn".to_owned(),
+                    commit: "commit-b".to_owned(),
+                },
+            },
+            relation: RelationKind::Touches,
+            parent: Some("commit-a".to_owned()),
+            change_kind: Some(ChangeKind::Modified),
+        },
+    ];
+    artifact
 }
 
 fn assert_parquet_files_exist(dir: &Path) {
