@@ -494,6 +494,10 @@ pub fn read_artifact_parquet_slim(dir: &Path) -> anyhow::Result<GraphIndexArtifa
     Ok(artifact)
 }
 
+pub fn load_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
+    read_temporal_artifact_parquet(dir)
+}
+
 pub(crate) fn read_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
     let manifest = read_artifact_header_parquet(dir)?;
     if !manifest.complete {
@@ -504,19 +508,26 @@ pub(crate) fn read_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<Graph
     }
     let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
         || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
+    let commits_path = dir.join("commits.parquet");
     let symbol_snapshots_path = dir.join("symbol_snapshots.parquet");
     let temporal_edges_path = dir.join("temporal_edges.parquet");
+    let diagnostics_path = dir.join("diagnostics.parquet");
     let row_counts = manifest.row_counts.clone();
 
-    let (symbol_snapshots, temporal_edges) = std::thread::scope(|scope| {
+    let (commits, symbol_snapshots, temporal_edges, diagnostics) = std::thread::scope(|scope| {
+        let commits = scope.spawn(|| read_commits(&commits_path, row_counts.commits));
         let symbol_snapshots = scope
             .spawn(|| read_symbol_snapshots(&symbol_snapshots_path, row_counts.symbol_snapshots));
         let temporal_edges =
             scope.spawn(|| read_temporal_edges(&temporal_edges_path, row_counts.temporal_edges));
+        let diagnostics =
+            scope.spawn(|| read_diagnostics(&diagnostics_path, row_counts.diagnostics));
 
         Ok::<_, anyhow::Error>((
+            join_scoped(commits, "read commits.parquet")?,
             join_scoped(symbol_snapshots, "read symbol_snapshots.parquet")?,
             join_scoped(temporal_edges, "read temporal_edges.parquet")?,
+            join_scoped(diagnostics, "read diagnostics.parquet")?,
         ))
     })?;
 
@@ -534,8 +545,8 @@ pub(crate) fn read_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<Graph
         symbol_node_ids: Vec::new(),
         edges: Vec::new(),
         tombstones: Vec::new(),
-        diagnostics: Vec::new(),
-        commits: Vec::new(),
+        diagnostics,
+        commits,
         symbol_snapshots,
         temporal_edges,
     };
