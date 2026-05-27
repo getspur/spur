@@ -14,8 +14,8 @@ fn current_schema_version() -> u32 {
 fn pointer(artifact_relative_path: &str) -> CommitIndexPointer {
     CommitIndexPointer {
         schema_version: current_schema_version(),
-        artifact_relative_path: artifact_relative_path.to_string(),
-        indexed_at: "2026-05-21T00:00:00Z".to_string(),
+        artifact_relative_path: artifact_relative_path.to_owned(),
+        indexed_at: "2026-05-21T00:00:00Z".to_owned(),
         refs: Default::default(),
     }
 }
@@ -45,7 +45,7 @@ fn write_commit_index_artifact_with_schema_version(path: &Path, schema_version: 
         schema_version,
         commits: Vec::new(),
         refs: Default::default(),
-        indexed_at: "2026-05-21T00:00:00Z".to_string(),
+        indexed_at: "2026-05-21T00:00:00Z".to_owned(),
         walk_strategy: WalkStrategy::Reachable,
     };
     fs::create_dir_all(path.parent().expect("artifact has parent")).expect("create artifact dir");

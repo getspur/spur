@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(
             resolve_selector(artifact, selector),
             SelectorResolution::Resolved(ResolvedSymbol {
-                stable_symbol_id: expected_id.to_string(),
+                stable_symbol_id: expected_id.to_owned(),
             })
         );
     }
@@ -290,7 +290,7 @@ mod tests {
     fn file(path: &str) -> GraphFileArtifact {
         GraphFileArtifact {
             stable_file_id: format!("file-{path}"),
-            file_path: path.to_string(),
+            file_path: path.to_owned(),
         }
     }
 
@@ -304,13 +304,13 @@ mod tests {
         enclosing_scope: Option<&str>,
     ) -> GraphSymbolArtifact {
         GraphSymbolArtifact {
-            stable_symbol_id: id.to_string(),
-            file_path: file_path.to_string(),
+            stable_symbol_id: id.to_owned(),
+            file_path: file_path.to_owned(),
             byte_range: [0, 8],
             line_range,
-            entity_name: entity_name.to_string(),
-            qualified_name: qualified_name.to_string(),
-            symbol_kind: symbol_kind.to_string(),
+            entity_name: entity_name.to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            symbol_kind: symbol_kind.to_owned(),
             anchor_hash: format!("anchor-{id}"),
             enclosing_scope: enclosing_scope.map(str::to_string),
         }
@@ -319,11 +319,11 @@ mod tests {
     fn artifact() -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "test".to_string(),
+                graph_index_version: "test".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test".to_string(),
-            graph_content_hash: "test".to_string(),
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
             file_manifests: Vec::new(),
             files: vec![
                 file("src/cache.rs"),
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(
             double_colon_resolution,
             SelectorResolution::Resolved(ResolvedSymbol {
-                stable_symbol_id: "aaaaaaaaaaaaaaaa".to_string(),
+                stable_symbol_id: "aaaaaaaaaaaaaaaa".to_owned(),
             })
         );
         assert_eq!(
@@ -689,37 +689,37 @@ mod tests {
             SelectorResolution::Ambiguous {
                 candidates: vec![
                     CandidateRow {
-                        selector: "a/file.rs::duplicate::Thing".to_string(),
-                        uri: "graph://symbol/1000000000000000".to_string(),
-                        id: "1000000000000000".to_string(),
-                        entity_name: "Thing".to_string(),
-                        qualified_name: "duplicate::Thing".to_string(),
-                        file_path: "a/file.rs".to_string(),
+                        selector: "a/file.rs::duplicate::Thing".to_owned(),
+                        uri: "graph://symbol/1000000000000000".to_owned(),
+                        id: "1000000000000000".to_owned(),
+                        entity_name: "Thing".to_owned(),
+                        qualified_name: "duplicate::Thing".to_owned(),
+                        file_path: "a/file.rs".to_owned(),
                         line_range: [5, 6],
-                        symbol_kind: "struct".to_string(),
-                        enclosing_scope: Some("duplicate".to_string()),
+                        symbol_kind: "struct".to_owned(),
+                        enclosing_scope: Some("duplicate".to_owned()),
                     },
                     CandidateRow {
-                        selector: "b/file.rs::duplicate::Thing".to_string(),
-                        uri: "graph://symbol/2000000000000000".to_string(),
-                        id: "2000000000000000".to_string(),
-                        entity_name: "Thing".to_string(),
-                        qualified_name: "duplicate::Thing".to_string(),
-                        file_path: "b/file.rs".to_string(),
+                        selector: "b/file.rs::duplicate::Thing".to_owned(),
+                        uri: "graph://symbol/2000000000000000".to_owned(),
+                        id: "2000000000000000".to_owned(),
+                        entity_name: "Thing".to_owned(),
+                        qualified_name: "duplicate::Thing".to_owned(),
+                        file_path: "b/file.rs".to_owned(),
                         line_range: [3, 4],
-                        symbol_kind: "struct".to_string(),
-                        enclosing_scope: Some("duplicate".to_string()),
+                        symbol_kind: "struct".to_owned(),
+                        enclosing_scope: Some("duplicate".to_owned()),
                     },
                     CandidateRow {
-                        selector: "c/file.rs::duplicate::Thing".to_string(),
-                        uri: "graph://symbol/3000000000000000".to_string(),
-                        id: "3000000000000000".to_string(),
-                        entity_name: "Thing".to_string(),
-                        qualified_name: "duplicate::Thing".to_string(),
-                        file_path: "c/file.rs".to_string(),
+                        selector: "c/file.rs::duplicate::Thing".to_owned(),
+                        uri: "graph://symbol/3000000000000000".to_owned(),
+                        id: "3000000000000000".to_owned(),
+                        entity_name: "Thing".to_owned(),
+                        qualified_name: "duplicate::Thing".to_owned(),
+                        file_path: "c/file.rs".to_owned(),
                         line_range: [7, 8],
-                        symbol_kind: "struct".to_string(),
-                        enclosing_scope: Some("duplicate".to_string()),
+                        symbol_kind: "struct".to_owned(),
+                        enclosing_scope: Some("duplicate".to_owned()),
                     },
                 ],
             }

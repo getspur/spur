@@ -341,8 +341,8 @@ fn validate_symbol_fails_when_file_path_was_renamed() {
 fn validate_file_fails_when_regular_file_is_missing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let payload = GraphFileArtifact {
-        stable_file_id: "file-lib".to_string(),
-        file_path: "lib.rs".to_string(),
+        stable_file_id: "file-lib".to_owned(),
+        file_path: "lib.rs".to_owned(),
     };
 
     assert_eq!(
@@ -358,13 +358,13 @@ fn symbol_payload(
     anchor_hash: u64,
 ) -> GraphSymbolArtifact {
     GraphSymbolArtifact {
-        stable_symbol_id: "symbol-run".to_string(),
-        file_path: file_path.to_string(),
+        stable_symbol_id: "symbol-run".to_owned(),
+        file_path: file_path.to_owned(),
         byte_range,
         line_range: [1, 1],
-        entity_name: entity_name.to_string(),
-        qualified_name: entity_name.to_string(),
-        symbol_kind: "fn".to_string(),
+        entity_name: entity_name.to_owned(),
+        qualified_name: entity_name.to_owned(),
+        symbol_kind: "fn".to_owned(),
         anchor_hash: anchor_hash.to_string(),
         enclosing_scope: None,
     }

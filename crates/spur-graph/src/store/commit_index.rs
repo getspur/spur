@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{CommitIndexArtifact, GRAPH_INDEX_VERSION_TEMPORAL};
@@ -90,7 +90,7 @@ fn canonical_artifact_path(worktree: &Path, artifact_relative_path: &str) -> Res
     let relative = Path::new(artifact_relative_path);
     if relative.is_absolute() {
         return Err(CommitIndexLoadError::AbsoluteArtifactRelativePath {
-            path: artifact_relative_path.to_string(),
+            path: artifact_relative_path.to_owned(),
         }
         .into());
     }
@@ -99,7 +99,7 @@ fn canonical_artifact_path(worktree: &Path, artifact_relative_path: &str) -> Res
         .any(|component| matches!(component, Component::ParentDir))
     {
         return Err(CommitIndexLoadError::ParentTraversalArtifactRelativePath {
-            path: artifact_relative_path.to_string(),
+            path: artifact_relative_path.to_owned(),
         }
         .into());
     }
@@ -147,9 +147,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pointer = CommitIndexPointer {
             schema_version: current_schema_version().unwrap(),
-            artifact_relative_path: "commits/2026-05-20.json".to_string(),
-            indexed_at: "2026-05-20T12:00:00Z".to_string(),
-            refs: [("main".to_string(), "abc123".to_string())].into(),
+            artifact_relative_path: "commits/2026-05-20.json".to_owned(),
+            indexed_at: "2026-05-20T12:00:00Z".to_owned(),
+            refs: [("main".to_owned(), "abc123".to_owned())].into(),
         };
         save_pointer(dir.path(), &pointer).unwrap();
         let loaded = load_pointer(dir.path()).unwrap();

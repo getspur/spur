@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::ScopedJoinHandle;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail, Context as _};
 use arrow_array::{
-    Array, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    Array as _, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
 };
 use base64::Engine as _;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -300,11 +300,11 @@ pub fn write_artifact_parquet(
 
     let manifest = GraphArtifactManifest {
         graph_index_version: artifact.header.graph_index_version.clone(),
-        schema_version: SCHEMA_VERSION.to_string(),
+        schema_version: SCHEMA_VERSION.to_owned(),
         manifest_version: artifact.manifest_version.clone(),
         graph_content_hash: artifact.graph_content_hash.clone(),
         indexed_commit_oid: None,
-        extractor_version: EXTRACTOR_VERSION.to_string(),
+        extractor_version: EXTRACTOR_VERSION.to_owned(),
         complete: true,
         row_counts: GraphArtifactRowCounts {
             nodes: nodes.len(),
@@ -320,7 +320,7 @@ pub fn write_artifact_parquet(
             diagnostics: artifact.diagnostics.len(),
         },
         parquet_writer: GraphArtifactParquetWriter {
-            compression: "zstd-3".to_string(),
+            compression: "zstd-3".to_owned(),
             row_group_size: PARQUET_ROW_GROUP_SIZE,
         },
         edges_by_dst_present: options.emit_edges_by_dst,
@@ -567,7 +567,7 @@ fn file_rows(artifact: &GraphIndexArtifact) -> anyhow::Result<Vec<FileRow>> {
         .iter()
         .cloned()
         .zip(artifact.file_node_ids.iter().copied())
-        .map(|(file, node_id)| Ok(FileRow { file, node_id }))
+        .map(|(file, node_id)| Ok(FileRow { node_id, file }))
         .collect()
 }
 
@@ -584,7 +584,7 @@ fn node_rows(artifact: &GraphIndexArtifact) -> anyhow::Result<Vec<NodeRow>> {
         .iter()
         .cloned()
         .zip(artifact.symbol_node_ids.iter().copied())
-        .map(|(symbol, node_id)| Ok(NodeRow { symbol, node_id }))
+        .map(|(symbol, node_id)| Ok(NodeRow { node_id, symbol }))
         .collect()
 }
 
@@ -668,13 +668,14 @@ fn edge_rows(
             .get(&edge.source_stable_symbol_id)
             .ok_or_else(|| anyhow!("missing source endpoint `{}`", edge.source_stable_symbol_id))?;
         match edge.target_stable_symbol_id.as_deref() {
-            Some(target_stable_id) => match endpoint_ids.get(target_stable_id) {
-                Some(&dst_id) => resolved.push(ResolvedEdgeRow {
-                    edge: edge.clone(),
-                    src_id,
-                    dst_id,
-                }),
-                None => {
+            Some(target_stable_id) => {
+                if let Some(&dst_id) = endpoint_ids.get(target_stable_id) {
+                    resolved.push(ResolvedEdgeRow {
+                        edge: edge.clone(),
+                        src_id,
+                        dst_id,
+                    });
+                } else {
                     dropped_stale += 1;
                     tracing::warn!(
                         stable_symbol_id = %target_stable_id,
@@ -686,7 +687,7 @@ fn edge_rows(
                         src_id,
                     });
                 }
-            },
+            }
             None => unresolved.push(UnresolvedEdgeRow {
                 edge: edge.clone(),
                 src_id,
@@ -713,7 +714,7 @@ mod edge_rows_test {
     fn edge_rows_routes_stale_target_to_unresolved() {
         let edge = test_edge("sym-a", Some("sym-stale-target"));
         let artifact = test_artifact(edge.clone());
-        let endpoint_ids = HashMap::from([("sym-a".to_string(), NodeId(1))]);
+        let endpoint_ids = HashMap::from([("sym-a".to_owned(), NodeId(1))]);
 
         let (resolved, unresolved) =
             edge_rows(&artifact, &endpoint_ids).expect("stale target routes to unresolved");
@@ -728,7 +729,7 @@ mod edge_rows_test {
     fn edge_rows_still_bails_on_missing_source() {
         let edge = test_edge("sym-missing-source", Some("sym-a"));
         let artifact = test_artifact(edge);
-        let endpoint_ids = HashMap::from([("sym-a".to_string(), NodeId(1))]);
+        let endpoint_ids = HashMap::from([("sym-a".to_owned(), NodeId(1))]);
 
         let err =
             edge_rows(&artifact, &endpoint_ids).expect_err("missing source endpoint remains fatal");
@@ -743,23 +744,23 @@ mod edge_rows_test {
     fn test_artifact(edge: GraphEdgeArtifact) -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: crate::schema::GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+                graph_index_version: crate::schema::GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test-manifest".to_string(),
-            graph_content_hash: "test-content-hash".to_string(),
+            manifest_version: "test-manifest".to_owned(),
+            graph_content_hash: "test-content-hash".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
             symbols: vec![GraphSymbolArtifact {
-                stable_symbol_id: "sym-a".to_string(),
-                file_path: "src/a.rs".to_string(),
+                stable_symbol_id: "sym-a".to_owned(),
+                file_path: "src/a.rs".to_owned(),
                 byte_range: [0, 10],
                 line_range: [1, 1],
-                entity_name: "a".to_string(),
-                qualified_name: "crate::a".to_string(),
-                symbol_kind: "function".to_string(),
-                anchor_hash: "anchor-a".to_string(),
+                entity_name: "a".to_owned(),
+                qualified_name: "crate::a".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-a".to_owned(),
                 enclosing_scope: None,
             }],
             symbol_node_ids: vec![NodeId(1)],
@@ -774,9 +775,9 @@ mod edge_rows_test {
 
     fn test_edge(source: &str, target: Option<&str>) -> GraphEdgeArtifact {
         GraphEdgeArtifact {
-            source_stable_symbol_id: source.to_string(),
+            source_stable_symbol_id: source.to_owned(),
             target_stable_symbol_id: target.map(str::to_string),
-            target_label: target.map(|_| "target".to_string()),
+            target_label: target.map(|_| "target".to_owned()),
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
@@ -793,7 +794,7 @@ fn write_nodes(path: &Path, rows: &[NodeRow]) -> anyhow::Result<()> {
 
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary stable_symbol_id (STRING);
           required int64 node_id;
@@ -808,7 +809,7 @@ fn write_nodes(path: &Path, rows: &[NodeRow]) -> anyhow::Result<()> {
           required binary anchor_hash (STRING);
           optional binary enclosing_scope (STRING);
         }
-        "#,
+        ",
         &[
             "file_path",
             "entity_name",
@@ -894,7 +895,7 @@ fn write_nodes(path: &Path, rows: &[NodeRow]) -> anyhow::Result<()> {
 fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary source_stable_id (STRING);
           required binary target_stable_id (STRING);
@@ -907,7 +908,7 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
           optional binary edge_kind (STRING);
           optional binary bind_method (STRING);
         }
-        "#,
+        ",
         &[
             "source_stable_id",
             "target_stable_id",
@@ -951,12 +952,12 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
             ),
             ColumnData::RequiredString(
                 rows.iter()
-                    .map(|row| relation_to_str(row.edge.relation).to_string())
+                    .map(|row| relation_to_str(row.edge.relation).to_owned())
                     .collect(),
             ),
             ColumnData::RequiredString(
                 rows.iter()
-                    .map(|row| confidence_to_str(row.edge.confidence).to_string())
+                    .map(|row| confidence_to_str(row.edge.confidence).to_owned())
                     .collect(),
             ),
             ColumnData::RequiredF32(rows.iter().map(|row| row.edge.confidence_score).collect()),
@@ -977,7 +978,7 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
 fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Result<()> {
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary source_stable_id (STRING);
           required int64 src_id;
@@ -988,7 +989,7 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
           optional binary edge_kind (STRING);
           optional binary bind_method (STRING);
         }
-        "#,
+        ",
         &[
             "source_stable_id",
             "target_label",
@@ -1016,12 +1017,12 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
             ),
             ColumnData::RequiredString(
                 rows.iter()
-                    .map(|row| relation_to_str(row.edge.relation).to_string())
+                    .map(|row| relation_to_str(row.edge.relation).to_owned())
                     .collect(),
             ),
             ColumnData::RequiredString(
                 rows.iter()
-                    .map(|row| confidence_to_str(row.edge.confidence).to_string())
+                    .map(|row| confidence_to_str(row.edge.confidence).to_owned())
                     .collect(),
             ),
             ColumnData::RequiredF32(rows.iter().map(|row| row.edge.confidence_score).collect()),
@@ -1045,13 +1046,13 @@ fn write_files(path: &Path, rows: &[FileRow]) -> anyhow::Result<()> {
 
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary stable_file_id (STRING);
           required int64 node_id;
           required binary file_path (STRING);
         }
-        "#,
+        ",
         &["file_path"],
         &["file_path"],
         vec![
@@ -1076,7 +1077,7 @@ fn write_file_manifests(path: &Path, rows: &[GraphFileManifestEntry]) -> anyhow:
 
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary stable_file_id (STRING);
           required binary path (STRING);
@@ -1087,7 +1088,7 @@ fn write_file_manifests(path: &Path, rows: &[GraphFileManifestEntry]) -> anyhow:
             }
           }
         }
-        "#,
+        ",
         &["path"],
         &["stable_file_id", "path"],
         vec![
@@ -1115,12 +1116,12 @@ fn write_tombstones(path: &Path, rows: &[GraphTombstoneEntry]) -> anyhow::Result
 
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary path (STRING);
           required binary stable_file_id (STRING);
         }
-        "#,
+        ",
         &["path"],
         &["stable_file_id", "path"],
         vec![
@@ -1148,7 +1149,7 @@ fn write_commits(
 
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary sha (STRING);
           optional group parents (LIST) {
@@ -1159,7 +1160,7 @@ fn write_commits(
           required int64 author_time;
           required binary summary (STRING);
         }
-        "#,
+        ",
         &["sha", "summary"],
         &["sha"],
         vec![
@@ -1204,7 +1205,7 @@ fn write_symbol_snapshots(
 
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary key_stable_symbol_id (STRING);
           required binary key_commit (STRING);
@@ -1223,7 +1224,7 @@ fn write_symbol_snapshots(
             }
           }
         }
-        "#,
+        ",
         &[
             "key_stable_symbol_id",
             "key_commit",
@@ -1277,15 +1278,15 @@ fn write_temporal_edges(
             let (rename_prev_path_b64, rename_prev_stable_symbol_id, rename_prev_commit) =
                 change_kind_rename_prev_columns(row.change_kind.as_ref());
             TemporalEdgeRow {
-                source_kind: endpoint_kind_to_str(&row.source).to_string(),
+                source_kind: endpoint_kind_to_str(&row.source).to_owned(),
                 source_path_b64,
                 source_stable_symbol_id,
                 source_commit,
-                target_kind: endpoint_kind_to_str(&row.target).to_string(),
+                target_kind: endpoint_kind_to_str(&row.target).to_owned(),
                 target_path_b64,
                 target_stable_symbol_id,
                 target_commit,
-                relation: relation_to_str(row.relation).to_string(),
+                relation: relation_to_str(row.relation).to_owned(),
                 parent: row.parent.clone(),
                 change_kind: row
                     .change_kind
@@ -1306,7 +1307,7 @@ fn write_temporal_edges(
 
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary source_kind (STRING);
           optional binary source_path_b64 (STRING);
@@ -1323,7 +1324,7 @@ fn write_temporal_edges(
           optional binary rename_prev_stable_symbol_id (STRING);
           optional binary rename_prev_commit (STRING);
         }
-        "#,
+        ",
         &["source_kind", "target_kind", "relation", "change_kind"],
         &["target_stable_symbol_id"],
         vec![
@@ -1373,11 +1374,11 @@ fn write_temporal_edges(
 fn write_diagnostics(path: &Path, rows: &[String]) -> anyhow::Result<usize> {
     write_table(
         path,
-        r#"
+        r"
         message schema {
           required binary message (STRING);
         }
-        "#,
+        ",
         &["message"],
         &[],
         vec![ColumnData::RequiredString(rows.to_vec())],
@@ -1630,7 +1631,7 @@ fn write_column(
                     for (index, value) in list.iter().enumerate() {
                         encoded.push(*value);
                         def_levels.push(1);
-                        rep_levels.push(if index == 0 { 0 } else { 1 });
+                        rep_levels.push(i16::from(index != 0));
                     }
                 }
             }
@@ -1652,7 +1653,7 @@ fn write_column(
                     for (index, value) in list.iter().enumerate() {
                         encoded.push(ByteArray::from(value.as_bytes().to_vec()));
                         def_levels.push(2);
-                        rep_levels.push(if index == 0 { 0 } else { 1 });
+                        rep_levels.push(i16::from(index != 0));
                     }
                 }
             }
@@ -2090,11 +2091,11 @@ fn required_string_value(values: &StringArray, index: usize, name: &str) -> anyh
     if values.is_null(index) {
         bail!("missing required string column `{name}`");
     }
-    Ok(values.value(index).to_string())
+    Ok(values.value(index).to_owned())
 }
 
 fn optional_string_value(values: &StringArray, index: usize) -> Option<String> {
-    (!values.is_null(index)).then(|| values.value(index).to_string())
+    (!values.is_null(index)).then(|| values.value(index).to_owned())
 }
 
 fn required_node_id_list_value(
@@ -2133,7 +2134,7 @@ fn required_string_list_value(
         if strings.is_null(item_index) {
             bail!("missing string element {item_index} in list column `{name}`");
         }
-        out.push(strings.value(item_index).to_string());
+        out.push(strings.value(item_index).to_owned());
     }
     Ok(out)
 }
@@ -2611,8 +2612,8 @@ mod helpers_test {
     #[test]
     fn endpoint_kind_round_trips_all_discriminators() {
         let snapshot_key = SnapshotKey {
-            stable_symbol_id: "graph://symbol/sample".to_string(),
-            commit: "abc123".to_string(),
+            stable_symbol_id: "graph://symbol/sample".to_owned(),
+            commit: "abc123".to_owned(),
         };
         let endpoints = [
             (
@@ -2623,7 +2624,7 @@ mod helpers_test {
             ),
             (
                 EdgeEndpoint::Symbol {
-                    stable_symbol_id: "graph://symbol/sample".to_string(),
+                    stable_symbol_id: "graph://symbol/sample".to_owned(),
                 },
                 EdgeEndpointKind::Symbol,
             ),
@@ -2633,7 +2634,7 @@ mod helpers_test {
             ),
             (
                 EdgeEndpoint::Commit {
-                    sha: "abc123".to_string(),
+                    sha: "abc123".to_owned(),
                 },
                 EdgeEndpointKind::Commit,
             ),
@@ -2676,8 +2677,8 @@ mod helpers_test {
     #[test]
     fn change_kind_round_trips_renamed_from_symbol_base() {
         let change = ChangeKind::RenamedFrom(RenamePrev::Symbol(SnapshotKey {
-            stable_symbol_id: "graph://symbol/old".to_string(),
-            commit: "abc123".to_string(),
+            stable_symbol_id: "graph://symbol/old".to_owned(),
+            commit: "abc123".to_owned(),
         }));
 
         let encoded = change_kind_to_str(&change);
@@ -2696,23 +2697,23 @@ mod parquet_temporal_test {
         ChangeKind, CommitArtifact, EdgeEndpoint, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
         TemporalEdgeArtifact,
     };
-    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::file::reader::{FileReader as _, SerializedFileReader};
 
     #[test]
     fn commits_round_trip() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let rows = vec![
             CommitArtifact {
-                sha: "c1".to_string(),
+                sha: "c1".to_owned(),
                 parents: Vec::new(),
                 author_time: 1_700_000_001,
-                summary: "initial import".to_string(),
+                summary: "initial import".to_owned(),
             },
             CommitArtifact {
-                sha: "c2".to_string(),
-                parents: vec!["c1".to_string(), "merge-parent".to_string()],
+                sha: "c2".to_owned(),
+                parents: vec!["c1".to_owned(), "merge-parent".to_owned()],
                 author_time: 1_700_000_123,
-                summary: "merge branch".to_string(),
+                summary: "merge branch".to_owned(),
             },
         ];
 
@@ -2732,23 +2733,23 @@ mod parquet_temporal_test {
             SymbolSnapshotArtifact {
                 key: snapshot_key("sym-a", "c1"),
                 file_path: GitPath::from_bytes(b"src/lib.rs".to_vec()),
-                entity_name: "alpha".to_string(),
-                symbol_kind: "function".to_string(),
-                enclosing_scope: Some("mod root".to_string()),
+                entity_name: "alpha".to_owned(),
+                symbol_kind: "function".to_owned(),
+                enclosing_scope: Some("mod root".to_owned()),
                 byte_range: [10, 42],
                 line_range: [2, 5],
-                anchor_hash: "anchor-a".to_string(),
-                tokens: vec!["alpha".to_string(), "body".to_string()],
+                anchor_hash: "anchor-a".to_owned(),
+                tokens: vec!["alpha".to_owned(), "body".to_owned()],
             },
             SymbolSnapshotArtifact {
                 key: snapshot_key("sym-b", "c2"),
                 file_path: GitPath::from_bytes(b"src/non-utf8-\xff.rs".to_vec()),
-                entity_name: "Beta".to_string(),
-                symbol_kind: "struct".to_string(),
+                entity_name: "Beta".to_owned(),
+                symbol_kind: "struct".to_owned(),
                 enclosing_scope: None,
                 byte_range: [100, 180],
                 line_range: [9, 17],
-                anchor_hash: "anchor-b".to_string(),
+                anchor_hash: "anchor-b".to_owned(),
                 tokens: Vec::new(),
             },
         ];
@@ -2770,13 +2771,13 @@ mod parquet_temporal_test {
         let rows = vec![
             TemporalEdgeArtifact {
                 source: EdgeEndpoint::Commit {
-                    sha: "c3".to_string(),
+                    sha: "c3".to_owned(),
                 },
                 target: EdgeEndpoint::File {
                     path: GitPath::from_bytes(b"src/new-name.rs".to_vec()),
                 },
                 relation: RelationKind::Touches,
-                parent: Some("c2".to_string()),
+                parent: Some("c2".to_owned()),
                 change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::File(
                     GitPath::from_bytes(b"src/old-name.rs".to_vec()),
                 ))),
@@ -2789,7 +2790,7 @@ mod parquet_temporal_test {
                     key: new_symbol.clone(),
                 },
                 relation: RelationKind::Touches,
-                parent: Some("c1".to_string()),
+                parent: Some("c1".to_owned()),
                 change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_symbol))),
             },
         ];
@@ -2812,40 +2813,40 @@ mod parquet_temporal_test {
 
         artifact.commits = vec![
             CommitArtifact {
-                sha: "c1".to_string(),
+                sha: "c1".to_owned(),
                 parents: Vec::new(),
                 author_time: 1_700_000_001,
-                summary: "initial import".to_string(),
+                summary: "initial import".to_owned(),
             },
             CommitArtifact {
-                sha: "c2".to_string(),
-                parents: vec!["c1".to_string()],
+                sha: "c2".to_owned(),
+                parents: vec!["c1".to_owned()],
                 author_time: 1_700_000_123,
-                summary: "rename alpha to beta".to_string(),
+                summary: "rename alpha to beta".to_owned(),
             },
         ];
         artifact.symbol_snapshots = vec![
             SymbolSnapshotArtifact {
                 key: new_symbol.clone(),
                 file_path: GitPath::from_bytes(b"src/new.rs".to_vec()),
-                entity_name: "beta".to_string(),
-                symbol_kind: "function".to_string(),
-                enclosing_scope: Some("mod root".to_string()),
+                entity_name: "beta".to_owned(),
+                symbol_kind: "function".to_owned(),
+                enclosing_scope: Some("mod root".to_owned()),
                 byte_range: [100, 150],
                 line_range: [9, 14],
-                anchor_hash: "anchor-new".to_string(),
-                tokens: vec!["beta".to_string(), "body".to_string()],
+                anchor_hash: "anchor-new".to_owned(),
+                tokens: vec!["beta".to_owned(), "body".to_owned()],
             },
             SymbolSnapshotArtifact {
                 key: old_symbol.clone(),
                 file_path: GitPath::from_bytes(b"src/old.rs".to_vec()),
-                entity_name: "alpha".to_string(),
-                symbol_kind: "function".to_string(),
-                enclosing_scope: Some("mod root".to_string()),
+                entity_name: "alpha".to_owned(),
+                symbol_kind: "function".to_owned(),
+                enclosing_scope: Some("mod root".to_owned()),
                 byte_range: [10, 42],
                 line_range: [2, 5],
-                anchor_hash: "anchor-old".to_string(),
-                tokens: vec!["alpha".to_string(), "body".to_string()],
+                anchor_hash: "anchor-old".to_owned(),
+                tokens: vec!["alpha".to_owned(), "body".to_owned()],
             },
         ];
         artifact.temporal_edges = vec![
@@ -2857,18 +2858,18 @@ mod parquet_temporal_test {
                     key: new_symbol.clone(),
                 },
                 relation: RelationKind::Touches,
-                parent: Some("c1".to_string()),
+                parent: Some("c1".to_owned()),
                 change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_symbol))),
             },
             TemporalEdgeArtifact {
                 source: EdgeEndpoint::Commit {
-                    sha: "c2".to_string(),
+                    sha: "c2".to_owned(),
                 },
                 target: EdgeEndpoint::Snapshot {
                     key: new_symbol.clone(),
                 },
                 relation: RelationKind::Touches,
-                parent: Some("c1".to_string()),
+                parent: Some("c1".to_owned()),
                 change_kind: Some(ChangeKind::Added),
             },
         ];
@@ -2899,32 +2900,32 @@ mod parquet_temporal_test {
         let snapshot = snapshot_key("sym-a", "c1");
 
         artifact.files = vec![GraphFileArtifact {
-            stable_file_id: "file-a".to_string(),
-            file_path: "src/lib.rs".to_string(),
+            stable_file_id: "file-a".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
         }];
         artifact.file_node_ids = vec![NodeId(1)];
         artifact.file_manifests = vec![GraphFileManifestEntry {
-            stable_file_id: "file-a".to_string(),
-            path: "src/lib.rs".to_string(),
-            content_oid: "content-a".to_string(),
+            stable_file_id: "file-a".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            content_oid: "content-a".to_owned(),
             node_ids: vec![NodeId(2)],
         }];
         artifact.symbols = vec![GraphSymbolArtifact {
-            stable_symbol_id: "sym-a".to_string(),
-            file_path: "src/lib.rs".to_string(),
+            stable_symbol_id: "sym-a".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
             byte_range: [0, 12],
             line_range: [1, 2],
-            entity_name: "alpha".to_string(),
-            qualified_name: "crate::alpha".to_string(),
-            symbol_kind: "function".to_string(),
-            anchor_hash: "anchor-a".to_string(),
+            entity_name: "alpha".to_owned(),
+            qualified_name: "crate::alpha".to_owned(),
+            symbol_kind: "function".to_owned(),
+            anchor_hash: "anchor-a".to_owned(),
             enclosing_scope: None,
         }];
         artifact.symbol_node_ids = vec![NodeId(2)];
         artifact.edges = vec![GraphEdgeArtifact {
-            source_stable_symbol_id: "sym-a".to_string(),
-            target_stable_symbol_id: Some("sym-a".to_string()),
-            target_label: Some("alpha".to_string()),
+            source_stable_symbol_id: "sym-a".to_owned(),
+            target_stable_symbol_id: Some("sym-a".to_owned()),
+            target_label: Some("alpha".to_owned()),
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
@@ -2933,30 +2934,30 @@ mod parquet_temporal_test {
             bind_method: None,
         }];
         artifact.tombstones = vec![GraphTombstoneEntry {
-            path: "src/deleted.rs".to_string(),
-            stable_file_id: "file-deleted".to_string(),
+            path: "src/deleted.rs".to_owned(),
+            stable_file_id: "file-deleted".to_owned(),
         }];
-        artifact.diagnostics = vec!["diagnostic skipped by slim reader".to_string()];
+        artifact.diagnostics = vec!["diagnostic skipped by slim reader".to_owned()];
         artifact.commits = vec![CommitArtifact {
-            sha: "c1".to_string(),
+            sha: "c1".to_owned(),
             parents: Vec::new(),
             author_time: 1_700_000_001,
-            summary: "initial import".to_string(),
+            summary: "initial import".to_owned(),
         }];
         artifact.symbol_snapshots = vec![SymbolSnapshotArtifact {
             key: snapshot.clone(),
             file_path: GitPath::from_bytes(b"src/lib.rs".to_vec()),
-            entity_name: "alpha".to_string(),
-            symbol_kind: "function".to_string(),
+            entity_name: "alpha".to_owned(),
+            symbol_kind: "function".to_owned(),
             enclosing_scope: None,
             byte_range: [0, 12],
             line_range: [1, 2],
-            anchor_hash: "anchor-a".to_string(),
-            tokens: vec!["alpha".to_string()],
+            anchor_hash: "anchor-a".to_owned(),
+            tokens: vec!["alpha".to_owned()],
         }];
         artifact.temporal_edges = vec![TemporalEdgeArtifact {
             source: EdgeEndpoint::Commit {
-                sha: "c1".to_string(),
+                sha: "c1".to_owned(),
             },
             target: EdgeEndpoint::Snapshot { key: snapshot },
             relation: RelationKind::Touches,
@@ -3000,36 +3001,36 @@ mod parquet_temporal_test {
         let mut artifact = empty_artifact("node-stats-bloom-sort");
         artifact.symbols = vec![
             GraphSymbolArtifact {
-                stable_symbol_id: "sym-z".to_string(),
-                file_path: "src/a.rs".to_string(),
+                stable_symbol_id: "sym-z".to_owned(),
+                file_path: "src/a.rs".to_owned(),
                 byte_range: [0, 8],
                 line_range: [1, 2],
-                entity_name: "zeta".to_string(),
-                qualified_name: "crate::zeta".to_string(),
-                symbol_kind: "function".to_string(),
-                anchor_hash: "anchor-z".to_string(),
+                entity_name: "zeta".to_owned(),
+                qualified_name: "crate::zeta".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-z".to_owned(),
                 enclosing_scope: None,
             },
             GraphSymbolArtifact {
-                stable_symbol_id: "sym-a".to_string(),
-                file_path: "src/z.rs".to_string(),
+                stable_symbol_id: "sym-a".to_owned(),
+                file_path: "src/z.rs".to_owned(),
                 byte_range: [10, 18],
                 line_range: [3, 4],
-                entity_name: "alpha".to_string(),
-                qualified_name: "crate::alpha".to_string(),
-                symbol_kind: "function".to_string(),
-                anchor_hash: "anchor-a".to_string(),
+                entity_name: "alpha".to_owned(),
+                qualified_name: "crate::alpha".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-a".to_owned(),
                 enclosing_scope: None,
             },
             GraphSymbolArtifact {
-                stable_symbol_id: "sym-m".to_string(),
-                file_path: "src/m.rs".to_string(),
+                stable_symbol_id: "sym-m".to_owned(),
+                file_path: "src/m.rs".to_owned(),
                 byte_range: [20, 28],
                 line_range: [5, 6],
-                entity_name: "middle".to_string(),
-                qualified_name: "crate::middle".to_string(),
-                symbol_kind: "function".to_string(),
-                anchor_hash: "anchor-m".to_string(),
+                entity_name: "middle".to_owned(),
+                qualified_name: "crate::middle".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-m".to_owned(),
                 enclosing_scope: None,
             },
         ];
@@ -3063,9 +3064,9 @@ mod parquet_temporal_test {
         let tempdir = tempfile::tempdir()?;
         let mut artifact = empty_artifact("diagnostics-round-trip");
         artifact.diagnostics = vec![
-            "parse_failed path=src/lib.rs sha=abc123".to_string(),
-            "tree_sitter_error path=src/main.rs line=42".to_string(),
-            "ambiguous_rename stable_symbol_id=sym-main".to_string(),
+            "parse_failed path=src/lib.rs sha=abc123".to_owned(),
+            "tree_sitter_error path=src/main.rs line=42".to_owned(),
+            "ambiguous_rename stable_symbol_id=sym-main".to_owned(),
         ];
 
         let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
@@ -3120,19 +3121,19 @@ mod parquet_temporal_test {
 
     fn snapshot_key(stable_symbol_id: &str, commit: &str) -> SnapshotKey {
         SnapshotKey {
-            stable_symbol_id: stable_symbol_id.to_string(),
-            commit: commit.to_string(),
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            commit: commit.to_owned(),
         }
     }
 
     fn empty_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: crate::schema::GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+                graph_index_version: crate::schema::GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "test-manifest".to_string(),
-            graph_content_hash: graph_content_hash.to_string(),
+            manifest_version: "test-manifest".to_owned(),
+            graph_content_hash: graph_content_hash.to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),

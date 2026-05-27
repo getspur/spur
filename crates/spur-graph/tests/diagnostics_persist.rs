@@ -9,8 +9,8 @@ use spur_graph::{
 fn diagnostics_round_trip_through_json() {
     let mut artifact = minimal_artifact();
     artifact.diagnostics = vec![
-        "parse_failed path=src/lib.rs sha=abc123".to_string(),
-        "ambiguous_rename stable_symbol_id=sym-main".to_string(),
+        "parse_failed path=src/lib.rs sha=abc123".to_owned(),
+        "ambiguous_rename stable_symbol_id=sym-main".to_owned(),
     ];
 
     let encoded = serde_json::to_string(&artifact).expect("encode artifact");
@@ -22,7 +22,7 @@ fn diagnostics_round_trip_through_json() {
 #[test]
 fn diagnostics_round_trip_through_artifact_io() {
     let mut artifact = minimal_artifact();
-    artifact.diagnostics = vec!["parse_failed path=src/lib.rs sha=abc123".to_string()];
+    artifact.diagnostics = vec!["parse_failed path=src/lib.rs sha=abc123".to_owned()];
     let dir = tempfile::tempdir().expect("tempdir");
 
     write_graph_artifact(dir.path(), &artifact);
@@ -73,15 +73,15 @@ fn write_and_load_graph_artifact(
 fn minimal_artifact() -> GraphIndexArtifact {
     GraphIndexArtifact {
         header: GraphIndexHeader {
-            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
             content_hash_blake3: None,
         },
-        manifest_version: "manifest-v1".to_string(),
-        graph_content_hash: "graph-hash-v1".to_string(),
+        manifest_version: "manifest-v1".to_owned(),
+        graph_content_hash: "graph-hash-v1".to_owned(),
         file_manifests: Vec::new(),
         files: vec![GraphFileArtifact {
-            stable_file_id: "file-src-lib".to_string(),
-            file_path: "src/lib.rs".to_string(),
+            stable_file_id: "file-src-lib".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
         }],
         file_node_ids: vec![NodeId(1)],
         symbols: Vec::new(),
@@ -99,15 +99,15 @@ fn temporal_artifact() -> GraphIndexArtifact {
     let mut artifact = minimal_artifact();
     let snapshot = symbol_snapshot("sym-main", "c1");
     artifact.commits.push(CommitArtifact {
-        sha: "c1".to_string(),
+        sha: "c1".to_owned(),
         parents: Vec::new(),
         author_time: 1,
-        summary: "initial import".to_string(),
+        summary: "initial import".to_owned(),
     });
     artifact.symbol_snapshots.push(snapshot.clone());
     artifact.temporal_edges.push(TemporalEdgeArtifact {
         source: EdgeEndpoint::Commit {
-            sha: "c1".to_string(),
+            sha: "c1".to_owned(),
         },
         target: EdgeEndpoint::Snapshot { key: snapshot.key },
         relation: RelationKind::Touches,
@@ -120,16 +120,16 @@ fn temporal_artifact() -> GraphIndexArtifact {
 fn symbol_snapshot(stable_symbol_id: &str, commit: &str) -> SymbolSnapshotArtifact {
     SymbolSnapshotArtifact {
         key: SnapshotKey {
-            stable_symbol_id: stable_symbol_id.to_string(),
-            commit: commit.to_string(),
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            commit: commit.to_owned(),
         },
         file_path: "src/lib.rs".into(),
-        entity_name: stable_symbol_id.to_string(),
-        symbol_kind: "function".to_string(),
+        entity_name: stable_symbol_id.to_owned(),
+        symbol_kind: "function".to_owned(),
         enclosing_scope: None,
         byte_range: [0, 10],
         line_range: [1, 1],
         anchor_hash: format!("anchor-{stable_symbol_id}"),
-        tokens: vec![stable_symbol_id.to_string()],
+        tokens: vec![stable_symbol_id.to_owned()],
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::Context as _;
 use serde::Serialize;
 
 use crate::{
@@ -53,38 +53,38 @@ mod tests {
     fn canonical_bytes_snapshot_guard() {
         let artifact = GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "v5".to_string(),
-                content_hash_blake3: Some("header-content-hash".to_string()),
+                graph_index_version: "v5".to_owned(),
+                content_hash_blake3: Some("header-content-hash".to_owned()),
             },
-            manifest_version: "manifest-v1".to_string(),
-            graph_content_hash: "graph-content-hash".to_string(),
+            manifest_version: "manifest-v1".to_owned(),
+            graph_content_hash: "graph-content-hash".to_owned(),
             file_manifests: vec![GraphFileManifestEntry {
-                stable_file_id: "file:src/lib.rs".to_string(),
-                path: "src/lib.rs".to_string(),
-                content_oid: "blob-oid".to_string(),
+                stable_file_id: "file:src/lib.rs".to_owned(),
+                path: "src/lib.rs".to_owned(),
+                content_oid: "blob-oid".to_owned(),
                 node_ids: vec![NodeId(1), NodeId(2)],
             }],
             files: vec![GraphFileArtifact {
-                stable_file_id: "file:src/lib.rs".to_string(),
-                file_path: "src/lib.rs".to_string(),
+                stable_file_id: "file:src/lib.rs".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
             }],
             file_node_ids: vec![NodeId(1)],
             symbols: vec![GraphSymbolArtifact {
-                stable_symbol_id: "sym:src/lib.rs:demo".to_string(),
-                file_path: "src/lib.rs".to_string(),
+                stable_symbol_id: "sym:src/lib.rs:demo".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
                 byte_range: [10, 42],
                 line_range: [2, 5],
-                entity_name: "demo".to_string(),
-                qualified_name: "crate::demo".to_string(),
-                symbol_kind: "function".to_string(),
-                anchor_hash: "anchor-hash".to_string(),
-                enclosing_scope: Some("crate".to_string()),
+                entity_name: "demo".to_owned(),
+                qualified_name: "crate::demo".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-hash".to_owned(),
+                enclosing_scope: Some("crate".to_owned()),
             }],
             symbol_node_ids: vec![NodeId(2)],
             edges: vec![GraphEdgeArtifact {
-                source_stable_symbol_id: "sym:src/lib.rs:demo".to_string(),
-                target_stable_symbol_id: Some("sym:src/lib.rs:helper".to_string()),
-                target_label: Some("helper".to_string()),
+                source_stable_symbol_id: "sym:src/lib.rs:demo".to_owned(),
+                target_stable_symbol_id: Some("sym:src/lib.rs:helper".to_owned()),
+                target_label: Some("helper".to_owned()),
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 0.875,
@@ -93,8 +93,8 @@ mod tests {
                 bind_method: None,
             }],
             tombstones: vec![GraphTombstoneEntry {
-                path: "src/old.rs".to_string(),
-                stable_file_id: "file:src/old.rs".to_string(),
+                path: "src/old.rs".to_owned(),
+                stable_file_id: "file:src/old.rs".to_owned(),
             }],
             diagnostics: Vec::new(),
             commits: Vec::new(),
@@ -148,10 +148,10 @@ mod tests {
         let mut mutated = artifact.clone();
         mutated.temporal_edges.push(TemporalEdgeArtifact {
             source: EdgeEndpoint::File {
-                path: "src/lib.rs".to_string().into(),
+                path: "src/lib.rs".to_owned().into(),
             },
             target: EdgeEndpoint::Commit {
-                sha: "c1".to_string(),
+                sha: "c1".to_owned(),
             },
             relation: RelationKind::Touches,
             parent: None,
@@ -167,7 +167,7 @@ mod tests {
         let mut mutated = artifact.clone();
         mutated
             .diagnostics
-            .push("parse_failed path=src/lib.rs sha=abc123".to_string());
+            .push("parse_failed path=src/lib.rs sha=abc123".to_owned());
 
         assert_hash_changes(&artifact, &mutated);
     }
@@ -187,11 +187,11 @@ mod tests {
     fn minimal_hash_artifact() -> GraphIndexArtifact {
         GraphIndexArtifact {
             header: GraphIndexHeader {
-                graph_index_version: "v5".to_string(),
+                graph_index_version: "v5".to_owned(),
                 content_hash_blake3: None,
             },
-            manifest_version: "manifest-v1".to_string(),
-            graph_content_hash: "graph-content-hash".to_string(),
+            manifest_version: "manifest-v1".to_owned(),
+            graph_content_hash: "graph-content-hash".to_owned(),
             file_manifests: Vec::new(),
             files: Vec::new(),
             file_node_ids: Vec::new(),
@@ -208,7 +208,7 @@ mod tests {
 
     fn commit(sha: &str) -> CommitArtifact {
         CommitArtifact {
-            sha: sha.to_string(),
+            sha: sha.to_owned(),
             parents: Vec::new(),
             author_time: 1,
             summary: format!("commit {sha}"),
@@ -218,16 +218,16 @@ mod tests {
     fn symbol_snapshot(stable_symbol_id: &str, commit: &str) -> SymbolSnapshotArtifact {
         SymbolSnapshotArtifact {
             key: SnapshotKey {
-                stable_symbol_id: stable_symbol_id.to_string(),
-                commit: commit.to_string(),
+                stable_symbol_id: stable_symbol_id.to_owned(),
+                commit: commit.to_owned(),
             },
-            file_path: "src/lib.rs".to_string().into(),
-            entity_name: "demo".to_string(),
-            symbol_kind: "function".to_string(),
+            file_path: "src/lib.rs".to_owned().into(),
+            entity_name: "demo".to_owned(),
+            symbol_kind: "function".to_owned(),
             enclosing_scope: None,
             byte_range: [10, 42],
             line_range: [2, 5],
-            anchor_hash: "anchor-hash".to_string(),
+            anchor_hash: "anchor-hash".to_owned(),
             tokens: Vec::new(),
         }
     }

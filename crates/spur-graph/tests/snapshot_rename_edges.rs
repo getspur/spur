@@ -169,7 +169,7 @@ fn rev_parse(dir: &Path, rev: &str) -> String {
         "git rev-parse {rev} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap().trim().to_string()
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn git(dir: &Path, args: &[&str]) {

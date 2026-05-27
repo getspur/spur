@@ -10,8 +10,8 @@ use std::io;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use fs2::FileExt;
+use anyhow::{Context as _, Result};
+use fs2::FileExt as _;
 
 /// How long to sleep between flock retry attempts. Caller-visible default;
 /// individual call sites can pass their own deadline via `timeout`.
