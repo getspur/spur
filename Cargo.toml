@@ -15,6 +15,7 @@ members = [
     "crates/spur-bot",
     "crates/spur-cli",
     "crates/spur-telemetry",
+    "crates/spur-test-madsim",
     "crates/spur-context",
     "crates/spur-graph",
     "crates/spur-notebook",
