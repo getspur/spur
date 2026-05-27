@@ -43,3 +43,6 @@ spur-license = { path = ".", features = ["test-support"] }
 
 [features]
 test-support = []
+
+[lints]
+workspace = true
