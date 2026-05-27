@@ -1269,6 +1269,13 @@ async fn run() -> Result<()> {
             // token immediately so the orchestrator's guarded select arms can
             // observe it, then give the TUI a brief grace to restore the
             // terminal before dropping its future.
+            //
+            // The same `cancel_token` is also handed to the TUI so its normal
+            // quit path can fire cancellation *before* `perm_rx` (owned by the
+            // TUI future) drops on function return. Without this, a clean
+            // Ctrl-Q strands any in-flight agent permission request — the
+            // SIGINT path here only protects the wedged-TUI case.
+            let cancel_token = host.cancel_token();
             let tui_fut = spur_tui::app::run_tui_with_license(
                 event_rx,
                 Some(tui_tx),
@@ -1280,6 +1287,7 @@ async fn run() -> Result<()> {
                 config_path,
                 repo_root.clone(),
                 upgrade_rx,
+                Some(cancel_token.clone()),
             );
             tokio::pin!(tui_fut);
 
@@ -1287,11 +1295,21 @@ async fn run() -> Result<()> {
                 res = &mut tui_fut => res,
                 sig = tokio::signal::ctrl_c() => {
                     if let Err(e) = sig {
-                        tracing::warn!(%e, "ctrl_c handler failed; falling through to TUI await");
+                        // ctrl_c handler install failed (rare; sandboxed /
+                        // signalfd-disabled environments). Best-effort: fire
+                        // cancellation so the orchestrator at least sees the
+                        // intent, then fall back to awaiting the TUI. The
+                        // "guaranteed escape" property degrades to "best-effort
+                        // escape" on these platforms.
+                        tracing::warn!(
+                            %e,
+                            "ctrl_c handler failed; firing cancel and falling back to TUI await (escape is best-effort on this platform)"
+                        );
+                        cancel_token.cancel();
                         (&mut tui_fut).await
                     } else {
                         tracing::info!("SIGINT received; initiating shutdown");
-                        host.cancel_token().cancel();
+                        cancel_token.cancel();
                         match tokio::time::timeout(Duration::from_millis(500), &mut tui_fut).await {
                             Ok(r) => r,
                             Err(_) => {

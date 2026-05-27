@@ -38,7 +38,10 @@ const GIT_WORKTREE_OP_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Backoff schedule for retrying git invocations that fail on transient
-/// `index.lock` / `cannot lock ref` errors. Cumulative ceiling ≈1.9s.
+/// `index.lock` / `cannot lock ref` errors. Five attempts produce four
+/// inter-attempt sleeps (cumulative ≈900 ms = 50+100+250+500); the final
+/// `1000` slot is loaded but never slept because the 5th attempt's failure
+/// short-circuits through the terminal `Err` arm.
 const GIT_RETRY_DELAYS_MS: [u64; 5] = [50, 100, 250, 500, 1000];
 
 /// Wrap a git exec block in the transient-lock retry loop. The block must
