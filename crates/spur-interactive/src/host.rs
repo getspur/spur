@@ -139,6 +139,14 @@ impl InteractiveFrontendHost {
         self.handle.clone()
     }
 
+    /// Cancellation token shared with the orchestrator's `run_interactive`.
+    /// Callers can race this against external shutdown triggers (e.g. SIGINT)
+    /// to wake the orchestrator from its guarded select arms without going
+    /// through the full `shutdown()` teardown.
+    pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
+        self.shutdown_token.clone()
+    }
+
     pub fn take_event_stream(
         &mut self,
     ) -> Option<tokio::sync::broadcast::Receiver<spur_acp::SpurEvent>> {
@@ -200,13 +208,28 @@ impl InteractiveFrontendHost {
     }
 
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
+        // Signal cancellation BEFORE silencing TUI-side reply channels. If
+        // permission_rx is dropped while the agent is mid-tool-call awaiting a
+        // permission decision, the round-trip becomes unanswerable and the
+        // orchestrator's connection.prompt().await never returns.
+        self.shutdown_token.cancel();
+        drop(self.handle);
+        let mut handle = self.orch_handle;
+
+        // Bounded grace window with TUI reply channels still open so the
+        // orchestrator can flush a final permission / agent round-trip.
+        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+
         self.event_rx.take();
         self.permission_rx.take();
         self.data_rx.take();
         self.data_loop_handle.take();
-        self.shutdown_token.cancel();
-        drop(self.handle);
-        let mut handle = self.orch_handle;
+
         match tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle).await {
             Ok(_) => Ok(()),
             Err(_) => {
