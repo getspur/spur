@@ -1157,49 +1157,97 @@ fn tier2_jaccard_matches(
         return Vec::new();
     };
 
+    let deleted_token_sets = token_sets_for_changes(deleted_candidates);
+    let added_token_sets = token_sets_for_changes(added_candidates);
     let mut matches = Vec::new();
-    for added in added_candidates {
-        let mut scored: Vec<_> = deleted_candidates
-            .iter()
-            .map(|deleted| (deleted, jaccard_tokens(&added.snapshot, &deleted.snapshot)))
-            .collect();
-        scored.sort_by(|(_, left), (_, right)| {
-            right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let Some((best_deleted, best_score)) = scored.first().copied() else {
+    for added in &added_token_sets {
+        let (Some((best_deleted, best_score)), second) =
+            best_two_jaccard_matches(added, &deleted_token_sets)
+        else {
             continue;
         };
         if best_score < threshold {
-            record_ambiguous_rename_pair(diagnostics, file_change, added, best_deleted);
+            record_ambiguous_rename_pair(diagnostics, file_change, added.change, best_deleted);
             continue;
         }
-        if let Some((second_deleted, second_score)) = scored.get(1).copied() {
+        if let Some((second_deleted, second_score)) = second {
             if second_score >= threshold {
-                record_ambiguous_rename_pair(diagnostics, file_change, added, best_deleted);
-                record_ambiguous_rename_pair(diagnostics, file_change, added, second_deleted);
+                record_ambiguous_rename_pair(diagnostics, file_change, added.change, best_deleted);
+                record_ambiguous_rename_pair(
+                    diagnostics,
+                    file_change,
+                    added.change,
+                    second_deleted,
+                );
                 diagnostics.push(format!(
                     "merge_collision: file={} candidate={}",
                     file_change.path.display(),
-                    added.snapshot.entity_name
+                    added.change.snapshot.entity_name
                 ));
                 continue;
             }
             if best_score - second_score < 0.05 {
-                record_ambiguous_rename_pair(diagnostics, file_change, added, best_deleted);
-                record_ambiguous_rename_pair(diagnostics, file_change, added, second_deleted);
+                record_ambiguous_rename_pair(diagnostics, file_change, added.change, best_deleted);
+                record_ambiguous_rename_pair(
+                    diagnostics,
+                    file_change,
+                    added.change,
+                    second_deleted,
+                );
                 continue;
             }
         }
 
         matches.push(RenameMatch {
             from: best_deleted.clone(),
-            to: added.clone(),
+            to: added.change.clone(),
             score: best_score,
         });
     }
 
     reject_ambiguous_splits(matches, file_change, diagnostics)
+}
+
+struct ChangeTokenSet<'a> {
+    change: &'a SymbolChange,
+    tokens: HashSet<&'a str>,
+}
+
+fn token_sets_for_changes(changes: &[SymbolChange]) -> Vec<ChangeTokenSet<'_>> {
+    changes
+        .iter()
+        .map(|change| ChangeTokenSet {
+            change,
+            tokens: change.snapshot.tokens.iter().map(String::as_str).collect(),
+        })
+        .collect()
+}
+
+type ScoredChange<'a> = (&'a SymbolChange, f64);
+
+fn best_two_jaccard_matches<'a>(
+    added: &ChangeTokenSet<'_>,
+    deleted_candidates: &'a [ChangeTokenSet<'a>],
+) -> (Option<ScoredChange<'a>>, Option<ScoredChange<'a>>) {
+    let mut best = None;
+    let mut second = None;
+    for deleted in deleted_candidates {
+        let scored = (
+            deleted.change,
+            jaccard_token_sets(&added.tokens, &deleted.tokens),
+        );
+        if best.is_none_or(|(_, best_score)| score_outranks(scored.1, best_score)) {
+            second = best;
+            best = Some(scored);
+        } else if second.is_none_or(|(_, second_score)| score_outranks(scored.1, second_score)) {
+            second = Some(scored);
+        }
+    }
+    (best, second)
+}
+
+fn score_outranks(candidate: f64, current: f64) -> bool {
+    current.partial_cmp(&candidate) == Some(std::cmp::Ordering::Less)
 }
 
 fn reject_ambiguous_splits(
@@ -1272,14 +1320,12 @@ fn ambiguous_rename_diagnostic(
     )
 }
 
-fn jaccard_tokens(a: &SymbolSnapshotArtifact, b: &SymbolSnapshotArtifact) -> f64 {
-    let a_tokens: HashSet<_> = a.tokens.iter().collect();
-    let b_tokens: HashSet<_> = b.tokens.iter().collect();
-    let union = a_tokens.union(&b_tokens).count();
+fn jaccard_token_sets(a_tokens: &HashSet<&str>, b_tokens: &HashSet<&str>) -> f64 {
+    let union = a_tokens.union(b_tokens).count();
     if union == 0 {
         return 0.0;
     }
-    let intersection = a_tokens.intersection(&b_tokens).count();
+    let intersection = a_tokens.intersection(b_tokens).count();
     intersection as f64 / union as f64
 }
 
@@ -2262,6 +2308,93 @@ mod tests {
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.contains("merge_collision")));
+    }
+
+    #[test]
+    fn tier2_jaccard_matches_preserves_matches_and_ambiguity_diagnostics() {
+        let file_change = FileChange {
+            path: GitPath::from("lib.rs"),
+            kind: FileChangeKind::Modified,
+            parent_sha: Some("parent".into()),
+        };
+        let deleted = vec![
+            symbol_change("deleted_clean", "old_clean", &["a", "b", "c", "d"]),
+            symbol_change("deleted_tie_a", "old_tie_a", &["t1", "t2", "t3", "t4"]),
+            symbol_change("deleted_tie_b", "old_tie_b", &["t1", "t2", "t3", "t4"]),
+            symbol_change("deleted_low", "old_low", &["x", "y", "z"]),
+        ];
+        let added = vec![
+            symbol_change("added_clean", "new_clean", &["a", "b", "c", "d", "e"]),
+            symbol_change("added_tie", "new_tie", &["t1", "t2", "t3", "t4"]),
+            symbol_change("added_low", "new_low", &["x", "unrelated"]),
+        ];
+        let mut diagnostics = Vec::new();
+
+        let matches = tier2_jaccard_matches(
+            &deleted,
+            &added,
+            &file_change,
+            Language::Rust,
+            &mut diagnostics,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].from.snapshot.key.stable_symbol_id,
+            "deleted_clean"
+        );
+        assert_eq!(matches[0].to.snapshot.key.stable_symbol_id, "added_clean");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("merge_collision") && diagnostic.contains("candidate=new_tie")
+        }));
+        assert!(has_ambiguous_rename_diagnostic(
+            &diagnostics,
+            "added_tie",
+            "deleted_tie_a"
+        ));
+        assert!(has_ambiguous_rename_diagnostic(
+            &diagnostics,
+            "added_tie",
+            "deleted_tie_b"
+        ));
+        assert!(has_ambiguous_rename_diagnostic(
+            &diagnostics,
+            "added_low",
+            "deleted_low"
+        ));
+    }
+
+    fn symbol_change(stable_symbol_id: &str, entity_name: &str, tokens: &[&str]) -> SymbolChange {
+        SymbolChange {
+            snapshot: SymbolSnapshotArtifact {
+                key: SnapshotKey {
+                    stable_symbol_id: stable_symbol_id.into(),
+                    commit: "commit".into(),
+                },
+                file_path: "lib.rs".into(),
+                entity_name: entity_name.into(),
+                symbol_kind: "function".into(),
+                enclosing_scope: None,
+                byte_range: [0, 1],
+                line_range: [1, 1],
+                anchor_hash: format!("hash-{stable_symbol_id}"),
+                tokens: tokens.iter().map(|token| (*token).into()).collect(),
+            },
+            change_kind: ChangeKind::Added,
+            parent_sha: Some("parent".into()),
+        }
+    }
+
+    fn has_ambiguous_rename_diagnostic(
+        diagnostics: &[String],
+        stable_id: &str,
+        other_stable_id: &str,
+    ) -> bool {
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("ambiguous_rename")
+                && diagnostic.contains(&format!("stable_symbol_id={stable_id}"))
+                && diagnostic.contains(&format!("other_stable_symbol_id={other_stable_id}"))
+        })
     }
 
     #[test]
