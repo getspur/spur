@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // macOS task_info FFI + MaybeUninit::assume_init for bench RSS metrics.
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;

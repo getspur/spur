@@ -2,6 +2,7 @@
 //!
 //! Each function is a precondition that must hold before `BeadsCrateAdapter`
 //! is allowed to open the writer connection.
+#![allow(unsafe_code)] // libc::statfs FFI for NFS/SMB/CIFS detection.
 
 use beads_rust::storage::sqlite::SqliteStorage;
 use beads_rust::sync;

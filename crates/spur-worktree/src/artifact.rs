@@ -148,6 +148,7 @@ async fn update_ref(worktree: &Path, ref_name: &str, sha: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // std::env::set_var is unsafe in Rust 2024; test-only setup.
 mod tests {
     use super::*;
     use tempfile::tempdir;
