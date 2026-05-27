@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +16,7 @@ const DEFAULT_WRITE_LOCK_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 2_000;
 pub(crate) const WRITE_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-static PROCESS_START_EPOCH_MS: LazyLock<u64> = LazyLock::new(process_start_epoch_ms);
+static PROCESS_START_EPOCH_MS: OnceLock<Option<u64>> = OnceLock::new();
 
 pub(crate) enum WriteLockAttempt {
     Acquired(WriteLockGuard),
@@ -198,7 +198,7 @@ impl LockPayload {
     fn new(beads_dir: &Path) -> Self {
         Self {
             pid: std::process::id(),
-            process_start_epoch_ms: *PROCESS_START_EPOCH_MS,
+            process_start_epoch_ms: process_start_epoch_ms(),
             repo_root: repo_root_for(beads_dir),
             argv: std::env::args().collect::<Vec<_>>().join(" "),
             host: hostname(),
@@ -303,11 +303,17 @@ fn current_epoch_ms() -> u64 {
 }
 
 fn process_start_epoch_ms() -> u64 {
-    let system = System::new_all();
-    system
-        .process(Pid::from_u32(std::process::id()))
-        .map(|process| process.start_time().saturating_mul(1_000))
-        .unwrap_or_else(current_epoch_ms)
+    match PROCESS_START_EPOCH_MS.get_or_init(|| {
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_process(pid);
+        system
+            .process(pid)
+            .map(|process| process.start_time().saturating_mul(1_000))
+    }) {
+        Some(started_at) => *started_at,
+        None => current_epoch_ms(),
+    }
 }
 
 fn human_duration(ms: u64) -> String {
@@ -398,5 +404,15 @@ mod tests {
         );
 
         drop(held);
+    }
+
+    #[test]
+    fn process_start_epoch_cache_is_populated() {
+        let _ = process_start_epoch_ms();
+
+        assert!(
+            PROCESS_START_EPOCH_MS.get().is_some(),
+            "process start cache should be initialized after first lookup"
+        );
     }
 }
