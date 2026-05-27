@@ -529,6 +529,17 @@ impl McpCallbackServer {
                     .lock()
                     .await
                     .remove(&request_id);
+                let attempt = attempt_tracker.load(Ordering::SeqCst);
+                let continuation = self.materializer
+                    .materialize(
+                        result.clone(),
+                        request_id.clone(),
+                        attempt,
+                        self.brain_session_id().clone(),
+                        spur_acp::domain::ContinuationSource::Inline,
+                        self.event_sink.as_ref(),
+                    )
+                    .await;
                 let result_json = match serde_json::to_value(&result) {
                     Ok(v) => v,
                     Err(e) => {
@@ -545,6 +556,7 @@ impl McpCallbackServer {
                 let payload = json!({
                     "status": "completed",
                     "delegation_id": request_id,
+                    "artifact_id": continuation.payload.artifact_id,
                     "continuation_will_fire": false,
                     "description": format!(
                         "Delegation to '{agent}' completed inline (delegation_id={request_id}).",
@@ -678,7 +690,8 @@ impl McpCallbackServer {
             let task_tracker = self.task_tracker.clone();
             let cancel_token = self.cancel_token.child_token();
             let event_sink = self.event_sink.clone();
-            let brain_session = self.brain_session_id().as_session_id().clone();
+            let brain_session_id = self.brain_session_id().clone();
+            let brain_session = brain_session_id.as_session_id().clone();
             let materializer = self.materializer.clone();
             waits.spawn(async move {
                 let mut rx = rx;
@@ -707,10 +720,22 @@ impl McpCallbackServer {
                             .lock()
                             .await
                             .remove(&request_id);
+                        let attempt = attempt_tracker.load(Ordering::SeqCst);
+                        let continuation = materializer
+                            .materialize(
+                                result.clone(),
+                                request_id.clone(),
+                                attempt,
+                                brain_session_id,
+                                spur_acp::domain::ContinuationSource::Inline,
+                                event_sink.as_ref(),
+                            )
+                            .await;
                         let result_json = serde_json::to_value(&result).unwrap_or(json!(null));
                         json!({
                             "status": "completed",
                             "delegation_id": request_id,
+                            "artifact_id": continuation.payload.artifact_id,
                             "agent": agent,
                             "continuation_will_fire": false,
                             "description": format!(
