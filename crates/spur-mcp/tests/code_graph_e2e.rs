@@ -580,8 +580,13 @@ fn build_real_tools_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
 
 fn write_graph_artifact(worktree: &Path, artifact: &GraphIndexArtifact) {
     let artifact_base = worktree.join(".spur/graph");
-    let written = write_artifact_parquet(artifact, &artifact_base, WriteOptions::default())
-        .expect("write parquet artifact");
+    let written = write_artifact_parquet(
+        artifact,
+        &artifact_base,
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
     write_current_pointer(worktree, &written).expect("write CURRENT pointer");
 }
 

@@ -5,7 +5,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::ScopedJoinHandle;
-use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context as _};
 use arrow_array::{
@@ -32,7 +31,6 @@ use crate::{
 pub const PARQUET_ROW_GROUP_SIZE: usize = 16_384;
 const ENCLOSING_SCOPE_DICTIONARY: bool = true;
 const EDGES_BY_DST_PRESENT: bool = true;
-const STALE_PARQUET_TEMP_DIR_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -45,6 +43,12 @@ impl Default for WriteOptions {
             emit_edges_by_dst: EDGES_BY_DST_PRESENT,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalArtifactTable {
+    TemporalEdges,
+    SymbolSnapshots,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -184,22 +188,12 @@ impl ColumnData {
 
 pub fn write_artifact_parquet(
     artifact: &GraphIndexArtifact,
-    base_dir: &Path,
+    out_dir: &Path,
     options: WriteOptions,
+    temporal_shards: Vec<ShardIndexEntry>,
 ) -> anyhow::Result<PathBuf> {
-    let artifact_hash = &artifact.graph_content_hash;
-    fs::create_dir_all(base_dir)
-        .with_context(|| format!("failed to create `{}`", base_dir.display()))?;
-    sweep_stale_parquet_temp_dirs(base_dir);
-
-    let final_dir = base_dir.join(format!("{artifact_hash}.parquet"));
-    let temp_dir = parquet_temp_dir(base_dir, artifact_hash);
-    if temp_dir.exists() {
-        fs::remove_dir_all(&temp_dir)
-            .with_context(|| format!("failed to remove stale temp dir `{}`", temp_dir.display()))?;
-    }
-    fs::create_dir(&temp_dir)
-        .with_context(|| format!("failed to create `{}`", temp_dir.display()))?;
+    fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create `{}`", out_dir.display()))?;
 
     let mut files = file_rows(artifact)?;
     let mut nodes = node_rows(artifact)?;
@@ -238,17 +232,27 @@ pub fn write_artifact_parquet(
         edges_by_dst = Some(by_dst);
     }
 
-    let nodes_path = temp_dir.join("nodes.parquet");
-    let edges_path = temp_dir.join("edges.parquet");
-    let edges_by_dst_path = temp_dir.join("edges_by_dst.parquet");
-    let unresolved_edges_path = temp_dir.join("edges_unresolved.parquet");
-    let files_path = temp_dir.join("files.parquet");
-    let file_manifests_path = temp_dir.join("file_manifests.parquet");
-    let tombstones_path = temp_dir.join("tombstones.parquet");
-    let commits_path = temp_dir.join("commits.parquet");
-    let symbol_snapshots_path = temp_dir.join("symbol_snapshots.parquet");
-    let temporal_edges_path = temp_dir.join("temporal_edges.parquet");
-    let diagnostics_path = temp_dir.join("diagnostics.parquet");
+    let fallback_temporal_shards =
+        !artifact.symbol_snapshots.is_empty() || !artifact.temporal_edges.is_empty();
+    let temporal_shards = if fallback_temporal_shards {
+        synthesize_single_temporal_shard(artifact)
+    } else {
+        temporal_shards
+    };
+
+    let nodes_path = out_dir.join("nodes.parquet");
+    let edges_path = out_dir.join("edges.parquet");
+    let edges_by_dst_path = out_dir.join("edges_by_dst.parquet");
+    let unresolved_edges_path = out_dir.join("edges_unresolved.parquet");
+    let files_path = out_dir.join("files.parquet");
+    let file_manifests_path = out_dir.join("file_manifests.parquet");
+    let tombstones_path = out_dir.join("tombstones.parquet");
+    let commits_path = out_dir.join("commits.parquet");
+    let symbol_snapshots_dir = out_dir.join("symbol_snapshots");
+    let temporal_edges_dir = out_dir.join("temporal_edges");
+    let symbol_snapshots_path = symbol_snapshots_dir.join("00000.parquet");
+    let temporal_edges_path = temporal_edges_dir.join("00000.parquet");
+    let diagnostics_path = out_dir.join("diagnostics.parquet");
 
     std::thread::scope(|scope| {
         let nodes_handle = scope.spawn(|| write_nodes(&nodes_path, &nodes));
@@ -261,16 +265,28 @@ pub fn write_artifact_parquet(
         let tombstones_handle = scope.spawn(|| write_tombstones(&tombstones_path, &tombstones));
         let commits_handle = (!artifact.commits.is_empty())
             .then(|| scope.spawn(|| write_commits(&commits_path, &artifact.commits, &options)));
-        let symbol_snapshots_handle = (!artifact.symbol_snapshots.is_empty()).then(|| {
+        if fallback_temporal_shards && !artifact.symbol_snapshots.is_empty() {
+            fs::create_dir_all(&symbol_snapshots_dir).with_context(|| {
+                format!("failed to create `{}`", symbol_snapshots_dir.display())
+            })?;
+        }
+        if fallback_temporal_shards && !artifact.temporal_edges.is_empty() {
+            fs::create_dir_all(&temporal_edges_dir)
+                .with_context(|| format!("failed to create `{}`", temporal_edges_dir.display()))?;
+        }
+        let symbol_snapshots_handle = (fallback_temporal_shards
+            && !artifact.symbol_snapshots.is_empty())
+        .then(|| {
             scope.spawn(|| {
                 write_symbol_snapshots(&symbol_snapshots_path, &artifact.symbol_snapshots, &options)
             })
         });
-        let temporal_edges_handle = (!artifact.temporal_edges.is_empty()).then(|| {
-            scope.spawn(|| {
-                write_temporal_edges(&temporal_edges_path, &artifact.temporal_edges, &options)
-            })
-        });
+        let temporal_edges_handle =
+            (fallback_temporal_shards && !artifact.temporal_edges.is_empty()).then(|| {
+                scope.spawn(|| {
+                    write_temporal_edges(&temporal_edges_path, &artifact.temporal_edges, &options)
+                })
+            });
         let diagnostics_handle = (!artifact.diagnostics.is_empty())
             .then(|| scope.spawn(|| write_diagnostics(&diagnostics_path, &artifact.diagnostics)));
         let edges_by_dst_handle = edges_by_dst
@@ -318,8 +334,14 @@ pub fn write_artifact_parquet(
             file_manifests: file_manifests.len(),
             tombstones: tombstones.len(),
             commits: artifact.commits.len(),
-            symbol_snapshots: artifact.symbol_snapshots.len(),
-            temporal_edges: artifact.temporal_edges.len(),
+            symbol_snapshots: temporal_shards
+                .iter()
+                .map(|entry| entry.row_count_snapshots)
+                .sum(),
+            temporal_edges: temporal_shards
+                .iter()
+                .map(|entry| entry.row_count_edges)
+                .sum(),
             diagnostics: artifact.diagnostics.len(),
         },
         parquet_writer: GraphArtifactParquetWriter {
@@ -327,27 +349,14 @@ pub fn write_artifact_parquet(
             row_group_size: PARQUET_ROW_GROUP_SIZE,
         },
         edges_by_dst_present: options.emit_edges_by_dst,
-        temporal_shards: Vec::new(),
+        temporal_shards,
     };
     let manifest_json =
         serde_json::to_string_pretty(&manifest).context("failed to encode Parquet manifest")?;
-    write_manifest(&temp_dir, &manifest_json)?;
-    fsync_dir(&temp_dir)?;
+    write_manifest(out_dir, &manifest_json)?;
+    fsync_dir(out_dir)?;
 
-    if final_dir.exists() {
-        fs::remove_dir_all(&final_dir)
-            .with_context(|| format!("failed to remove `{}`", final_dir.display()))?;
-    }
-    fs::rename(&temp_dir, &final_dir).with_context(|| {
-        format!(
-            "failed to atomically rename `{}` to `{}`",
-            temp_dir.display(),
-            final_dir.display()
-        )
-    })?;
-    fsync_dir(base_dir)?;
-
-    Ok(final_dir)
+    Ok(out_dir.to_path_buf())
 }
 
 pub fn read_artifact_header_parquet(dir: &Path) -> anyhow::Result<GraphArtifactManifest> {
@@ -357,6 +366,32 @@ pub fn read_artifact_header_parquet(dir: &Path) -> anyhow::Result<GraphArtifactM
     let manifest: GraphArtifactManifest = serde_json::from_str(&content)
         .with_context(|| format!("invalid Parquet manifest `{}`", manifest_path.display()))?;
     Ok(manifest)
+}
+
+fn synthesize_single_temporal_shard(artifact: &GraphIndexArtifact) -> Vec<ShardIndexEntry> {
+    if artifact.symbol_snapshots.is_empty() && artifact.temporal_edges.is_empty() {
+        return Vec::new();
+    }
+
+    let (commit_time_min, commit_time_max) = artifact
+        .commits
+        .iter()
+        .map(|commit| commit.author_time)
+        .fold(None, |range: Option<(i64, i64)>, author_time| {
+            Some(match range {
+                Some((min, max)) => (min.min(author_time), max.max(author_time)),
+                None => (author_time, author_time),
+            })
+        })
+        .unwrap_or((0, 0));
+
+    vec![ShardIndexEntry {
+        shard_idx: 0,
+        commit_time_min,
+        commit_time_max,
+        row_count_edges: artifact.temporal_edges.len(),
+        row_count_snapshots: artifact.symbol_snapshots.len(),
+    }]
 }
 
 pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
@@ -376,8 +411,6 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
     let file_manifests_path = dir.join("file_manifests.parquet");
     let tombstones_path = dir.join("tombstones.parquet");
     let commits_path = dir.join("commits.parquet");
-    let symbol_snapshots_path = dir.join("symbol_snapshots.parquet");
-    let temporal_edges_path = dir.join("temporal_edges.parquet");
     let diagnostics_path = dir.join("diagnostics.parquet");
     let row_counts = manifest.row_counts.clone();
 
@@ -399,10 +432,8 @@ pub fn read_artifact_parquet(dir: &Path) -> anyhow::Result<GraphIndexArtifact> {
         let unresolved_edges = scope
             .spawn(|| read_unresolved_edges(&unresolved_edges_path, row_counts.edges_unresolved));
         let commits = scope.spawn(|| read_commits(&commits_path, row_counts.commits));
-        let symbol_snapshots = scope
-            .spawn(|| read_symbol_snapshots(&symbol_snapshots_path, row_counts.symbol_snapshots));
-        let temporal_edges =
-            scope.spawn(|| read_temporal_edges(&temporal_edges_path, row_counts.temporal_edges));
+        let symbol_snapshots = scope.spawn(|| read_symbol_snapshots(dir, &manifest));
+        let temporal_edges = scope.spawn(|| read_temporal_edges(dir, &manifest));
         let diagnostics =
             scope.spawn(|| read_diagnostics(&diagnostics_path, row_counts.diagnostics));
 
@@ -513,17 +544,13 @@ pub(crate) fn read_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<Graph
     let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
         || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
     let commits_path = dir.join("commits.parquet");
-    let symbol_snapshots_path = dir.join("symbol_snapshots.parquet");
-    let temporal_edges_path = dir.join("temporal_edges.parquet");
     let diagnostics_path = dir.join("diagnostics.parquet");
     let row_counts = manifest.row_counts.clone();
 
     let (commits, symbol_snapshots, temporal_edges, diagnostics) = std::thread::scope(|scope| {
         let commits = scope.spawn(|| read_commits(&commits_path, row_counts.commits));
-        let symbol_snapshots = scope
-            .spawn(|| read_symbol_snapshots(&symbol_snapshots_path, row_counts.symbol_snapshots));
-        let temporal_edges =
-            scope.spawn(|| read_temporal_edges(&temporal_edges_path, row_counts.temporal_edges));
+        let symbol_snapshots = scope.spawn(|| read_symbol_snapshots(dir, &manifest));
+        let temporal_edges = scope.spawn(|| read_temporal_edges(dir, &manifest));
         let diagnostics =
             scope.spawn(|| read_diagnostics(&diagnostics_path, row_counts.diagnostics));
 
@@ -1151,7 +1178,7 @@ fn write_commits(
     rows: &[CommitArtifact],
     _options: &WriteOptions,
 ) -> anyhow::Result<usize> {
-    let mut rows: Vec<CommitRow> = rows
+    let rows: Vec<CommitRow> = rows
         .iter()
         .map(|row| CommitRow {
             sha: row.sha.clone(),
@@ -1160,7 +1187,6 @@ fn write_commits(
             summary: row.summary.clone(),
         })
         .collect();
-    rows.sort_by(|a, b| a.sha.cmp(&b.sha));
 
     write_table(
         path,
@@ -1193,7 +1219,7 @@ pub(crate) fn write_symbol_snapshots(
     rows: &[SymbolSnapshotArtifact],
     _options: &WriteOptions,
 ) -> anyhow::Result<usize> {
-    let mut rows = rows
+    let rows = rows
         .iter()
         .map(|row| {
             Ok(SymbolSnapshotRow {
@@ -1212,11 +1238,6 @@ pub(crate) fn write_symbol_snapshots(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    rows.sort_by(|a, b| {
-        a.key_stable_symbol_id
-            .cmp(&b.key_stable_symbol_id)
-            .then(a.key_commit.cmp(&b.key_commit))
-    });
 
     write_table(
         path,
@@ -1283,7 +1304,7 @@ pub(crate) fn write_temporal_edges(
     rows: &[TemporalEdgeArtifact],
     _options: &WriteOptions,
 ) -> anyhow::Result<usize> {
-    let mut rows: Vec<TemporalEdgeRow> = rows
+    let rows: Vec<TemporalEdgeRow> = rows
         .iter()
         .map(|row| {
             let (source_path_b64, source_stable_symbol_id, source_commit) =
@@ -1314,11 +1335,6 @@ pub(crate) fn write_temporal_edges(
             }
         })
         .collect();
-    rows.sort_by(|a, b| {
-        a.target_stable_symbol_id
-            .cmp(&b.target_stable_symbol_id)
-            .then(a.source_commit.cmp(&b.source_commit))
-    });
 
     write_table(
         path,
@@ -1477,84 +1493,6 @@ fn fsync_dir(path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to open directory `{}` for fsync", path.display()))?
         .sync_all()
         .with_context(|| format!("failed to fsync directory `{}`", path.display()))
-}
-
-fn parquet_temp_dir(base_dir: &Path, artifact_hash: &str) -> PathBuf {
-    base_dir.join(format!(
-        "{artifact_hash}.parquet.tmp.{}",
-        std::process::id()
-    ))
-}
-
-fn sweep_stale_parquet_temp_dirs(base_dir: &Path) {
-    let entries = match fs::read_dir(base_dir) {
-        Ok(entries) => entries,
-        Err(err) => {
-            tracing::warn!(
-                path = %base_dir.display(),
-                error = %err,
-                "spur-graph: failed to scan Parquet artifact temp dirs"
-            );
-            return;
-        }
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(err) => {
-                tracing::warn!(
-                    path = %base_dir.display(),
-                    error = %err,
-                    "spur-graph: failed to inspect Parquet artifact temp dir entry"
-                );
-                continue;
-            }
-        };
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(err) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "spur-graph: failed to stat Parquet artifact temp dir entry"
-                );
-                continue;
-            }
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.contains(".parquet.tmp.") {
-            continue;
-        }
-        if !parquet_temp_dir_is_stale(&path) {
-            continue;
-        }
-        if let Err(err) = fs::remove_dir_all(&path) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %err,
-                "spur-graph: failed to remove stale Parquet artifact temp dir"
-            );
-        }
-    }
-}
-
-fn parquet_temp_dir_is_stale(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    SystemTime::now()
-        .duration_since(modified)
-        .map(|age| age >= STALE_PARQUET_TEMP_DIR_AGE)
-        .unwrap_or(false)
 }
 
 fn writer_properties(
@@ -1893,6 +1831,26 @@ fn read_commits(path: &Path, row_count: usize) -> anyhow::Result<Vec<CommitArtif
 }
 
 fn read_symbol_snapshots(
+    dir: &Path,
+    manifest: &GraphArtifactManifest,
+) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
+    ensure_temporal_shards_layout(dir, manifest)?;
+    if manifest.temporal_shards.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut snapshots = Vec::with_capacity(manifest.row_counts.symbol_snapshots);
+    for shard in &manifest.temporal_shards {
+        let path = temporal_shard_path(dir, "symbol_snapshots", shard.shard_idx);
+        snapshots.extend(read_symbol_snapshots_file(
+            &path,
+            shard.row_count_snapshots,
+        )?);
+    }
+    Ok(snapshots)
+}
+
+fn read_symbol_snapshots_file(
     path: &Path,
     row_count: usize,
 ) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
@@ -1946,7 +1904,27 @@ fn read_symbol_snapshots(
     Ok(snapshots)
 }
 
-fn read_temporal_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
+fn read_temporal_edges(
+    dir: &Path,
+    manifest: &GraphArtifactManifest,
+) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
+    ensure_temporal_shards_layout(dir, manifest)?;
+    if manifest.temporal_shards.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut edges = Vec::with_capacity(manifest.row_counts.temporal_edges);
+    for shard in &manifest.temporal_shards {
+        let path = temporal_shard_path(dir, "temporal_edges", shard.shard_idx);
+        edges.extend(read_temporal_edges_file(&path, shard.row_count_edges)?);
+    }
+    Ok(edges)
+}
+
+fn read_temporal_edges_file(
+    path: &Path,
+    row_count: usize,
+) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
     if row_count == 0 || !path.exists() {
         return Ok(Vec::new());
     }
@@ -2019,16 +1997,79 @@ fn read_diagnostics(path: &Path, row_count: usize) -> anyhow::Result<Vec<String>
     Ok(diagnostics)
 }
 
+pub fn stream_temporal_artifact_parquet<F>(dir: &Path, mut callback: F) -> anyhow::Result<()>
+where
+    F: FnMut(TemporalArtifactTable, RecordBatch) -> anyhow::Result<()>,
+{
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    ensure_temporal_shards_layout(dir, &manifest)?;
+
+    for shard in &manifest.temporal_shards {
+        let temporal_edges_path = temporal_shard_path(dir, "temporal_edges", shard.shard_idx);
+        if shard.row_count_edges > 0 {
+            stream_record_batches(&temporal_edges_path, |batch| {
+                callback(TemporalArtifactTable::TemporalEdges, batch)
+            })?;
+        }
+
+        let symbol_snapshots_path = temporal_shard_path(dir, "symbol_snapshots", shard.shard_idx);
+        if shard.row_count_snapshots > 0 {
+            stream_record_batches(&symbol_snapshots_path, |batch| {
+                callback(TemporalArtifactTable::SymbolSnapshots, batch)
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_temporal_shards_layout(
+    dir: &Path,
+    manifest: &GraphArtifactManifest,
+) -> anyhow::Result<()> {
+    if manifest.temporal_shards.is_empty() && dir.join("temporal_edges.parquet").exists() {
+        bail!(
+            "legacy temporal_edges.parquet exists in `{}` but manifest has no temporal_shards",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn temporal_shard_path(dir: &Path, table: &str, shard_idx: u32) -> PathBuf {
+    dir.join(table).join(format!("{shard_idx:05}.parquet"))
+}
+
 fn read_record_batches(path: &Path) -> anyhow::Result<Vec<RecordBatch>> {
+    let mut batches = Vec::new();
+    stream_record_batches(path, |batch| {
+        batches.push(batch);
+        Ok(())
+    })?;
+    Ok(batches)
+}
+
+fn stream_record_batches<F>(path: &Path, mut callback: F) -> anyhow::Result<()>
+where
+    F: FnMut(RecordBatch) -> anyhow::Result<()>,
+{
     let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("failed to read `{}`", path.display()))?;
-    builder
+    for batch in builder
         .with_batch_size(PARQUET_ROW_GROUP_SIZE)
         .build()
         .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to decode `{}`", path.display()))
+    {
+        callback(batch.with_context(|| format!("failed to decode `{}`", path.display()))?)?;
+    }
+    Ok(())
 }
 
 fn string_array<'a>(
@@ -2771,7 +2812,7 @@ mod parquet_temporal_test {
 
         let path = tempdir.path().join("symbol_snapshots.parquet");
         let written = write_symbol_snapshots(&path, &rows, &WriteOptions::default())?;
-        let decoded = read_symbol_snapshots(&path, rows.len())?;
+        let decoded = read_symbol_snapshots_file(&path, rows.len())?;
 
         assert_eq!(written, rows.len());
         assert_eq!(decoded, rows);
@@ -2812,7 +2853,7 @@ mod parquet_temporal_test {
 
         let path = tempdir.path().join("temporal_edges.parquet");
         let written = write_temporal_edges(&path, &rows, &WriteOptions::default())?;
-        let decoded = read_temporal_edges(&path, rows.len())?;
+        let decoded = read_temporal_edges_file(&path, rows.len())?;
 
         assert_eq!(written, rows.len());
         assert_eq!(decoded, rows);
@@ -2889,7 +2930,12 @@ mod parquet_temporal_test {
             },
         ];
 
-        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )?;
         let manifest = read_artifact_header_parquet(&dir)?;
         let decoded = read_artifact_parquet(&dir)?;
 
@@ -2905,6 +2951,217 @@ mod parquet_temporal_test {
         assert_eq!(decoded.commits, artifact.commits);
         assert_eq!(decoded.symbol_snapshots, artifact.symbol_snapshots);
         assert_eq!(decoded.temporal_edges, artifact.temporal_edges);
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_temporal_write_emits_single_shard_layout() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut artifact = empty_artifact("fallback-temporal-shard-layout");
+        artifact.commits = vec![
+            CommitArtifact {
+                sha: "c1".to_owned(),
+                parents: Vec::new(),
+                author_time: 30,
+                summary: "newer".to_owned(),
+            },
+            CommitArtifact {
+                sha: "c2".to_owned(),
+                parents: vec!["c1".to_owned()],
+                author_time: 10,
+                summary: "older clock".to_owned(),
+            },
+        ];
+        let snapshot = SymbolSnapshotArtifact {
+            key: snapshot_key("sym-a", "c2"),
+            file_path: GitPath::from_bytes(b"src/lib.rs".to_vec()),
+            entity_name: "alpha".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [0, 12],
+            line_range: [1, 2],
+            anchor_hash: "anchor-a".to_owned(),
+            tokens: vec!["alpha".to_owned()],
+        };
+        artifact.symbol_snapshots = vec![snapshot.clone()];
+        artifact.temporal_edges = vec![TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "c2".to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot { key: snapshot.key },
+            relation: RelationKind::Touches,
+            parent: Some("c1".to_owned()),
+            change_kind: Some(ChangeKind::Added),
+        }];
+
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )?;
+        let manifest = read_artifact_header_parquet(&dir)?;
+        let decoded = read_temporal_artifact_parquet(&dir)?;
+
+        assert!(dir.join("symbol_snapshots/00000.parquet").is_file());
+        assert!(dir.join("temporal_edges/00000.parquet").is_file());
+        assert!(!dir.join("symbol_snapshots.parquet").exists());
+        assert!(!dir.join("temporal_edges.parquet").exists());
+        assert_eq!(manifest.temporal_shards.len(), 1);
+        assert_eq!(manifest.temporal_shards[0].shard_idx, 0);
+        assert_eq!(manifest.temporal_shards[0].commit_time_min, 10);
+        assert_eq!(manifest.temporal_shards[0].commit_time_max, 30);
+        assert_eq!(manifest.temporal_shards[0].row_count_edges, 1);
+        assert_eq!(manifest.temporal_shards[0].row_count_snapshots, 1);
+        assert_eq!(decoded.symbol_snapshots, artifact.symbol_snapshots);
+        assert_eq!(decoded.temporal_edges, artifact.temporal_edges);
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_reader_chains_manifest_shards_in_order() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut artifact = empty_artifact("temporal-reader-chains-shards");
+        artifact.commits = vec![
+            CommitArtifact {
+                sha: "c1".to_owned(),
+                parents: Vec::new(),
+                author_time: 1,
+                summary: "first".to_owned(),
+            },
+            CommitArtifact {
+                sha: "c2".to_owned(),
+                parents: vec!["c1".to_owned()],
+                author_time: 2,
+                summary: "second".to_owned(),
+            },
+        ];
+
+        let shard0_snapshot = SymbolSnapshotArtifact {
+            key: snapshot_key("sym-a", "c1"),
+            file_path: GitPath::from_bytes(b"src/a.rs".to_vec()),
+            entity_name: "alpha".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [0, 1],
+            line_range: [1, 1],
+            anchor_hash: "anchor-a".to_owned(),
+            tokens: Vec::new(),
+        };
+        let shard1_snapshot = SymbolSnapshotArtifact {
+            key: snapshot_key("sym-b", "c2"),
+            file_path: GitPath::from_bytes(b"src/b.rs".to_vec()),
+            entity_name: "beta".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [0, 1],
+            line_range: [1, 1],
+            anchor_hash: "anchor-b".to_owned(),
+            tokens: Vec::new(),
+        };
+        let shard0_edge = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "c1".to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: shard0_snapshot.key.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(ChangeKind::Added),
+        };
+        let shard1_edge = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "c2".to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: shard1_snapshot.key.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: Some("c1".to_owned()),
+            change_kind: Some(ChangeKind::Added),
+        };
+
+        fs::create_dir_all(tempdir.path().join("symbol_snapshots"))?;
+        fs::create_dir_all(tempdir.path().join("temporal_edges"))?;
+        write_symbol_snapshots(
+            &tempdir.path().join("symbol_snapshots/00000.parquet"),
+            &[shard0_snapshot.clone()],
+            &WriteOptions::default(),
+        )?;
+        write_symbol_snapshots(
+            &tempdir.path().join("symbol_snapshots/00001.parquet"),
+            &[shard1_snapshot.clone()],
+            &WriteOptions::default(),
+        )?;
+        write_temporal_edges(
+            &tempdir.path().join("temporal_edges/00000.parquet"),
+            &[shard0_edge.clone()],
+            &WriteOptions::default(),
+        )?;
+        write_temporal_edges(
+            &tempdir.path().join("temporal_edges/00001.parquet"),
+            &[shard1_edge.clone()],
+            &WriteOptions::default(),
+        )?;
+
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            vec![
+                ShardIndexEntry {
+                    shard_idx: 0,
+                    commit_time_min: 1,
+                    commit_time_max: 1,
+                    row_count_edges: 1,
+                    row_count_snapshots: 1,
+                },
+                ShardIndexEntry {
+                    shard_idx: 1,
+                    commit_time_min: 2,
+                    commit_time_max: 2,
+                    row_count_edges: 1,
+                    row_count_snapshots: 1,
+                },
+            ],
+        )?;
+
+        let decoded = read_temporal_artifact_parquet(&dir)?;
+        let mut streamed_rows = Vec::new();
+        stream_temporal_artifact_parquet(&dir, |_table, batch| {
+            streamed_rows.push(batch.num_rows());
+            Ok(())
+        })?;
+
+        assert_eq!(
+            decoded.symbol_snapshots,
+            vec![shard0_snapshot, shard1_snapshot]
+        );
+        assert_eq!(decoded.temporal_edges, vec![shard0_edge, shard1_edge]);
+        assert_eq!(streamed_rows, vec![1, 1, 1, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_reader_rejects_legacy_edges_without_manifest_shards() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let artifact = empty_artifact("legacy-temporal-edge-defensive-error");
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )?;
+        fs::write(dir.join("temporal_edges.parquet"), b"legacy")?;
+
+        let err = read_temporal_artifact_parquet(&dir)
+            .expect_err("legacy temporal_edges.parquet must be rejected");
+
+        assert!(
+            err.to_string().contains("temporal_edges.parquet"),
+            "error should mention legacy temporal_edges.parquet: {err:#}"
+        );
         Ok(())
     }
 
@@ -2980,19 +3237,24 @@ mod parquet_temporal_test {
             change_kind: Some(ChangeKind::Added),
         }];
 
-        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )?;
         for table in [
             "edges.parquet",
             "edges_unresolved.parquet",
             "edges_by_dst.parquet",
             "file_manifests.parquet",
             "commits.parquet",
-            "symbol_snapshots.parquet",
-            "temporal_edges.parquet",
             "diagnostics.parquet",
         ] {
             fs::remove_file(dir.join(table))?;
         }
+        fs::remove_dir_all(dir.join("symbol_snapshots"))?;
+        fs::remove_dir_all(dir.join("temporal_edges"))?;
 
         let decoded = read_artifact_parquet_slim(&dir)?;
 
@@ -3051,7 +3313,12 @@ mod parquet_temporal_test {
         ];
         artifact.symbol_node_ids = vec![NodeId(1), NodeId(2), NodeId(3)];
 
-        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )?;
         let reader = SerializedFileReader::new(File::open(dir.join("nodes.parquet"))?)?;
         let metadata = reader.metadata();
         let stable_symbol_id_column = metadata.row_group(0).column(0);
@@ -3084,7 +3351,12 @@ mod parquet_temporal_test {
             "ambiguous_rename stable_symbol_id=sym-main".to_owned(),
         ];
 
-        let dir = write_artifact_parquet(&artifact, tempdir.path(), WriteOptions::default())?;
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )?;
         let manifest = read_artifact_header_parquet(&dir)?;
         let decoded = read_artifact_parquet(&dir)?;
 
@@ -3100,6 +3372,7 @@ mod parquet_temporal_test {
             &empty_artifact("back-compat-without-temporal-tables"),
             tempdir.path(),
             WriteOptions::default(),
+            Vec::new(),
         )?;
 
         assert!(!dir.join("commits.parquet").exists());
