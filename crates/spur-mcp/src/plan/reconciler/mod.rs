@@ -78,7 +78,8 @@ pub(crate) async fn monitor_journal_appends(path: std::path::PathBuf, notify: Ar
             return;
         }
     };
-    loop {
+    let keep_polling = true;
+    while keep_polling {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let next_len = match tokio::fs::metadata(&path).await {
             Ok(meta) => meta.len(),

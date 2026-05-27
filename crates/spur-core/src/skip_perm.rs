@@ -170,7 +170,7 @@ mod tests {
             &mut self,
             _request: InitializeRequest,
         ) -> anyhow::Result<InitializeResponse> {
-            unimplemented!()
+            panic!("MockConn::initialize must not be called")
         }
 
         async fn new_session(
@@ -193,11 +193,11 @@ mod tests {
             &mut self,
             _request: PromptRequest,
         ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
-            unimplemented!()
+            panic!("MockConn::prompt must not be called")
         }
 
         async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
-            unimplemented!()
+            panic!("MockConn::cancel must not be called")
         }
 
         async fn shutdown(&mut self) -> anyhow::Result<()> {
