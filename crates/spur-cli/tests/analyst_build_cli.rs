@@ -127,7 +127,7 @@ fn analyst_build_rejects_schema_version_mismatch() {
     let resolved = std::fs::canonicalize(&current).expect("CURRENT resolves");
     let manifest_path = resolved.join("manifest.json");
     let original = std::fs::read_to_string(&manifest_path).unwrap();
-    let tampered = original.replace("spur-graph-schema-v6", "spur-graph-schema-vNEXT");
+    let tampered = original.replace("spur-graph-schema-v7", "spur-graph-schema-vNEXT");
     assert_ne!(
         original, tampered,
         "fixture invariant: schema_version must have been present"
