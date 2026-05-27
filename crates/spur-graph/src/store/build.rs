@@ -104,6 +104,12 @@ pub enum BuildMode {
     Incremental,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuildStats {
+    pub reused_buckets: usize,
+    pub changed_paths: usize,
+}
+
 #[derive(Debug, Clone)]
 struct FileBucket {
     file: GraphFileArtifact,
@@ -230,7 +236,7 @@ pub fn artifact_from_facts(
 pub fn artifact_from_facts_incremental(
     prev: &GraphIndexArtifact,
     root: &Path,
-) -> anyhow::Result<(GraphIndexArtifact, BuildMode)> {
+) -> anyhow::Result<(GraphIndexArtifact, BuildMode, BuildStats)> {
     let build_started = Instant::now();
     let root = root
         .canonicalize()
@@ -304,7 +310,7 @@ pub fn artifact_from_facts_incremental(
             }
             result?
         };
-        return Ok((artifact, BuildMode::Full));
+        return Ok((artifact, BuildMode::Full, BuildStats::default()));
     }
 
     let discover_started = Instant::now();
@@ -366,7 +372,7 @@ pub fn artifact_from_facts_incremental(
         prev_files = prev.file_manifests.len(),
         changed_paths = tracing::field::Empty
     );
-    let (mut buckets, changed_paths) = {
+    let (mut buckets, changed_paths, reused_buckets) = {
         let _entered = changed_span.enter();
         let prev_content_oids: BTreeMap<_, _> = prev
             .file_manifests
@@ -400,9 +406,13 @@ pub fn artifact_from_facts_incremental(
             elapsed_ms = elapsed_ms(changed_started),
             "spur-graph build phase completed"
         );
-        (buckets, changed_paths)
+        (buckets, changed_paths, reused)
     };
     let changed_count = changed_paths.len();
+    let stats = BuildStats {
+        reused_buckets,
+        changed_paths: changed_count,
+    };
 
     if !changed_paths.is_empty() {
         let extract_started = Instant::now();
@@ -475,7 +485,7 @@ pub fn artifact_from_facts_incremental(
         elapsed_ms = elapsed_ms(build_started),
         "spur-graph build completed"
     );
-    Ok((artifact, BuildMode::Incremental))
+    Ok((artifact, BuildMode::Incremental, stats))
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -1720,7 +1730,8 @@ fn submit_plan_def() -> ToolDefinition {
         subscriber.clear();
         fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n").expect("rewrite a.rs");
 
-        let (_next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+        let (_next, mode, _stats) =
+            artifact_from_facts_incremental(&prev, root).expect("incremental");
 
         assert_eq!(mode, BuildMode::Incremental);
         subscriber.assert_span_targets([
@@ -1764,7 +1775,8 @@ fn submit_plan_def() -> ToolDefinition {
 
         fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n").expect("rewrite a.rs");
 
-        let (next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+        let (next, mode, _stats) =
+            artifact_from_facts_incremental(&prev, root).expect("incremental");
         assert_eq!(mode, BuildMode::Incremental);
         assert_eq!(
             next.file_manifests
@@ -1805,7 +1817,8 @@ fn submit_plan_def() -> ToolDefinition {
         let dirty_bytes = b"pub fn alpha_dirty() {}\n";
         fs::write(root.join("src/a.rs"), dirty_bytes).expect("dirty a.rs");
 
-        let (next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+        let (next, mode, _stats) =
+            artifact_from_facts_incremental(&prev, root).expect("incremental");
         assert_eq!(mode, BuildMode::Incremental);
         let expected_oid = git_blob_oid(dirty_bytes);
         assert_eq!(
@@ -1841,7 +1854,8 @@ fn submit_plan_def() -> ToolDefinition {
             .clone();
 
         fs::remove_file(root.join("src/a.rs")).expect("remove a.rs");
-        let (next, mode) = artifact_from_facts_incremental(&prev, root).expect("incremental");
+        let (next, mode, _stats) =
+            artifact_from_facts_incremental(&prev, root).expect("incremental");
 
         assert_eq!(mode, BuildMode::Incremental);
         assert_eq!(next.tombstones.len(), 1);
