@@ -118,6 +118,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                     n.delegation_id = Some(delegation_id);
                 }
             }
+            lineage.drain_child_orphans_for(&id);
         }
 
         SpurEventBody::DelegationRequested {
