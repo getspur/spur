@@ -1,10 +1,43 @@
 import type { Output } from "@/bindings";
+import type { JuteDeckCellMetadata } from "@/bindings/JuteDeckCellMetadata";
 
-export type AgentBridgeRequest = {
+type AgentBridgeRequestBase = {
   requestId: string;
-  method: string;
-  params: unknown;
 };
+
+export type AgentBridgeRequest =
+  | (AgentBridgeRequestBase & {
+      method: "notebook.snapshot";
+      params?: unknown;
+    })
+  | (AgentBridgeRequestBase & {
+      method: "notebook.export";
+      params?: unknown;
+    })
+  | (AgentBridgeRequestBase & {
+      method: "notebook.flush_pending";
+      params?: unknown;
+    })
+  | (AgentBridgeRequestBase & {
+      method: "notebook.read_cell";
+      params: unknown;
+    })
+  | (AgentBridgeRequestBase & {
+      method: "notebook.insert_cell";
+      params: unknown;
+    })
+  | (AgentBridgeRequestBase & {
+      method: "notebook.write_cell";
+      params: unknown;
+    })
+  | (AgentBridgeRequestBase & {
+      method: "notebook.delete_cell";
+      params: unknown;
+    })
+  | (AgentBridgeRequestBase & {
+      method: "notebook.set_cell_metadata";
+      params: AgentSetCellMetadata;
+    });
 
 export type AgentBridgeResponse =
   | {
@@ -70,6 +103,12 @@ export type AgentInsertCell = {
 
 export type AgentWriteCell = {
   version: number;
+};
+
+export type AgentSetCellMetadata = {
+  id: string;
+  patch: Partial<JuteDeckCellMetadata>;
+  expected_version: number;
 };
 
 export type AgentDeleteCell = {

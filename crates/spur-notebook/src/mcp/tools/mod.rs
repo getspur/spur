@@ -20,6 +20,7 @@ pub mod read_cell;
 pub mod restart_kernel;
 pub mod run_cell;
 pub mod save;
+pub mod set_cell_metadata;
 pub mod snapshot;
 pub mod start_kernel;
 pub mod stop_kernel;
@@ -40,6 +41,7 @@ pub fn tools() -> Vec<Tool> {
         kernel_info::tool(),
         insert_cell::tool(),
         write_cell::tool(),
+        set_cell_metadata::tool(),
         save::tool(),
         delete_cell::tool(),
         interrupt::tool(),
@@ -200,6 +202,9 @@ mod tests {
 
         assert!(names.iter().any(|name| name == "notebook.save"));
         assert!(names.iter().any(|name| name == "notebook.get_notebook"));
+        assert!(names
+            .iter()
+            .any(|name| name == "notebook.set_cell_metadata"));
     }
 
     #[test]
@@ -218,6 +223,7 @@ mod tests {
             "notebook.venv_create",
             "notebook.venv_delete",
             "notebook.venv_list_python_versions",
+            "notebook.set_cell_metadata",
             "notebook.list_recents",
             "notebook.set_pinned",
             "notebook.remove_from_recents",

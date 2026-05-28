@@ -11,6 +11,7 @@ import type {
   CellMetadata,
   DaemonCell,
   DaemonNotebookSnapshot,
+  JuteDeckCellMetadata,
   NotebookDelta,
   NotebookRoot,
   Output,
@@ -40,6 +41,7 @@ export type NotebookStoreState = {
       source: string;
       version: number;
       lastEditedBy?: string;
+      juteDeckMetadata?: JuteDeckCellMetadata;
       result?: CellResult;
     };
   };
@@ -160,6 +162,40 @@ function notebookStoreActions(
         }
         cell.lastEditedBy = lastEditedBy;
       }),
+
+    /** Merge set-valued jute-deck metadata fields into a cell. */
+    mergeCellJuteDeckMetadata: (
+      cellId: string,
+      patch: Partial<JuteDeckCellMetadata>,
+      lastEditedBy?: string,
+    ) => {
+      let nextVersion = 0;
+      set((state) => {
+        const cell = state.cells[cellId];
+        if (!cell) return;
+
+        const merged: JuteDeckCellMetadata = {
+          ...(cell.juteDeckMetadata ?? {}),
+        };
+        if (patch.layout !== undefined) merged.layout = patch.layout;
+        if (patch.hidden !== undefined) merged.hidden = patch.hidden;
+        if (patch.speaker_notes !== undefined) {
+          merged.speaker_notes = patch.speaker_notes;
+        }
+        if (patch.theme_override !== undefined) {
+          merged.theme_override = patch.theme_override;
+        }
+        if (patch.fragments !== undefined) merged.fragments = patch.fragments;
+        if (patch.background !== undefined)
+          merged.background = patch.background;
+
+        cell.juteDeckMetadata = merged;
+        cell.version += 1;
+        cell.lastEditedBy = lastEditedBy;
+        nextVersion = cell.version;
+      });
+      return nextVersion;
+    },
 
     /** Reconcile one cell from the authoritative Rust store. */
     applyCellSnapshot: (cell: DaemonCell, afterId?: string | null) =>
@@ -288,6 +324,7 @@ function notebookStoreActions(
               source: multiline(cell.source),
               version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
               lastEditedBy: cell.metadata.spur?.last_edited_by,
+              juteDeckMetadata: cell.metadata.jute_deck,
             };
 
             if (cell.cell_type === "code") {
@@ -696,14 +733,22 @@ export class Notebook {
           source: cell.source,
           execution_count: cell.result?.executionCount ?? null,
           outputs: cell.result?.outputs ?? [],
-          metadata: cellMetadata(cell.version, cell.lastEditedBy),
+          metadata: cellMetadata(
+            cell.version,
+            cell.lastEditedBy,
+            cell.juteDeckMetadata,
+          ),
         });
       } else if (cell.type === "markdown") {
         cells.push({
           cell_type: "markdown",
           id: cellId,
           source: cell.source,
-          metadata: cellMetadata(cell.version, cell.lastEditedBy),
+          metadata: cellMetadata(
+            cell.version,
+            cell.lastEditedBy,
+            cell.juteDeckMetadata,
+          ),
         });
       } else {
         throw new Error(`Unknown cell type: ${cell.type}`);
@@ -780,6 +825,25 @@ export class Notebook {
 
   updateCellSource(cellId: string, source: string, lastEditedBy?: string) {
     this.state.setCellSource(cellId, source, lastEditedBy);
+  }
+
+  getCellSnapshotById(cellId: string): { metadata: CellMetadata } | undefined {
+    const cell = this.state.cells[cellId];
+    if (!cell) return undefined;
+    return {
+      metadata: cellMetadata(
+        cell.version,
+        cell.lastEditedBy,
+        cell.juteDeckMetadata,
+      ),
+    };
+  }
+
+  mergeCellJuteDeckMetadata(
+    cellId: string,
+    patch: Partial<JuteDeckCellMetadata>,
+  ): number {
+    return this.state.mergeCellJuteDeckMetadata(cellId, patch, "brain");
   }
 
   async applyNotebookDelta(delta: NotebookDelta) {
@@ -1036,10 +1100,18 @@ function multiline(string: string | string[]): string {
   return typeof string === "string" ? string : string.join("");
 }
 
-function cellMetadata(version: number, lastEditedBy?: string): CellMetadata {
-  return {
+function cellMetadata(
+  version: number,
+  lastEditedBy?: string,
+  juteDeckMetadata?: JuteDeckCellMetadata,
+): CellMetadata {
+  const metadata: CellMetadata = {
     spur: { version, last_edited_by: lastEditedBy },
   };
+  if (juteDeckMetadata !== undefined) {
+    metadata.jute_deck = juteDeckMetadata;
+  }
+  return metadata;
 }
 
 export const NotebookContext = createContext<Notebook | undefined>(undefined);

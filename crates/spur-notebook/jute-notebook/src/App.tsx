@@ -4,6 +4,7 @@ import { Route, Switch } from "wouter";
 import HomePage from "@/pages/HomePage";
 import NotFoundPage from "@/pages/NotFoundPage";
 import NotebookPage from "@/pages/NotebookPage";
+import PresentPage from "@/pages/PresentPage";
 
 import { UnhandledError } from "./ui/shared/UnhandledError";
 
@@ -21,6 +22,7 @@ export default function App() {
       <Switch>
         <Route path="/" component={HomePage} />
         <Route path="/notebook" component={NotebookPage} />
+        <Route path="/present" component={PresentPage} />
 
         <Route component={NotFoundPage} />
       </Switch>

@@ -52,6 +52,13 @@ pub struct KernelSlotInfo {
     pub mem_mb: f32,
 }
 
+/// Result returned after a worker delegation is accepted by SPUR.
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegateResult {
+    /// ACP delegation identifier assigned by the SPUR brain.
+    pub delegation_id: String,
+}
+
 /// Recent notebook entry enriched for the Tauri webview.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -1013,6 +1020,21 @@ pub fn install_kernel_in_slot(
     }
 }
 
+/// Delegate AI work to a SPUR worker.
+///
+/// The jute shell exposes this command name so frontend deck commands fail with
+/// a structured bridge error instead of Tauri's generic "command not found"
+/// when the SPUR brain delegation path has not been wired into this process.
+#[tauri::command]
+pub async fn spur_delegate_to_worker(
+    task: String,
+    worker_type: String,
+    tool_allowlist: Vec<String>,
+) -> Result<DelegateResult, String> {
+    let _ = (task, worker_type, tool_allowlist);
+    Err("delegate_to_worker bridge not wired; see plan task 11".to_string())
+}
+
 fn take_kernel_if_present(state: &State, slot_id: &str) -> Option<LocalKernel> {
     let mut slot = state.kernels.get_mut(slot_id)?;
     slot.kernel.take()
@@ -1553,6 +1575,7 @@ mod tests {
                 orig_nbformat: None,
                 title: None,
                 authors: None,
+                jute_deck: None,
                 other: Default::default(),
             },
             nbformat_minor: 5,
@@ -1564,6 +1587,7 @@ mod tests {
                         version,
                         last_edited_by: None,
                     }),
+                    jute_deck: None,
                     other: Default::default(),
                 },
                 source: MultilineString::Single(source.to_string()),
