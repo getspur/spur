@@ -8,12 +8,16 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+arrow-array = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 base64ct = { version = "1", features = ["alloc"] }
 chrono = { workspace = true }
 futures = { workspace = true }
+globset = "0.4"
 hmac = "0.12"
+lance-index = "6.0.0"
+lancedb = "0.29.0"
 parking_lot = "0.12"
 rand = "0.8"
 rmcp = { workspace = true }
