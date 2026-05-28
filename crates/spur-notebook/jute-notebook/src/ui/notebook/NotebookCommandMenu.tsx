@@ -5,19 +5,31 @@ import {
   FileTypeIcon,
   ListRestartIcon,
   ListVideoIcon,
+  MessageSquareIcon,
   PaletteIcon,
   PauseIcon,
+  PencilIcon,
   PlayIcon,
+  RefreshCwIcon,
   RotateCcw,
+  SparklesIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useStore } from "zustand";
 
+import { dispatchDeckCommand } from "@/agent/deck";
 import { useNotebook } from "@/stores/notebook";
+
+type DeckPromptKind = "draft" | "restructure" | "polish" | "notes";
 
 export default function NotebookCommandMenu() {
   const notebook = useNotebook();
   const [open, setOpen] = useState(false);
+  const [activePrompt, setActivePrompt] = useState<{
+    kind: DeckPromptKind;
+    placeholder: string;
+  } | null>(null);
+  const [promptText, setPromptText] = useState("");
   const selectedCellId = useStore(
     notebook.store,
     (state) => state.selectedCellId,
@@ -41,6 +53,14 @@ export default function NotebookCommandMenu() {
       );
     });
   }, [closeAndRun, notebookPath]);
+
+  const openDeckPrompt = useCallback(
+    (kind: DeckPromptKind, placeholder: string) => {
+      setActivePrompt({ kind, placeholder });
+      setPromptText("");
+    },
+    [],
+  );
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -104,6 +124,41 @@ export default function NotebookCommandMenu() {
             <PlayIcon /> Enter present mode
             <span style={{ marginLeft: "auto", opacity: 0.5 }}>⌘⇧P</span>
           </Command.Item>
+          <Command.Item
+            onSelect={() => openDeckPrompt("draft", "What's the deck about?")}
+          >
+            <SparklesIcon /> Draft deck with AI…
+          </Command.Item>
+          <Command.Item
+            onSelect={() =>
+              openDeckPrompt(
+                "restructure",
+                "Tighten to 8 slides; move conclusion last…",
+              )
+            }
+          >
+            <RefreshCwIcon /> Restructure deck…
+          </Command.Item>
+          <Command.Item
+            onSelect={() =>
+              openDeckPrompt(
+                "polish",
+                "Rewrite bullets for a non-technical audience",
+              )
+            }
+          >
+            <PencilIcon /> Polish slides for audience…
+          </Command.Item>
+          <Command.Item
+            onSelect={() =>
+              openDeckPrompt(
+                "notes",
+                "Tone of speaker notes (defaults to neutral)",
+              )
+            }
+          >
+            <MessageSquareIcon /> Generate speaker notes
+          </Command.Item>
         </Command.Group>
 
         <Command.Group heading="Formatting">
@@ -142,6 +197,44 @@ export default function NotebookCommandMenu() {
           </Command.Item>
         </Command.Group>
       </Command.List>
+
+      {activePrompt && (
+        <div style={{ padding: "12px", borderTop: "1px solid #e2e8f0" }}>
+          <input
+            autoFocus
+            placeholder={activePrompt.placeholder}
+            value={promptText}
+            onChange={(e) => setPromptText(e.target.value)}
+            onKeyDown={async (e) => {
+              if (e.key === "Enter" && promptText.trim()) {
+                e.preventDefault();
+                e.stopPropagation();
+                await dispatchDeckCommand(
+                  notebook,
+                  activePrompt.kind,
+                  promptText.trim(),
+                );
+                setActivePrompt(null);
+                setPromptText("");
+                setOpen(false);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                setActivePrompt(null);
+              }
+            }}
+            style={{
+              width: "100%",
+              padding: "8px",
+              border: "1px solid #cbd5e1",
+              borderRadius: 4,
+            }}
+          />
+          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+            Press Enter to send · Esc to cancel
+          </div>
+        </div>
+      )}
     </Command.Dialog>
   );
 }
