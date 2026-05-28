@@ -1,5 +1,57 @@
 use super::*;
 
+const RETIRE_SESSION_COST_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn retire_session_cost_write<T, F>(
+    session_id: String,
+    brain_id: String,
+    resource: T,
+    write: F,
+) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&T) -> Result<()> + Send + 'static,
+{
+    let cost_result = tokio::time::timeout(
+        RETIRE_SESSION_COST_WRITE_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let result = write(&resource);
+            (resource, result)
+        }),
+    )
+    .await;
+
+    match cost_result {
+        Ok(Ok((resource, Ok(())))) => Some(resource),
+        Ok(Ok((resource, Err(error)))) => {
+            warn!(
+                session_id = %session_id,
+                brain_id = %brain_id,
+                %error,
+                "cost db write failed during retire_active_brain"
+            );
+            Some(resource)
+        }
+        Ok(Err(join_error)) => {
+            error!(
+                session_id = %session_id,
+                brain_id = %brain_id,
+                %join_error,
+                "cost db spawn_blocking panicked during retire"
+            );
+            None
+        }
+        Err(_) => {
+            error!(
+                session_id = %session_id,
+                brain_id = %brain_id,
+                "cost db write timed out (2s) during retire_active_brain; proceeding with teardown"
+            );
+            None
+        }
+    }
+}
+
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod session_attach_guard_transfer_tests {
@@ -142,6 +194,35 @@ mod session_attach_guard_transfer_tests {
         fn health(&self) -> AgentHealth {
             AgentHealth::Ready
         }
+    }
+
+    #[tokio::test]
+    async fn retire_session_cost_write_times_out_without_returning_resource() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+
+        let result = retire_session_cost_write(
+            "hung-session".to_string(),
+            "hung-brain".to_string(),
+            "test-resource".to_string(),
+            move |_| {
+                let _ = rx.recv();
+                Ok(())
+            },
+        )
+        .await;
+
+        let elapsed = started.elapsed();
+        drop(tx);
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "cost write helper should return after the 2s timeout, elapsed {elapsed:?}"
+        );
+        assert!(
+            result.is_none(),
+            "timed-out writes cannot safely return the moved cost resource"
+        );
     }
 
     #[tokio::test]
@@ -1239,10 +1320,19 @@ impl Orchestrator {
         //    or start_session was skipped). If the brain name has left
         //    the registry, we cannot recover its `cost_tier` — in that
         //    case the ledger stays open (better than inventing a tier).
-        if let Some(ref ct) = self.cost_tracker {
-            if let Some(cfg) = self.registry.get(&b.brain_name) {
+        if let Some(ct) = self.cost_tracker.take() {
+            if let Some(cost_tier) = self.registry.get(&b.brain_name).map(|cfg| cfg.cost_tier) {
                 let duration = b.started_at.elapsed();
-                let _ = ct.end_session(&b.spur_session_id, "retired", duration, cfg.cost_tier);
+                let session_id = b.spur_session_id.clone();
+                let session_id_for_log = session_id.0.clone();
+                let brain_id = b.brain_name.clone();
+                self.cost_tracker =
+                    retire_session_cost_write(session_id_for_log, brain_id, ct, move |ct| {
+                        ct.end_session(&session_id, "retired", duration, cost_tier)
+                    })
+                    .await;
+            } else {
+                self.cost_tracker = Some(ct);
             }
         }
 
