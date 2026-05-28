@@ -12,8 +12,8 @@ use anyhow::{Context as _, Result};
 use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::build::BuildStats;
 use crate::store::{
-    read_artifact_parquet, write_artifact_parquet, write_current_pointer, ArtifactStagingDir,
-    WriteOptions,
+    read_artifact_parquet, write_artifact_parquet, write_current_pointer, write_sections_dataset,
+    ArtifactStagingDir, WriteOptions,
 };
 use crate::{git, git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
@@ -24,7 +24,7 @@ const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
 pub const COMMIT_INDEX_POINTER_PATH: &str = ".spur/commit-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
-const BASE_ARTIFACT_CACHE_CAP: usize = 4;
+const BASE_ARTIFACT_CACHE_CAP: usize = 64;
 
 #[cfg(test)]
 static LOCK_TIMEOUT_MS_OVERRIDE: AtomicU64 = AtomicU64::new(5_000);
@@ -88,7 +88,7 @@ pub fn write_with_dedup(
     let write_result = if canonical.join("manifest.json").is_file() {
         Ok(canonical)
     } else {
-        write_canonical_atomically(artifact, &canonical_dir)
+        write_canonical_atomically(artifact, worktree_root, &canonical_dir)
     };
     let unlock_result = fs2::FileExt::unlock(&lock).context("failed to unlock graph cache lock");
     let written_dir = write_result?;
@@ -162,6 +162,7 @@ fn canonical_path(common_dir: &Path, manifest_version: &str, hash: &str) -> Path
 
 fn write_canonical_atomically(
     artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
     canonical_dir: &Path,
 ) -> Result<PathBuf> {
     let staging = ArtifactStagingDir::new(canonical_dir, &artifact.graph_content_hash)?;
@@ -171,6 +172,7 @@ fn write_canonical_atomically(
         WriteOptions::default(),
         Vec::new(),
     )?;
+    write_sections_dataset(artifact, worktree_root, staging.path())?;
     staging.commit()
 }
 
@@ -383,6 +385,7 @@ fn write_artifact_to_worktree(
         WriteOptions::default(),
         Vec::new(),
     )?;
+    write_sections_dataset(artifact, worktree_root, staging.path())?;
     staging.commit()
 }
 

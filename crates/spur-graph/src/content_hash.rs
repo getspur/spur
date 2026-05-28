@@ -30,6 +30,10 @@ where
     hasher.finalize().to_hex().to_string()
 }
 
+pub fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
