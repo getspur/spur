@@ -80,7 +80,9 @@ pub async fn report_detached_completion(
                 continuation,
             } = err.0
             else {
-                return;
+                unreachable!(
+                    "SendError must hold the SystemContinuation variant we just sent"
+                );
             };
             let mut buf = overflow.lock().await;
             buf.push_back((session, continuation.clone()));
