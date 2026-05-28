@@ -32,7 +32,9 @@ export type DaemonControlRequest = {
       kind: CellKind;
       after_id: string | null;
       source: string;
+      last_edited_by: string | null;
     }
+  | { command: "load"; path: string }
   | { command: "delete_cell"; id: string; expected_version: number }
   | { command: "snapshot" }
   | { command: "apply_edit"; id: string; source: string }

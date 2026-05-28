@@ -21,9 +21,9 @@ use crate::{
     backend::{
         commands::RunCellEvent,
         notebook::{
-            Cell, CellMetadata, CodeCell, MarkdownCell, MultilineString, NotebookMetadata,
-            NotebookRoot, Output, OutputDisplayData, OutputError, OutputExecuteResult,
-            OutputStream, RawCell,
+            Cell, CellMetadata, CodeCell, JuteDeckCellMetadata, MarkdownCell, MultilineString,
+            NotebookMetadata, NotebookRoot, Output, OutputDisplayData, OutputError,
+            OutputExecuteResult, OutputStream, RawCell,
         },
     },
     commands::SaveCoordinator,
@@ -82,6 +82,15 @@ pub enum NotebookOp {
     DeleteCell {
         /// Cell identifier.
         id: String,
+        /// Expected cell version for optimistic concurrency.
+        expected_version: u64,
+    },
+    /// Merge jute-deck metadata for an existing cell after checking cell version.
+    SetJuteDeckMetadata {
+        /// Cell identifier.
+        id: String,
+        /// Metadata patch. Only `Some` fields overwrite existing values.
+        patch: JuteDeckCellMetadata,
         /// Expected cell version for optimistic concurrency.
         expected_version: u64,
     },
@@ -263,6 +272,22 @@ impl NotebookStore {
                 root.cells.remove(index);
                 (DeltaKind::CellDeleted { id }, None)
             }
+            NotebookOp::SetJuteDeckMetadata {
+                id,
+                patch,
+                expected_version,
+            } => {
+                self.ensure_cell_version(&root, &id, expected_version)?;
+                let cell = find_cell_mut(&mut root, &id)
+                    .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
+                let metadata = cell_metadata_mut(cell);
+                let mut merged = metadata.jute_deck.clone().unwrap_or_default();
+                merge_jute_deck_metadata(&mut merged, patch);
+                metadata.jute_deck = Some(merged);
+                let metadata_update = Some((id.clone(), Some("brain".to_string())));
+                let kind = DeltaKind::CellWritten { id };
+                (kind, metadata_update)
+            }
             NotebookOp::ApplyEdit { id, source } => {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
@@ -376,6 +401,7 @@ fn empty_notebook() -> NotebookRoot {
             orig_nbformat: None,
             title: None,
             authors: None,
+            jute_deck: None,
             other: Map::new(),
         },
         nbformat_minor: 5,
@@ -411,6 +437,7 @@ fn make_cell(kind: CellKind, id: String, source: String) -> Cell {
 fn empty_cell_metadata() -> CellMetadata {
     CellMetadata {
         spur: None,
+        jute_deck: None,
         other: Map::new(),
     }
 }
@@ -455,6 +482,35 @@ fn set_cell_source(cell: &mut Cell, source: String) {
         Cell::Raw(cell) => cell.source = source,
         Cell::Markdown(cell) => cell.source = source,
         Cell::Code(cell) => cell.source = source,
+    }
+}
+
+fn cell_metadata_mut(cell: &mut Cell) -> &mut CellMetadata {
+    match cell {
+        Cell::Raw(cell) => &mut cell.metadata,
+        Cell::Markdown(cell) => &mut cell.metadata,
+        Cell::Code(cell) => &mut cell.metadata,
+    }
+}
+
+fn merge_jute_deck_metadata(metadata: &mut JuteDeckCellMetadata, patch: JuteDeckCellMetadata) {
+    if patch.layout.is_some() {
+        metadata.layout = patch.layout;
+    }
+    if patch.hidden.is_some() {
+        metadata.hidden = patch.hidden;
+    }
+    if patch.speaker_notes.is_some() {
+        metadata.speaker_notes = patch.speaker_notes;
+    }
+    if patch.theme_override.is_some() {
+        metadata.theme_override = patch.theme_override;
+    }
+    if patch.fragments.is_some() {
+        metadata.fragments = patch.fragments;
+    }
+    if patch.background.is_some() {
+        metadata.background = patch.background;
     }
 }
 
@@ -550,8 +606,8 @@ mod tests {
 
     use super::*;
     use crate::backend::notebook::{
-        Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, Output, OutputStream,
-        SpurCellMetadata,
+        Cell, CellMetadata, CodeCell, JuteDeckCellMetadata, JuteDeckLayout, MultilineString,
+        NotebookMetadata, Output, OutputStream, SpurCellMetadata,
     };
 
     const CELL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -565,6 +621,7 @@ mod tests {
                     version,
                     last_edited_by: None,
                 }),
+                jute_deck: None,
                 other: Map::new(),
             },
             source: MultilineString::Single(source.to_string()),
@@ -581,6 +638,7 @@ mod tests {
                 orig_nbformat: None,
                 title: None,
                 authors: None,
+                jute_deck: None,
                 other: Map::new(),
             },
             nbformat_minor: 5,
@@ -597,6 +655,7 @@ mod tests {
                 orig_nbformat: None,
                 title: None,
                 authors: None,
+                jute_deck: None,
                 other: Map::new(),
             },
             nbformat_minor: 5,
@@ -796,6 +855,79 @@ mod tests {
         let (snapshot, _version) = store.snapshot();
         assert_eq!(snapshot.cells.len(), 1);
         assert_eq!(cell_id(&snapshot.cells[0]), Some(CELL_ID));
+    }
+
+    #[test]
+    fn set_jute_deck_metadata_merges_patch() {
+        let store = store_with_notebook();
+
+        let patch = JuteDeckCellMetadata {
+            layout: Some(JuteDeckLayout::Title),
+            speaker_notes: Some("note 1".to_string()),
+            ..Default::default()
+        };
+        store
+            .apply(NotebookOp::SetJuteDeckMetadata {
+                id: CELL_ID.to_string(),
+                patch,
+                expected_version: 1,
+            })
+            .expect("first patch applies");
+
+        let patch = JuteDeckCellMetadata {
+            layout: Some(JuteDeckLayout::Section),
+            ..Default::default()
+        };
+        let delta = store
+            .apply(NotebookOp::SetJuteDeckMetadata {
+                id: CELL_ID.to_string(),
+                patch,
+                expected_version: 2,
+            })
+            .expect("second patch applies");
+
+        assert!(matches!(
+            delta.kind,
+            DeltaKind::CellWritten { id } if id == CELL_ID
+        ));
+        let (snapshot, _version) = store.snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        let metadata = cell.metadata.jute_deck.as_ref().expect("metadata present");
+        assert_eq!(metadata.layout, Some(JuteDeckLayout::Section));
+        assert_eq!(metadata.speaker_notes.as_deref(), Some("note 1"));
+        assert_eq!(cell.metadata.spur.as_ref().unwrap().version, delta.version);
+        assert_eq!(
+            cell.metadata
+                .spur
+                .as_ref()
+                .unwrap()
+                .last_edited_by
+                .as_deref(),
+            Some("brain")
+        );
+    }
+
+    #[test]
+    fn set_jute_deck_metadata_rejects_stale_version() {
+        let store = store_with_notebook();
+
+        let err = store
+            .apply(NotebookOp::SetJuteDeckMetadata {
+                id: CELL_ID.to_string(),
+                patch: JuteDeckCellMetadata::default(),
+                expected_version: 100,
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            StoreError::OptimisticConcurrency {
+                expected: 100,
+                actual: 1,
+            }
+        );
     }
 
     #[test]
