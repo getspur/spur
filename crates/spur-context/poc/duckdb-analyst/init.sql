@@ -30,8 +30,13 @@
 
 INSTALL duckpgq FROM community;
 INSTALL onager  FROM community;
+-- TODO: pin lance once DuckDB exposes a stable SQL pin syntax for community extension builds.
+INSTALL lance;
 LOAD duckpgq;
 LOAD onager;
+LOAD lance;
+
+__SPUR_LANCE_ATTACH_SQL__
 
 SET preserve_insertion_order = false;
 SET memory_limit = '6GB';
