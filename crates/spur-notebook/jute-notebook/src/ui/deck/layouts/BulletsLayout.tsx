@@ -36,7 +36,7 @@ export default function BulletsLayout({
           <li
             key={index}
             className={clsx(
-              "flex items-start text-[2cqi] leading-snug transition-opacity",
+              "flex items-start text-[2cqi] leading-snug transition-opacity [&_code]:rounded [&_code]:bg-black/5 [&_code]:px-1 [&_code]:font-mono",
               theme.body,
               index > fragmentIndex && "opacity-30",
             )}
@@ -60,6 +60,7 @@ function renderInlineMarkdown(source: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
   return escaped
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/\*([^*]+)\*/g, "<i>$1</i>");
 }
