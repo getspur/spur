@@ -1,3 +1,4 @@
+import clsx from "clsx";
 import { encode } from "html-entities";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
@@ -10,15 +11,21 @@ import { htmlOutputSandbox } from "./rendering";
 
 type Props = {
   value: CellResult | undefined;
+  chromeless?: boolean;
 };
 
-export default function OutputView({ value }: Props) {
+export default function OutputView({ value, chromeless = false }: Props) {
   if (!value) {
     return null;
   }
   const outputs = value.outputs ?? [];
   return (
-    <div className="select-text whitespace-pre-wrap break-words px-8 pb-6 pt-4 text-sm after:contents">
+    <div
+      className={clsx(
+        "select-text whitespace-pre-wrap break-words text-sm after:contents",
+        !chromeless && "px-8 pb-6 pt-4",
+      )}
+    >
       {outputs.map((output, index) => (
         <div key={index}>
           {output.output_type === "stream" ? (
