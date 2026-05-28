@@ -1,4 +1,4 @@
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Point, Range};
 
 use crate::extract::languages::LanguageConfig;
 use crate::extract::tree_sitter::{
@@ -78,10 +78,11 @@ fn emit_sections<'tree>(
     let mut sections = Vec::new();
     let mut stack: Vec<(usize, NodeId, String)> = Vec::new();
 
-    for (node, label, level) in headings {
+    for index in 0..headings.len() {
+        let (node, label, level) = &headings[index];
         while stack
             .last()
-            .is_some_and(|(ancestor_level, _, _)| *ancestor_level >= level)
+            .is_some_and(|(ancestor_level, _, _)| *ancestor_level >= *level)
         {
             stack.pop();
         }
@@ -92,20 +93,48 @@ fn emit_sections<'tree>(
             .unwrap_or((file_node_id, None));
 
         let fqn = scoped_name(parent_fqn.unwrap_or(""), &label);
-        let node_id = builder.add_node(
+        let section_end = headings[index + 1..]
+            .iter()
+            .find_map(|(next_node, _, next_level)| {
+                (*next_level <= *level).then_some(next_node.start_byte())
+            })
+            .unwrap_or(source.len());
+        let node_id = builder.add_node_with_range(
             relative_path,
-            label,
+            label.clone(),
             fqn.clone(),
             NodeKind::Section,
             file_id,
-            node,
+            range_with_end(*node, source, section_end),
         );
         builder.add_edge(parent_id, Some(node_id), RelationKind::Contains, None);
-        stack.push((level, node_id, fqn.clone()));
-        sections.push(SectionBinding { node, node_id });
+        stack.push((*level, node_id, fqn.clone()));
+        sections.push(SectionBinding {
+            node: *node,
+            node_id,
+        });
     }
 
     sections
+}
+
+fn range_with_end(node: Node<'_>, source: &str, end_byte: usize) -> Range {
+    Range {
+        start_byte: node.start_byte(),
+        end_byte,
+        start_point: node.start_position(),
+        end_point: point_for_byte(source, end_byte),
+    }
+}
+
+fn point_for_byte(source: &str, byte: usize) -> Point {
+    let prefix = &source.as_bytes()[..byte];
+    let row = prefix.iter().filter(|byte| **byte == b'\n').count();
+    let column = prefix
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(byte, |newline| byte - newline - 1);
+    Point { row, column }
 }
 
 #[expect(clippy::too_many_arguments)]
