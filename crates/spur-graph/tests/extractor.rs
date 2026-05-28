@@ -565,6 +565,32 @@ fn markdown_extractor_builds_section_hierarchy_and_link_edges() {
 }
 
 #[test]
+fn markdown_section_span_covers_body_beyond_heading_line() {
+    let root = markdown_fixture_root();
+    let facts = build_facts(&root, None).expect("extract fixture").0;
+
+    let overview = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Section && node.label == "Overview")
+        .expect("Overview section");
+    let span_id = overview.source_span_id.expect("Overview source span");
+    let span = facts
+        .spans
+        .iter()
+        .find(|span| span.span_id == span_id)
+        .expect("Overview span");
+
+    let heading_len = "# Overview\n".len() as u32;
+    assert!(
+        span.end_byte - span.start_byte > heading_len,
+        "expected Overview span to include body text, got byte range [{}, {}]",
+        span.start_byte,
+        span.end_byte
+    );
+}
+
+#[test]
 fn rust_extractor_keeps_nested_functions_inside_methods_as_functions() {
     let root = nested_fn_fixture_root();
     let facts = build_facts(&root, None).expect("extract fixture").0;
