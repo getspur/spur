@@ -8,6 +8,7 @@ use arrow_array::{
     LargeStringArray, RecordBatch, StringArray, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_schema::{DataType, Field, Schema};
+use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexType};
 
 use crate::content_hash::blake3_hex;
 use crate::{
@@ -91,22 +92,51 @@ async fn write_sections_dataset_async(
     let rows = filter_rows_for_new_file_versions(existing.as_ref(), rows).await?;
     let batch = rows_to_batch(rows, schema.clone())?;
 
-    if let Some(table) = existing {
+    let (table, dataset_changed) = if let Some(table) = existing {
         if batch.num_rows() > 0 {
             table
                 .add(batch)
                 .execute()
                 .await
                 .context("failed to append LanceDB section rows")?;
+            (table, true)
+        } else {
+            (table, false)
         }
     } else {
-        db.create_table(SECTIONS_TABLE, batch)
+        let table = db
+            .create_table(SECTIONS_TABLE, batch)
             .execute()
             .await
             .context("failed to create LanceDB sections table")?;
+        (table, true)
+    };
+
+    if dataset_changed {
+        ensure_body_text_fts_index(&table).await?;
     }
 
     Ok(())
+}
+
+async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<()> {
+    if table
+        .list_indices()
+        .await
+        .context("failed to list LanceDB section indices")?
+        .iter()
+        .any(|index| {
+            index.index_type == IndexType::FTS && index.columns.as_slice() == ["body_text"]
+        })
+    {
+        return Ok(());
+    }
+
+    table
+        .create_index(&["body_text"], Index::FTS(FtsIndexBuilder::default()))
+        .execute()
+        .await
+        .context("failed to create LanceDB body_text FTS index")
 }
 
 async fn filter_rows_for_new_file_versions(
