@@ -248,7 +248,7 @@ async fn project_completion_snapshot_and_deliver<F>(
                 brain_session_id = %context.brain_session_id,
                 attempt = context.attempt,
                 timeout_ms,
-                "project stage timed out — abandoning snapshot+event for this completion"
+                "project stage timed out — abandoning snapshot for this completion (event delivered via deferred push when present)"
             );
             tracing::info!(
                 target: "spur.reconciler.completion_collector",
@@ -270,7 +270,7 @@ async fn project_completion_snapshot_and_deliver<F>(
                     brain_session_id = %context.brain_session_id,
                     attempt = context.attempt,
                     timeout_ms,
-                    "stage_requeued_project_timeout"
+                    "stage_delivered_on_project_timeout"
                 );
             } else {
                 tracing::warn!(
