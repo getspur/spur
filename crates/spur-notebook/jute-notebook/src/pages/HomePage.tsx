@@ -24,6 +24,7 @@ import {
 
 import { listenForRecentNotebookChanges } from "@/agent/events";
 import type { RecentNotebookEntry } from "@/bindings";
+import { validateRename } from "@/ui/home/renameValidation";
 import Header from "@/ui/shared/Header";
 
 type ContextMenuState = {
@@ -105,6 +106,12 @@ type NotebookCardProps = {
     event: MouseEvent<HTMLElement>,
     entry: RecentNotebookEntry,
   ) => void;
+  isRenaming: boolean;
+  onCancelRename: () => void;
+  onCommitRename: (
+    entry: RecentNotebookEntry,
+    nextNameInput: string,
+  ) => void | Promise<void>;
   onOpen: (entry: RecentNotebookEntry) => void | Promise<void>;
   onTogglePinned: (entry: RecentNotebookEntry) => void;
 };
@@ -112,6 +119,9 @@ type NotebookCardProps = {
 function NotebookCard({
   compact = false,
   entry,
+  isRenaming,
+  onCancelRename,
+  onCommitRename,
   onContextMenu,
   onOpen,
   onTogglePinned,
@@ -139,15 +149,42 @@ function NotebookCard({
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3
-            className={[
-              "truncate text-gray-950",
-              compact ? "text-base" : "text-xl",
-            ].join(" ")}
-            title={notebookFilename(entry.path)}
-          >
-            {notebookFilename(entry.path)}
-          </h3>
+          {isRenaming ? (
+            <input
+              autoFocus
+              className={[
+                "w-full rounded border border-gray-300 px-2 py-1 text-gray-950 outline-none focus:border-black",
+                compact ? "text-base" : "text-xl",
+              ].join(" ")}
+              defaultValue={notebookFilename(entry.path)}
+              onBlur={(event) => {
+                void onCommitRename(entry, event.currentTarget.value);
+              }}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void onCommitRename(entry, event.currentTarget.value);
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  onCancelRename();
+                }
+              }}
+              title={notebookFilename(entry.path)}
+            />
+          ) : (
+            <h3
+              className={[
+                "truncate text-gray-950",
+                compact ? "text-base" : "text-xl",
+              ].join(" ")}
+              title={notebookFilename(entry.path)}
+            >
+              {notebookFilename(entry.path)}
+            </h3>
+          )}
           <div
             className="mt-1 flex min-w-0 items-center gap-1.5 text-sm text-gray-400"
             title={notebookParentPath(entry.path)}
@@ -233,6 +270,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
 
   const refreshRecents = useCallback(async () => {
     try {
@@ -362,32 +400,31 @@ export default function HomePage() {
     [],
   );
 
+  const handleBeginRename = useCallback((entry: RecentNotebookEntry) => {
+    setRenamingPath(entry.path);
+  }, []);
+
+  const handleCancelRename = useCallback(() => {
+    setRenamingPath(null);
+  }, []);
+
   const handleRenameNotebook = useCallback(
-    async (entry: RecentNotebookEntry) => {
-      const input = window.prompt(
-        "Rename notebook",
-        notebookFilename(entry.path),
-      );
-      if (input === null) return;
-
-      const trimmed = input.trim();
-      if (!trimmed) {
-        setError("Notebook name must not be empty.");
-        return;
-      }
-      if (/[\\/]/.test(trimmed)) {
-        setError("Notebook name must not contain path separators.");
+    async (entry: RecentNotebookEntry, nextNameInput: string) => {
+      const validation = validateRename(nextNameInput);
+      if (!validation.ok) {
+        setError(validation.error);
         return;
       }
 
-      const fileName = trimmed.toLowerCase().endsWith(".ipynb")
-        ? trimmed
-        : `${trimmed}.ipynb`;
-      const to = notebookRenameTarget(entry.path, fileName);
-      if (to === entry.path) return;
+      const to = notebookRenameTarget(entry.path, validation.fileName);
+      if (to === entry.path) {
+        setRenamingPath(null);
+        return;
+      }
 
       try {
         await invoke<string>("rename_notebook", { from: entry.path, to });
+        setRenamingPath(null);
         await refreshRecents();
       } catch (caught) {
         setError(errorMessage(caught));
@@ -546,6 +583,9 @@ export default function HomePage() {
                 {regularNotebooks.map((entry) => (
                   <NotebookCard
                     entry={entry}
+                    isRenaming={renamingPath === entry.path}
+                    onCancelRename={handleCancelRename}
+                    onCommitRename={handleRenameNotebook}
                     key={entry.path}
                     onContextMenu={handleCardContextMenu}
                     onOpen={openNotebook}
@@ -586,6 +626,9 @@ export default function HomePage() {
                 <NotebookCard
                   compact
                   entry={entry}
+                  isRenaming={renamingPath === entry.path}
+                  onCancelRename={handleCancelRename}
+                  onCommitRename={handleRenameNotebook}
                   key={entry.path}
                   onContextMenu={handleCardContextMenu}
                   onOpen={openNotebook}
@@ -616,7 +659,10 @@ export default function HomePage() {
             </ContextMenuItem>
             <ContextMenuItem
               icon={<Pencil size={16} strokeWidth={1.5} />}
-              onClick={() => void handleRenameNotebook(contextMenu.entry)}
+              onClick={() => {
+                handleBeginRename(contextMenu.entry);
+                setContextMenu(null);
+              }}
             >
               Rename...
             </ContextMenuItem>
