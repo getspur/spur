@@ -7,7 +7,6 @@ use spur_acp::domain::{BrainContinuation, ContinuationSource, DeferReason, Deleg
 use spur_acp::types::SessionId;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::orchestrator::InteractiveInput;
@@ -38,6 +37,10 @@ pub trait ContinuationEventSink: Send + Sync {
 ///
 /// Callers do NOT need to emit `DelegationCompleted` separately — doing so
 /// causes duplicate dashboard log entries.
+///
+/// This function is async already, and all current callers are async, so it
+/// awaits the ingress send directly instead of spawning a detached delivery
+/// task or blocking a runtime thread.
 pub async fn report_detached_completion(
     continuation_tx: &mpsc::Sender<InteractiveInput>,
     overflow: &OverflowBuf,
@@ -53,41 +56,41 @@ pub async fn report_detached_completion(
         session = %session,
         "continuation path: entering report_detached_completion"
     );
-    // Route the model-visible continuation (try_send + overflow fallback).
+    // Awaiting mpsc send wakes an idle receiver once capacity opens; overflow
+    // is only a closed-channel shutdown fallback, not the full-channel path.
     // DelegationCompleted is emitted by execute_delegation before the oneshot
     // fires — do NOT emit it here to avoid duplicate dashboard entries.
-    match continuation_tx.try_send(InteractiveInput::SystemContinuation {
+    let input = InteractiveInput::SystemContinuation {
         session: session.clone(),
         continuation: cont.clone(),
-    }) {
+    };
+    match continuation_tx.send(input).await {
         Ok(()) => {
             tracing::debug!(
                 continuation_probe = true,
                 site = "A_report_detached_completion",
                 delegation_id = %cont.delegation_id,
-                outcome = "try_send_ok",
+                outcome = "send_ok",
                 "continuation path: SystemContinuation enqueued on ingress"
             );
         }
-        Err(TrySendError::Full(_)) => {
+        Err(err) => {
+            let InteractiveInput::SystemContinuation {
+                session,
+                continuation,
+            } = err.0
+            else {
+                return;
+            };
             let mut buf = overflow.lock().await;
-            buf.push_back((session, cont.clone()));
-            tracing::debug!(
-                continuation_probe = true,
-                site = "A_report_detached_completion",
-                delegation_id = %cont.delegation_id,
-                outcome = "overflow_pushed",
-                overflow_depth = buf.len(),
-                "continuation path: ingress full, spilled to overflow deque"
-            );
-        }
-        Err(TrySendError::Closed(_)) => {
+            buf.push_back((session, continuation.clone()));
             tracing::warn!(
                 continuation_probe = true,
                 site = "A_report_detached_completion",
-                delegation_id = %cont.delegation_id,
-                outcome = "channel_closed",
-                "continuation channel disconnected — continuation lost (orchestrator shut down)"
+                delegation_id = %continuation.delegation_id,
+                outcome = "channel_closed_overflow_pushed",
+                overflow_depth = buf.len(),
+                "continuation channel disconnected — spilled to overflow deque for shutdown fallback"
             );
         }
     }
@@ -351,7 +354,8 @@ mod tests {
         continuation::ArtifactKind, ArtifactRef, ContinuationPayload, ContinuationSource,
         DeferReason, DelegationKey,
     };
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc::error::TrySendError;
 
     fn mk_cont(
         id: &str,
@@ -405,6 +409,63 @@ mod tests {
             _ => panic!("expected Full"),
         }
         assert_eq!(buf.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn report_detached_completion_waits_for_capacity_and_wakes_idle_consumer() {
+        let overflow = new_overflow_buf();
+        let (tx, mut rx) = mpsc::channel::<InteractiveInput>(1);
+        tx.try_send(InteractiveInput::Message {
+            blocks: vec![],
+            interrupt: false,
+        })
+        .unwrap();
+
+        let consumer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let first = rx.recv().await.expect("expected prefilled input");
+            let second = rx.recv().await.expect("expected continuation input");
+            (first, second)
+        });
+
+        let sid = SessionId::new();
+        let continuation = mk_cont(
+            "id-await-capacity-1",
+            1,
+            ContinuationSource::AsyncRequested,
+            Some("recognizable continuation".into()),
+        );
+        report_detached_completion(
+            &tx,
+            &overflow,
+            sid.clone(),
+            SessionId::new(),
+            continuation.clone(),
+        )
+        .await;
+
+        let (first, second) = tokio::time::timeout(Duration::from_millis(200), consumer)
+            .await
+            .expect("consumer did not receive both ingress messages in time")
+            .expect("consumer task panicked");
+
+        match first {
+            InteractiveInput::Message { interrupt, .. } => assert!(!interrupt),
+            other => panic!("expected prefilled Message first, got {other:?}"),
+        }
+
+        match second {
+            InteractiveInput::SystemContinuation {
+                session,
+                continuation: received,
+            } => {
+                assert_eq!(session, sid);
+                assert_eq!(received.delegation_id, continuation.delegation_id);
+                assert_eq!(received.payload.summary, continuation.payload.summary);
+            }
+            other => panic!("expected SystemContinuation second, got {other:?}"),
+        }
+        assert!(overflow.lock().await.is_empty());
     }
 
     fn continuation_cost(continuation: &BrainContinuation) -> usize {
