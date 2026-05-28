@@ -11183,6 +11183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-analyst"
+version = "1.1.20"
+dependencies = [
+ "spur-cli",
+ "spur-graph",
+ "tempfile",
+]
+
+[[package]]
 name = "spur-blob-store"
 version = "1.1.20"
 dependencies = [
@@ -11355,6 +11364,7 @@ dependencies = [
  "ignore",
  "indicatif",
  "insta",
+ "lance-index",
  "lancedb",
  "libc",
  "parquet",
@@ -11442,12 +11452,16 @@ version = "1.1.20"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "arrow-array",
  "async-trait",
  "axum",
  "base64ct",
  "chrono",
  "futures",
+ "globset",
  "hmac",
+ "lance-index",
+ "lancedb",
  "madsim",
  "madsim-tokio",
  "parking_lot",
