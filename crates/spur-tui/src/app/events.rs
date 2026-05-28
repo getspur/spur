@@ -6,6 +6,28 @@ use tokio::time::timeout;
 
 type UpgradeResult = Result<Option<spur_core::UpgradeBanner>, oneshot::error::RecvError>;
 
+pub(super) fn handle_crossterm_stream_result(
+    app: &mut App,
+    result: Option<std::io::Result<crossterm::event::Event>>,
+) -> bool {
+    match result {
+        Some(Ok(crossterm_event)) => {
+            app.handle_crossterm_event(crossterm_event);
+            true
+        }
+        Some(Err(error)) => {
+            tracing::error!(%error, "crossterm input stream read failed; shutting down TUI");
+            app.confirm_quit();
+            false
+        }
+        None => {
+            tracing::warn!("crossterm input stream ended; shutting down TUI");
+            app.confirm_quit();
+            false
+        }
+    }
+}
+
 pub(super) async fn next_upgrade_result(upgrade_rx: &mut Option<UpgradeReceiver>) -> UpgradeResult {
     match upgrade_rx.as_mut() {
         Some(rx) => rx.await,
@@ -719,9 +741,8 @@ pub async fn run_tui_with_license(
 
         // Phase 1: Wait for at least one event (async yield point).
         tokio::select! {
-            Some(Ok(crossterm_event)) = event_stream.next() => {
-                crossterm_drained += 1;
-                app.handle_crossterm_event(crossterm_event);
+            result = event_stream.next() => {
+                crossterm_drained += handle_crossterm_stream_result(&mut app, result) as u32;
             }
             result = event_rx.recv() => {
                 match result {
@@ -772,9 +793,12 @@ pub async fn run_tui_with_license(
 
         // Phase 2: Drain all remaining crossterm events (non-blocking).
         // This collapses bursts of mouse scroll events into one render pass.
-        while let Ok(Some(Ok(ev))) = timeout(Duration::ZERO, event_stream.next()).await {
-            crossterm_drained += 1;
-            app.handle_crossterm_event(ev);
+        while let Ok(result) = timeout(Duration::ZERO, event_stream.next()).await {
+            let handled = handle_crossterm_stream_result(&mut app, result);
+            crossterm_drained += handled as u32;
+            if !handled {
+                break;
+            }
         }
 
         // Phase 3: Drain remaining spur events (non-blocking), capped per frame.
