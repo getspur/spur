@@ -20,4 +20,12 @@ export type DaemonRecentEntry = {
    * Whether the notebook is pinned in recents.
    */
   pinned: boolean;
+  /**
+   * Whether the path-derived kernel slot has a live kernel, when enriched by Tauri.
+   */
+  kernelAlive?: boolean;
+  /**
+   * Whether this entry is the daemon's current notebook, when enriched by Tauri.
+   */
+  isCurrent?: boolean;
 };
