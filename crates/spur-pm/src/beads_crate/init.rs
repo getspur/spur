@@ -33,11 +33,15 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
     #[cfg(target_os = "linux")]
     {
         use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::ffi::OsStrExt as _;
         let Ok(path) = CString::new(beads_dir.as_os_str().as_bytes()) else {
             return Ok(()); // path can't be C-stringified — best-effort allow
         };
+        // SAFETY: `statfs` is a plain C output struct; zeroing it before the
+        // syscall fills the fields is the standard initialization pattern.
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `path` is a valid NUL-terminated C string and `buf` points to
+        // writable memory for the duration of the call.
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
         if rc != 0 {
             return Ok(());
@@ -54,22 +58,28 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
         if ty == NFS_SUPER_MAGIC || ty == SMB_SUPER_MAGIC || ty == CIFS_MAGIC_NUMBER {
             return Err(InitError::NonLocalFilesystem {
                 path: beads_dir.display().to_string(),
-                fs_type: format!("0x{:x}", ty),
+                fs_type: format!("0x{ty:x}"),
             });
         }
     }
     #[cfg(target_os = "macos")]
     {
         use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::ffi::OsStrExt as _;
         let Ok(path) = CString::new(beads_dir.as_os_str().as_bytes()) else {
             return Ok(()); // path can't be C-stringified — best-effort allow
         };
+        // SAFETY: `statfs` is a plain C output struct; zeroing it before the
+        // syscall fills the fields is the standard initialization pattern.
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `path` is a valid NUL-terminated C string and `buf` points to
+        // writable memory for the duration of the call.
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
         if rc != 0 {
             return Ok(());
         }
+        // SAFETY: `statfs` returned success and `f_fstypename` is a
+        // NUL-terminated filesystem type name on macOS.
         let fs_name = unsafe {
             let raw = buf.f_fstypename.as_ptr();
             std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned()
@@ -327,8 +337,8 @@ mod tests {
     }
 }
 
-/// Pattern matching the temp files beads_rust creates during atomic JSONL writes.
-/// Per beads_rust 0.2.1 `sync::export_temp_path`:
+/// Pattern matching the temp files `beads_rust` creates during atomic JSONL writes.
+/// Per `beads_rust` 0.2.1 `sync::export_temp_path`:
 ///
 /// ```ignore
 /// pub(crate) fn export_temp_path(output_path: &Path) -> PathBuf {
@@ -339,7 +349,7 @@ mod tests {
 /// For input `issues.jsonl`, `Path::with_extension` strips `.jsonl` and appends
 /// the new extension, producing `issues.jsonl.<pid>.tmp`. The PID is decimal
 /// digits; there is NO random suffix. We deliberately match strictly so we
-/// never touch SQLite sidecars (`-wal`, `-shm`) or the live `issues.jsonl`.
+/// never touch `SQLite` sidecars (`-wal`, `-shm`) or the live `issues.jsonl`.
 fn is_jsonl_temp_file(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("issues.jsonl.") else {
         return false;
@@ -454,7 +464,7 @@ mod sweep_tests {
 
 /// Cheap filesystem-only probe used to decide whether the boot-time
 /// `init_writer_with_flush` sequence has anything to do. The full sequence
-/// holds `.write.lock` across SQLite open + `sweep_stale_jsonl_temps` +
+/// holds `.write.lock` across `SQLite` open + `sweep_stale_jsonl_temps` +
 /// `sync::auto_flush`, then releases it before the WAL checkpoint. It can
 /// still take several seconds on a busy beads dir and starve any concurrent
 /// process trying to acquire the lock during PM startup. When the filesystem
@@ -490,14 +500,12 @@ fn can_skip_init_flush(beads_dir: &Path) -> bool {
         return false;
     };
 
-    let entries = match std::fs::read_dir(beads_dir) {
-        Ok(e) => e,
-        Err(_) => return false,
+    let Ok(entries) = std::fs::read_dir(beads_dir) else {
+        return false;
     };
     for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => return false,
+        let Ok(entry) = entry else {
+            return false;
         };
         let name = entry.file_name();
         if let Some(name_str) = name.to_str() {
@@ -507,12 +515,10 @@ fn can_skip_init_flush(beads_dir: &Path) -> bool {
         }
     }
 
-    let conn = match rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return false,
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
     };
     let needs_flush = match conn.query_row(
         "SELECT value FROM metadata WHERE key = 'needs_flush'",
@@ -545,7 +551,7 @@ fn can_skip_init_flush(beads_dir: &Path) -> bool {
     true
 }
 
-/// Initialize the writer-side storage state and flush stale SQLite changes to
+/// Initialize the writer-side storage state and flush stale `SQLite` changes to
 /// JSONL while holding `.write.lock` for the full boot-time sequence.
 ///
 /// Fast path: `can_skip_init_flush` (lock-free, filesystem-only) returns true
@@ -575,6 +581,9 @@ pub(crate) fn init_writer_with_flush(
     let result = sync::auto_flush(&mut storage, beads_dir);
     drop(storage);
     drop(_guard);
+    // Documented exception to the connection actor rule: startup auto-flush
+    // runs before BeadsDb exists, so this one-shot checkpoint may still use the
+    // legacy helper. Hot-path reads/writes checkpoint on the writer actor.
     wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
     result?;
     Ok(())
