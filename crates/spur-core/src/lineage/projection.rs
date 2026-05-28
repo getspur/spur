@@ -459,20 +459,31 @@ impl ExecutorLineage {
     }
 
     fn buffer_orphan(&mut self, id: ExecutorId, ev: SpurEvent) {
-        let q = self.orphan_buffer.entry(id).or_default();
+        let q = self.orphan_buffer.entry(id.clone()).or_default();
         if q.len() < MAX_ORPHAN_BUFFER_PER_EXEC {
             q.push_back(ev);
         } else {
-            tracing::warn!("orphan buffer overflow; dropping event");
+            tracing::warn!(
+                executor_id = %id.0,
+                buffered = q.len(),
+                "orphan buffer overflow; dropping event"
+            );
         }
     }
 
     fn buffer_parent_orphan(&mut self, parent_id: ExecutorId, event: SpurEvent) {
-        let q = self.parent_orphan_buffer.entry(parent_id).or_default();
+        let q = self
+            .parent_orphan_buffer
+            .entry(parent_id.clone())
+            .or_default();
         if q.len() < MAX_ORPHAN_BUFFER_PER_EXEC {
             q.push_back(event);
         } else {
-            tracing::warn!("parent-orphan buffer overflow; dropping event");
+            tracing::warn!(
+                parent_id = %parent_id.0,
+                buffered = q.len(),
+                "parent-orphan buffer overflow; dropping event"
+            );
         }
     }
 

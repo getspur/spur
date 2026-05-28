@@ -4,7 +4,7 @@ use proptest::prelude::*;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::Notify;
 use tracing::field::{Field, Visit};
 
@@ -278,7 +278,7 @@ impl crate::plan::PmLike for CompletionTimeoutPm {
 }
 
 #[tokio::test(start_paused = true)]
-async fn completion_collector_project_timeout_abandons_snapshot_and_continuation() {
+async fn completion_collector_project_timeout_requeues_via_deferred_push() {
     let plan_id = "plan-timeout";
     let task_id = "task-timeout";
     let issue_id = "bd-timeout";
@@ -331,6 +331,14 @@ async fn completion_collector_project_timeout_abandons_snapshot_and_continuation
         }),
     });
     let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
+    outcomes.lock().await.record_dispatched(
+        plan_id,
+        task_id,
+        "w",
+        delegation_id,
+        false,
+        SystemTime::UNIX_EPOCH,
+    );
     let tracker = tokio_util::task::TaskTracker::new();
     let dispatch = test_completion_dispatch(tracker.clone(), brain_session_id.to_string());
     let context = CompletionCollectorLogContext {
@@ -404,13 +412,44 @@ async fn completion_collector_project_timeout_abandons_snapshot_and_continuation
         "expected timeout checkpoint"
     );
     assert!(
-        sink.events.lock().expect("events lock").is_empty(),
-        "timeout must not emit PlanTaskAwaitingReview"
+        captured.contains_event_with(&["stage_requeued_project_timeout"]),
+        "expected timeout requeue checkpoint"
     );
+    let emitted_events = sink.events.lock().expect("events lock");
+    assert!(
+        !emitted_events
+            .iter()
+            .any(|event| matches!(event, spur_acp::SpurEventBody::PlanSnapshotUpdated { .. })),
+        "timeout must not emit PlanSnapshotUpdated"
+    );
+    assert!(
+        emitted_events.iter().any(|event| matches!(
+            event,
+            spur_acp::SpurEventBody::PlanTaskAwaitingReview { .. }
+        )),
+        "timeout must requeue the deferred plan-task event"
+    );
+    drop(emitted_events);
     assert_eq!(
         continuation_count.load(Ordering::SeqCst),
-        0,
-        "timeout must not push continuation"
+        1,
+        "timeout must push the deferred completion back onto the continuation queue"
+    );
+    assert!(
+        outcomes
+            .lock()
+            .await
+            .recent_outcomes(plan_id)
+            .iter()
+            .any(|outcome| matches!(
+                outcome,
+                DispatchOutcome::Dispatched {
+                    task_id: recorded_task_id,
+                    delegation_id: recorded_delegation_id,
+                    ..
+                } if recorded_task_id == task_id && recorded_delegation_id == delegation_id
+            )),
+        "timeout must leave the outcome row available for the next projection attempt"
     );
     assert!(
         pm.advanced
@@ -425,6 +464,73 @@ async fn completion_collector_project_timeout_abandons_snapshot_and_continuation
                 ))
             )),
         "completion audit should be durable before projection timeout"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_collector_project_timeout_without_deferred_warns_and_returns() {
+    let plan_id = "plan-timeout-none";
+    let task_id = "task-timeout-none";
+    let delegation_id = "del-timeout-none";
+    let attempt = 1;
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-timeout-none".into()));
+    let captured = CapturedCompletionCollectorErrors::default();
+    let sink = Arc::new(RecordingEventSink::default());
+    let continuation_ctx = Arc::new(crate::server::DetachedContinuationCtx {
+        on_complete: Arc::new(|_, _| Box::pin(async {})),
+    });
+    let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
+    let tracker = tokio_util::task::TaskTracker::new();
+    let dispatch = test_completion_dispatch(tracker.clone(), brain_session_id.to_string());
+    let context = CompletionCollectorLogContext {
+        plan_id: plan_id.to_string(),
+        task_id: task_id.to_string(),
+        delegation_id: delegation_id.to_string(),
+        brain_session_id: brain_session_id.to_string(),
+        attempt,
+    };
+
+    let guard = tracing::subscriber::set_default(captured.clone());
+    spawn_completion_collector(&dispatch, context, {
+        let sink = Arc::clone(&sink);
+        let continuation_ctx = Arc::clone(&continuation_ctx);
+        let outcomes = Arc::clone(&outcomes);
+        let brain_session_id = brain_session_id.clone();
+        async move {
+            project_completion_snapshot_and_deliver(
+                &SystemClock,
+                std::future::pending(),
+                &outcomes,
+                Some(sink.as_ref()),
+                continuation_ctx.as_ref(),
+                None,
+                CompletionProjectionLogContext {
+                    plan_id,
+                    task_id,
+                    delegation_id,
+                    brain_session_id: &brain_session_id,
+                    attempt,
+                },
+            )
+            .await;
+        }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(COMPLETION_PROJECTION_TIMEOUT + Duration::from_millis(1)).await;
+    tracker.close();
+    tokio::time::timeout(Duration::from_secs(12), tracker.wait())
+        .await
+        .expect("completion collector must return after projection timeout");
+    drop(guard);
+
+    assert!(
+        captured.contains_event_with(&["completion lost — no deferred queue to requeue into"]),
+        "expected missing-deferred warning"
+    );
+    assert!(
+        sink.events.lock().expect("events lock").is_empty(),
+        "timeout without a deferred push must not emit events"
     );
 }
 
