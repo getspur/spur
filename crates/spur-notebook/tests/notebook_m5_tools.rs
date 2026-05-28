@@ -423,6 +423,48 @@ async fn write_notebook(path: &Path, notebook: &NotebookRoot) {
         .expect("notebook writes");
 }
 
+#[test]
+fn legacy_tauri_daemon_commands_are_not_exported() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let main_rs = std::fs::read_to_string(manifest_dir.join("src/main.rs")).expect("read main.rs");
+    let commands_rs =
+        std::fs::read_to_string(manifest_dir.join("jute-notebook/src-tauri/src/commands.rs"))
+            .expect("read commands.rs");
+    let home_page =
+        std::fs::read_to_string(manifest_dir.join("jute-notebook/src/pages/HomePage.tsx"))
+            .expect("read HomePage.tsx");
+
+    assert!(
+        main_rs.contains("jute::commands::daemon_control"),
+        "typed daemon_control command must be registered"
+    );
+
+    for command in [
+        "list_recent_notebooks",
+        "remove_notebook_from_recents",
+        "set_notebook_pinned",
+        "open_notebook_via_daemon",
+        "rename_notebook",
+        "new_notebook_via_daemon",
+        "new_notebook_at_via_daemon",
+        "reopen_notebook_via_daemon",
+        "close_notebook_via_daemon",
+    ] {
+        assert!(
+            !main_rs.contains(&format!("jute::commands::{command}")),
+            "{command} must not be registered as a Tauri command"
+        );
+        assert!(
+            !commands_rs.contains(&format!("pub async fn {command}")),
+            "{command} must not remain a public Tauri command"
+        );
+        assert!(
+            !home_page.contains(&format!("\"{command}\"")),
+            "HomePage must not invoke legacy Tauri command {command}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
     let notebook = Arc::new(MockNotebook::default());

@@ -91,6 +91,14 @@ pub struct DaemonRecentEntry {
     pub is_scratch: bool,
     /// Whether the notebook is pinned in recents.
     pub pinned: bool,
+    /// Whether the path-derived kernel slot has a live kernel, when enriched by Tauri.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kernel_alive: Option<bool>,
+    /// Whether this entry is the daemon's current notebook, when enriched by Tauri.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub is_current: Option<bool>,
 }
 
 /// A daemon control protocol request.
@@ -536,28 +544,36 @@ pub async fn send_daemon_control_to(
 }
 
 #[cfg(unix)]
-async fn send_daemon_control(
-    command: &str,
-    path: Option<&Path>,
-    pinned: Option<bool>,
+#[tauri::command]
+/// Send a typed daemon-control command through the app's daemon socket.
+pub async fn daemon_control(
+    cmd: DaemonControlCommand,
+    state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<DaemonControlResponse, Error> {
     let socket_path = daemon_socket_path_from_args()?;
-    let request = daemon_control_request_from_legacy(command, path, pinned)?;
-    send_daemon_control_to(&socket_path, &request).await
+    let enrich_recents = matches!(cmd, DaemonControlCommand::ListRecents {});
+    let request = DaemonControlRequest::new(cmd);
+    let mut response = send_daemon_control_to(&socket_path, &request).await?;
+    if enrich_recents {
+        enrich_daemon_recent_entries(&mut response, &state).await?;
+    }
+    Ok(response)
 }
 
 #[cfg(not(unix))]
-async fn send_daemon_control(
-    _command: &str,
-    _path: Option<&Path>,
-    _pinned: Option<bool>,
+#[tauri::command]
+/// Send a typed daemon-control command through the app's daemon socket.
+pub async fn daemon_control(
+    _cmd: DaemonControlCommand,
+    _state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<DaemonControlResponse, Error> {
     Err(Error::NotebookDaemon(
         "notebook daemon socket commands are only available on Unix platforms".to_string(),
     ))
 }
 
-fn daemon_control_rename_request(from: &Path, to: &Path) -> DaemonControlRequest {
+/// Build the typed daemon-control request used by rename callers.
+pub fn daemon_control_rename_request(from: &Path, to: &Path) -> DaemonControlRequest {
     DaemonControlRequest::new(DaemonControlCommand::Rename {
         from: from.display().to_string(),
         to: to.display().to_string(),
@@ -565,7 +581,8 @@ fn daemon_control_rename_request(from: &Path, to: &Path) -> DaemonControlRequest
 }
 
 #[cfg(unix)]
-async fn send_daemon_control_rename(
+/// Send a typed rename daemon-control request through the app's daemon socket.
+pub async fn send_daemon_control_rename(
     from: &Path,
     to: &Path,
 ) -> Result<DaemonControlResponse, Error> {
@@ -575,51 +592,14 @@ async fn send_daemon_control_rename(
 }
 
 #[cfg(not(unix))]
-async fn send_daemon_control_rename(
+/// Send a typed rename daemon-control request through the app's daemon socket.
+pub async fn send_daemon_control_rename(
     _from: &Path,
     _to: &Path,
 ) -> Result<DaemonControlResponse, Error> {
     Err(Error::NotebookDaemon(
         "notebook daemon socket commands are only available on Unix platforms".to_string(),
     ))
-}
-
-fn daemon_control_request_from_legacy(
-    command: &str,
-    path: Option<&Path>,
-    pinned: Option<bool>,
-) -> Result<DaemonControlRequest, Error> {
-    let path_string = || {
-        path.map(|path| path.display().to_string())
-            .ok_or_else(|| Error::NotebookDaemon(format!("{command} requires path")))
-    };
-    let command = match command {
-        "open" => DaemonControlCommand::Open {
-            path: path_string()?,
-        },
-        "new" => DaemonControlCommand::New {},
-        "new_at" => DaemonControlCommand::NewAt {
-            path: path_string()?,
-        },
-        "reopen" => DaemonControlCommand::Reopen {},
-        "close" => DaemonControlCommand::Close {},
-        "list_recents" => DaemonControlCommand::ListRecents {},
-        "remove_from_recents" => DaemonControlCommand::RemoveFromRecents {
-            path: path_string()?,
-        },
-        "set_pinned" => DaemonControlCommand::SetPinned {
-            path: path_string()?,
-            pinned: pinned
-                .ok_or_else(|| Error::NotebookDaemon("set_pinned requires pinned".to_string()))?,
-        },
-        "shutdown" => DaemonControlCommand::Shutdown {},
-        command => {
-            return Err(Error::NotebookDaemon(format!(
-                "unknown daemon command: {command}"
-            )))
-        }
-    };
-    Ok(DaemonControlRequest::new(command))
 }
 
 /// Handle notebook-store daemon control requests inside the Tauri process.
@@ -1187,97 +1167,22 @@ async fn kernel_alive_for_notebook(path: &str, state: &State) -> bool {
         .unwrap_or(false)
 }
 
-/// List daemon recent notebooks with Tauri-side status metadata.
-#[tauri::command]
-pub async fn list_recent_notebooks(
-    state: tauri::State<'_, std::sync::Arc<State>>,
-) -> Result<Vec<RecentNotebookEntry>, Error> {
-    let response = send_daemon_control("list_recents", None, None).await?;
+async fn enrich_daemon_recent_entries(
+    response: &mut DaemonControlResponse,
+    state: &State,
+) -> Result<(), Error> {
     let current_path = load_current_notebook_path_normalized().await?;
-    let entries = response.entries.unwrap_or_default();
-    let mut recent_notebooks = Vec::with_capacity(entries.len());
+    let Some(entries) = response.entries.as_mut() else {
+        return Ok(());
+    };
     for entry in entries {
         let normalized_path = normalize_path(Path::new(&entry.path)).await?;
         let path = normalized_path.display().to_string();
-        let kernel_alive = kernel_alive_for_notebook(&path, &state).await;
-        let is_current = current_path.as_ref() == Some(&normalized_path);
-        recent_notebooks.push(RecentNotebookEntry {
-            path,
-            last_opened: entry.last_opened,
-            is_scratch: entry.is_scratch,
-            pinned: entry.pinned,
-            kernel_alive,
-            is_current,
-        });
+        entry.kernel_alive = Some(kernel_alive_for_notebook(&path, state).await);
+        entry.is_current = Some(current_path.as_ref() == Some(&normalized_path));
+        entry.path = path;
     }
-    Ok(recent_notebooks)
-}
-
-/// Remove a notebook path from daemon recents.
-#[tauri::command]
-pub async fn remove_notebook_from_recents(path: String) -> Result<(), Error> {
-    send_daemon_control("remove_from_recents", Some(Path::new(&path)), None)
-        .await
-        .map(|_| ())
-}
-
-/// Set a notebook's daemon recents pin state.
-#[tauri::command]
-pub async fn set_notebook_pinned(path: String, pinned: bool) -> Result<(), Error> {
-    send_daemon_control("set_pinned", Some(Path::new(&path)), Some(pinned))
-        .await
-        .map(|_| ())
-}
-
-/// Open an existing notebook through the daemon and return its path.
-#[tauri::command]
-pub async fn open_notebook_via_daemon(path: String) -> Result<String, Error> {
-    send_daemon_control("open", Some(Path::new(&path)), None)
-        .await?
-        .path
-        .ok_or_else(|| Error::NotebookDaemon("daemon open response did not include path".into()))
-}
-
-/// Rename a notebook through the daemon and return the new path.
-#[tauri::command]
-pub async fn rename_notebook(from: String, to: String) -> Result<String, Error> {
-    send_daemon_control_rename(Path::new(&from), Path::new(&to))
-        .await?
-        .path
-        .ok_or_else(|| Error::NotebookDaemon("daemon rename response did not include path".into()))
-}
-
-/// Create a new scratch notebook through the daemon and return its path.
-#[tauri::command]
-pub async fn new_notebook_via_daemon() -> Result<String, Error> {
-    send_daemon_control("new", None, None)
-        .await?
-        .path
-        .ok_or_else(|| Error::NotebookDaemon("daemon new response did not include path".into()))
-}
-
-/// Create a new notebook at an explicit path through the daemon and return its path.
-#[tauri::command]
-pub async fn new_notebook_at_via_daemon(path: String) -> Result<String, Error> {
-    send_daemon_control("new_at", Some(Path::new(&path)), None)
-        .await?
-        .path
-        .ok_or_else(|| Error::NotebookDaemon("daemon new_at response did not include path".into()))
-}
-
-/// Reopen the daemon's current notebook window and return its path.
-#[tauri::command]
-pub async fn reopen_notebook_via_daemon() -> Result<String, Error> {
-    send_daemon_control("reopen", None, None)
-        .await?
-        .path
-        .ok_or_else(|| Error::NotebookDaemon("daemon reopen response did not include path".into()))
-}
-
-/// Close the daemon's current notebook window.
-#[tauri::command]
-pub async fn close_notebook_via_daemon() -> Result<(), Error> {
-    send_daemon_control("close", None, None).await.map(|_| ())
+    Ok(())
 }
 
 /// Move a notebook file to the OS trash unless it is currently loaded.
@@ -1624,27 +1529,8 @@ mod tests {
     }
 
     #[test]
-    fn open_notebook_via_daemon_command_is_exported() {
-        fn assert_open_command<F, Fut>(_command: F)
-        where
-            F: Fn(String) -> Fut,
-            Fut: std::future::Future<Output = Result<String, Error>>,
-        {
-        }
-
-        assert_open_command(open_notebook_via_daemon);
-    }
-
-    #[test]
-    fn new_notebook_at_via_daemon_command_is_exported() {
-        fn assert_open_command<F, Fut>(_command: F)
-        where
-            F: Fn(String) -> Fut,
-            Fut: std::future::Future<Output = Result<String, Error>>,
-        {
-        }
-
-        assert_open_command(new_notebook_at_via_daemon);
+    fn daemon_control_command_symbol_is_exported() {
+        let _command = daemon_control;
     }
 
     #[test]

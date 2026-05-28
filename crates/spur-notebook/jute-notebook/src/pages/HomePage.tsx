@@ -24,6 +24,11 @@ import {
 
 import { listenForRecentNotebookChanges } from "@/agent/events";
 import type { RecentNotebookEntry } from "@/bindings";
+import {
+  daemonControl,
+  pathFromDaemonControlResponse,
+  recentEntriesFromDaemonControlResponse,
+} from "@/daemon/control";
 import { validateRename } from "@/ui/home/renameValidation";
 import ConfirmModal from "@/ui/shared/ConfirmModal";
 import Header from "@/ui/shared/Header";
@@ -276,10 +281,8 @@ export default function HomePage() {
 
   const refreshRecents = useCallback(async () => {
     try {
-      const entries = await invoke<RecentNotebookEntry[]>(
-        "list_recent_notebooks",
-      );
-      setRecents(entries);
+      const response = await daemonControl({ command: "list_recents" });
+      setRecents(recentEntriesFromDaemonControlResponse(response));
       setError(null);
     } catch (caught) {
       setError(errorMessage(caught));
@@ -328,7 +331,11 @@ export default function HomePage() {
 
   const openNotebook = useCallback(async (entry: RecentNotebookEntry) => {
     try {
-      await invoke<string>("open_notebook_via_daemon", { path: entry.path });
+      const response = await daemonControl({
+        command: "open",
+        path: entry.path,
+      });
+      pathFromDaemonControlResponse(response, "open");
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -342,7 +349,8 @@ export default function HomePage() {
         filters: [{ name: "Jupyter Notebook", extensions: ["ipynb"] }],
       });
       if (typeof file === "string") {
-        await invoke<string>("open_notebook_via_daemon", { path: file });
+        const response = await daemonControl({ command: "open", path: file });
+        pathFromDaemonControlResponse(response, "open");
       }
     } catch (caught) {
       setError(errorMessage(caught));
@@ -351,7 +359,8 @@ export default function HomePage() {
 
   const handleNewNotebook = useCallback(async () => {
     try {
-      await invoke<string>("new_notebook_via_daemon");
+      const response = await daemonControl({ command: "new" });
+      pathFromDaemonControlResponse(response, "new");
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -367,7 +376,11 @@ export default function HomePage() {
         const withExt = path.toLowerCase().endsWith(".ipynb")
           ? path
           : `${path}.ipynb`;
-        await invoke<string>("new_notebook_at_via_daemon", { path: withExt });
+        const response = await daemonControl({
+          command: "new_at",
+          path: withExt,
+        });
+        pathFromDaemonControlResponse(response, "new_at");
       }
     } catch (caught) {
       setError(errorMessage(caught));
@@ -378,7 +391,8 @@ export default function HomePage() {
     if (!currentNotebook) return;
 
     try {
-      await invoke<string>("reopen_notebook_via_daemon");
+      const response = await daemonControl({ command: "reopen" });
+      pathFromDaemonControlResponse(response, "reopen");
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -386,7 +400,7 @@ export default function HomePage() {
 
   const handleCloseCurrent = useCallback(async () => {
     try {
-      await invoke("close_notebook_via_daemon");
+      await daemonControl({ command: "close" });
       await refreshRecents();
     } catch (caught) {
       setError(errorMessage(caught));
@@ -396,7 +410,8 @@ export default function HomePage() {
   const handleTogglePinned = useCallback(
     async (entry: RecentNotebookEntry) => {
       try {
-        await invoke("set_notebook_pinned", {
+        await daemonControl({
+          command: "set_pinned",
           path: entry.path,
           pinned: !entry.pinned,
         });
@@ -442,7 +457,12 @@ export default function HomePage() {
       }
 
       try {
-        await invoke<string>("rename_notebook", { from: entry.path, to });
+        const response = await daemonControl({
+          command: "rename",
+          from: entry.path,
+          to,
+        });
+        pathFromDaemonControlResponse(response, "rename");
         setRenamingPath(null);
         await refreshRecents();
       } catch (caught) {
@@ -455,7 +475,10 @@ export default function HomePage() {
   const handleRemoveFromRecents = useCallback(
     async (entry: RecentNotebookEntry) => {
       try {
-        await invoke("remove_notebook_from_recents", { path: entry.path });
+        await daemonControl({
+          command: "remove_from_recents",
+          path: entry.path,
+        });
         await refreshRecents();
       } catch (caught) {
         setError(errorMessage(caught));
