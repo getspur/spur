@@ -25,6 +25,7 @@ import {
 import { listenForRecentNotebookChanges } from "@/agent/events";
 import type { RecentNotebookEntry } from "@/bindings";
 import { validateRename } from "@/ui/home/renameValidation";
+import ConfirmModal from "@/ui/shared/ConfirmModal";
 import Header from "@/ui/shared/Header";
 
 type ContextMenuState = {
@@ -271,6 +272,7 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const refreshRecents = useCallback(async () => {
     try {
@@ -459,17 +461,16 @@ export default function HomePage() {
     [refreshRecents],
   );
 
+  const openDiscardConfirm = useCallback(() => {
+    if (scratchNotebooks.length === 0) return;
+    setConfirmDiscard(true);
+  }, [scratchNotebooks.length]);
+
   const handleDiscardScratch = useCallback(async () => {
     if (scratchNotebooks.length === 0) return;
 
-    const confirmed = window.confirm(
-      `Discard ${scratchNotebooks.length} scratch notebook${
-        scratchNotebooks.length === 1 ? "" : "s"
-      }?`,
-    );
-    if (!confirmed) return;
-
     try {
+      setConfirmDiscard(false);
       await invoke<number>("discard_scratch_notebooks");
       await refreshRecents();
     } catch (caught) {
@@ -608,7 +609,7 @@ export default function HomePage() {
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                void handleDiscardScratch();
+                openDiscardConfirm();
               }}
               type="button"
             >
@@ -698,6 +699,17 @@ export default function HomePage() {
             </ContextMenuItem>
           </ul>
         )}
+        <ConfirmModal
+          body={`Move ${scratchNotebooks.length} scratch notebook${
+            scratchNotebooks.length === 1 ? "" : "s"
+          } to the Trash?`}
+          confirmLabel="Discard"
+          danger
+          onCancel={() => setConfirmDiscard(false)}
+          onConfirm={() => void handleDiscardScratch()}
+          open={confirmDiscard}
+          title="Discard scratch notebooks"
+        />
       </main>
     </div>
   );
