@@ -82,7 +82,7 @@ async fn happy_scenario() {
 
     assert!(harness.pm.epic_is_closed());
     assert_eq!(
-        harness.pm.statuses(),
+        harness.pm.projected_statuses().await,
         vec![
             ("T1".to_string(), "approved".to_string()),
             ("T2".to_string(), "approved".to_string()),
@@ -191,12 +191,30 @@ async fn edge_cancel_mid_tick_scenario() {
     assert_eq!(pm.dispatch_count("T1"), 1);
 
     let _ = dispatch_rx.lock().unwrap().recv().await;
-    let recovery = Harness::from_existing_pm(pm, sink, continuations);
-    recovery.reconciler.tick_once().await.unwrap();
-    let request = recovery.recv_dispatch().await;
+    let recovery = Harness::from_existing_pm_with_config(pm, sink, continuations, |cfg| {
+        cfg.base_interval = Duration::from_secs(1);
+    });
+    let Harness {
+        pm,
+        reconciler,
+        dispatch_rx,
+        ..
+    } = recovery;
+    let (recovery_cancel_tx, recovery_cancel_rx) = oneshot::channel();
+    let recovery_run = tokio::spawn(reconciler.run(recovery_cancel_rx));
+    let request = tokio::time::timeout(Duration::from_secs(3), async {
+        dispatch_rx.lock().unwrap().recv().await.unwrap()
+    })
+    .await
+    .unwrap();
+    recovery_cancel_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), recovery_run)
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(request.issue_id.as_deref(), Some("bd-t1"));
-    assert_eq!(recovery.pm.dispatch_count("T1"), 2);
+    assert_eq!(pm.dispatch_count("T1"), 2);
 }
 
 async fn edge_fast_forward_storm_scenario() {
@@ -344,14 +362,6 @@ impl Harness {
         Self::from_existing_pm_with_config(pm, Arc::default(), Arc::default(), configure)
     }
 
-    fn from_existing_pm(
-        pm: Arc<SimPm>,
-        sink: Arc<RecordingEventSink>,
-        continuations: Arc<AtomicUsize>,
-    ) -> Self {
-        Self::from_existing_pm_with_config(pm, sink, continuations, |_| {})
-    }
-
     fn from_existing_pm_with_config(
         pm: Arc<SimPm>,
         sink: Arc<RecordingEventSink>,
@@ -484,6 +494,22 @@ impl Harness {
 
 fn is_awaiting_review(status: &PlanTaskStatus) -> bool {
     matches!(status, PlanTaskStatus::AwaitingReview { .. })
+}
+
+fn status_name(status: &PlanTaskStatus) -> &'static str {
+    match status {
+        PlanTaskStatus::Pending => "pending",
+        PlanTaskStatus::Ready => "ready",
+        PlanTaskStatus::Dispatched { .. } => "dispatched",
+        PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
+        PlanTaskStatus::Approved { .. } => "approved",
+        PlanTaskStatus::Rejected { .. } => "rejected",
+        PlanTaskStatus::Failed { .. } => "failed",
+        PlanTaskStatus::Cancelled { .. } => "cancelled",
+        PlanTaskStatus::Superseded { .. } => "superseded",
+        PlanTaskStatus::BlockedOnSetupConflict { .. } => "blocked_on_setup_conflict",
+        PlanTaskStatus::EscalatedToBrain { .. } => "escalated_to_brain",
+    }
 }
 
 #[derive(Default)]
@@ -675,30 +701,19 @@ impl SimPm {
             .find(|task| task.spec.task_id == task_id)
             .unwrap()
             .status;
-        match status {
-            PlanTaskStatus::Pending => "pending",
-            PlanTaskStatus::Ready => "ready",
-            PlanTaskStatus::Dispatched { .. } => "dispatched",
-            PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
-            PlanTaskStatus::Approved { .. } => "approved",
-            PlanTaskStatus::Rejected { .. } => "rejected",
-            PlanTaskStatus::Failed { .. } => "failed",
-            PlanTaskStatus::Cancelled { .. } => "cancelled",
-            PlanTaskStatus::Superseded { .. } => "superseded",
-            PlanTaskStatus::BlockedOnSetupConflict { .. } => "blocked_on_setup_conflict",
-            PlanTaskStatus::EscalatedToBrain { .. } => "escalated_to_brain",
-        }
-        .to_string()
+        status_name(status).to_string()
     }
 
-    fn statuses(&self) -> Vec<(String, String)> {
-        let state = self.state.lock().unwrap();
-        state
-            .task_issue_by_id
-            .keys()
-            .map(|task_id| {
-                let issue = state.issue_for_task(task_id);
-                (task_id.clone(), issue.status.clone())
+    async fn projected_statuses(&self) -> Vec<(String, String)> {
+        self.project()
+            .await
+            .tasks
+            .iter()
+            .map(|task| {
+                (
+                    task.spec.task_id.clone(),
+                    status_name(&task.status).to_string(),
+                )
             })
             .collect()
     }
@@ -782,10 +797,12 @@ impl SimState {
             .map(|task| (task.task_id, task.issue_id))
             .collect::<BTreeMap<_, _>>();
         for task in plan.tasks {
-            let blocked_by = task
-                .depends_on
-                .iter()
-                .map(|dep| issue_by_task[dep].to_string())
+            let blocked_by = std::iter::once(EPIC_ID.to_string())
+                .chain(
+                    task.depends_on
+                        .iter()
+                        .map(|dep| issue_by_task[dep].to_string()),
+                )
                 .collect::<Vec<_>>();
             let mut item = issue(
                 task.issue_id,
@@ -903,10 +920,6 @@ impl SimState {
             _ => None,
         })
     }
-
-    fn issue_for_task(&self, task_id: &str) -> &Issue {
-        &self.issues[&self.task_issue_by_id[task_id]]
-    }
 }
 
 #[async_trait]
@@ -995,6 +1008,9 @@ impl BeadsAdvanced for SimPm {
                         .iter()
                         .all(|label| issue.labels.contains(label))
                     && issue.blocked_by.iter().all(|dep| {
+                        if dep == EPIC_ID {
+                            return true;
+                        }
                         state
                             .issues
                             .get(dep)
