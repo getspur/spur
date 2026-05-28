@@ -285,6 +285,7 @@ fn main() {
             jute::commands::open_notebook_via_daemon,
             jute::commands::rename_notebook,
             jute::commands::new_notebook_via_daemon,
+            jute::commands::new_notebook_at_via_daemon,
             jute::commands::reopen_notebook_via_daemon,
             jute::commands::close_notebook_via_daemon,
             jute::commands::discard_scratch_notebooks,

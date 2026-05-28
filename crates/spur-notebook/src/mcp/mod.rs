@@ -728,6 +728,27 @@ impl NotebookDaemonControl {
                 }
                 Ok(DaemonControlSuccess::path(path))
             }
+            "new_at" => {
+                let path = request.path.ok_or_else(|| BridgeError::Handler {
+                    code: "invalid_params".to_string(),
+                    message: "new_at requires path".to_string(),
+                })?;
+                self.save_current().await?;
+                let path = resolve_notebook_path(path);
+                create_empty_notebook_at(&path)
+                    .await
+                    .map_err(|error| BridgeError::Handler {
+                        code: "notebook_create_failed".to_string(),
+                        message: error.to_string(),
+                    })?;
+                let path = self.open_path(path).await?;
+                if let Err(error) = self.record_recent_open(&path).await {
+                    warn!(%error, path = %path.display(), "failed to record recent notebook");
+                } else {
+                    self.windows.emit_recents_changed();
+                }
+                Ok(DaemonControlSuccess::path(path))
+            }
             "reopen" => self.reopen().await.map(DaemonControlSuccess::path),
             "rename" => {
                 let from = request.from.ok_or_else(|| BridgeError::Handler {
@@ -1221,16 +1242,43 @@ async fn create_untitled_notebook() -> anyhow::Result<PathBuf> {
     create_untitled_notebook_in_dir(&scratch_dir()?).await
 }
 
-async fn create_untitled_notebook_in_dir(dir: &Path) -> anyhow::Result<PathBuf> {
-    tokio::fs::create_dir_all(dir)
-        .await
-        .with_context(|| format!("failed to create {}", dir.display()))?;
-    let contents = serde_json::to_vec_pretty(&json!({
+fn empty_notebook_bytes() -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec_pretty(&json!({
         "cells": [],
         "metadata": {},
         "nbformat": 4,
         "nbformat_minor": 5
-    }))?;
+    }))?)
+}
+
+pub(crate) async fn create_empty_notebook_at(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let contents = empty_notebook_bytes()?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(&contents)
+        .await
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+async fn create_untitled_notebook_in_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    let contents = empty_notebook_bytes()?;
 
     for suffix in 0..=UNTITLED_NOTEBOOK_MAX_SUFFIX {
         let file_name = if suffix == 0 {
@@ -2111,6 +2159,58 @@ mod tests {
         assert_eq!(
             fills_gap.file_name().and_then(|name| name.to_str()),
             Some("Untitled.ipynb")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_empty_notebook_at_creates_parent_dirs_and_empty_notebook() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-new-at-")
+            .tempdir()
+            .expect("temp dir");
+        let path = temp_dir.path().join("nested").join("analysis.ipynb");
+
+        create_empty_notebook_at(&path)
+            .await
+            .expect("notebook writes at exact path");
+
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .expect("created notebook reads");
+        let notebook: serde_json::Value =
+            serde_json::from_str(&contents).expect("created notebook is json");
+        assert_eq!(notebook["cells"], json!([]));
+        assert_eq!(notebook["metadata"], json!({}));
+        assert_eq!(notebook["nbformat"], json!(4));
+        assert_eq!(notebook["nbformat_minor"], json!(5));
+    }
+
+    #[tokio::test]
+    async fn create_empty_notebook_at_refuses_to_overwrite() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-new-at-overwrite-")
+            .tempdir()
+            .expect("temp dir");
+        let path = temp_dir.path().join("analysis.ipynb");
+        tokio::fs::write(&path, b"existing")
+            .await
+            .expect("existing file writes");
+
+        let error = create_empty_notebook_at(&path)
+            .await
+            .expect_err("existing notebook is not overwritten");
+
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(|error| error.kind()),
+            Some(std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&path)
+                .await
+                .expect("existing file reads"),
+            "existing"
         );
     }
 

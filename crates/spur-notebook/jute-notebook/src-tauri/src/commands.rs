@@ -127,6 +127,10 @@ pub enum DaemonControlCommand {
     Rename { from: String, to: String },
     /// Create a scratch notebook.
     New {},
+    /// Create a notebook at an exact path.
+    #[serde(rename = "new_at")]
+    #[ts(rename = "new_at")]
+    NewAt { path: String },
     /// Reopen the current notebook window.
     Reopen {},
     /// Close the current notebook window.
@@ -594,6 +598,9 @@ fn daemon_control_request_from_legacy(
             path: path_string()?,
         },
         "new" => DaemonControlCommand::New {},
+        "new_at" => DaemonControlCommand::NewAt {
+            path: path_string()?,
+        },
         "reopen" => DaemonControlCommand::Reopen {},
         "close" => DaemonControlCommand::Close {},
         "list_recents" => DaemonControlCommand::ListRecents {},
@@ -1249,6 +1256,15 @@ pub async fn new_notebook_via_daemon() -> Result<String, Error> {
         .ok_or_else(|| Error::NotebookDaemon("daemon new response did not include path".into()))
 }
 
+/// Create a new notebook at an explicit path through the daemon and return its path.
+#[tauri::command]
+pub async fn new_notebook_at_via_daemon(path: String) -> Result<String, Error> {
+    send_daemon_control("new_at", Some(Path::new(&path)), None)
+        .await?
+        .path
+        .ok_or_else(|| Error::NotebookDaemon("daemon new_at response did not include path".into()))
+}
+
 /// Reopen the daemon's current notebook window and return its path.
 #[tauri::command]
 pub async fn reopen_notebook_via_daemon() -> Result<String, Error> {
@@ -1617,6 +1633,18 @@ mod tests {
         }
 
         assert_open_command(open_notebook_via_daemon);
+    }
+
+    #[test]
+    fn new_notebook_at_via_daemon_command_is_exported() {
+        fn assert_open_command<F, Fut>(_command: F)
+        where
+            F: Fn(String) -> Fut,
+            Fut: std::future::Future<Output = Result<String, Error>>,
+        {
+        }
+
+        assert_open_command(new_notebook_at_via_daemon);
     }
 
     #[test]
