@@ -13,6 +13,7 @@ export type DaemonControlRequest = {
   | { command: "open"; path: string }
   | { command: "rename"; from: string; to: string }
   | { command: "new" }
+  | { command: "new_at"; path: string }
   | { command: "reopen" }
   | { command: "close" }
   | { command: "list_recents" }
