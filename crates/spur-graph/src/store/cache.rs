@@ -24,6 +24,10 @@ const WORKTREE_ARTIFACT_PATH: &str = ".spur/graph";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
 pub const COMMIT_INDEX_POINTER_PATH: &str = ".spur/commit-index.pointer.json";
 const POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
+// LRU cap for in-process GraphIndexArtifact reuse. Bumped from 4 to 64 when the
+// Lance section sidecar landed (s1): write_sections_dataset re-loads the artifact
+// per finalization to compute incremental row diffs, and the prior cap evicted
+// before adjacent writes could reuse it.
 const BASE_ARTIFACT_CACHE_CAP: usize = 64;
 
 #[cfg(test)]

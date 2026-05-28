@@ -25,8 +25,8 @@ indicatif = "0.18"
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 base64 = "0.22"
-lance-index = "6.0.0"
-lancedb = "0.29.0"
+lance-index = { workspace = true }
+lancedb = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
 petgraph = { workspace = true }
 serde = { workspace = true }
