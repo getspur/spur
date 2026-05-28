@@ -11,7 +11,15 @@ use beads_rust::model::{Issue, IssueType, Priority, Status};
 use beads_rust::storage::sqlite::ListFilters;
 use chrono::Utc;
 use spur_pm::beads_crate::{AdapterConfig, BeadsCrateAdapter};
+use std::sync::OnceLock;
 use tempfile::TempDir;
+
+async fn multiprocess_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
 
 fn make_issue(id: impl Into<String>, title: impl Into<String>) -> Issue {
     let now = Utc::now();
@@ -60,6 +68,7 @@ fn make_issue(id: impl Into<String>, title: impl Into<String>) -> Issue {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_writes_no_corruption() {
+    let _guard = multiprocess_test_guard().await;
     let dir = TempDir::new().unwrap();
     let path = dir.path().to_path_buf();
 
@@ -114,6 +123,7 @@ async fn concurrent_writes_no_corruption() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_first_open_serializes_via_migration_lock() {
+    let _guard = multiprocess_test_guard().await;
     let dir = TempDir::new().unwrap();
     let p1 = dir.path().to_path_buf();
     let p2 = dir.path().to_path_buf();
@@ -135,6 +145,7 @@ async fn concurrent_first_open_serializes_via_migration_lock() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_conflict_detected() {
+    let _guard = multiprocess_test_guard().await;
     let dir = TempDir::new().unwrap();
     let adapter1 = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
         .await

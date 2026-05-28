@@ -6,6 +6,7 @@
 pub mod adapter;
 pub mod backoff;
 mod beads_advanced;
+mod beads_db;
 pub(crate) mod dependency_compat;
 pub mod init;
 pub mod issue_tracker;
