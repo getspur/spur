@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { formatDistanceToNow } from "date-fns";
 import {
   ArrowRight,
@@ -357,6 +357,23 @@ export default function HomePage() {
     }
   }, []);
 
+  const handleNewNotebookAt = useCallback(async () => {
+    try {
+      const path = await save({
+        defaultPath: "Untitled.ipynb",
+        filters: [{ name: "Jupyter Notebook", extensions: ["ipynb"] }],
+      });
+      if (typeof path === "string") {
+        const withExt = path.toLowerCase().endsWith(".ipynb")
+          ? path
+          : `${path}.ipynb`;
+        await invoke<string>("new_notebook_at_via_daemon", { path: withExt });
+      }
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
+
   const handleReopenCurrent = useCallback(async () => {
     if (!currentNotebook) return;
 
@@ -552,6 +569,15 @@ export default function HomePage() {
           >
             <Plus size={24} strokeWidth={1.5} />
             <span className="text-xl">New notebook</span>
+          </button>
+
+          <button
+            className="flex h-28 min-w-48 flex-col justify-between rounded border border-gray-300 p-4 text-left text-gray-600 transition-colors hover:border-black hover:text-gray-950"
+            onClick={handleNewNotebookAt}
+            type="button"
+          >
+            <FolderOpen size={22} strokeWidth={1.5} />
+            <span className="text-xl">New here...</span>
           </button>
 
           <button
