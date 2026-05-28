@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use spur_acp::domain::delegation::DelegationId;
 use spur_acp::domain::peer_message::{MessageKind, PeerMessageId};
 use spur_acp::{
-    Artifact, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
-    SessionId, SpurEvent, SpurEventBody,
+    AcpToolCall, Artifact, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind,
+    ReviewPayload, Role, SessionId, SessionNotification, SessionUpdate, SpurEvent, SpurEventBody,
 };
 use spur_core::{AttemptStatus, ExecutorId, ExecutorLineage};
 
@@ -48,6 +48,29 @@ fn spawn_links_child_under_parent() {
 
     let child = l.node(&ExecutorId::new("worker-1")).unwrap();
     assert_eq!(child.parent_id, Some(ExecutorId::new("brain-1")));
+}
+
+#[test]
+fn worker_spawned_drains_child_orphan_buffer() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerNotification {
+        brain_session_id: SessionId("brain-1".into()),
+        executor_id: "sess-1".into(),
+        notification: Box::new(SessionNotification::new(
+            "sess-1",
+            SessionUpdate::ToolCall(AcpToolCall::new("tc-1", "read_file")),
+        )),
+    }));
+
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("sess-1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    }));
+
+    let worker = l.node(&ExecutorId::new("sess-1")).unwrap();
+    assert_eq!(worker.tool_call_count, 1);
+    assert_eq!(worker.latest_tool_call.as_deref(), Some("read_file"));
 }
 
 #[test]
