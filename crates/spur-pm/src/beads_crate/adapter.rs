@@ -1,83 +1,38 @@
 //! `BeadsCrateAdapter` — direct-linkage adapter to `beads_rust` 0.2.1.
 //!
-//! Open-fresh-per-call shape: the `SqliteStorage` handle is never shared
-//! across async boundaries. We mirror beads_rust's own MCP module — store only
-//! paths and config in the adapter, open a new `SqliteStorage` inside each
-//! `spawn_blocking` invocation, and drop it when the closure returns. The
-//! closure result must be `Send`, but the storage itself never crosses thread
-//! boundaries.
+//! Persistent connection actor shape: the `SqliteStorage` handles are pinned to
+//! dedicated OS threads and reached through channels. Public async signatures
+//! stay unchanged while avoiding per-operation `SQLite` open/drop churn.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::beads_crate::backoff::BackoffPolicy;
+use crate::beads_crate::beads_db::{BeadsDb, DEFAULT_READER_THREADS};
 use crate::beads_crate::init;
 use crate::beads_crate::metrics::ContentionMetrics;
 use crate::beads_crate::snapshot::{Conflict, Snapshot};
-#[cfg(not(test))]
-use crate::beads_crate::wal_checkpoint;
 use crate::beads_crate::write_lock;
 use crate::poll_cursor::PollCursor;
 
-#[cfg(test)]
-mod wal_checkpoint {
-    use std::path::Path;
-
-    pub(crate) fn checkpoint_wal_truncate_best_effort(db_path: &Path) {
-        super::test_checkpoint_hook::before_checkpoint(db_path);
-        crate::beads_crate::wal_checkpoint::checkpoint_wal_truncate_best_effort(db_path);
-    }
-}
-
-#[cfg(test)]
-mod test_checkpoint_hook {
-    use std::path::Path;
-    use std::sync::{Arc, Mutex, OnceLock};
-
-    type Hook = Arc<dyn Fn(&Path) + Send + Sync>;
-
-    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
-
-    pub(super) struct CheckpointHookGuard;
-
-    pub(super) fn install(hook: Hook) -> CheckpointHookGuard {
-        *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hook);
-        CheckpointHookGuard
-    }
-
-    pub(super) fn before_checkpoint(db_path: &Path) {
-        let hook = HOOK
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap()
-            .clone();
-        if let Some(hook) = hook {
-            hook(db_path);
-        }
-    }
-
-    impl Drop for CheckpointHookGuard {
-        fn drop(&mut self) {
-            *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = None;
-        }
-    }
-}
-
-/// Coarse data_version proxy. beads_rust 0.2.1 does not expose
+/// Coarse `data_version` proxy. `beads_rust` 0.2.1 does not expose
 /// `PRAGMA data_version`; until it does, we use `count_issues()`. This
 /// detects net add/delete between snapshot and commit, which covers
-/// the IssueTracker CAS use cases (e.g. "delete iff still present").
+/// the `IssueTracker` CAS use cases (e.g. "delete iff still present").
 /// It MISSES pure field updates that don't change the row count —
 /// callers who need that level of strictness must not rely on this
-/// proxy yet. Follow-up: expose PRAGMA data_version upstream or
+/// proxy yet. Follow-up: expose PRAGMA `data_version` upstream or
 /// vendor a helper.
 fn read_data_version(s: &beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<i64> {
     let count = s.count_issues()?;
     Ok(count as i64)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "kept for synchronous lock-path unit coverage")
+)]
 fn acquire_write_lock_with_backoff(
     beads_dir: &Path,
     backoff: &BackoffPolicy,
@@ -217,12 +172,13 @@ impl Default for AdapterConfig {
     }
 }
 
-#[allow(dead_code)] // jsonl_path and config wired by T11–T14
+#[expect(dead_code, reason = "jsonl_path and config wired by T11-T14")]
 pub struct BeadsCrateAdapter {
     pub(crate) beads_dir: PathBuf,
     pub(crate) jsonl_path: PathBuf,
     pub(crate) config: AdapterConfig,
     pub(crate) metrics: Arc<ContentionMetrics>,
+    pub(crate) db: BeadsDb,
     /// Boundary-safe poll cursor; `None` until the first `poll()` call so a
     /// fresh adapter emits all open issues as `IssueCreated` on first poll
     /// (matching `BeadsAdapter` semantics in `beads.rs`).
@@ -250,6 +206,20 @@ impl BeadsCrateAdapter {
         .await??;
 
         let metrics = Arc::new(ContentionMetrics::default());
+        let db = {
+            let db_beads_dir = beads_dir.clone();
+            let db_metrics = Arc::clone(&metrics);
+            let lock_timeout_ms = config.lock_timeout_ms;
+            tokio::task::spawn_blocking(move || {
+                BeadsDb::spawn_with_metrics(
+                    db_beads_dir,
+                    lock_timeout_ms,
+                    DEFAULT_READER_THREADS,
+                    db_metrics,
+                )
+            })
+            .await??
+        };
         let initial_cursor = match config.cursor_path.as_ref() {
             Some(path) => match PollCursor::load_from(path) {
                 Ok(cursor) => cursor,
@@ -269,6 +239,7 @@ impl BeadsCrateAdapter {
             jsonl_path,
             config,
             metrics,
+            db,
             cursor: tokio::sync::Mutex::new(initial_cursor),
         })
     }
@@ -296,35 +267,31 @@ impl BeadsCrateAdapter {
             Arc::clone(&metrics),
         )
         .await?;
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let _flock = flock;
-            let db_path = beads_dir.join("beads.db");
-            let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &db_path,
-                Some(lock_timeout_ms),
-            )?;
-            let outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir);
-            drop(storage);
-            drop(_flock);
-            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
-            let outcome = outcome?;
-            if outcome.flushed {
-                metrics.incr_auto_flush_dirty();
-                metrics.incr_auto_flush_success();
-            } else {
-                metrics.incr_auto_flush_skipped();
-            }
-            Ok(())
-        })
-        .await?
+        let result = self
+            .db
+            .submit_write(move |storage| -> anyhow::Result<()> {
+                let _flock = flock;
+                let outcome = beads_rust::sync::auto_flush(storage, &beads_dir);
+                let outcome = outcome?;
+                if outcome.flushed {
+                    metrics.incr_auto_flush_dirty();
+                    metrics.incr_auto_flush_success();
+                } else {
+                    metrics.incr_auto_flush_skipped();
+                }
+                Ok(())
+            })
+            .await;
+        self.db.request_checkpoint();
+        result
     }
 
     pub(crate) fn actor(&self) -> String {
         self.config.actor.clone()
     }
 
-    /// Lock-free snapshot read. Opens a fresh `SqliteStorage` connection
-    /// for the duration of `f` and drops it on return. WAL mode gives
+    /// Lock-free snapshot read. Runs on a reader-pool thread that owns one
+    /// long-lived `SqliteStorage` connection for its lifetime. WAL mode gives
     /// snapshot isolation across concurrent readers and writers.
     pub async fn read<T, F>(&self, f: F) -> anyhow::Result<T>
     where
@@ -334,46 +301,33 @@ impl BeadsCrateAdapter {
         T: Send + 'static,
     {
         let metrics = Arc::clone(&self.metrics);
-        let db_path = self.beads_dir.join("beads.db");
-        let lock_timeout_ms = self.config.lock_timeout_ms;
         // PROBE: issue_detail_latency
         let dispatch_started = Instant::now();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
-            // PROBE: issue_detail_latency — measure spawn_blocking queue wait,
-            // sqlite Connection::open + pragmas, and the read closure body.
-            let blocking_entered = Instant::now();
-            let spawn_blocking_queue_ms = blocking_entered
-                .duration_since(dispatch_started)
-                .as_millis() as u64;
-            metrics.incr_read();
-            let open_started = Instant::now();
-            let storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &db_path,
-                Some(lock_timeout_ms),
-            )?;
-            let sqlite_open_ms = open_started.elapsed().as_millis() as u64;
-            let closure_started = Instant::now();
-            let result = f(&storage);
-            let closure_ms = closure_started.elapsed().as_millis() as u64;
-            tracing::info!(
-                target: "issue_probe",
-                site = "beads_read",
-                spawn_blocking_queue_ms = spawn_blocking_queue_ms,
-                sqlite_open_ms = sqlite_open_ms,
-                closure_ms = closure_ms,
-                total_ms = dispatch_started.elapsed().as_millis() as u64,
-                "BeadsCrateAdapter::read timing",
-            );
-            let drop_started = Instant::now();
-            drop(storage);
-            let drop_ms = drop_started.elapsed().as_millis() as u64;
-            tracing::info!(target: "issue_probe", site = "beads_read_drop", drop_ms = drop_ms);
-            result
-        })
-        .await?
+        self.db
+            .submit_read(move |storage| -> anyhow::Result<T> {
+                // PROBE: issue_detail_latency — measure actor queue wait and
+                // the read closure body. SQLite open happens only at warmup.
+                let reader_entered = Instant::now();
+                let actor_queue_ms =
+                    reader_entered.duration_since(dispatch_started).as_millis() as u64;
+                metrics.incr_read();
+                let closure_started = Instant::now();
+                let result = f(storage);
+                let closure_ms = closure_started.elapsed().as_millis() as u64;
+                tracing::info!(
+                    target: "issue_probe",
+                    site = "beads_read",
+                    actor_queue_ms = actor_queue_ms,
+                    closure_ms = closure_ms,
+                    total_ms = dispatch_started.elapsed().as_millis() as u64,
+                    "BeadsCrateAdapter::read timing",
+                );
+                result
+            })
+            .await
     }
 
-    /// Read a snapshot value plus the current data_version proxy so the
+    /// Read a snapshot value plus the current `data_version` proxy so the
     /// caller can do async work and then call `validate_and_commit`. The
     /// snapshot is consistent at read time; if the db changes before
     /// `validate_and_commit`, the commit returns a `Conflict` error.
@@ -385,30 +339,19 @@ impl BeadsCrateAdapter {
         S: Send + 'static,
     {
         let metrics = Arc::clone(&self.metrics);
-        let db_path = self.beads_dir.join("beads.db");
-        let lock_timeout_ms = self.config.lock_timeout_ms;
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot<S>> {
-            metrics.incr_read();
-            let storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &db_path,
-                Some(lock_timeout_ms),
-            )?;
-            let result = f(&storage).and_then(|value| {
+        self.db
+            .submit_read(move |storage| -> anyhow::Result<Snapshot<S>> {
+                metrics.incr_read();
+                let value = f(storage)?;
                 Ok(Snapshot {
                     value,
-                    data_version: read_data_version(&storage)?,
+                    data_version: read_data_version(storage)?,
                 })
-            });
-            let drop_started = Instant::now();
-            drop(storage);
-            let drop_ms = drop_started.elapsed().as_millis() as u64;
-            tracing::info!(target: "issue_probe", site = "beads_read_snapshot_drop", drop_ms = drop_ms);
-            result
-        })
-        .await?
+            })
+            .await
     }
 
-    /// Apply a write conditioned on the snapshot's data_version still
+    /// Apply a write conditioned on the snapshot's `data_version` still
     /// matching at commit time. Returns a `Conflict` error if the
     /// underlying state moved between read and validate. The closure
     /// receives the snapshot's value alongside `&mut SqliteStorage`.
@@ -435,44 +378,31 @@ impl BeadsCrateAdapter {
             Arc::clone(&metrics),
         )
         .await?;
-        tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
-            let _flock = flock;
-            let db_path = beads_dir.join("beads.db");
-            let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &db_path,
-                Some(lock_timeout_ms),
-            )?;
-            let current = read_data_version(&storage)?;
-            let should_checkpoint = current == snapshot.data_version;
-            let result = if !should_checkpoint {
-                metrics.incr_conflict();
-                Err(Conflict::data_version(snapshot.data_version, current).into())
-            } else {
-                metrics.incr_write();
-                let result = write(&mut storage, snapshot.value);
-                if result.is_err() {
-                    metrics.incr_write_error();
+        let should_checkpoint = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let should_checkpoint_for_job = Arc::clone(&should_checkpoint);
+        let result = self
+            .db
+            .submit_write(move |storage| -> anyhow::Result<T> {
+                let _flock = flock;
+                let current = read_data_version(storage)?;
+                if current != snapshot.data_version {
+                    metrics.incr_conflict();
+                    Err(Conflict::data_version(snapshot.data_version, current).into())
+                } else {
+                    should_checkpoint_for_job.store(true, std::sync::atomic::Ordering::Relaxed);
+                    metrics.incr_write();
+                    let result = write(storage, snapshot.value);
+                    if result.is_err() {
+                        metrics.incr_write_error();
+                    }
+                    result
                 }
-                result
-            };
-            let drop_started = Instant::now();
-            drop(storage);
-            let drop_ms = drop_started.elapsed().as_millis() as u64;
-            let flock_drop_started = Instant::now();
-            drop(_flock);
-            let flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64;
-            if should_checkpoint {
-                wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
-            }
-            tracing::info!(
-                target: "issue_probe",
-                site = "beads_validate_and_commit_drop",
-                drop_ms = drop_ms,
-                flock_drop_ms = flock_drop_ms
-            );
-            result
-        })
-        .await?
+            })
+            .await;
+        if should_checkpoint.load(std::sync::atomic::Ordering::Relaxed) {
+            self.db.request_checkpoint();
+        }
+        result
     }
 
     /// Multiple mutations under one flock acquisition. NOT a single DB
@@ -490,10 +420,10 @@ impl BeadsCrateAdapter {
         self.write(f).await
     }
 
-    /// Single write under cross-process flock. Opens a fresh
-    /// `SqliteStorage` AFTER acquiring `.write.lock`, runs the closure,
-    /// drops both. Each `beads_rust` mutation method is internally
-    /// atomic via the crate's `with_write_transaction`.
+    /// Single write under cross-process flock. Runs on the writer actor's
+    /// long-lived `SqliteStorage` AFTER acquiring `.write.lock`. Each
+    /// `beads_rust` mutation method is internally atomic via the crate's
+    /// `with_write_transaction`.
     pub async fn write<T, F>(&self, f: F) -> anyhow::Result<T>
     where
         F: FnOnce(&mut beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<T>
@@ -512,43 +442,26 @@ impl BeadsCrateAdapter {
             Arc::clone(&metrics),
         )
         .await?;
-        tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
-            let _flock = flock;
-            let db_path = beads_dir.join("beads.db");
-            let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &db_path,
-                Some(lock_timeout_ms),
-            )?;
-            metrics.incr_write();
-            let result = f(&mut storage);
-            if result.is_err() {
-                metrics.incr_write_error();
-            }
-            let drop_started = Instant::now();
-            drop(storage);
-            let drop_ms = drop_started.elapsed().as_millis() as u64;
-            let flock_drop_started = Instant::now();
-            drop(_flock);
-            let flock_drop_ms = flock_drop_started.elapsed().as_millis() as u64;
-            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
-            tracing::info!(
-                target: "issue_probe",
-                site = "beads_write_drop",
-                drop_ms = drop_ms,
-                flock_drop_ms = flock_drop_ms
-            );
-            result
-        })
-        .await?
+        let result = self
+            .db
+            .submit_write(move |storage| -> anyhow::Result<T> {
+                let _flock = flock;
+                metrics.incr_write();
+                let result = f(storage);
+                if result.is_err() {
+                    metrics.incr_write_error();
+                }
+                result
+            })
+            .await;
+        self.db.request_checkpoint();
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs2::FileExt;
-    use std::fs::OpenOptions;
-    use std::sync::{mpsc, Condvar, Mutex};
     use tempfile::TempDir;
 
     use crate::adapter::IssueTracker;
@@ -649,6 +562,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn reads_reuse_sqlite_connections_after_warmup() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let opens_after_spawn = adapter
+            .metrics()
+            .sqlite_open_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            opens_after_spawn > 0,
+            "adapter open must warm persistent SQLite connections"
+        );
+
+        for _ in 0..8 {
+            adapter
+                .read(|s| Ok(s.count_issues()?))
+                .await
+                .expect("read should complete");
+        }
+
+        assert_eq!(
+            adapter
+                .metrics()
+                .sqlite_open_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            opens_after_spawn,
+            "reads must reuse the warmed reader connections instead of opening per call"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn write_runs_closure_under_flock() {
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
@@ -663,6 +609,35 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_requests_actor_checkpoint() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        adapter
+            .write(|_s| Ok::<_, anyhow::Error>(()))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if adapter
+                    .metrics()
+                    .checkpoint_total
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    > 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("writer actor should service checkpoint request promptly");
     }
 
     #[test]
@@ -684,64 +659,6 @@ mod tests {
             err.to_string()
                 .contains(&format!("PID {}", std::process::id())),
             "ceiling error should include holder identity: {err:#}"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn flock_released_before_checkpoint() {
-        let dir = TempDir::new().unwrap();
-        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
-            .await
-            .unwrap();
-        let db_path = dir.path().join("beads.db");
-        let lock_path = dir.path().join(".write.lock");
-        let (checkpoint_started_tx, checkpoint_started_rx) = mpsc::channel();
-        let release_checkpoint = Arc::new((Mutex::new(false), Condvar::new()));
-        let hook_db_path = db_path.clone();
-        let release_checkpoint_for_hook = Arc::clone(&release_checkpoint);
-
-        let _hook = test_checkpoint_hook::install(Arc::new(move |checkpoint_db_path| {
-            if checkpoint_db_path == hook_db_path {
-                checkpoint_started_tx
-                    .send(())
-                    .expect("test should observe checkpoint start");
-                let (released, cvar) = &*release_checkpoint_for_hook;
-                let released = released.lock().unwrap();
-                let (_released, wait_result) = cvar
-                    .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
-                    .unwrap();
-                assert!(!wait_result.timed_out(), "test should release checkpoint");
-            }
-        }));
-
-        let writer =
-            tokio::spawn(async move { adapter.write(|_s| Ok::<_, anyhow::Error>(())).await });
-
-        tokio::task::spawn_blocking(move || {
-            checkpoint_started_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("checkpoint should start")
-        })
-        .await
-        .unwrap();
-
-        let contender = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .expect("open write lock");
-        let lock_result = contender.try_lock_exclusive();
-
-        let (released, cvar) = &*release_checkpoint;
-        *released.lock().unwrap() = true;
-        cvar.notify_one();
-        writer.await.unwrap().unwrap();
-
-        assert!(
-            lock_result.is_ok(),
-            ".write.lock must be acquirable while checkpoint is still running"
         );
     }
 
