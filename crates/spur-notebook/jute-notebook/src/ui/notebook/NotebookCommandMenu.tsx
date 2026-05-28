@@ -10,7 +10,7 @@ import {
   PlayIcon,
   RotateCcw,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "zustand";
 
 import { useNotebook } from "@/stores/notebook";
@@ -25,23 +25,37 @@ export default function NotebookCommandMenu() {
   const selectedCellType = useStore(notebook.store, (state) =>
     state.selectedCellId ? state.cells[state.selectedCellId]?.type : null,
   );
+  const notebookPath = useStore(notebook.store, (state) => state.path);
+
+  const closeAndRun = useCallback((action: () => void) => {
+    setOpen(false);
+    action();
+  }, []);
+
+  const enterPresentMode = useCallback(() => {
+    if (!notebookPath) return;
+    closeAndRun(() => {
+      window.location.hash = "";
+      window.location.assign(
+        `/present?path=${encodeURIComponent(notebookPath)}`,
+      );
+    });
+  }, [closeAndRun, notebookPath]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         setOpen((open) => !open);
+      } else if (e.key === "p" && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+        e.preventDefault();
+        enterPresentMode();
       }
     };
 
     document.addEventListener("keydown", down);
     return () => document.removeEventListener("keydown", down);
-  }, []);
-
-  const closeAndRun = (action: () => void) => {
-    setOpen(false);
-    action();
-  };
+  }, [enterPresentMode]);
 
   return (
     <Command.Dialog open={open} onOpenChange={setOpen}>
@@ -82,6 +96,13 @@ export default function NotebookCommandMenu() {
           <Command.Item disabled>
             <ListRestartIcon />
             Restart kernel and run all cells
+          </Command.Item>
+        </Command.Group>
+
+        <Command.Group heading="Deck">
+          <Command.Item disabled={!notebookPath} onSelect={enterPresentMode}>
+            <PlayIcon /> Enter present mode
+            <span style={{ marginLeft: "auto", opacity: 0.5 }}>⌘⇧P</span>
           </Command.Item>
         </Command.Group>
 
