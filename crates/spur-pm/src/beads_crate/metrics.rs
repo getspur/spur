@@ -11,6 +11,8 @@ pub struct ContentionMetrics {
     pub write_total: AtomicU64,
     pub write_error_total: AtomicU64,
     pub read_total: AtomicU64,
+    pub sqlite_open_total: AtomicU64,
+    pub checkpoint_total: AtomicU64,
     pub conflict_total: AtomicU64,
     pub conflict_exhausted_total: AtomicU64,
     pub auto_flush_skipped_total: AtomicU64,
@@ -38,6 +40,12 @@ impl ContentionMetrics {
     }
     pub fn incr_read(&self) {
         self.read_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn incr_sqlite_open(&self) {
+        self.sqlite_open_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn incr_checkpoint(&self) {
+        self.checkpoint_total.fetch_add(1, Ordering::Relaxed);
     }
     pub fn incr_conflict(&self) {
         self.conflict_total.fetch_add(1, Ordering::Relaxed);
@@ -72,8 +80,12 @@ mod tests {
         m.incr_write();
         m.incr_write();
         m.incr_read();
+        m.incr_sqlite_open();
+        m.incr_checkpoint();
         assert_eq!(m.write_total.load(Ordering::Relaxed), 2);
         assert_eq!(m.read_total.load(Ordering::Relaxed), 1);
+        assert_eq!(m.sqlite_open_total.load(Ordering::Relaxed), 1);
+        assert_eq!(m.checkpoint_total.load(Ordering::Relaxed), 1);
     }
 
     #[test]
