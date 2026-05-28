@@ -295,11 +295,22 @@ impl<'a> FactBuilder<'a> {
         file_id: FileId,
         node: Node<'_>,
     ) -> NodeId {
+        self.add_node_with_range(relative_path, label, fqn, kind, file_id, node.range())
+    }
+
+    pub(crate) fn add_node_with_range(
+        &mut self,
+        relative_path: &str,
+        label: String,
+        fqn: String,
+        kind: NodeKind,
+        file_id: FileId,
+        range: tree_sitter::Range,
+    ) -> NodeId {
         let node_id = NodeId(self.next_node);
         self.next_node += 1;
         let span_id = SpanId(self.next_span);
         self.next_span += 1;
-        let range = node.range();
         let impl_identity;
         let identity_fqn = if kind == NodeKind::Impl {
             impl_identity = impl_identity_fqn(&fqn);
