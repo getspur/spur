@@ -260,6 +260,30 @@ async fn project_completion_snapshot_and_deliver<F>(
                 timeout_ms,
                 "stage_completed_project_timeout"
             );
+            if let Some(deferred) = deferred {
+                deferred.deliver(event_sink, continuation_ctx).await;
+                tracing::info!(
+                    target: "spur.reconciler.completion_collector",
+                    plan_id = %context.plan_id,
+                    task_id = %context.task_id,
+                    delegation_id = %context.delegation_id,
+                    brain_session_id = %context.brain_session_id,
+                    attempt = context.attempt,
+                    timeout_ms,
+                    "stage_requeued_project_timeout"
+                );
+            } else {
+                tracing::warn!(
+                    target: "spur.reconciler.completion_collector",
+                    plan_id = %context.plan_id,
+                    task_id = %context.task_id,
+                    delegation_id = %context.delegation_id,
+                    brain_session_id = %context.brain_session_id,
+                    attempt = context.attempt,
+                    timeout_ms,
+                    "completion lost — no deferred queue to requeue into"
+                );
+            }
             return;
         }
     }
