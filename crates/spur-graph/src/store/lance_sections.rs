@@ -199,10 +199,21 @@ fn section_rows(artifact: &GraphIndexArtifact, worktree_root: &Path) -> Result<V
 
     let mut rows = Vec::new();
     for (path, sections) in &sections_by_path {
-        let bytes = read_file_bytes(worktree_root, path)?;
+        let bytes = match read_file_bytes(worktree_root, path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(path = %path, error = %e, "section_rows: skipping unreadable file");
+                continue;
+            }
+        };
         let content_hash = blake3_hex(&bytes);
-        let source = std::str::from_utf8(&bytes)
-            .with_context(|| format!("markdown source `{}` is not UTF-8", path))?;
+        let source = match std::str::from_utf8(&bytes) {
+            Ok(source) => source,
+            Err(e) => {
+                tracing::warn!(path = %path, error = %e, "section_rows: skipping non-UTF-8 markdown");
+                continue;
+            }
+        };
         for section in sections {
             rows.push(section_row(
                 section,
@@ -220,10 +231,21 @@ fn section_rows(artifact: &GraphIndexArtifact, worktree_root: &Path) -> Result<V
         {
             continue;
         }
-        let bytes = read_file_bytes(worktree_root, &manifest.path)?;
+        let bytes = match read_file_bytes(worktree_root, &manifest.path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(path = %manifest.path, error = %e, "section_rows: skipping unreadable file");
+                continue;
+            }
+        };
         let content_hash = blake3_hex(&bytes);
-        let source = std::str::from_utf8(&bytes)
-            .with_context(|| format!("markdown source `{}` is not UTF-8", manifest.path))?;
+        let source = match std::str::from_utf8(&bytes) {
+            Ok(source) => source,
+            Err(e) => {
+                tracing::warn!(path = %manifest.path, error = %e, "section_rows: skipping non-UTF-8 markdown");
+                continue;
+            }
+        };
         rows.push(SectionRow {
             stable_symbol_id: manifest.stable_file_id.clone(),
             file_path: manifest.path.clone(),
