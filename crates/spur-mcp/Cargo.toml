@@ -16,8 +16,8 @@ chrono = { workspace = true }
 futures = { workspace = true }
 globset = "0.4"
 hmac = "0.12"
-lance-index = "6.0.0"
-lancedb = "0.29.0"
+lance-index = { workspace = true }
+lancedb = { workspace = true }
 parking_lot = "0.12"
 rand = "0.8"
 rmcp = { workspace = true }
