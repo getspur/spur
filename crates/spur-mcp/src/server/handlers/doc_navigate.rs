@@ -331,11 +331,7 @@ fn resolve_symbol_as_of(
                 )));
             }
             Resolution::Ambiguous { candidates } => {
-                let candidates = candidates
-                    .into_iter()
-                    .map(|candidate| candidate.stable_symbol_id)
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let candidates = candidates.join(", ");
                 return Err(McpHandlerError::InvalidParams(format!(
                     "symbol {symbol_id} is ambiguous at `{as_of}`; candidates: {candidates}"
                 )));
