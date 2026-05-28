@@ -3007,7 +3007,10 @@ pub struct DeferredCompletionPush {
 
 impl DeferredCompletionPush {
     /// Emit the plan-task event and, when present, push the brain continuation.
-    /// Call AFTER updating the in-memory PlanState and dropping the lock.
+    /// Safe to call without a successful in-memory PlanState update — callers
+    /// MUST NOT add PlanState reads here without auditing every caller
+    /// (notably the projection-timeout branch in
+    /// `project_completion_snapshot_and_deliver`).
     pub async fn deliver(
         self,
         event_sink: Option<&dyn crate::events::McpEventSink>,

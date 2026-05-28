@@ -278,7 +278,7 @@ impl crate::plan::PmLike for CompletionTimeoutPm {
 }
 
 #[tokio::test(start_paused = true)]
-async fn completion_collector_project_timeout_requeues_via_deferred_push() {
+async fn completion_collector_project_timeout_delivers_via_deferred_push() {
     let plan_id = "plan-timeout";
     let task_id = "task-timeout";
     let issue_id = "bd-timeout";
@@ -412,8 +412,8 @@ async fn completion_collector_project_timeout_requeues_via_deferred_push() {
         "expected timeout checkpoint"
     );
     assert!(
-        captured.contains_event_with(&["stage_requeued_project_timeout"]),
-        "expected timeout requeue checkpoint"
+        captured.contains_event_with(&["stage_delivered_on_project_timeout"]),
+        "expected timeout delivery checkpoint"
     );
     let emitted_events = sink.events.lock().expect("events lock");
     assert!(
