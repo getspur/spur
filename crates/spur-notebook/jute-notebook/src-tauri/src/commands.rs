@@ -127,6 +127,10 @@ pub enum DaemonControlCommand {
     Rename { from: String, to: String },
     /// Create a scratch notebook.
     New {},
+    /// Create a notebook at an exact path.
+    #[serde(rename = "new_at")]
+    #[ts(rename = "new_at")]
+    NewAt { path: String },
     /// Reopen the current notebook window.
     Reopen {},
     /// Close the current notebook window.
@@ -594,6 +598,9 @@ fn daemon_control_request_from_legacy(
             path: path_string()?,
         },
         "new" => DaemonControlCommand::New {},
+        "new_at" => DaemonControlCommand::NewAt {
+            path: path_string()?,
+        },
         "reopen" => DaemonControlCommand::Reopen {},
         "close" => DaemonControlCommand::Close {},
         "list_recents" => DaemonControlCommand::ListRecents {},
