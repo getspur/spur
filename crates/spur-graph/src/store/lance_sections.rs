@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
-pub const SECTIONS_TABLE: &str = "sections";
+pub const SECTIONS_TABLE: &str = "section_bodies";
 
 #[derive(Debug)]
 struct SectionRow {

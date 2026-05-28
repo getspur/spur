@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use spur_graph::locking::try_lock_exclusive_with_timeout;
+use spur_graph::store::SECTIONS_DATASET_DIR;
 
 const INIT_SQL: &str = include_str!("../../../spur-context/poc/duckdb-analyst/init.sql");
 const INIT_TEMPORAL_SQL: &str =
@@ -20,6 +21,7 @@ const INIT_DIAGNOSTICS_SQL: &str =
 const INIT_VIEWS_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_views.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
+const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
 
 /// Compiled-in parquet schema version this analyst build understands.
 ///
@@ -108,6 +110,21 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let _ = std::fs::remove_file(&tmp_db);
 
     let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
+    let lance_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
+    let lance_attach_sql = if lance_dataset_dir.is_dir() {
+        format!(
+            "ATTACH '{}' AS lance_ns (TYPE LANCE);\n",
+            lance_dataset_dir.display().to_string().replace('\'', "''")
+        )
+    } else {
+        if !quiet {
+            eprintln!(
+                "[spur] warning: Lance section dataset not found at {} - skipping lance_ns attach",
+                lance_dataset_dir.display()
+            );
+        }
+        String::new()
+    };
     let sql_template = [
         INIT_SQL,
         if want_temporal { INIT_TEMPORAL_SQL } else { "" },
@@ -117,7 +134,9 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         if want_temporal { INIT_VIEWS_SQL } else { "" },
     ]
     .concat();
-    let sql = sql_template.replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql);
+    let sql = sql_template
+        .replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql)
+        .replace(LANCE_ATTACH_PLACEHOLDER, &lance_attach_sql);
 
     let mut child = Command::new("duckdb")
         .arg(&tmp_db)
@@ -160,6 +179,7 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     })?;
 
     if !quiet {
+        let lance_version = lance_extension_version(&db_path).unwrap_or_else(|| "<unknown>".into());
         // Surface the schema/content hash from the manifest we already validated.
         let observed_hash = std::fs::read(artifact_dir.join("manifest.json"))
             .ok()
@@ -171,8 +191,9 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
             .unwrap_or_else(|| "<unknown>".to_string());
         let elapsed = started.elapsed();
         eprintln!(
-            "[spur] Analyst DB ready (graph_content_hash={}, {:.1}s)",
+            "[spur] Analyst DB ready (graph_content_hash={}, lance_extension_version={}, {:.1}s)",
             short_hash(&observed_hash),
+            lance_version,
             elapsed.as_secs_f64()
         );
     }
@@ -305,6 +326,32 @@ pub(crate) fn duckdb_cli_present() -> bool {
         }
     }
     false
+}
+
+fn lance_extension_version(db_path: &Path) -> Option<String> {
+    let output = Command::new("duckdb")
+        .args(["-csv", "-noheader"])
+        .arg(db_path)
+        .args([
+            "-c",
+            "LOAD lance;
+             SELECT COALESCE(extension_version, '<unknown>')
+             FROM duckdb_extensions()
+             WHERE extension_name = 'lance';",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    value.lines().next().map(str::trim).and_then(|line| {
+        if line.is_empty() {
+            None
+        } else {
+            Some(line.to_owned())
+        }
+    })
 }
 
 #[cfg(test)]
