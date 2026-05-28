@@ -1272,6 +1272,55 @@ mod quit_shortcut_tests {
 }
 
 #[cfg(test)]
+mod crossterm_stream_tests {
+    use super::super::super::events::handle_crossterm_stream_result;
+    use super::super::super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::io;
+
+    #[test]
+    fn crossterm_read_error_shuts_down_within_bounded_iterations() {
+        let mut app = App::new_for_tests();
+
+        for _ in 0..3 {
+            handle_crossterm_stream_result(
+                &mut app,
+                Some(Err(io::Error::new(io::ErrorKind::Other, "tty read failed"))),
+            );
+            if app.should_quit {
+                break;
+            }
+        }
+
+        assert!(app.should_quit, "read errors should confirm quit");
+    }
+
+    #[test]
+    fn crossterm_stream_end_shuts_down_immediately() {
+        let mut app = App::new_for_tests();
+
+        handle_crossterm_stream_result(&mut app, None);
+
+        assert!(app.should_quit, "stream end should confirm quit");
+    }
+
+    #[test]
+    fn crossterm_happy_path_dispatches_event_unchanged() {
+        let mut app = App::new_for_tests();
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        let handled = handle_crossterm_stream_result(&mut app, Some(Ok(event)));
+
+        assert!(handled, "happy path should report one handled event");
+        assert!(
+            app.quit_confirm_visible,
+            "Ctrl-C should still dispatch through App input handling"
+        );
+        assert!(!app.should_quit, "first Ctrl-C must not force shutdown");
+    }
+}
+
+#[cfg(test)]
 mod synopsis_wire_tests {
     use super::super::super::*;
     use agent_client_protocol::schema::{
