@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use beads_rust::model::{Issue, IssueType, Priority, Status};
 use chrono::Utc;
 use spur_pm::beads_crate::{AdapterConfig, BeadsCrateAdapter};
@@ -48,37 +51,45 @@ fn make_issue(id: impl Into<String>, title: impl Into<String>) -> Issue {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn write_requests_actor_checkpoint() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_adapters_write_read_loops_complete_under_deadline() {
     let dir = TempDir::new().unwrap();
-    let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
-        .await
-        .expect("adapter opens");
-    let checkpoints_before = adapter
-        .metrics()
-        .checkpoint_total
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let cfg = AdapterConfig {
+        lock_timeout_ms: 30_000,
+        ..AdapterConfig::default()
+    };
+    let adapter_a = Arc::new(
+        BeadsCrateAdapter::open(dir.path(), cfg.clone())
+            .await
+            .expect("adapter A opens"),
+    );
+    let adapter_b = Arc::new(
+        BeadsCrateAdapter::open(dir.path(), cfg)
+            .await
+            .expect("adapter B opens"),
+    );
 
-    adapter
-        .write(|s| {
-            s.create_issue(&make_issue("bd-wal-cleanup", "WAL cleanup"), "test")
-                .map_err(anyhow::Error::from)
-        })
-        .await
-        .expect("write succeeds");
+    let run = |adapter: Arc<BeadsCrateAdapter>, prefix: &'static str| async move {
+        for i in 0..20 {
+            let id = format!("bd-cohabit-{prefix}-{i}");
+            let title = format!("{prefix} {i}");
+            adapter
+                .write(move |s| {
+                    s.create_issue(&make_issue(id, title), "test")
+                        .map_err(anyhow::Error::from)
+                })
+                .await?;
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let checkpoints_after = adapter
-                .metrics()
-                .checkpoint_total
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if checkpoints_after > checkpoints_before {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let count = adapter.read(|s| Ok(s.count_issues()?)).await?;
+            assert!(count > 0, "read should observe the shared database");
         }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(run(adapter_a, "a"), run(adapter_b, "b"))
     })
     .await
-    .expect("writer actor should service post-write checkpoint request");
+    .expect("cohabiting adapters should not wedge")
+    .expect("cohabiting write/read loops should succeed");
 }
