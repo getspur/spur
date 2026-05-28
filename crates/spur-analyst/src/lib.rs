@@ -1,0 +1,1 @@
+//! Analyst integration test crate.

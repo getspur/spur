@@ -1,0 +1,19 @@
+[package]
+name = "spur-analyst"
+description = "SPUR DuckDB analyst integration tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/getspur/spur-releases"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+spur-cli = { path = "../spur-cli" }
+spur-graph = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true
