@@ -59,6 +59,14 @@ fn edge_fast_forward_storm_ticks_without_starvation() {
     run_seed(0x5eed_0006, edge_fast_forward_storm_scenario);
 }
 
+#[test]
+fn edge_completion_projection_timeout_does_not_redeliver_on_next_tick() {
+    run_seed(
+        0x5eed_0007,
+        edge_completion_projection_timeout_does_not_redeliver_on_next_tick_scenario,
+    );
+}
+
 async fn happy_scenario() {
     print_seed("happy_pending_ready_dispatched_awaiting_review_approved_complete");
     let harness = Harness::new(SimPlan::chain3());
@@ -212,6 +220,34 @@ async fn edge_fast_forward_storm_scenario() {
         .unwrap();
 
     assert!(harness.pm.ready_poll_count() >= 1);
+}
+
+async fn edge_completion_projection_timeout_does_not_redeliver_on_next_tick_scenario() {
+    print_seed("edge_completion_projection_timeout_does_not_redeliver_on_next_tick");
+    let harness = Harness::new(SimPlan::single_ready());
+    harness.pm.delay_next_projection_after_completion();
+
+    let request = harness.tick_and_receive_dispatch().await;
+    harness.complete_success(request).await;
+    harness.wait_for_continuations(1).await;
+
+    assert_eq!(harness.continuations.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.sink.count_plan_task_awaiting_review(), 1);
+
+    harness.reconciler.tick_once().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    assert_eq!(
+        harness.continuations.load(Ordering::SeqCst),
+        1,
+        "second tick must not reconstruct and redeliver the same completion"
+    );
+    assert_eq!(
+        harness.sink.count_plan_task_awaiting_review(),
+        1,
+        "second tick must not emit a duplicate awaiting-review event"
+    );
+    assert_eq!(harness.pm.dispatch_count("T1"), 1);
 }
 
 fn run_seed<Fut>(seed: u64, f: fn() -> Fut)
@@ -431,6 +467,19 @@ impl Harness {
         self.pm.approve_from_current(task_id);
         self.reconciler.tick_once().await.unwrap();
     }
+
+    async fn wait_for_continuations(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                if self.continuations.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("continuation count did not reach expected value");
+    }
 }
 
 fn is_awaiting_review(status: &PlanTaskStatus) -> bool {
@@ -449,6 +498,20 @@ impl RecordingEventSink {
             .unwrap()
             .iter()
             .filter(|event| matches!(event, spur_acp::SpurEventBody::PlanCompleted { .. }))
+            .count()
+    }
+
+    fn count_plan_task_awaiting_review(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    spur_acp::SpurEventBody::PlanTaskAwaitingReview { .. }
+                )
+            })
             .count()
     }
 }
@@ -553,6 +616,8 @@ struct SimState {
     dispatch_counts: BTreeMap<String, usize>,
     ready_poll_count: usize,
     comment_seq: u64,
+    delay_projection_after_completion: bool,
+    delay_next_comment_list: bool,
 }
 
 impl SimPm {
@@ -565,6 +630,8 @@ impl SimPm {
             dispatch_counts: BTreeMap::new(),
             ready_poll_count: 0,
             comment_seq: 0,
+            delay_projection_after_completion: false,
+            delay_next_comment_list: false,
         };
         state.insert_plan(plan);
         Self {
@@ -584,6 +651,10 @@ impl SimPm {
 
     fn ready_poll_count(&self) -> usize {
         self.state.lock().unwrap().ready_poll_count
+    }
+
+    fn delay_next_projection_after_completion(&self) {
+        self.state.lock().unwrap().delay_projection_after_completion = true;
     }
 
     async fn project(&self) -> PlanState {
@@ -939,6 +1010,17 @@ impl BeadsAdvanced for SimPm {
     }
 
     async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+        let should_delay = {
+            let mut state = self.state.lock().unwrap();
+            let should_delay = state.delay_next_comment_list;
+            if should_delay {
+                state.delay_next_comment_list = false;
+            }
+            should_delay
+        };
+        if should_delay {
+            tokio::time::sleep(Duration::from_secs(11)).await;
+        }
         Ok(self
             .state
             .lock()
@@ -951,6 +1033,15 @@ impl BeadsAdvanced for SimPm {
 
     async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<String> {
         let mut state = self.state.lock().unwrap();
+        if state.delay_projection_after_completion
+            && matches!(
+                spur_mcp::plan::audit_sentinel::parse_comment(body),
+                Some(Ok(AuditSentinelKind::Completion { .. }))
+            )
+        {
+            state.delay_projection_after_completion = false;
+            state.delay_next_comment_list = true;
+        }
         if let Some(AuditSentinelKind::Dispatch { .. }) =
             spur_mcp::plan::audit_sentinel::parse_comment(body).and_then(Result::ok)
         {
