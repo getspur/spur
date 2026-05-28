@@ -297,6 +297,7 @@ fn main() {
             jute::commands::read_notebook_store_cell,
             jute::commands::notebook_store_snapshot,
             jute::commands::save_to_disk,
+            jute::commands::spur_delegate_to_worker,
             jute::commands::venv::venv_list_python_versions,
             jute::commands::venv::venv_create,
             jute::commands::venv::venv_list,
