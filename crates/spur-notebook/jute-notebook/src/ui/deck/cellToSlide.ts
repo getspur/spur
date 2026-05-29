@@ -73,7 +73,8 @@ function buildBlocks(
   source: string,
   layout: ResolvedLayout,
 ): Block[] {
-  if (cellKind(cell) === "code") {
+  const kind = cellKind(cell);
+  if (kind === "code") {
     if (layout === "code") return [{ kind: "code", lang: detectLang(cell), source }];
     if (layout === "code-output")
       return [
@@ -82,7 +83,9 @@ function buildBlocks(
       ];
     return [{ kind: "output", outputs: cellOutputs(cell) }];
   }
-  // markdown / raw / html
+  if (kind === "html") return [{ kind: "html", html: source }];
+
+  // markdown / raw
   return [{ kind: "markdown", md: source }];
 }
 

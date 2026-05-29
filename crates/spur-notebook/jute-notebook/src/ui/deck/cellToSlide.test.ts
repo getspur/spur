@@ -18,6 +18,14 @@ const code = (source: string, outputs: any[] = [], id = "c1") => ({
   outputs,
 });
 
+const html = (source: string, id = "c1") => ({
+  id,
+  type: "html" as const,
+  source,
+  metadata: { spur: { version: 1 } },
+  outputs: [],
+});
+
 const deck = { theme: "minimal-light" };
 
 describe("cellToSlide layout inference", () => {
@@ -44,6 +52,12 @@ describe("cellToSlide layout inference", () => {
   it("infers 'output' for code cells by default", () => {
     const s = cellToSlide(code("print('x')"), deck);
     expect(s?.layout).toBe("output");
+  });
+
+  it("emits an html block for html cells", () => {
+    const source = "<section><h1>Hello</h1></section>";
+    const s = cellToSlide(html(source), deck);
+    expect(s?.blocks).toEqual([{ kind: "html", html: source }]);
   });
 
   it("returns null when hidden=true", () => {
