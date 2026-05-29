@@ -131,10 +131,18 @@ log "  $COUNT files"
 # Note we symlink the in-source target/ -> $REMOTE_TARGET instead of setting
 # CARGO_TARGET_DIR env — sccache hashes CARGO_TARGET_DIR (it's a CARGO_* var)
 # which would defeat cross-worktree cache sharing.
+#
+# Only (re)create the symlink when it is missing or points elsewhere. An
+# unconditional `rm -rf target && ln -sf` momentarily deletes the link; a
+# concurrent build sharing this worktree key (e.g. another session running
+# cargo against ~/spur/main) then races into the gap and rustc fails with
+# "os error 2" creating a temp dir under target/release/deps. When the link is
+# already correct — the steady state for repeated builds — we touch nothing and
+# the window never opens.
 gcloud compute ssh "$VM_NAME" \
     --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
     --tunnel-through-iap --quiet \
-    --command="mkdir -p ~/$REMOTE_DIR $REMOTE_TARGET /mnt/cargo/cargo-home /mnt/cargo/rustup && rm -rf ~/$REMOTE_DIR/target && ln -sf $REMOTE_TARGET ~/$REMOTE_DIR/target" >/dev/null
+    --command="mkdir -p ~/$REMOTE_DIR $REMOTE_TARGET /mnt/cargo/cargo-home /mnt/cargo/rustup && link=\"\$HOME/$REMOTE_DIR/target\" && if [ \"\$(readlink \"\$link\" 2>/dev/null)\" != \"$REMOTE_TARGET\" ]; then rm -rf \"\$link\"; ln -s \"$REMOTE_TARGET\" \"\$link\"; fi" >/dev/null
 
 log "Syncing to $VM_NAME:~/$REMOTE_DIR ..."
 rsync -az --delete -0 --files-from="$FILE_LIST" \
