@@ -131,6 +131,7 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     /// `enable_worker_mcp = Some(false)`. Resolved once in
     /// `execute_delegation` so retries reuse the same token URL.
     pub(crate) worker_mcp_servers: &'a [McpServer],
+    pub(crate) worker_mcp_server: Option<Arc<WorkerMcpServer>>,
     pub(crate) pm_service: Option<&'a PmService>,
     pub(crate) feature_gate: &'a spur_license::FeatureGate,
 }
@@ -284,6 +285,12 @@ pub(crate) async fn run_one_worker_attempt(
         // returned AttemptSetupError instead of being hidden behind the top-level
         // `failed to create v2 worktree at <path>` context wrapper.
         .map_err(|e| AttemptSetupError::WorktreeFailed(format!("{e:#}")))?;
+    if let Some(server) = &ctx.worker_mcp_server {
+        server.register_delegation_worktree_root(
+            ctx.request_id.to_string(),
+            worktree_info.path.clone(),
+        );
+    }
 
     // The snapshot branch is only needed as a base ref for worktree creation.
     // Once the worktree exists, delete it immediately to prevent ref leaks.

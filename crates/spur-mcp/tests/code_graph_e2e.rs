@@ -2,9 +2,19 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use async_trait::async_trait;
+use rmcp::{
+    model::CallToolRequestParams,
+    service::ServiceError,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use serde_json::{json, Value};
-use spur_acp::{BrainSessionId, SessionId};
+use spur_acp::{BrainSessionId, SessionId, SpurEventBody};
 use spur_graph::{
     artifact_from_facts, build_facts, build_facts_for_paths, write_artifact_parquet,
     write_current_pointer, ChangeKind, CommitArtifact, CommitIndexArtifact, Confidence,
@@ -13,8 +23,14 @@ use spur_graph::{
     WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 use spur_mcp::server::{community_feature_gate, DetachedContinuationCtx};
+use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use spur_mcp::McpCallbackServer;
+use spur_mcp::{events::McpEventSink, handlers::PlanResolver};
+use spur_pm::PmService;
 use tempfile::TempDir;
+use tokio::sync::Mutex as TokioMutex;
+
+mod common;
 
 const ROOT_SYMBOL: &str = "orchestrate_order";
 const OLD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -682,6 +698,79 @@ async fn call_tool(server: &McpCallbackServer, tool: &str, arguments: Value) -> 
     server.__test_call_tool(tool, arguments).await
 }
 
+struct NullWorkerSink;
+
+impl McpEventSink for NullWorkerSink {
+    fn emit(&self, _event: SpurEventBody) {}
+}
+
+struct NullWorkerPlanResolver;
+
+#[async_trait]
+impl PlanResolver for NullWorkerPlanResolver {
+    async fn load_or_project_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Arc<TokioMutex<spur_mcp::plan::PlanState>>, String> {
+        Err(format!("test resolver: unknown plan_id '{plan_id}'"))
+    }
+}
+
+fn worker_mcp_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
+    WorkerMcpDeps {
+        pm_service: pm,
+        feature_gate: community_feature_gate(),
+        funnel: Arc::new(NullWorkerSink),
+        plan_resolver: Arc::new(NullWorkerPlanResolver),
+        reconciler_outcomes: Arc::new(TokioMutex::new(
+            spur_mcp::plan::outcomes::OutcomeStore::default(),
+        )),
+        outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        repo_root: None,
+    }
+}
+
+async fn call_worker_tool(
+    server: &Arc<WorkerMcpServer>,
+    token: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
+    let config =
+        StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(token.to_string());
+    let client =
+        ().serve(StreamableHttpClientTransport::from_config(config))
+            .await
+            .expect("rmcp client initialize");
+
+    let mut request = CallToolRequestParams::new(tool_name.to_string());
+    request.arguments = arguments.as_object().cloned();
+    let response = match client.call_tool(request).await {
+        Ok(result) => result
+            .structured_content
+            .clone()
+            .unwrap_or_else(|| serde_json::to_value(result).expect("serialize result")),
+        Err(error) => worker_service_error_response(error),
+    };
+    drop(client);
+    response
+}
+
+fn worker_service_error_response(error: ServiceError) -> Value {
+    let (code, message) = match &error {
+        ServiceError::McpError(mcp_error) => {
+            (i64::from(mcp_error.code.0), mcp_error.message.to_string())
+        }
+        _ => (-32603, error.to_string()),
+    };
+    json!({
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
+}
+
 fn tool_body(response: Value) -> Value {
     let text = response["result"]["content"][0]["text"]
         .as_str()
@@ -843,6 +932,70 @@ async fn code_search_unrelated_edit_does_not_rebuild() {
     assert_eq!(body["rebuild_status"], "not_needed");
     assert_eq!(body["response_file_oids_match"], true);
     assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn worker_code_search_freshness_uses_registered_worktree_root() {
+    skip_if_no_loopback!("worker_code_search_freshness_uses_registered_worktree_root");
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let parent = TempDir::new().expect("temp parent");
+    let main = parent.path().join("main");
+    let worker = parent.path().join("worker");
+    std::fs::create_dir(&main).expect("create main checkout");
+    copy_fixture_crate(&main);
+    commit_fixture(&main);
+    build_graph_artifact(&main);
+
+    let worker_arg = worker.to_str().expect("worker path is UTF-8");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "worker-code-graph",
+            worker_arg,
+            "HEAD",
+        ],
+    );
+    build_graph_artifact(&worker);
+    let worker_source_path = worker.join("src/lib.rs");
+    let mut worker_source =
+        std::fs::read_to_string(&worker_source_path).expect("read worker fixture source");
+    worker_source.push_str("\n// worker-local dirty edit\n");
+    std::fs::write(&worker_source_path, worker_source).expect("dirty worker fixture source");
+
+    let (_beads, pm) = common::beads::init_beads_pm(&main).await;
+    let _cwd = enter_dir(&main);
+    let server = WorkerMcpServer::start("worker-code-graph-brain".into(), worker_mcp_deps(pm))
+        .await
+        .expect("worker MCP server starts");
+    let delegation_id = "worker-code-graph-delegation";
+    server.register_delegation_worktree_root(delegation_id.to_string(), worker.clone());
+    let token = server.issue_token(delegation_id, Duration::from_secs(60));
+
+    let body = call_worker_tool(
+        &server,
+        &token,
+        "code_search",
+        json!({
+            "query": ROOT_SYMBOL,
+            "mode": "exact",
+            "limit": 20
+        }),
+    )
+    .await;
+
+    assert!(
+        body.get("error").is_none(),
+        "worker code_search should succeed: {body}"
+    );
+    assert!(candidate_entity_names(&body).contains(ROOT_SYMBOL));
+    assert_eq!(
+        body["response_file_oids_match"], false,
+        "freshness must compare indexed file OIDs against the worker worktree, not the main cwd"
+    );
 }
 
 #[tokio::test]
