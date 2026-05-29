@@ -12,6 +12,7 @@ pub enum MentionKind {
     CodeSymbol,
     Worker,
     Issue,
+    Datasource,
 }
 
 #[derive(Debug, Clone)]
@@ -19,7 +20,8 @@ pub struct MentionEntry {
     /// Optional synthetic section header marker (empty-query grouping rows).
     pub section_header: Option<&'static str>,
     pub kind: MentionKind,
-    /// File URI (`file:///abs/...`) or worker URI (`worker://<name>`).
+    /// File URI (`file:///abs/...`), worker URI (`worker://<name>`), or
+    /// datasource URI (`datasource://<name>`).
     pub uri: String,
     /// Display label. For files: relative path (dirs end with `/`).
     /// For workers: `worker:<name>` (e.g. `worker:claude-code`).
@@ -66,6 +68,10 @@ pub trait MentionSource: Send {
     fn code_payloads(&self) -> &[(String, Arc<CodeMentionPayload>)] {
         &[]
     }
+
+    fn datasource_hints(&self) -> &[(String, Arc<String>)] {
+        &[]
+    }
 }
 
 /// Convert an absolute path under cwd into a `MentionEntry`.
@@ -84,7 +90,8 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
         MentionKind::CodeFile
         | MentionKind::CodeSymbol
         | MentionKind::Worker
-        | MentionKind::Issue => {
+        | MentionKind::Issue
+        | MentionKind::Datasource => {
             unreachable!("entry_for_path never builds non-file mentions")
         }
     };

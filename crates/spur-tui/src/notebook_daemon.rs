@@ -1,8 +1,4 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{io, path::Path, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -22,7 +18,11 @@ struct ControlRequest<'a> {
     daemon: &'static str,
     command: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<&'a std::path::Path>,
+    path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,25 +44,201 @@ pub async fn send_notebook_command(
     arg: &str,
     socket_path: &Path,
 ) -> anyhow::Result<ControlResponse> {
+    match parse_notebook_command(arg)? {
+        NotebookCommand::Reopen => send_control("reopen", None, None, None, socket_path).await,
+        NotebookCommand::New => send_control("new", None, None, None, socket_path).await,
+        NotebookCommand::Close => send_control("close", None, None, None, socket_path).await,
+        NotebookCommand::Open { path } => {
+            send_control("open", Some(&path), None, None, socket_path).await
+        }
+        NotebookCommand::AttachDatasource { path, name, group } => {
+            send_control(
+                "attach_datasource",
+                Some(&path),
+                Some(&name),
+                group.as_deref(),
+                socket_path,
+            )
+            .await
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NotebookCommand {
+    Reopen,
+    New,
+    Close,
+    Open {
+        path: String,
+    },
+    AttachDatasource {
+        path: String,
+        name: String,
+        group: Option<String>,
+    },
+}
+
+fn parse_notebook_command(arg: &str) -> anyhow::Result<NotebookCommand> {
     let trimmed = arg.trim();
     match trimmed {
-        "" => send_control("reopen", None, socket_path).await,
-        "new" => send_control("new", None, socket_path).await,
-        "close" => send_control("close", None, socket_path).await,
-        path => send_control("open", Some(PathBuf::from(path)), socket_path).await,
+        "" => return Ok(NotebookCommand::Reopen),
+        "new" => return Ok(NotebookCommand::New),
+        "close" => return Ok(NotebookCommand::Close),
+        _ => {}
     }
+
+    if let Some(rest) = strip_data_add(trimmed) {
+        return parse_attach_datasource(rest);
+    }
+
+    Ok(NotebookCommand::Open {
+        path: trimmed.to_string(),
+    })
+}
+
+fn strip_data_add(trimmed: &str) -> Option<&str> {
+    if trimmed == "data add" {
+        Some("")
+    } else {
+        trimmed.strip_prefix("data add ").map(str::trim_start)
+    }
+}
+
+fn parse_attach_datasource(rest: &str) -> anyhow::Result<NotebookCommand> {
+    let tokens = split_notebook_args(rest)?;
+    let Some(path) = tokens.first() else {
+        anyhow::bail!("usage: /notebook data add <path> [--name X] [--group G]");
+    };
+    if path.starts_with("--") {
+        anyhow::bail!("usage: /notebook data add <path> [--name X] [--group G]");
+    }
+
+    let mut name = None;
+    let mut group = None;
+    let mut index = 1;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        match token.as_str() {
+            "--name" => {
+                index += 1;
+                let Some(value) = tokens.get(index) else {
+                    anyhow::bail!("--name requires a value");
+                };
+                name = Some(value.clone());
+            }
+            "--group" => {
+                index += 1;
+                let Some(value) = tokens.get(index) else {
+                    anyhow::bail!("--group requires a value");
+                };
+                group = Some(value.clone());
+            }
+            _ if token.starts_with("--name=") => {
+                name = Some(token["--name=".len()..].to_string());
+            }
+            _ if token.starts_with("--group=") => {
+                group = Some(token["--group=".len()..].to_string());
+            }
+            _ if token.starts_with("--") => {
+                anyhow::bail!("unknown /notebook data add option: {token}");
+            }
+            _ => {
+                anyhow::bail!("unexpected /notebook data add argument: {token}");
+            }
+        }
+        index += 1;
+    }
+
+    let name = match name {
+        Some(name) if !name.trim().is_empty() => name,
+        Some(_) => anyhow::bail!("--name requires a non-empty value"),
+        None => infer_datasource_name(path)?,
+    };
+    if group
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        anyhow::bail!("--group requires a non-empty value");
+    }
+
+    Ok(NotebookCommand::AttachDatasource {
+        path: path.clone(),
+        name,
+        group,
+    })
+}
+
+fn split_notebook_args(input: &str) -> anyhow::Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaping = false;
+
+    for ch in input.chars() {
+        if escaping {
+            current.push(ch);
+            escaping = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaping = true;
+            continue;
+        }
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaping {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        anyhow::bail!("unterminated quote in /notebook data add");
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+fn infer_datasource_name(path: &str) -> anyhow::Result<String> {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("could not infer datasource name from path; pass --name"))
 }
 
 async fn send_control(
     command: &str,
-    path: Option<PathBuf>,
+    path: Option<&str>,
+    name: Option<&str>,
+    group: Option<&str>,
     socket_path: &Path,
 ) -> anyhow::Result<ControlResponse> {
     let mut stream = connect_control_socket(socket_path).await?;
     let request = ControlRequest {
         daemon: "notebook.v1",
         command,
-        path: path.as_deref(),
+        path,
+        name,
+        group,
     };
     let bytes = serde_json::to_vec(&request)?;
     write_frame(&mut stream, &bytes).await?;

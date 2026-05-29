@@ -270,6 +270,12 @@ impl DashboardView {
         self.refresh_mention_issues();
     }
 
+    pub fn set_datasource_snapshot(&mut self, entries: Vec<spur_acp::DatasourceEntry>) {
+        self.mention_registry
+            .borrow_mut()
+            .set_datasource_snapshot(entries);
+    }
+
     fn refresh_mention_issues(&mut self) {
         let descriptors = self
             .tracked_issues
@@ -1730,7 +1736,12 @@ impl DashboardView {
                                 mut blocks,
                                 interrupt,
                             } => {
-                                if ranges.iter().any(|range| range.uri.starts_with("graph://")) {
+                                let has_code_mentions =
+                                    ranges.iter().any(|range| range.uri.starts_with("graph://"));
+                                let has_datasource_mentions = ranges
+                                    .iter()
+                                    .any(|range| range.uri.starts_with("datasource://"));
+                                if has_code_mentions {
                                     let mut mention_registry = self.mention_registry.borrow_mut();
                                     mention_registry.retain_code_payloads_for_uris(
                                         ranges.iter().map(|range| range.uri.as_str()),
@@ -1741,6 +1752,18 @@ impl DashboardView {
                                         &pending_images,
                                         &self.cwd,
                                         |uri| mention_registry.lookup_code_payload(uri),
+                                    );
+                                }
+                                if has_datasource_mentions {
+                                    let mention_registry = self.mention_registry.borrow();
+                                    let _ = crate::mentions::hint::prepend_datasource_hint(
+                                        &mut blocks,
+                                        &ranges,
+                                        |uri| {
+                                            mention_registry
+                                                .lookup_datasource_hint(uri)
+                                                .map(str::to_string)
+                                        },
                                     );
                                 }
                                 let _ = crate::mentions::hint::prepend_worker_hint(
