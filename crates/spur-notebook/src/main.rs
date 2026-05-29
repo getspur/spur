@@ -38,22 +38,13 @@ enum Mode {
     App {
         files: Vec<PathBuf>,
         socket: Option<PathBuf>,
-        config: mcp::NotebookConfig,
     },
     McpProxy {
         socket_path: PathBuf,
-        config: mcp::NotebookConfig,
     },
 }
 
 fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
-    parse_mode_from_with_config(args, notebook_config_from_env())
-}
-
-fn parse_mode_from_with_config(
-    args: impl IntoIterator<Item = String>,
-    config: mcp::NotebookConfig,
-) -> Mode {
     let mut files = Vec::new();
     let mut socket = None;
     let mut mcp_proxy_socket = None;
@@ -85,28 +76,17 @@ fn parse_mode_from_with_config(
         }
     }
     if let Some(socket_path) = mcp_proxy_socket {
-        return Mode::McpProxy {
-            socket_path,
-            config,
-        };
+        return Mode::McpProxy { socket_path };
     }
-    Mode::App {
-        files,
-        socket,
-        config,
-    }
+    Mode::App { files, socket }
 }
 
 fn parse_mode() -> Mode {
     parse_mode_from(env::args().skip(1))
 }
 
-fn notebook_config_from_env() -> mcp::NotebookConfig {
-    mcp::NotebookConfig
-}
-
-async fn run_mcp_proxy(socket_path: PathBuf, config: mcp::NotebookConfig) -> anyhow::Result<()> {
-    let stream = connect_or_spawn_daemon(&socket_path, config).await?;
+async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
+    let stream = connect_or_spawn_daemon(&socket_path).await?;
     let (mut socket_reader, mut socket_writer) = stream.into_split();
 
     let stdin_to_socket = tokio::spawn(async move {
@@ -137,20 +117,16 @@ async fn run_mcp_proxy(socket_path: PathBuf, config: mcp::NotebookConfig) -> any
     Ok(())
 }
 
-async fn connect_or_spawn_daemon(
-    socket_path: &PathBuf,
-    config: mcp::NotebookConfig,
-) -> anyhow::Result<UnixStream> {
-    connect_or_spawn_daemon_with(socket_path, config, &spawn_notebook_app).await
+async fn connect_or_spawn_daemon(socket_path: &PathBuf) -> anyhow::Result<UnixStream> {
+    connect_or_spawn_daemon_with(socket_path, &spawn_notebook_app).await
 }
 
 async fn connect_or_spawn_daemon_with<F>(
     socket_path: &Path,
-    config: mcp::NotebookConfig,
     spawn_daemon: &F,
 ) -> anyhow::Result<UnixStream>
 where
-    F: Fn(&Path, mcp::NotebookConfig) -> anyhow::Result<()> + Sync,
+    F: Fn(&Path) -> anyhow::Result<()> + Sync,
 {
     if let Some(stream) = try_connect_daemon(socket_path).await? {
         return Ok(stream);
@@ -161,7 +137,7 @@ where
         return Ok(stream);
     }
 
-    spawn_daemon(socket_path, config)?;
+    spawn_daemon(socket_path)?;
     wait_for_daemon_socket(socket_path).await
 }
 
@@ -229,7 +205,7 @@ fn daemon_spawn_lock_path(socket_path: &Path) -> PathBuf {
     PathBuf::from(lock_path)
 }
 
-fn spawn_notebook_app(socket_path: &Path, _config: mcp::NotebookConfig) -> anyhow::Result<()> {
+fn spawn_notebook_app(socket_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -288,26 +264,22 @@ async fn wait_for_daemon_socket(socket_path: &Path) -> anyhow::Result<UnixStream
 fn main() {
     tracing_subscriber::fmt().init();
 
-    let (files, socket_path, config) = match parse_mode() {
+    let (files, socket_path) = match parse_mode() {
         Mode::App {
             files,
             socket: Some(socket_path),
-            config,
-        } => (files, socket_path, config),
+        } => (files, socket_path),
         Mode::App { socket: None, .. } => {
             eprintln!("spur-notebook app mode requires --socket <path>");
             std::process::exit(2);
         }
-        Mode::McpProxy {
-            socket_path,
-            config,
-        } => {
+        Mode::McpProxy { socket_path } => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("failed to build tokio runtime");
             runtime
-                .block_on(run_mcp_proxy(socket_path, config))
+                .block_on(run_mcp_proxy(socket_path))
                 .expect("notebook MCP proxy failed");
             return;
         }
@@ -369,12 +341,11 @@ fn main() {
             #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {
-                match mcp::start_daemon_server_with_config(
+                match mcp::start_daemon_server(
                     server_socket_path,
                     server_bridge,
                     server_app,
                     server_state,
-                    config,
                 )
                 .await
                 {
@@ -483,23 +454,12 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn default_config() -> mcp::NotebookConfig {
-        mcp::NotebookConfig
-    }
-
     #[test]
     fn mcp_proxy_requires_explicit_socket_path() {
-        let Mode::McpProxy {
-            socket_path,
-            config: _,
-        } = parse_mode_from_with_config(
-            [
-                "--mcp-proxy".to_string(),
-                "/tmp/notebook-session.sock".to_string(),
-            ],
-            default_config(),
-        )
-        else {
+        let Mode::McpProxy { socket_path } = parse_mode_from([
+            "--mcp-proxy".to_string(),
+            "/tmp/notebook-session.sock".to_string(),
+        ]) else {
             panic!("expected mcp proxy mode");
         };
 
@@ -508,19 +468,11 @@ mod tests {
 
     #[test]
     fn app_mode_accepts_explicit_socket_path() {
-        let Mode::App {
-            files,
-            socket,
-            config: _,
-        } = parse_mode_from_with_config(
-            [
-                "--socket".to_string(),
-                "/tmp/notebook-session.sock".to_string(),
-                "something.ipynb".to_string(),
-            ],
-            default_config(),
-        )
-        else {
+        let Mode::App { files, socket } = parse_mode_from([
+            "--socket".to_string(),
+            "/tmp/notebook-session.sock".to_string(),
+            "something.ipynb".to_string(),
+        ]) else {
             panic!("expected app mode");
         };
 
@@ -530,12 +482,7 @@ mod tests {
 
     #[test]
     fn app_mode_collects_file_args() {
-        let Mode::App {
-            files,
-            socket,
-            config: _,
-        } = parse_mode_from_with_config(["something.ipynb".to_string()], default_config())
-        else {
+        let Mode::App { files, socket } = parse_mode_from(["something.ipynb".to_string()]) else {
             panic!("expected app mode");
         };
 
@@ -559,34 +506,32 @@ mod tests {
 
         let spawn_count_for_spawn = Arc::clone(&spawn_count);
         let listener_thread_for_spawn = Arc::clone(&listener_thread);
-        let spawn_daemon =
-            move |socket_path: &Path, _config: mcp::NotebookConfig| -> anyhow::Result<()> {
-                if spawn_count_for_spawn.fetch_add(1, Ordering::SeqCst) != 0 {
-                    anyhow::bail!("spawn hook called more than once");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-                if let Some(parent) = socket_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let listener = StdUnixListener::bind(socket_path)?;
-                let handle = std::thread::spawn(move || -> std::io::Result<()> {
-                    let (mut first, _) = listener.accept()?;
-                    let (mut second, _) = listener.accept()?;
-                    let mut byte = [0_u8; 1];
-                    first.read_exact(&mut byte)?;
-                    second.read_exact(&mut byte)?;
-                    Ok(())
-                });
-                *listener_thread_for_spawn
-                    .lock()
-                    .expect("listener thread lock") = Some(handle);
+        let spawn_daemon = move |socket_path: &Path| -> anyhow::Result<()> {
+            if spawn_count_for_spawn.fetch_add(1, Ordering::SeqCst) != 0 {
+                anyhow::bail!("spawn hook called more than once");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            if let Some(parent) = socket_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let listener = StdUnixListener::bind(socket_path)?;
+            let handle = std::thread::spawn(move || -> std::io::Result<()> {
+                let (mut first, _) = listener.accept()?;
+                let (mut second, _) = listener.accept()?;
+                let mut byte = [0_u8; 1];
+                first.read_exact(&mut byte)?;
+                second.read_exact(&mut byte)?;
                 Ok(())
-            };
-        let config = mcp::NotebookConfig;
+            });
+            *listener_thread_for_spawn
+                .lock()
+                .expect("listener thread lock") = Some(handle);
+            Ok(())
+        };
 
         let (first, second) = tokio::join!(
-            connect_or_spawn_daemon_with(&socket_path, config, &spawn_daemon),
-            connect_or_spawn_daemon_with(&socket_path, config, &spawn_daemon)
+            connect_or_spawn_daemon_with(&socket_path, &spawn_daemon),
+            connect_or_spawn_daemon_with(&socket_path, &spawn_daemon)
         );
         let mut first = first.expect("first caller should connect");
         let mut second = second.expect("second caller should connect");

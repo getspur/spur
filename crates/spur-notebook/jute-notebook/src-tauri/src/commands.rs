@@ -161,8 +161,6 @@ pub enum DaemonControlCommand {
     RemoveFromRecents { path: String },
     /// Set a recent notebook's pin state.
     SetPinned { path: String, pinned: bool },
-    /// Shut the daemon down.
-    Shutdown {},
     /// Replace one cell's source.
     WriteCell {
         id: String,

@@ -14,7 +14,6 @@ export type DaemonControlCommand =
   | { command: "list_recents" }
   | { command: "remove_from_recents"; path: string }
   | { command: "set_pinned"; path: string; pinned: boolean }
-  | { command: "shutdown" }
   | {
       command: "write_cell";
       id: string;
