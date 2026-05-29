@@ -56,8 +56,6 @@ marketing/marketingskills/skills/*/*
 .antigravitycli/
 .wrangler/
 .zed/
-.claude/skills/
-.codex/
 
 # loose logs and patches at repo root
 /*.log
