@@ -15,6 +15,7 @@ async-channel = "2"
 blake3 = "1"
 chrono.workspace = true
 directories.workspace = true
+duckdb = { workspace = true, optional = true }
 fs4 = "0.13"
 jute = { path = "jute-notebook/src-tauri" }
 rmcp.workspace = true
@@ -45,6 +46,7 @@ tempfile = "3"
 tauri-build = { version = "2", features = [] }
 
 [features]
+default = []
 # Tauri 2.0.4 (per tauri/src/lib.rs:338) gates "production mode" on this Cargo
 # feature: `!cfg!(feature = "custom-protocol")` means dev. With this feature
 # OFF, the runtime tries to load `devUrl` (http://localhost:1420) which doesn't
@@ -53,6 +55,9 @@ tauri-build = { version = "2", features = [] }
 # ourselves. Despite the v2 migration guide claiming this feature is ignored,
 # 2.0.4 source clearly checks it (`cfg!(feature = "custom-protocol")`).
 custom-protocol = ["tauri/custom-protocol"]
+# Accepts DuckDB's compile-cost/binary-size delta only for datasource schema
+# probing; keep it default-off until attach-time introspection ships.
+datasource-introspect = ["dep:duckdb"]
 
 [lints]
 workspace = true
