@@ -227,6 +227,11 @@ pub struct SpurCellMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_edited_by: Option<String>,
+
+    /// Marks the SPUR-managed datasource setup cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub datasource_setup: Option<bool>,
 }
 
 /// jute-deck per-cell metadata.
