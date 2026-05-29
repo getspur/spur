@@ -1,0 +1,141 @@
+name: CI
+
+# Full-workspace compile + unit-test gate.
+#
+# Why this exists: before this workflow the only PR gate that touched Rust was
+# spur-tui-build.yml, which compiles/tests a single crate (spur-tui). The other
+# 20 workspace members (see Cargo.toml `members`) had NO compile gating on PRs —
+# regressions only surfaced when a developer manually triggered the GCP remote
+# build (scripts/gcp-build/). This closes that gap.
+#
+# Scope (deliberately conservative for a first gate):
+#   - `cargo check --workspace --all-targets` compiles every crate AND every
+#     test/bench/example target, so a compile regression anywhere fails the PR.
+#   - `cargo test --workspace --lib` runs hermetic library unit tests.
+#   Integration tests (tests/) are deferred to a follow-up lane: several need
+#   external infra (e.g. the duckdb CLI for spur-analyst/tests/lance_session.rs,
+#   per scripts/gcp-build/startup.sh) and should land behind explicit setup.
+#
+# Caching: rust-cache (registry + target). sccache with the GitHub Actions or
+# the project's GCS backend (scripts/gcp-build/config.env SCCACHE_BUCKET) can
+# augment/replace this later for object-level, cross-run caching — GCS needs a
+# GCP credential (Workload Identity Federation) provisioned as a repo secret.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref so a force-push doesn't queue duplicates.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Matches the remote build VM (scripts/gcp-build/startup.sh): incremental
+  # artifacts are not worth their cost in ephemeral/cached CI.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check-test:
+    name: check + unit test (workspace)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # System libraries the workspace links against — mirrored from the remote
+      # build VM provisioning (scripts/gcp-build/startup.sh). Tauri/wry pull the
+      # GTK/WebKit stack; protobuf-compiler provides protoc (PROTOC_INCLUDE is
+      # set relative-to-repo in .cargo/config.toml). libduckdb-sys builds the
+      # vendored DuckDB amalgamation from source, so clang/cmake are required.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake clang lld \
+            protobuf-compiler \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev
+
+      # Reads rust-toolchain.toml (channel + rustfmt/clippy components) so CI,
+      # local dev, and the remote VM all use the identical pinned toolchain.
+      # Bundles registry + target caching keyed on Cargo.lock.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # --locked: fail if Cargo.lock would change. Keeps CI reproducible and
+      # catches an un-committed lockfile drift. Verified locally that the
+      # current lockfile satisfies --locked (cargo metadata --locked).
+      - name: cargo check (workspace, all targets)
+        run: cargo check --workspace --all-targets --locked
+
+      # nextest: process-per-test isolation + parallelism + flaky-retry/JUnit
+      # (see .config/nextest.toml). Scoped to --lib here, matching the
+      # conservative first gate; integration tests (tests/) that need external
+      # infra are a follow-up lane.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: cargo nextest (workspace, lib unit tests)
+        run: cargo nextest run --workspace --lib --profile ci --locked
+
+      # Doctests: nextest cannot run them, so run them separately to keep the
+      # ~34 doc code-fences in the suite covered.
+      - name: doctests
+        run: cargo test --workspace --doc --locked
+
+      - name: Upload test results (JUnit)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  # Formatting gate. Cheap (rustfmt doesn't compile/link, so no system deps) and
+  # blocking — verified locally that `cargo fmt --all --check` is currently clean
+  # on the pinned stable toolchain. Note: rustfmt.toml enables several nightly-only
+  # options (wrap_comments, group_imports, ...) that stable silently ignores; this
+  # gate therefore enforces the stable-applicable subset, consistently with what
+  # developers get from the pinned toolchain locally.
+  fmt:
+    name: rustfmt --check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - run: cargo fmt --all --check
+
+  # Clippy lint gate — NON-BLOCKING for now (continue-on-error), on purpose.
+  #
+  # The workspace clippy policy ([workspace.lints.clippy] in Cargo.toml) is
+  # already active on 18/19 crates via `[lints] workspace = true`; only
+  # spur-graph does not opt in. So this is mostly about enforcing that policy
+  # (plus clippy defaults) as a hard `-D warnings` gate for the first time.
+  # It is left non-blocking initially because remote-cargo is enabled
+  # (.spur/remote-cargo.enabled), so the warning baseline could not be measured
+  # locally without spinning the GCP build VM. This job's first runs ARE that
+  # measurement. Upgrade path once triaged:
+  #   - add `[lints] workspace = true` to spur-graph (the lone gap), then
+  #   - drop continue-on-error and append `-- -D warnings`.
+  clippy:
+    name: clippy (non-blocking baseline)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake clang lld \
+            protobuf-compiler \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo clippy --workspace --all-targets --locked
