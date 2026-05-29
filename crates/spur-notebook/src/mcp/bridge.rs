@@ -137,13 +137,6 @@ impl TauriBridgeRequester {
     pub fn without_app(bridge: Arc<AgentBridge>) -> Self {
         Self { bridge, app: None }
     }
-
-    pub fn with_app(bridge: Arc<AgentBridge>, app: tauri::AppHandle) -> Self {
-        Self {
-            bridge,
-            app: Some(app),
-        }
-    }
 }
 
 impl BridgeRequester for TauriBridgeRequester {

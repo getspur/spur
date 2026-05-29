@@ -25,8 +25,6 @@ type NotebookStoreActions = ReturnType<typeof notebookStoreActions>;
 
 const INITIAL_CELL_VERSION = 1;
 const AUTOSAVE_DEBOUNCE_MS = 5000;
-const NOTEBOOK_IN_PROC_STORE_ENV = "VITE_SPUR_NOTEBOOK_IN_PROC_STORE";
-
 /** Zustand reactive data used by the UI to render notebooks. */
 export type NotebookStoreState = {
   /** A list of cell IDs in order. */
@@ -600,54 +598,6 @@ export function applyRunCellEvent(
   return nextRunState;
 }
 
-/** Webview-side mirror of the Rust `NotebookRuntimeConfig` Tauri command. */
-export type NotebookRuntimeConfig = { inProcStore: boolean };
-
-let runtimeConfigCache: NotebookRuntimeConfig | null = null;
-let runtimeConfigPromise: Promise<NotebookRuntimeConfig> | null = null;
-
-/**
- * Resolve the runtime config from the Rust process (single source of truth).
- *
- * Cached on first success. Falls back to the env-derived default — which now
- * matches the Rust default of in-proc-store enabled — when invoke is
- * unavailable (vitest, SSR, jute standalone shells without the command
- * registered).
- */
-export async function loadNotebookRuntimeConfig(): Promise<NotebookRuntimeConfig> {
-  if (runtimeConfigCache) return runtimeConfigCache;
-  if (!runtimeConfigPromise) {
-    runtimeConfigPromise = (async () => {
-      try {
-        const cfg = await invoke<NotebookRuntimeConfig>(
-          "notebook_runtime_config",
-        );
-        runtimeConfigCache = cfg;
-        return cfg;
-      } catch {
-        const cfg: NotebookRuntimeConfig = {
-          inProcStore: envInProcStoreEnabled(),
-        };
-        runtimeConfigCache = cfg;
-        return cfg;
-      }
-    })();
-  }
-  return runtimeConfigPromise;
-}
-
-function envInProcStoreEnabled(): boolean {
-  const metaEnv = import.meta.env as Record<string, unknown>;
-  const processEnv = typeof process === "undefined" ? undefined : process.env;
-  const value =
-    metaEnv[NOTEBOOK_IN_PROC_STORE_ENV] ??
-    processEnv?.[NOTEBOOK_IN_PROC_STORE_ENV] ??
-    processEnv?.SPUR_NOTEBOOK_IN_PROC_STORE;
-  if (typeof value === "boolean") return value;
-  if (typeof value !== "string") return true;
-  return !["0", "false", "no", "off"].includes(value.toLowerCase());
-}
-
 function displayIdForRunCellEvent(message: RunCellEvent): string | undefined {
   if (message.event !== "display_data") return undefined;
   return message.data.transient?.display_id || uuidv4();
@@ -668,15 +618,7 @@ export async function reconcileNotebookDelta(
   notebook: Notebook,
   delta: NotebookDelta,
 ) {
-  const { inProcStore } = await loadNotebookRuntimeConfig();
-  if (!inProcStore) return;
   notebook.applyNotebookDelta(delta);
-}
-
-/** Test-only: drop the cached runtime config so the next call refetches. */
-export function __resetNotebookRuntimeConfigCacheForTesting() {
-  runtimeConfigCache = null;
-  runtimeConfigPromise = null;
 }
 
 /**
