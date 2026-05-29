@@ -30,6 +30,11 @@ impl App {
                         socket = %socket_path.display(),
                         "notebook daemon command completed"
                     );
+                    let message = match response.path.as_deref() {
+                        Some(path) => format!("{label} done: {path}"),
+                        None => format!("{label} done"),
+                    };
+                    let _ = tx.send(Action::FlashHint { message });
                 }
                 Ok(response) => {
                     let detail = notebook_control_failure_detail(response.error.as_ref());

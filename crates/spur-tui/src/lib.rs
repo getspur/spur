@@ -44,6 +44,7 @@ pub mod test_support {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }

@@ -29,6 +29,7 @@ fn render_status_for(view: &ViewId, width: u16) -> String {
             context_size: None,
             stream_in_flight: false,
             esc_consumed_by_composer: false,
+            notebook_ready: false,
             issue_count: 0,
             alert_summary: None,
             license_badge: None,
