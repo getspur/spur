@@ -129,6 +129,7 @@ struct PendingResolutionIndexes<'a> {
     file_by_id: &'a HashMap<NodeId, &'a str>,
     node_kind_by_id: &'a HashMap<NodeId, NodeKind>,
     enclosing_scope_by_id: &'a HashMap<NodeId, String>,
+    qualified_name_by_id: &'a HashMap<NodeId, String>,
 }
 
 #[derive(Debug, Error)]
@@ -493,6 +494,7 @@ impl<'a> FactBuilder<'a> {
                 ),
             )
         };
+        let qualified_name_by_id = qualified_name_by_id_from_index(&qualified_symbols_by_name);
         let pending = std::mem::take(&mut self.pending_edges);
         let indexes = PendingResolutionIndexes {
             singleton_symbols_by_label: &singleton_symbols_by_label,
@@ -501,6 +503,7 @@ impl<'a> FactBuilder<'a> {
             file_by_id: &file_by_id,
             node_kind_by_id: &node_kind_by_id,
             enclosing_scope_by_id: &enclosing_scope_by_id,
+            qualified_name_by_id: &qualified_name_by_id,
         };
         let mut ambiguous_unresolved = 0usize;
         let mut phantom_blocked_references = 0usize;
@@ -670,6 +673,19 @@ fn resolve_bare_pending_edge(
         .get(&edge.target_name)
         .copied()
     {
+        if let Some(target) = same_file_duplicate_function_candidate(
+            edge,
+            builder.symbol_index.get(&edge.target_name),
+            indexes,
+        ) {
+            builder.add_pending_edge_with_bind_method(
+                edge,
+                Some(target),
+                Some("same_file_duplicate"),
+            );
+            return;
+        }
+
         *ambiguous_unresolved += 1;
         tracing::debug!(
             target_label = %edge.target_name,
@@ -721,6 +737,54 @@ fn resolve_bare_pending_edge(
             builder.add_pending_edge(edge, Some(target));
         }
     }
+}
+
+fn same_file_duplicate_function_candidate(
+    edge: &PendingEdge,
+    candidates: Option<&Vec<NodeId>>,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Option<NodeId> {
+    if edge.relation != RelationKind::Calls {
+        return None;
+    }
+
+    let mut candidates = candidates?
+        .iter()
+        .copied()
+        .filter(|target| *target != edge.source)
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    if candidates.len() < 2 {
+        return None;
+    }
+
+    if !candidates.iter().all(|target| {
+        matches!(
+            indexes.node_kind_by_id.get(target),
+            Some(NodeKind::Function)
+        )
+    }) {
+        return None;
+    }
+
+    let first_file = indexes.file_by_id.get(&candidates[0]).copied()?;
+    if !candidates
+        .iter()
+        .all(|target| indexes.file_by_id.get(target).copied() == Some(first_file))
+    {
+        return None;
+    }
+
+    let first_qualified_name = indexes.qualified_name_by_id.get(&candidates[0])?;
+    if !candidates
+        .iter()
+        .all(|target| indexes.qualified_name_by_id.get(target) == Some(first_qualified_name))
+    {
+        return None;
+    }
+
+    Some(candidates[0])
 }
 
 fn function_singleton_safe(src_file: &str, tgt_file: &str) -> bool {
@@ -1307,6 +1371,18 @@ fn qualified_symbols_by_name_from_maps(
     index
 }
 
+fn qualified_name_by_id_from_index(
+    index: &HashMap<String, Vec<NodeId>>,
+) -> HashMap<NodeId, String> {
+    let mut qualified_name_by_id = HashMap::new();
+    for (qualified_name, ids) in index {
+        for id in ids {
+            qualified_name_by_id.insert(*id, qualified_name.clone());
+        }
+    }
+    qualified_name_by_id
+}
+
 fn parent_by_target(facts: &GraphFacts) -> HashMap<NodeId, NodeId> {
     let mut parent_by_target = HashMap::new();
     for edge in &facts.edges {
@@ -1527,6 +1603,56 @@ mod tests {
         assert_eq!(edge.source_node_id, source);
         assert_eq!(edge.target_node_id, None);
         assert_eq!(edge.target_label.as_deref(), Some("flush"));
+    }
+
+    #[test]
+    fn bare_call_to_cfg_duplicate_free_function_resolves_to_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        let path = root.join("src/lib.rs");
+        let source = r#"
+#[cfg(unix)]
+fn send_control() {}
+
+#[cfg(not(unix))]
+fn send_control() {}
+
+pub fn caller() {
+    send_control();
+}
+"#;
+        fs::write(&path, source).expect("write lib.rs");
+
+        let facts =
+            build_facts_for_paths(root, &[PathBuf::from("src/lib.rs")]).expect("build facts");
+        let caller = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Function && node.label == "caller")
+            .expect("caller node");
+        let duplicate_targets = facts
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Function && node.label == "send_control")
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>();
+        assert_eq!(duplicate_targets.len(), 2);
+
+        let call_edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.source_node_id == caller.node_id
+                    && edge.relation == RelationKind::Calls
+                    && edge.target_label.as_deref() == Some("send_control")
+            })
+            .expect("send_control call edge");
+
+        let target = call_edge
+            .target_node_id
+            .expect("cfg duplicate call should resolve to one target");
+        assert!(duplicate_targets.contains(&target));
     }
 
     #[test]
