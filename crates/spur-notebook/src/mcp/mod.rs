@@ -474,32 +474,29 @@ struct NotebookDaemonState {
     window_label: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct DaemonControlRequest {
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
-    pub daemon: Option<String>,
-    pub command: String,
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    #[serde(default)]
-    pub from: Option<PathBuf>,
-    #[serde(default)]
-    pub to: Option<PathBuf>,
-    #[serde(default)]
-    pub pinned: Option<bool>,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default, alias = "expected_version")]
-    pub expected_version: Option<u64>,
-    #[serde(default, alias = "last_edited_by")]
-    pub last_edited_by: Option<String>,
-    #[serde(default)]
-    pub kind: Option<jute::notebook_store::CellKind>,
-    #[serde(default, alias = "after_id")]
-    pub after_id: Option<String>,
+    pub request: jute::commands::DaemonControlRequest,
+}
+
+impl<'de> Deserialize<'de> for DaemonControlRequest {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let id = value
+            .get("id")
+            .cloned()
+            .map(String::deserialize)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let request = jute::commands::DaemonControlRequest::deserialize(value)
+            .map_err(serde::de::Error::custom)?;
+
+        Ok(Self { id, request })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -624,13 +621,163 @@ impl NotebookDaemonControl {
         Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path)
     }
 
-    pub async fn handle(&self, request: DaemonControlRequest) -> DaemonControlResponse {
-        if is_notebook_store_command(&request.command) {
-            return self.handle_notebook_store_control(request).await;
+    pub async fn handle(&self, envelope: DaemonControlRequest) -> DaemonControlResponse {
+        use jute::commands::DaemonControlCommand;
+
+        let DaemonControlRequest { id, request } = envelope;
+        if request.daemon != "notebook.v1" {
+            return DaemonControlResponse {
+                id,
+                ok: false,
+                path: None,
+                entries: None,
+                result: None,
+                error: Some(DaemonControlError {
+                    code: "invalid_control_message".to_owned(),
+                    message: format!("unsupported daemon discriminator: {}", request.daemon),
+                }),
+            };
         }
 
-        let id = request.id.clone();
-        match self.handle_inner(request).await {
+        let result: Result<DaemonControlSuccess, BridgeError> =
+            match request.command.clone() {
+                DaemonControlCommand::WriteCell { .. }
+                | DaemonControlCommand::ReadCell { .. }
+                | DaemonControlCommand::InsertCell { .. }
+                | DaemonControlCommand::LoadNotebook { .. }
+                | DaemonControlCommand::DeleteCell { .. }
+                | DaemonControlCommand::Snapshot {}
+                | DaemonControlCommand::ApplyEdit { .. }
+                | DaemonControlCommand::FlushNotebook {} => {
+                    return self.handle_notebook_store_control(id, request).await;
+                }
+                DaemonControlCommand::Open { path } => async {
+                    self.save_current().await?;
+                    let path = self
+                        .open_path(resolve_notebook_path(PathBuf::from(path)))
+                        .await?;
+                    if let Err(error) = self.record_recent_open(&path).await {
+                        warn!(%error, path = %path.display(), "failed to record recent notebook");
+                    } else {
+                        self.windows.emit_recents_changed();
+                    }
+                    Ok(DaemonControlSuccess::path(path))
+                }
+                .await,
+                DaemonControlCommand::New {} => async {
+                    self.save_current().await?;
+                    let path =
+                        create_untitled_notebook()
+                            .await
+                            .map_err(|error| BridgeError::Handler {
+                                code: "scratch_create_failed".to_owned(),
+                                message: error.to_string(),
+                            })?;
+                    let path = self.open_path(path).await?;
+                    if let Err(error) = self.record_recent_open(&path).await {
+                        warn!(%error, path = %path.display(), "failed to record recent notebook");
+                    } else {
+                        self.windows.emit_recents_changed();
+                    }
+                    Ok(DaemonControlSuccess::path(path))
+                }
+                .await,
+                DaemonControlCommand::NewAt { path } => async {
+                    self.save_current().await?;
+                    let path = resolve_notebook_path(PathBuf::from(path));
+                    create_empty_notebook_at(&path).await.map_err(|error| {
+                        BridgeError::Handler {
+                            code: "notebook_create_failed".to_owned(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                    let path = self.open_path(path).await?;
+                    if let Err(error) = self.record_recent_open(&path).await {
+                        warn!(%error, path = %path.display(), "failed to record recent notebook");
+                    } else {
+                        self.windows.emit_recents_changed();
+                    }
+                    Ok(DaemonControlSuccess::path(path))
+                }
+                .await,
+                DaemonControlCommand::Reopen {} => {
+                    self.reopen().await.map(DaemonControlSuccess::path)
+                }
+                DaemonControlCommand::Rename { from, to } => {
+                    async {
+                        self.save_current().await?;
+                        let path = self
+                            .rename_path(
+                                resolve_notebook_path(PathBuf::from(from)),
+                                resolve_notebook_path(PathBuf::from(to)),
+                            )
+                            .await?;
+                        Ok(DaemonControlSuccess::path(path))
+                    }
+                    .await
+                }
+                DaemonControlCommand::Close {} => {
+                    async {
+                        self.save_current().await?;
+                        self.close_current_window().await;
+                        self.bridge.set_notebook_open(false);
+                        {
+                            let mut state = self.state.lock().await;
+                            state.current_path = None;
+                            state.window_label = None;
+                        }
+                        if let Err(error) = self.clear_last_notebook().await {
+                            warn!(%error, "failed to clear last notebook record");
+                        }
+                        self.windows.emit_recents_changed();
+                        Ok(DaemonControlSuccess::empty())
+                    }
+                    .await
+                }
+                DaemonControlCommand::ListRecents {} => recents::list_recents()
+                    .await
+                    .map(DaemonControlSuccess::entries)
+                    .map_err(|error| BridgeError::Handler {
+                        code: "recents_failed".to_owned(),
+                        message: error.to_string(),
+                    }),
+                DaemonControlCommand::RemoveFromRecents { path } => {
+                    async {
+                        recents::remove_from_recents(&resolve_notebook_path(PathBuf::from(path)))
+                            .await
+                            .map_err(|error| BridgeError::Handler {
+                                code: "recents_failed".to_owned(),
+                                message: error.to_string(),
+                            })?;
+                        self.windows.emit_recents_changed();
+                        Ok(DaemonControlSuccess::empty())
+                    }
+                    .await
+                }
+                DaemonControlCommand::SetPinned { path, pinned } => {
+                    async {
+                        recents::set_pinned(&resolve_notebook_path(PathBuf::from(path)), pinned)
+                            .await
+                            .map_err(|error| BridgeError::Handler {
+                                code: "recents_failed".to_owned(),
+                                message: error.to_string(),
+                            })?;
+                        self.windows.emit_recents_changed();
+                        Ok(DaemonControlSuccess::empty())
+                    }
+                    .await
+                }
+                DaemonControlCommand::Shutdown {} => {
+                    async {
+                        self.save_current().await?;
+                        self.windows.exit();
+                        Ok(DaemonControlSuccess::empty())
+                    }
+                    .await
+                }
+            };
+
+        match result {
             Ok(success) => DaemonControlResponse {
                 id,
                 ok: true,
@@ -646,7 +793,7 @@ impl NotebookDaemonControl {
                 entries: None,
                 result: None,
                 error: Some(DaemonControlError {
-                    code: error.mcp_code().to_string(),
+                    code: error.mcp_code().to_owned(),
                     message: error.to_string(),
                 }),
             },
@@ -659,26 +806,13 @@ impl NotebookDaemonControl {
 
     async fn handle_notebook_store_control(
         &self,
-        request: DaemonControlRequest,
+        id: Option<String>,
+        request: jute::commands::DaemonControlRequest,
     ) -> DaemonControlResponse {
-        let cell_id = request.id.clone();
-        let jute_request = match notebook_store_request_from_daemon(request) {
-            Ok(request) => request,
-            Err(error) => {
-                return DaemonControlResponse {
-                    id: cell_id,
-                    ok: false,
-                    path: None,
-                    entries: None,
-                    result: None,
-                    error: Some(error),
-                }
-            }
-        };
         let response =
-            jute::commands::handle_daemon_control_request(jute_request, &self.jute_state).await;
+            jute::commands::handle_daemon_control_request(request, &self.jute_state).await;
         DaemonControlResponse {
-            id: cell_id,
+            id,
             ok: response.ok,
             path: response.path,
             entries: None,
@@ -688,145 +822,6 @@ impl NotebookDaemonControl {
             error: response.error.map(|error| DaemonControlError {
                 code: error.code,
                 message: error.message,
-            }),
-        }
-    }
-
-    async fn handle_inner(
-        &self,
-        request: DaemonControlRequest,
-    ) -> Result<DaemonControlSuccess, BridgeError> {
-        match request.command.as_str() {
-            "open" => {
-                let path = request.path.ok_or_else(|| BridgeError::Handler {
-                    code: "invalid_params".to_string(),
-                    message: "open requires path".to_string(),
-                })?;
-                self.save_current().await?;
-                let path = self.open_path(resolve_notebook_path(path)).await?;
-                if let Err(error) = self.record_recent_open(&path).await {
-                    warn!(%error, path = %path.display(), "failed to record recent notebook");
-                } else {
-                    self.windows.emit_recents_changed();
-                }
-                Ok(DaemonControlSuccess::path(path))
-            }
-            "new" => {
-                self.save_current().await?;
-                let path =
-                    create_untitled_notebook()
-                        .await
-                        .map_err(|error| BridgeError::Handler {
-                            code: "scratch_create_failed".to_string(),
-                            message: error.to_string(),
-                        })?;
-                let path = self.open_path(path).await?;
-                if let Err(error) = self.record_recent_open(&path).await {
-                    warn!(%error, path = %path.display(), "failed to record recent notebook");
-                } else {
-                    self.windows.emit_recents_changed();
-                }
-                Ok(DaemonControlSuccess::path(path))
-            }
-            "new_at" => {
-                let path = request.path.ok_or_else(|| BridgeError::Handler {
-                    code: "invalid_params".to_string(),
-                    message: "new_at requires path".to_string(),
-                })?;
-                self.save_current().await?;
-                let path = resolve_notebook_path(path);
-                create_empty_notebook_at(&path)
-                    .await
-                    .map_err(|error| BridgeError::Handler {
-                        code: "notebook_create_failed".to_string(),
-                        message: error.to_string(),
-                    })?;
-                let path = self.open_path(path).await?;
-                if let Err(error) = self.record_recent_open(&path).await {
-                    warn!(%error, path = %path.display(), "failed to record recent notebook");
-                } else {
-                    self.windows.emit_recents_changed();
-                }
-                Ok(DaemonControlSuccess::path(path))
-            }
-            "reopen" => self.reopen().await.map(DaemonControlSuccess::path),
-            "rename" => {
-                let from = request.from.ok_or_else(|| BridgeError::Handler {
-                    code: "invalid_params".to_string(),
-                    message: "rename requires from".to_string(),
-                })?;
-                let to = request.to.ok_or_else(|| BridgeError::Handler {
-                    code: "invalid_params".to_string(),
-                    message: "rename requires to".to_string(),
-                })?;
-                self.save_current().await?;
-                let path = self
-                    .rename_path(resolve_notebook_path(from), resolve_notebook_path(to))
-                    .await?;
-                Ok(DaemonControlSuccess::path(path))
-            }
-            "close" => {
-                self.save_current().await?;
-                self.close_current_window().await;
-                self.bridge.set_notebook_open(false);
-                {
-                    let mut state = self.state.lock().await;
-                    state.current_path = None;
-                    state.window_label = None;
-                }
-                if let Err(error) = self.clear_last_notebook().await {
-                    warn!(%error, "failed to clear last notebook record");
-                }
-                self.windows.emit_recents_changed();
-                Ok(DaemonControlSuccess::empty())
-            }
-            "list_recents" => recents::list_recents()
-                .await
-                .map(DaemonControlSuccess::entries)
-                .map_err(|error| BridgeError::Handler {
-                    code: "recents_failed".to_string(),
-                    message: error.to_string(),
-                }),
-            "remove_from_recents" => {
-                let path = request.path.ok_or_else(|| BridgeError::Handler {
-                    code: "invalid_params".to_string(),
-                    message: "remove_from_recents requires path".to_string(),
-                })?;
-                recents::remove_from_recents(&resolve_notebook_path(path))
-                    .await
-                    .map_err(|error| BridgeError::Handler {
-                        code: "recents_failed".to_string(),
-                        message: error.to_string(),
-                    })?;
-                self.windows.emit_recents_changed();
-                Ok(DaemonControlSuccess::empty())
-            }
-            "set_pinned" => {
-                let path = request.path.ok_or_else(|| BridgeError::Handler {
-                    code: "invalid_params".to_string(),
-                    message: "set_pinned requires path".to_string(),
-                })?;
-                let pinned = request.pinned.ok_or_else(|| BridgeError::Handler {
-                    code: "invalid_params".to_string(),
-                    message: "set_pinned requires pinned".to_string(),
-                })?;
-                recents::set_pinned(&resolve_notebook_path(path), pinned)
-                    .await
-                    .map_err(|error| BridgeError::Handler {
-                        code: "recents_failed".to_string(),
-                        message: error.to_string(),
-                    })?;
-                self.windows.emit_recents_changed();
-                Ok(DaemonControlSuccess::empty())
-            }
-            "shutdown" => {
-                self.save_current().await?;
-                self.windows.exit();
-                Ok(DaemonControlSuccess::empty())
-            }
-            command => Err(BridgeError::Handler {
-                code: "unknown_daemon_command".to_string(),
-                message: format!("unknown daemon command: {command}"),
             }),
         }
     }
@@ -1070,95 +1065,6 @@ fn should_continue_without_flush(error: &BridgeError) -> bool {
         | BridgeError::NoListener
         | BridgeError::Timeout => true,
         BridgeError::Handler { code, .. } => code == "notebook_not_open",
-    }
-}
-
-fn is_notebook_store_command(command: &str) -> bool {
-    matches!(
-        command,
-        "write_cell"
-            | "read_cell"
-            | "insert_cell"
-            | "delete_cell"
-            | "snapshot"
-            | "apply_edit"
-            | "load"
-            | "flush_notebook"
-    )
-}
-
-fn notebook_store_request_from_daemon(
-    request: DaemonControlRequest,
-) -> std::result::Result<jute::commands::DaemonControlRequest, DaemonControlError> {
-    let command = match request.command.as_str() {
-        "write_cell" => jute::commands::DaemonControlCommand::WriteCell {
-            id: required_cell_id(&request)?,
-            source: required_string(&request.source, "write_cell requires source")?,
-            expected_version: request.expected_version,
-            last_edited_by: request.last_edited_by,
-        },
-        "read_cell" => jute::commands::DaemonControlCommand::ReadCell {
-            id: required_cell_id(&request)?,
-        },
-        "insert_cell" => jute::commands::DaemonControlCommand::InsertCell {
-            kind: request
-                .kind
-                .ok_or_else(|| invalid_params("insert_cell requires kind"))?,
-            after_id: request.after_id,
-            source: required_string(&request.source, "insert_cell requires source")?,
-            last_edited_by: request.last_edited_by,
-        },
-        "load" => {
-            let path = request
-                .path
-                .ok_or_else(|| invalid_params("load requires path"))?;
-            jute::commands::DaemonControlCommand::LoadNotebook {
-                path: path.to_string_lossy().into_owned(),
-            }
-        }
-        "delete_cell" => jute::commands::DaemonControlCommand::DeleteCell {
-            id: required_cell_id(&request)?,
-            expected_version: request
-                .expected_version
-                .ok_or_else(|| invalid_params("delete_cell requires expected_version"))?,
-        },
-        "snapshot" => jute::commands::DaemonControlCommand::Snapshot {},
-        "apply_edit" => jute::commands::DaemonControlCommand::ApplyEdit {
-            id: required_cell_id(&request)?,
-            source: required_string(&request.source, "apply_edit requires source")?,
-        },
-        "flush_notebook" => jute::commands::DaemonControlCommand::FlushNotebook {},
-        command => {
-            return Err(DaemonControlError {
-                code: "unsupported_daemon_command".to_string(),
-                message: format!("unsupported notebook store command: {command}"),
-            })
-        }
-    };
-    Ok(jute::commands::DaemonControlRequest::new(command))
-}
-
-fn required_cell_id(
-    request: &DaemonControlRequest,
-) -> std::result::Result<String, DaemonControlError> {
-    required_string(&request.id, "cell command requires id")
-}
-
-fn required_string(
-    value: &Option<String>,
-    message: &str,
-) -> std::result::Result<String, DaemonControlError> {
-    value
-        .as_ref()
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .ok_or_else(|| invalid_params(message))
-}
-
-fn invalid_params(message: &str) -> DaemonControlError {
-    DaemonControlError {
-        code: "invalid_params".to_string(),
-        message: message.to_string(),
     }
 }
 
@@ -1512,10 +1418,13 @@ mod tests {
     impl DaemonControlHandler for RecordingDaemonControl {
         fn handle_control<'a>(&'a self, request: DaemonControlRequest) -> DaemonControlFuture<'a> {
             Box::pin(async move {
-                self.commands
-                    .lock()
-                    .expect("commands lock")
-                    .push(request.command);
+                let command = serde_json::to_value(&request.request.command)
+                    .expect("daemon command serializes")
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .expect("daemon command has tag")
+                    .to_owned();
+                self.commands.lock().expect("commands lock").push(command);
                 DaemonControlResponse {
                     id: request.id,
                     ok: false,
@@ -1523,11 +1432,63 @@ mod tests {
                     entries: None,
                     result: None,
                     error: Some(DaemonControlError {
-                        code: "recorded_control_request".to_string(),
-                        message: "recorded control request".to_string(),
+                        code: "recorded_control_request".to_owned(),
+                        message: "recorded control request".to_owned(),
                     }),
                 }
             })
+        }
+    }
+
+    #[test]
+    fn daemon_control_request_decodes_flat_wire_as_typed_commands() {
+        let request: DaemonControlRequest = serde_json::from_value(json!({
+            "id": "request-1",
+            "daemon": "notebook.v1",
+            "command": "open",
+            "path": "/tmp/notebook.ipynb"
+        }))
+        .expect("control daemon request decodes");
+
+        assert_eq!(request.id.as_deref(), Some("request-1"));
+        match request.request.command {
+            jute::commands::DaemonControlCommand::Open { path } => {
+                assert_eq!(path, "/tmp/notebook.ipynb");
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        let request: DaemonControlRequest = serde_json::from_value(json!({
+            "daemon": "notebook.v1",
+            "command": "write_cell",
+            "id": "cell-1",
+            "source": "print(1)",
+            "expected_version": 7,
+            "last_edited_by": "brain"
+        }))
+        .expect("daemon control request decodes");
+
+        assert_eq!(request.id.as_deref(), Some("cell-1"));
+        match request.request.command {
+            jute::commands::DaemonControlCommand::WriteCell {
+                id,
+                source,
+                expected_version,
+                last_edited_by,
+            } => {
+                assert_eq!(id, "cell-1");
+                assert_eq!(source, "print(1)");
+                assert_eq!(expected_version, Some(7));
+                assert_eq!(last_edited_by.as_deref(), Some("brain"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
+        DaemonControlRequest {
+            id: None,
+            request: jute::commands::DaemonControlRequest::new(command),
         }
     }
 
@@ -1755,14 +1716,9 @@ mod tests {
         .expect("insert_cell mutates in-memory notebook");
 
         let response = control
-            .handle(DaemonControlRequest {
-                id: None,
-                daemon: None,
-                command: "open".to_string(),
-                path: Some(other_path.clone()),
-                pinned: None,
-                ..Default::default()
-            })
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: other_path.display().to_string(),
+            }))
             .await;
 
         assert!(response.ok, "{:?}", response.error);
@@ -1836,14 +1792,12 @@ mod tests {
         }
 
         let response = control
-            .handle(DaemonControlRequest {
-                id: None,
-                daemon: None,
-                command: "rename".to_string(),
-                from: Some(from.clone()),
-                to: Some(to.clone()),
-                ..Default::default()
-            })
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::Rename {
+                    from: from.display().to_string(),
+                    to: to.display().to_string(),
+                },
+            ))
             .await;
 
         assert!(response.ok, "{:?}", response.error);
@@ -1911,7 +1865,8 @@ mod tests {
             &mut client,
             &json!({
                 "daemon": "notebook.v1",
-                "command": "not-a-command"
+                "command": "open",
+                "path": "/tmp/recorded.ipynb"
             }),
         )
         .await
@@ -1922,7 +1877,7 @@ mod tests {
             .expect("control response reads");
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "recorded_control_request");
-        assert_eq!(control.commands(), vec!["not-a-command"]);
+        assert_eq!(control.commands(), vec!["open"]);
 
         handler.await.expect("handler finishes");
     }
