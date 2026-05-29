@@ -155,6 +155,9 @@ impl ServerHandler for NotebookMcpServer {
             "notebook.get_notebook" => tools::get_notebook::call(&self.deps, arguments).await,
             "notebook.read_cell" => tools::read_cell::call(&self.deps, arguments).await,
             "notebook.kernel_info" => tools::kernel_info::call(&self.deps, arguments).await,
+            "notebook_list_datasources" => {
+                tools::list_datasources::call(&self.deps, arguments).await
+            }
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,
@@ -2096,6 +2099,75 @@ mod tests {
         assert_eq!(pushed_entries, vec![entry.clone()]);
 
         drop(client);
+    }
+
+    #[tokio::test]
+    async fn list_datasources_returns_catalog() {
+        let jute_state = Arc::new(State::new());
+        let entry = test_datasource_entry("sales");
+        jute_state.attach_datasource(entry.clone());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: test_bridge_requester(),
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+        });
+        let server = NotebookMcpServer::new(Arc::clone(&deps));
+        assert!(server
+            .tools()
+            .into_iter()
+            .any(|tool| tool.name == "notebook_list_datasources"));
+        let tempdir = tempfile::tempdir().expect("socket dir");
+        let socket_path = tempdir.path().join("notebook.sock");
+        let _server = start_multiplexed_server(&socket_path, deps, control)
+            .await
+            .expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("notebook_list_datasources"))
+            .await
+            .expect("list datasources succeeds");
+        let structured = result
+            .structured_content
+            .expect("list datasources returns structured content");
+
+        assert_eq!(
+            structured,
+            json!({
+                "entries": [
+                    {
+                        "name": "sales",
+                        "path": "/tmp/sales.csv",
+                        "kind": "csv",
+                        "group": "quarterly",
+                        "columns": [
+                            {
+                                "name": "region",
+                                "sqlType": "VARCHAR"
+                            }
+                        ],
+                        "rowCount": 2
+                    }
+                ]
+            })
+        );
+
+        client.cancel().await.expect("client closes");
     }
 
     #[cfg(feature = "datasource-introspect")]

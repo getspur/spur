@@ -16,6 +16,7 @@ pub mod get_notebook;
 pub mod insert_cell;
 pub mod interrupt;
 pub mod kernel_info;
+pub mod list_datasources;
 pub mod read_cell;
 pub mod restart_kernel;
 pub mod run_cell;
@@ -39,6 +40,7 @@ pub fn tools() -> Vec<Tool> {
         get_notebook::tool(),
         read_cell::tool(),
         kernel_info::tool(),
+        list_datasources::tool(),
         insert_cell::tool(),
         write_cell::tool(),
         set_cell_metadata::tool(),
