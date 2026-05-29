@@ -857,6 +857,56 @@ fn typescript_extractor_finds_expected_nodes_and_edges() {
         app_import_targets,
         BTreeSet::from(["Helper", "Mode", "renderThing"])
     );
+
+    // JSX render edges: `<Greeting />` inside `Root` is an uppercase component,
+    // so it must produce a Calls edge; the sibling `<div>` is a lowercase host
+    // element and must be filtered out. Root has no other calls, so its only
+    // outgoing Calls edge is to Greeting.
+    let root_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Function && node.label == "Root")
+        .expect("Root component node")
+        .node_id;
+    let root_call_targets: Vec<_> = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls && edge.source_node_id == root_id)
+        .filter_map(|edge| edge.target_node_id)
+        .map(|target_node_id| {
+            *node_labels_by_id
+                .get(&target_node_id)
+                .expect("call target node exists")
+        })
+        .collect();
+    assert_eq!(
+        root_call_targets,
+        vec!["Greeting"],
+        "Root should call only the uppercase <Greeting> component, with <div> filtered out"
+    );
+
+    // The `new App()` instantiation inside createApp must become a Calls edge.
+    let create_app_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Function && node.label == "createApp")
+        .expect("createApp node")
+        .node_id;
+    let create_app_calls: BTreeSet<_> = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls && edge.source_node_id == create_app_id)
+        .filter_map(|edge| edge.target_node_id)
+        .map(|target_node_id| {
+            *node_labels_by_id
+                .get(&target_node_id)
+                .expect("call target node exists")
+        })
+        .collect();
+    assert!(
+        create_app_calls.contains("App"),
+        "createApp should have a Calls edge to App via `new App()`; got {create_app_calls:?}"
+    );
 }
 
 #[test]

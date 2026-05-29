@@ -127,36 +127,64 @@ pub(crate) fn python_config() -> LanguageConfig {
     }
 }
 
-fn typescript_config_for(language: TsLanguage) -> LanguageConfig {
+// Shared by the plain TypeScript grammar. Must only reference nodes that exist
+// in that grammar — JSX nodes are excluded here and added for TSX below.
+const TYPESCRIPT_QUERIES: &[(&str, &str)] = &[
+    ("tags", include_str!("../../queries/typescript/tags.scm")),
+    (
+        "spur-edges",
+        include_str!("../../queries/typescript/spur-edges.scm"),
+    ),
+];
+
+// TSX reuses the TypeScript tags/edges and adds JSX render edges. The JSX
+// query references nodes that exist only in tree-sitter-typescript's TSX
+// grammar, so it must never be compiled against the plain TypeScript grammar.
+const TSX_QUERIES: &[(&str, &str)] = &[
+    ("tags", include_str!("../../queries/typescript/tags.scm")),
+    (
+        "spur-edges",
+        include_str!("../../queries/typescript/spur-edges.scm"),
+    ),
+    (
+        "jsx-edges",
+        include_str!("../../queries/typescript/jsx-edges.scm"),
+    ),
+];
+
+const TYPESCRIPT_DEFINITION_KIND_MAP: &[(&str, NodeKind)] = &[
+    ("definition.class", NodeKind::Class),
+    ("definition.interface", NodeKind::Interface),
+    ("definition.enum", NodeKind::Enum),
+    ("definition.function", NodeKind::Function),
+    ("definition.method", NodeKind::Method),
+    ("definition.type_alias", NodeKind::TypeAlias),
+    ("definition.module", NodeKind::Module),
+];
+
+fn typescript_config_for(
+    language: TsLanguage,
+    queries: &'static [(&'static str, &'static str)],
+) -> LanguageConfig {
     LanguageConfig {
         language,
         inline_language: None,
-        queries: &[
-            ("tags", include_str!("../../queries/typescript/tags.scm")),
-            (
-                "spur-edges",
-                include_str!("../../queries/typescript/spur-edges.scm"),
-            ),
-        ],
-        definition_kind_map: &[
-            ("definition.class", NodeKind::Class),
-            ("definition.interface", NodeKind::Interface),
-            ("definition.enum", NodeKind::Enum),
-            ("definition.function", NodeKind::Function),
-            ("definition.method", NodeKind::Method),
-            ("definition.type_alias", NodeKind::TypeAlias),
-        ],
+        queries,
+        definition_kind_map: TYPESCRIPT_DEFINITION_KIND_MAP,
         relation_kind_map: None,
         is_method: None,
     }
 }
 
 pub(crate) fn typescript_config() -> LanguageConfig {
-    typescript_config_for(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+    typescript_config_for(
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        TYPESCRIPT_QUERIES,
+    )
 }
 
 pub(crate) fn tsx_config() -> LanguageConfig {
-    typescript_config_for(tree_sitter_typescript::LANGUAGE_TSX.into())
+    typescript_config_for(tree_sitter_typescript::LANGUAGE_TSX.into(), TSX_QUERIES)
 }
 
 pub(crate) fn cpp_config() -> LanguageConfig {
@@ -416,6 +444,27 @@ pub(crate) fn emit_edges(
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: receiver_text.clone(),
                         scope_text: scope_text.clone(),
+                    });
+                }
+            }
+            "jsx_call" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                for callee in contained_capture_text(capture, source, captures, "jsx_call.name") {
+                    // React naming rule: a JSX tag whose name begins with an
+                    // uppercase letter is a component reference; lowercase tags
+                    // (`div`, `span`, …) are intrinsic host elements and must
+                    // not produce call edges.
+                    if !callee.chars().next().is_some_and(char::is_uppercase) {
+                        continue;
+                    }
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: callee,
+                        relation: RelationKind::Calls,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
                     });
                 }
             }
