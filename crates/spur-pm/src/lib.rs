@@ -1,3 +1,28 @@
+#![expect(
+    clippy::allow_attributes,
+    clippy::doc_markdown,
+    clippy::elidable_lifetime_names,
+    clippy::format_push_string,
+    clippy::ignored_unit_patterns,
+    clippy::iter_over_hash_type,
+    clippy::map_err_ignore,
+    clippy::match_same_arms,
+    clippy::missing_fields_in_debug,
+    clippy::ref_option,
+    clippy::ref_patterns,
+    clippy::return_and_then,
+    clippy::single_match_else,
+    clippy::str_to_string,
+    clippy::uninlined_format_args,
+    clippy::unnecessary_debug_formatting,
+    clippy::unnecessary_wraps,
+    clippy::unused_trait_names,
+    clippy::use_self,
+    clippy::useless_let_if_seq,
+    clippy::verbose_file_reads,
+    reason = "spur-pm has a pre-existing style-lint backlog; keep -D warnings useful for bug-catching lints"
+)]
+
 pub mod adapter;
 pub mod advanced;
 pub mod beads_crate;
