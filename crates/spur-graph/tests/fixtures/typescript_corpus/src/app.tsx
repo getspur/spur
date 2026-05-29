@@ -22,3 +22,9 @@ function createApp(mode: Mode): AppResult {
 const helper = () => 42;
 
 export const Greeting = ({ name }: { name: string }) => <div>{name}</div>;
+
+export const Root = () => (
+  <div>
+    <Greeting name="hi" />
+  </div>
+);
