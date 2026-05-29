@@ -5,15 +5,16 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Weak,
     },
+    time::Duration,
 };
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -30,6 +31,8 @@ use crate::{
     Error as JuteError,
 };
 
+const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(750);
+
 /// Authoritative Rust-owned notebook document store.
 pub struct NotebookStore {
     inner: Arc<RwLock<NotebookRoot>>,
@@ -38,6 +41,10 @@ pub struct NotebookStore {
     broadcast: broadcast::Sender<NotebookDelta>,
     save_coord: Arc<SaveCoordinator>,
     path: Mutex<Option<PathBuf>>,
+    flush_lock: AsyncMutex<()>,
+    autosave_notify: Arc<Notify>,
+    autosave_task_started: AtomicBool,
+    self_ref: Weak<Self>,
 }
 
 /// Cell kind to create when inserting a notebook cell.
@@ -219,13 +226,17 @@ impl NotebookStore {
     /// Create a new notebook store.
     pub fn new(save_coord: Arc<SaveCoordinator>) -> Arc<Self> {
         let (broadcast, _receiver) = broadcast::channel(128);
-        Arc::new(Self {
+        Arc::new_cyclic(|self_ref| Self {
             inner: Arc::new(RwLock::new(empty_notebook())),
             version: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
             broadcast,
             save_coord,
             path: Mutex::new(None),
+            flush_lock: AsyncMutex::new(()),
+            autosave_notify: Arc::new(Notify::new()),
+            autosave_task_started: AtomicBool::new(false),
+            self_ref: Weak::clone(self_ref),
         })
     }
 
@@ -356,7 +367,7 @@ impl NotebookStore {
         };
 
         let delta = NotebookDelta { version, kind };
-        self.dirty.store(true, Ordering::SeqCst);
+        self.mark_dirty();
         drop(root);
         self.publish(&delta);
         Ok(delta)
@@ -382,7 +393,7 @@ impl NotebookStore {
             version: self.bump_version(),
             kind: DeltaKind::RunCellEvent { cell_id, event },
         };
-        self.dirty.store(true, Ordering::SeqCst);
+        self.mark_dirty();
         drop(root);
         self.publish(&delta);
         Ok(delta)
@@ -390,6 +401,7 @@ impl NotebookStore {
 
     /// Flush the current notebook contents to disk through the save coordinator.
     pub async fn flush(&self) -> Result<(), io::Error> {
+        let _guard = self.flush_lock.lock().await;
         if !self.dirty.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -438,8 +450,67 @@ impl NotebookStore {
         self.version.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+        self.schedule_autosave();
+    }
+
+    fn schedule_autosave(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        if self
+            .autosave_task_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let store = Weak::clone(&self.self_ref);
+            let notify = Arc::clone(&self.autosave_notify);
+            drop(handle.spawn(async move {
+                autosave_loop(store, notify).await;
+            }));
+        }
+
+        self.autosave_notify.notify_one();
+    }
+
     fn publish(&self, delta: &NotebookDelta) {
         let _ = self.broadcast.send(delta.clone());
+    }
+}
+
+impl Drop for NotebookStore {
+    fn drop(&mut self) {
+        self.autosave_notify.notify_waiters();
+    }
+}
+
+async fn autosave_loop(store: Weak<NotebookStore>, notify: Arc<Notify>) {
+    loop {
+        notify.notified().await;
+        if store.upgrade().is_none() {
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(AUTOSAVE_DEBOUNCE) => {
+                    let Some(store) = store.upgrade() else {
+                        return;
+                    };
+                    if let Err(error) = store.flush().await {
+                        tracing::warn!(%error, "failed to autosave notebook store");
+                    }
+                    break;
+                }
+                () = notify.notified() => {
+                    if store.upgrade().is_none() {
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1129,5 +1200,42 @@ mod tests {
                 other: Map::new(),
             })]
         );
+    }
+
+    #[tokio::test]
+    async fn autosave_persists_dirty_store_after_debounce_without_explicit_flush() {
+        let dir = std::env::temp_dir().join(format!("jute-store-autosave-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notebook.ipynb");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&notebook_with_source("initial")).unwrap(),
+        )
+        .unwrap();
+
+        let store = NotebookStore::new(Arc::new(SaveCoordinator::default()));
+        store.load(&path, notebook_with_source("initial"));
+        store
+            .apply(NotebookOp::WriteCell {
+                id: CELL_ID.to_string(),
+                source: "autosaved".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: NotebookRoot = serde_json::from_str(&contents).unwrap();
+        let Cell::Code(cell) = &parsed.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.source,
+            MultilineString::Single("autosaved".to_string())
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
