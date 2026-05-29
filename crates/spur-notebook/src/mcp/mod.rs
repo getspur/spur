@@ -729,6 +729,7 @@ impl NotebookDaemonControl {
                     }
                     .await
                 }
+                DaemonControlCommand::AttachDatasource { .. } => Ok(DaemonControlSuccess::empty()),
                 DaemonControlCommand::ListRecents {} => self
                     .list_recent_entries()
                     .await
@@ -1520,6 +1521,33 @@ mod tests {
             }
             command => panic!("unexpected command: {command:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn daemon_control_attach_datasource_returns_empty_stub() {
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::new(State::new()),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_string(),
+                    path: "/tmp/sales.csv".to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+
+        assert!(response.ok);
+        assert!(response.path.is_none());
+        assert!(response.entries.is_none());
+        assert!(response.result.is_none());
+        assert!(response.error.is_none());
     }
 
     fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
