@@ -30,6 +30,14 @@ if [[ "${1:-}" == "--auto-spin" ]]; then
 fi
 if [[ "${1:-}" == "--" ]]; then shift; fi
 CARGO_ARGS="${CARGO_ARGS:-${*:-build --release --workspace}}"
+NOTEBOOK_FRONTEND_DIR="crates/spur-notebook/jute-notebook"
+NOTEBOOK_FRONTEND_INSTALL_CMD="npm ci"
+NOTEBOOK_FRONTEND_BUILD_CMD="npm run build"
+
+is_notebook_production_build() {
+    local args="$1"
+    [[ "$args" == *spur-notebook* && "$args" == *custom-protocol* ]]
+}
 
 # ---- worktree detection ----------------------------------------------------
 # Resolve toplevel from the *current* directory so workers invoking us from
@@ -152,6 +160,11 @@ if [[ -n "${RUSTFLAGS:-}" ]]; then
     REMOTE_RUSTFLAGS_EXPORT="export RUSTFLAGS=$(printf '%q' "$RUSTFLAGS")"
 fi
 log "Running: cargo $CARGO_ARGS  -j$JOBS${RUSTFLAGS:+  RUSTFLAGS=$RUSTFLAGS}"
+NOTEBOOK_PRODUCTION_BUILD=0
+if is_notebook_production_build "$CARGO_ARGS"; then
+    NOTEBOOK_PRODUCTION_BUILD=1
+    log "Notebook production build detected; will run frontend build on VM first."
+fi
 gcloud compute ssh "$VM_NAME" \
     --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
     --tunnel-through-iap --quiet \
@@ -167,6 +180,10 @@ gcloud compute ssh "$VM_NAME" \
         export CARGO_BUILD_JOBS=$JOBS
         $REMOTE_RUSTFLAGS_EXPORT
         sccache --start-server >/dev/null 2>&1 || true
+        if [[ $NOTEBOOK_PRODUCTION_BUILD -eq 1 ]]; then
+            echo \"[build] Building notebook frontend: $NOTEBOOK_FRONTEND_DIR\"
+            (cd $NOTEBOOK_FRONTEND_DIR && $NOTEBOOK_FRONTEND_INSTALL_CMD && $NOTEBOOK_FRONTEND_BUILD_CMD)
+        fi
         cargo $CARGO_ARGS
         echo
         echo \"--- sccache stats ($WORKTREE_KEY) ---\"

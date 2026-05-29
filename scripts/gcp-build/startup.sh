@@ -37,6 +37,16 @@ if ! command -v cc >/dev/null 2>&1; then
         libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev
 fi
 
+# Node.js LTS (system-wide). Needed for production spur-notebook builds where
+# Tauri embeds the Vite-built frontend. Corepack is enabled now so a future
+# pnpm switch does not require re-provisioning the VM.
+if ! command -v node >/dev/null 2>&1; then
+    echo "Installing Node.js LTS..."
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+    apt-get install -y --no-install-recommends nodejs
+fi
+corepack enable
+
 # sccache (system-wide). Pinned to 0.15.0 because it's the first version that
 # treats --remap-path-prefix as cacheable (#2270) and excludes
 # CARGO_ENCODED_RUSTFLAGS from the env hash (#2651) — both required for
