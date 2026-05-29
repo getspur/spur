@@ -1552,7 +1552,7 @@ impl Orchestrator {
             ),
             mcp_handle,
         ): McpGuarded<NewBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
-            let socket_nonce = uuid::Uuid::new_v4().simple().to_string();
+            let socket_nonce = self.notebook_socket_nonce.clone();
             let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url, &socket_nonce);
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
@@ -1604,7 +1604,7 @@ impl Orchestrator {
         })
         .await?;
 
-        self.register_notebook_socket(brain_session_id.clone(), socket_nonce.clone());
+        self.register_notebook_socket(brain_session_id.clone());
 
         info!(brain = %brain_name, session = %session_id, "Creating brain session");
         self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
@@ -1854,7 +1854,7 @@ impl Orchestrator {
             ),
             mcp_handle,
         ): McpGuarded<LoadedBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
-            let socket_nonce = uuid::Uuid::new_v4().simple().to_string();
+            let socket_nonce = self.notebook_socket_nonce.clone();
             let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url, &socket_nonce);
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
@@ -1964,7 +1964,7 @@ impl Orchestrator {
         })
         .await?;
 
-        self.register_notebook_socket(brain_session_id.clone(), socket_nonce.clone());
+        self.register_notebook_socket(brain_session_id.clone());
 
         if final_acp_session_id != requested_acp_session_id {
             drop(attach_guard.take());
