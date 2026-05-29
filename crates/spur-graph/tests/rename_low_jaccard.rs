@@ -110,6 +110,91 @@ pub fn process_batch(records: &[String]) -> usize {
     );
 }
 
+#[test]
+fn rename_sibling_cohort_uses_line_proximity_tiebreaker_without_ambiguity() {
+    let dir = TempDir::new().unwrap();
+    init_repo(dir.path());
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        br#"
+pub fn old_iopub(topic: &str) -> usize {
+    let clean = topic.trim();
+    let mut total = 0usize;
+    for byte in clean.as_bytes() {
+        if *byte != b'/' {
+            total += usize::from(*byte);
+        }
+    }
+    total
+}
+"#,
+    )
+    .unwrap();
+    commit(dir.path(), "c1");
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        br#"
+pub fn subscribe_iopub(topic: &str) -> usize {
+    let clean = topic.trim();
+    let mut total = 0usize;
+    for byte in clean.as_bytes() {
+        if *byte != b'/' {
+            total += usize::from(*byte);
+        }
+    }
+    total
+}
+
+pub fn publish_iopub(topic: &str) -> usize {
+    let clean = topic.trim();
+    let mut total = 0usize;
+    for byte in clean.as_bytes() {
+        if *byte != b'/' {
+            total += usize::from(*byte);
+        }
+    }
+    total
+}
+"#,
+    )
+    .unwrap();
+    let sha = commit(dir.path(), "rename with sibling");
+
+    let mut ctx = SymbolDiffCtx::new();
+    let file_changes = file_changes_for_commit(dir.path(), &sha).unwrap();
+    let changes = symbol_changes_for_commit(dir.path(), &sha, &file_changes, &mut ctx).unwrap();
+    let renamed = changes
+        .iter()
+        .find(|change| change.snapshot.entity_name == "subscribe_iopub")
+        .expect("subscribe_iopub snapshot");
+    let sibling = changes
+        .iter()
+        .find(|change| change.snapshot.entity_name == "publish_iopub")
+        .expect("publish_iopub snapshot");
+
+    assert!(
+        matches!(
+            &renamed.change_kind,
+            ChangeKind::RenamedFrom(spur_graph::RenamePrev::Symbol(_))
+        ),
+        "near-tied sibling rename should keep nearest candidate: {changes:#?}"
+    );
+    assert!(matches!(sibling.change_kind, ChangeKind::Added));
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.snapshot.entity_name != "old_iopub"),
+        "accepted rename should consume the deleted endpoint: {changes:#?}"
+    );
+    assert!(
+        !ctx.diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("ambiguous_rename")),
+        "line-proximity tie-break should not emit ambiguity diagnostics: {:#?}",
+        ctx.diagnostics()
+    );
+}
+
 fn has_ambiguous_rename(diagnostics: &[String], stable_id: &str, other_stable_id: &str) -> bool {
     diagnostics.iter().any(|diagnostic| {
         diagnostic.contains("ambiguous_rename")
