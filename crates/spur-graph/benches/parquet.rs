@@ -402,12 +402,16 @@ fn temporal_benchmark_artifact() -> GraphIndexArtifact {
                 vec![format!("commit-{:04}", index * 2 - 1)]
             },
             author_time: (index * 2) as i64,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: format!("add temporal {index}"),
         });
         artifact.commits.push(CommitArtifact {
             sha: new_commit.clone(),
             parents: vec![old_commit.clone()],
             author_time: (index * 2 + 1) as i64,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: format!("rename temporal {index}"),
         });
 

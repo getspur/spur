@@ -212,6 +212,8 @@ fn temporal_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         sha: "c1".to_string(),
         parents: Vec::new(),
         author_time: 1_700_000_001,
+        author_name: String::new(),
+        author_email: String::new(),
         summary: "initial import".to_string(),
     });
     artifact.symbol_snapshots.push(SymbolSnapshotArtifact {
@@ -296,6 +298,8 @@ fn direct_symbol_id_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         sha: "c1".to_string(),
         parents: Vec::new(),
         author_time: chrono::Utc::now().timestamp(),
+        author_name: String::new(),
+        author_email: String::new(),
         summary: "touch symbols".to_string(),
     });
     for (structural_id, snapshot_id, name, byte_range, line_range) in [
