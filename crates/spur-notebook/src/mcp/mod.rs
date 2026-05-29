@@ -206,9 +206,6 @@ pub struct NotebookMcpServerHandle {
     task: JoinHandle<()>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NotebookConfig;
-
 impl NotebookMcpServerHandle {
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
@@ -766,14 +763,6 @@ impl NotebookDaemonControl {
                     }
                     .await
                 }
-                DaemonControlCommand::Shutdown {} => {
-                    async {
-                        self.save_current().await?;
-                        self.windows.exit();
-                        Ok(DaemonControlSuccess::empty())
-                    }
-                    .await
-                }
             };
 
         match result {
@@ -1297,18 +1286,6 @@ pub async fn start_daemon_server(
     lifecycle_bridge: Arc<AgentBridge>,
     app: tauri::AppHandle,
     state: Arc<State>,
-) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
-    start_daemon_server_with_config(socket_path, lifecycle_bridge, app, state, NotebookConfig).await
-}
-
-/// Starts the daemon with a bridge for window-lifecycle signals.
-/// The lifecycle bridge is always used for notebook-open and shutdown-drain plumbing.
-pub async fn start_daemon_server_with_config(
-    socket_path: impl AsRef<Path>,
-    lifecycle_bridge: Arc<AgentBridge>,
-    app: tauri::AppHandle,
-    state: Arc<State>,
-    _config: NotebookConfig,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
     let socket_path = socket_path.as_ref().to_path_buf();
     let app_for_deps = app.clone();

@@ -52,11 +52,6 @@ function runAsync(label: string, action: () => Promise<void>) {
 
 export function listenForNotebookEvents(notebook: Notebook): () => void {
   const registrations = [
-    listen("notebook://kernel_changed", () => {
-      runAsync("notebook://kernel_changed", async () => {
-        await notebook.refreshKernelSlotInfo();
-      });
-    }),
     listen<SavedPayload>("notebook://saved", (event) => {
       // TODO: Clear the unsaved indicator once notebook dirty state exists.
       void event.payload;
