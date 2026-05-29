@@ -528,6 +528,7 @@ struct PendingNotebookFlush {
 struct DaemonControlSuccess {
     path: Option<PathBuf>,
     entries: Option<Vec<RecentEntry>>,
+    result: Option<Value>,
 }
 
 impl DaemonControlSuccess {
@@ -535,6 +536,7 @@ impl DaemonControlSuccess {
         Self {
             path: None,
             entries: None,
+            result: None,
         }
     }
 
@@ -542,6 +544,7 @@ impl DaemonControlSuccess {
         Self {
             path: Some(path),
             entries: None,
+            result: None,
         }
     }
 
@@ -549,6 +552,16 @@ impl DaemonControlSuccess {
         Self {
             path: None,
             entries: Some(entries),
+            result: None,
+        }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn result(result: Value) -> Self {
+        Self {
+            path: None,
+            entries: None,
+            result: Some(result),
         }
     }
 }
@@ -557,6 +570,42 @@ fn recents_bridge_error(error: anyhow::Error) -> BridgeError {
     BridgeError::Handler {
         code: "recents_failed".to_string(),
         message: error.to_string(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn normalize_datasource_path(path: String) -> Result<PathBuf, BridgeError> {
+    if path.trim().is_empty() {
+        return Err(BridgeError::Handler {
+            code: "invalid_datasource_path".to_string(),
+            message: "datasource path must not be empty".to_string(),
+        });
+    }
+
+    std::fs::canonicalize(&path).map_err(|error| BridgeError::Handler {
+        code: "invalid_datasource_path".to_string(),
+        message: format!("failed to resolve datasource path {path}: {error}"),
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, BridgeError> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+
+    match extension.as_deref() {
+        Some("csv") => Ok(jute::commands::DatasourceKind::Csv),
+        Some("parquet" | "parq") => Ok(jute::commands::DatasourceKind::Parquet),
+        Some("json" | "jsonl" | "ndjson") => Ok(jute::commands::DatasourceKind::Json),
+        _ => Err(BridgeError::Handler {
+            code: "unsupported_datasource_kind".to_string(),
+            message: format!(
+                "unsupported datasource file extension for {}",
+                path.display()
+            ),
+        }),
     }
 }
 
@@ -729,7 +778,9 @@ impl NotebookDaemonControl {
                     }
                     .await
                 }
-                DaemonControlCommand::AttachDatasource { .. } => Ok(DaemonControlSuccess::empty()),
+                DaemonControlCommand::AttachDatasource { name, path, group } => {
+                    self.attach_datasource(name, path, group)
+                }
                 DaemonControlCommand::ListRecents {} => self
                     .list_recent_entries()
                     .await
@@ -772,7 +823,7 @@ impl NotebookDaemonControl {
                 ok: true,
                 path: success.path.map(|path| path.display().to_string()),
                 entries: success.entries,
-                result: None,
+                result: success.result,
                 error: None,
             },
             Err(error) => DaemonControlResponse {
@@ -787,6 +838,57 @@ impl NotebookDaemonControl {
                 }),
             },
         }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn attach_datasource(
+        &self,
+        name: String,
+        path: String,
+        group: Option<String>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        let path = normalize_datasource_path(path)?;
+        let kind = infer_datasource_kind(&path)?;
+        let schema = crate::datasource::introspect_datasource(&path, kind).map_err(|error| {
+            BridgeError::Handler {
+                code: "datasource_introspection_failed".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+
+        let entry = jute::commands::DatasourceEntry {
+            name,
+            path: path.display().to_string(),
+            kind,
+            group,
+            columns: schema.columns,
+            row_count: schema.row_count,
+        };
+
+        self.jute_state
+            .datasource_catalog
+            .lock()
+            .attach(entry.clone());
+
+        let result = serde_json::to_value(entry).map_err(|error| BridgeError::Handler {
+            code: "datasource_entry_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+
+        Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    fn attach_datasource(
+        &self,
+        _name: String,
+        _path: String,
+        _group: Option<String>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
     }
 
     pub async fn current_path(&self) -> Option<PathBuf> {
@@ -1523,12 +1625,18 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
-    async fn daemon_control_attach_datasource_returns_empty_stub() {
+    async fn attach_introspects_csv_schema() {
+        let tempdir = tempfile::tempdir().expect("csv fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+
+        let jute_state = Arc::new(State::new());
         let control = NotebookDaemonControl::new_for_test(
             Arc::new(AgentBridge::new()),
             test_bridge_requester(),
-            Arc::new(State::new()),
+            Arc::clone(&jute_state),
             Arc::new(RecordingWindowOps::default()),
             None,
         );
@@ -1536,17 +1644,40 @@ mod tests {
         let response = control
             .handle(daemon_request(
                 jute::commands::DaemonControlCommand::AttachDatasource {
-                    name: "sales".to_string(),
-                    path: "/tmp/sales.csv".to_string(),
-                    group: None,
+                    name: "sales".to_owned(),
+                    path: csv.display().to_string(),
+                    group: Some("quarterly".to_owned()),
                 },
             ))
             .await;
 
         assert!(response.ok);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+
+        assert_eq!(entry.name, "sales");
+        assert_eq!(entry.path, csv.display().to_string());
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::Csv);
+        assert_eq!(entry.group.as_deref(), Some("quarterly"));
+        assert_eq!(
+            entry.columns,
+            vec![
+                jute::commands::Column {
+                    name: "region".to_owned(),
+                    sql_type: "VARCHAR".to_owned(),
+                },
+                jute::commands::Column {
+                    name: "revenue".to_owned(),
+                    sql_type: "BIGINT".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(entry.row_count, Some(2));
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+
         assert!(response.path.is_none());
         assert!(response.entries.is_none());
-        assert!(response.result.is_none());
         assert!(response.error.is_none());
     }
 

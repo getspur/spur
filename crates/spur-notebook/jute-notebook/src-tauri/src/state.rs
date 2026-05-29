@@ -9,8 +9,57 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::{
-    backend::local::LocalKernel, commands::SaveCoordinator, notebook_store::NotebookStore,
+    backend::local::LocalKernel,
+    commands::{DatasourceEntry, SaveCoordinator},
+    notebook_store::NotebookStore,
 };
+
+/// Current schema version for notebook datasource catalog entries.
+pub const DATASOURCE_CATALOG_SCHEMA_VERSION: u32 = 1;
+
+/// In-memory catalog of datasources attached to the active notebook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasourceCatalog {
+    /// Catalog schema version.
+    pub schema_version: u32,
+    /// Attached datasource entries.
+    pub entries: Vec<DatasourceEntry>,
+}
+
+impl Default for DatasourceCatalog {
+    fn default() -> Self {
+        Self {
+            schema_version: DATASOURCE_CATALOG_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl DatasourceCatalog {
+    /// Attach or replace a datasource entry by name.
+    pub fn attach(&mut self, entry: DatasourceEntry) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.name == entry.name)
+        {
+            *existing = entry;
+        } else {
+            self.entries.push(entry);
+        }
+    }
+
+    /// Detach a datasource by name, returning the removed entry when present.
+    pub fn detach(&mut self, name: &str) -> Option<DatasourceEntry> {
+        let index = self.entries.iter().position(|entry| entry.name == name)?;
+        Some(self.entries.remove(index))
+    }
+
+    /// List attached datasources in catalog order.
+    pub fn list(&self) -> Vec<DatasourceEntry> {
+        self.entries.clone()
+    }
+}
 
 /// Stable prefix used for notebook path-derived kernel slots.
 pub(crate) const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
@@ -78,6 +127,9 @@ pub struct State {
 
     /// Coordinator for debounced notebook saves.
     pub save_coordinator: SaveCoordinator,
+
+    /// In-memory datasource catalog for the active notebook.
+    pub datasource_catalog: Mutex<DatasourceCatalog>,
 
     /// Lazily initialized authoritative notebook document store.
     notebook: Mutex<Option<Arc<NotebookStore>>>,
