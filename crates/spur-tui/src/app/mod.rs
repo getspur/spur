@@ -362,7 +362,7 @@ pub struct App {
     brain_name: Option<String>,
     pending_first_user_message: Option<String>,
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
-    notebook_socket_nonces: std::collections::HashMap<String, String>,
+    notebook_socket_nonce: Option<String>,
     /// Event-sourced projection of brain → executor lineage.
     pub(super) lineage: ExecutorLineage,
     #[cfg(feature = "analytics")]
