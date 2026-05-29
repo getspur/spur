@@ -419,6 +419,8 @@ fn commit_artifact(sha: &str, parents: Vec<&str>, author_time: i64) -> CommitArt
         sha: sha.into(),
         parents: parents.into_iter().map(str::to_string).collect(),
         author_time,
+        author_name: String::new(),
+        author_email: String::new(),
         summary: sha.into(),
     }
 }

@@ -1481,12 +1481,16 @@ mod tests {
                 sha: "commit-a".to_owned(),
                 parents: Vec::new(),
                 author_time: 1,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "add foo".to_owned(),
             },
             CommitArtifact {
                 sha: "commit-b".to_owned(),
                 parents: vec!["commit-a".to_owned()],
                 author_time: 2,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "rename foo to bar".to_owned(),
             },
         ]
