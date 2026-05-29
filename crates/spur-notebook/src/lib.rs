@@ -1,2 +1,4 @@
+#[cfg(feature = "datasource-introspect")]
+pub mod datasource;
 pub mod mcp;
 pub mod recents;

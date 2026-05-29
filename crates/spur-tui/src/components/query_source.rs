@@ -528,6 +528,7 @@ impl QuerySource for MentionQuerySource {
                     MentionKind::CodeSymbol => "\u{0192}", // ƒ
                     MentionKind::Worker => "\u{1F916}",    // 🤖
                     MentionKind::Issue => "\u{1F39F}",     // 🎟
+                    MentionKind::Datasource => "D",
                 };
                 let tag_render = m
                     .tag
@@ -660,7 +661,10 @@ impl QuerySource for MentionQuerySource {
                     graph_index_version: payload.display_meta.graph_index_version,
                 }))
             }
-            MentionKind::Worker | MentionKind::Directory | MentionKind::File => None,
+            MentionKind::Worker
+            | MentionKind::Directory
+            | MentionKind::File
+            | MentionKind::Datasource => None,
         }
     }
 }

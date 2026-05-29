@@ -37,6 +37,7 @@ pub mod venv;
 
 type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
+type BeforeSaveHook = dyn Fn(&Path, &mut NotebookRoot) + Send + Sync;
 
 /// Snapshot of a stable kernel slot for agent read-side tools.
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +114,50 @@ pub struct DaemonRecentEntry {
     pub is_current: Option<bool>,
 }
 
+/// Local datasource file type supported by the notebook daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum DatasourceKind {
+    /// Comma-separated values file.
+    Csv,
+    /// Apache Parquet file.
+    Parquet,
+    /// JSON file.
+    Json,
+}
+
+/// Column metadata captured for a notebook datasource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct Column {
+    /// Column name.
+    pub name: String,
+    /// SQL type reported by the datasource engine.
+    pub sql_type: String,
+}
+
+/// Catalog entry describing one datasource attached to a notebook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct DatasourceEntry {
+    /// User-facing datasource name.
+    pub name: String,
+    /// Datasource file path.
+    pub path: String,
+    /// Datasource file kind.
+    pub kind: DatasourceKind,
+    /// Optional UI grouping key.
+    pub group: Option<String>,
+    /// Columns discovered for the datasource.
+    pub columns: Vec<Column>,
+    /// Row count when known.
+    #[ts(type = "number | null")]
+    pub row_count: Option<u64>,
+}
+
 /// A daemon control protocol request.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +200,12 @@ pub enum DaemonControlCommand {
     Reopen {},
     /// Close the current notebook window.
     Close {},
+    /// Attach a local datasource to the current notebook.
+    AttachDatasource {
+        name: String,
+        path: String,
+        group: Option<String>,
+    },
     /// List daemon recents.
     ListRecents {},
     /// Remove a path from daemon recents.
@@ -300,6 +351,7 @@ struct LastNotebookRecord {
 pub struct SaveCoordinator {
     inner: Arc<Mutex<SaveState>>,
     writer: Arc<SaveWriter>,
+    before_save: Option<Arc<BeforeSaveHook>>,
 }
 
 #[derive(Default)]
@@ -320,13 +372,18 @@ impl Default for SaveCoordinator {
             writer: Arc::new(|path, contents| {
                 Box::pin(async move { atomic_write_notebook(&path, &contents).await })
             }),
+            before_save: None,
         }
     }
 }
 
 impl SaveCoordinator {
     /// Queue and persist notebook contents to disk.
-    pub async fn save(&self, path: PathBuf, contents: NotebookRoot) -> Result<(), Error> {
+    pub async fn save(&self, path: PathBuf, mut contents: NotebookRoot) -> Result<(), Error> {
+        if let Some(before_save) = self.before_save.as_ref() {
+            before_save(&path, &mut contents);
+        }
+
         let mut state = self.inner.lock().await;
         state.queued = Some(PendingSave { path, contents });
         if state.in_flight {
@@ -355,6 +412,18 @@ impl SaveCoordinator {
         }
     }
 
+    /// Build a coordinator that patches notebook metadata immediately before
+    /// writes use the normal atomic-save path.
+    pub fn with_before_save<F>(before_save: F) -> Self
+    where
+        F: Fn(&Path, &mut NotebookRoot) + Send + Sync + 'static,
+    {
+        Self {
+            before_save: Some(Arc::new(before_save)),
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     fn with_writer_for_test<F>(writer: F) -> Self
     where
@@ -363,6 +432,7 @@ impl SaveCoordinator {
         Self {
             inner: Arc::new(Mutex::new(SaveState::default())),
             writer: Arc::new(writer),
+            before_save: None,
         }
     }
 }
@@ -640,6 +710,11 @@ async fn handle_daemon_control_inner(
             let root: NotebookRoot = serde_json::from_str(&contents).map_err(|error| {
                 DaemonControlResponse::failure("load_failed", error.to_string())
             })?;
+            let catalog = crate::state::DatasourceCatalog::hydrate_from_metadata(
+                &root.metadata,
+                Some(Path::new(&path)),
+            );
+            *state.datasource_catalog.lock() = catalog;
             let delta = notebook.load(PathBuf::from(path), root);
             Ok(DaemonControlResult::Delta(delta))
         }
@@ -1329,6 +1404,7 @@ mod tests {
                     spur: Some(SpurCellMetadata {
                         version,
                         last_edited_by: None,
+                        datasource_setup: None,
                     }),
                     jute_deck: None,
                     other: Default::default(),
@@ -1361,6 +1437,52 @@ mod tests {
     #[test]
     fn daemon_control_command_symbol_is_exported() {
         let _command = daemon_control;
+    }
+
+    #[test]
+    fn attach_datasource_command_round_trips_with_catalog_types() {
+        let request = DaemonControlRequest::new(DaemonControlCommand::AttachDatasource {
+            name: "sales".to_string(),
+            path: "/tmp/sales.csv".to_string(),
+            group: Some("quarterly".to_string()),
+        });
+
+        let value = serde_json::to_value(&request).expect("attach datasource serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "attach_datasource",
+                "name": "sales",
+                "path": "/tmp/sales.csv",
+                "group": "quarterly"
+            })
+        );
+
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(value).expect("attach datasource decodes");
+        match decoded.command {
+            DaemonControlCommand::AttachDatasource { name, path, group } => {
+                assert_eq!(name, "sales");
+                assert_eq!(path, "/tmp/sales.csv");
+                assert_eq!(group.as_deref(), Some("quarterly"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        let entry = DatasourceEntry {
+            name: "sales".to_string(),
+            path: "/tmp/sales.csv".to_string(),
+            kind: DatasourceKind::Csv,
+            group: Some("quarterly".to_string()),
+            columns: vec![Column {
+                name: "amount".to_string(),
+                sql_type: "DOUBLE".to_string(),
+            }],
+            row_count: Some(42),
+        };
+        assert_eq!(entry.kind, DatasourceKind::Csv);
+        assert_eq!(entry.columns[0].sql_type, "DOUBLE");
     }
 
     #[tokio::test]

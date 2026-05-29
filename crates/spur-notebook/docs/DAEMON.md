@@ -83,6 +83,33 @@ missing or invalid:
 Wiping `~/.spur/jupyter` triggers a fresh provision on the next kernel
 start; the user does not need to run anything manually.
 
+## Canonical Datasource Demo Test
+
+The automatable part of the DuckDB datasource demo is covered by the ignored
+integration test:
+
+```text
+scripts/spur-cargo test -p spur-notebook --features datasource-introspect \
+  --test notebook_read_tools \
+  canonical_demo_attach_csv_runs_setup_and_renders_html_chart \
+  -- --ignored --nocapture
+```
+
+The test creates a small CSV fixture, attaches it through
+`AttachDatasource`, verifies `notebook_list_datasources`, verifies exactly one
+SPUR-managed setup cell, then runs the setup cell plus a small HTML chart cell
+through a real Python kernel. The chart assertion requires a `display_data`
+output with `text/html` or `image/png`.
+
+If the output says `skipping live kernel test: python3 modules unavailable`,
+the Rust attach/list/setup path compiled but the Python kernel portion did not
+run in that environment. Run on a machine with `python3` plus `uv`, or install
+`ipykernel`, `pyzmq`, and `duckdb` for the selected `PYTHON_PATH`.
+
+The remaining manual demo steps are the GUI sidebar drag/drop gesture and the
+brain prompt from `spur-tui` (`@sales plot monthly revenue by region`). The
+test drives their daemon control, MCP, and kernel equivalents directly.
+
 ## Multiplexing
 
 The daemon reads the first frame on each connection.
