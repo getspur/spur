@@ -250,12 +250,16 @@ fn write_temporal_fixture_artifact_for_backend(worktree: &Path, backend: CodeGra
                 sha: OLD_SHA.to_string(),
                 parents: Vec::new(),
                 author_time: 1,
+                author_name: "Ada Lovelace".to_string(),
+                author_email: "ada@example.test".to_string(),
                 summary: "add foo".to_string(),
             },
             CommitArtifact {
                 sha: NEW_SHA.to_string(),
                 parents: vec![OLD_SHA.to_string()],
                 author_time: 2,
+                author_name: "Grace Hopper".to_string(),
+                author_email: "grace@example.test".to_string(),
                 summary: "rename foo to bar".to_string(),
             },
         ],
@@ -317,30 +321,40 @@ fn write_temporal_resolution_fixture_artifact(worktree: &Path) {
             sha: OLD_SHA.to_string(),
             parents: Vec::new(),
             author_time: 1,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "add roots".to_string(),
         },
         CommitArtifact {
             sha: NEW_SHA.to_string(),
             parents: vec![OLD_SHA.to_string()],
             author_time: 2,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "rename found".to_string(),
         },
         CommitArtifact {
             sha: DELETE_SHA.to_string(),
             parents: vec![NEW_SHA.to_string()],
             author_time: 3,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "delete symbol".to_string(),
         },
         CommitArtifact {
             sha: AMBIGUOUS_SHA.to_string(),
             parents: vec![DELETE_SHA.to_string()],
             author_time: 4,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "ambiguous rename".to_string(),
         },
         CommitArtifact {
             sha: UNKNOWN_TARGET_SHA.to_string(),
             parents: vec![AMBIGUOUS_SHA.to_string()],
             author_time: 5,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "target for unknown anchor".to_string(),
         },
     ];
@@ -470,6 +484,8 @@ fn write_graph_with_empty_snapshots(worktree: &Path) {
         sha: OLD_SHA.to_string(),
         parents: Vec::new(),
         author_time: 1,
+        author_name: String::new(),
+        author_email: String::new(),
         summary: "empty snapshots".to_string(),
     }];
     let graph = GraphIndexArtifact {
@@ -816,8 +832,12 @@ fn assert_code_symbol_history_rename_chain(body: &Value, backend: CodeGraphFixtu
         assert_eq!(
             event_keys,
             BTreeSet::from([
+                "author_email".to_string(),
+                "author_name".to_string(),
+                "author_time".to_string(),
                 "change_kind".to_string(),
                 "commit".to_string(),
+                "summary".to_string(),
                 "snapshot".to_string(),
             ]),
             "unexpected event keys for {backend:?}"
@@ -825,9 +845,17 @@ fn assert_code_symbol_history_rename_chain(body: &Value, backend: CodeGraphFixtu
     }
 
     assert_eq!(events[0]["commit"], OLD_SHA);
+    assert_eq!(events[0]["author_time"], 1);
+    assert_eq!(events[0]["author_name"], "Ada Lovelace");
+    assert_eq!(events[0]["author_email"], "ada@example.test");
+    assert_eq!(events[0]["summary"], "add foo");
     assert_eq!(events[0]["change_kind"], "added");
     assert_eq!(events[0]["snapshot"]["stable_symbol_id"], OLD_ROOT_ID);
     assert_eq!(events[1]["commit"], NEW_SHA);
+    assert_eq!(events[1]["author_time"], 2);
+    assert_eq!(events[1]["author_name"], "Grace Hopper");
+    assert_eq!(events[1]["author_email"], "grace@example.test");
+    assert_eq!(events[1]["summary"], "rename foo to bar");
     assert_eq!(
         events[1]["change_kind"]["renamed_from"]["symbol"]["stable_symbol_id"],
         OLD_ROOT_ID

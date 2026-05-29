@@ -92,7 +92,7 @@ fn emit_sections<'tree>(
             .map(|(_, node_id, fqn)| (*node_id, Some(fqn.as_str())))
             .unwrap_or((file_node_id, None));
 
-        let fqn = scoped_name(parent_fqn.unwrap_or(""), &label);
+        let fqn = scoped_name(parent_fqn.unwrap_or(""), label);
         let section_end = headings[index + 1..]
             .iter()
             .find_map(|(next_node, _, next_level)| {

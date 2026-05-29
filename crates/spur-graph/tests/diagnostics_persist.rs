@@ -108,6 +108,8 @@ fn temporal_artifact() -> GraphIndexArtifact {
         sha: "c1".to_owned(),
         parents: Vec::new(),
         author_time: 1,
+        author_name: String::new(),
+        author_email: String::new(),
         summary: "initial import".to_owned(),
     });
     artifact.symbol_snapshots.push(snapshot.clone());

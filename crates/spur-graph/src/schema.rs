@@ -675,6 +675,10 @@ pub struct CommitArtifact {
     pub sha: String,
     pub parents: Vec<String>,
     pub author_time: i64,
+    #[serde(default)]
+    pub author_name: String,
+    #[serde(default)]
+    pub author_email: String,
     pub summary: String,
 }
 
