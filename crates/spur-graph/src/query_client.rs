@@ -1601,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn parquet_client_symbol_history_matches_in_memory_without_caching_full_temporal_index() {
+    fn parquet_client_symbol_history_returns_rename_chain_without_caching_full_temporal_index() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let artifact = temporal_artifact();
         let commits = commit_index(artifact.commits.clone());
@@ -1622,6 +1622,30 @@ mod tests {
             .expect("parquet symbol history succeeds");
 
         assert_eq!(actual, expected);
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "commit-a".to_owned(),
+                    ChangeKind::Added,
+                    SnapshotKey {
+                        stable_symbol_id: "old-root".to_owned(),
+                        commit: "commit-a".to_owned(),
+                    },
+                ),
+                (
+                    "commit-b".to_owned(),
+                    ChangeKind::RenamedFrom(RenamePrev::Symbol(SnapshotKey {
+                        stable_symbol_id: "old-root".to_owned(),
+                        commit: "commit-a".to_owned(),
+                    })),
+                    SnapshotKey {
+                        stable_symbol_id: "new-root".to_owned(),
+                        commit: "commit-b".to_owned(),
+                    },
+                ),
+            ]
+        );
         assert!(parquet.temporal_index.get().is_none());
     }
 }
