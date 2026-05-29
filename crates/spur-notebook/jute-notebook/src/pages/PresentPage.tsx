@@ -52,6 +52,10 @@ export default function PresentPage() {
     notebook.store,
     (state) => state.serverState.notebookMetadata.jute_deck,
   );
+  const notebookLanguage = useStore(
+    notebook.store,
+    (state) => state.serverState.notebookMetadata.language_info?.name,
+  );
   const cellSourceDrafts = useStore(
     notebook.store,
     (state) => state.editBuffer.cellSources,
@@ -66,11 +70,14 @@ export default function PresentPage() {
           id,
           type: cell.type,
           source: sourceDraft?.source ?? cell.source,
-          metadata: { jute_deck: cell.juteDeckMetadata },
+          metadata: {
+            jute_deck: cell.juteDeckMetadata,
+            kernel_language: notebookLanguage,
+          },
           outputs: cell.result?.outputs ?? [],
         };
       }),
-    [cellIds, storeCells, cellSourceDrafts],
+    [cellIds, storeCells, cellSourceDrafts, notebookLanguage],
   );
 
   const slides: SlideSpec[] = useMemo(
