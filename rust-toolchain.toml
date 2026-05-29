@@ -1,0 +1,11 @@
+# Pin the toolchain so local dev, GitHub Actions, and the GCP remote build VM
+# all compile with the identical rustc. Without this, every environment tracked
+# a moving `stable`, which (a) made build reproducibility and the sccache cache
+# key drift whenever upstream stable bumped, and (b) made "is lld the default
+# linker?" non-deterministic across machines.
+#
+# MSRV floor is workspace.package.rust-version = "1.88" (Cargo.toml); this pin
+# is the *dev/CI* toolchain, deliberately ahead of the floor. Bump explicitly.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
