@@ -666,6 +666,7 @@ impl SessionPickerView {
                 context_size: None,
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
+                notebook_ready: false,
                 issue_count: 0,
                 alert_summary: None,
                 license_badge,
@@ -1186,6 +1187,7 @@ impl SessionPickerView {
                     context_size: None,
                     stream_in_flight: false,
                     esc_consumed_by_composer: false,
+                    notebook_ready: ctx.notebook_ready,
                     issue_count: 0,
                     alert_summary: None,
                     license_badge,
@@ -1269,6 +1271,7 @@ impl SessionPickerView {
                 context_size: None,
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
+                notebook_ready: ctx.notebook_ready,
                 issue_count: 0,
                 alert_summary: None,
                 license_badge,
@@ -1830,6 +1833,7 @@ mod current_session_shortcut_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }
@@ -2135,6 +2139,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         };
 
@@ -2200,6 +2205,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         };
 
@@ -2268,6 +2274,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         };
 
@@ -2364,6 +2371,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         };
 
@@ -2446,6 +2454,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         };
 
@@ -2534,6 +2543,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         };
 
