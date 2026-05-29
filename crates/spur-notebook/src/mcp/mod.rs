@@ -779,7 +779,7 @@ impl NotebookDaemonControl {
                     .await
                 }
                 DaemonControlCommand::AttachDatasource { name, path, group } => {
-                    self.attach_datasource(name, path, group)
+                    self.attach_datasource(name, path, group).await
                 }
                 DaemonControlCommand::ListRecents {} => self
                     .list_recent_entries()
@@ -841,7 +841,7 @@ impl NotebookDaemonControl {
     }
 
     #[cfg(feature = "datasource-introspect")]
-    fn attach_datasource(
+    async fn attach_datasource(
         &self,
         name: String,
         path: String,
@@ -869,6 +869,7 @@ impl NotebookDaemonControl {
             .datasource_catalog
             .lock()
             .attach(entry.clone());
+        self.persist_catalog_to_current_notebook().await?;
 
         let result = serde_json::to_value(entry).map_err(|error| BridgeError::Handler {
             code: "datasource_entry_encode_failed".to_string(),
@@ -879,7 +880,7 @@ impl NotebookDaemonControl {
     }
 
     #[cfg(not(feature = "datasource-introspect"))]
-    fn attach_datasource(
+    async fn attach_datasource(
         &self,
         _name: String,
         _path: String,
@@ -956,6 +957,27 @@ impl NotebookDaemonControl {
             .await
             .map_err(|error| BridgeError::Handler {
                 code: "save_failed".to_string(),
+                message: error.to_string(),
+            })
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn persist_catalog_to_current_notebook(&self) -> Result<(), BridgeError> {
+        let path = {
+            let state = self.state.lock().await;
+            state.current_path.clone()
+        };
+        let Some(path) = path else {
+            return Ok(());
+        };
+
+        let (snapshot, _) = self.jute_state.get_notebook().snapshot();
+        self.jute_state
+            .save_coordinator
+            .save(path, snapshot)
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "catalog_persist_failed".to_string(),
                 message: error.to_string(),
             })
     }
@@ -1679,6 +1701,93 @@ mod tests {
         assert!(response.path.is_none());
         assert!(response.entries.is_none());
         assert!(response.error.is_none());
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn catalog_hydrates_from_metadata() {
+        let workspace_dir = std::env::current_dir().expect("current dir");
+        let tempdir = tempfile::Builder::new()
+            .prefix("spur-notebook-catalog-hydrate-")
+            .tempdir_in(&workspace_dir)
+            .expect("workspace-local fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+        )
+        .await
+        .expect("write notebook fixture");
+
+        let jute_state = Arc::new(State::new());
+        let notebook_root: NotebookRoot =
+            serde_json::from_value(empty_notebook()).expect("empty notebook parses");
+        jute_state
+            .get_notebook()
+            .load(notebook_path.clone(), notebook_root);
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(notebook_path.clone());
+        }
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_owned(),
+                    path: csv.display().to_string(),
+                    group: Some("quarterly".to_owned()),
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+
+        let serialized: Value = serde_json::from_slice(
+            &tokio::fs::read(&notebook_path)
+                .await
+                .expect("serialized notebook reads"),
+        )
+        .expect("serialized notebook parses");
+        assert_eq!(
+            serialized["metadata"]["spur"]["datasources"]["schema_version"],
+            json!(1)
+        );
+        assert_eq!(
+            serialized["metadata"]["spur"]["datasources"]["entries"][0]["path"],
+            json!(entry.path)
+        );
+        let relative_path = serialized["metadata"]["spur"]["datasources"]["entries"][0]
+            ["workspaceRelativePath"]
+            .as_str()
+            .expect("workspace-relative path is stored");
+        assert!(!std::path::Path::new(relative_path).is_absolute());
+        assert!(relative_path.ends_with("sales.csv"));
+
+        let rehydrated = State::new();
+        let load_response = jute::commands::handle_daemon_control_request(
+            jute::commands::DaemonControlRequest::new(
+                jute::commands::DaemonControlCommand::LoadNotebook {
+                    path: notebook_path.display().to_string(),
+                },
+            ),
+            &rehydrated,
+        )
+        .await;
+
+        assert!(load_response.ok, "{:?}", load_response.error);
+        assert_eq!(rehydrated.datasource_catalog.lock().list(), vec![entry]);
     }
 
     fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {

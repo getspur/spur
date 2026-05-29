@@ -37,6 +37,7 @@ pub mod venv;
 
 type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
+type BeforeSaveHook = dyn Fn(&Path, &mut NotebookRoot) + Send + Sync;
 
 /// Snapshot of a stable kernel slot for agent read-side tools.
 #[derive(Debug, Clone, Serialize)]
@@ -350,6 +351,7 @@ struct LastNotebookRecord {
 pub struct SaveCoordinator {
     inner: Arc<Mutex<SaveState>>,
     writer: Arc<SaveWriter>,
+    before_save: Option<Arc<BeforeSaveHook>>,
 }
 
 #[derive(Default)]
@@ -370,13 +372,18 @@ impl Default for SaveCoordinator {
             writer: Arc::new(|path, contents| {
                 Box::pin(async move { atomic_write_notebook(&path, &contents).await })
             }),
+            before_save: None,
         }
     }
 }
 
 impl SaveCoordinator {
     /// Queue and persist notebook contents to disk.
-    pub async fn save(&self, path: PathBuf, contents: NotebookRoot) -> Result<(), Error> {
+    pub async fn save(&self, path: PathBuf, mut contents: NotebookRoot) -> Result<(), Error> {
+        if let Some(before_save) = self.before_save.as_ref() {
+            before_save(&path, &mut contents);
+        }
+
         let mut state = self.inner.lock().await;
         state.queued = Some(PendingSave { path, contents });
         if state.in_flight {
@@ -405,6 +412,18 @@ impl SaveCoordinator {
         }
     }
 
+    /// Build a coordinator that patches notebook metadata immediately before
+    /// writes use the normal atomic-save path.
+    pub fn with_before_save<F>(before_save: F) -> Self
+    where
+        F: Fn(&Path, &mut NotebookRoot) + Send + Sync + 'static,
+    {
+        Self {
+            before_save: Some(Arc::new(before_save)),
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     fn with_writer_for_test<F>(writer: F) -> Self
     where
@@ -413,6 +432,7 @@ impl SaveCoordinator {
         Self {
             inner: Arc::new(Mutex::new(SaveState::default())),
             writer: Arc::new(writer),
+            before_save: None,
         }
     }
 }
@@ -690,6 +710,11 @@ async fn handle_daemon_control_inner(
             let root: NotebookRoot = serde_json::from_str(&contents).map_err(|error| {
                 DaemonControlResponse::failure("load_failed", error.to_string())
             })?;
+            let catalog = crate::state::DatasourceCatalog::hydrate_from_metadata(
+                &root.metadata,
+                Some(Path::new(&path)),
+            );
+            *state.datasource_catalog.lock() = catalog;
             let delta = notebook.load(PathBuf::from(path), root);
             Ok(DaemonControlResult::Delta(delta))
         }
