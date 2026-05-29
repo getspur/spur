@@ -543,12 +543,16 @@ fn temporal_fixture_artifact() -> GraphIndexArtifact {
             sha: "commit-a".to_owned(),
             parents: Vec::new(),
             author_time: 1_700_000_001,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "initial".to_owned(),
         },
         CommitArtifact {
             sha: "commit-b".to_owned(),
             parents: vec!["commit-a".to_owned()],
             author_time: 1_700_000_002,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "next".to_owned(),
         },
     ];
