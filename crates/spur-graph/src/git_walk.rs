@@ -1442,18 +1442,34 @@ fn split_tiebreak_winner(matches: &[RenameMatch], scores: &[(usize, f64)]) -> Op
     if tied {
         None
     } else {
-        winner.map(|(index, _)| index)
+        winner.and_then(|(index, signal)| (signal.0 || signal.1).then_some(index))
     }
 }
 
-fn split_tiebreak_signal(rename_match: &RenameMatch) -> (bool, std::cmp::Reverse<usize>) {
+fn split_tiebreak_signal(rename_match: &RenameMatch) -> (bool, bool, std::cmp::Reverse<usize>) {
     (
         rename_match.from.snapshot.entity_name == rename_match.to.snapshot.entity_name,
+        entity_names_share_significant_token(
+            &rename_match.from.snapshot.entity_name,
+            &rename_match.to.snapshot.entity_name,
+        ),
         std::cmp::Reverse(line_start_distance(
             &rename_match.from.snapshot,
             &rename_match.to.snapshot,
         )),
     )
+}
+
+fn entity_names_share_significant_token(left: &str, right: &str) -> bool {
+    significant_name_tokens(left).any(|left_token| {
+        significant_name_tokens(right).any(|right_token| right_token == left_token)
+    })
+}
+
+fn significant_name_tokens(name: &str) -> impl Iterator<Item = &str> {
+    name.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3)
+        .filter(|token| !matches!(*token, "old" | "new"))
 }
 
 fn line_start_distance(from: &SymbolSnapshotArtifact, to: &SymbolSnapshotArtifact) -> usize {
