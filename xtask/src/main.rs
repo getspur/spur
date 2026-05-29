@@ -29,23 +29,46 @@ fn print_help() {
     eprintln!("subcommands:");
     if cfg!(target_os = "macos") {
         eprintln!(
-            "  install [--debug]   install spur to $CARGO_HOME/bin and Jute.app to ~/Applications"
+            "  install [--debug] [--remote]   install spur to $CARGO_HOME/bin and Jute.app to ~/Applications"
         );
     } else {
-        eprintln!("  install [--debug]   install spur and spur-notebook to $CARGO_HOME/bin");
+        eprintln!(
+            "  install [--debug] [--remote]   install spur and spur-notebook to $CARGO_HOME/bin"
+        );
+    }
+    eprintln!();
+    eprintln!("options:");
+    eprintln!("  --debug    build/install debug artifacts for local installs");
+    eprintln!(
+        "  --remote   build Linux release binaries on the GCP VM via scripts/gcp-build and fetch them to $CARGO_HOME/bin"
+    );
+    if cfg!(target_os = "macos") {
+        eprintln!(
+            "             on macOS this installs Linux binaries only; it does not build Jute.app"
+        );
     }
 }
 
 fn install(extra: Vec<String>) -> ExitCode {
     let debug = extra.iter().any(|a| a == "--debug");
+    let remote = extra.iter().any(|a| a == "--remote");
     let workspace_root = workspace_root();
 
-    if let Err(err) = cargo_install(&workspace_root, "crates/spur-cli", debug, &[], &extra) {
-        eprintln!("xtask: {err}");
-        return ExitCode::FAILURE;
+    if remote {
+        if let Err(err) = install_remote_linux_binaries(&workspace_root) {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
+        }
+        verify_sibling_install();
+        return ExitCode::SUCCESS;
     }
 
     if cfg!(target_os = "macos") {
+        if let Err(err) = install_macos_cli(&workspace_root, debug, &extra) {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
+        }
+
         match install_macos_jute_app(&workspace_root) {
             Ok(app_path) => {
                 verify_macos_install(&app_path);
@@ -63,13 +86,7 @@ fn install(extra: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
 
-        if let Err(err) = cargo_install(
-            &workspace_root,
-            "crates/spur-notebook",
-            debug,
-            &["custom-protocol"],
-            &extra,
-        ) {
+        if let Err(err) = install_linux_binaries(&workspace_root, debug, &extra) {
             eprintln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
@@ -78,56 +95,166 @@ fn install(extra: Vec<String>) -> ExitCode {
     }
 }
 
-fn cargo_install(
-    workspace_root: &Path,
-    crate_path: &str,
-    debug: bool,
-    features: &[&str],
-    extra: &[String],
-) -> Result<(), String> {
-    let manifest_path = workspace_root.join(crate_path);
-    eprintln!("==> cargo install --path {}", manifest_path.display());
-    let mut cmd = cargo_install_command(workspace_root, crate_path, debug, features, extra);
-    run_status(&mut cmd, &format!("cargo install for {crate_path}"))
+fn install_macos_cli(workspace_root: &Path, debug: bool, extra: &[String]) -> Result<(), String> {
+    let mut build = cargo_build_command(workspace_root, debug, &["spur-cli"], &[], extra);
+    run_status(&mut build, "cargo build -p spur-cli")?;
+    install_built_binary(workspace_root, debug, "spur")
 }
 
-fn cargo_install_command(
+fn install_linux_binaries(
     workspace_root: &Path,
-    crate_path: &str,
     debug: bool,
+    extra: &[String],
+) -> Result<(), String> {
+    let mut build = linux_install_build_command(workspace_root, debug, extra);
+    run_status(&mut build, "cargo build -p spur-cli -p spur-notebook")?;
+    install_built_binary(workspace_root, debug, "spur")?;
+    install_built_binary(workspace_root, debug, "spur-notebook")
+}
+
+fn linux_install_build_command(workspace_root: &Path, debug: bool, extra: &[String]) -> Command {
+    cargo_build_command(
+        workspace_root,
+        debug,
+        &["spur-cli", "spur-notebook"],
+        &["spur-notebook/custom-protocol"],
+        extra,
+    )
+}
+
+fn install_remote_linux_binaries(workspace_root: &Path) -> Result<(), String> {
+    let mut build = remote_install_build_command(workspace_root);
+    run_status(
+        &mut build,
+        "scripts/gcp-build/build.sh remote release build",
+    )?;
+    let mut fetch = remote_install_fetch_command(workspace_root);
+    run_status(&mut fetch, "scripts/gcp-build/fetch.sh --bins")
+}
+
+fn remote_install_build_command(workspace_root: &Path) -> Command {
+    let mut cmd = Command::new(workspace_root.join("scripts/gcp-build/build.sh"));
+    cmd.arg("--auto-spin")
+        .arg("--")
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "spur-cli",
+            "-p",
+            "spur-notebook",
+            "--features",
+            "spur-notebook/custom-protocol",
+            "--locked",
+        ])
+        .current_dir(workspace_root);
+    cmd
+}
+
+fn remote_install_fetch_command(workspace_root: &Path) -> Command {
+    let mut cmd = Command::new(workspace_root.join("scripts/gcp-build/fetch.sh"));
+    cmd.arg("--bins").current_dir(workspace_root);
+    cmd
+}
+
+fn cargo_build_command(
+    workspace_root: &Path,
+    debug: bool,
+    packages: &[&str],
     features: &[&str],
     extra: &[String],
 ) -> Command {
-    let manifest_path = workspace_root.join(crate_path);
     let mut cmd = Command::new(cargo());
-    cmd.arg("install")
-        .arg("--path")
-        .arg(&manifest_path)
-        .arg("--force")
-        // macOS Sequoia/Tahoe stamps every file with com.apple.provenance based on
-        // the creating process. When sccache (configured in ~/.cargo/config.toml as
-        // a global rustc-wrapper) writes intermediate artifacts, they carry sccache's
-        // provenance and subsequent rustc invocations fail to overwrite them with
-        // "Operation not permitted". Disable the wrapper inside install so users
-        // don't have to chase the cryptic error.
-        .env_remove("RUSTC_WRAPPER");
-    if debug {
-        cmd.arg("--debug");
+    cmd.arg("build").current_dir(workspace_root);
+    if !debug {
+        cmd.arg("--release");
+    }
+    for package in packages {
+        cmd.arg("-p").arg(package);
     }
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
     }
-    for arg in extra.iter().filter(|a| a.as_str() != "--debug") {
+    for arg in extra.iter().filter(|arg| !is_xtask_install_flag(arg)) {
         cmd.arg(arg);
     }
+    apply_macos_rustc_wrapper_workaround(&mut cmd);
     cmd
+}
+
+fn is_xtask_install_flag(arg: &str) -> bool {
+    matches!(arg, "--debug" | "--remote")
+}
+
+fn install_built_binary(
+    workspace_root: &Path,
+    debug: bool,
+    binary_name: &str,
+) -> Result<(), String> {
+    let profile = if debug { "debug" } else { "release" };
+    let built_binary = workspace_root
+        .join("target")
+        .join(profile)
+        .join(binary_name);
+    if !built_binary.is_file() {
+        return Err(format!(
+            "expected built binary at {}",
+            built_binary.display()
+        ));
+    }
+
+    let bin_dir = cargo_home_bin();
+    fs::create_dir_all(&bin_dir)
+        .map_err(|err| format!("failed to create {}: {err}", bin_dir.display()))?;
+    let installed_binary = bin_dir.join(binary_name);
+    remove_existing_path(&installed_binary)?;
+    fs::copy(&built_binary, &installed_binary).map_err(|err| {
+        format!(
+            "failed to copy {} to {}: {err}",
+            built_binary.display(),
+            installed_binary.display()
+        )
+    })?;
+    eprintln!("installed {binary_name}: {}", installed_binary.display());
+    Ok(())
+}
+
+fn remove_existing_path(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let result = if metadata.file_type().is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+            result.map_err(|err| format!("failed to remove existing {}: {err}", path.display()))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!(
+            "failed to inspect existing {}: {err}",
+            path.display()
+        )),
+    }
+}
+
+fn apply_macos_rustc_wrapper_workaround(cmd: &mut Command) {
+    if should_strip_rustc_wrapper(cfg!(target_os = "macos")) {
+        // macOS Sequoia/Tahoe stamps files with com.apple.provenance based on the
+        // creating process. sccache-written intermediates can then fail later rustc
+        // overwrites with "Operation not permitted"; Linux keeps its wrapper.
+        cmd.env_remove("RUSTC_WRAPPER");
+    }
+}
+
+fn should_strip_rustc_wrapper(is_macos: bool) -> bool {
+    is_macos
 }
 
 fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
     let jute_dir = workspace_root.join("crates/spur-notebook/jute-notebook");
     let tauri_dir = jute_dir.join("src-tauri");
 
-    ensure_jute_frontend_dist(&jute_dir)?;
+    ensure_jute_frontend_deps(&jute_dir)?;
 
     if tauri_uv_sidecars_missing(&tauri_dir) {
         let mut download = Command::new("python3");
@@ -179,9 +306,8 @@ fn tauri_build_command(workspace_root: &Path) -> Command {
     let mut cmd = Command::new(jute_dir.join(tauri_cli_bin()));
     cmd.args(["build", "--bundles", "app"])
         .current_dir(spur_notebook_dir)
-        .env_remove("TAURI_CONFIG")
-        // See cargo_install: avoids the macOS provenance vs sccache collision.
-        .env_remove("RUSTC_WRAPPER");
+        .env_remove("TAURI_CONFIG");
+    apply_macos_rustc_wrapper_workaround(&mut cmd);
     cmd
 }
 
@@ -196,18 +322,41 @@ fn tauri_cli_bin() -> PathBuf {
 }
 
 fn ensure_jute_frontend_dist(jute_dir: &Path) -> Result<(), String> {
+    ensure_jute_frontend_deps(jute_dir)?;
+
+    let mut build = jute_frontend_dist_build_command(jute_dir);
+    run_status(&mut build, "npm run build")?;
+    Ok(())
+}
+
+fn ensure_jute_frontend_deps(jute_dir: &Path) -> Result<(), String> {
+    ensure_jute_frontend_deps_with_runner(jute_dir, run_status)
+}
+
+fn ensure_jute_frontend_deps_with_runner(
+    jute_dir: &Path,
+    mut run: impl FnMut(&mut Command, &str) -> Result<(), String>,
+) -> Result<(), String> {
     if npm_install_needed(jute_dir) {
-        let mut cmd = Command::new("npm");
-        cmd.arg("install").current_dir(jute_dir);
-        run_status(&mut cmd, "npm install")?;
+        let mut cmd = jute_frontend_deps_install_command(jute_dir);
+        run(&mut cmd, "npm install")?;
     } else {
         eprintln!("==> npm install skipped; node_modules and package-lock.json look current");
     }
 
-    let mut build = Command::new("npm");
-    build.arg("run").arg("build").current_dir(jute_dir);
-    run_status(&mut build, "npm run build")?;
     Ok(())
+}
+
+fn jute_frontend_deps_install_command(jute_dir: &Path) -> Command {
+    let mut cmd = Command::new("npm");
+    cmd.arg("install").current_dir(jute_dir);
+    cmd
+}
+
+fn jute_frontend_dist_build_command(jute_dir: &Path) -> Command {
+    let mut cmd = Command::new("npm");
+    cmd.arg("run").arg("build").current_dir(jute_dir);
+    cmd
 }
 
 fn resign_macos_bundle_ad_hoc(built_app: &Path) {
@@ -326,15 +475,14 @@ fn verify_sibling_install() {
     let spur = bin_dir.join("spur");
     let notebook = bin_dir.join("spur-notebook");
     let ok = spur.exists() && notebook.exists();
+    eprintln!();
     if ok {
-        eprintln!();
         eprintln!("installed:");
         eprintln!("  {}", spur.display());
         eprintln!("  {}", notebook.display());
         eprintln!();
         eprintln!("sibling lookup will resolve spur-notebook automatically.");
     } else {
-        eprintln!();
         eprintln!(
             "warning: expected siblings not both present in {}",
             bin_dir.display()
@@ -396,7 +544,7 @@ fn binary_contains(path: &Path, needle: &[u8]) -> io::Result<bool> {
 fn user_applications_dir() -> Result<PathBuf, String> {
     env::var_os("HOME")
         .map(|home| PathBuf::from(home).join("Applications"))
-        .ok_or_else(|| "HOME is not set; cannot install Jute.app to ~/Applications".to_string())
+        .ok_or_else(|| "HOME is not set; cannot install Jute.app to ~/Applications".to_owned())
 }
 
 fn cargo_home_bin() -> PathBuf {
@@ -409,41 +557,106 @@ fn cargo_home_bin() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::*;
 
     #[test]
-    fn cargo_install_command_includes_requested_features() {
+    fn cargo_build_command_includes_requested_features() {
         let root = PathBuf::from("/workspace");
-        let extra = vec!["--locked".to_string(), "--debug".to_string()];
+        let extra = vec![
+            "--locked".to_string(),
+            "--debug".to_string(),
+            "--remote".to_string(),
+        ];
 
-        let command = cargo_install_command(
+        let command = cargo_build_command(
             &root,
-            "crates/spur-notebook",
             true,
-            &["custom-protocol"],
+            &["spur-notebook"],
+            &["spur-notebook/custom-protocol"],
             &extra,
         );
 
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
         assert_eq!(
-            args,
+            command_args(&command),
             vec![
-                "install".to_string(),
-                "--path".to_string(),
-                root.join("crates/spur-notebook")
-                    .to_string_lossy()
-                    .into_owned(),
-                "--force".to_string(),
-                "--debug".to_string(),
+                "build".to_string(),
+                "-p".to_string(),
+                "spur-notebook".to_string(),
                 "--features".to_string(),
-                "custom-protocol".to_string(),
+                "spur-notebook/custom-protocol".to_string(),
                 "--locked".to_string(),
             ]
         );
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn remote_install_build_command_dispatches_locked_linux_release_build() {
+        let root = PathBuf::from("/workspace");
+
+        let command = remote_install_build_command(&root);
+
+        assert_eq!(
+            command.get_program(),
+            root.join("scripts/gcp-build/build.sh").as_os_str()
+        );
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "--auto-spin".to_string(),
+                "--".to_string(),
+                "build".to_string(),
+                "--release".to_string(),
+                "-p".to_string(),
+                "spur-cli".to_string(),
+                "-p".to_string(),
+                "spur-notebook".to_string(),
+                "--features".to_string(),
+                "spur-notebook/custom-protocol".to_string(),
+                "--locked".to_string(),
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn remote_install_fetch_command_uses_binary_fetch_mode() {
+        let root = PathBuf::from("/workspace");
+
+        let command = remote_install_fetch_command(&root);
+
+        assert_eq!(
+            command.get_program(),
+            root.join("scripts/gcp-build/fetch.sh").as_os_str()
+        );
+        assert_eq!(command_args(&command), vec!["--bins".to_string()]);
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn linux_install_build_command_builds_cli_and_notebook_together() {
+        let root = PathBuf::from("/workspace");
+        let extra = vec!["--locked".to_string()];
+
+        let command = linux_install_build_command(&root, false, &extra);
+
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "build".to_string(),
+                "--release".to_string(),
+                "-p".to_string(),
+                "spur-cli".to_string(),
+                "-p".to_string(),
+                "spur-notebook".to_string(),
+                "--features".to_string(),
+                "spur-notebook/custom-protocol".to_string(),
+                "--locked".to_string(),
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
     }
 
     #[test]
@@ -452,11 +665,6 @@ mod tests {
 
         let command = tauri_build_command(&root);
 
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
         assert_eq!(
             command.get_program(),
             root.join("crates/spur-notebook/jute-notebook")
@@ -464,7 +672,7 @@ mod tests {
                 .as_os_str()
         );
         assert_eq!(
-            args,
+            command_args(&command),
             vec![
                 "build".to_string(),
                 "--bundles".to_string(),
@@ -475,5 +683,54 @@ mod tests {
             command.get_current_dir(),
             Some(root.join("crates/spur-notebook").as_path())
         );
+        assert!(command_removes_env(&command, "TAURI_CONFIG"));
+        assert_eq!(
+            command_removes_env(&command, "RUSTC_WRAPPER"),
+            cfg!(target_os = "macos")
+        );
+    }
+
+    #[test]
+    fn macos_jute_frontend_setup_installs_deps_without_running_build() {
+        let jute_dir = PathBuf::from("/workspace/crates/spur-notebook/jute-notebook");
+        let mut commands = Vec::new();
+
+        ensure_jute_frontend_deps_with_runner(&jute_dir, |command, label| {
+            commands.push((
+                label.to_string(),
+                command.get_program().to_string_lossy().into_owned(),
+                command_args(command),
+            ));
+            Ok(())
+        })
+        .expect("frontend dependency setup should succeed");
+
+        assert_eq!(
+            commands,
+            vec![(
+                "npm install".to_string(),
+                "npm".to_string(),
+                vec!["install".to_string()]
+            )]
+        );
+    }
+
+    #[test]
+    fn rustc_wrapper_strip_is_macos_gated() {
+        assert!(should_strip_rustc_wrapper(true));
+        assert!(!should_strip_rustc_wrapper(false));
+    }
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn command_removes_env(command: &Command, name: &str) -> bool {
+        command
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new(name) && value.is_none())
     }
 }
