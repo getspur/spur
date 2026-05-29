@@ -39,6 +39,12 @@ const UNKNOWN_ID: &str = "unknown-symbol";
 
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Clone, Copy, Debug)]
+enum CodeGraphFixtureBackend {
+    Parquet,
+    InMemory,
+}
+
 struct CwdGuard {
     original: std::path::PathBuf,
 }
@@ -189,6 +195,10 @@ fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
 }
 
 fn write_temporal_fixture_artifact(worktree: &Path) {
+    write_temporal_fixture_artifact_for_backend(worktree, CodeGraphFixtureBackend::Parquet);
+}
+
+fn write_temporal_fixture_artifact_for_backend(worktree: &Path, backend: CodeGraphFixtureBackend) {
     std::fs::create_dir_all(worktree.join(".git")).expect("create git marker");
     let old_root = snapshot(OLD_ROOT_ID, OLD_SHA, "foo");
     let new_root = snapshot(NEW_ROOT_ID, NEW_SHA, "bar");
@@ -244,7 +254,10 @@ fn write_temporal_fixture_artifact(worktree: &Path) {
             temporal_rename(old_root.key.clone(), new_root.key.clone()),
         ],
     };
-    write_graph_artifact(worktree, &graph);
+    match backend {
+        CodeGraphFixtureBackend::Parquet => write_graph_artifact(worktree, &graph),
+        CodeGraphFixtureBackend::InMemory => write_legacy_graph_artifact(worktree, &graph),
+    }
 
     let commits = CommitIndexArtifact {
         schema_version: GRAPH_INDEX_VERSION_TEMPORAL
@@ -590,6 +603,16 @@ fn write_graph_artifact(worktree: &Path, artifact: &GraphIndexArtifact) {
     write_current_pointer(worktree, &written).expect("write CURRENT pointer");
 }
 
+fn write_legacy_graph_artifact(worktree: &Path, artifact: &GraphIndexArtifact) {
+    let spur_dir = worktree.join(".spur");
+    std::fs::create_dir_all(&spur_dir).expect("create .spur");
+    std::fs::write(
+        spur_dir.join("graph-index.json"),
+        serde_json::to_string_pretty(artifact).expect("encode legacy JSON graph artifact"),
+    )
+    .expect("write legacy JSON graph artifact");
+}
+
 fn symbol_id(artifact: &GraphIndexArtifact, entity_name: &str) -> String {
     symbol_by_entity(artifact, entity_name)
         .stable_symbol_id
@@ -671,6 +694,56 @@ fn error_data(response: &Value) -> &Value {
         .as_object()
         .unwrap_or_else(|| panic!("JSON-RPC error has structured data: {response}"));
     &response["error"]["data"]
+}
+
+fn assert_code_symbol_history_rename_chain(body: &Value, backend: CodeGraphFixtureBackend) {
+    let keys = body
+        .as_object()
+        .unwrap_or_else(|| panic!("symbol history body is object for {backend:?}: {body}"))
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        keys.contains("events") && keys.contains("symbol"),
+        "symbol history body has required keys for {backend:?}: {keys:?}"
+    );
+    assert_eq!(
+        body["symbol"],
+        format!("graph://symbol/{NEW_ROOT_ID}"),
+        "unexpected symbol URI for {backend:?}"
+    );
+
+    let events = body["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("history events are an array for {backend:?}: {body}"));
+    assert_eq!(events.len(), 2, "unexpected event count for {backend:?}");
+    for event in events {
+        let event_keys = event
+            .as_object()
+            .unwrap_or_else(|| panic!("history event is object for {backend:?}: {event}"))
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            event_keys,
+            BTreeSet::from([
+                "change_kind".to_string(),
+                "commit".to_string(),
+                "snapshot".to_string(),
+            ]),
+            "unexpected event keys for {backend:?}"
+        );
+    }
+
+    assert_eq!(events[0]["commit"], OLD_SHA);
+    assert_eq!(events[0]["change_kind"], "added");
+    assert_eq!(events[0]["snapshot"]["stable_symbol_id"], OLD_ROOT_ID);
+    assert_eq!(events[1]["commit"], NEW_SHA);
+    assert_eq!(
+        events[1]["change_kind"]["renamed_from"]["symbol"]["stable_symbol_id"],
+        OLD_ROOT_ID
+    );
+    assert_eq!(events[1]["snapshot"]["stable_symbol_id"], NEW_ROOT_ID);
 }
 
 fn entity_names(rows: &[Value]) -> BTreeSet<String> {
@@ -1874,34 +1947,28 @@ async fn code_subgraph_returns_deleted_with_last_seen() {
 }
 
 #[tokio::test]
-async fn code_symbol_history_returns_rename_chain() {
+async fn code_symbol_history_returns_rename_chain_for_parquet_and_in_memory_backends() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
-    let worktree = TempDir::new().expect("temp worktree");
-    write_temporal_fixture_artifact(worktree.path());
-    let _cwd = enter_dir(worktree.path());
-    let server = test_server();
+    for backend in [
+        CodeGraphFixtureBackend::Parquet,
+        CodeGraphFixtureBackend::InMemory,
+    ] {
+        let worktree = TempDir::new().expect("temp worktree");
+        write_temporal_fixture_artifact_for_backend(worktree.path(), backend);
+        let _cwd = enter_dir(worktree.path());
+        let server = test_server();
 
-    let body = tool_body(
-        call_tool(
-            &server,
-            "code_symbol_history",
-            json!({ "symbol": format!("graph://symbol/{NEW_ROOT_ID}") }),
-        )
-        .await,
-    );
+        let body = tool_body(
+            call_tool(
+                &server,
+                "code_symbol_history",
+                json!({ "symbol": format!("graph://symbol/{NEW_ROOT_ID}") }),
+            )
+            .await,
+        );
 
-    assert_eq!(body["symbol"], format!("graph://symbol/{NEW_ROOT_ID}"));
-    let events = body["events"].as_array().expect("history events");
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0]["commit"], OLD_SHA);
-    assert_eq!(events[0]["change_kind"], "added");
-    assert_eq!(events[0]["snapshot"]["stable_symbol_id"], OLD_ROOT_ID);
-    assert_eq!(events[1]["commit"], NEW_SHA);
-    assert_eq!(
-        events[1]["change_kind"]["renamed_from"]["symbol"]["stable_symbol_id"],
-        OLD_ROOT_ID
-    );
-    assert_eq!(events[1]["snapshot"]["stable_symbol_id"], NEW_ROOT_ID);
+        assert_code_symbol_history_rename_chain(&body, backend);
+    }
 }
 
 #[tokio::test]
