@@ -26,16 +26,16 @@ use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::store::parquet::{
-    confidence_from_str, edge_kind_from_str, read_temporal_artifact_parquet, relation_from_str,
-    PARQUET_ROW_GROUP_SIZE,
+    confidence_from_str, edge_kind_from_str, read_temporal_artifact_parquet,
+    read_temporal_artifact_parquet_for_symbol_history, relation_from_str, PARQUET_ROW_GROUP_SIZE,
 };
-use crate::temporal::TemporalIndex;
+use crate::temporal::{symbol_history_indexed, GitSha, TemporalIndex};
 use crate::{
     compare_symbols, find_callee_edges, find_caller_edges, read_artifact_header_parquet,
-    resolve_selector, search_symbols, GraphArtifactManifest, GraphEdgeArtifact,
-    GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact, OwnedCalleeRecord,
-    OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
-    CODE_SYMBOL_URI_PREFIX,
+    resolve_selector, search_symbols, ChangeKind, CommitIndexArtifact, GraphArtifactManifest,
+    GraphEdgeArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact,
+    OwnedCalleeRecord, OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol,
+    SelectorResolution, SnapshotKey, CODE_SYMBOL_URI_PREFIX,
 };
 use crate::{CandidateRow, NodeId, ResolvedSymbol, SearchFilters, SearchMode};
 
@@ -56,6 +56,14 @@ pub trait GraphQueryClient {
     fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>>;
     fn file_exists(&self, path: &str) -> anyhow::Result<bool>;
     fn temporal_index(&self) -> Arc<TemporalIndex>;
+    fn symbol_history(
+        &self,
+        commits: &CommitIndexArtifact,
+        symbol_id: &str,
+    ) -> anyhow::Result<Vec<(GitSha, ChangeKind, SnapshotKey)>> {
+        let index = self.temporal_index();
+        Ok(symbol_history_indexed(index.as_ref(), commits, symbol_id))
+    }
 }
 
 #[derive(Clone)]
@@ -754,6 +762,22 @@ impl GraphQueryClient for ParquetClient {
             Arc::new(TemporalIndex::new(Arc::new(artifact)))
         }))
     }
+
+    fn symbol_history(
+        &self,
+        commits: &CommitIndexArtifact,
+        symbol_id: &str,
+    ) -> anyhow::Result<Vec<(GitSha, ChangeKind, SnapshotKey)>> {
+        let artifact = read_temporal_artifact_parquet_for_symbol_history(&self.dir, symbol_id)
+            .with_context(|| {
+                format!(
+                    "failed to read filtered Parquet temporal artifact from `{}`",
+                    self.dir.display()
+                )
+            })?;
+        let index = TemporalIndex::new(Arc::new(artifact));
+        Ok(symbol_history_indexed(&index, commits, symbol_id))
+    }
 }
 
 fn projected_batches<const N: usize>(
@@ -1395,7 +1419,14 @@ fn i64_to_node_id(value: i64, name: &str) -> anyhow::Result<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{search_symbols, GraphIndexHeader, GraphSymbolArtifact, SearchFilters, SearchMode};
+    use crate::store::parquet::write_artifact_parquet;
+    use crate::{
+        search_symbols, ChangeKind, CommitArtifact, CommitIndexArtifact, EdgeEndpoint,
+        GraphIndexHeader, GraphSymbolArtifact, RelationKind, RenamePrev, SearchFilters, SearchMode,
+        SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy, WriteOptions,
+        GRAPH_INDEX_VERSION_TEMPORAL,
+    };
+    use std::collections::BTreeMap;
 
     fn artifact(symbols: Vec<GraphSymbolArtifact>) -> GraphIndexArtifact {
         GraphIndexArtifact {
@@ -1416,6 +1447,101 @@ mod tests {
             commits: Vec::new(),
             symbol_snapshots: Vec::new(),
             temporal_edges: Vec::new(),
+        }
+    }
+
+    fn temporal_artifact() -> GraphIndexArtifact {
+        let old_snapshot = snapshot("old-root", "commit-a", "foo");
+        let new_snapshot = snapshot("new-root", "commit-b", "bar");
+        let unrelated_snapshot = snapshot("unrelated", "commit-b", "baz");
+        let mut artifact = artifact(Vec::new());
+        artifact.header.graph_index_version = GRAPH_INDEX_VERSION_TEMPORAL.to_owned();
+        artifact.commits = commits();
+        artifact.symbol_snapshots = vec![
+            old_snapshot.clone(),
+            new_snapshot.clone(),
+            unrelated_snapshot.clone(),
+        ];
+        artifact.temporal_edges = vec![
+            temporal_touch("commit-a", old_snapshot.key.clone(), ChangeKind::Added),
+            temporal_touch(
+                "commit-b",
+                new_snapshot.key.clone(),
+                ChangeKind::RenamedFrom(RenamePrev::Symbol(old_snapshot.key.clone())),
+            ),
+            temporal_rename(old_snapshot.key, new_snapshot.key),
+            temporal_touch("commit-b", unrelated_snapshot.key, ChangeKind::Added),
+        ];
+        artifact
+    }
+
+    fn commits() -> Vec<CommitArtifact> {
+        vec![
+            CommitArtifact {
+                sha: "commit-a".to_owned(),
+                parents: Vec::new(),
+                author_time: 1,
+                summary: "add foo".to_owned(),
+            },
+            CommitArtifact {
+                sha: "commit-b".to_owned(),
+                parents: vec!["commit-a".to_owned()],
+                author_time: 2,
+                summary: "rename foo to bar".to_owned(),
+            },
+        ]
+    }
+
+    fn commit_index(commits: Vec<CommitArtifact>) -> CommitIndexArtifact {
+        CommitIndexArtifact {
+            schema_version: 7,
+            commits,
+            refs: BTreeMap::from([("HEAD".to_owned(), "commit-b".to_owned())]),
+            indexed_at: "2026-05-26T00:00:00Z".to_owned(),
+            walk_strategy: WalkStrategy::Reachable,
+        }
+    }
+
+    fn snapshot(id: &str, commit: &str, entity_name: &str) -> SymbolSnapshotArtifact {
+        SymbolSnapshotArtifact {
+            key: SnapshotKey {
+                stable_symbol_id: id.to_owned(),
+                commit: commit.to_owned(),
+            },
+            file_path: "src/lib.rs".to_owned().into(),
+            entity_name: entity_name.to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [0, 8],
+            line_range: [1, 2],
+            anchor_hash: format!("hash-{id}-{commit}"),
+            tokens: vec![entity_name.to_owned()],
+        }
+    }
+
+    fn temporal_touch(
+        commit: &str,
+        key: SnapshotKey,
+        change_kind: ChangeKind,
+    ) -> TemporalEdgeArtifact {
+        TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: commit.to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot { key },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(change_kind),
+        }
+    }
+
+    fn temporal_rename(from: SnapshotKey, to: SnapshotKey) -> TemporalEdgeArtifact {
+        TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot { key: from.clone() },
+            target: EdgeEndpoint::Snapshot { key: to },
+            relation: RelationKind::Touches,
+            parent: None,
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(from))),
         }
     }
 
@@ -1472,5 +1598,54 @@ mod tests {
         let second = client.temporal_index();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn parquet_client_symbol_history_returns_rename_chain_without_caching_full_temporal_index() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let artifact = temporal_artifact();
+        let commits = commit_index(artifact.commits.clone());
+        let expected = InMemoryClient::new(Arc::new(artifact.clone()))
+            .symbol_history(&commits, "new-root")
+            .expect("in-memory symbol history succeeds");
+        let parquet_dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write parquet artifact");
+        let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+        let actual = parquet
+            .symbol_history(&commits, "new-root")
+            .expect("parquet symbol history succeeds");
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "commit-a".to_owned(),
+                    ChangeKind::Added,
+                    SnapshotKey {
+                        stable_symbol_id: "old-root".to_owned(),
+                        commit: "commit-a".to_owned(),
+                    },
+                ),
+                (
+                    "commit-b".to_owned(),
+                    ChangeKind::RenamedFrom(RenamePrev::Symbol(SnapshotKey {
+                        stable_symbol_id: "old-root".to_owned(),
+                        commit: "commit-a".to_owned(),
+                    })),
+                    SnapshotKey {
+                        stable_symbol_id: "new-root".to_owned(),
+                        commit: "commit-b".to_owned(),
+                    },
+                ),
+            ]
+        );
+        assert!(parquet.temporal_index.get().is_none());
     }
 }
