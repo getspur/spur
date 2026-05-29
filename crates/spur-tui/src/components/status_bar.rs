@@ -165,6 +165,8 @@ pub struct StatusBarProps<'a> {
     /// (e.g. Vim Insert/Visual/Operator mode). Used to show `[Esc]back`
     /// instead of the misleading `[Esc]stop` when Esc cannot cancel.
     pub esc_consumed_by_composer: bool,
+    /// True when the notebook socket has advertised readiness.
+    pub notebook_ready: bool,
     /// Number of tracked issues (from IssuesLoaded); 0 means not shown.
     pub issue_count: usize,
     /// Graph alert summary from bv: (total, critical, warning). None if bv unavailable.
@@ -407,6 +409,13 @@ impl StatusBar {
             spans.extend(tombstone_badge.spans);
             spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         }
+        if props.notebook_ready && matches!(props.view, ViewId::SessionDetail(_)) {
+            spans.push(Span::styled(
+                if compact { "nb" } else { "notebook" },
+                Style::default().fg(token(theme, "status_bar.notebook.fg")),
+            ));
+            spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
+        }
         #[cfg(feature = "analytics")]
         if via_analytics_visible() {
             spans.push(Span::styled(
@@ -522,7 +531,52 @@ impl StatusBar {
 
 #[cfg(test)]
 mod status_bar_hint_tests {
-    use super::{hint_for_session_detail, StatusBar};
+    use super::{hint_for_session_detail, StatusBar, StatusBarProps};
+    use crate::action::ViewId;
+    use ratatui::style::Style;
+
+    fn status_bar_metric_contents(
+        view: &ViewId,
+        notebook_ready: bool,
+        compact: bool,
+    ) -> Vec<String> {
+        let theme = crate::theme::fallback_theme();
+        let props = StatusBarProps {
+            view,
+            theme,
+            tombstone: None,
+            running: 0,
+            pending_review: 0,
+            total_cost: 0.0,
+            elapsed: "0s",
+            current_mode: None,
+            current_model_label: None,
+            current_effort_label: None,
+            usage_supported: false,
+            context_used: None,
+            context_size: None,
+            stream_in_flight: false,
+            esc_consumed_by_composer: false,
+            notebook_ready,
+            issue_count: 0,
+            alert_summary: None,
+            license_badge: None,
+            flag_summary: None,
+            view_hint_override: None,
+        };
+
+        StatusBar::metric_spans(
+            theme,
+            &props,
+            String::new(),
+            None,
+            Style::default(),
+            compact,
+        )
+        .into_iter()
+        .map(|span| span.content.into_owned())
+        .collect()
+    }
 
     #[test]
     fn hint_shows_stop_when_streaming_and_esc_can_cancel() {
@@ -564,5 +618,35 @@ mod status_bar_hint_tests {
 
         let truncated = StatusBar::truncate_model_label("a-名前20241022", 4);
         assert_eq!(truncated.as_ref(), "a-名…");
+    }
+
+    #[test]
+    fn notebook_ready_badge_only_renders_for_session_detail() {
+        let session_detail = ViewId::SessionDetail(spur_acp::SessionId("session".to_string()));
+        let dashboard = ViewId::Dashboard;
+
+        let full_ready = status_bar_metric_contents(&session_detail, true, false);
+        assert!(
+            full_ready.iter().any(|content| content == "notebook"),
+            "expected notebook badge for ready SessionDetail: {full_ready:?}"
+        );
+
+        let compact_ready = status_bar_metric_contents(&session_detail, true, true);
+        assert!(
+            compact_ready.iter().any(|content| content == "nb"),
+            "expected compact notebook badge for ready SessionDetail: {compact_ready:?}"
+        );
+
+        let not_ready = status_bar_metric_contents(&session_detail, false, false);
+        assert!(
+            !not_ready.iter().any(|content| content == "notebook"),
+            "expected no notebook badge when socket is not ready: {not_ready:?}"
+        );
+
+        let dashboard_ready = status_bar_metric_contents(&dashboard, true, false);
+        assert!(
+            !dashboard_ready.iter().any(|content| content == "notebook"),
+            "expected no notebook badge outside SessionDetail: {dashboard_ready:?}"
+        );
     }
 }

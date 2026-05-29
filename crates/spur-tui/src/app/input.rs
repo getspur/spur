@@ -217,6 +217,7 @@ impl App {
                     flag_summary: self.flag_summary,
                     tombstone: None,
                     transient_hint_override: None,
+                    notebook_ready: self.notebook_socket_nonce.is_some(),
                     theme: &self.theme,
                 };
                 let action = match self.current_view {
