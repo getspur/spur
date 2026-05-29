@@ -26,6 +26,13 @@ pub const DATASOURCE_CATALOG_SCHEMA_VERSION: u32 = 1;
 const SPUR_METADATA_KEY: &str = "spur";
 const DATASOURCES_METADATA_KEY: &str = "datasources";
 
+/// In-daemon events produced by notebook state mutations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonEvent {
+    /// The active notebook's datasource catalog changed.
+    DatasourcesChanged(Vec<DatasourceEntry>),
+}
+
 /// In-memory catalog of datasources attached to the active notebook.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasourceCatalog {
@@ -314,6 +321,9 @@ pub struct State {
     /// In-memory datasource catalog for the active notebook.
     pub datasource_catalog: Arc<Mutex<DatasourceCatalog>>,
 
+    /// In-process daemon event fan-out for subscribers.
+    pub event_tx: tokio::sync::broadcast::Sender<DaemonEvent>,
+
     /// Lazily initialized authoritative notebook document store.
     notebook: Mutex<Option<Arc<NotebookStore>>>,
 }
@@ -322,6 +332,7 @@ impl Default for State {
     fn default() -> Self {
         let datasource_catalog = Arc::new(Mutex::new(DatasourceCatalog::default()));
         let catalog_for_save = Arc::clone(&datasource_catalog);
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             kernels: DashMap::new(),
             save_coordinator: SaveCoordinator::with_before_save(
@@ -332,6 +343,7 @@ impl Default for State {
                 },
             ),
             datasource_catalog,
+            event_tx,
             notebook: Mutex::new(None),
         }
     }
@@ -343,12 +355,40 @@ impl State {
         Self::default()
     }
 
+    /// Attach or replace a datasource entry, then notify daemon event subscribers.
+    pub fn attach_datasource(&self, entry: DatasourceEntry) {
+        let entries = {
+            let mut catalog = self.datasource_catalog.lock();
+            catalog.attach(entry);
+            catalog.list()
+        };
+        self.emit_datasources_changed(entries);
+    }
+
+    /// Detach a datasource entry, notifying subscribers only when the catalog changes.
+    pub fn detach_datasource(&self, name: &str) -> Option<DatasourceEntry> {
+        let (removed, entries) = {
+            let mut catalog = self.datasource_catalog.lock();
+            let removed = catalog.detach(name);
+            let entries = removed.as_ref().map(|_| catalog.list());
+            (removed, entries)
+        };
+        if let Some(entries) = entries {
+            self.emit_datasources_changed(entries);
+        }
+        removed
+    }
+
     /// Return the process-wide notebook store, initializing it on first use.
     pub fn get_notebook(&self) -> Arc<NotebookStore> {
         let mut notebook = self.notebook.lock();
         notebook
             .get_or_insert_with(|| NotebookStore::new(Arc::new(self.save_coordinator.clone())))
             .clone()
+    }
+
+    fn emit_datasources_changed(&self, entries: Vec<DatasourceEntry>) {
+        let _ = self.event_tx.send(DaemonEvent::DatasourcesChanged(entries));
     }
 }
 
