@@ -376,3 +376,20 @@ debug = true
 strip = false
 codegen-units = 1
 lto = "thin"
+
+# Dev/test compile-time tuning. Full debuginfo (debug=2, the default) is one of
+# the slowest parts of dev/test builds and linking. line-tables-only keeps panic
+# backtraces and accurate profiling stack attribution — and `force-frame-pointers`
+# (.cargo/config.toml) is an orthogonal rustflag that stays on — while cutting
+# dev/test compile+link time materially. The release/dist/profiling profiles are
+# untouched: `profiling` sets debug=true explicitly for full local-variable
+# debugging. Need a full-debuginfo dev build? `RUSTFLAGS="-C debuginfo=2" cargo build`.
+# `[profile.test]` inherits these via `dev`.
+[profile.dev]
+debug = "line-tables-only"
+
+# Build scripts and proc-macros are compiled once but executed many times; this
+# workspace is macro/codegen-heavy (tauri, prost, serde, tree-sitter), so paying
+# to optimize them pays back in faster macro expansion / codegen execution.
+[profile.dev.build-override]
+opt-level = 3
