@@ -74,19 +74,19 @@ pub async fn run_cell(
     code: &str,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
     let mut iopub_rx = conn.subscribe_iopub();
-    let mut req = conn
-        .call_shell(KernelMessage::new(
-            KernelMessageType::ExecuteRequest,
-            ExecuteRequest {
-                code: code.into(),
-                silent: false,
-                store_history: true,
-                user_expressions: Default::default(),
-                allow_stdin: false,
-                stop_on_error: true,
-            },
-        ))
-        .await?;
+    let request = KernelMessage::new(
+        KernelMessageType::ExecuteRequest,
+        ExecuteRequest {
+            code: code.into(),
+            silent: false,
+            store_history: true,
+            user_expressions: Default::default(),
+            allow_stdin: false,
+            stop_on_error: true,
+        },
+    );
+    let request_id = request.header.msg_id.clone();
+    let mut req = conn.call_shell(request).await?;
 
     let (tx, rx) = async_channel::unbounded();
     _ = tx.send(RunCellEvent::Started).await;
@@ -97,6 +97,14 @@ pub async fn run_cell(
 
         while status != KernelStatus::Idle {
             let msg = iopub_rx.recv().await.map_err(|_| Error::KernelDisconnect)?;
+            if msg
+                .parent_header
+                .as_ref()
+                .map(|header| header.msg_id.as_str())
+                != Some(request_id.as_str())
+            {
+                continue;
+            }
             match msg.header.msg_type {
                 KernelMessageType::Status => {
                     let msg = msg.into_typed::<Status>()?;
