@@ -40,26 +40,35 @@ fn print_help() {
     eprintln!("options:");
     eprintln!("  --debug    build/install debug artifacts for local installs");
     eprintln!(
-        "  --remote   build Linux release binaries on the GCP VM via scripts/gcp-build and fetch them to $CARGO_HOME/bin"
+        "  --remote   build Linux release binaries on the GCP VM via scripts/gcp-build and fetch them back"
     );
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "linux") {
+        eprintln!("             fetched into $CARGO_HOME/bin (native on this host)");
+    } else {
         eprintln!(
-            "             on macOS this installs Linux binaries only; it does not build Jute.app"
+            "             on a non-Linux host the Linux binaries are staged under target/remote-linux-bin"
+        );
+        eprintln!(
+            "             instead of $CARGO_HOME/bin; they do not run here. macOS does not build Jute.app"
         );
     }
+    eprintln!("  --force    with --remote on a non-Linux host, overwrite $CARGO_HOME/bin anyway");
 }
 
 fn install(extra: Vec<String>) -> ExitCode {
     let debug = extra.iter().any(|a| a == "--debug");
     let remote = extra.iter().any(|a| a == "--remote");
+    let force = extra.iter().any(|a| a == "--force");
     let workspace_root = workspace_root();
 
     if remote {
-        if let Err(err) = install_remote_linux_binaries(&workspace_root) {
+        let host_is_linux = cfg!(target_os = "linux");
+        let dest = remote_install_dest(&workspace_root, host_is_linux, force);
+        if let Err(err) = install_remote_linux_binaries(&workspace_root, &dest) {
             eprintln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
-        verify_sibling_install();
+        report_remote_install(&dest, host_is_linux);
         return ExitCode::SUCCESS;
     }
 
@@ -122,13 +131,49 @@ fn linux_install_build_command(workspace_root: &Path, debug: bool, extra: &[Stri
     )
 }
 
-fn install_remote_linux_binaries(workspace_root: &Path) -> Result<(), String> {
+/// Where `install --remote` deposits the fetched Linux release binaries.
+struct RemoteInstallDest {
+    dir: PathBuf,
+    /// True when we steered the foreign Linux binaries into a staging directory
+    /// instead of clobbering `$CARGO_HOME/bin` (the default on a non-Linux host).
+    staged: bool,
+}
+
+/// Decide where the fetched Linux binaries land.
+///
+/// On a Linux host the binaries are native, so install them into
+/// `$CARGO_HOME/bin` as usual. On any other host they are foreign ELF binaries
+/// that would shadow — and break — the working native `spur`/`spur-notebook`, so
+/// default to a staging dir under `target/`. `--force` opts back into clobbering
+/// `$CARGO_HOME/bin` (useful when the host PATH targets a Linux box over a mount).
+fn remote_install_dest(
+    workspace_root: &Path,
+    host_is_linux: bool,
+    force: bool,
+) -> RemoteInstallDest {
+    if host_is_linux || force {
+        RemoteInstallDest {
+            dir: cargo_home_bin(),
+            staged: false,
+        }
+    } else {
+        RemoteInstallDest {
+            dir: workspace_root.join("target/remote-linux-bin"),
+            staged: true,
+        }
+    }
+}
+
+fn install_remote_linux_binaries(
+    workspace_root: &Path,
+    dest: &RemoteInstallDest,
+) -> Result<(), String> {
     let mut build = remote_install_build_command(workspace_root);
     run_status(
         &mut build,
         "scripts/gcp-build/build.sh remote release build",
     )?;
-    let mut fetch = remote_install_fetch_command(workspace_root);
+    let mut fetch = remote_install_fetch_command(workspace_root, &dest.dir);
     run_status(&mut fetch, "scripts/gcp-build/fetch.sh --bins")
 }
 
@@ -151,10 +196,35 @@ fn remote_install_build_command(workspace_root: &Path) -> Command {
     cmd
 }
 
-fn remote_install_fetch_command(workspace_root: &Path) -> Command {
+fn remote_install_fetch_command(workspace_root: &Path, dest_dir: &Path) -> Command {
     let mut cmd = Command::new(workspace_root.join("scripts/gcp-build/fetch.sh"));
-    cmd.arg("--bins").current_dir(workspace_root);
+    cmd.arg("--bins")
+        .arg("--to")
+        .arg(dest_dir)
+        .current_dir(workspace_root);
     cmd
+}
+
+fn report_remote_install(dest: &RemoteInstallDest, host_is_linux: bool) {
+    if dest.staged {
+        let spur = dest.dir.join("spur");
+        let notebook = dest.dir.join("spur-notebook");
+        eprintln!();
+        eprintln!("fetched Linux release binaries to a staging dir (not $CARGO_HOME/bin):");
+        eprintln!("  {}", spur.display());
+        eprintln!("  {}", notebook.display());
+        eprintln!();
+        eprintln!("these are Linux ELF binaries and will not run on this host. Copy them");
+        eprintln!("to a Linux box, or re-run with --force to overwrite $CARGO_HOME/bin.");
+    } else {
+        if !host_is_linux {
+            eprintln!();
+            eprintln!("warning: --force installed Linux binaries into $CARGO_HOME/bin on a");
+            eprintln!("warning: non-Linux host; they will not run here. Re-run `cargo xtask");
+            eprintln!("warning: install` (no --remote) to restore the native binaries.");
+        }
+        verify_sibling_install();
+    }
 }
 
 fn cargo_build_command(
@@ -183,7 +253,7 @@ fn cargo_build_command(
 }
 
 fn is_xtask_install_flag(arg: &str) -> bool {
-    matches!(arg, "--debug" | "--remote")
+    matches!(arg, "--debug" | "--remote" | "--force")
 }
 
 fn install_built_binary(
@@ -622,17 +692,60 @@ mod tests {
     }
 
     #[test]
-    fn remote_install_fetch_command_uses_binary_fetch_mode() {
+    fn remote_install_fetch_command_targets_requested_dest() {
         let root = PathBuf::from("/workspace");
+        let dest = PathBuf::from("/workspace/target/remote-linux-bin");
 
-        let command = remote_install_fetch_command(&root);
+        let command = remote_install_fetch_command(&root, &dest);
 
         assert_eq!(
             command.get_program(),
             root.join("scripts/gcp-build/fetch.sh").as_os_str()
         );
-        assert_eq!(command_args(&command), vec!["--bins".to_string()]);
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "--bins".to_string(),
+                "--to".to_string(),
+                dest.to_string_lossy().into_owned(),
+            ]
+        );
         assert_eq!(command.get_current_dir(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn remote_install_dest_uses_cargo_bin_on_linux_host() {
+        let root = PathBuf::from("/workspace");
+
+        let dest = remote_install_dest(&root, true, false);
+
+        assert!(!dest.staged);
+        assert_eq!(dest.dir, cargo_home_bin());
+    }
+
+    #[test]
+    fn remote_install_dest_stages_foreign_binaries_off_linux() {
+        let root = PathBuf::from("/workspace");
+
+        let dest = remote_install_dest(&root, false, false);
+
+        assert!(dest.staged);
+        assert_eq!(dest.dir, root.join("target/remote-linux-bin"));
+    }
+
+    #[test]
+    fn remote_install_dest_force_clobbers_cargo_bin_off_linux() {
+        let root = PathBuf::from("/workspace");
+
+        let dest = remote_install_dest(&root, false, true);
+
+        assert!(!dest.staged);
+        assert_eq!(dest.dir, cargo_home_bin());
+    }
+
+    #[test]
+    fn force_flag_is_not_forwarded_to_cargo() {
+        assert!(is_xtask_install_flag("--force"));
     }
 
     #[test]
