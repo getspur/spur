@@ -498,6 +498,7 @@ impl App {
             | SpurEventBody::PrCreated { .. }
             | SpurEventBody::IssueUpdated { .. }
             | SpurEventBody::PlanSnapshotUpdated { .. }
+            | SpurEventBody::DatasourcesChanged { .. }
             | SpurEventBody::AgentExtNotification { .. } => {}
             // Catch-all for future variants — log so we notice.
             _ => {

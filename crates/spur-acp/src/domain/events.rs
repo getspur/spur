@@ -90,6 +90,35 @@ pub struct DiffSummary {
     pub files: Vec<PathBuf>,
 }
 
+/// Local datasource file type surfaced by the notebook daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasourceKind {
+    Csv,
+    Parquet,
+    Json,
+}
+
+/// Column metadata captured for a notebook datasource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Column {
+    pub name: String,
+    pub sql_type: String,
+}
+
+/// Catalog entry describing one datasource attached to a notebook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasourceEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: DatasourceKind,
+    pub group: Option<String>,
+    pub columns: Vec<Column>,
+    pub row_count: Option<u64>,
+}
+
 /// Artifact kinds emitted by an executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Artifact {
@@ -531,6 +560,10 @@ pub enum SpurEventBody {
     NotebookSocketReady {
         session: SessionId,
         socket_nonce: String,
+    },
+    DatasourcesChanged {
+        session: SessionId,
+        entries: Vec<DatasourceEntry>,
     },
     SessionAttachRejected {
         acp_session_id: String,
