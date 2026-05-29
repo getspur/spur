@@ -887,6 +887,7 @@ impl PlanBrowserView {
                 context_size: None,
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
+                notebook_ready: false,
                 issue_count: self.plans.len(),
                 alert_summary: None,
                 license_badge: None,
@@ -1293,6 +1294,7 @@ mod tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }
