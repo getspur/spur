@@ -2,7 +2,7 @@
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
- * Cell payload returned by daemon control read operations.
+ * Self-contained cell payload carried by deltas and daemon control reads.
  */
 export type DaemonCell = {
   id: string;

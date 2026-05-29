@@ -10,7 +10,6 @@ import type {
   Cell,
   CellMetadata,
   DaemonCell,
-  DaemonNotebookSnapshot,
   JuteDeckCellMetadata,
   NotebookDelta,
   NotebookRoot,
@@ -659,13 +658,19 @@ function cellTypeFromDaemon(kind: string): CellType | undefined {
   return undefined;
 }
 
+function assertNever(value: never): never {
+  throw new Error(
+    `Unhandled notebook delta kind: ${JSON.stringify(value)}`,
+  );
+}
+
 export async function reconcileNotebookDelta(
   notebook: Notebook,
   delta: NotebookDelta,
 ) {
   const { inProcStore } = await loadNotebookRuntimeConfig();
   if (!inProcStore) return;
-  await notebook.applyNotebookDelta(delta);
+  notebook.applyNotebookDelta(delta);
 }
 
 /** Test-only: drop the cached runtime config so the next call refetches. */
@@ -846,22 +851,21 @@ export class Notebook {
     return this.state.mergeCellJuteDeckMetadata(cellId, patch, "brain");
   }
 
-  async applyNotebookDelta(delta: NotebookDelta) {
+  applyNotebookDelta(delta: NotebookDelta) {
     const kind = delta.kind;
     if (kind.type === "loaded") {
-      const snapshot = await invoke<DaemonNotebookSnapshot>(
-        "notebook_store_snapshot",
-      );
-      this.loadNotebook(snapshot.root);
+      this.loadNotebook(kind.root);
     } else if (kind.type === "cellWritten") {
-      await this.reconcileStoreCell(kind.id);
+      this.upsertStoreCell(kind.cell);
     } else if (kind.type === "cellInserted") {
-      await this.reconcileStoreCell(kind.id, kind.after_id);
+      this.upsertStoreCell(kind.cell, kind.after_id);
     } else if (kind.type === "cellDeleted") {
       this.refs.delete(kind.id);
       this.state.deleteCell(kind.id);
     } else if (kind.type === "runCellEvent") {
       this.handleRunCellEvent(kind.cell_id, kind.event);
+    } else {
+      assertNever(kind);
     }
   }
 
@@ -1029,13 +1033,10 @@ export class Notebook {
     });
   }
 
-  private async reconcileStoreCell(cellId: string, afterId?: string | null) {
-    const cell = await invoke<DaemonCell>("read_notebook_store_cell", {
-      id: cellId,
-    });
+  private upsertStoreCell(cell: DaemonCell, afterId?: string | null) {
     if (!cellTypeFromDaemon(cell.kind)) {
       console.warn("Skipping unsupported notebook store cell kind", {
-        cellId,
+        cellId: cell.id,
         kind: cell.kind,
       });
       return;

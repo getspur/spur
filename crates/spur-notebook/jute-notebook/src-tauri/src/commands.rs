@@ -11,7 +11,6 @@ use std::{
 
 use dashmap::mapref::entry::Entry;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sysinfo::{Pid, System};
 use tauri::{ipc::Channel, AppHandle, WebviewWindow};
 use tokio::sync::Mutex;
@@ -23,12 +22,16 @@ use crate::{
     backend::{
         commands::{self, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
-        notebook::{Cell, MultilineString, NotebookRoot},
+        notebook::{Cell, NotebookRoot},
     },
-    notebook_store::{CellKind, NotebookDelta, NotebookOp, StoreError},
+    notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
     state::{notebook_slot_id, window_slot_id, KernelSlot, State},
     Error,
 };
+
+/// Re-export so existing callers keep using `commands::DaemonCell`; the type and
+/// its root→cell conversion now live in `notebook_store` for correct layering.
+pub use crate::notebook_store::DaemonCell;
 
 pub mod venv;
 
@@ -258,23 +261,6 @@ pub enum DaemonControlResult {
     Cell(DaemonCell),
     /// Full notebook snapshot.
     Snapshot(DaemonNotebookSnapshot),
-}
-
-/// Cell payload returned by daemon control read operations.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
-pub struct DaemonCell {
-    pub id: String,
-    pub kind: String,
-    #[ts(type = "number")]
-    pub version: u64,
-    pub last_edited_by: Option<String>,
-    pub source: String,
-    pub exec_count: Option<u32>,
-    pub status: String,
-    pub outputs: Vec<Value>,
 }
 
 /// Full notebook snapshot returned by daemon control.
@@ -590,33 +576,6 @@ pub async fn handle_daemon_control_request(
     }
 }
 
-/// Read one cell from the authoritative in-process notebook store.
-#[tauri::command]
-pub async fn read_notebook_store_cell(
-    id: &str,
-    state: tauri::State<'_, Arc<State>>,
-) -> Result<DaemonCell, Error> {
-    if id.is_empty() {
-        return Err(Error::NotebookDaemon(
-            "cell id must not be empty".to_string(),
-        ));
-    }
-
-    let notebook = state.get_notebook();
-    let (root, _version) = notebook.snapshot();
-    read_daemon_cell(&root, id).map_err(daemon_control_failure_to_error)
-}
-
-/// Read a full snapshot from the authoritative in-process notebook store.
-#[tauri::command]
-pub async fn notebook_store_snapshot(
-    state: tauri::State<'_, Arc<State>>,
-) -> Result<DaemonNotebookSnapshot, Error> {
-    let notebook = state.get_notebook();
-    let (root, version) = notebook.snapshot();
-    Ok(DaemonNotebookSnapshot { root, version })
-}
-
 async fn handle_daemon_control_inner(
     command: DaemonControlCommand,
     state: &State,
@@ -716,14 +675,6 @@ async fn handle_daemon_control_inner(
     }
 }
 
-fn daemon_control_failure_to_error(response: DaemonControlResponse) -> Error {
-    let message = response
-        .error
-        .map(|error| format!("{}: {}", error.code, error.message))
-        .unwrap_or_else(|| "notebook store command failed without an error body".to_string());
-    Error::NotebookDaemon(message)
-}
-
 fn validate_cell_id(id: &str) -> Result<(), DaemonControlResponse> {
     if id.is_empty() {
         Err(DaemonControlResponse::failure(
@@ -750,82 +701,12 @@ fn store_error_response(error: StoreError) -> DaemonControlResponse {
     }
 }
 
+/// Thin daemon-layer wrapper over [`daemon_cell`], mapping a missing cell to the
+/// daemon control error the read path returns.
 fn read_daemon_cell(root: &NotebookRoot, id: &str) -> Result<DaemonCell, DaemonControlResponse> {
-    let cell = root
-        .cells
-        .iter()
-        .find(|cell| cell_id(cell).is_some_and(|cell_id| cell_id == id))
-        .ok_or_else(|| {
-            DaemonControlResponse::failure("cell_not_found", format!("cell not found: {id}"))
-        })?;
-
-    let (kind, source, version, last_edited_by, exec_count, outputs) = match cell {
-        Cell::Raw(cell) => {
-            let spur = cell.metadata.spur.as_ref();
-            (
-                "raw",
-                multiline_to_string(&cell.source),
-                spur.map(|spur| spur.version).unwrap_or_default(),
-                spur.and_then(|spur| spur.last_edited_by.clone()),
-                None,
-                Vec::new(),
-            )
-        }
-        Cell::Markdown(cell) => {
-            let spur = cell.metadata.spur.as_ref();
-            (
-                "markdown",
-                multiline_to_string(&cell.source),
-                spur.map(|spur| spur.version).unwrap_or_default(),
-                spur.and_then(|spur| spur.last_edited_by.clone()),
-                None,
-                Vec::new(),
-            )
-        }
-        Cell::Code(cell) => {
-            let spur = cell.metadata.spur.as_ref();
-            (
-                "code",
-                multiline_to_string(&cell.source),
-                spur.map(|spur| spur.version).unwrap_or_default(),
-                spur.and_then(|spur| spur.last_edited_by.clone()),
-                cell.execution_count,
-                cell.outputs
-                    .iter()
-                    .map(serde_json::to_value)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| {
-                        DaemonControlResponse::failure("cell_encode_failed", error.to_string())
-                    })?,
-            )
-        }
-    };
-
-    Ok(DaemonCell {
-        id: id.to_string(),
-        kind: kind.to_string(),
-        version,
-        last_edited_by,
-        source,
-        exec_count,
-        status: "idle".to_string(),
-        outputs,
+    daemon_cell(root, id).ok_or_else(|| {
+        DaemonControlResponse::failure("cell_not_found", format!("cell not found: {id}"))
     })
-}
-
-fn cell_id(cell: &Cell) -> Option<&str> {
-    match cell {
-        Cell::Raw(cell) => cell.id.as_deref(),
-        Cell::Markdown(cell) => cell.id.as_deref(),
-        Cell::Code(cell) => cell.id.as_deref(),
-    }
-}
-
-fn multiline_to_string(source: &MultilineString) -> String {
-    match source {
-        MultilineString::Single(source) => source.clone(),
-        MultilineString::Multi(lines) => lines.join(""),
-    }
 }
 
 fn home_dir() -> Result<PathBuf, Error> {
@@ -1498,6 +1379,14 @@ mod tests {
         }
     }
 
+    fn cell_id(cell: &Cell) -> Option<&str> {
+        match cell {
+            Cell::Raw(cell) => cell.id.as_deref(),
+            Cell::Markdown(cell) => cell.id.as_deref(),
+            Cell::Code(cell) => cell.id.as_deref(),
+        }
+    }
+
     #[test]
     fn daemon_control_command_symbol_is_exported() {
         let _command = daemon_control;
@@ -1653,7 +1542,7 @@ mod tests {
         let response = handle_daemon_control_request(request, &state).await;
         let result = response.into_result().unwrap();
         let DaemonControlResult::Delta(NotebookDelta {
-            kind: DeltaKind::CellInserted { id, .. },
+            kind: DeltaKind::CellInserted { cell, .. },
             ..
         }) = result
         else {
@@ -1664,7 +1553,7 @@ mod tests {
         let inserted = snapshot
             .cells
             .iter()
-            .find(|cell| cell_id(cell) == Some(id.as_str()))
+            .find(|stored| cell_id(stored) == Some(cell.id.as_str()))
             .expect("inserted cell is present");
         let Cell::Markdown(cell) = inserted else {
             panic!("expected markdown cell");
@@ -1700,7 +1589,7 @@ mod tests {
         let response = handle_daemon_control_request(request, &state).await;
         let result = response.into_result().unwrap();
         let DaemonControlResult::Delta(NotebookDelta {
-            kind: DeltaKind::Loaded,
+            kind: DeltaKind::Loaded { .. },
             ..
         }) = result
         else {
@@ -1726,14 +1615,14 @@ mod tests {
                 last_edited_by: Some("brain".to_string()),
             })
             .unwrap();
-        let DeltaKind::CellInserted { id, .. } = delta.kind else {
+        let DeltaKind::CellInserted { cell, .. } = delta.kind else {
             panic!("expected inserted cell delta");
         };
 
         let (snapshot, _version) = store.snapshot();
-        let cell = read_daemon_cell(&snapshot, &id).unwrap();
+        let reread = read_daemon_cell(&snapshot, &cell.id).unwrap();
 
-        assert_eq!(cell.last_edited_by.as_deref(), Some("brain"));
+        assert_eq!(reread.last_edited_by.as_deref(), Some("brain"));
     }
 
     #[tokio::test]
@@ -1829,8 +1718,8 @@ mod tests {
             write,
             DaemonControlResult::Delta(NotebookDelta {
                 version: 2,
-                kind: DeltaKind::CellWritten { ref id },
-            }) if id == &cell_id
+                kind: DeltaKind::CellWritten { ref cell },
+            }) if cell.id == cell_id
         ));
 
         let insert = send_daemon_control_to(
@@ -1850,8 +1739,7 @@ mod tests {
             version: 3,
             kind:
                 DeltaKind::CellInserted {
-                    id: inserted_id,
-                    kind: CellKind::Markdown,
+                    cell: inserted_cell,
                     after_id: Some(after_id),
                 },
         }) = insert
@@ -1859,6 +1747,8 @@ mod tests {
             panic!("expected insert delta");
         };
         assert_eq!(after_id, cell_id);
+        assert_eq!(inserted_cell.kind, "markdown");
+        let inserted_id = inserted_cell.id.clone();
 
         let apply = send_daemon_control_to(
             &socket_path,
@@ -1875,8 +1765,8 @@ mod tests {
             apply,
             DaemonControlResult::Delta(NotebookDelta {
                 version: 4,
-                kind: DeltaKind::CellWritten { ref id },
-            }) if id == &inserted_id
+                kind: DeltaKind::CellWritten { ref cell },
+            }) if cell.id == inserted_id
         ));
 
         let snapshot = send_daemon_control_to(
