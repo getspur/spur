@@ -3478,7 +3478,8 @@ mod parquet_temporal_test {
         let old_symbol = snapshot_key("sym-old", "c1");
         let mid_symbol = snapshot_key("sym-mid", "c2");
         let new_symbol = snapshot_key("sym-new", "c3");
-        let other_symbol = snapshot_key("sym-other", "c3");
+        let other_old_symbol = snapshot_key("sym-other-old", "c1");
+        let other_new_symbol = snapshot_key("sym-other-new", "c3");
 
         artifact.commits = vec![
             CommitArtifact {
@@ -3534,22 +3535,34 @@ mod parquet_temporal_test {
             anchor_hash: "anchor-new".to_owned(),
             tokens: Vec::new(),
         };
-        let other_snapshot = SymbolSnapshotArtifact {
-            key: other_symbol.clone(),
+        let other_old_snapshot = SymbolSnapshotArtifact {
+            key: other_old_symbol.clone(),
             file_path: GitPath::from_bytes(b"src/other.rs".to_vec()),
-            entity_name: "other".to_owned(),
+            entity_name: "other_old".to_owned(),
             symbol_kind: "function".to_owned(),
             enclosing_scope: None,
             byte_range: [30, 40],
             line_range: [7, 8],
-            anchor_hash: "anchor-other".to_owned(),
+            anchor_hash: "anchor-other-old".to_owned(),
+            tokens: Vec::new(),
+        };
+        let other_new_snapshot = SymbolSnapshotArtifact {
+            key: other_new_symbol.clone(),
+            file_path: GitPath::from_bytes(b"src/other_new.rs".to_vec()),
+            entity_name: "other_new".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [40, 50],
+            line_range: [9, 10],
+            anchor_hash: "anchor-other-new".to_owned(),
             tokens: Vec::new(),
         };
         artifact.symbol_snapshots = vec![
             old_snapshot.clone(),
             mid_snapshot.clone(),
             new_snapshot.clone(),
-            other_snapshot,
+            other_old_snapshot,
+            other_new_snapshot,
         ];
 
         let rename_old_to_mid = TemporalEdgeArtifact {
@@ -3589,11 +3602,26 @@ mod parquet_temporal_test {
             parent: Some("c2".to_owned()),
             change_kind: Some(ChangeKind::Modified),
         };
+        let rename_other = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot {
+                key: other_old_symbol.clone(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: other_new_symbol.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: Some("c1".to_owned()),
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(
+                other_old_symbol.clone(),
+            ))),
+        };
         let touch_other = TemporalEdgeArtifact {
             source: EdgeEndpoint::Commit {
                 sha: "c3".to_owned(),
             },
-            target: EdgeEndpoint::Snapshot { key: other_symbol },
+            target: EdgeEndpoint::Snapshot {
+                key: other_new_symbol,
+            },
             relation: RelationKind::Touches,
             parent: Some("c2".to_owned()),
             change_kind: Some(ChangeKind::Added),
@@ -3602,6 +3630,7 @@ mod parquet_temporal_test {
             rename_old_to_mid.clone(),
             rename_mid_to_new.clone(),
             touch_new.clone(),
+            rename_other,
             touch_other,
         ];
         artifact.diagnostics = vec!["diagnostic excluded from reduced history".to_owned()];
