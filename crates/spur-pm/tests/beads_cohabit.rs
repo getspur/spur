@@ -53,40 +53,40 @@ fn make_issue(id: impl Into<String>, title: impl Into<String>) -> Issue {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_adapters_write_read_loops_complete_under_deadline() {
-    let dir = TempDir::new().unwrap();
-    let cfg = AdapterConfig {
-        lock_timeout_ms: 30_000,
-        ..AdapterConfig::default()
-    };
-    let adapter_a = Arc::new(
-        BeadsCrateAdapter::open(dir.path(), cfg.clone())
-            .await
-            .expect("adapter A opens"),
-    );
-    let adapter_b = Arc::new(
-        BeadsCrateAdapter::open(dir.path(), cfg)
-            .await
-            .expect("adapter B opens"),
-    );
-
-    let run = |adapter: Arc<BeadsCrateAdapter>, prefix: &'static str| async move {
-        for i in 0..20 {
-            let id = format!("bd-cohabit-{prefix}-{i}");
-            let title = format!("{prefix} {i}");
-            adapter
-                .write(move |s| {
-                    s.create_issue(&make_issue(id, title), "test")
-                        .map_err(anyhow::Error::from)
-                })
-                .await?;
-
-            let count = adapter.read(|s| Ok(s.count_issues()?)).await?;
-            assert!(count > 0, "read should observe the shared database");
-        }
-        Ok::<(), anyhow::Error>(())
-    };
-
     tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = TempDir::new().unwrap();
+        let cfg = AdapterConfig {
+            lock_timeout_ms: 30_000,
+            ..AdapterConfig::default()
+        };
+        let adapter_a = Arc::new(
+            BeadsCrateAdapter::open(dir.path(), cfg.clone())
+                .await
+                .expect("adapter A opens"),
+        );
+        let adapter_b = Arc::new(
+            BeadsCrateAdapter::open(dir.path(), cfg)
+                .await
+                .expect("adapter B opens"),
+        );
+
+        let run = |adapter: Arc<BeadsCrateAdapter>, prefix: &'static str| async move {
+            for i in 0..20 {
+                let id = format!("bd-cohabit-{prefix}-{i}");
+                let title = format!("{prefix} {i}");
+                adapter
+                    .write(move |s| {
+                        s.create_issue(&make_issue(id, title), "test")
+                            .map_err(anyhow::Error::from)
+                    })
+                    .await?;
+
+                let count = adapter.read(|s| Ok(s.count_issues()?)).await?;
+                assert!(count > 0, "read should observe the shared database");
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+
         tokio::try_join!(run(adapter_a, "a"), run(adapter_b, "b"))
     })
     .await
