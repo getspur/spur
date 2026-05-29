@@ -1,9 +1,5 @@
 peer_mailbox_enabled = false
 
-[plan.substrate_migration]
-versioned_cache_serve = false
-nonadvisory_review_writes = true
-
 [brain]
 default = "claude-code"
 fallback = [
@@ -420,7 +416,9 @@ worker_heartbeat_initial_grace_secs = 60
 [cost]
 db_path = "~/.spur/cost.db"
 
-[pm]
+[pm.beads]
+enabled = true
+auto_sync = false
 
 [bot.telegram]
 enabled = true
@@ -432,11 +430,18 @@ max_requests_per_second = 20
 [delegation]
 inline_wait_ms = 0
 
+[delegation.normalize]
+bypass_hooks = false
+
 [spur]
 auto_merge_approved_plans = false
 plan_pending_grace_secs = 3600
 dispatch_lease_secs = 600
 dispatch_lease_heartbeat_secs = 200
+
+[plan.substrate_migration]
+versioned_cache_serve = false
+nonadvisory_review_writes = true
 
 [tui]
 edit_mode = "vim"
