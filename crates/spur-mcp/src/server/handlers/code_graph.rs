@@ -368,6 +368,11 @@ const MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES: usize = 50;
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
+
+tokio::task_local! {
+    static SCOPED_CODE_GRAPH_WORKTREE_ROOT: PathBuf;
+}
+
 #[cfg(any(test, feature = "test-support"))]
 const GRAPH_REBUILD_LATENCY_BUDGET_UNSET_MS: u64 = u64::MAX;
 #[cfg(any(test, feature = "test-support"))]
@@ -2292,10 +2297,23 @@ async fn code_graph_error_response(id: Value, error: CodeGraphError) -> JsonRpcR
 
 #[allow(clippy::result_large_err)]
 fn current_worktree() -> Result<PathBuf, McpHandlerError> {
+    if let Some(worktree) = scoped_worktree_root() {
+        return Ok(worktree);
+    }
     let current_dir = std::env::current_dir().map_err(|error| {
         McpHandlerError::Internal(format!("failed to read current directory: {error}"))
     })?;
     Ok(resolve_worktree_root_from(current_dir))
+}
+
+pub(crate) async fn with_worktree_root_for_request<F, T>(worktree_root: PathBuf, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let worktree_root = resolve_worktree_root_from(worktree_root);
+    SCOPED_CODE_GRAPH_WORKTREE_ROOT
+        .scope(worktree_root, future)
+        .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -3864,8 +3882,12 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
         .map(|entry| entry.content_oid.as_str())
 }
 
+fn scoped_worktree_root() -> Option<PathBuf> {
+    SCOPED_CODE_GRAPH_WORKTREE_ROOT.try_with(Clone::clone).ok()
+}
+
 fn current_worktree_root() -> Option<std::path::PathBuf> {
-    std::env::current_dir().ok().map(resolve_worktree_root_from)
+    scoped_worktree_root().or_else(|| std::env::current_dir().ok().map(resolve_worktree_root_from))
 }
 
 fn matching_graph_pointer(
