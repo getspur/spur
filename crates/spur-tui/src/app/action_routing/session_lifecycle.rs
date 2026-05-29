@@ -110,7 +110,6 @@ impl App {
                 // NOT retired, so we must NOT visually reset the view -
                 // otherwise the user sees "cleared" while the stale brain is
                 // still active (ghost-cleared state).
-                self.close_active_notebook_daemon();
                 let send_ok = match self.user_input_tx.as_ref() {
                     Some(tx) => match tx.try_send(UserInput::NewSessionWithMessage {
                         blocks: vec![],
@@ -205,7 +204,6 @@ impl App {
                 // the picker dismisses in the same tick (FP-6). Lazy-construct
                 // a pre-ready SessionDetailView so LoadState renders correctly
                 // while the resume pipeline is in flight (Tranche 2 Task 5).
-                self.close_active_notebook_daemon();
                 let sid = SessionId(session_id.clone());
                 let view =
                     crate::views::session_detail::SessionDetailView::for_session(sid.clone());
@@ -251,7 +249,6 @@ impl App {
                 // ClearSession, which uses NewSessionWithMessage{empty} to defer
                 // spawn until the next Message - that path preserves the open
                 // SessionDetail for the `/clear` reset banner.
-                self.close_active_notebook_daemon();
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::NewSession);
                 }
@@ -260,49 +257,5 @@ impl App {
 
             _ => None,
         }
-    }
-
-    fn close_active_notebook_daemon(&self) {
-        let Some(session_id) = self
-            .session_detail
-            .as_ref()
-            .map(|detail| detail.session_id().clone())
-        else {
-            return;
-        };
-        let Some(socket_nonce) = self.notebook_socket_nonces.get(&session_id.0).cloned() else {
-            return;
-        };
-        let socket_path = spur_core::notebook::control_socket_path(&socket_nonce);
-        tokio::spawn(async move {
-            match crate::notebook_daemon::send_notebook_command("close", &socket_path).await {
-                Ok(response) if response.ok => {
-                    tracing::debug!(
-                        path = response.path.as_deref(),
-                        socket = %socket_path.display(),
-                        "notebook daemon close command completed during session switch"
-                    );
-                }
-                Ok(response) => {
-                    if let Some(error) = response.error.as_ref() {
-                        tracing::debug!(
-                            code = %error.code,
-                            message = %error.message,
-                            "notebook daemon close command failed during session switch"
-                        );
-                    } else {
-                        tracing::debug!(
-                            "notebook daemon close command failed during session switch"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        "notebook daemon close command failed during session switch"
-                    );
-                }
-            }
-        });
     }
 }
