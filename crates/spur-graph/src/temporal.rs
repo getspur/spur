@@ -385,7 +385,7 @@ where
     }
 }
 
-fn symbol_history_indexed(
+pub(crate) fn symbol_history_indexed(
     index: &TemporalIndex,
     commits: &CommitIndexArtifact,
     symbol: &str,

@@ -28,6 +28,7 @@ pub use schema::*;
 pub use search::*;
 pub use selector::*;
 pub use store::*;
+pub use temporal::GitSha;
 pub use traversal::*;
 pub use validation::*;
 pub use worktree::*;
