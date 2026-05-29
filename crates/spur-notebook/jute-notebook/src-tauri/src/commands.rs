@@ -113,6 +113,50 @@ pub struct DaemonRecentEntry {
     pub is_current: Option<bool>,
 }
 
+/// Local datasource file type supported by the notebook daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum DatasourceKind {
+    /// Comma-separated values file.
+    Csv,
+    /// Apache Parquet file.
+    Parquet,
+    /// JSON file.
+    Json,
+}
+
+/// Column metadata captured for a notebook datasource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct Column {
+    /// Column name.
+    pub name: String,
+    /// SQL type reported by the datasource engine.
+    pub sql_type: String,
+}
+
+/// Catalog entry describing one datasource attached to a notebook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct DatasourceEntry {
+    /// User-facing datasource name.
+    pub name: String,
+    /// Datasource file path.
+    pub path: String,
+    /// Datasource file kind.
+    pub kind: DatasourceKind,
+    /// Optional UI grouping key.
+    pub group: Option<String>,
+    /// Columns discovered for the datasource.
+    pub columns: Vec<Column>,
+    /// Row count when known.
+    #[ts(type = "number | null")]
+    pub row_count: Option<u64>,
+}
+
 /// A daemon control protocol request.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +199,12 @@ pub enum DaemonControlCommand {
     Reopen {},
     /// Close the current notebook window.
     Close {},
+    /// Attach a local datasource to the current notebook.
+    AttachDatasource {
+        name: String,
+        path: String,
+        group: Option<String>,
+    },
     /// List daemon recents.
     ListRecents {},
     /// Remove a path from daemon recents.
@@ -1361,6 +1411,52 @@ mod tests {
     #[test]
     fn daemon_control_command_symbol_is_exported() {
         let _command = daemon_control;
+    }
+
+    #[test]
+    fn attach_datasource_command_round_trips_with_catalog_types() {
+        let request = DaemonControlRequest::new(DaemonControlCommand::AttachDatasource {
+            name: "sales".to_string(),
+            path: "/tmp/sales.csv".to_string(),
+            group: Some("quarterly".to_string()),
+        });
+
+        let value = serde_json::to_value(&request).expect("attach datasource serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "attach_datasource",
+                "name": "sales",
+                "path": "/tmp/sales.csv",
+                "group": "quarterly"
+            })
+        );
+
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(value).expect("attach datasource decodes");
+        match decoded.command {
+            DaemonControlCommand::AttachDatasource { name, path, group } => {
+                assert_eq!(name, "sales");
+                assert_eq!(path, "/tmp/sales.csv");
+                assert_eq!(group.as_deref(), Some("quarterly"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        let entry = DatasourceEntry {
+            name: "sales".to_string(),
+            path: "/tmp/sales.csv".to_string(),
+            kind: DatasourceKind::Csv,
+            group: Some("quarterly".to_string()),
+            columns: vec![Column {
+                name: "amount".to_string(),
+                sql_type: "DOUBLE".to_string(),
+            }],
+            row_count: Some(42),
+        };
+        assert_eq!(entry.kind, DatasourceKind::Csv);
+        assert_eq!(entry.columns[0].sql_type, "DOUBLE");
     }
 
     #[tokio::test]
