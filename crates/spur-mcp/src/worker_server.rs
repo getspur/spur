@@ -6,6 +6,7 @@
 //! existing freestanding handlers in [`crate::handlers`]. Audit emission and
 //! per-delegation lifecycle guards remain in this module.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -377,6 +378,10 @@ struct DispatcherDeps {
     /// terminal delegation status (Success/Failed/Cancelled) so long-running
     /// brain sessions don't leak DelegationContext entries indefinitely.
     delegations: Arc<parking_lot::Mutex<std::collections::HashMap<String, DelegationContext>>>,
+    /// Worktree root for code graph requests, keyed by delegation id. The
+    /// worker MCP server is per brain session and runs in the brain process,
+    /// so code_* handlers cannot derive the worker worktree from process cwd.
+    delegation_worktree_roots: Arc<parking_lot::Mutex<std::collections::HashMap<String, PathBuf>>>,
     /// Per-delegation read-tool aggregation buffers. Each entry is `Arc`'d
     /// so concurrent in-flight read calls and the (future T21) background
     /// flusher can hold cheap references without contending for the outer
@@ -416,6 +421,30 @@ struct WorkerAuthMiddlewareState {
     session_manager: Arc<LocalSessionManager>,
     session_contexts:
         Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
+}
+
+async fn invoke_code_graph_for_worker<F, Fut>(
+    deps: Arc<DispatcherDeps>,
+    worker_ctx: WorkerCallContext,
+    invoke: F,
+) -> Result<Value, McpHandlerError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Value, McpHandlerError>>,
+{
+    let worktree_root = {
+        deps.delegation_worktree_roots
+            .lock()
+            .get(&worker_ctx.delegation_id)
+            .cloned()
+    };
+    let future = invoke();
+    if let Some(worktree_root) = worktree_root {
+        crate::server::handlers::code_graph::with_worktree_root_for_request(worktree_root, future)
+            .await
+    } else {
+        future.await
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -892,12 +921,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_resolve",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_resolve(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_resolve(&args)
+                })
+                .await
             },
         )
         .await
@@ -914,12 +947,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_file_symbols",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_file_symbols(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_file_symbols(&args)
+                })
+                .await
             },
         )
         .await
@@ -936,12 +973,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_symbol_info",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_symbol_info(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_symbol_info(&args)
+                })
+                .await
             },
         )
         .await
@@ -958,12 +999,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_read_symbol",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_read_symbol(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_read_symbol(&args)
+                })
+                .await
             },
         )
         .await
@@ -980,12 +1025,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_callers",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_callers(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_callers(&args)
+                })
+                .await
             },
         )
         .await
@@ -1002,12 +1051,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_callees",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_callees(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_callees(&args)
+                })
+                .await
             },
         )
         .await
@@ -1024,12 +1077,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_search",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_search(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_search(&args)
+                })
+                .await
             },
         )
         .await
@@ -1046,12 +1103,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_subgraph",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_subgraph(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_subgraph(&args)
+                })
+                .await
             },
         )
         .await
@@ -1068,12 +1129,16 @@ impl WorkerToolHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
             "code_symbol_history",
             context,
             Some(None),
-            move |_worker_ctx| async move {
-                crate::server::handlers::code_graph::code_symbol_history(&args).await
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::code_graph::code_symbol_history(&args)
+                })
+                .await
             },
         )
         .await
@@ -1377,6 +1442,8 @@ impl WorkerMcpServer {
 
         let materializer = OutcomeMaterializer::new(Arc::clone(&deps.outcome_store));
         let delegations = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let delegation_worktree_roots =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let read_audit_buffers =
             Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushMessage>();
@@ -1392,6 +1459,7 @@ impl WorkerMcpServer {
             materializer,
             repo_root: deps.repo_root,
             delegations: Arc::clone(&delegations),
+            delegation_worktree_roots: Arc::clone(&delegation_worktree_roots),
             read_audit_buffers: Arc::clone(&read_audit_buffers),
             flush_tx,
             active_delegations: Arc::clone(&active_delegations),
@@ -1525,6 +1593,24 @@ impl WorkerMcpServer {
         });
     }
 
+    /// Register the worktree root a delegated worker is running in. Code graph
+    /// tools use this root for freshness checks because this HTTP server runs
+    /// in the brain process rather than inside the worker process.
+    pub fn register_delegation_worktree_root(&self, delegation_id: String, worktree_root: PathBuf) {
+        self.deps
+            .delegation_worktree_roots
+            .lock()
+            .insert(delegation_id.clone(), worktree_root);
+        let mut guards = self.deps.delegation_guards.lock();
+        guards.entry(delegation_id.clone()).or_insert_with(|| {
+            DelegationDispatchGuard::new(
+                delegation_id,
+                self.brain_session_id.clone(),
+                Arc::clone(&self.deps.funnel),
+            )
+        });
+    }
+
     /// Signal that a delegation has reached a terminal state. Removes the
     /// cached context and drops the per-delegation summary guard, which emits
     /// one `WorkerMcpDelegationSummary` event. The `_outcome` parameter is
@@ -1532,6 +1618,10 @@ impl WorkerMcpServer {
     /// come from the dispatcher's `record_call` telemetry.
     pub fn complete_delegation(&self, delegation_id: &str, _outcome: &str) {
         self.deps.delegations.lock().remove(delegation_id);
+        self.deps
+            .delegation_worktree_roots
+            .lock()
+            .remove(delegation_id);
         self.deps.read_audit_buffers.lock().remove(delegation_id);
         if let Some(guard) = self.deps.delegation_guards.lock().remove(delegation_id) {
             guard.completed.store(true, Ordering::Relaxed);
@@ -1569,6 +1659,10 @@ impl WorkerMcpServer {
         outcome: &str,
     ) -> Result<(), FlushDelegationError> {
         self.deps.delegations.lock().remove(delegation_id);
+        self.deps
+            .delegation_worktree_roots
+            .lock()
+            .remove(delegation_id);
 
         // Drain the read-audit buffer in-band rather than relying on its Drop
         // so that send-failures surface to the caller as a Result.
