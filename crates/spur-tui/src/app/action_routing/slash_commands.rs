@@ -66,21 +66,35 @@ impl App {
 }
 
 pub(super) fn notebook_command_label(arg: &str) -> &'static str {
-    match arg.trim() {
-        "" => "Reopening notebook",
-        "new" => "Creating notebook",
-        "close" => "Closing notebook",
-        _ => "Opening notebook",
+    let arg = arg.trim();
+    if is_notebook_data_add(arg) {
+        "Attaching datasource"
+    } else {
+        match arg {
+            "" => "Reopening notebook",
+            "new" => "Creating notebook",
+            "close" => "Closing notebook",
+            _ => "Opening notebook",
+        }
     }
 }
 
 pub(super) fn notebook_command_action(arg: &str) -> &'static str {
-    match arg.trim() {
-        "" => "reopen",
-        "new" => "new",
-        "close" => "close",
-        _ => "open",
+    let arg = arg.trim();
+    if is_notebook_data_add(arg) {
+        "attach datasource"
+    } else {
+        match arg {
+            "" => "reopen",
+            "new" => "new",
+            "close" => "close",
+            _ => "open",
+        }
     }
+}
+
+fn is_notebook_data_add(arg: &str) -> bool {
+    arg == "data add" || arg.starts_with("data add ")
 }
 
 pub(super) fn notebook_control_failure_detail(
