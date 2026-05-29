@@ -7,16 +7,12 @@ impl App {
     }
 
     pub(super) fn process_notebook_cmd(&mut self, arg: String) -> Option<Action> {
-        let Some(session_id) = self
-            .session_detail
-            .as_ref()
-            .map(|detail| detail.session_id().clone())
-        else {
+        if self.session_detail.is_none() {
             return Some(Action::FlashHint {
                 message: "/notebook: no active brain session in focus".into(),
             });
-        };
-        let Some(socket_nonce) = self.notebook_socket_nonces.get(&session_id.0).cloned() else {
+        }
+        let Some(socket_nonce) = self.notebook_socket_nonce.clone() else {
             return Some(Action::FlashHint {
                 message: "/notebook: notebook socket not ready".into(),
             });
