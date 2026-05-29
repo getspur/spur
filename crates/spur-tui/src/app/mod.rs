@@ -627,6 +627,7 @@ impl App {
             flag_summary: self.flag_summary,
             tombstone: self.tombstones.peek(self.current_view()),
             transient_hint_override,
+            notebook_ready: self.notebook_socket_nonce.is_some(),
             theme: &self.theme,
         };
 
