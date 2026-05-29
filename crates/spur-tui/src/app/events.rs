@@ -538,6 +538,7 @@ impl App {
             flag_summary: self.flag_summary,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: self.notebook_socket_nonce.is_some(),
             theme: &self.theme,
         };
         let issue_snapshot_changed = matches!(
