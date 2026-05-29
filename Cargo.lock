@@ -11503,6 +11503,7 @@ dependencies = [
  "blake3",
  "chrono",
  "directories",
+ "duckdb",
  "fs4",
  "jute",
  "rmcp",
