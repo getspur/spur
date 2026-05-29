@@ -139,7 +139,18 @@ rsync -az --delete -0 --files-from="$FILE_LIST" \
 # `--config build.rustflags=[...]` arg, so we propagate via env instead and
 # escape with %q to survive both the local→gcloud quoting and the remote
 # bash -lc re-parse.
-REMOTE_RUSTFLAGS_QUOTED=$(printf '%q' "${RUSTFLAGS:-}")
+#
+# Only emit the export when the caller actually set RUSTFLAGS. A set-but-empty
+# RUSTFLAGS is NOT inert: cargo treats it as "no flags" and IGNORES the synced
+# .cargo/config.toml `build.rustflags`, silently dropping
+# `-C force-frame-pointers=yes`. That both diverges from local builds (where
+# config applies) and changes rustc args, fragmenting the shared sccache cache.
+# Verified: `RUSTFLAGS='' cargo build -v` omits force-frame-pointers; unset
+# preserves it. So when unset we emit no export at all and let config win.
+REMOTE_RUSTFLAGS_EXPORT=""
+if [[ -n "${RUSTFLAGS:-}" ]]; then
+    REMOTE_RUSTFLAGS_EXPORT="export RUSTFLAGS=$(printf '%q' "$RUSTFLAGS")"
+fi
 log "Running: cargo $CARGO_ARGS  -j$JOBS${RUSTFLAGS:+  RUSTFLAGS=$RUSTFLAGS}"
 gcloud compute ssh "$VM_NAME" \
     --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
@@ -154,7 +165,7 @@ gcloud compute ssh "$VM_NAME" \
         # SCCACHE_BASEDIRS is set per rustc invocation by the
         # sccache-worktree wrapper (RUSTC_WRAPPER in profile.d).
         export CARGO_BUILD_JOBS=$JOBS
-        export RUSTFLAGS=$REMOTE_RUSTFLAGS_QUOTED
+        $REMOTE_RUSTFLAGS_EXPORT
         sccache --start-server >/dev/null 2>&1 || true
         cargo $CARGO_ARGS
         echo
