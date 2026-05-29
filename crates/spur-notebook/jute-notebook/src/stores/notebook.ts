@@ -17,6 +17,10 @@ import type {
   OutputDisplayData,
   RunCellEvent,
 } from "@/bindings";
+import {
+  daemonControl,
+  snapshotFromDaemonControlResponse,
+} from "@/daemon/control";
 
 type NotebookStore = NotebookStoreState & NotebookStoreActions;
 
@@ -40,6 +44,9 @@ export type NotebookCellState = {
 };
 
 export type NotebookServerState = {
+  /** Last authoritative Rust store document version applied to this replica. */
+  lastAppliedVersion: number;
+
   /** A list of cell IDs in order. */
   cellIds: string[];
 
@@ -128,6 +135,29 @@ type NotebookLocalDelta = {
 };
 
 type NotebookStateDelta = NotebookDelta | NotebookLocalDelta;
+
+function isLocalNotebookDelta(
+  delta: NotebookStateDelta,
+): delta is NotebookLocalDelta {
+  const type = delta.kind.type;
+  return type === "localCellSnapshot" || type === "localClearResult";
+}
+
+function shouldAdvanceAppliedVersion(delta: NotebookStateDelta): boolean {
+  return !isLocalNotebookDelta(delta) && delta.version > 0;
+}
+
+function hasAuthoritativeVersionGap(
+  state: NotebookServerState,
+  delta: NotebookDelta,
+): boolean {
+  return (
+    delta.kind.type !== "loaded" &&
+    delta.version > 0 &&
+    state.lastAppliedVersion > 0 &&
+    delta.version > state.lastAppliedVersion + 1
+  );
+}
 
 type RunCellEventDeltaApplication = {
   runState: RunCellEventApplicationState;
@@ -262,6 +292,7 @@ function createNotebookStore(): StoreApi<NotebookStore> {
     immer<NotebookStore>((set) => {
       const initialState: NotebookStoreState = {
         serverState: {
+          lastAppliedVersion: 0,
           cellIds: [],
           cells: {},
         },
@@ -339,6 +370,7 @@ function applyNotebookDeltaDraft(
   application?: RunCellEventDeltaApplication,
 ): RunCellEventApplicationState | undefined {
   const kind = delta.kind;
+  let runCellApplication: RunCellEventApplicationState | undefined;
   if (kind.type === "loaded") {
     loadNotebookRootDraft(state, kind.root);
   } else if (kind.type === "cellWritten") {
@@ -350,7 +382,7 @@ function applyNotebookDeltaDraft(
     delete state.cells[kind.id];
   } else if (kind.type === "runCellEvent") {
     if (!application) return undefined;
-    return applyRunCellEvent(
+    runCellApplication = applyRunCellEvent(
       state,
       kind.cell_id,
       kind.event,
@@ -375,7 +407,14 @@ function applyNotebookDeltaDraft(
     assertNever(kind);
   }
 
-  return undefined;
+  if (shouldAdvanceAppliedVersion(delta)) {
+    state.lastAppliedVersion = Math.max(
+      state.lastAppliedVersion,
+      delta.version,
+    );
+  }
+
+  return runCellApplication;
 }
 
 function loadNotebookRootDraft(
@@ -671,6 +710,20 @@ export async function reconcileNotebookDelta(
   notebook: Notebook,
   delta: NotebookDelta,
 ) {
+  const lastAppliedVersion = notebook.state.serverState.lastAppliedVersion;
+  if (hasAuthoritativeVersionGap(notebook.state.serverState, delta)) {
+    console.warn(
+      "Notebook delta version gap detected; requesting snapshot resync",
+      {
+        lastAppliedVersion,
+        receivedVersion: delta.version,
+        kind: delta.kind.type,
+      },
+    );
+    await notebook.resyncFromSnapshot();
+    return;
+  }
+
   notebook.applyNotebookDelta(delta);
 }
 
@@ -787,6 +840,15 @@ export class Notebook {
     } catch (e: any) {
       this.state.viewStateActions.setLoadError(e.toString());
     }
+  }
+
+  async resyncFromSnapshot() {
+    const response = await daemonControl({ command: "snapshot" });
+    const snapshot = snapshotFromDaemonControlResponse(response);
+    this.applyNotebookDelta({
+      version: snapshot.version,
+      kind: { type: "loaded", root: snapshot.root },
+    });
   }
 
   addCell(type: CellType, initialText: string, lastEditedBy?: string): string {
@@ -916,7 +978,7 @@ export class Notebook {
       this.state.viewStateActions.clearSelectedCellIfDeleted(kind.id);
       this.state.editBufferActions.clearCell(kind.id);
     } else if (kind.type === "runCellEvent") {
-      this.handleRunCellEvent(kind.cell_id, kind.event);
+      this.handleRunCellEvent(kind.cell_id, kind.event, delta.version);
     } else {
       assertNever(kind);
     }
@@ -1056,7 +1118,11 @@ export class Notebook {
     }
   }
 
-  handleRunCellEvent(cellId: string, message: RunCellEvent) {
+  handleRunCellEvent(
+    cellId: string,
+    message: RunCellEvent,
+    documentVersion = 0,
+  ) {
     if (!this.state.serverState.cells[cellId]) {
       this.directRunCellStates.delete(cellId);
       console.warn("Skipping run cell event for unknown cell", {
@@ -1066,7 +1132,7 @@ export class Notebook {
       return;
     }
 
-    const beginRun = () => {
+    const beginRun = (startedVersion = 0) => {
       const runState: DirectRunCellState = {
         status: "running",
         timings: { startedAt: Date.now() },
@@ -1078,6 +1144,8 @@ export class Notebook {
         cellId,
         { event: "started" },
         runState,
+        undefined,
+        startedVersion,
       );
       nextRunState = this.applyRunCellEventDelta(
         cellId,
@@ -1089,7 +1157,7 @@ export class Notebook {
 
     let runState = this.directRunCellStates.get(cellId);
     if (message.event === "started") {
-      beginRun();
+      beginRun(documentVersion);
       return;
     }
     if (!runState) {
@@ -1098,11 +1166,17 @@ export class Notebook {
 
     const isTerminal =
       message.event === "finished" || message.event === "disconnect";
-    runState = this.applyRunCellEventDelta(cellId, message, runState, {
-      displayId: displayIdForRunCellEvent(message),
-      finishedAt: isTerminal ? Date.now() : undefined,
-      handleDisconnect: true,
-    });
+    runState = this.applyRunCellEventDelta(
+      cellId,
+      message,
+      runState,
+      {
+        displayId: displayIdForRunCellEvent(message),
+        finishedAt: isTerminal ? Date.now() : undefined,
+        handleDisconnect: true,
+      },
+      documentVersion,
+    );
 
     if (isTerminal) {
       this.directRunCellStates.delete(cellId);
@@ -1148,11 +1222,12 @@ export class Notebook {
     event: RunCellEvent,
     runState: RunCellEventApplicationState,
     options?: ApplyRunCellEventOptions,
+    documentVersion = 0,
   ): RunCellEventApplicationState {
     return (
       this.state.serverStateActions.applyNotebookDelta(
         {
-          version: 0,
+          version: documentVersion,
           kind: { type: "runCellEvent", cell_id: cellId, event },
         },
         { runState, options },

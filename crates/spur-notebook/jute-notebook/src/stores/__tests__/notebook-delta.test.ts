@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { DaemonCell, NotebookDelta, NotebookRoot } from "@/bindings";
 
@@ -18,9 +18,18 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+afterEach(() => {
+  invokeMock.mockReset();
+  vi.restoreAllMocks();
+});
+
 describe("reconcileNotebookDelta", () => {
   test("upserts the inline cell from a CellWritten delta without refetching", async () => {
     const cellId = "cell-1";
+    const snapshotRoot = notebookRootFromCells([
+      { id: cellId, source: "answer = 42", version: 2 },
+    ]);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const updatedCell: DaemonCell = {
       id: cellId,
       kind: "code",
@@ -32,7 +41,7 @@ describe("reconcileNotebookDelta", () => {
       outputs: [],
     };
 
-    invokeMock.mockImplementation(async (command: string) => {
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
       if (command === "start_kernel") return "kernel-1";
       if (command === "kernel_slot_info") {
         return {
@@ -42,6 +51,16 @@ describe("reconcileNotebookDelta", () => {
           status: "idle",
           cpu_pct: 0,
           mem_mb: 0,
+        };
+      }
+      if (command === "daemon_control") {
+        expect(args).toEqual({ cmd: { command: "snapshot" } });
+        return {
+          ok: true,
+          result: {
+            type: "snapshot",
+            data: { root: snapshotRoot, version: 2 },
+          },
         };
       }
       throw new Error(`unexpected invoke: ${command}`);
@@ -56,6 +75,11 @@ describe("reconcileNotebookDelta", () => {
       kind: { type: "cellWritten", cell: updatedCell },
     };
     await reconcileNotebookDelta(notebook, delta);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("daemon_control", {
+      cmd: { command: "snapshot" },
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
 
     const selectSource = (state: NotebookStoreState) =>
       selectCell(state, cellId)?.source;
@@ -110,22 +134,120 @@ describe("reconcileNotebookDelta", () => {
       2,
     );
   });
+
+  test("requests a snapshot resync instead of applying a gapped CellInserted delta", async () => {
+    const firstCellId = "cell-1";
+    const missedCellId = "cell-2";
+    const gappedCellId = "cell-3";
+    const authoritativeRoot = notebookRootFromCells([
+      { id: firstCellId, source: "answer = 1", version: 2 },
+      { id: missedCellId, source: "missed = true", version: 1 },
+      { id: gappedCellId, source: "authoritative = 3", version: 1 },
+    ]);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      if (command === "daemon_control") {
+        expect(args).toEqual({ cmd: { command: "snapshot" } });
+        return {
+          ok: true,
+          result: {
+            type: "snapshot",
+            data: { root: authoritativeRoot, version: 3 },
+          },
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook(notebookRoot(firstCellId, "answer = 0"));
+    await notebook.kernelStartPromise;
+
+    await reconcileNotebookDelta(notebook, {
+      version: 1,
+      kind: {
+        type: "cellWritten",
+        cell: daemonCell(firstCellId, "answer = 1", 2),
+      },
+    });
+
+    await reconcileNotebookDelta(notebook, {
+      version: 3,
+      kind: {
+        type: "cellInserted",
+        cell: daemonCell(gappedCellId, "gapped payload should not apply", 1),
+        after_id: missedCellId,
+      },
+    });
+
+    const state = notebook.store.getState();
+    expect(invokeMock).toHaveBeenCalledWith("daemon_control", {
+      cmd: { command: "snapshot" },
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "Notebook delta version gap detected; requesting snapshot resync",
+      expect.objectContaining({
+        lastAppliedVersion: 1,
+        receivedVersion: 3,
+        kind: "cellInserted",
+      }),
+    );
+    expect(state.serverState.cellIds).toEqual([
+      firstCellId,
+      missedCellId,
+      gappedCellId,
+    ]);
+    expect(state.serverState.cells[missedCellId]?.source).toBe("missed = true");
+    expect(state.serverState.cells[gappedCellId]?.source).toBe(
+      "authoritative = 3",
+    );
+    expect(state.serverState.lastAppliedVersion).toBe(3);
+  });
 });
 
 function notebookRoot(cellId: string, source: string): NotebookRoot {
+  return notebookRootFromCells([{ id: cellId, source, version: 1 }]);
+}
+
+function notebookRootFromCells(
+  cells: Array<{ id: string; source: string; version: number }>,
+): NotebookRoot {
   return {
     metadata: {},
     nbformat_minor: 5,
     nbformat: 4,
-    cells: [
-      {
-        cell_type: "code",
-        id: cellId,
-        metadata: { spur: { version: 1 } },
-        source,
-        execution_count: null,
-        outputs: [],
-      },
-    ],
+    cells: cells.map((cell) => ({
+      cell_type: "code",
+      id: cell.id,
+      metadata: { spur: { version: cell.version } },
+      source: cell.source,
+      execution_count: null,
+      outputs: [],
+    })),
+  };
+}
+
+function daemonCell(id: string, source: string, version: number): DaemonCell {
+  return {
+    id,
+    kind: "code",
+    version,
+    source,
+    lastEditedBy: "brain",
+    execCount: null,
+    status: "idle",
+    outputs: [],
   };
 }

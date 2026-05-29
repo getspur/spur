@@ -13,6 +13,7 @@ describe("applyRunCellEvent", () => {
     const cellId = "cell-1";
     const state: NotebookStoreState = {
       serverState: {
+        lastAppliedVersion: 0,
         cellIds: [cellId],
         cells: {
           [cellId]: {
