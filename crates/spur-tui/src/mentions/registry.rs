@@ -8,9 +8,10 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher,
 };
-use spur_acp::SessionId;
+use spur_acp::{DatasourceEntry, SessionId};
 
 use super::code_graph::source::CodeGraphMentionSource;
+use super::datasource_source::DatasourceMentionSource;
 use super::entry::{MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
 use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
@@ -30,11 +31,13 @@ const CODE_GRAPH_LEGACY_INDEX_PATH: &str = ".spur/graph-index.json";
 pub(super) const WORKER_PIN_CAP: usize = 4;
 const FILE_CAP: usize = 6;
 const ISSUE_CAP: usize = 3;
+const DATASOURCE_CAP: usize = 4;
 const CODE_CAP: usize = 3;
 
 struct CachedSourceIndex {
     entries: Arc<Vec<MentionEntry>>,
     code_payloads: HashMap<String, Arc<CodeMentionPayload>>,
+    datasource_hints: HashMap<String, Arc<String>>,
     built_at: Instant,
 }
 
@@ -265,6 +268,14 @@ impl MentionRegistry {
             .map(Arc::as_ref)
     }
 
+    pub fn lookup_datasource_hint(&self, uri: &str) -> Option<&str> {
+        self.cache
+            .values()
+            .find_map(|cached| cached.datasource_hints.get(uri))
+            .map(Arc::as_ref)
+            .map(String::as_str)
+    }
+
     pub fn code_graph_hint(&self) -> Option<&'static str> {
         self.code_graph_hint
     }
@@ -307,6 +318,20 @@ impl MentionRegistry {
         self.clear_cache_for("worker");
     }
 
+    pub fn set_datasource_snapshot(&mut self, entries: Vec<DatasourceEntry>) {
+        if let Some(source) = self
+            .sources
+            .iter_mut()
+            .find(|source| source.name() == "datasource")
+        {
+            *source = Box::new(DatasourceMentionSource::new(entries));
+        } else {
+            self.sources
+                .push(Box::new(DatasourceMentionSource::new(entries)));
+        }
+        self.clear_cache_for("datasource");
+    }
+
     pub fn query(
         &mut self,
         scope: CompletionScope<'_>,
@@ -345,11 +370,16 @@ impl MentionRegistry {
                     for (uri, payload) in source.code_payloads() {
                         source_code_payloads.insert(uri.clone(), Arc::clone(payload));
                     }
+                    let mut source_datasource_hints = HashMap::new();
+                    for (uri, hint) in source.datasource_hints() {
+                        source_datasource_hints.insert(uri.clone(), Arc::clone(hint));
+                    }
                     self.cache.insert(
                         source_name,
                         CachedSourceIndex {
                             entries: Arc::new(entries),
                             code_payloads: source_code_payloads,
+                            datasource_hints: source_datasource_hints,
                             built_at: Instant::now(),
                         },
                     );
@@ -412,6 +442,20 @@ impl MentionRegistry {
             let issues: Vec<MentionEntry> =
                 issues.into_iter().map(|(_, entry)| entry.clone()).collect();
 
+            let mut datasources: Vec<&MentionEntry> = entries
+                .iter()
+                .filter(|e| e.kind == MentionKind::Datasource)
+                .copied()
+                .collect();
+            datasources.sort_by(|a, b| {
+                a.display
+                    .cmp(&b.display)
+                    .then(a.secondary.cmp(&b.secondary))
+                    .then(a.uri.cmp(&b.uri))
+            });
+            datasources.truncate(DATASOURCE_CAP);
+            let datasources: Vec<MentionEntry> = datasources.into_iter().cloned().collect();
+
             let mut code_graph: Vec<&MentionEntry> = entries
                 .iter()
                 .filter(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
@@ -432,6 +476,7 @@ impl MentionRegistry {
             append_section_rows(&mut rows, "Workers", &workers);
             append_section_rows(&mut rows, "Files", &files);
             append_section_rows(&mut rows, "Issues", &issues);
+            append_section_rows(&mut rows, "Data", &datasources);
             append_section_rows(&mut rows, "Code", &code_graph);
             rows.truncate(limit);
             return rows;
@@ -541,9 +586,11 @@ fn code_match_rank(
 
             pattern_score(pattern, matcher, buf, path).or_else(|| path_prefix_score(path, query))
         }
-        MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => {
-            None
-        }
+        MentionKind::File
+        | MentionKind::Directory
+        | MentionKind::Worker
+        | MentionKind::Issue
+        | MentionKind::Datasource => None,
     }
 }
 
@@ -588,9 +635,11 @@ fn path_segments_and_stems(path: &str) -> impl Iterator<Item = &str> {
 fn code_entry_path(entry: &MentionEntry) -> Option<&str> {
     match entry.kind {
         MentionKind::CodeFile | MentionKind::CodeSymbol => entry.code_path.as_deref(),
-        MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => {
-            None
-        }
+        MentionKind::File
+        | MentionKind::Directory
+        | MentionKind::Worker
+        | MentionKind::Issue
+        | MentionKind::Datasource => None,
     }
 }
 
@@ -609,7 +658,11 @@ fn empty_code_kind_rank(kind: &MentionKind) -> u8 {
     match kind {
         MentionKind::CodeFile => 0,
         MentionKind::CodeSymbol => 1,
-        MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => 2,
+        MentionKind::File
+        | MentionKind::Directory
+        | MentionKind::Worker
+        | MentionKind::Issue
+        | MentionKind::Datasource => 2,
     }
 }
 
@@ -658,7 +711,8 @@ fn tier_rank(kind: &MentionKind) -> u8 {
         MentionKind::File | MentionKind::Directory => 0,
         MentionKind::Worker => 1,
         MentionKind::Issue => 2,
-        MentionKind::CodeFile | MentionKind::CodeSymbol => 3,
+        MentionKind::Datasource => 3,
+        MentionKind::CodeFile | MentionKind::CodeSymbol => 4,
     }
 }
 
