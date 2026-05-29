@@ -7,6 +7,8 @@ use jute::commands::{install_kernel_in_slot, start_local_kernel};
 use jute::state::{notebook_slot_id, KernelSlot, State};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
+#[cfg(feature = "datasource-introspect")]
+use spur_notebook::mcp::tools::list_datasources;
 use spur_notebook::mcp::{
     bridge::{
         AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester, TauriBridgeRequester,
@@ -118,6 +120,19 @@ impl DaemonWindowOps for RecordingWindowOps {
 fn structured(result: CallToolResult) -> Value {
     assert_eq!(result.is_error, Some(false));
     result.structured_content.expect("structured content")
+}
+
+fn combined_stream_text(outputs: &[Value]) -> String {
+    outputs
+        .iter()
+        .filter_map(|event| {
+            event
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| event.get("data").and_then(Value::as_str))
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 #[tokio::test]
@@ -320,13 +335,49 @@ async fn command_succeeds(command: &str, args: &[&str]) -> bool {
     status.success()
 }
 
-async fn install_ipykernel_into(python: &str, target: &Path) -> bool {
+async fn python_modules_available(python: &str, modules: &[&str]) -> bool {
+    let code = modules
+        .iter()
+        .map(|module| format!("import {module}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    command_succeeds(python, &["-c", &code]).await
+}
+
+async fn uv_modules_available(packages: &[&str], modules: &[&str]) -> bool {
+    let code = modules
+        .iter()
+        .map(|module| format!("import {module}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut command = tokio::process::Command::new("uv");
+    command.arg("run");
+    for package in packages {
+        command.args(["--with", package]);
+    }
+    command.args(["python", "-c", &code]);
+
+    let Ok(Ok(status)) = timeout(
+        Duration::from_secs(120),
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+    )
+    .await
+    else {
+        return false;
+    };
+    status.success()
+}
+
+async fn install_python_packages_into(python: &str, target: &Path, packages: &[&str]) -> bool {
     let Ok(Ok(status)) = timeout(
         Duration::from_secs(240),
         tokio::process::Command::new(python)
             .args(["-m", "pip", "install", "--quiet", "--target"])
             .arg(target)
-            .arg("ipykernel")
+            .args(packages)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status(),
@@ -339,6 +390,10 @@ async fn install_ipykernel_into(python: &str, target: &Path) -> bool {
 }
 
 async fn install_test_python3_kernelspec() -> Option<TestKernelSpec> {
+    install_test_python3_kernelspec_with(&[]).await
+}
+
+async fn install_test_python3_kernelspec_with(extra_packages: &[&str]) -> Option<TestKernelSpec> {
     let env_lock = TEST_KERNELSPEC_ENV.lock().await;
     let temp_dir = tempfile::Builder::new()
         .prefix("spur-notebook-it-kernelspec-")
@@ -351,7 +406,11 @@ async fn install_test_python3_kernelspec() -> Option<TestKernelSpec> {
         .expect("kernelspec dir");
     let python = std::env::var("PYTHON_PATH").unwrap_or_else(|_| "python3".to_string());
     let site_packages = temp_dir.path().join("site-packages");
-    let argv = if command_succeeds(&python, &["-c", "import ipykernel, zmq"]).await {
+    let mut packages = vec!["ipykernel"];
+    packages.extend_from_slice(extra_packages);
+    let mut modules = vec!["ipykernel", "zmq"];
+    modules.extend_from_slice(extra_packages);
+    let argv = if python_modules_available(&python, &modules).await {
         vec![
             python,
             "-m".to_string(),
@@ -359,31 +418,21 @@ async fn install_test_python3_kernelspec() -> Option<TestKernelSpec> {
             "-f".to_string(),
             "{connection_file}".to_string(),
         ]
-    } else if command_succeeds(
-        "uv",
-        &[
-            "run",
-            "--with",
-            "ipykernel",
-            "python",
-            "-c",
-            "import ipykernel, zmq",
-        ],
-    )
-    .await
-    {
-        vec![
-            "uv".to_string(),
-            "run".to_string(),
-            "--with".to_string(),
-            "ipykernel".to_string(),
+    } else if uv_modules_available(&packages, &modules).await {
+        let mut argv = vec!["uv".to_string(), "run".to_string()];
+        for package in &packages {
+            argv.push("--with".to_string());
+            argv.push((*package).to_string());
+        }
+        argv.extend([
             "python".to_string(),
             "-m".to_string(),
             "ipykernel_launcher".to_string(),
             "-f".to_string(),
             "{connection_file}".to_string(),
-        ]
-    } else if install_ipykernel_into(&python, &site_packages).await {
+        ]);
+        argv
+    } else if install_python_packages_into(&python, &site_packages, &packages).await {
         let site_packages = site_packages.to_string_lossy().into_owned();
         vec![
             python,
@@ -399,7 +448,10 @@ async fn install_test_python3_kernelspec() -> Option<TestKernelSpec> {
             "{connection_file}".to_string(),
         ]
     } else {
-        eprintln!("skipping live kernel test: python3 ipykernel is unavailable");
+        eprintln!(
+            "skipping live kernel test: python3 modules unavailable: {}",
+            modules.join(", ")
+        );
         return None;
     };
     tokio::fs::write(
@@ -490,11 +542,7 @@ async fn run_cell_collects_events_against_in_process_kernel_mock() {
     assert_eq!(body["id"], "code-run-1");
     assert_eq!(body["status"], "ok");
     let outputs = body["outputs"].as_array().expect("outputs is an array");
-    let combined = outputs
-        .iter()
-        .filter_map(|event| event.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("");
+    let combined = combined_stream_text(outputs);
     assert!(
         combined.contains('4'),
         "expected stdout to contain '4', got outputs={outputs:?}"
@@ -578,14 +626,199 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
     );
     assert_eq!(print["status"], "ok");
     let outputs = print["outputs"].as_array().expect("outputs is an array");
-    let combined = outputs
-        .iter()
-        .filter_map(|event| event.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("");
+    let combined = combined_stream_text(outputs);
     assert!(
         combined.contains("42"),
         "expected stdout to contain 42, got outputs={outputs:?}"
+    );
+
+    let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[tokio::test]
+#[ignore = "requires a working python3 kernel with duckdb; run with --ignored"]
+async fn canonical_demo_attach_csv_runs_setup_and_renders_html_chart() {
+    let Some(_kernelspec) = install_test_python3_kernelspec_with(&["duckdb"]).await else {
+        return;
+    };
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-canonical-demo-")
+        .tempdir()
+        .expect("temp dir");
+    let csv = temp_dir.path().join("sales.csv");
+    tokio::fs::write(
+        &csv,
+        concat!(
+            "month,region,revenue\n",
+            "2026-01,west,10\n",
+            "2026-01,east,20\n",
+            "2026-02,west,30\n",
+            "2026-02,east,40\n",
+        ),
+    )
+    .await
+    .expect("csv fixture writes");
+    let notebook_path = temp_dir.path().join("analysis.ipynb");
+    let empty_notebook = json!({
+        "metadata": {},
+        "nbformat_minor": 5,
+        "nbformat": 4,
+        "cells": []
+    });
+    tokio::fs::write(
+        &notebook_path,
+        serde_json::to_vec_pretty(&empty_notebook).expect("empty notebook serializes"),
+    )
+    .await
+    .expect("notebook fixture writes");
+
+    let state = Arc::new(State::new());
+    let notebook_root: jute::backend::notebook::NotebookRoot =
+        serde_json::from_value(empty_notebook).expect("empty notebook parses");
+    state
+        .get_notebook()
+        .load(notebook_path.clone(), notebook_root);
+
+    let control = NotebookDaemonControl::new_with_parts_for_test(
+        Arc::new(AgentBridge::new()),
+        Arc::new(MockBridge::default()),
+        state.clone(),
+        Arc::new(RecordingWindowOps::default()),
+        None,
+    );
+
+    for _ in 0..2 {
+        let attach = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_string(),
+                    path: csv.display().to_string(),
+                    group: Some("demo".to_string()),
+                },
+            ))
+            .await;
+        assert!(attach.ok, "{:?}", attach.error);
+    }
+
+    let deps = deps_with_state_and_daemon(state.clone(), control);
+    let listed = structured(
+        list_datasources::call(&deps, json!({}))
+            .await
+            .expect("notebook_list_datasources succeeds"),
+    );
+    let entries = listed["entries"]
+        .as_array()
+        .expect("datasource entries are an array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "sales");
+    assert_eq!(entries[0]["kind"], "csv");
+    assert_eq!(entries[0]["group"], "demo");
+    assert_eq!(entries[0]["rowCount"], 4);
+    assert_eq!(entries[0]["columns"][0]["name"], "month");
+    assert_eq!(entries[0]["columns"][1]["name"], "region");
+    assert_eq!(entries[0]["columns"][2]["name"], "revenue");
+
+    let (root, _) = state.get_notebook().snapshot();
+    let notebook = serde_json::to_value(root).expect("notebook serializes");
+    let setup_cells = notebook["cells"]
+        .as_array()
+        .expect("cells array")
+        .iter()
+        .filter(|cell| {
+            cell["cell_type"] == "code"
+                && cell["metadata"]["spur"]["datasource_setup"] == json!(true)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(setup_cells.len(), 1);
+    let setup_cell = setup_cells[0];
+    let setup_cell_id = setup_cell["id"]
+        .as_str()
+        .expect("setup cell has an id")
+        .to_string();
+    let setup_source = setup_cell["source"].as_str().expect("setup cell source");
+    assert!(setup_source.contains("# SPUR datasource setup cell v1"));
+    assert_eq!(setup_source.matches("CREATE OR REPLACE VIEW").count(), 1);
+    assert!(setup_source.contains("read_csv_auto"));
+    assert!(setup_source.contains("sales"));
+
+    let slot_id = "mcp:notebook-read-tools-canonical-demo".to_string();
+    let kernel = start_local_kernel("python3")
+        .await
+        .expect("python3 kernel starts");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
+
+    let setup = structured(
+        run_cell::call(
+            &deps,
+            json!({
+                "cell_id": setup_cell_id,
+                "kernel_id": slot_id,
+                "code": setup_source,
+            }),
+        )
+        .await
+        .expect("setup cell runs"),
+    );
+    assert_eq!(
+        setup["status"], "ok",
+        "setup outputs={:?}",
+        setup["outputs"]
+    );
+
+    let analysis = structured(
+        run_cell::call(
+            &deps,
+            json!({
+                "cell_id": "code-canonical-demo-chart",
+                "kernel_id": slot_id,
+                "code": r#"
+from IPython.display import HTML, display
+
+rows = duckdb.sql("""
+    SELECT region, SUM(revenue) AS revenue
+    FROM sales
+    GROUP BY region
+    ORDER BY region
+""").fetchall()
+max_revenue = max((revenue for _, revenue in rows), default=1)
+bars = "".join(
+    f"<div><span>{region}</span>"
+    f"<div style='background:#2563eb;color:white;width:{int((revenue / max_revenue) * 160)}px'>"
+    f"{revenue}</div></div>"
+    for region, revenue in rows
+)
+display(HTML(f"<section data-spur-demo-chart='sales'>{bars}</section>"))
+"#,
+            }),
+        )
+        .await
+        .expect("analysis cell runs"),
+    );
+    assert_eq!(
+        analysis["status"], "ok",
+        "analysis outputs={:?}",
+        analysis["outputs"]
+    );
+    let outputs = analysis["outputs"]
+        .as_array()
+        .expect("analysis outputs are an array");
+    let display = outputs
+        .iter()
+        .find(|output| {
+            output["event"] == "display_data"
+                && (output["data"]["data"].get("text/html").is_some()
+                    || output["data"]["data"].get("image/png").is_some())
+        })
+        .unwrap_or_else(|| panic!("expected display_data HTML or image/png, got {outputs:?}"));
+    let html = display["data"]["data"]["text/html"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        html.contains("data-spur-demo-chart='sales'")
+            && html.contains("east")
+            && html.contains("west"),
+        "expected rendered chart HTML to include sales regions, got {html:?}"
     );
 
     let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
