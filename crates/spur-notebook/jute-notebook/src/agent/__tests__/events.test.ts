@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { NotebookDelta, RunCellEvent } from "@/bindings";
+import type {
+  NotebookDelta,
+  RecentNotebookEntry,
+  RunCellEvent,
+} from "@/bindings";
 import { Notebook } from "@/stores/notebook";
 
-import { listenForNotebookEvents } from "../events";
+import {
+  listenForNotebookEvents,
+  listenForRecentNotebookChanges,
+} from "../events";
 
 type EventCallback<T> = (event: { payload: T }) => void;
 
@@ -87,9 +94,44 @@ describe("listenForNotebookEvents", () => {
     } satisfies NotebookDelta);
     await flushPromises();
 
-    expect(notebook.store.getState().cells[cellId].result?.outputs).toEqual([
-      { output_type: "stream", name: "stdout", text: "hello\n" },
-    ]);
+    expect(
+      notebook.store.getState().serverState.cells[cellId].result?.outputs,
+    ).toEqual([{ output_type: "stream", name: "stdout", text: "hello\n" }]);
+  });
+});
+
+describe("listenForRecentNotebookChanges", () => {
+  afterEach(() => {
+    invokeMock.mockReset();
+    listeners.clear();
+  });
+
+  test("applies recents event payload without refetching", async () => {
+    const entries: RecentNotebookEntry[] = [
+      {
+        path: "/tmp/demo.ipynb",
+        lastOpened: "2026-05-29T00:00:00Z",
+        isScratch: false,
+        pinned: true,
+        kernelAlive: false,
+        isCurrent: true,
+      },
+    ];
+    const appliedEntries: RecentNotebookEntry[][] = [];
+    const applyRecents = vi.fn(async (nextEntries: RecentNotebookEntry[]) => {
+      appliedEntries.push(nextEntries);
+    });
+
+    listenForRecentNotebookChanges(applyRecents);
+    await flushPromises();
+
+    emit("notebook://recents_changed", { entries });
+    await flushPromises();
+
+    expect(applyRecents).toHaveBeenCalledTimes(1);
+    expect(applyRecents).toHaveBeenCalledWith(entries);
+    expect(appliedEntries).toEqual([entries]);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

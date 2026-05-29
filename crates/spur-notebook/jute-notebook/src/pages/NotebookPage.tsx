@@ -31,7 +31,7 @@ export default function NotebookPage() {
         return;
       }
 
-      if (!cancelled && !notebook.state.loadError) {
+      if (!cancelled && !notebook.state.viewState.loadError) {
         setActiveAgentNotebook(notebook);
       }
     }

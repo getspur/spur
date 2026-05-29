@@ -1,6 +1,6 @@
 import { type UnlistenFn, listen } from "@tauri-apps/api/event";
 
-import type { NotebookDelta } from "@/bindings";
+import type { NotebookDelta, RecentsChangedEvent } from "@/bindings";
 import { type Notebook, reconcileNotebookDelta } from "@/stores/notebook";
 
 type SavedPayload = {
@@ -75,12 +75,14 @@ export function listenForNotebookEvents(notebook: Notebook): () => void {
 }
 
 export function listenForRecentNotebookChanges(
-  refreshRecents: () => Promise<void>,
+  applyRecents: (entries: RecentsChangedEvent["entries"]) => void | Promise<void>,
 ): () => void {
   return listenForAll(
     [
-      listen("notebook://recents_changed", () => {
-        runAsync("notebook://recents_changed", refreshRecents);
+      listen<RecentsChangedEvent>("notebook://recents_changed", (event) => {
+        runAsync("notebook://recents_changed", async () => {
+          await applyRecents(event.payload.entries);
+        });
       }),
     ],
     "recent notebook",

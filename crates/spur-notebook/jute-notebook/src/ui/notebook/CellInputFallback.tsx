@@ -11,10 +11,13 @@ type Props = {
 /** Fallback component with no editing or syntax highlighting, before CodeMirror loads. */
 export default function CellInput({ cellId }: Props) {
   const notebook = useNotebook();
-  const type = useStore(notebook.store, (state) => state.cells[cellId].type);
+  const type = useStore(
+    notebook.store,
+    (state) => state.serverState.cells[cellId].type,
+  );
   const initialText = useStore(
     notebook.store,
-    (state) => state.cells[cellId].initialText,
+    (state) => state.serverState.cells[cellId].initialText,
   );
 
   // 57px padding left matches the gutter size of the full editor.

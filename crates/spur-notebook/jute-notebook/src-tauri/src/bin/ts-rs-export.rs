@@ -9,7 +9,7 @@ use jute::{
     commands::{
         DaemonCell, DaemonControlCommand, DaemonControlError, DaemonControlRequest,
         DaemonControlResponse, DaemonControlResult, DaemonNotebookSnapshot, DaemonRecentEntry,
-        RecentNotebookEntry,
+        RecentNotebookEntry, RecentsChangedEvent,
     },
     notebook_store::{CellKind, DeltaKind, NotebookDelta},
 };
@@ -39,6 +39,7 @@ fn main() {
     RunCellEvent::export_all_to(&export_path).unwrap();
     KernelUsageInfo::export_all_to(&export_path).unwrap();
     RecentNotebookEntry::export_all_to(&export_path).unwrap();
+    RecentsChangedEvent::export_all_to(&export_path).unwrap();
     CellKind::export_all_to(&export_path).unwrap();
     DeltaKind::export_all_to(&export_path).unwrap();
     NotebookDelta::export_all_to(&export_path).unwrap();

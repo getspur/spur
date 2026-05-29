@@ -167,10 +167,24 @@ pub(super) fn check_response(
     }
 }
 
-pub(super) fn emit_recents_changed(deps: &ServerDeps) {
-    if let Some(app) = deps.app.as_ref() {
-        let _ = app.emit(RECENTS_CHANGED_EVENT, &json!({}));
-    }
+pub(super) async fn emit_recents_changed(deps: &ServerDeps) -> Result<(), McpError> {
+    let Some(app) = deps.app.as_ref() else {
+        return Ok(());
+    };
+    let daemon = deps.daemon.as_ref().ok_or_else(|| {
+        McpError::internal_error(
+            "notebook daemon control plane is required to emit recents_changed",
+            Some(json!({ "code": "daemon_unavailable" })),
+        )
+    })?;
+    let event = daemon.recents_changed_event().await.map_err(|error| {
+        McpError::internal_error(
+            "failed to load recent notebooks for recents_changed",
+            Some(json!({ "error": error.to_string() })),
+        )
+    })?;
+    let _ = app.emit(RECENTS_CHANGED_EVENT, &event);
+    Ok(())
 }
 
 fn require_app<'a>(

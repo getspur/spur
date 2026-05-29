@@ -99,10 +99,13 @@ export default function CellInput({ cellId }: Props) {
 
   const [view, setView] = useState<EditorView | null>(null);
 
-  const type = useStore(notebook.store, (state) => state.cells[cellId].type);
+  const type = useStore(
+    notebook.store,
+    (state) => state.serverState.cells[cellId].type,
+  );
   const initialText = useStore(
     notebook.store,
-    (state) => state.cells[cellId].initialText,
+    (state) => state.serverState.cells[cellId].initialText,
   );
 
   // Only updated when the editor view is switched to Markdown rendering mode.

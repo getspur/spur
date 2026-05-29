@@ -40,22 +40,33 @@ export default function PresentPage() {
     if (path) void notebook.loadNotebookFromPath(path);
   }, [notebook, path]);
 
-  const cellIds = useStore(notebook.store, (state) => state.cellIds);
-  const storeCells = useStore(notebook.store, (state) => state.cells);
+  const cellIds = useStore(
+    notebook.store,
+    (state) => state.serverState.cellIds,
+  );
+  const storeCells = useStore(
+    notebook.store,
+    (state) => state.serverState.cells,
+  );
+  const cellSourceDrafts = useStore(
+    notebook.store,
+    (state) => state.editBuffer.cellSources,
+  );
 
   const cells = useMemo(
     () =>
       cellIds.map((id) => {
         const cell = storeCells[id];
+        const sourceDraft = cellSourceDrafts[id];
         return {
           id,
           type: cell.type,
-          source: cell.source,
+          source: sourceDraft?.source ?? cell.source,
           metadata: { jute_deck: cell.juteDeckMetadata },
           outputs: cell.result?.outputs ?? [],
         };
       }),
-    [cellIds, storeCells],
+    [cellIds, storeCells, cellSourceDrafts],
   );
 
   const slides: SlideSpec[] = useMemo(

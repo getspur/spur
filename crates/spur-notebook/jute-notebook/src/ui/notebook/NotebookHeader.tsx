@@ -25,14 +25,17 @@ type Props = {
 export default function NotebookHeader({ kernelName }: Props) {
   const notebook = useNotebook();
 
-  const kernelId = useStore(notebook.store, (state) => state.kernelId);
+  const kernelId = useStore(
+    notebook.store,
+    (state) => state.viewState.kernelId,
+  );
   const selectedCellId = useStore(
     notebook.store,
-    (state) => state.selectedCellId,
+    (state) => state.viewState.selectedCellId,
   );
   const kernelGeneration = useStore(
     notebook.store,
-    (state) => state.kernelGeneration,
+    (state) => state.viewState.kernelGeneration,
   );
   const [statsOpen, setStatsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);

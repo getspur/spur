@@ -110,7 +110,7 @@ impl DaemonWindowOps for RecordingWindowOps {
         Ok(format!("window-{}", opened.len()))
     }
 
-    fn emit_recents_changed(&self) {}
+    fn emit_recents_changed(&self, _event: &jute::commands::RecentsChangedEvent) {}
 
     fn exit(&self) {}
 }

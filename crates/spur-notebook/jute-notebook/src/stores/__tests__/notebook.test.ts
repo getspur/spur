@@ -12,24 +12,31 @@ describe("applyRunCellEvent", () => {
   test("applies a synthetic run event sequence to a cell result", () => {
     const cellId = "cell-1";
     const state: NotebookStoreState = {
-      cellIds: [cellId],
-      cells: {
-        [cellId]: {
-          type: "code",
-          initialText: "",
-          source: "",
-          version: 1,
-          result: {
-            status: "running",
-            timings: { startedAt: 100 },
-            executionCount: undefined,
-            outputs: [],
-            displays: {},
+      serverState: {
+        cellIds: [cellId],
+        cells: {
+          [cellId]: {
+            type: "code",
+            initialText: "",
+            source: "",
+            version: 1,
+            result: {
+              status: "running",
+              timings: { startedAt: 100 },
+              executionCount: undefined,
+              outputs: [],
+              displays: {},
+            },
           },
         },
       },
-      selectedCellId: null,
-      isLoading: false,
+      viewState: {
+        selectedCellId: null,
+        isLoading: false,
+      },
+      editBuffer: {
+        cellSources: {},
+      },
     };
     let runState: RunCellEventApplicationState = {
       status: "running",
@@ -39,7 +46,7 @@ describe("applyRunCellEvent", () => {
     };
 
     const apply = (event: RunCellEvent) => {
-      runState = applyRunCellEvent(state, cellId, event, runState);
+      runState = applyRunCellEvent(state.serverState, cellId, event, runState);
     };
 
     apply({ event: "started" });
@@ -63,14 +70,16 @@ describe("applyRunCellEvent", () => {
       },
     });
 
-    expect(state.cells[cellId].result?.outputs).toEqual([
+    expect(state.serverState.cells[cellId].result?.outputs).toEqual([
       {
         output_type: "display_data",
         data: { "text/plain": "updated" },
         metadata: { isolated: true },
       },
     ]);
-    expect(state.cells[cellId].result?.displays).toEqual({ "display-1": 0 });
+    expect(state.serverState.cells[cellId].result?.displays).toEqual({
+      "display-1": 0,
+    });
 
     apply({
       event: "execute_result",
@@ -97,7 +106,7 @@ describe("applyRunCellEvent", () => {
       executionCount: 3,
       willClearOutput: false,
     });
-    expect(state.cells[cellId].result).toEqual({
+    expect(state.serverState.cells[cellId].result).toEqual({
       status: "success",
       timings: { startedAt: 100 },
       executionCount: 3,
