@@ -395,11 +395,10 @@ impl App {
                 self.persist_metadata("AgentSessionReady metadata");
             }
             SpurEventBody::NotebookSocketReady {
-                session,
+                session: _,
                 socket_nonce,
             } => {
-                self.notebook_socket_nonces
-                    .insert(session.0.clone(), socket_nonce.clone());
+                self.notebook_socket_nonce = Some(socket_nonce.clone());
             }
             SpurEventBody::SessionAttachRejected {
                 acp_session_id,
@@ -438,12 +437,11 @@ impl App {
                 self.brain_status = BrainStatus::Error(reason.clone());
                 self.pending_first_user_message = None;
             }
-            SpurEventBody::SessionCompleted { session, .. } => {
+            SpurEventBody::SessionCompleted { .. } => {
                 self.brain_status = BrainStatus::Idle;
                 self.pending_first_user_message = None;
-                self.notebook_socket_nonces.remove(&session.0);
             }
-            SpurEventBody::BrainRetired { session, reason } => {
+            SpurEventBody::BrainRetired { reason, .. } => {
                 // Null per-App state that was tied to the retired session.
                 // `brain_status` is intentionally NOT touched here:
                 //  - UserClear: already set to Idle by the ClearSession
@@ -453,7 +451,6 @@ impl App {
                 //    Idle would race that transition.
                 self.brain_name = None;
                 self.pending_first_user_message = None;
-                self.notebook_socket_nonces.remove(&session.0);
                 // Clear auto-resume pointers so /clear followed by a
                 // process quit before the next prompt does not cause
                 // spur-cli to auto-resume the just-retired session on

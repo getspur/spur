@@ -428,6 +428,9 @@ mod brain_retired_tests {
     use super::super::super::*;
     use spur_acp::domain::events::{BrainRetireReason, SpurEvent, SpurEventBody};
     use spur_acp::SessionId;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
+    use tokio::time::{timeout, Duration};
 
     fn wrap(body: SpurEventBody) -> SpurEvent {
         SpurEvent::now(body)
@@ -441,6 +444,62 @@ mod brain_retired_tests {
     fn app_with_user_input_tx() -> (App, tokio::sync::mpsc::Receiver<UserInput>) {
         let (tx, rx) = tokio::sync::mpsc::channel::<UserInput>(8);
         (App::new(Some(tx), false), rx)
+    }
+
+    struct SocketCleanup {
+        socket_path: std::path::PathBuf,
+        _tempdir: tempfile::TempDir,
+    }
+
+    impl Drop for SocketCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+    }
+
+    fn bind_notebook_listener(label: &str) -> (String, SocketCleanup, UnixListener) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let tempdir = tempfile::Builder::new()
+            .prefix("nb")
+            .tempdir_in("/tmp")
+            .expect("notebook socket tempdir");
+        let nonce = tempdir
+            .path()
+            .join(format!("n-{label}-{}-{nanos}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let socket_path = spur_core::notebook::control_socket_path(&nonce);
+        let listener = UnixListener::bind(&socket_path).expect("bind notebook control socket");
+        (
+            nonce,
+            SocketCleanup {
+                socket_path,
+                _tempdir: tempdir,
+            },
+            listener,
+        )
+    }
+
+    async fn read_notebook_frame(stream: &mut tokio::net::UnixStream) -> serde_json::Value {
+        let mut len = [0_u8; 4];
+        stream.read_exact(&mut len).await.expect("frame length");
+        let len = u32::from_be_bytes(len) as usize;
+        let mut bytes = vec![0_u8; len];
+        stream.read_exact(&mut bytes).await.expect("frame body");
+        serde_json::from_slice(&bytes).expect("request json")
+    }
+
+    async fn write_notebook_frame(stream: &mut tokio::net::UnixStream, value: serde_json::Value) {
+        let bytes = serde_json::to_vec(&value).expect("response json");
+        stream
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .await
+            .expect("write frame length");
+        stream.write_all(&bytes).await.expect("write frame body");
+        stream.flush().await.expect("flush frame");
     }
 
     fn effort_config_option() -> spur_acp::SessionConfigOption {
@@ -608,6 +667,87 @@ mod brain_retired_tests {
         assert!(detail.ready_banner_text().is_some());
         assert_eq!(detail.session_id(), &sid_before, "session_id stays retired");
         assert_eq!(app.brain_status, BrainStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn resume_session_does_not_close_shared_notebook_daemon() {
+        let (nonce, _cleanup, listener) = bind_notebook_listener("resume");
+        let mut accepted_close = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept command");
+            read_notebook_frame(&mut stream).await
+        });
+
+        let (mut app, _rx) = app_with_user_input_tx();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("notebook-a".into()),
+        }));
+        app.handle_spur_event(wrap(SpurEventBody::NotebookSocketReady {
+            session: SessionId("notebook-a".into()),
+            socket_nonce: nonce,
+        }));
+
+        app.process_action(Action::ResumeSession {
+            session_id: "notebook-b".into(),
+        });
+
+        match timeout(Duration::from_millis(150), &mut accepted_close).await {
+            Ok(Ok(request)) => panic!(
+                "session switch must not close shared notebook daemon; got command {:?}",
+                request["command"]
+            ),
+            Ok(Err(err)) => panic!("notebook accept task failed: {err}"),
+            Err(_) => {
+                accepted_close.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn notebook_command_uses_shared_nonce_after_prior_session_completes() {
+        let (nonce, _cleanup, listener) = bind_notebook_listener("shared");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept command");
+            let request = read_notebook_frame(&mut stream).await;
+            write_notebook_frame(
+                &mut stream,
+                serde_json::json!({
+                    "ok": true,
+                    "path": null,
+                    "error": null
+                }),
+            )
+            .await;
+            request
+        });
+
+        let mut app = App::new_for_tests();
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("notebook-a".into()),
+        }));
+        app.handle_spur_event(wrap(SpurEventBody::NotebookSocketReady {
+            session: SessionId("notebook-a".into()),
+            socket_nonce: nonce,
+        }));
+        app.handle_spur_event(wrap(SpurEventBody::SessionCompleted {
+            session: SessionId("notebook-a".into()),
+            success: true,
+        }));
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("notebook-b".into()),
+        }));
+
+        app.process_action(Action::NotebookCommand { arg: "new".into() });
+
+        let request = timeout(Duration::from_millis(500), server)
+            .await
+            .expect("notebook command should reach shared socket")
+            .expect("server task");
+        assert_eq!(request["daemon"], "notebook.v1");
+        assert_eq!(request["command"], "new");
+        assert!(request.get("path").is_none());
     }
 
     #[test]
