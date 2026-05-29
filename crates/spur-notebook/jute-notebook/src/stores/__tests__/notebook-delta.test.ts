@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { DaemonCell, NotebookDelta, NotebookRoot } from "@/bindings";
+import { cellToSlide } from "@/ui/deck/cellToSlide";
 
 import {
   Notebook,
@@ -214,6 +215,58 @@ describe("reconcileNotebookDelta", () => {
       "authoritative = 3",
     );
     expect(state.serverState.lastAppliedVersion).toBe(3);
+  });
+
+  test("loads notebook jute_deck theme for slide theme resolution", async () => {
+    const cellId = "slide-1";
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook({
+      metadata: { jute_deck: { theme: "spur-brand" } },
+      nbformat_minor: 5,
+      nbformat: 4,
+      cells: [
+        {
+          cell_type: "markdown",
+          id: cellId,
+          metadata: { spur: { version: 1 } },
+          source: "# Deck title",
+        },
+      ],
+    });
+    await notebook.kernelStartPromise;
+
+    const state = notebook.store.getState();
+    const cell = state.serverState.cells[cellId];
+    const deck = state.serverState.notebookMetadata.jute_deck;
+    expect(cell?.juteDeckMetadata).toBeUndefined();
+    expect(
+      cellToSlide(
+        {
+          id: cellId,
+          type: cell?.type,
+          source: cell?.source,
+          metadata: { jute_deck: cell?.juteDeckMetadata },
+          outputs: [],
+        },
+        deck,
+      )?.theme,
+    ).toBe("spur-brand");
   });
 });
 

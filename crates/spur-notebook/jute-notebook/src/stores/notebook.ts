@@ -11,6 +11,7 @@ import type {
   CellMetadata,
   DaemonCell,
   JuteDeckCellMetadata,
+  NotebookMetadata,
   NotebookDelta,
   NotebookRoot,
   Output,
@@ -46,6 +47,9 @@ export type NotebookCellState = {
 export type NotebookServerState = {
   /** Last authoritative Rust store document version applied to this replica. */
   lastAppliedVersion: number;
+
+  /** Root-level notebook metadata loaded from the notebook file. */
+  notebookMetadata: NotebookMetadata;
 
   /** A list of cell IDs in order. */
   cellIds: string[];
@@ -293,6 +297,7 @@ function createNotebookStore(): StoreApi<NotebookStore> {
       const initialState: NotebookStoreState = {
         serverState: {
           lastAppliedVersion: 0,
+          notebookMetadata: {},
           cellIds: [],
           cells: {},
         },
@@ -421,6 +426,8 @@ function loadNotebookRootDraft(
   state: WritableDraft<NotebookServerState>,
   notebook: NotebookRoot,
 ) {
+  state.notebookMetadata = notebook.metadata;
+
   // Filter out 'raw' cells, as they aren't supported yet.
   const cells = notebook.cells.filter(
     (cell) => cell.cell_type === "code" || cell.cell_type === "markdown",

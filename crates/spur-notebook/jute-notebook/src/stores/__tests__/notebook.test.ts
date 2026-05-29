@@ -14,6 +14,7 @@ describe("applyRunCellEvent", () => {
     const state: NotebookStoreState = {
       serverState: {
         lastAppliedVersion: 0,
+        notebookMetadata: {},
         cellIds: [cellId],
         cells: {
           [cellId]: {

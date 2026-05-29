@@ -48,6 +48,10 @@ export default function PresentPage() {
     notebook.store,
     (state) => state.serverState.cells,
   );
+  const notebookDeckMetadata = useStore(
+    notebook.store,
+    (state) => state.serverState.notebookMetadata.jute_deck,
+  );
   const cellSourceDrafts = useStore(
     notebook.store,
     (state) => state.editBuffer.cellSources,
@@ -72,9 +76,9 @@ export default function PresentPage() {
   const slides: SlideSpec[] = useMemo(
     () =>
       cells
-        .map((cell) => cellToSlide(cell, undefined))
+        .map((cell) => cellToSlide(cell, notebookDeckMetadata))
         .filter((slide): slide is SlideSpec => slide !== null),
-    [cells],
+    [cells, notebookDeckMetadata],
   );
 
   const [idx, setIdx] = useState(0);
