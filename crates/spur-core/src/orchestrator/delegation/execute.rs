@@ -114,6 +114,14 @@ pub(crate) async fn execute_delegation(
             );
         }
     };
+    let worker_mcp_server = if worker_mcp_dispatch_vec.is_empty() {
+        None
+    } else {
+        worker_mcp_fetcher
+            .cache
+            .get(&brain_session_id)
+            .map(|server| Arc::clone(server.value()))
+    };
 
     let mut current_task = original_task.clone();
     // Retry-history accumulator. Each retry attempt pushes its
@@ -167,6 +175,7 @@ pub(crate) async fn execute_delegation(
                 dispatched_base_oid_tx: dispatched_base_oid_tx.clone(),
                 fault_injection_hooks: &fault_injection_hooks,
                 worker_mcp_servers: &worker_mcp_dispatch_vec,
+                worker_mcp_server: worker_mcp_server.as_ref().map(Arc::clone),
                 pm_service: pm_service.as_deref(),
                 feature_gate: feature_gate.as_ref(),
             },
