@@ -519,6 +519,26 @@ pub struct DaemonControlError {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonDatasourcesChangedFrame {
+    daemon: &'static str,
+    event: &'static str,
+    snapshot: bool,
+    entries: Vec<jute::commands::DatasourceEntry>,
+}
+
+impl DaemonDatasourcesChangedFrame {
+    fn new(entries: Vec<jute::commands::DatasourceEntry>, snapshot: bool) -> Self {
+        Self {
+            daemon: "notebook.v1",
+            event: "datasources_changed",
+            snapshot,
+            entries,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PendingNotebookFlush {
     path: PathBuf,
@@ -1487,6 +1507,26 @@ async fn handle_daemon_connection(
     };
 
     if first.get("daemon").and_then(Value::as_str) == Some("notebook.v1") {
+        if first.get("command").and_then(Value::as_str) == Some("subscribe") {
+            match deps.state.clone() {
+                Some(state) => stream_daemon_events(stream, state).await,
+                None => {
+                    let response = DaemonControlResponse {
+                        id: None,
+                        ok: false,
+                        path: None,
+                        entries: None,
+                        result: None,
+                        error: Some(DaemonControlError {
+                            code: "daemon_unavailable".to_string(),
+                            message: "notebook daemon event stream is unavailable".to_string(),
+                        }),
+                    };
+                    let _ = write_frame_json(&mut stream, &response).await;
+                }
+            }
+            return;
+        }
         let response = match serde_json::from_value::<DaemonControlRequest>(first) {
             Ok(request) => control.handle_control(request).await,
             Err(error) => DaemonControlResponse {
@@ -1528,6 +1568,41 @@ async fn handle_daemon_connection(
         }
         Err(error) => {
             tracing::debug!(%error, "notebook MCP session failed to initialize");
+        }
+    }
+}
+
+async fn stream_daemon_events(mut stream: UnixStream, state: Arc<State>) {
+    let mut events = state.event_tx.subscribe();
+    let snapshot = state.datasource_catalog.lock().list();
+    if write_frame_json(
+        &mut stream,
+        &DaemonDatasourcesChangedFrame::new(snapshot, true),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    loop {
+        let entries = match events.recv().await {
+            Ok(jute::state::DaemonEvent::DatasourcesChanged(entries)) => entries,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::debug!(skipped, "notebook daemon event subscriber lagged");
+                state.datasource_catalog.lock().list()
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+
+        if write_frame_json(
+            &mut stream,
+            &DaemonDatasourcesChangedFrame::new(entries, false),
+        )
+        .await
+        .is_err()
+        {
+            return;
         }
     }
 }
@@ -1700,9 +1775,71 @@ mod tests {
         assert!(response.error.is_none());
     }
 
-    #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
     async fn catalog_change_pushes_subscriber() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: test_bridge_requester(),
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+        });
+        let tempdir = tempfile::tempdir().expect("socket dir");
+        let socket_path = tempdir.path().join("notebook.sock");
+        let _server = start_multiplexed_server(&socket_path, deps, control)
+            .await
+            .expect("server starts");
+        let mut client = UnixStream::connect(&socket_path)
+            .await
+            .expect("subscriber connects");
+
+        write_frame_json(
+            &mut client,
+            &json!({
+                "daemon": "notebook.v1",
+                "command": "subscribe"
+            }),
+        )
+        .await
+        .expect("subscribe frame writes");
+
+        let snapshot = read_frame_value(&mut client)
+            .await
+            .expect("snapshot frame reads");
+        assert_eq!(snapshot["daemon"], "notebook.v1");
+        assert_eq!(snapshot["event"], "datasources_changed");
+        assert_eq!(snapshot["snapshot"], true);
+        let snapshot_entries: Vec<jute::commands::DatasourceEntry> =
+            serde_json::from_value(snapshot["entries"].clone()).expect("snapshot entries decode");
+        assert!(snapshot_entries.is_empty());
+
+        let entry = test_datasource_entry("sales");
+        jute_state.attach_datasource(entry.clone());
+        let pushed = tokio::time::timeout(Duration::from_secs(1), read_frame_value(&mut client))
+            .await
+            .expect("catalog push frame is sent")
+            .expect("catalog push frame reads");
+
+        assert_eq!(pushed["daemon"], "notebook.v1");
+        assert_eq!(pushed["event"], "datasources_changed");
+        assert_eq!(pushed["snapshot"], false);
+        let pushed_entries: Vec<jute::commands::DatasourceEntry> =
+            serde_json::from_value(pushed["entries"].clone()).expect("push entries decode");
+        assert_eq!(pushed_entries, vec![entry.clone()]);
+
+        drop(client);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn catalog_change_emits_daemon_event() {
         let tempdir = tempfile::tempdir().expect("csv fixture dir");
         let csv = tempdir.path().join("sales.csv");
         std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
@@ -1856,6 +1993,20 @@ mod tests {
 
     fn test_server_deps() -> Arc<ServerDeps> {
         Arc::new(ServerDeps::from_bridge(test_bridge_requester()))
+    }
+
+    fn test_datasource_entry(name: &str) -> jute::commands::DatasourceEntry {
+        jute::commands::DatasourceEntry {
+            name: name.to_owned(),
+            path: format!("/tmp/{name}.csv"),
+            kind: jute::commands::DatasourceKind::Csv,
+            group: Some("quarterly".to_owned()),
+            columns: vec![jute::commands::Column {
+                name: "region".to_owned(),
+                sql_type: "VARCHAR".to_owned(),
+            }],
+            row_count: Some(2),
+        }
     }
 
     struct BufferedNotebookBridge {
