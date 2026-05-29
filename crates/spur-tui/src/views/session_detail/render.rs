@@ -394,6 +394,7 @@ impl SessionDetailView {
                 context_size: self.context_size,
                 stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
                 esc_consumed_by_composer: self.input_bar.wants_esc(),
+                notebook_ready: ctx.notebook_ready,
                 issue_count: 0,
                 alert_summary: None,
                 license_badge,
