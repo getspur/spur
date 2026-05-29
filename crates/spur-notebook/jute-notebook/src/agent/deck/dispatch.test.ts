@@ -19,6 +19,7 @@ describe("dispatchDeckCommand", () => {
         getState: () => ({
           serverState: {
             lastAppliedVersion: 0,
+            notebookMetadata: {},
             cellIds: ["markdown-1", "code-1"],
             cells: {
               "markdown-1": {
