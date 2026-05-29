@@ -1293,7 +1293,7 @@ fn tier2_jaccard_matches(
                 ));
                 continue;
             }
-            if best_score - second_score < 0.05 {
+            if best_score - second_score < RENAME_AMBIGUITY_EPSILON {
                 record_ambiguous_rename_pair(diagnostics, file_change, added.change, best_deleted);
                 record_ambiguous_rename_pair(
                     diagnostics,
@@ -1331,6 +1331,7 @@ fn token_sets_for_changes(changes: &[SymbolChange]) -> Vec<ChangeTokenSet<'_>> {
 }
 
 type ScoredChange<'a> = (&'a SymbolChange, f64);
+const RENAME_AMBIGUITY_EPSILON: f64 = 0.05;
 
 fn best_two_jaccard_matches<'a>(
     added: &ChangeTokenSet<'_>,
@@ -1382,7 +1383,16 @@ fn reject_ambiguous_splits(
         scores.sort_by(|(_, left), (_, right)| {
             right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
         });
-        if scores[0].1 - scores[1].1 < 0.05 {
+        if scores[0].1 - scores[1].1 < RENAME_AMBIGUITY_EPSILON {
+            if let Some(winner) = split_tiebreak_winner(&matches, &scores) {
+                for (index, _) in scores {
+                    if index != winner {
+                        rejected.insert(index);
+                    }
+                }
+                continue;
+            }
+
             for (index, _) in scores {
                 rejected.insert(index);
                 record_ambiguous_rename_pair(
@@ -1400,6 +1410,70 @@ fn reject_ambiguous_splits(
         .enumerate()
         .filter_map(|(index, rename_match)| (!rejected.contains(&index)).then_some(rename_match))
         .collect()
+}
+
+fn split_tiebreak_winner(matches: &[RenameMatch], scores: &[(usize, f64)]) -> Option<usize> {
+    let top_score = scores.first()?.1;
+    let mut winner = None;
+    let mut tied = false;
+
+    for (index, score) in scores {
+        if top_score - score >= RENAME_AMBIGUITY_EPSILON {
+            continue;
+        }
+
+        let candidate = split_tiebreak_signal(&matches[*index]);
+        match winner {
+            None => {
+                winner = Some((*index, candidate));
+                tied = false;
+            }
+            Some((_, current)) => match candidate.cmp(&current) {
+                std::cmp::Ordering::Greater => {
+                    winner = Some((*index, candidate));
+                    tied = false;
+                }
+                std::cmp::Ordering::Equal => tied = true,
+                std::cmp::Ordering::Less => {}
+            },
+        }
+    }
+
+    if tied {
+        None
+    } else {
+        winner.and_then(|(index, signal)| (signal.0 || signal.1).then_some(index))
+    }
+}
+
+fn split_tiebreak_signal(rename_match: &RenameMatch) -> (bool, bool, std::cmp::Reverse<usize>) {
+    (
+        rename_match.from.snapshot.entity_name == rename_match.to.snapshot.entity_name,
+        entity_names_share_significant_token(
+            &rename_match.from.snapshot.entity_name,
+            &rename_match.to.snapshot.entity_name,
+        ),
+        std::cmp::Reverse(line_start_distance(
+            &rename_match.from.snapshot,
+            &rename_match.to.snapshot,
+        )),
+    )
+}
+
+fn entity_names_share_significant_token(left: &str, right: &str) -> bool {
+    significant_name_tokens(left).any(|left_token| {
+        significant_name_tokens(right).any(|right_token| right_token == left_token)
+    })
+}
+
+fn significant_name_tokens(name: &str) -> impl Iterator<Item = &str> {
+    name.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3)
+        .filter(|token| !matches!(*token, "old" | "new"))
+}
+
+fn line_start_distance(from: &SymbolSnapshotArtifact, to: &SymbolSnapshotArtifact) -> usize {
+    from.line_range[0].abs_diff(to.line_range[0])
 }
 
 fn record_ambiguous_rename_pair(
