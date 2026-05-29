@@ -58,7 +58,7 @@ pub async fn call_move_to_trash(
     jute::commands::move_notebook_to_trash(path.to_string_lossy().into_owned())
         .await
         .map_err(|error| jute_error("trash_failed", "notebook.move_to_trash failed", &error))?;
-    emit_recents_changed(deps);
+    emit_recents_changed(deps).await?;
     Ok(CallToolResult::structured(json!({ "ok": true })))
 }
 
@@ -124,7 +124,7 @@ pub async fn call_discard_scratch(
                 &error,
             )
         })?;
-    emit_recents_changed(deps);
+    emit_recents_changed(deps).await?;
     Ok(CallToolResult::structured(json!({ "count": count })))
 }
 

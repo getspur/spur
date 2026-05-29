@@ -81,6 +81,15 @@ pub struct RecentNotebookEntry {
     pub is_current: bool,
 }
 
+/// Payload emitted when the recent-notebooks list changes.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct RecentsChangedEvent {
+    /// Current recent-notebook entries.
+    pub entries: Vec<RecentNotebookEntry>,
+}
+
 /// Recent notebook entry returned by the daemon control protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

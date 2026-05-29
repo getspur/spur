@@ -1,4 +1,4 @@
-import type { CellType, Notebook } from "@/stores/notebook";
+import { type CellType, type Notebook, selectCell } from "@/stores/notebook";
 
 import {
   type AgentBridgeRequest,
@@ -47,7 +47,7 @@ export async function dispatchAgentRequest(
 }
 
 function flushPending(notebook: Notebook) {
-  const path = notebook.state.path;
+  const path = notebook.state.viewState.path;
   if (!path) {
     throw new AgentHandlerError(
       "notebook_not_open",
@@ -58,7 +58,11 @@ function flushPending(notebook: Notebook) {
 }
 
 function requireNotebook(notebook: Notebook | undefined): Notebook {
-  if (!notebook || notebook.state.isLoading || notebook.state.loadError) {
+  if (
+    !notebook ||
+    notebook.state.viewState.isLoading ||
+    notebook.state.viewState.loadError
+  ) {
     throw new AgentHandlerError("notebook_not_open", "No notebook is loaded");
   }
   return notebook;
@@ -66,8 +70,11 @@ function requireNotebook(notebook: Notebook | undefined): Notebook {
 
 function snapshot(notebook: Notebook): AgentSnapshotCell[] {
   const state = notebook.state;
-  return state.cellIds.map((id) => {
-    const cell = state.cells[id];
+  return state.serverState.cellIds.map((id) => {
+    const cell = selectCell(state, id);
+    if (!cell) {
+      throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
+    }
     return {
       id,
       kind: cell.type,
@@ -82,7 +89,7 @@ function snapshot(notebook: Notebook): AgentSnapshotCell[] {
 function readCell(notebook: Notebook, params: unknown): AgentReadCell {
   const id = readCellId(params);
   const state = notebook.state;
-  const cell = state.cells[id];
+  const cell = selectCell(state, id);
   if (!cell) {
     throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
   }
@@ -105,12 +112,12 @@ function insertCell(notebook: Notebook, params: unknown): AgentInsertCell {
   const lastEditedBy =
     readOptionalStringParam(params, "last_edited_by") ?? "brain";
   const state = notebook.state;
-  if (afterId && !state.cells[afterId]) {
+  if (afterId && !state.serverState.cells[afterId]) {
     throw new AgentHandlerError("cell_not_found", `Cell not found: ${afterId}`);
   }
 
   const id = notebook.insertCellAfter(afterId, kind, source, lastEditedBy);
-  return { id, version: notebook.state.cells[id].version };
+  return { id, version: selectCell(notebook.state, id)?.version ?? 0 };
 }
 
 function writeCell(notebook: Notebook, params: unknown): AgentWriteCell {
@@ -119,7 +126,7 @@ function writeCell(notebook: Notebook, params: unknown): AgentWriteCell {
   const expectedVersion = readExpectedVersion(params, "notebook.write_cell");
   const lastEditedBy =
     readOptionalStringParam(params, "last_edited_by") ?? "brain";
-  const cell = notebook.state.cells[id];
+  const cell = selectCell(notebook.state, id);
   if (!cell) {
     throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
   }
@@ -131,13 +138,13 @@ function writeCell(notebook: Notebook, params: unknown): AgentWriteCell {
   }
 
   notebook.updateCellSource(id, source, lastEditedBy);
-  return { version: notebook.state.cells[id].version };
+  return { version: selectCell(notebook.state, id)?.version ?? 0 };
 }
 
 function deleteCell(notebook: Notebook, params: unknown): AgentDeleteCell {
   const id = readStringParam(params, "id", "notebook.delete_cell");
   const expectedVersion = readExpectedVersion(params, "notebook.delete_cell");
-  const cell = notebook.state.cells[id];
+  const cell = selectCell(notebook.state, id);
   if (!cell) {
     throw new AgentHandlerError("cell_not_found", `Cell not found: ${id}`);
   }

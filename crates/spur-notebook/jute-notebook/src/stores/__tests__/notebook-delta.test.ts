@@ -6,6 +6,7 @@ import {
   Notebook,
   type NotebookStoreState,
   reconcileNotebookDelta,
+  selectCell,
 } from "../notebook";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -57,12 +58,57 @@ describe("reconcileNotebookDelta", () => {
     await reconcileNotebookDelta(notebook, delta);
 
     const selectSource = (state: NotebookStoreState) =>
-      state.cells[cellId]?.source;
+      selectCell(state, cellId)?.source;
     expect(selectSource(notebook.store.getState())).toBe("answer = 42");
-    expect(notebook.store.getState().cells[cellId]?.lastEditedBy).toBe("brain");
+    expect(
+      notebook.store.getState().serverState.cells[cellId]?.lastEditedBy,
+    ).toBe("brain");
     // No cell-refetch invoke: the mock throws on any unexpected command, so the
     // reducer applying the inline cell is what keeps this test green.
-    expect(notebook.store.getState().cells[cellId]?.version).toBe(2);
+    expect(notebook.store.getState().serverState.cells[cellId]?.version).toBe(
+      2,
+    );
+    expect(notebook.store.getState().editBuffer.cellSources[cellId]).toBe(
+      undefined,
+    );
+  });
+
+  test("keeps local source edits in the edit buffer overlay", async () => {
+    const cellId = "cell-1";
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook(notebookRoot(cellId, "answer = 0"));
+    await notebook.kernelStartPromise;
+
+    notebook.updateCellSource(cellId, "answer = 42");
+
+    const state = notebook.store.getState();
+    expect(state.serverState.cells[cellId]?.source).toBe("answer = 0");
+    expect(state.editBuffer.cellSources[cellId]).toEqual({
+      source: "answer = 42",
+      version: 2,
+      lastEditedBy: undefined,
+    });
+    expect(selectCell(state, cellId)?.source).toBe("answer = 42");
+    expect(notebook.export().cells[0]?.source).toBe("answer = 42");
+    expect(notebook.getCellSnapshotById(cellId)?.metadata.spur?.version).toBe(
+      2,
+    );
   });
 });
 

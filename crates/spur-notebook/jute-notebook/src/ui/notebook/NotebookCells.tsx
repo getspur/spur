@@ -39,15 +39,20 @@ const AsideIconButton = ({
 
 function CellInputAside({ cellId }: { cellId: string }) {
   const notebook = useNotebook();
-  const type = useStore(notebook.store, (state) => state.cells[cellId].type);
+  const type = useStore(
+    notebook.store,
+    (state) => state.serverState.cells[cellId].type,
+  );
   const output = useStore(
     notebook.store,
-    (state) => state.cells[cellId].result,
+    (state) => state.serverState.cells[cellId].result,
   );
-  const lastEditedBy = useStore(
-    notebook.store,
-    (state) => state.cells[cellId].lastEditedBy,
-  );
+  const lastEditedBy = useStore(notebook.store, (state) => {
+    const sourceDraft = state.editBuffer.cellSources[cellId];
+    return sourceDraft
+      ? sourceDraft.lastEditedBy
+      : state.serverState.cells[cellId].lastEditedBy;
+  });
 
   const formatExecutionDuration = (durationMs: number) => {
     const seconds = durationMs / 1000;
@@ -98,9 +103,15 @@ function CellInputAside({ cellId }: { cellId: string }) {
 
 export default function NotebookCells() {
   const notebook = useNotebook();
-  const cellIds = useStore(notebook.store, (state) => state.cellIds);
-  const cells = useStore(notebook.store, (state) => state.cells);
-  const isLoading = useStore(notebook.store, (state) => state.isLoading);
+  const cellIds = useStore(
+    notebook.store,
+    (state) => state.serverState.cellIds,
+  );
+  const cells = useStore(notebook.store, (state) => state.serverState.cells);
+  const isLoading = useStore(
+    notebook.store,
+    (state) => state.viewState.isLoading,
+  );
 
   if (isLoading)
     // TODO: add a better loading state

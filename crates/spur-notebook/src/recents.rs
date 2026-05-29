@@ -95,7 +95,7 @@ pub(crate) async fn record_open_at(
     write_recents_at(record_path, &record).await
 }
 
-async fn list_recents_at(record_path: &Path) -> Result<Vec<RecentEntry>> {
+pub(crate) async fn list_recents_at(record_path: &Path) -> Result<Vec<RecentEntry>> {
     let _guard = RECENTS_LOCK.lock().await;
     let record = read_recents_at(record_path).await?;
     let original_len = record.entries.len();
@@ -121,7 +121,7 @@ async fn list_recents_at(record_path: &Path) -> Result<Vec<RecentEntry>> {
     Ok(entries)
 }
 
-async fn remove_from_recents_at(record_path: &Path, path: &Path) -> Result<()> {
+pub(crate) async fn remove_from_recents_at(record_path: &Path, path: &Path) -> Result<()> {
     let path = canonicalize_or_normalize(path).await?;
     let _guard = RECENTS_LOCK.lock().await;
     let mut record = read_recents_at(record_path).await?;
@@ -133,7 +133,7 @@ async fn remove_from_recents_at(record_path: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn set_pinned_at(record_path: &Path, path: &Path, pinned: bool) -> Result<()> {
+pub(crate) async fn set_pinned_at(record_path: &Path, path: &Path, pinned: bool) -> Result<()> {
     let path = canonicalize_or_normalize(path).await?;
     let _guard = RECENTS_LOCK.lock().await;
     let mut record = read_recents_at(record_path).await?;
@@ -214,7 +214,7 @@ async fn write_recents_at(record_path: &Path, record: &RecentEntriesFile) -> Res
     Ok(())
 }
 
-async fn canonicalize_or_normalize(path: &Path) -> Result<PathBuf> {
+pub(crate) async fn canonicalize_or_normalize(path: &Path) -> Result<PathBuf> {
     match tokio::fs::canonicalize(path).await {
         Ok(path) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => lexical_normalize(path),

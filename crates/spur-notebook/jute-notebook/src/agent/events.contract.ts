@@ -1,3 +1,4 @@
+import type { RecentNotebookEntry } from "@/bindings";
 import type { Notebook } from "@/stores/notebook";
 
 import {
@@ -7,7 +8,7 @@ import {
 
 type NotebookEventsListener = (notebook: Notebook) => () => void;
 type RecentNotebookChangesListener = (
-  refreshRecents: () => Promise<void>,
+  applyRecents: (entries: RecentNotebookEntry[]) => void | Promise<void>,
 ) => () => void;
 
 const notebookEventsListener: NotebookEventsListener = listenForNotebookEvents;

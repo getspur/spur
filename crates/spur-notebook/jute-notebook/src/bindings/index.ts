@@ -34,6 +34,7 @@ export * from "./OutputError";
 export * from "./MultilineString";
 export * from "./SpurCellMetadata";
 export * from "./DaemonControlRequest";
+export * from "./RecentsChangedEvent";
 export * from "./NotebookRoot";
 export * from "./DisplayDataTransient";
 export * from "./NotebookMetadata";

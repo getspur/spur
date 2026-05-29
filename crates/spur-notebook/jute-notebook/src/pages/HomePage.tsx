@@ -291,9 +291,16 @@ export default function HomePage() {
     }
   }, []);
 
+  const applyRecentsChanged = useCallback((entries: RecentNotebookEntry[]) => {
+    setRecents(entries);
+    setError(null);
+    setLoading(false);
+  }, []);
+
   useEffect(() => {
     void refreshRecents();
-    const stopRecentsListener = listenForRecentNotebookChanges(refreshRecents);
+    const stopRecentsListener =
+      listenForRecentNotebookChanges(applyRecentsChanged);
 
     const handleFocus = () => {
       void refreshRecents();
@@ -304,7 +311,7 @@ export default function HomePage() {
       stopRecentsListener();
       window.removeEventListener("focus", handleFocus);
     };
-  }, [refreshRecents]);
+  }, [applyRecentsChanged, refreshRecents]);
 
   useEffect(() => {
     if (!contextMenu) return;

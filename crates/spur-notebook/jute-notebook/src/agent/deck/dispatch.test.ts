@@ -17,18 +17,31 @@ describe("dispatchDeckCommand", () => {
     const notebook = {
       store: {
         getState: () => ({
-          path: "/tmp/deck.ipynb",
-          cellIds: ["markdown-1", "code-1"],
-          cells: {
-            "markdown-1": {
-              type: "markdown",
-              source: longSource,
-              juteDeckMetadata: { layout: "title" },
+          serverState: {
+            cellIds: ["markdown-1", "code-1"],
+            cells: {
+              "markdown-1": {
+                type: "markdown",
+                initialText: longSource,
+                source: longSource,
+                version: 1,
+                juteDeckMetadata: { layout: "title" },
+              },
+              "code-1": {
+                type: "code",
+                initialText: "print('hello')",
+                source: "print('hello')",
+                version: 1,
+              },
             },
-            "code-1": {
-              type: "code",
-              source: "print('hello')",
-            },
+          },
+          viewState: {
+            path: "/tmp/deck.ipynb",
+            selectedCellId: null,
+            isLoading: false,
+          },
+          editBuffer: {
+            cellSources: {},
           },
         }),
       },
@@ -44,9 +57,7 @@ describe("dispatchDeckCommand", () => {
     });
 
     const [{ task }] = invokeMock.mock.calls[0].slice(1);
-    const summary = JSON.parse(
-      task.split("Current notebook (2 cells):\n")[1],
-    );
+    const summary = JSON.parse(task.split("Current notebook (2 cells):\n")[1]);
     expect(summary).toEqual({
       path: "/tmp/deck.ipynb",
       cells: [

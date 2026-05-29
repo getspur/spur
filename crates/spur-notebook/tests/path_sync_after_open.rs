@@ -72,7 +72,7 @@ mod unix {
             Ok(format!("window-{}", path.display()))
         }
 
-        fn emit_recents_changed(&self) {}
+        fn emit_recents_changed(&self, _event: &jute::commands::RecentsChangedEvent) {}
 
         fn exit(&self) {}
     }

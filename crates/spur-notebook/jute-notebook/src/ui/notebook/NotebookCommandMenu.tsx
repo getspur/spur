@@ -32,12 +32,17 @@ export default function NotebookCommandMenu() {
   const [promptText, setPromptText] = useState("");
   const selectedCellId = useStore(
     notebook.store,
-    (state) => state.selectedCellId,
+    (state) => state.viewState.selectedCellId,
   );
   const selectedCellType = useStore(notebook.store, (state) =>
-    state.selectedCellId ? state.cells[state.selectedCellId]?.type : null,
+    state.viewState.selectedCellId
+      ? state.serverState.cells[state.viewState.selectedCellId]?.type
+      : null,
   );
-  const notebookPath = useStore(notebook.store, (state) => state.path);
+  const notebookPath = useStore(
+    notebook.store,
+    (state) => state.viewState.path,
+  );
 
   const closeAndRun = useCallback((action: () => void) => {
     setOpen(false);

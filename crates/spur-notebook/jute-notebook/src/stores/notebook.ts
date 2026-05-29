@@ -21,28 +21,33 @@ import type {
 type NotebookStore = NotebookStoreState & NotebookStoreActions;
 
 /** Actions are kept private, only to be used from the `Notebook` class. */
-type NotebookStoreActions = ReturnType<typeof notebookStoreActions>;
+type NotebookStoreActions = {
+  serverStateActions: ReturnType<typeof notebookServerStateActions>;
+  viewStateActions: ReturnType<typeof notebookViewStateActions>;
+  editBufferActions: ReturnType<typeof notebookEditBufferActions>;
+};
 
 const INITIAL_CELL_VERSION = 1;
 const AUTOSAVE_DEBOUNCE_MS = 5000;
-/** Zustand reactive data used by the UI to render notebooks. */
-export type NotebookStoreState = {
+export type NotebookCellState = {
+  type: CellType;
+  initialText: string;
+  source: string;
+  version: number;
+  lastEditedBy?: string;
+  juteDeckMetadata?: JuteDeckCellMetadata;
+  result?: CellResult;
+};
+
+export type NotebookServerState = {
   /** A list of cell IDs in order. */
   cellIds: string[];
 
   /** Information about each cell, keyed by ID. */
-  cells: {
-    [cellId: string]: {
-      type: CellType;
-      initialText: string;
-      source: string;
-      version: number;
-      lastEditedBy?: string;
-      juteDeckMetadata?: JuteDeckCellMetadata;
-      result?: CellResult;
-    };
-  };
+  cells: Record<string, NotebookCellState>;
+};
 
+export type NotebookViewState = {
   /** ID of the currently focused cell, when any. */
   selectedCellId: string | null;
 
@@ -63,6 +68,26 @@ export type NotebookStoreState = {
 
   /** In-memory generation of the running kernel slot. */
   kernelGeneration?: number;
+};
+
+export type NotebookEditBuffer = {
+  /** Optimistic cell source/version overlays while editors are ahead of Rust. */
+  cellSources: Record<
+    string,
+    { source: string; version: number; lastEditedBy?: string }
+  >;
+};
+
+/** Zustand reactive data used by the UI to render notebooks. */
+export type NotebookStoreState = {
+  /** Replica of the Rust authoritative notebook store. */
+  serverState: NotebookServerState;
+
+  /** React/UI-only state that does not belong to the Rust store. */
+  viewState: NotebookViewState;
+
+  /** Optimistic local overlays not yet reflected in serverState. */
+  editBuffer: NotebookEditBuffer;
 };
 
 export type CellType = "code" | "markdown";
@@ -87,280 +112,145 @@ export type KernelSlotInfo = {
   mem_mb: number;
 };
 
-function notebookStoreActions(
+type NotebookLocalDelta = {
+  version: number;
+  kind:
+    | {
+        type: "localCellSnapshot";
+        cellId: string;
+        cell: NotebookCellState;
+        after_id?: string | null;
+      }
+    | {
+        type: "localClearResult";
+        cell_id: string;
+      };
+};
+
+type NotebookStateDelta = NotebookDelta | NotebookLocalDelta;
+
+type RunCellEventDeltaApplication = {
+  runState: RunCellEventApplicationState;
+  options?: ApplyRunCellEventOptions;
+};
+
+function notebookServerStateActions(
   // Updater used by Zustand / Immer to mutate the state.
   set: (updater: (state: WritableDraft<NotebookStoreState>) => void) => void,
 ) {
   return {
-    /** Add a new cell to the notebook. */
-    addCell: (
-      cellId: string,
-      type: CellType,
-      initialText: string,
-      lastEditedBy?: string,
-    ) =>
-      set((state) => {
-        state.cellIds.push(cellId);
-        state.cells[cellId] = {
-          type,
-          initialText,
-          source: initialText,
-          version: INITIAL_CELL_VERSION,
-          lastEditedBy,
-        };
-      }),
-
-    /** Insert a new cell after another cell, or at the end when omitted. */
-    insertCellAfter: (
-      cellId: string,
-      afterId: string | undefined,
-      type: CellType,
-      initialText: string,
-      lastEditedBy?: string,
-    ) =>
-      set((state) => {
-        const insertAt = afterId
-          ? state.cellIds.indexOf(afterId) + 1
-          : state.cellIds.length;
-        state.cellIds.splice(insertAt, 0, cellId);
-        state.cells[cellId] = {
-          type,
-          initialText,
-          source: initialText,
-          version: INITIAL_CELL_VERSION,
-          lastEditedBy,
-        };
-      }),
-
-    /** Set the type of a cell. */
-    setCellType: (cellId: string, type: CellType) =>
-      set((state) => {
-        if (state.cells[cellId].type === type) return;
-        state.cells[cellId].type = type;
-        state.cells[cellId].lastEditedBy = undefined;
-        state.cells[cellId].version += 1;
-      }),
-
-    /** Set the currently focused cell. */
-    setSelectedCell: (cellId: string) =>
-      set((state) => {
-        if (state.cells[cellId]) {
-          state.selectedCellId = cellId;
-        }
-      }),
-
-    /** Set the source text of a cell. */
-    setCellSource: (cellId: string, source: string, lastEditedBy?: string) =>
-      set((state) => {
-        const cell = state.cells[cellId];
-        if (cell.source !== source) {
-          cell.source = source;
-          cell.version += 1;
-        }
-        cell.lastEditedBy = lastEditedBy;
-      }),
-
-    /** Merge set-valued jute-deck metadata fields into a cell. */
-    mergeCellJuteDeckMetadata: (
-      cellId: string,
-      patch: Partial<JuteDeckCellMetadata>,
-      lastEditedBy?: string,
+    /** Apply the reducer that is allowed to mutate the Rust replica slice. */
+    applyNotebookDelta: (
+      delta: NotebookStateDelta,
+      application?: RunCellEventDeltaApplication,
     ) => {
-      let nextVersion = 0;
+      let nextRunState: RunCellEventApplicationState | undefined;
       set((state) => {
-        const cell = state.cells[cellId];
-        if (!cell) return;
-
-        const merged: JuteDeckCellMetadata = {
-          ...(cell.juteDeckMetadata ?? {}),
-        };
-        if (patch.layout !== undefined) merged.layout = patch.layout;
-        if (patch.hidden !== undefined) merged.hidden = patch.hidden;
-        if (patch.speaker_notes !== undefined) {
-          merged.speaker_notes = patch.speaker_notes;
-        }
-        if (patch.theme_override !== undefined) {
-          merged.theme_override = patch.theme_override;
-        }
-        if (patch.fragments !== undefined) merged.fragments = patch.fragments;
-        if (patch.background !== undefined)
-          merged.background = patch.background;
-
-        cell.juteDeckMetadata = merged;
-        cell.version += 1;
-        cell.lastEditedBy = lastEditedBy;
-        nextVersion = cell.version;
-      });
-      return nextVersion;
-    },
-
-    /** Reconcile one cell from the authoritative Rust store. */
-    applyCellSnapshot: (cell: DaemonCell, afterId?: string | null) =>
-      set((state) => {
-        const type = cellTypeFromDaemon(cell.kind);
-        if (!type) return;
-
-        const existing = state.cells[cell.id];
-        if (!existing) {
-          const afterIndex = afterId ? state.cellIds.indexOf(afterId) : -1;
-          const insertAt =
-            afterIndex >= 0 ? afterIndex + 1 : state.cellIds.length;
-          if (!state.cellIds.includes(cell.id)) {
-            state.cellIds.splice(insertAt, 0, cell.id);
-          }
-          state.cells[cell.id] = {
-            type,
-            initialText: cell.source,
-            source: cell.source,
-            version: cell.version,
-            lastEditedBy: cell.lastEditedBy ?? undefined,
-          };
-          return;
-        }
-
-        existing.type = type;
-        existing.source = cell.source;
-        existing.version = cell.version;
-        existing.lastEditedBy = cell.lastEditedBy ?? undefined;
-      }),
-
-    /** Delete a cell from the notebook. */
-    deleteCell: (cellId: string) =>
-      set((state) => {
-        state.cellIds = state.cellIds.filter((id) => id !== cellId);
-        delete state.cells[cellId];
-        if (state.selectedCellId === cellId) {
-          state.selectedCellId = null;
-        }
-      }),
-
-    /** Clear the result of a cell. */
-    clearResult: (cellId: string) =>
-      set((state) => {
-        state.cells[cellId].result = undefined;
-      }),
-
-    /** Update properties of a cell result, except the actual `outputs` array. */
-    updateResult: (cellId: string, result: CellResult) =>
-      set((state) => {
-        updateResultDraft(state, cellId, result);
-      }),
-
-    /** Append outputs to a cell. */
-    appendOutput: (cellId: string, output: Output, displayId?: string) =>
-      set((state) => {
-        appendOutputDraft(state, cellId, output, displayId);
-      }),
-
-    /** Clear the output of a cell. */
-    clearOutput: (cellId: string) =>
-      set((state) => {
-        clearOutputDraft(state, cellId);
-      }),
-
-    /** Update an existing `display_data` output. */
-    updateOutputDisplay: (
-      cellId: string,
-      displayId: string,
-      displayData: OutputDisplayData,
-    ) =>
-      set((state) => {
-        updateOutputDisplayDraft(state, cellId, displayId, displayData);
-      }),
-
-    applyRunCellEvent: (
-      cellId: string,
-      event: RunCellEvent,
-      runState: RunCellEventApplicationState,
-      options?: ApplyRunCellEventOptions,
-    ) => {
-      let nextRunState = runState;
-      set((state) => {
-        nextRunState = applyRunCellEvent(
-          state,
-          cellId,
-          event,
-          runState,
-          options,
+        nextRunState = applyNotebookDeltaDraft(
+          state.serverState,
+          delta,
+          application,
         );
       });
       return nextRunState;
     },
+  };
+}
 
-    /**
-     * Start loading the notebook from an external source.
-     *
-     * After this function is called, no new cell executions should happen until
-     * the notebook finishes loading and one of the functions below is called. If
-     * successful, this clears the current cells.
-     */
+function notebookViewStateActions(
+  set: (updater: (state: WritableDraft<NotebookStoreState>) => void) => void,
+) {
+  return {
+    /** Set the currently focused cell. */
+    setSelectedCell: (cellId: string) =>
+      set((state) => {
+        if (state.serverState.cells[cellId]) {
+          state.viewState.selectedCellId = cellId;
+        }
+      }),
+
+    clearSelectedCellIfDeleted: (cellId: string) =>
+      set((state) => {
+        if (state.viewState.selectedCellId === cellId) {
+          state.viewState.selectedCellId = null;
+        }
+      }),
+
     startLoading: () =>
       set((state) => {
         // TODO: Fix this to handle errors better.
-        if (state.isLoading) throw new Error("Notebook is already loading");
-        state.isLoading = true;
+        if (state.viewState.isLoading) {
+          throw new Error("Notebook is already loading");
+        }
+        state.viewState.isLoading = true;
       }),
 
-    /** Load the notebook from a JSON object. */
-    loadNotebook: (notebook: NotebookRoot) =>
+    finishLoading: () =>
       set((state) => {
-        // Filter out 'raw' cells, as they aren't supported yet.
-        const cells = notebook.cells.filter(
-          (cell) => cell.cell_type === "code" || cell.cell_type === "markdown",
-        );
-
-        // Some older notebooks have no cell IDs, so we generate them on import.
-        const cellIds = cells.map((cell) => cell.id ?? uuidv4());
-
-        state.cellIds = cellIds;
-        state.cells = Object.fromEntries(
-          cells.map((cell, i) => {
-            const imported: NotebookStoreState["cells"][string] = {
-              type: cell.cell_type,
-              initialText: multiline(cell.source),
-              source: multiline(cell.source),
-              version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
-              lastEditedBy: cell.metadata.spur?.last_edited_by,
-              juteDeckMetadata: cell.metadata.jute_deck,
-            };
-
-            if (cell.cell_type === "code") {
-              if (cell.execution_count || cell.outputs.length > 0) {
-                // Infer status based on the outputs of the cell.
-                const status = cell.outputs.some(
-                  (output) => output.output_type === "error",
-                )
-                  ? "error"
-                  : "success";
-                imported.result = {
-                  status,
-                  outputs: cell.outputs,
-                };
-                if (cell.execution_count) {
-                  imported.result.executionCount = cell.execution_count;
-                }
-              }
-            }
-
-            return [cellIds[i], imported];
-          }),
-        );
-        state.selectedCellId = null;
-        state.isLoading = false;
-        state.loadError = undefined;
+        state.viewState.selectedCellId = null;
+        state.viewState.isLoading = false;
+        state.viewState.loadError = undefined;
       }),
 
     /** Set the error on failure to load a notebook. */
     setLoadError: (error: string) =>
       set((state) => {
-        state.loadError = error;
-        state.isLoading = false;
+        state.viewState.loadError = error;
+        state.viewState.isLoading = false;
       }),
 
     /** Set the path of the notebook, when it is opened or saved. */
     setPath: (path: string) =>
       set((state) => {
-        state.path = path;
+        state.viewState.path = path;
+      }),
+
+    setKernelSlotInfo: (info: KernelSlotInfo) =>
+      set((state) => {
+        state.viewState.kernelId = info.kernel_id;
+        state.viewState.kernelSpecName = info.spec_name;
+        state.viewState.kernelGeneration = info.generation;
+      }),
+  };
+}
+
+function notebookEditBufferActions(
+  set: (updater: (state: WritableDraft<NotebookStoreState>) => void) => void,
+) {
+  return {
+    /** Set the optimistic source text of a cell. */
+    setCellSource: (cellId: string, source: string, lastEditedBy?: string) =>
+      set((state) => {
+        const cell = selectCell(state, cellId);
+        const serverCell = state.serverState.cells[cellId];
+        if (!cell || !serverCell) return;
+
+        const version =
+          cell.source !== source ? cell.version + 1 : cell.version;
+        if (
+          source === serverCell.source &&
+          version === serverCell.version &&
+          lastEditedBy === serverCell.lastEditedBy
+        ) {
+          delete state.editBuffer.cellSources[cellId];
+          return;
+        }
+
+        state.editBuffer.cellSources[cellId] = {
+          source,
+          version,
+          lastEditedBy,
+        };
+      }),
+
+    clearCell: (cellId: string) =>
+      set((state) => {
+        delete state.editBuffer.cellSources[cellId];
+      }),
+
+    clearAll: () =>
+      set((state) => {
+        state.editBuffer.cellSources = {};
       }),
   };
 }
@@ -371,12 +261,23 @@ function createNotebookStore(): StoreApi<NotebookStore> {
   return createStore<NotebookStore>()(
     immer<NotebookStore>((set) => {
       const initialState: NotebookStoreState = {
-        cellIds: [],
-        cells: {},
-        selectedCellId: null,
-        isLoading: false,
+        serverState: {
+          cellIds: [],
+          cells: {},
+        },
+        viewState: {
+          selectedCellId: null,
+          isLoading: false,
+        },
+        editBuffer: {
+          cellSources: {},
+        },
       };
-      const actions: NotebookStoreActions = notebookStoreActions(set);
+      const actions: NotebookStoreActions = {
+        serverStateActions: notebookServerStateActions(set),
+        viewStateActions: notebookViewStateActions(set),
+        editBufferActions: notebookEditBufferActions(set),
+      };
       return { ...initialState, ...actions };
     }),
   );
@@ -401,8 +302,162 @@ type ApplyRunCellEventOptions = {
   handleDisconnect?: boolean;
 };
 
+export function selectCell(
+  state: NotebookStoreState,
+  cellId: string,
+): NotebookCellState | undefined {
+  const cell = state.serverState.cells[cellId];
+  if (!cell) return undefined;
+
+  const sourceDraft = state.editBuffer.cellSources[cellId];
+  if (!sourceDraft) return cell;
+
+  return {
+    ...cell,
+    source: sourceDraft.source,
+    version: sourceDraft.version,
+    lastEditedBy: sourceDraft.lastEditedBy,
+  };
+}
+
+function selectCells(
+  state: NotebookStoreState,
+): Record<string, NotebookCellState> {
+  return Object.fromEntries(
+    state.serverState.cellIds
+      .map((cellId) => [cellId, selectCell(state, cellId)] as const)
+      .filter(
+        (entry): entry is readonly [string, NotebookCellState] =>
+          entry[1] !== undefined,
+      ),
+  );
+}
+
+function applyNotebookDeltaDraft(
+  state: WritableDraft<NotebookServerState>,
+  delta: NotebookStateDelta,
+  application?: RunCellEventDeltaApplication,
+): RunCellEventApplicationState | undefined {
+  const kind = delta.kind;
+  if (kind.type === "loaded") {
+    loadNotebookRootDraft(state, kind.root);
+  } else if (kind.type === "cellWritten") {
+    applyDaemonCellSnapshotDraft(state, kind.cell);
+  } else if (kind.type === "cellInserted") {
+    applyDaemonCellSnapshotDraft(state, kind.cell, kind.after_id);
+  } else if (kind.type === "cellDeleted") {
+    state.cellIds = state.cellIds.filter((id) => id !== kind.id);
+    delete state.cells[kind.id];
+  } else if (kind.type === "runCellEvent") {
+    if (!application) return undefined;
+    return applyRunCellEvent(
+      state,
+      kind.cell_id,
+      kind.event,
+      application.runState,
+      application.options,
+    );
+  } else if (kind.type === "localCellSnapshot") {
+    const afterIndex = kind.after_id
+      ? state.cellIds.indexOf(kind.after_id)
+      : -1;
+    const insertAt = afterIndex >= 0 ? afterIndex + 1 : state.cellIds.length;
+    if (!state.cellIds.includes(kind.cellId)) {
+      state.cellIds.splice(insertAt, 0, kind.cellId);
+    }
+    state.cells[kind.cellId] = kind.cell;
+  } else if (kind.type === "localClearResult") {
+    const cell = state.cells[kind.cell_id];
+    if (cell) {
+      cell.result = undefined;
+    }
+  } else {
+    assertNever(kind);
+  }
+
+  return undefined;
+}
+
+function loadNotebookRootDraft(
+  state: WritableDraft<NotebookServerState>,
+  notebook: NotebookRoot,
+) {
+  // Filter out 'raw' cells, as they aren't supported yet.
+  const cells = notebook.cells.filter(
+    (cell) => cell.cell_type === "code" || cell.cell_type === "markdown",
+  );
+
+  // Some older notebooks have no cell IDs, so we generate them on import.
+  const cellIds = cells.map((cell) => cell.id ?? uuidv4());
+
+  state.cellIds = cellIds;
+  state.cells = Object.fromEntries(
+    cells.map((cell, i) => {
+      const imported: NotebookCellState = {
+        type: cell.cell_type,
+        initialText: multiline(cell.source),
+        source: multiline(cell.source),
+        version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
+        lastEditedBy: cell.metadata.spur?.last_edited_by,
+        juteDeckMetadata: cell.metadata.jute_deck,
+      };
+
+      if (cell.cell_type === "code") {
+        if (cell.execution_count || cell.outputs.length > 0) {
+          // Infer status based on the outputs of the cell.
+          const status = cell.outputs.some(
+            (output) => output.output_type === "error",
+          )
+            ? "error"
+            : "success";
+          imported.result = {
+            status,
+            outputs: cell.outputs,
+          };
+          if (cell.execution_count) {
+            imported.result.executionCount = cell.execution_count;
+          }
+        }
+      }
+
+      return [cellIds[i], imported];
+    }),
+  );
+}
+
+function applyDaemonCellSnapshotDraft(
+  state: WritableDraft<NotebookServerState>,
+  cell: DaemonCell,
+  afterId?: string | null,
+) {
+  const type = cellTypeFromDaemon(cell.kind);
+  if (!type) return;
+
+  const existing = state.cells[cell.id];
+  if (!existing) {
+    const afterIndex = afterId ? state.cellIds.indexOf(afterId) : -1;
+    const insertAt = afterIndex >= 0 ? afterIndex + 1 : state.cellIds.length;
+    if (!state.cellIds.includes(cell.id)) {
+      state.cellIds.splice(insertAt, 0, cell.id);
+    }
+    state.cells[cell.id] = {
+      type,
+      initialText: cell.source,
+      source: cell.source,
+      version: cell.version,
+      lastEditedBy: cell.lastEditedBy ?? undefined,
+    };
+    return;
+  }
+
+  existing.type = type;
+  existing.source = cell.source;
+  existing.version = cell.version;
+  existing.lastEditedBy = cell.lastEditedBy ?? undefined;
+}
+
 function updateResultDraft(
-  state: WritableDraft<NotebookStoreState>,
+  state: WritableDraft<NotebookServerState>,
   cellId: string,
   result: CellResult,
 ) {
@@ -419,7 +474,7 @@ function updateResultDraft(
 }
 
 function appendOutputDraft(
-  state: WritableDraft<NotebookStoreState>,
+  state: WritableDraft<NotebookServerState>,
   cellId: string,
   output: Output,
   displayId?: string,
@@ -458,7 +513,7 @@ function appendOutputDraft(
 }
 
 function clearOutputDraft(
-  state: WritableDraft<NotebookStoreState>,
+  state: WritableDraft<NotebookServerState>,
   cellId: string,
 ) {
   const obj = state.cells[cellId].result;
@@ -469,7 +524,7 @@ function clearOutputDraft(
 }
 
 function updateOutputDisplayDraft(
-  state: WritableDraft<NotebookStoreState>,
+  state: WritableDraft<NotebookServerState>,
   cellId: string,
   displayId: string,
   displayData: OutputDisplayData,
@@ -488,7 +543,7 @@ function updateOutputDisplayDraft(
 }
 
 function updateRunCellResultDraft(
-  state: WritableDraft<NotebookStoreState>,
+  state: WritableDraft<NotebookServerState>,
   cellId: string,
   runState: RunCellEventApplicationState,
 ) {
@@ -500,7 +555,7 @@ function updateRunCellResultDraft(
 }
 
 export function applyRunCellEvent(
-  state: WritableDraft<NotebookStoreState>,
+  state: WritableDraft<NotebookServerState>,
   cellId: string,
   message: RunCellEvent,
   runState: RunCellEventApplicationState,
@@ -609,9 +664,7 @@ function cellTypeFromDaemon(kind: string): CellType | undefined {
 }
 
 function assertNever(value: never): never {
-  throw new Error(
-    `Unhandled notebook delta kind: ${JSON.stringify(value)}`,
-  );
+  throw new Error(`Unhandled notebook delta kind: ${JSON.stringify(value)}`);
 }
 
 export async function reconcileNotebookDelta(
@@ -670,9 +723,11 @@ export class Notebook {
   export(): NotebookRoot {
     const cells: Cell[] = [];
     const state = this.state;
+    const effectiveCells = selectCells(state);
 
-    for (const cellId of state.cellIds) {
-      const cell = state.cells[cellId];
+    for (const cellId of state.serverState.cellIds) {
+      const cell = effectiveCells[cellId];
+      if (!cell) continue;
       if (cell.type === "code") {
         cells.push({
           cell_type: "code",
@@ -712,30 +767,38 @@ export class Notebook {
 
   /** Load a notebook from a direct object. */
   loadNotebook(notebook: NotebookRoot) {
-    this.state.loadNotebook(notebook);
-    this.refs = new Map(this.state.cellIds.map((cellId) => [cellId, {}]));
+    this.applyNotebookDelta({
+      version: 0,
+      kind: { type: "loaded", root: notebook },
+    });
   }
 
   /** Load a notebook from a file path. */
   async loadNotebookFromPath(path: string) {
     try {
-      this.state.startLoading();
+      this.state.viewStateActions.startLoading();
     } catch {
       return;
     }
     try {
       const notebook = await invoke<NotebookRoot>("get_notebook", { path });
       this.loadNotebook(notebook);
-      this.state.setPath(path);
+      this.state.viewStateActions.setPath(path);
     } catch (e: any) {
-      this.state.setLoadError(e.toString());
+      this.state.viewStateActions.setLoadError(e.toString());
     }
   }
 
   addCell(type: CellType, initialText: string, lastEditedBy?: string): string {
     const cellId = uuidv4();
     this.refs.set(cellId, {});
-    this.state.addCell(cellId, type, initialText, lastEditedBy);
+    this.applyLocalCellSnapshot(cellId, {
+      type,
+      initialText,
+      source: initialText,
+      version: INITIAL_CELL_VERSION,
+      lastEditedBy,
+    });
     return cellId;
   }
 
@@ -747,35 +810,52 @@ export class Notebook {
   ): string {
     const cellId = uuidv4();
     this.refs.set(cellId, {});
-    this.state.insertCellAfter(
+    this.applyLocalCellSnapshot(
       cellId,
+      {
+        type,
+        initialText,
+        source: initialText,
+        version: INITIAL_CELL_VERSION,
+        lastEditedBy,
+      },
       afterId,
-      type,
-      initialText,
-      lastEditedBy,
     );
     return cellId;
   }
 
   deleteCell(cellId: string) {
     this.refs.delete(cellId);
-    this.state.deleteCell(cellId);
+    this.state.serverStateActions.applyNotebookDelta({
+      version: 0,
+      kind: { type: "cellDeleted", id: cellId },
+    });
+    this.state.viewStateActions.clearSelectedCellIfDeleted(cellId);
+    this.state.editBufferActions.clearCell(cellId);
   }
 
   setCellType(cellId: string, type: CellType) {
-    this.state.setCellType(cellId, type);
+    const cell = selectCell(this.state, cellId);
+    if (!cell || cell.type === type) return;
+
+    this.applyLocalCellSnapshot(cellId, {
+      ...cell,
+      type,
+      lastEditedBy: undefined,
+      version: cell.version + 1,
+    });
   }
 
   setSelectedCell(cellId: string) {
-    this.state.setSelectedCell(cellId);
+    this.state.viewStateActions.setSelectedCell(cellId);
   }
 
   updateCellSource(cellId: string, source: string, lastEditedBy?: string) {
-    this.state.setCellSource(cellId, source, lastEditedBy);
+    this.state.editBufferActions.setCellSource(cellId, source, lastEditedBy);
   }
 
   getCellSnapshotById(cellId: string): { metadata: CellMetadata } | undefined {
-    const cell = this.state.cells[cellId];
+    const cell = selectCell(this.state, cellId);
     if (!cell) return undefined;
     return {
       metadata: cellMetadata(
@@ -790,20 +870,51 @@ export class Notebook {
     cellId: string,
     patch: Partial<JuteDeckCellMetadata>,
   ): number {
-    return this.state.mergeCellJuteDeckMetadata(cellId, patch, "brain");
+    const cell = selectCell(this.state, cellId);
+    if (!cell) return 0;
+
+    const merged: JuteDeckCellMetadata = {
+      ...(cell.juteDeckMetadata ?? {}),
+    };
+    if (patch.layout !== undefined) merged.layout = patch.layout;
+    if (patch.hidden !== undefined) merged.hidden = patch.hidden;
+    if (patch.speaker_notes !== undefined) {
+      merged.speaker_notes = patch.speaker_notes;
+    }
+    if (patch.theme_override !== undefined) {
+      merged.theme_override = patch.theme_override;
+    }
+    if (patch.fragments !== undefined) merged.fragments = patch.fragments;
+    if (patch.background !== undefined) merged.background = patch.background;
+
+    const nextVersion = cell.version + 1;
+    this.applyLocalCellSnapshot(cellId, {
+      ...cell,
+      juteDeckMetadata: merged,
+      version: nextVersion,
+      lastEditedBy: "brain",
+    });
+    return nextVersion;
   }
 
   applyNotebookDelta(delta: NotebookDelta) {
     const kind = delta.kind;
     if (kind.type === "loaded") {
-      this.loadNotebook(kind.root);
+      this.state.serverStateActions.applyNotebookDelta(delta);
+      this.refs = new Map(
+        this.state.serverState.cellIds.map((cellId) => [cellId, {}]),
+      );
+      this.state.viewStateActions.finishLoading();
+      this.state.editBufferActions.clearAll();
     } else if (kind.type === "cellWritten") {
-      this.upsertStoreCell(kind.cell);
+      this.upsertStoreCell(delta, kind.cell);
     } else if (kind.type === "cellInserted") {
-      this.upsertStoreCell(kind.cell, kind.after_id);
+      this.upsertStoreCell(delta, kind.cell);
     } else if (kind.type === "cellDeleted") {
       this.refs.delete(kind.id);
-      this.state.deleteCell(kind.id);
+      this.state.serverStateActions.applyNotebookDelta(delta);
+      this.state.viewStateActions.clearSelectedCellIfDeleted(kind.id);
+      this.state.editBufferActions.clearCell(kind.id);
     } else if (kind.type === "runCellEvent") {
       this.handleRunCellEvent(kind.cell_id, kind.event);
     } else {
@@ -812,14 +923,17 @@ export class Notebook {
   }
 
   clearResult(cellId: string) {
-    this.state.clearResult(cellId);
+    this.state.serverStateActions.applyNotebookDelta({
+      version: 0,
+      kind: { type: "localClearResult", cell_id: cellId },
+    });
   }
 
   async refreshKernelSlotInfo(): Promise<KernelSlotInfo> {
-    if (!this.state.kernelId) {
+    if (!this.state.viewState.kernelId) {
       await this.kernelStartPromise;
     }
-    const kernelId = this.state.kernelId;
+    const kernelId = this.state.viewState.kernelId;
     if (!kernelId) {
       throw new Error("Kernel has not started");
     }
@@ -827,25 +941,25 @@ export class Notebook {
   }
 
   async restartKernel() {
-    if (!this.state.kernelId) {
+    if (!this.state.viewState.kernelId) {
       await this.kernelStartPromise;
     }
-    const kernelId = this.state.kernelId;
+    const kernelId = this.state.viewState.kernelId;
     if (!kernelId) {
       throw new Error("Kernel has not started");
     }
     const restartedKernelId = await invoke<string>("restart_kernel", {
       slotId: kernelId,
-      specName: this.state.kernelSpecName ?? "python3",
+      specName: this.state.viewState.kernelSpecName ?? "python3",
     });
     await this.setKernelSlotInfo(restartedKernelId);
   }
 
   async interruptKernel() {
-    if (!this.state.kernelId) {
+    if (!this.state.viewState.kernelId) {
       await this.kernelStartPromise;
     }
-    const kernelId = this.state.kernelId;
+    const kernelId = this.state.viewState.kernelId;
     if (!kernelId) {
       throw new Error("Kernel has not started");
     }
@@ -853,7 +967,7 @@ export class Notebook {
   }
 
   async execute(cellId: string) {
-    if (!this.state.kernelId) {
+    if (!this.state.viewState.kernelId) {
       await this.kernelStartPromise;
     }
 
@@ -862,7 +976,7 @@ export class Notebook {
       throw new Error(`Cell ${cellId} not found`);
     }
     const code = editor.state.doc.toString();
-    const cell = this.state.cells[cellId];
+    const cell = selectCell(this.state, cellId);
     const lastEditedBy = cell?.source === code ? cell.lastEditedBy : undefined;
     this.updateCellSource(cellId, code, lastEditedBy);
 
@@ -873,20 +987,22 @@ export class Notebook {
       willClearOutput: false,
     };
 
-    const update = () =>
-      this.state.updateResult(cellId, {
-        status: runState.status,
-        timings: runState.timings,
-        executionCount: runState.executionCount,
-      });
-    update();
-    this.state.clearOutput(cellId);
+    runState = this.applyRunCellEventDelta(
+      cellId,
+      { event: "started" },
+      runState,
+    );
+    runState = this.applyRunCellEventDelta(
+      cellId,
+      { event: "clear_output", data: { wait: false } },
+      runState,
+    );
 
     try {
       const onEvent = new Channel<RunCellEvent>();
 
       onEvent.onmessage = (message: RunCellEvent) => {
-        runState = this.state.applyRunCellEvent(cellId, message, runState, {
+        runState = this.applyRunCellEventDelta(cellId, message, runState, {
           displayId: displayIdForRunCellEvent(message),
         });
         if (message.event === "disconnect") {
@@ -895,33 +1011,53 @@ export class Notebook {
       };
 
       await invoke("run_cell", {
-        kernelId: this.state.kernelId,
+        kernelId: this.state.viewState.kernelId,
         code,
         onEvent,
       });
-      if (runState.status === "running") {
-        runState = { ...runState, status: "success" };
-      }
     } catch (error: any) {
-      runState = { ...runState, status: "error" };
-      // Synthesize an error output for kernel disconnects or other errors.
-      this.state.appendOutput(cellId, {
-        output_type: "error",
-        ename: "InternalError",
-        evalue: error.toString(),
-        traceback: [],
-      });
+      runState = this.applyRunCellEventDelta(
+        cellId,
+        { event: "disconnect", data: error.toString() },
+        runState,
+        {
+          finishedAt: Date.now(),
+          handleDisconnect: true,
+        },
+      );
     } finally {
-      runState = {
-        ...runState,
-        timings: { ...runState.timings, finishedAt: Date.now() },
-      };
-      update();
+      if (runState.status === "running") {
+        runState = this.applyRunCellEventDelta(
+          cellId,
+          {
+            event: "finished",
+            data: {
+              status: "ok",
+              exec_count: runState.executionCount ?? null,
+            },
+          },
+          runState,
+          { finishedAt: Date.now() },
+        );
+      } else if (runState.timings.finishedAt === undefined) {
+        runState = this.applyRunCellEventDelta(
+          cellId,
+          {
+            event: "finished",
+            data: {
+              status: runState.status === "success" ? "ok" : "error",
+              exec_count: runState.executionCount ?? null,
+            },
+          },
+          runState,
+          { finishedAt: Date.now() },
+        );
+      }
     }
   }
 
   handleRunCellEvent(cellId: string, message: RunCellEvent) {
-    if (!this.state.cells[cellId]) {
+    if (!this.state.serverState.cells[cellId]) {
       this.directRunCellStates.delete(cellId);
       console.warn("Skipping run cell event for unknown cell", {
         cellId,
@@ -938,9 +1074,17 @@ export class Notebook {
         willClearOutput: false,
       };
       this.directRunCellStates.set(cellId, runState);
-      this.updateDirectRunResult(cellId, runState);
-      this.state.clearOutput(cellId);
-      return runState;
+      let nextRunState = this.applyRunCellEventDelta(
+        cellId,
+        { event: "started" },
+        runState,
+      );
+      nextRunState = this.applyRunCellEventDelta(
+        cellId,
+        { event: "clear_output", data: { wait: false } },
+        nextRunState,
+      );
+      return nextRunState;
     };
 
     let runState = this.directRunCellStates.get(cellId);
@@ -954,7 +1098,7 @@ export class Notebook {
 
     const isTerminal =
       message.event === "finished" || message.event === "disconnect";
-    runState = this.state.applyRunCellEvent(cellId, message, runState, {
+    runState = this.applyRunCellEventDelta(cellId, message, runState, {
       displayId: displayIdForRunCellEvent(message),
       finishedAt: isTerminal ? Date.now() : undefined,
       handleDisconnect: true,
@@ -967,15 +1111,7 @@ export class Notebook {
     }
   }
 
-  private updateDirectRunResult(cellId: string, runState: DirectRunCellState) {
-    this.state.updateResult(cellId, {
-      status: runState.status,
-      timings: runState.timings,
-      executionCount: runState.executionCount,
-    });
-  }
-
-  private upsertStoreCell(cell: DaemonCell, afterId?: string | null) {
+  private upsertStoreCell(delta: NotebookDelta, cell: DaemonCell) {
     if (!cellTypeFromDaemon(cell.kind)) {
       console.warn("Skipping unsupported notebook store cell kind", {
         cellId: cell.id,
@@ -986,7 +1122,42 @@ export class Notebook {
     if (!this.refs.has(cell.id)) {
       this.refs.set(cell.id, {});
     }
-    this.state.applyCellSnapshot(cell, afterId);
+    this.state.serverStateActions.applyNotebookDelta(delta);
+    this.state.editBufferActions.clearCell(cell.id);
+  }
+
+  private applyLocalCellSnapshot(
+    cellId: string,
+    cell: NotebookCellState,
+    afterId?: string | null,
+  ) {
+    this.state.serverStateActions.applyNotebookDelta({
+      version: cell.version,
+      kind: {
+        type: "localCellSnapshot",
+        cellId,
+        cell,
+        after_id: afterId,
+      },
+    });
+    this.state.editBufferActions.clearCell(cellId);
+  }
+
+  private applyRunCellEventDelta(
+    cellId: string,
+    event: RunCellEvent,
+    runState: RunCellEventApplicationState,
+    options?: ApplyRunCellEventOptions,
+  ): RunCellEventApplicationState {
+    return (
+      this.state.serverStateActions.applyNotebookDelta(
+        {
+          version: 0,
+          kind: { type: "runCellEvent", cell_id: cellId, event },
+        },
+        { runState, options },
+      ) ?? runState
+    );
   }
 
   private scheduleAutosave() {
@@ -995,7 +1166,7 @@ export class Notebook {
       this.autosaveTimer = undefined;
     }
 
-    if (!this.state.path || this.state.isLoading) {
+    if (!this.state.viewState.path || this.state.viewState.isLoading) {
       return;
     }
 
@@ -1014,7 +1185,7 @@ export class Notebook {
   }
 
   private async saveToDisk() {
-    const path = this.state.path;
+    const path = this.state.viewState.path;
     if (!path) return;
 
     try {
@@ -1029,11 +1200,7 @@ export class Notebook {
 
   private async setKernelSlotInfo(kernelId: string): Promise<KernelSlotInfo> {
     const info = await invoke<KernelSlotInfo>("kernel_slot_info", { kernelId });
-    this.store.setState({
-      kernelId: info.kernel_id,
-      kernelSpecName: info.spec_name,
-      kernelGeneration: info.generation,
-    });
+    this.state.viewStateActions.setKernelSlotInfo(info);
     return info;
   }
 }

@@ -26,7 +26,10 @@ const KernelUsage = () => {
   const [cpuAvailable, setCpuAvailable] = useState(0);
   const [mem, setMem] = useState(0);
   const [memAvailable, setMemAvailable] = useState(0);
-  const kernelId = useStore(notebook.store, (state) => state.kernelId);
+  const kernelId = useStore(
+    notebook.store,
+    (state) => state.viewState.kernelId,
+  );
 
   useEffect(() => {
     const updateUsage = async () => {

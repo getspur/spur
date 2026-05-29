@@ -8,7 +8,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
-use jute::{backend::notebook::NotebookRoot, state::State};
+use jute::{
+    backend::notebook::NotebookRoot,
+    commands::{kernel_slot_info_for_state, RecentNotebookEntry, RecentsChangedEvent},
+    state::{notebook_slot_id, State},
+};
 use rmcp::{
     model::{
         object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation,
@@ -415,7 +419,7 @@ pub trait DaemonWindowOps: Send + Sync {
     fn show_and_focus(&self, label: &str) -> bool;
     fn hide(&self, label: &str);
     fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError>;
-    fn emit_recents_changed(&self);
+    fn emit_recents_changed(&self, event: &RecentsChangedEvent);
     fn exit(&self);
 }
 
@@ -449,10 +453,8 @@ impl DaemonWindowOps for TauriDaemonWindowOps {
         Ok(window.label().to_string())
     }
 
-    fn emit_recents_changed(&self) {
-        let _ = self
-            .app
-            .emit(self::tools::RECENTS_CHANGED_EVENT, &json!({}));
+    fn emit_recents_changed(&self, event: &RecentsChangedEvent) {
+        let _ = self.app.emit(self::tools::RECENTS_CHANGED_EVENT, event);
     }
 
     fn exit(&self) {
@@ -554,6 +556,13 @@ impl DaemonControlSuccess {
     }
 }
 
+fn recents_bridge_error(error: anyhow::Error) -> BridgeError {
+    BridgeError::Handler {
+        code: "recents_failed".to_string(),
+        message: error.to_string(),
+    }
+}
+
 impl NotebookDaemonControl {
     fn new_with_parts(
         bridge: Arc<AgentBridge>,
@@ -648,7 +657,7 @@ impl NotebookDaemonControl {
                     if let Err(error) = self.record_recent_open(&path).await {
                         warn!(%error, path = %path.display(), "failed to record recent notebook");
                     } else {
-                        self.windows.emit_recents_changed();
+                        self.emit_recents_changed().await?;
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
@@ -666,7 +675,7 @@ impl NotebookDaemonControl {
                     if let Err(error) = self.record_recent_open(&path).await {
                         warn!(%error, path = %path.display(), "failed to record recent notebook");
                     } else {
-                        self.windows.emit_recents_changed();
+                        self.emit_recents_changed().await?;
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
@@ -684,7 +693,7 @@ impl NotebookDaemonControl {
                     if let Err(error) = self.record_recent_open(&path).await {
                         warn!(%error, path = %path.display(), "failed to record recent notebook");
                     } else {
-                        self.windows.emit_recents_changed();
+                        self.emit_recents_changed().await?;
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
@@ -718,12 +727,13 @@ impl NotebookDaemonControl {
                         if let Err(error) = self.clear_last_notebook().await {
                             warn!(%error, "failed to clear last notebook record");
                         }
-                        self.windows.emit_recents_changed();
+                        self.emit_recents_changed().await?;
                         Ok(DaemonControlSuccess::empty())
                     }
                     .await
                 }
-                DaemonControlCommand::ListRecents {} => recents::list_recents()
+                DaemonControlCommand::ListRecents {} => self
+                    .list_recent_entries()
                     .await
                     .map(DaemonControlSuccess::entries)
                     .map_err(|error| BridgeError::Handler {
@@ -732,26 +742,26 @@ impl NotebookDaemonControl {
                     }),
                 DaemonControlCommand::RemoveFromRecents { path } => {
                     async {
-                        recents::remove_from_recents(&resolve_notebook_path(PathBuf::from(path)))
+                        self.remove_recent_path(&resolve_notebook_path(PathBuf::from(path)))
                             .await
                             .map_err(|error| BridgeError::Handler {
                                 code: "recents_failed".to_owned(),
                                 message: error.to_string(),
                             })?;
-                        self.windows.emit_recents_changed();
+                        self.emit_recents_changed().await?;
                         Ok(DaemonControlSuccess::empty())
                     }
                     .await
                 }
                 DaemonControlCommand::SetPinned { path, pinned } => {
                     async {
-                        recents::set_pinned(&resolve_notebook_path(PathBuf::from(path)), pinned)
+                        self.set_recent_pinned(&resolve_notebook_path(PathBuf::from(path)), pinned)
                             .await
                             .map_err(|error| BridgeError::Handler {
                                 code: "recents_failed".to_owned(),
                                 message: error.to_string(),
                             })?;
-                        self.windows.emit_recents_changed();
+                        self.emit_recents_changed().await?;
                         Ok(DaemonControlSuccess::empty())
                     }
                     .await
@@ -865,11 +875,86 @@ impl NotebookDaemonControl {
         }
     }
 
+    async fn list_recent_entries(&self) -> Result<Vec<RecentEntry>> {
+        match self.recents_record_path.as_deref() {
+            Some(record_path) => recents::list_recents_at(record_path).await,
+            None => recents::list_recents().await,
+        }
+    }
+
+    async fn remove_recent_path(&self, path: &Path) -> Result<()> {
+        match self.recents_record_path.as_deref() {
+            Some(record_path) => recents::remove_from_recents_at(record_path, path).await,
+            None => recents::remove_from_recents(path).await,
+        }
+    }
+
+    async fn set_recent_pinned(&self, path: &Path, pinned: bool) -> Result<()> {
+        match self.recents_record_path.as_deref() {
+            Some(record_path) => recents::set_pinned_at(record_path, path, pinned).await,
+            None => recents::set_pinned(path, pinned).await,
+        }
+    }
+
     async fn rename_recent_path(&self, from: &Path, to: &Path) -> Result<()> {
         match self.recents_record_path.as_deref() {
             Some(record_path) => recents::rename_path_at(record_path, from, to).await,
             None => recents::rename_path(from, to).await,
         }
+    }
+
+    async fn recents_changed_event(&self) -> Result<RecentsChangedEvent, BridgeError> {
+        let current_path = self.current_path_for_recents_event().await?;
+        let entries = self
+            .list_recent_entries()
+            .await
+            .map_err(recents_bridge_error)?;
+        let mut event_entries = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let normalized_path = recents::canonicalize_or_normalize(&entry.path)
+                .await
+                .map_err(recents_bridge_error)?;
+            let path = normalized_path.display().to_string();
+            event_entries.push(RecentNotebookEntry {
+                path: path.clone(),
+                last_opened: entry.last_opened.to_rfc3339(),
+                is_scratch: entry.is_scratch,
+                pinned: entry.pinned,
+                kernel_alive: self.kernel_alive_for_notebook(&path).await,
+                is_current: current_path.as_ref() == Some(&normalized_path),
+            });
+        }
+        Ok(RecentsChangedEvent {
+            entries: event_entries,
+        })
+    }
+
+    async fn current_path_for_recents_event(&self) -> Result<Option<PathBuf>, BridgeError> {
+        let current_path = {
+            let state = self.state.lock().await;
+            state.current_path.clone()
+        };
+        match current_path {
+            Some(path) => recents::canonicalize_or_normalize(&path)
+                .await
+                .map(Some)
+                .map_err(recents_bridge_error),
+            None => Ok(None),
+        }
+    }
+
+    async fn kernel_alive_for_notebook(&self, path: &str) -> bool {
+        let slot_id = notebook_slot_id(path);
+        kernel_slot_info_for_state(&slot_id, &self.jute_state)
+            .await
+            .map(|info| info.status != "dead")
+            .unwrap_or(false)
+    }
+
+    async fn emit_recents_changed(&self) -> Result<(), BridgeError> {
+        let event = self.recents_changed_event().await?;
+        self.windows.emit_recents_changed(&event);
+        Ok(())
     }
 
     async fn rename_path(&self, from: PathBuf, to: PathBuf) -> Result<PathBuf, BridgeError> {
@@ -907,7 +992,7 @@ impl NotebookDaemonControl {
                 code: "recents_failed".to_string(),
                 message: error.to_string(),
             })?;
-        self.windows.emit_recents_changed();
+        self.emit_recents_changed().await?;
         Ok(to)
     }
 
@@ -1370,7 +1455,7 @@ async fn prepare_socket_path(socket_path: impl AsRef<Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
     use tokio::net::UnixStream;
     use tokio::time::{timeout, Duration};
@@ -1584,7 +1669,7 @@ mod tests {
     struct RecordingWindowOps {
         opened: StdMutex<Vec<PathBuf>>,
         hidden: StdMutex<Vec<String>>,
-        recents_changed: AtomicUsize,
+        recents_changed: StdMutex<Vec<RecentsChangedEvent>>,
         exited: AtomicBool,
     }
 
@@ -1598,7 +1683,17 @@ mod tests {
         }
 
         fn recents_changed_count(&self) -> usize {
-            self.recents_changed.load(Ordering::SeqCst)
+            self.recents_changed
+                .lock()
+                .expect("recents_changed lock")
+                .len()
+        }
+
+        fn recents_changed_events(&self) -> Vec<RecentsChangedEvent> {
+            self.recents_changed
+                .lock()
+                .expect("recents_changed lock")
+                .clone()
         }
     }
 
@@ -1622,8 +1717,11 @@ mod tests {
             Ok(format!("window-{}", self.opened().len()))
         }
 
-        fn emit_recents_changed(&self) {
-            self.recents_changed.fetch_add(1, Ordering::SeqCst);
+        fn emit_recents_changed(&self, event: &RecentsChangedEvent) {
+            self.recents_changed
+                .lock()
+                .expect("recents_changed lock")
+                .push(event.clone());
         }
 
         fn exit(&self) {
@@ -1793,6 +1891,11 @@ mod tests {
         assert_eq!(recents["entries"][0]["path"], to.display().to_string());
         assert_eq!(recents["entries"][0]["pinned"], true);
         assert_eq!(windows.recents_changed_count(), 1);
+        let events = windows.recents_changed_events();
+        assert_eq!(events[0].entries.len(), 1);
+        assert_eq!(events[0].entries[0].path, to.display().to_string());
+        assert_eq!(events[0].entries[0].pinned, true);
+        assert!(events[0].entries[0].is_current);
     }
     // DaemonWindowOps keeps lifecycle tests independent of a concrete Tauri
     // AppHandle; the production implementation still delegates to Tauri.
@@ -1917,7 +2020,7 @@ mod tests {
             })
         }
 
-        fn emit_recents_changed(&self) {}
+        fn emit_recents_changed(&self, _event: &RecentsChangedEvent) {}
 
         fn exit(&self) {}
     }

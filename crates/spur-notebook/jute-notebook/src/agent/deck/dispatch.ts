@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { Notebook } from "@/stores/notebook";
+import { type Notebook, selectCell } from "@/stores/notebook";
 
 import { PROMPTS } from "./prompts";
 
@@ -23,9 +23,12 @@ export async function dispatchDeckCommand(
 
 function summarizeNotebook(notebook: Notebook) {
   const state = notebook.store.getState();
-  const cellIds = state.cellIds ?? Object.keys(state.cells);
+  const cellIds = state.serverState.cellIds;
   const cells = cellIds.map((id: string) => {
-    const cell = state.cells[id];
+    const cell = selectCell(state, id);
+    if (!cell) {
+      throw new Error(`Cell not found: ${id}`);
+    }
     const source = Array.isArray(cell.source)
       ? cell.source.join("")
       : (cell.source ?? "");
@@ -36,5 +39,5 @@ function summarizeNotebook(notebook: Notebook) {
       preview: source.slice(0, 80),
     };
   });
-  return { path: state.path, cells };
+  return { path: state.viewState.path, cells };
 }

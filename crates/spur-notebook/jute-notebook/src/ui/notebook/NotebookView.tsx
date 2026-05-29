@@ -12,7 +12,7 @@ export default function NotebookView() {
 
   const [path, loadError] = useStore(
     notebook.store,
-    useShallow((state) => [state.path, state.loadError]),
+    useShallow((state) => [state.viewState.path, state.viewState.loadError]),
   );
 
   // should be set to default home directory, and kernel should start there too
