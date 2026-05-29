@@ -1407,8 +1407,10 @@ fn code_symbol_history_with_client(args: &Value, client: &dyn GraphQueryClient) 
     let worktree = current_worktree()?;
     let commits = load_commit_index_for_request(&worktree)?;
     let symbol_id = symbol_id_arg(args)?.to_string();
-    let temporal_index = client.temporal_index();
-    let events = code_symbol_history_events(args, &temporal_index, &commits, &symbol_id)?;
+    let history = client
+        .symbol_history(&commits, &symbol_id)
+        .map_err(graph_query_error)?;
+    let events = code_symbol_history_events(args, &commits, history)?;
 
     Ok(json!({
         "symbol": symbol_uri(&symbol_id),
@@ -1418,18 +1420,14 @@ fn code_symbol_history_with_client(args: &Value, client: &dyn GraphQueryClient) 
 
 fn code_symbol_history_events(
     args: &Value,
-    temporal_index: &TemporalIndex,
     commits: &CommitIndexArtifact,
-    symbol_id: &str,
+    history: Vec<(String, spur_graph::ChangeKind, SnapshotKey)>,
 ) -> Result<Vec<Value>, McpHandlerError> {
     let reachable = parse_as_of(args)?
         .map(|as_of| reachable_commits(commits, &as_of))
         .transpose()?;
-    if temporal_index.artifact().symbol_snapshots.is_empty() {
-        return Ok(Vec::new());
-    }
 
-    Ok(symbol_history(temporal_index, commits, symbol_id)
+    Ok(history
         .into_iter()
         .filter(|(sha, _, _)| {
             reachable
@@ -4217,11 +4215,12 @@ mod tests {
     use super::super::*;
     use serde_json::{json, Value};
     use spur_acp::{BrainSessionId, SessionId};
-    use spur_graph::schema::GRAPH_INDEX_VERSION_TEMPORAL;
+    use spur_graph::schema::{WalkStrategy, GRAPH_INDEX_VERSION_TEMPORAL};
     use spur_graph::{
-        write_artifact_parquet, write_current_pointer, Confidence, GraphEdgeArtifact,
-        GraphEdgeKind, GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact,
-        GraphIndexHeader, GraphSymbolArtifact, NodeId, RelationKind, WriteOptions,
+        write_artifact_parquet, write_current_pointer, ChangeKind, CommitArtifact,
+        CommitIndexArtifact, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId,
+        RelationKind, SnapshotKey, WriteOptions,
     };
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
@@ -4453,6 +4452,124 @@ mod tests {
         write_current_pointer(dir.path(), &parquet_dir).expect("write CURRENT pointer");
     }
 
+    fn write_commit_index_fixture(dir: &TempDir) {
+        let commits = CommitIndexArtifact {
+            schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+                .parse()
+                .expect("temporal graph index version is numeric"),
+            commits: vec![
+                CommitArtifact {
+                    sha: "commit-a".to_string(),
+                    parents: Vec::new(),
+                    author_time: 1,
+                    summary: "add target".to_string(),
+                },
+                CommitArtifact {
+                    sha: "commit-b".to_string(),
+                    parents: vec!["commit-a".to_string()],
+                    author_time: 2,
+                    summary: "modify target".to_string(),
+                },
+            ],
+            refs: [("HEAD".to_string(), "commit-b".to_string())].into(),
+            indexed_at: "2026-05-29T00:00:00Z".to_string(),
+            walk_strategy: WalkStrategy::Reachable,
+        };
+        spur_graph::store::commit_index::save_artifact(
+            dir.path(),
+            ".spur/commit-index.json",
+            &commits,
+        )
+        .expect("write commit index artifact");
+        spur_graph::store::commit_index::save_pointer(
+            dir.path(),
+            &spur_graph::store::commit_index::CommitIndexPointer {
+                schema_version: GRAPH_INDEX_VERSION_TEMPORAL
+                    .parse()
+                    .expect("temporal graph index version is numeric"),
+                artifact_relative_path: ".spur/commit-index.json".to_string(),
+                indexed_at: commits.indexed_at.clone(),
+                refs: commits.refs.clone(),
+            },
+        )
+        .expect("write commit index pointer");
+    }
+
+    struct HistoryOnlyClient {
+        events: Vec<(String, ChangeKind, SnapshotKey)>,
+    }
+
+    impl spur_graph::GraphQueryClient for HistoryOnlyClient {
+        fn search_symbols(
+            &self,
+            _opts: &spur_graph::SearchOptions,
+        ) -> anyhow::Result<spur_graph::SearchResult> {
+            unreachable!("symbol history handler should not search symbols")
+        }
+
+        fn find_caller_edges(&self, _sid: &str) -> Vec<spur_graph::OwnedCallerRecord> {
+            unreachable!("symbol history handler should not find caller edges")
+        }
+
+        fn find_callee_edges(&self, _sid: &str) -> Vec<spur_graph::OwnedCalleeRecord> {
+            unreachable!("symbol history handler should not find callee edges")
+        }
+
+        fn resolve_selector(
+            &self,
+            _selector: &str,
+        ) -> anyhow::Result<spur_graph::SelectorResolution> {
+            unreachable!("symbol history handler should not resolve selectors")
+        }
+
+        fn symbol_by_id(
+            &self,
+            _sid: &str,
+        ) -> anyhow::Result<Option<spur_graph::GraphSymbolArtifact>> {
+            unreachable!("symbol history handler should not read symbols")
+        }
+
+        fn symbols_by_file(
+            &self,
+            _path: &str,
+        ) -> anyhow::Result<Vec<spur_graph::GraphSymbolArtifact>> {
+            unreachable!("symbol history handler should not read file symbols")
+        }
+
+        fn symbols_by_path_name(
+            &self,
+            _path: &str,
+            _name: &str,
+        ) -> anyhow::Result<Vec<spur_graph::GraphSymbolArtifact>> {
+            unreachable!("symbol history handler should not read symbols by path/name")
+        }
+
+        fn file_manifest_by_path(
+            &self,
+            _path: &str,
+        ) -> anyhow::Result<Option<spur_graph::GraphFileManifestEntry>> {
+            unreachable!("symbol history handler should not read file manifests")
+        }
+
+        fn file_exists(&self, _path: &str) -> anyhow::Result<bool> {
+            unreachable!("symbol history handler should not stat graph files")
+        }
+
+        fn temporal_index(&self) -> Arc<spur_graph::temporal::TemporalIndex> {
+            panic!("symbol history handler must not load the full temporal index")
+        }
+
+        fn symbol_history(
+            &self,
+            commits: &CommitIndexArtifact,
+            symbol_id: &str,
+        ) -> anyhow::Result<Vec<(String, ChangeKind, SnapshotKey)>> {
+            assert_eq!(symbol_id, "target");
+            assert_eq!(commits.commits.len(), 2);
+            Ok(self.events.clone())
+        }
+    }
+
     fn symbol(
         id: &str,
         file_path: &str,
@@ -4523,6 +4640,47 @@ mod tests {
             .expect("content text")
             .to_string();
         serde_json::from_str(&text).expect("JSON content")
+    }
+
+    #[test]
+    fn code_symbol_history_with_client_uses_symbol_history_without_temporal_index() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_commit_index_fixture(&dir);
+        let _cwd = enter_dir(dir.path());
+        let client = HistoryOnlyClient {
+            events: vec![
+                (
+                    "commit-a".to_string(),
+                    ChangeKind::Added,
+                    SnapshotKey {
+                        stable_symbol_id: "old-target".to_string(),
+                        commit: "commit-a".to_string(),
+                    },
+                ),
+                (
+                    "commit-b".to_string(),
+                    ChangeKind::Modified,
+                    SnapshotKey {
+                        stable_symbol_id: "target".to_string(),
+                        commit: "commit-b".to_string(),
+                    },
+                ),
+            ],
+        };
+
+        let body = super::code_symbol_history_with_client(
+            &json!({ "symbol": "graph://symbol/target", "as_of": "commit-a" }),
+            &client,
+        )
+        .expect("symbol history succeeds");
+
+        assert_eq!(body["symbol"], "graph://symbol/target");
+        let events = body["events"].as_array().expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["commit"], "commit-a");
+        assert_eq!(events[0]["change_kind"], "added");
+        assert_eq!(events[0]["snapshot"]["stable_symbol_id"], "old-target");
     }
 
     fn assert_unavailable_freshness_metadata(body: &Value) {
