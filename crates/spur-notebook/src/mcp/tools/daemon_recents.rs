@@ -13,6 +13,13 @@ use super::{check_response, daemon_unavailable, parse_no_args};
 use crate::mcp::{DaemonControlRequest, ServerDeps};
 use crate::recents;
 
+fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
+    DaemonControlRequest {
+        id: None,
+        request: jute::commands::DaemonControlRequest::new(command),
+    }
+}
+
 // ---------------------------------------------------------- notebook.list_recents
 
 pub fn list_recents_tool() -> Tool {
@@ -81,14 +88,12 @@ pub async fn call_set_pinned(
     let path = super::validate_notebook_path("notebook.set_pinned", &params.path)?;
     let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
     let response = daemon
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "set_pinned".to_string(),
-            path: Some(path),
-            pinned: Some(params.pinned),
-            ..Default::default()
-        })
+        .handle(daemon_request(
+            jute::commands::DaemonControlCommand::SetPinned {
+                path: path.display().to_string(),
+                pinned: params.pinned,
+            },
+        ))
         .await;
     check_response(response)?;
     Ok(CallToolResult::structured(json!({ "ok": true })))
@@ -129,14 +134,11 @@ pub async fn call_remove_from_recents(
     let path = super::validate_notebook_path("notebook.remove_from_recents", &params.path)?;
     let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
     let response = daemon
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "remove_from_recents".to_string(),
-            path: Some(path),
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(
+            jute::commands::DaemonControlCommand::RemoveFromRecents {
+                path: path.display().to_string(),
+            },
+        ))
         .await;
     check_response(response)?;
     Ok(CallToolResult::structured(json!({ "ok": true })))

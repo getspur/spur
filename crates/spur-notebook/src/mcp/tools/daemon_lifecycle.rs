@@ -12,6 +12,13 @@ use serde_json::{json, Value};
 use super::{check_response, daemon_unavailable, parse_no_args};
 use crate::mcp::{DaemonControlRequest, NotebookDaemonControl, ServerDeps};
 
+fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
+    DaemonControlRequest {
+        id: None,
+        request: jute::commands::DaemonControlRequest::new(command),
+    }
+}
+
 fn require_daemon(deps: &ServerDeps) -> Result<&NotebookDaemonControl, McpError> {
     deps.daemon.as_ref().ok_or_else(daemon_unavailable)
 }
@@ -34,14 +41,7 @@ pub async fn call_new(deps: &ServerDeps, arguments: Value) -> Result<CallToolRes
     parse_no_args("notebook.new", arguments)?;
     let daemon = require_daemon(deps)?;
     let response = daemon
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "new".to_string(),
-            path: None,
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(jute::commands::DaemonControlCommand::New {}))
         .await;
     let response = check_response(response)?;
     let path = response.path.ok_or_else(|| {
@@ -86,14 +86,9 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
     let fallback_path = path.to_string_lossy().into_owned();
     let daemon = require_daemon(deps)?;
     let response = daemon
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "open".to_string(),
-            path: Some(path),
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+            path: path.display().to_string(),
+        }))
         .await;
     let response = check_response(response)?;
     let path = response.path.unwrap_or(fallback_path);
@@ -118,14 +113,9 @@ pub async fn call_close(deps: &ServerDeps, arguments: Value) -> Result<CallToolR
     parse_no_args("notebook.close", arguments)?;
     let daemon = require_daemon(deps)?;
     let response = daemon
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "close".to_string(),
-            path: None,
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(
+            jute::commands::DaemonControlCommand::Close {},
+        ))
         .await;
     check_response(response)?;
     Ok(CallToolResult::structured(json!({ "ok": true })))
@@ -149,14 +139,9 @@ pub async fn call_reopen(deps: &ServerDeps, arguments: Value) -> Result<CallTool
     parse_no_args("notebook.reopen", arguments)?;
     let daemon = require_daemon(deps)?;
     let response = daemon
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "reopen".to_string(),
-            path: None,
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(
+            jute::commands::DaemonControlCommand::Reopen {},
+        ))
         .await;
     let response = check_response(response)?;
     let path = response.path.ok_or_else(|| {

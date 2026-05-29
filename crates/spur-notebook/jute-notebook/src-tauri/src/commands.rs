@@ -572,36 +572,6 @@ pub async fn daemon_control(
     ))
 }
 
-/// Build the typed daemon-control request used by rename callers.
-pub fn daemon_control_rename_request(from: &Path, to: &Path) -> DaemonControlRequest {
-    DaemonControlRequest::new(DaemonControlCommand::Rename {
-        from: from.display().to_string(),
-        to: to.display().to_string(),
-    })
-}
-
-#[cfg(unix)]
-/// Send a typed rename daemon-control request through the app's daemon socket.
-pub async fn send_daemon_control_rename(
-    from: &Path,
-    to: &Path,
-) -> Result<DaemonControlResponse, Error> {
-    let socket_path = daemon_socket_path_from_args()?;
-    let request = daemon_control_rename_request(from, to);
-    send_daemon_control_to(&socket_path, &request).await
-}
-
-#[cfg(not(unix))]
-/// Send a typed rename daemon-control request through the app's daemon socket.
-pub async fn send_daemon_control_rename(
-    _from: &Path,
-    _to: &Path,
-) -> Result<DaemonControlResponse, Error> {
-    Err(Error::NotebookDaemon(
-        "notebook daemon socket commands are only available on Unix platforms".to_string(),
-    ))
-}
-
 /// Handle notebook-store daemon control requests inside the Tauri process.
 pub async fn handle_daemon_control_request(
     request: DaemonControlRequest,
@@ -1531,24 +1501,6 @@ mod tests {
     #[test]
     fn daemon_control_command_symbol_is_exported() {
         let _command = daemon_control;
-    }
-
-    #[test]
-    fn rename_daemon_control_request_contains_from_and_to() {
-        let request = daemon_control_rename_request(
-            Path::new("/tmp/old-name.ipynb"),
-            Path::new("/tmp/new-name.ipynb"),
-        );
-
-        assert_eq!(
-            serde_json::to_value(request).unwrap(),
-            serde_json::json!({
-                "daemon": "notebook.v1",
-                "command": "rename",
-                "from": "/tmp/old-name.ipynb",
-                "to": "/tmp/new-name.ipynb"
-            })
-        );
     }
 
     #[tokio::test]

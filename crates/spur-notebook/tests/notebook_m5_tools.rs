@@ -21,6 +21,13 @@ use spur_notebook::mcp::{
 };
 use tokio::sync::Mutex;
 
+fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
+    DaemonControlRequest {
+        id: None,
+        request: jute::commands::DaemonControlRequest::new(command),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct MockCell {
     kind: String,
@@ -570,14 +577,9 @@ async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook()
     );
 
     let first_open = control
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "open".to_string(),
-            path: Some(notebook_a.clone()),
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+            path: notebook_a.display().to_string(),
+        }))
         .await;
     assert!(first_open.ok, "{:?}", first_open.error);
 
@@ -597,14 +599,9 @@ async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook()
     assert_eq!(write["version"], 2);
 
     let second_open = control
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "open".to_string(),
-            path: Some(notebook_b.clone()),
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+            path: notebook_b.display().to_string(),
+        }))
         .await;
     assert!(second_open.ok, "{:?}", second_open.error);
 

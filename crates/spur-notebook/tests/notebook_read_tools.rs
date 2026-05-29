@@ -17,6 +17,13 @@ use spur_notebook::mcp::{
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
+    DaemonControlRequest {
+        id: None,
+        request: jute::commands::DaemonControlRequest::new(command),
+    }
+}
+
 fn deps_with(bridge: Arc<dyn BridgeRequester>) -> ServerDeps {
     ServerDeps::from_bridge(bridge)
 }
@@ -532,14 +539,9 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
         None,
     );
     let open = control
-        .handle(DaemonControlRequest {
-            id: None,
-            daemon: None,
-            command: "open".to_string(),
-            path: Some(path.clone()),
-            pinned: None,
-            ..Default::default()
-        })
+        .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+            path: path.display().to_string(),
+        }))
         .await;
     assert!(open.ok, "{:?}", open.error);
 
