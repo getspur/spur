@@ -1,11 +1,10 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import type { DaemonCell, NotebookDelta, NotebookRoot } from "@/bindings";
 
 import {
   Notebook,
   type NotebookStoreState,
-  __resetNotebookRuntimeConfigCacheForTesting,
   reconcileNotebookDelta,
 } from "../notebook";
 
@@ -19,12 +18,6 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 describe("reconcileNotebookDelta", () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    invokeMock.mockReset();
-    __resetNotebookRuntimeConfigCacheForTesting();
-  });
-
   test("upserts the inline cell from a CellWritten delta without refetching", async () => {
     const cellId = "cell-1";
     const updatedCell: DaemonCell = {
@@ -39,7 +32,6 @@ describe("reconcileNotebookDelta", () => {
     };
 
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "notebook_runtime_config") return { inProcStore: true };
       if (command === "start_kernel") return "kernel-1";
       if (command === "kernel_slot_info") {
         return {

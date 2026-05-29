@@ -1,17 +1,7 @@
 import { type UnlistenFn, listen } from "@tauri-apps/api/event";
 
-import type { NotebookDelta, RunCellEvent } from "@/bindings";
-import {
-  type Notebook,
-  loadNotebookRuntimeConfig,
-  reconcileNotebookDelta,
-} from "@/stores/notebook";
-
-type RunCellEventPayload = {
-  cell_id: string;
-  kernel_id: string;
-  event: RunCellEvent;
-};
+import type { NotebookDelta } from "@/bindings";
+import { type Notebook, reconcileNotebookDelta } from "@/stores/notebook";
 
 type SavedPayload = {
   path?: string;
@@ -62,14 +52,6 @@ function runAsync(label: string, action: () => Promise<void>) {
 
 export function listenForNotebookEvents(notebook: Notebook): () => void {
   const registrations = [
-    listen<RunCellEventPayload>("notebook://run_cell_event", (event) => {
-      runAsync("notebook://run_cell_event", async () => {
-        const { inProcStore } = await loadNotebookRuntimeConfig();
-        if (inProcStore) return;
-        if (event.payload.kernel_id !== notebook.state.kernelId) return;
-        notebook.handleRunCellEvent(event.payload.cell_id, event.payload.event);
-      });
-    }),
     listen("notebook://kernel_changed", () => {
       runAsync("notebook://kernel_changed", async () => {
         await notebook.refreshKernelSlotInfo();
@@ -81,9 +63,6 @@ export function listenForNotebookEvents(notebook: Notebook): () => void {
     }),
   ];
 
-  // Warm the runtime-config cache so the first delta is gated on the
-  // Rust-resolved flag rather than the env fallback.
-  void loadNotebookRuntimeConfig();
   registrations.push(
     listen<NotebookDelta>("notebook://changed", (event) => {
       runAsync("notebook://changed", async () => {

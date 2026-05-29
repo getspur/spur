@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { NotebookDelta, RunCellEvent } from "@/bindings";
-import {
-  Notebook,
-  __resetNotebookRuntimeConfigCacheForTesting,
-} from "@/stores/notebook";
+import { Notebook } from "@/stores/notebook";
 
 import { listenForNotebookEvents } from "../events";
 
@@ -41,15 +38,13 @@ describe("listenForNotebookEvents", () => {
   afterEach(() => {
     invokeMock.mockReset();
     listeners.clear();
-    __resetNotebookRuntimeConfigCacheForTesting();
   });
 
-  test("does not double-apply run events when in-proc store deltas are enabled", async () => {
+  test("applies run events from notebook deltas", async () => {
     const cellId = "cell-1";
     const runEvent: RunCellEvent = { event: "stdout", data: "hello\n" };
 
     invokeMock.mockImplementation(async (command: string, args?: unknown) => {
-      if (command === "notebook_runtime_config") return { inProcStore: true };
       if (command === "start_kernel") return "kernel-1";
       if (command === "kernel_slot_info") {
         expect(args).toEqual({ kernelId: "kernel-1" });
@@ -86,11 +81,6 @@ describe("listenForNotebookEvents", () => {
     listenForNotebookEvents(notebook);
     await flushPromises();
 
-    emit("notebook://run_cell_event", {
-      cell_id: cellId,
-      kernel_id: "kernel-1",
-      event: runEvent,
-    });
     emit("notebook://changed", {
       version: 2,
       kind: { type: "runCellEvent", cell_id: cellId, event: runEvent },

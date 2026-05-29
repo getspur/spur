@@ -52,7 +52,7 @@ fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
 
 fn parse_mode_from_with_config(
     args: impl IntoIterator<Item = String>,
-    mut config: mcp::NotebookConfig,
+    config: mcp::NotebookConfig,
 ) -> Mode {
     let mut files = Vec::new();
     let mut socket = None;
@@ -69,12 +69,6 @@ fn parse_mode_from_with_config(
             }
             "--socket" => {
                 socket = args.next().map(PathBuf::from);
-            }
-            "--notebook-in-proc-store" => {
-                config.in_proc_store = true;
-            }
-            "--no-notebook-in-proc-store" => {
-                config.in_proc_store = false;
             }
             _ if arg.starts_with('-') => {}
             _ => {
@@ -108,11 +102,7 @@ fn parse_mode() -> Mode {
 }
 
 fn notebook_config_from_env() -> mcp::NotebookConfig {
-    mcp::NotebookConfig {
-        // Defaults to true (in-proc store on); jute::notebook_in_proc_store_enabled
-        // honors SPUR_NOTEBOOK_IN_PROC_STORE=0/false/no/off as the opt-out.
-        in_proc_store: jute::notebook_in_proc_store_enabled(),
-    }
+    mcp::NotebookConfig
 }
 
 async fn run_mcp_proxy(socket_path: PathBuf, config: mcp::NotebookConfig) -> anyhow::Result<()> {
@@ -239,7 +229,7 @@ fn daemon_spawn_lock_path(socket_path: &Path) -> PathBuf {
     PathBuf::from(lock_path)
 }
 
-fn spawn_notebook_app(socket_path: &Path, config: mcp::NotebookConfig) -> anyhow::Result<()> {
+fn spawn_notebook_app(socket_path: &Path, _config: mcp::NotebookConfig) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -257,7 +247,7 @@ fn spawn_notebook_app(socket_path: &Path, config: mcp::NotebookConfig) -> anyhow
     let program = std::env::current_exe().unwrap_or_else(|_| notebook_binary_path());
     let mut command = std::process::Command::new(program);
     command
-        .args(notebook_daemon_args(socket_path, config))
+        .args(notebook_daemon_args(socket_path))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
@@ -270,15 +260,10 @@ fn spawn_notebook_app(socket_path: &Path, config: mcp::NotebookConfig) -> anyhow
     Ok(())
 }
 
-fn notebook_daemon_args(socket_path: &Path, config: mcp::NotebookConfig) -> Vec<OsString> {
+fn notebook_daemon_args(socket_path: &Path) -> Vec<OsString> {
     vec![
         OsString::from("--socket"),
         socket_path.as_os_str().to_owned(),
-        OsString::from(if config.in_proc_store {
-            "--notebook-in-proc-store"
-        } else {
-            "--no-notebook-in-proc-store"
-        }),
     ]
 }
 
@@ -345,9 +330,6 @@ fn main() {
     tauri::Builder::default()
         .manage(state_for_manage)
         .manage(bridge_for_state)
-        .manage(jute::commands::NotebookRuntimeConfig {
-            in_proc_store: config.in_proc_store,
-        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -371,7 +353,6 @@ fn main() {
             jute::commands::venv::venv_create,
             jute::commands::venv::venv_list,
             jute::commands::venv::venv_delete,
-            jute::commands::notebook_runtime_config,
             spur_notebook::mcp::bridge::bridge_ready,
             spur_notebook::mcp::bridge::notebook_active_changed,
             spur_notebook::mcp::bridge::agent_response,
@@ -384,7 +365,6 @@ fn main() {
             jute::spawn_notebook_delta_forwarder(
                 app.handle().clone(),
                 Arc::clone(&state_for_setup),
-                config.in_proc_store,
             );
             #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
@@ -503,30 +483,27 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn default_off_config() -> mcp::NotebookConfig {
-        mcp::NotebookConfig {
-            in_proc_store: false,
-        }
+    fn default_config() -> mcp::NotebookConfig {
+        mcp::NotebookConfig
     }
 
     #[test]
     fn mcp_proxy_requires_explicit_socket_path() {
         let Mode::McpProxy {
             socket_path,
-            config,
+            config: _,
         } = parse_mode_from_with_config(
             [
                 "--mcp-proxy".to_string(),
                 "/tmp/notebook-session.sock".to_string(),
             ],
-            default_off_config(),
+            default_config(),
         )
         else {
             panic!("expected mcp proxy mode");
         };
 
         assert_eq!(socket_path, PathBuf::from("/tmp/notebook-session.sock"));
-        assert!(!config.in_proc_store);
     }
 
     #[test]
@@ -534,14 +511,14 @@ mod tests {
         let Mode::App {
             files,
             socket,
-            config,
+            config: _,
         } = parse_mode_from_with_config(
             [
                 "--socket".to_string(),
                 "/tmp/notebook-session.sock".to_string(),
                 "something.ipynb".to_string(),
             ],
-            default_off_config(),
+            default_config(),
         )
         else {
             panic!("expected app mode");
@@ -549,7 +526,6 @@ mod tests {
 
         assert_eq!(socket, Some(PathBuf::from("/tmp/notebook-session.sock")));
         assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
-        assert!(!config.in_proc_store);
     }
 
     #[test]
@@ -557,110 +533,14 @@ mod tests {
         let Mode::App {
             files,
             socket,
-            config,
-        } = parse_mode_from_with_config(["something.ipynb".to_string()], default_off_config())
+            config: _,
+        } = parse_mode_from_with_config(["something.ipynb".to_string()], default_config())
         else {
             panic!("expected app mode");
         };
 
         assert_eq!(socket, None);
         assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
-        assert!(!config.in_proc_store);
-    }
-
-    #[test]
-    fn app_mode_accepts_in_proc_store_flag() {
-        let Mode::App { config, .. } = parse_mode_from_with_config(
-            [
-                "--notebook-in-proc-store".to_string(),
-                "--socket".to_string(),
-                "/tmp/notebook-session.sock".to_string(),
-            ],
-            default_off_config(),
-        ) else {
-            panic!("expected app mode");
-        };
-
-        assert!(config.in_proc_store);
-    }
-
-    #[test]
-    fn mcp_proxy_accepts_in_proc_store_flag_after_socket_path() {
-        let Mode::McpProxy { config, .. } = parse_mode_from_with_config(
-            [
-                "--mcp-proxy".to_string(),
-                "/tmp/notebook-session.sock".to_string(),
-                "--notebook-in-proc-store".to_string(),
-            ],
-            default_off_config(),
-        ) else {
-            panic!("expected mcp proxy mode");
-        };
-
-        assert!(config.in_proc_store);
-    }
-
-    #[test]
-    fn app_mode_accepts_in_proc_store_env_fallback() {
-        let Mode::App { config, .. } = parse_mode_from_with_config(
-            [
-                "--socket".to_string(),
-                "/tmp/notebook-session.sock".to_string(),
-            ],
-            mcp::NotebookConfig {
-                in_proc_store: true,
-            },
-        ) else {
-            panic!("expected app mode");
-        };
-
-        assert!(config.in_proc_store);
-    }
-
-    #[test]
-    fn cli_no_flag_disables_in_proc_store_default() {
-        // Initial config is on (matches the new env default); --no-notebook-in-proc-store
-        // explicitly opts out.
-        let Mode::App { config, .. } = parse_mode_from_with_config(
-            [
-                "--no-notebook-in-proc-store".to_string(),
-                "--socket".to_string(),
-                "/tmp/notebook-session.sock".to_string(),
-            ],
-            mcp::NotebookConfig {
-                in_proc_store: true,
-            },
-        ) else {
-            panic!("expected app mode");
-        };
-
-        assert!(!config.in_proc_store);
-    }
-
-    #[test]
-    fn daemon_spawn_args_round_trip_no_in_proc_store_opt_out() {
-        let socket_path = PathBuf::from("/tmp/notebook-session.sock");
-        let args = notebook_daemon_args(
-            &socket_path,
-            mcp::NotebookConfig {
-                in_proc_store: false,
-            },
-        )
-        .into_iter()
-        .map(|arg| arg.into_string().expect("test args should be utf-8"))
-        .collect::<Vec<_>>();
-
-        let Mode::App { socket, config, .. } = parse_mode_from_with_config(
-            args,
-            mcp::NotebookConfig {
-                in_proc_store: true,
-            },
-        ) else {
-            panic!("expected app mode");
-        };
-
-        assert_eq!(socket, Some(socket_path));
-        assert!(!config.in_proc_store);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -702,9 +582,7 @@ mod tests {
                     .expect("listener thread lock") = Some(handle);
                 Ok(())
             };
-        let config = mcp::NotebookConfig {
-            in_proc_store: false,
-        };
+        let config = mcp::NotebookConfig;
 
         let (first, second) = tokio::join!(
             connect_or_spawn_daemon_with(&socket_path, config, &spawn_daemon),

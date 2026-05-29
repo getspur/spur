@@ -203,9 +203,7 @@ pub struct NotebookMcpServerHandle {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NotebookConfig {
-    pub in_proc_store: bool,
-}
+pub struct NotebookConfig;
 
 impl NotebookMcpServerHandle {
     pub async fn shutdown(mut self) {
@@ -557,15 +555,6 @@ impl DaemonControlSuccess {
 }
 
 impl NotebookDaemonControl {
-    pub fn new(bridge: Arc<AgentBridge>, app: tauri::AppHandle, jute_state: Arc<State>) -> Self {
-        let requester: Arc<dyn BridgeRequester> = Arc::new(TauriBridgeRequester::with_app(
-            Arc::clone(&bridge),
-            app.clone(),
-        ));
-        let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
-        Self::new_with_parts(bridge, requester, jute_state, windows, None)
-    }
-
     fn new_with_parts(
         bridge: Arc<AgentBridge>,
         requester: Arc<dyn BridgeRequester>,
@@ -1224,36 +1213,22 @@ pub async fn start_daemon_server(
     app: tauri::AppHandle,
     state: Arc<State>,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
-    start_daemon_server_with_config(
-        socket_path,
-        lifecycle_bridge,
-        app,
-        state,
-        NotebookConfig::default(),
-    )
-    .await
+    start_daemon_server_with_config(socket_path, lifecycle_bridge, app, state, NotebookConfig).await
 }
 
 /// Starts the daemon with a bridge for window-lifecycle signals.
 /// The lifecycle bridge is always used for notebook-open and shutdown-drain plumbing.
-/// When `in_proc_store` is false, it is also wrapped as the MCP transport.
 pub async fn start_daemon_server_with_config(
     socket_path: impl AsRef<Path>,
     lifecycle_bridge: Arc<AgentBridge>,
     app: tauri::AppHandle,
     state: Arc<State>,
-    config: NotebookConfig,
+    _config: NotebookConfig,
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
     let socket_path = socket_path.as_ref().to_path_buf();
     let app_for_deps = app.clone();
-    let requester: Arc<dyn BridgeRequester> = if config.in_proc_store {
-        Arc::new(LoopbackDaemonRequester::new(socket_path.clone()))
-    } else {
-        Arc::new(TauriBridgeRequester::with_app(
-            Arc::clone(&lifecycle_bridge),
-            app.clone(),
-        ))
-    };
+    let requester: Arc<dyn BridgeRequester> =
+        Arc::new(LoopbackDaemonRequester::new(socket_path.clone()));
     let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
     let control = NotebookDaemonControl::new_with_parts(
         lifecycle_bridge,
