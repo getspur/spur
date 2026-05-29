@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
@@ -8,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+use serde::Deserialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -124,6 +128,177 @@ const MAX_SESSION_LIST_PAGES: usize = 1000;
 /// 100k was excessive; even power users rarely exceed a few hundred
 /// sessions per agent.
 const MAX_SESSION_LIST_SESSIONS: usize = 1_000;
+const NOTEBOOK_DAEMON_FRAME_LIMIT: usize = 16 * 1024 * 1024;
+const NOTEBOOK_DAEMON_CONNECT_ATTEMPTS: usize = 5;
+const NOTEBOOK_DAEMON_CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const NOTEBOOK_DAEMON_CONNECT_MAX_DELAY: Duration = Duration::from_millis(800);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotebookDaemonDatasourcesFrame {
+    daemon: String,
+    event: String,
+    #[serde(default, rename = "snapshot")]
+    _snapshot: bool,
+    entries: Vec<spur_acp::DatasourceEntry>,
+}
+
+fn spawn_notebook_datasource_bridge(
+    socket_nonce: String,
+    notebook_sockets: Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
+    funnel: crate::event_funnel::FunnelHandle,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let socket_path = crate::notebook::control_socket_path(&socket_nonce);
+        let mut reconnect_delay = NOTEBOOK_DAEMON_CONNECT_INITIAL_DELAY;
+
+        loop {
+            match connect_notebook_control_socket(&socket_path).await {
+                Ok(mut stream) => {
+                    reconnect_delay = NOTEBOOK_DAEMON_CONNECT_INITIAL_DELAY;
+                    if let Err(error) = subscribe_to_notebook_daemon(&mut stream).await {
+                        tracing::debug!(%error, "failed to subscribe to notebook daemon events");
+                    } else {
+                        read_notebook_daemon_events(&mut stream, &notebook_sockets, &funnel).await;
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        path = %socket_path.display(),
+                        "notebook daemon event bridge connect failed"
+                    );
+                }
+            }
+
+            tokio::time::sleep(reconnect_delay).await;
+            reconnect_delay = reconnect_delay
+                .saturating_mul(2)
+                .min(NOTEBOOK_DAEMON_CONNECT_MAX_DELAY);
+        }
+    })
+}
+
+async fn connect_notebook_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
+    let mut delay = NOTEBOOK_DAEMON_CONNECT_INITIAL_DELAY;
+    for attempt in 0..NOTEBOOK_DAEMON_CONNECT_ATTEMPTS {
+        match UnixStream::connect(socket_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if should_retry_notebook_connect_error(&error)
+                    && attempt + 1 < NOTEBOOK_DAEMON_CONNECT_ATTEMPTS =>
+            {
+                tokio::time::sleep(delay).await;
+                delay = delay
+                    .saturating_mul(2)
+                    .min(NOTEBOOK_DAEMON_CONNECT_MAX_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::other("notebook daemon connect retry exhausted"))
+}
+
+fn should_retry_notebook_connect_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::AddrNotAvailable
+    )
+}
+
+async fn subscribe_to_notebook_daemon(stream: &mut UnixStream) -> io::Result<()> {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "daemon": "notebook.v1",
+        "command": "subscribe"
+    }))
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write_notebook_daemon_frame(stream, &bytes).await
+}
+
+async fn read_notebook_daemon_events(
+    stream: &mut UnixStream,
+    notebook_sockets: &Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
+    funnel: &crate::event_funnel::FunnelHandle,
+) {
+    loop {
+        let bytes = match read_notebook_daemon_frame(stream).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::debug!(%error, "notebook daemon event stream disconnected");
+                return;
+            }
+        };
+        let frame = match serde_json::from_slice::<NotebookDaemonDatasourcesFrame>(&bytes) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::debug!(%error, "failed to decode notebook daemon event frame");
+                continue;
+            }
+        };
+        if frame.daemon != "notebook.v1" || frame.event != "datasources_changed" {
+            tracing::debug!(
+                daemon = %frame.daemon,
+                event = %frame.event,
+                "ignoring unknown notebook daemon event frame"
+            );
+            continue;
+        }
+
+        emit_notebook_datasources_changed(notebook_sockets, funnel, frame.entries);
+    }
+}
+
+fn emit_notebook_datasources_changed(
+    notebook_sockets: &Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
+    funnel: &crate::event_funnel::FunnelHandle,
+    entries: Vec<spur_acp::DatasourceEntry>,
+) {
+    let sessions = notebook_sockets
+        .read()
+        .expect("notebook socket registry lock poisoned")
+        .keys()
+        .map(|brain_session_id| brain_session_id.as_session_id().clone())
+        .collect::<Vec<_>>();
+
+    for session in sessions {
+        funnel.emit(SpurEventBody::DatasourcesChanged {
+            session,
+            entries: entries.clone(),
+        });
+    }
+}
+
+async fn write_notebook_daemon_frame(stream: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > NOTEBOOK_DAEMON_FRAME_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notebook daemon frame too large",
+        ));
+    }
+    stream
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await?;
+    stream.write_all(bytes).await?;
+    stream.flush().await
+}
+
+async fn read_notebook_daemon_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+    let mut len = [0_u8; 4];
+    stream.read_exact(&mut len).await?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > NOTEBOOK_DAEMON_FRAME_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notebook daemon frame too large",
+        ));
+    }
+    let mut bytes = vec![0_u8; len];
+    stream.read_exact(&mut bytes).await?;
+    Ok(bytes)
+}
 
 // ─── Orchestrator ────────────────────────────────────────────────────
 
@@ -380,6 +555,15 @@ impl Orchestrator {
         // in background_tasks (orchestrator.rs:918-923).
         let periodic = worktree_authority.spawn_periodic();
         orchestrator.background_tasks.push(periodic);
+
+        let notebook_datasource_bridge = spawn_notebook_datasource_bridge(
+            orchestrator.notebook_socket_nonce.clone(),
+            Arc::clone(&orchestrator.notebook_sockets),
+            orchestrator.funnel.clone(),
+        );
+        orchestrator
+            .background_tasks
+            .push(notebook_datasource_bridge);
 
         Ok(orchestrator)
     }

@@ -155,6 +155,9 @@ impl ServerHandler for NotebookMcpServer {
             "notebook.get_notebook" => tools::get_notebook::call(&self.deps, arguments).await,
             "notebook.read_cell" => tools::read_cell::call(&self.deps, arguments).await,
             "notebook.kernel_info" => tools::kernel_info::call(&self.deps, arguments).await,
+            "notebook_list_datasources" => {
+                tools::list_datasources::call(&self.deps, arguments).await
+            }
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,
@@ -519,6 +522,26 @@ pub struct DaemonControlError {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonDatasourcesChangedFrame {
+    daemon: &'static str,
+    event: &'static str,
+    snapshot: bool,
+    entries: Vec<jute::commands::DatasourceEntry>,
+}
+
+impl DaemonDatasourcesChangedFrame {
+    fn new(entries: Vec<jute::commands::DatasourceEntry>, snapshot: bool) -> Self {
+        Self {
+            daemon: "notebook.v1",
+            event: "datasources_changed",
+            snapshot,
+            entries,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PendingNotebookFlush {
     path: PathBuf,
@@ -528,6 +551,7 @@ struct PendingNotebookFlush {
 struct DaemonControlSuccess {
     path: Option<PathBuf>,
     entries: Option<Vec<RecentEntry>>,
+    result: Option<Value>,
 }
 
 impl DaemonControlSuccess {
@@ -535,6 +559,7 @@ impl DaemonControlSuccess {
         Self {
             path: None,
             entries: None,
+            result: None,
         }
     }
 
@@ -542,6 +567,7 @@ impl DaemonControlSuccess {
         Self {
             path: Some(path),
             entries: None,
+            result: None,
         }
     }
 
@@ -549,6 +575,16 @@ impl DaemonControlSuccess {
         Self {
             path: None,
             entries: Some(entries),
+            result: None,
+        }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn result(result: Value) -> Self {
+        Self {
+            path: None,
+            entries: None,
+            result: Some(result),
         }
     }
 }
@@ -557,6 +593,160 @@ fn recents_bridge_error(error: anyhow::Error) -> BridgeError {
     BridgeError::Handler {
         code: "recents_failed".to_string(),
         message: error.to_string(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn normalize_datasource_path(path: String) -> Result<PathBuf, BridgeError> {
+    if path.trim().is_empty() {
+        return Err(BridgeError::Handler {
+            code: "invalid_datasource_path".to_string(),
+            message: "datasource path must not be empty".to_string(),
+        });
+    }
+
+    std::fs::canonicalize(&path).map_err(|error| BridgeError::Handler {
+        code: "invalid_datasource_path".to_string(),
+        message: format!("failed to resolve datasource path {path}: {error}"),
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, BridgeError> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+
+    match extension.as_deref() {
+        Some("csv") => Ok(jute::commands::DatasourceKind::Csv),
+        Some("parquet" | "parq") => Ok(jute::commands::DatasourceKind::Parquet),
+        Some("json" | "jsonl" | "ndjson") => Ok(jute::commands::DatasourceKind::Json),
+        _ => Err(BridgeError::Handler {
+            code: "unsupported_datasource_kind".to_string(),
+            message: format!(
+                "unsupported datasource file extension for {}",
+                path.display()
+            ),
+        }),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatasourceSetupCell {
+    id: String,
+    has_metadata_marker: bool,
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_setup_source(entries: &[jute::commands::DatasourceEntry]) -> String {
+    let mut source = String::from(DATASOURCE_SETUP_SENTINEL);
+    source.push_str("\n# This cell is managed by SPUR. Re-run it after datasource changes.\n");
+    source.push_str("import duckdb\n\n");
+
+    if entries.is_empty() {
+        source.push_str("# No datasources are attached.\n");
+        return source;
+    }
+
+    for entry in entries {
+        let sql = format!(
+            "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
+            sql_identifier(&entry.name),
+            datasource_scan_expression(entry)
+        );
+        source.push_str("duckdb.sql(");
+        source.push_str(&python_string_literal(&sql));
+        source.push_str(")\n");
+    }
+
+    source
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String {
+    let literal = sql_string_literal(&entry.path);
+    match entry.kind {
+        jute::commands::DatasourceKind::Csv => format!("read_csv_auto({literal})"),
+        jute::commands::DatasourceKind::Parquet => format!("read_parquet({literal})"),
+        jute::commands::DatasourceKind::Json => format!("read_json_auto({literal})"),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn sql_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn python_string_literal(value: &str) -> String {
+    serde_json::to_string(value).expect("string literal serializes")
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn find_datasource_setup_cell(root: &NotebookRoot) -> Option<DatasourceSetupCell> {
+    root.cells.iter().find_map(|cell| {
+        let id = notebook_cell_id(cell)?;
+        let has_metadata_marker = notebook_cell_metadata(cell)
+            .spur
+            .as_ref()
+            .and_then(|spur| spur.datasource_setup)
+            .unwrap_or(false);
+        if has_metadata_marker || notebook_cell_source(cell).contains(DATASOURCE_SETUP_SENTINEL) {
+            Some(DatasourceSetupCell {
+                id: id.to_string(),
+                has_metadata_marker,
+            })
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn notebook_cell_id(cell: &jute::backend::notebook::Cell) -> Option<&str> {
+    match cell {
+        jute::backend::notebook::Cell::Raw(cell) => cell.id.as_deref(),
+        jute::backend::notebook::Cell::Markdown(cell) => cell.id.as_deref(),
+        jute::backend::notebook::Cell::Code(cell) => cell.id.as_deref(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn notebook_cell_metadata(
+    cell: &jute::backend::notebook::Cell,
+) -> &jute::backend::notebook::CellMetadata {
+    match cell {
+        jute::backend::notebook::Cell::Raw(cell) => &cell.metadata,
+        jute::backend::notebook::Cell::Markdown(cell) => &cell.metadata,
+        jute::backend::notebook::Cell::Code(cell) => &cell.metadata,
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn notebook_cell_source(cell: &jute::backend::notebook::Cell) -> String {
+    let source = match cell {
+        jute::backend::notebook::Cell::Raw(cell) => &cell.source,
+        jute::backend::notebook::Cell::Markdown(cell) => &cell.source,
+        jute::backend::notebook::Cell::Code(cell) => &cell.source,
+    };
+    multiline_to_string(source)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn multiline_to_string(source: &jute::backend::notebook::MultilineString) -> String {
+    match source {
+        jute::backend::notebook::MultilineString::Single(source) => source.clone(),
+        jute::backend::notebook::MultilineString::Multi(lines) => lines.join(""),
     }
 }
 
@@ -729,6 +919,9 @@ impl NotebookDaemonControl {
                     }
                     .await
                 }
+                DaemonControlCommand::AttachDatasource { name, path, group } => {
+                    self.attach_datasource(name, path, group).await
+                }
                 DaemonControlCommand::ListRecents {} => self
                     .list_recent_entries()
                     .await
@@ -771,7 +964,7 @@ impl NotebookDaemonControl {
                 ok: true,
                 path: success.path.map(|path| path.display().to_string()),
                 entries: success.entries,
-                result: None,
+                result: success.result,
                 error: None,
             },
             Err(error) => DaemonControlResponse {
@@ -786,6 +979,126 @@ impl NotebookDaemonControl {
                 }),
             },
         }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn attach_datasource(
+        &self,
+        name: String,
+        path: String,
+        group: Option<String>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        let path = normalize_datasource_path(path)?;
+        let kind = infer_datasource_kind(&path)?;
+        let schema = crate::datasource::introspect_datasource(&path, kind).map_err(|error| {
+            BridgeError::Handler {
+                code: "datasource_introspection_failed".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+
+        let entry = jute::commands::DatasourceEntry {
+            name,
+            path: path.display().to_string(),
+            kind,
+            group,
+            columns: schema.columns,
+            row_count: schema.row_count,
+        };
+
+        self.jute_state.attach_datasource(entry.clone());
+        self.refresh_datasource_setup_cell().await?;
+        self.persist_catalog_to_current_notebook().await?;
+
+        let result = serde_json::to_value(entry).map_err(|error| BridgeError::Handler {
+            code: "datasource_entry_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+
+        Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn refresh_datasource_setup_cell(&self) -> Result<(), BridgeError> {
+        let entries = self.jute_state.datasource_catalog.lock().list();
+        let source = datasource_setup_source(&entries);
+        let (root, _) = self.jute_state.get_notebook().snapshot();
+
+        if let Some(setup_cell) = find_datasource_setup_cell(&root) {
+            self.apply_notebook_store_command(jute::commands::DaemonControlCommand::ApplyEdit {
+                id: setup_cell.id.clone(),
+                source,
+            })
+            .await?;
+            if !setup_cell.has_metadata_marker {
+                self.mark_datasource_setup_cell(&setup_cell.id)?;
+            }
+            return Ok(());
+        }
+
+        let result = self
+            .apply_notebook_store_command(jute::commands::DaemonControlCommand::InsertCell {
+                kind: jute::notebook_store::CellKind::Code,
+                after_id: None,
+                source,
+                last_edited_by: Some("brain".to_string()),
+            })
+            .await?;
+        let id = match result {
+            jute::commands::DaemonControlResult::Delta(jute::notebook_store::NotebookDelta {
+                kind: jute::notebook_store::DeltaKind::CellInserted { cell, .. },
+                ..
+            }) => cell.id,
+            result => {
+                return Err(BridgeError::Handler {
+                    code: "setup_cell_update_failed".to_string(),
+                    message: format!("insert setup cell returned unexpected result: {result:?}"),
+                });
+            }
+        };
+        self.mark_datasource_setup_cell(&id)
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn apply_notebook_store_command(
+        &self,
+        command: jute::commands::DaemonControlCommand,
+    ) -> Result<jute::commands::DaemonControlResult, BridgeError> {
+        jute::commands::handle_daemon_control_request(
+            jute::commands::DaemonControlRequest::new(command),
+            &self.jute_state,
+        )
+        .await
+        .into_result()
+        .map_err(|error| BridgeError::Handler {
+            code: error.code,
+            message: error.message,
+        })
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn mark_datasource_setup_cell(&self, id: &str) -> Result<(), BridgeError> {
+        self.jute_state
+            .get_notebook()
+            .apply(jute::notebook_store::NotebookOp::MarkDatasourceSetupCell { id: id.to_string() })
+            .map(|_| ())
+            .map_err(|error| BridgeError::Handler {
+                code: "setup_cell_update_failed".to_string(),
+                message: error.to_string(),
+            })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn attach_datasource(
+        &self,
+        _name: String,
+        _path: String,
+        _group: Option<String>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
     }
 
     pub async fn current_path(&self) -> Option<PathBuf> {
@@ -853,6 +1166,27 @@ impl NotebookDaemonControl {
             .await
             .map_err(|error| BridgeError::Handler {
                 code: "save_failed".to_string(),
+                message: error.to_string(),
+            })
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn persist_catalog_to_current_notebook(&self) -> Result<(), BridgeError> {
+        let path = {
+            let state = self.state.lock().await;
+            state.current_path.clone()
+        };
+        let Some(path) = path else {
+            return Ok(());
+        };
+
+        let (snapshot, _) = self.jute_state.get_notebook().snapshot();
+        self.jute_state
+            .save_coordinator
+            .save(path, snapshot)
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "catalog_persist_failed".to_string(),
                 message: error.to_string(),
             })
     }
@@ -1365,6 +1699,26 @@ async fn handle_daemon_connection(
     };
 
     if first.get("daemon").and_then(Value::as_str) == Some("notebook.v1") {
+        if first.get("command").and_then(Value::as_str) == Some("subscribe") {
+            match deps.state.clone() {
+                Some(state) => stream_daemon_events(stream, state).await,
+                None => {
+                    let response = DaemonControlResponse {
+                        id: None,
+                        ok: false,
+                        path: None,
+                        entries: None,
+                        result: None,
+                        error: Some(DaemonControlError {
+                            code: "daemon_unavailable".to_string(),
+                            message: "notebook daemon event stream is unavailable".to_string(),
+                        }),
+                    };
+                    let _ = write_frame_json(&mut stream, &response).await;
+                }
+            }
+            return;
+        }
         let response = match serde_json::from_value::<DaemonControlRequest>(first) {
             Ok(request) => control.handle_control(request).await,
             Err(error) => DaemonControlResponse {
@@ -1406,6 +1760,41 @@ async fn handle_daemon_connection(
         }
         Err(error) => {
             tracing::debug!(%error, "notebook MCP session failed to initialize");
+        }
+    }
+}
+
+async fn stream_daemon_events(mut stream: UnixStream, state: Arc<State>) {
+    let mut events = state.event_tx.subscribe();
+    let snapshot = state.datasource_catalog.lock().list();
+    if write_frame_json(
+        &mut stream,
+        &DaemonDatasourcesChangedFrame::new(snapshot, true),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    loop {
+        let entries = match events.recv().await {
+            Ok(jute::state::DaemonEvent::DatasourcesChanged(entries)) => entries,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::debug!(skipped, "notebook daemon event subscriber lagged");
+                state.datasource_catalog.lock().list()
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+
+        if write_frame_json(
+            &mut stream,
+            &DaemonDatasourcesChangedFrame::new(entries, false),
+        )
+        .await
+        .is_err()
+        {
+            return;
         }
     }
 }
@@ -1522,6 +1911,406 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_introspects_csv_schema() {
+        let tempdir = tempfile::tempdir().expect("csv fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_owned(),
+                    path: csv.display().to_string(),
+                    group: Some("quarterly".to_owned()),
+                },
+            ))
+            .await;
+
+        assert!(response.ok);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+
+        assert_eq!(entry.name, "sales");
+        assert_eq!(entry.path, csv.display().to_string());
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::Csv);
+        assert_eq!(entry.group.as_deref(), Some("quarterly"));
+        assert_eq!(
+            entry.columns,
+            vec![
+                jute::commands::Column {
+                    name: "region".to_owned(),
+                    sql_type: "VARCHAR".to_owned(),
+                },
+                jute::commands::Column {
+                    name: "revenue".to_owned(),
+                    sql_type: "BIGINT".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(entry.row_count, Some(2));
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+
+        assert!(response.path.is_none());
+        assert!(response.entries.is_none());
+        assert!(response.error.is_none());
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_inserts_idempotent_setup_cell() {
+        let tempdir = tempfile::tempdir().expect("csv fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+        )
+        .await
+        .expect("write notebook fixture");
+
+        let jute_state = Arc::new(State::new());
+        let notebook_root: NotebookRoot =
+            serde_json::from_value(empty_notebook()).expect("empty notebook parses");
+        jute_state
+            .get_notebook()
+            .load(notebook_path.clone(), notebook_root);
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(notebook_path);
+        }
+
+        for _ in 0..2 {
+            let response = control
+                .handle(daemon_request(
+                    jute::commands::DaemonControlCommand::AttachDatasource {
+                        name: "sales".to_owned(),
+                        path: csv.display().to_string(),
+                        group: None,
+                    },
+                ))
+                .await;
+            assert!(response.ok, "{:?}", response.error);
+        }
+
+        let (root, _) = jute_state.get_notebook().snapshot();
+        let notebook = serde_json::to_value(root).expect("notebook serializes");
+        let setup_cells = notebook["cells"]
+            .as_array()
+            .expect("cells array")
+            .iter()
+            .filter(|cell| {
+                cell["cell_type"] == "code"
+                    && cell["source"]
+                        .as_str()
+                        .is_some_and(|source| source.contains("CREATE OR REPLACE VIEW"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(setup_cells.len(), 1);
+        let setup_cell = setup_cells[0];
+        assert_eq!(
+            setup_cell["metadata"]["spur"]["datasource_setup"],
+            json!(true)
+        );
+        let source = setup_cell["source"].as_str().expect("setup source");
+        assert!(source.contains("# SPUR datasource setup cell v1"));
+        assert_eq!(source.matches("CREATE OR REPLACE VIEW").count(), 1);
+        assert!(source.contains("read_csv_auto"));
+        assert!(source.contains("sales"));
+    }
+
+    #[tokio::test]
+    async fn catalog_change_pushes_subscriber() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: test_bridge_requester(),
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+        });
+        let tempdir = tempfile::tempdir().expect("socket dir");
+        let socket_path = tempdir.path().join("notebook.sock");
+        let _server = start_multiplexed_server(&socket_path, deps, control)
+            .await
+            .expect("server starts");
+        let mut client = UnixStream::connect(&socket_path)
+            .await
+            .expect("subscriber connects");
+
+        write_frame_json(
+            &mut client,
+            &json!({
+                "daemon": "notebook.v1",
+                "command": "subscribe"
+            }),
+        )
+        .await
+        .expect("subscribe frame writes");
+
+        let snapshot = read_frame_value(&mut client)
+            .await
+            .expect("snapshot frame reads");
+        assert_eq!(snapshot["daemon"], "notebook.v1");
+        assert_eq!(snapshot["event"], "datasources_changed");
+        assert_eq!(snapshot["snapshot"], true);
+        let snapshot_entries: Vec<jute::commands::DatasourceEntry> =
+            serde_json::from_value(snapshot["entries"].clone()).expect("snapshot entries decode");
+        assert!(snapshot_entries.is_empty());
+
+        let entry = test_datasource_entry("sales");
+        jute_state.attach_datasource(entry.clone());
+        let pushed = tokio::time::timeout(Duration::from_secs(1), read_frame_value(&mut client))
+            .await
+            .expect("catalog push frame is sent")
+            .expect("catalog push frame reads");
+
+        assert_eq!(pushed["daemon"], "notebook.v1");
+        assert_eq!(pushed["event"], "datasources_changed");
+        assert_eq!(pushed["snapshot"], false);
+        let pushed_entries: Vec<jute::commands::DatasourceEntry> =
+            serde_json::from_value(pushed["entries"].clone()).expect("push entries decode");
+        assert_eq!(pushed_entries, vec![entry.clone()]);
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn list_datasources_returns_catalog() {
+        let jute_state = Arc::new(State::new());
+        let entry = test_datasource_entry("sales");
+        jute_state.attach_datasource(entry.clone());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: test_bridge_requester(),
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+        });
+        let server = NotebookMcpServer::new(Arc::clone(&deps));
+        assert!(server
+            .tools()
+            .into_iter()
+            .any(|tool| tool.name == "notebook_list_datasources"));
+        let tempdir = tempfile::tempdir().expect("socket dir");
+        let socket_path = tempdir.path().join("notebook.sock");
+        let _server = start_multiplexed_server(&socket_path, deps, control)
+            .await
+            .expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("notebook_list_datasources"))
+            .await
+            .expect("list datasources succeeds");
+        let structured = result
+            .structured_content
+            .expect("list datasources returns structured content");
+
+        assert_eq!(
+            structured,
+            json!({
+                "entries": [
+                    {
+                        "name": "sales",
+                        "path": "/tmp/sales.csv",
+                        "kind": "csv",
+                        "group": "quarterly",
+                        "columns": [
+                            {
+                                "name": "region",
+                                "sqlType": "VARCHAR"
+                            }
+                        ],
+                        "rowCount": 2
+                    }
+                ]
+            })
+        );
+
+        client.cancel().await.expect("client closes");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn catalog_change_emits_daemon_event() {
+        let tempdir = tempfile::tempdir().expect("csv fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+
+        let jute_state = Arc::new(State::new());
+        let mut events = jute_state.event_tx.subscribe();
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_owned(),
+                    path: csv.display().to_string(),
+                    group: Some("quarterly".to_owned()),
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("catalog event is pushed")
+            .expect("catalog event receiver stays open");
+
+        assert_eq!(
+            event,
+            jute::state::DaemonEvent::DatasourcesChanged(vec![entry.clone()])
+        );
+
+        let removed = jute_state.detach_datasource("sales");
+        assert_eq!(removed, Some(entry));
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("detach catalog event is pushed")
+            .expect("catalog event receiver stays open");
+
+        assert_eq!(
+            event,
+            jute::state::DaemonEvent::DatasourcesChanged(Vec::new())
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn catalog_hydrates_from_metadata() {
+        let workspace_dir = std::env::current_dir().expect("current dir");
+        let tempdir = tempfile::Builder::new()
+            .prefix("spur-notebook-catalog-hydrate-")
+            .tempdir_in(&workspace_dir)
+            .expect("workspace-local fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+        )
+        .await
+        .expect("write notebook fixture");
+
+        let jute_state = Arc::new(State::new());
+        let notebook_root: NotebookRoot =
+            serde_json::from_value(empty_notebook()).expect("empty notebook parses");
+        jute_state
+            .get_notebook()
+            .load(notebook_path.clone(), notebook_root);
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(notebook_path.clone());
+        }
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_owned(),
+                    path: csv.display().to_string(),
+                    group: Some("quarterly".to_owned()),
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+
+        let serialized: Value = serde_json::from_slice(
+            &tokio::fs::read(&notebook_path)
+                .await
+                .expect("serialized notebook reads"),
+        )
+        .expect("serialized notebook parses");
+        assert_eq!(
+            serialized["metadata"]["spur"]["datasources"]["schema_version"],
+            json!(1)
+        );
+        assert_eq!(
+            serialized["metadata"]["spur"]["datasources"]["entries"][0]["path"],
+            json!(entry.path)
+        );
+        let relative_path = serialized["metadata"]["spur"]["datasources"]["entries"][0]
+            ["workspaceRelativePath"]
+            .as_str()
+            .expect("workspace-relative path is stored");
+        assert!(!std::path::Path::new(relative_path).is_absolute());
+        assert!(relative_path.ends_with("sales.csv"));
+
+        let rehydrated = State::new();
+        let load_response = jute::commands::handle_daemon_control_request(
+            jute::commands::DaemonControlRequest::new(
+                jute::commands::DaemonControlCommand::LoadNotebook {
+                    path: notebook_path.display().to_string(),
+                },
+            ),
+            &rehydrated,
+        )
+        .await;
+
+        assert!(load_response.ok, "{:?}", load_response.error);
+        assert_eq!(rehydrated.datasource_catalog.lock().list(), vec![entry]);
+    }
+
     fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
         DaemonControlRequest {
             id: None,
@@ -1537,6 +2326,20 @@ mod tests {
 
     fn test_server_deps() -> Arc<ServerDeps> {
         Arc::new(ServerDeps::from_bridge(test_bridge_requester()))
+    }
+
+    fn test_datasource_entry(name: &str) -> jute::commands::DatasourceEntry {
+        jute::commands::DatasourceEntry {
+            name: name.to_owned(),
+            path: format!("/tmp/{name}.csv"),
+            kind: jute::commands::DatasourceKind::Csv,
+            group: Some("quarterly".to_owned()),
+            columns: vec![jute::commands::Column {
+                name: "region".to_owned(),
+                sql_type: "VARCHAR".to_owned(),
+            }],
+            row_count: Some(2),
+        }
     }
 
     struct BufferedNotebookBridge {

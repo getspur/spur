@@ -43,6 +43,32 @@ pub fn prepend_worker_hint(
     true
 }
 
+pub fn prepend_datasource_hint(
+    blocks: &mut Vec<ContentBlock>,
+    ranges: &[ProtectedRange],
+    mut lookup_hint: impl FnMut(&str) -> Option<String>,
+) -> bool {
+    let mut hints: Vec<(String, String)> = ranges
+        .iter()
+        .filter(|range| range.uri.starts_with("datasource://"))
+        .filter_map(|range| lookup_hint(&range.uri).map(|hint| (range.uri.clone(), hint)))
+        .collect();
+    hints.sort_by(|a, b| a.0.cmp(&b.0));
+    hints.dedup_by(|a, b| a.0 == b.0);
+    if hints.is_empty() {
+        return false;
+    }
+
+    let body = hints
+        .into_iter()
+        .map(|(_, hint)| hint)
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    let hint = format!("[UI hint] Datasource schemas mentioned this turn:\n{body}");
+    blocks.insert(0, ContentBlock::Text(TextContent::new(hint)));
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +135,27 @@ mod tests {
         assert!(!prepended);
         assert_eq!(blocks.len(), 1);
         assert_eq!(hint_text(&blocks), Some("user text"));
+    }
+
+    #[test]
+    fn datasource_hint_injects_known_schema() {
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
+        let ranges = vec![
+            range("datasource://sales"),
+            range("datasource://sales"),
+            range("datasource://missing"),
+        ];
+        let prepended = prepend_datasource_hint(&mut blocks, &ranges, |uri| match uri {
+            "datasource://sales" => {
+                Some("DATASOURCE sales\ncolumns:\n- revenue DOUBLE".to_string())
+            }
+            _ => None,
+        });
+        assert!(prepended);
+        assert_eq!(blocks.len(), 2);
+        let h = hint_text(&blocks).expect("first block is Text");
+        assert!(h.starts_with("[UI hint] Datasource schemas"));
+        assert!(h.contains("revenue DOUBLE"));
+        assert!(!h.contains("missing"));
     }
 }

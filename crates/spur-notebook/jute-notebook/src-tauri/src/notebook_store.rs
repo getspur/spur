@@ -108,6 +108,11 @@ pub enum NotebookOp {
         /// New cell source.
         source: String,
     },
+    /// Mark a cell as the SPUR-managed datasource setup cell.
+    MarkDatasourceSetupCell {
+        /// Cell identifier.
+        id: String,
+    },
 }
 
 /// Broadcast notification emitted after each store mutation.
@@ -340,6 +345,21 @@ impl NotebookStore {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 set_cell_source(cell, source);
+                let metadata_update = Some((id.clone(), None));
+                (PendingDelta::CellWritten { id }, metadata_update)
+            }
+            NotebookOp::MarkDatasourceSetupCell { id } => {
+                let cell = find_cell_mut(&mut root, &id)
+                    .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
+                let metadata = cell_metadata_mut(cell);
+                let spur = metadata.spur.get_or_insert_with(|| {
+                    crate::backend::notebook::SpurCellMetadata {
+                        version: 0,
+                        last_edited_by: None,
+                        datasource_setup: None,
+                    }
+                });
+                spur.datasource_setup = Some(true);
                 let metadata_update = Some((id.clone(), None));
                 (PendingDelta::CellWritten { id }, metadata_update)
             }
@@ -708,9 +728,14 @@ fn set_cell_spur_metadata(cell: &mut Cell, version: u64, last_edited_by: Option<
         .spur
         .as_ref()
         .and_then(|spur| spur.last_edited_by.clone());
+    let previous_datasource_setup = metadata
+        .spur
+        .as_ref()
+        .and_then(|spur| spur.datasource_setup);
     metadata.spur = Some(crate::backend::notebook::SpurCellMetadata {
         version,
         last_edited_by: last_edited_by.or(previous_last_edited_by),
+        datasource_setup: previous_datasource_setup,
     });
 }
 
@@ -804,6 +829,7 @@ mod tests {
                 spur: Some(SpurCellMetadata {
                     version,
                     last_edited_by: None,
+                    datasource_setup: None,
                 }),
                 jute_deck: None,
                 other: Map::new(),

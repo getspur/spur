@@ -7,9 +7,9 @@ use std::{
 use jute::{
     backend::{commands::RunCellEvent, local::KernelUsageInfo, notebook::NotebookRoot},
     commands::{
-        DaemonCell, DaemonControlCommand, DaemonControlError, DaemonControlRequest,
+        Column, DaemonCell, DaemonControlCommand, DaemonControlError, DaemonControlRequest,
         DaemonControlResponse, DaemonControlResult, DaemonNotebookSnapshot, DaemonRecentEntry,
-        RecentNotebookEntry, RecentsChangedEvent,
+        DatasourceEntry, DatasourceKind, RecentNotebookEntry, RecentsChangedEvent,
     },
     notebook_store::{CellKind, DeltaKind, NotebookDelta},
 };
@@ -44,6 +44,9 @@ fn main() {
     DeltaKind::export_all_to(&export_path).unwrap();
     NotebookDelta::export_all_to(&export_path).unwrap();
     DaemonRecentEntry::export_all_to(&export_path).unwrap();
+    DatasourceKind::export_all_to(&export_path).unwrap();
+    Column::export_all_to(&export_path).unwrap();
+    DatasourceEntry::export_all_to(&export_path).unwrap();
     DaemonControlCommand::export_all_to(&export_path).unwrap();
     DaemonControlRequest::export_all_to(&export_path).unwrap();
     DaemonControlError::export_all_to(&export_path).unwrap();

@@ -205,6 +205,12 @@ impl SessionDetailView {
             .set_issue_snapshot(descriptors);
     }
 
+    pub fn set_datasource_snapshot(&mut self, entries: Vec<spur_acp::DatasourceEntry>) {
+        self.mention_registry
+            .borrow_mut()
+            .set_datasource_snapshot(entries);
+    }
+
     #[cfg(feature = "markdown")]
     fn bump_mermaid_registry_version(&mut self) {
         self.mermaid_registry_version = self.mermaid_registry_version.wrapping_add(1);

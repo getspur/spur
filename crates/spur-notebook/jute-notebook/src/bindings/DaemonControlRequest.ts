@@ -16,6 +16,12 @@ export type DaemonControlRequest = {
   | { command: "new_at"; path: string }
   | { command: "reopen" }
   | { command: "close" }
+  | {
+      command: "attach_datasource";
+      name: string;
+      path: string;
+      group: string | null;
+    }
   | { command: "list_recents" }
   | { command: "remove_from_recents"; path: string }
   | { command: "set_pinned"; path: string; pinned: boolean }
