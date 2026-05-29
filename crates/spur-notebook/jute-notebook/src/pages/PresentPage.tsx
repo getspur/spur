@@ -147,6 +147,9 @@ export default function PresentPage() {
   }, [slides, idx, fragmentIndex, path, setLocation]);
 
   const slide = slides[idx];
+  const effectiveFragmentIndex = slide?.fragments
+    ? fragmentIndex
+    : Number.MAX_SAFE_INTEGER;
 
   return (
     <NotebookContext.Provider value={notebook}>
@@ -155,7 +158,7 @@ export default function PresentPage() {
           <div className="h-full w-full bg-black" />
         ) : (
           <SlideFrame themeId={slide.theme} background={slide.background}>
-            <LayoutFor slide={slide} fragmentIndex={fragmentIndex} />
+            <LayoutFor slide={slide} fragmentIndex={effectiveFragmentIndex} />
           </SlideFrame>
         )}
         <PresentChrome current={idx} total={slides.length} />
