@@ -248,8 +248,13 @@ impl SessionDetailView {
                                     mut blocks,
                                     interrupt,
                                 } => {
-                                    if ranges.iter().any(|range| range.uri.starts_with("graph://"))
-                                    {
+                                    let has_code_mentions = ranges
+                                        .iter()
+                                        .any(|range| range.uri.starts_with("graph://"));
+                                    let has_datasource_mentions = ranges
+                                        .iter()
+                                        .any(|range| range.uri.starts_with("datasource://"));
+                                    if has_code_mentions {
                                         let mut mention_registry =
                                             self.mention_registry.borrow_mut();
                                         mention_registry.retain_code_payloads_for_uris(
@@ -261,6 +266,18 @@ impl SessionDetailView {
                                             &pending_images,
                                             &self.cwd,
                                             |uri| mention_registry.lookup_code_payload(uri),
+                                        );
+                                    }
+                                    if has_datasource_mentions {
+                                        let mention_registry = self.mention_registry.borrow();
+                                        let _ = crate::mentions::hint::prepend_datasource_hint(
+                                            &mut blocks,
+                                            &ranges,
+                                            |uri| {
+                                                mention_registry
+                                                    .lookup_datasource_hint(uri)
+                                                    .map(str::to_string)
+                                            },
                                         );
                                     }
                                     if self.role == "brain" {

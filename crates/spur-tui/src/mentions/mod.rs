@@ -1,4 +1,5 @@
 pub mod code_graph;
+pub mod datasource_source;
 pub mod entry;
 pub mod file_source;
 pub(crate) mod hint;
@@ -8,6 +9,7 @@ pub mod registry;
 pub mod worker_source;
 
 pub use code_graph::source::CodeGraphMentionSource;
+pub use datasource_source::DatasourceMentionSource;
 pub use entry::{MentionEntry, MentionKind, MentionSource};
 pub use issue_source::{IssueMentionDescriptor, IssueMentionSource};
 pub use registry::{CompletionScope, MentionRegistry, CODE_GRAPH_INDEX_ENV};
