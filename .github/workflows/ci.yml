@@ -16,10 +16,22 @@ name: CI
 #   external infra (e.g. the duckdb CLI for spur-analyst/tests/lance_session.rs,
 #   per scripts/gcp-build/startup.sh) and should land behind explicit setup.
 #
-# Caching: rust-cache (registry + target). sccache with the GitHub Actions or
-# the project's GCS backend (scripts/gcp-build/config.env SCCACHE_BUCKET) can
-# augment/replace this later for object-level, cross-run caching — GCS needs a
-# GCP credential (Workload Identity Federation) provisioned as a repo secret.
+# Caching: sccache backed by the SHARED GCS bucket (config.env SCCACHE_BUCKET)
+# — the same bucket the GCP build VM warms in-region — authenticated via
+# Workload Identity Federation (keyless; google-github-actions/auth). This gives
+# object-level caching of rustc AND build-script C/C++/asm compiles (RUSTC_WRAPPER
+# + CC/CXX/CMAKE launchers) — the wins measured on the VM (e.g. libduckdb-sys's
+# C++ amalgamation ~280s -> ~107s at ~99% C++ hit; see scripts/gcp-build/startup.sh).
+#
+# Why share the VM's bucket instead of a per-repo GitHub Actions cache: the VM
+# continuously populates it in-region, so CI starts from a (near-)fully-warm
+# cache rather than an empty 10GB GHA cache that warms slowly and evicts. The
+# tradeoff is cross-region read latency (bucket is asia; runners are US/EU) —
+# acceptable when hits are near-100% and fetches parallelize across cargo -j.
+# sccache is pinned to the VM's exact version (v0.15.0) so cache keys match and
+# CI hits VM-populated objects. If cross-region latency proves net-negative, the
+# fallback is the GHA backend (SCCACHE_GHA_ENABLED=true, drop the GCS_* vars +
+# auth step). Swatinem/rust-cache caches only ~/.cargo (registry + git).
 
 on:
   pull_request:
@@ -42,6 +54,25 @@ jobs:
   check-test:
     name: check + unit test (workspace)
     runs-on: ubuntu-24.04
+    # id-token: write is REQUIRED for the GitHub OIDC token that WIF exchanges
+    # for GCP credentials. contents: read is the default, restated explicitly.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # sccache -> shared GCS bucket via WIF (see header comment).
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GCS_BUCKET: wiilearn-spur-sccache-asia
+      SCCACHE_GCS_RW_MODE: READ_WRITE
+      # Route build-script C/C++/asm compiles (libduckdb-sys, aws-lc-sys,
+      # zstd-sys, ...) through sccache too. cc-rs honors CC/CXX; cmake-based
+      # crates (aws-lc-sys) honor the *_COMPILER_LAUNCHER vars. This mirrors the
+      # VM wrappers in scripts/gcp-build/startup.sh.
+      CC: "sccache cc"
+      CXX: "sccache c++"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      CMAKE_ASM_COMPILER_LAUNCHER: sccache
     steps:
       - uses: actions/checkout@v4
 
@@ -61,8 +92,29 @@ jobs:
 
       # Reads rust-toolchain.toml (channel + rustfmt/clippy components) so CI,
       # local dev, and the remote VM all use the identical pinned toolchain.
-      # Bundles registry + target caching keyed on Cargo.lock.
+      # cache: false — sccache owns the compile cache; rust-cache below caches
+      # only ~/.cargo so the two don't both consume the ~10GB GHA cache budget.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Cache ~/.cargo (registry + git, not target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+      # Exchange the GitHub OIDC token for GCP credentials (keyless). Exports
+      # GOOGLE_APPLICATION_CREDENTIALS for later steps; sccache's GCS backend
+      # consumes it as Application Default Credentials (external_account).
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+      # Pinned to the VM's exact sccache version (scripts/gcp-build/startup.sh)
+      # so cache keys match and CI hits objects the VM already populated.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.15.0"
 
       # --locked: fail if Cargo.lock would change. Keeps CI reproducible and
       # catches an un-committed lockfile drift. Verified locally that the
@@ -94,6 +146,12 @@ jobs:
           name: nextest-junit
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
+
+      # Visibility: cache hit-rates (rust + C/C++ + assembler) per run. Watch
+      # these to confirm the cache is warming across runs and to tune later.
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   # Formatting gate. Cheap (rustfmt doesn't compile/link, so no system deps) and
   # blocking — verified locally that `cargo fmt --all --check` is currently clean
@@ -127,6 +185,18 @@ jobs:
     name: clippy (non-blocking baseline)
     runs-on: ubuntu-24.04
     continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GCS_BUCKET: wiilearn-spur-sccache-asia
+      SCCACHE_GCS_RW_MODE: READ_WRITE
+      CC: "sccache cc"
+      CXX: "sccache c++"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      CMAKE_ASM_COMPILER_LAUNCHER: sccache
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
@@ -138,4 +208,24 @@ jobs:
             libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Cache ~/.cargo (registry + git, not target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          # Distinct key so clippy's registry cache doesn't evict check-test's.
+          shared-key: clippy
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.15.0"
       - run: cargo clippy --workspace --all-targets --locked
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
