@@ -865,10 +865,7 @@ impl NotebookDaemonControl {
             row_count: schema.row_count,
         };
 
-        self.jute_state
-            .datasource_catalog
-            .lock()
-            .attach(entry.clone());
+        self.jute_state.attach_datasource(entry.clone());
         self.persist_catalog_to_current_notebook().await?;
 
         let result = serde_json::to_value(entry).map_err(|error| BridgeError::Handler {
@@ -1701,6 +1698,60 @@ mod tests {
         assert!(response.path.is_none());
         assert!(response.entries.is_none());
         assert!(response.error.is_none());
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn catalog_change_pushes_subscriber() {
+        let tempdir = tempfile::tempdir().expect("csv fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+
+        let jute_state = Arc::new(State::new());
+        let mut events = jute_state.event_tx.subscribe();
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_owned(),
+                    path: csv.display().to_string(),
+                    group: Some("quarterly".to_owned()),
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("catalog event is pushed")
+            .expect("catalog event receiver stays open");
+
+        assert_eq!(
+            event,
+            jute::state::DaemonEvent::DatasourcesChanged(vec![entry.clone()])
+        );
+
+        let removed = jute_state.detach_datasource("sales");
+        assert_eq!(removed, Some(entry));
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("detach catalog event is pushed")
+            .expect("catalog event receiver stays open");
+
+        assert_eq!(
+            event,
+            jute::state::DaemonEvent::DatasourcesChanged(Vec::new())
+        );
     }
 
     #[cfg(feature = "datasource-introspect")]
