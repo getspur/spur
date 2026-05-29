@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::io::Write as _;
@@ -8,16 +8,19 @@ use std::thread::ScopedJoinHandle;
 
 use anyhow::{anyhow, bail, Context as _};
 use arrow_array::{
-    Array as _, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    Array as _, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, RecordBatch,
+    StringArray,
 };
+use arrow_schema::ArrowError;
 use base64::Engine as _;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
+use parquet::arrow::ProjectionMask;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::{ByteArray, ByteArrayType, FloatType, Int32Type, Int64Type};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
 use parquet::schema::parser::parse_message_type;
-use parquet::schema::types::ColumnPath;
+use parquet::schema::types::{ColumnPath, SchemaDescriptor};
 
 use super::{ShardIndexEntry, TemporalShardSink};
 use crate::store::build::{EXTRACTOR_VERSION, SCHEMA_VERSION};
@@ -161,6 +164,44 @@ struct TemporalEdgeRow {
     rename_prev_stable_symbol_id: Option<String>,
     rename_prev_commit: Option<String>,
 }
+
+const SYMBOL_SNAPSHOT_COLUMNS: [&str; 12] = [
+    "key_stable_symbol_id",
+    "key_commit",
+    "file_path_b64",
+    "entity_name",
+    "symbol_kind",
+    "enclosing_scope",
+    "byte_range_start",
+    "byte_range_end",
+    "line_range_start",
+    "line_range_end",
+    "anchor_hash",
+    "tokens",
+];
+
+const TEMPORAL_EDGE_COLUMNS: [&str; 14] = [
+    "source_kind",
+    "source_path_b64",
+    "source_stable_symbol_id",
+    "source_commit",
+    "target_kind",
+    "target_path_b64",
+    "target_stable_symbol_id",
+    "target_commit",
+    "relation",
+    "parent",
+    "change_kind",
+    "rename_prev_path_b64",
+    "rename_prev_stable_symbol_id",
+    "rename_prev_commit",
+];
+
+const TEMPORAL_EDGE_SYMBOL_ID_COLUMNS: [&str; 3] = [
+    "source_stable_symbol_id",
+    "target_stable_symbol_id",
+    "rename_prev_stable_symbol_id",
+];
 
 enum ColumnData {
     RequiredString(Vec<String>),
@@ -708,6 +749,72 @@ pub(crate) fn read_temporal_artifact_parquet(dir: &Path) -> anyhow::Result<Graph
         edges: Vec::new(),
         tombstones: Vec::new(),
         diagnostics,
+        commits,
+        symbol_snapshots,
+        temporal_edges,
+    };
+    if legacy_snapshot_ids {
+        crate::schema::rehash_legacy_snapshot_ids(&mut artifact);
+    }
+    Ok(artifact)
+}
+
+pub fn read_temporal_artifact_parquet_for_symbol_history(
+    dir: &Path,
+    symbol_id: &str,
+) -> anyhow::Result<GraphIndexArtifact> {
+    let manifest = read_artifact_header_parquet(dir)?;
+    if !manifest.complete {
+        bail!(
+            "refusing to load incomplete Parquet artifact `{}`",
+            dir.display()
+        );
+    }
+    let legacy_snapshot_ids = manifest.schema_version == "spur-graph-schema-v5"
+        || manifest.graph_index_version != crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
+
+    let mut chain_ids = HashSet::from([symbol_id.to_owned()]);
+    let mut frontier = chain_ids.clone();
+    while !frontier.is_empty() {
+        let edges = read_temporal_edges_for_symbols(dir, &manifest, &frontier)?;
+        let mut next_frontier = HashSet::new();
+        for edge in edges {
+            let Some(rename_ids) = rename_symbol_ids(&edge) else {
+                continue;
+            };
+            if !rename_ids.iter().any(|id| frontier.contains(*id)) {
+                continue;
+            }
+            for id in rename_ids {
+                let id = id.to_owned();
+                if chain_ids.insert(id.clone()) {
+                    next_frontier.insert(id);
+                }
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    let commits_path = dir.join("commits.parquet");
+    let commits = read_commits(&commits_path, manifest.row_counts.commits)?;
+    let symbol_snapshots = read_symbol_snapshots_for_symbols(dir, &manifest, &chain_ids)?;
+    let temporal_edges = read_temporal_edges_for_symbols(dir, &manifest, &chain_ids)?;
+
+    let mut artifact = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: manifest.graph_index_version,
+            content_hash_blake3: None,
+        },
+        manifest_version: manifest.manifest_version,
+        graph_content_hash: manifest.graph_content_hash,
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: Vec::new(),
+        symbol_node_ids: Vec::new(),
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
         commits,
         symbol_snapshots,
         temporal_edges,
@@ -1981,6 +2088,45 @@ fn read_symbol_snapshots(
     Ok(snapshots)
 }
 
+pub fn read_symbol_snapshots_for_symbols(
+    dir: &Path,
+    manifest: &GraphArtifactManifest,
+    ids: &HashSet<String>,
+) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
+    ensure_temporal_shards_layout(dir, manifest)?;
+    if ids.is_empty() || manifest.temporal_shards.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut snapshots = Vec::new();
+    for shard in &manifest.temporal_shards {
+        let path = temporal_shard_path(dir, "symbol_snapshots", shard.shard_idx);
+        snapshots.extend(read_symbol_snapshots_file_for_symbols(
+            &path,
+            shard.row_count_snapshots,
+            ids,
+        )?);
+    }
+    Ok(snapshots)
+}
+
+fn read_symbol_snapshots_file_for_symbols(
+    path: &Path,
+    row_count: usize,
+    ids: &HashSet<String>,
+) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
+    if row_count == 0 || ids.is_empty() || !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut snapshots = Vec::new();
+    for batch in filtered_projected_batches(path, SYMBOL_SNAPSHOT_COLUMNS, |schema| {
+        string_in_row_filter(schema, "key_stable_symbol_id", ids.clone())
+    })? {
+        snapshots.extend(symbol_snapshots_from_batch(&batch)?);
+    }
+    Ok(snapshots)
+}
+
 fn read_symbol_snapshots_file(
     path: &Path,
     row_count: usize,
@@ -2052,6 +2198,45 @@ fn read_temporal_edges(
     Ok(edges)
 }
 
+pub fn read_temporal_edges_for_symbols(
+    dir: &Path,
+    manifest: &GraphArtifactManifest,
+    ids: &HashSet<String>,
+) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
+    ensure_temporal_shards_layout(dir, manifest)?;
+    if ids.is_empty() || manifest.temporal_shards.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut edges = Vec::new();
+    for shard in &manifest.temporal_shards {
+        let path = temporal_shard_path(dir, "temporal_edges", shard.shard_idx);
+        edges.extend(read_temporal_edges_file_for_symbols(
+            &path,
+            shard.row_count_edges,
+            ids,
+        )?);
+    }
+    Ok(edges)
+}
+
+fn read_temporal_edges_file_for_symbols(
+    path: &Path,
+    row_count: usize,
+    ids: &HashSet<String>,
+) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
+    if row_count == 0 || ids.is_empty() || !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut edges = Vec::new();
+    for batch in filtered_projected_batches(path, TEMPORAL_EDGE_COLUMNS, |schema| {
+        string_in_any_row_filter(schema, TEMPORAL_EDGE_SYMBOL_ID_COLUMNS, ids.clone())
+    })? {
+        edges.extend(temporal_edges_from_batch(&batch)?);
+    }
+    Ok(edges)
+}
+
 fn read_temporal_edges_file(
     path: &Path,
     row_count: usize,
@@ -2112,6 +2297,132 @@ fn read_temporal_edges_file(
         }
     }
     Ok(edges)
+}
+
+fn symbol_snapshots_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<SymbolSnapshotArtifact>> {
+    let key_stable_symbol_id = string_array(batch, 0, "key_stable_symbol_id")?;
+    let key_commit = string_array(batch, 1, "key_commit")?;
+    let file_path_b64 = string_array(batch, 2, "file_path_b64")?;
+    let entity_name = string_array(batch, 3, "entity_name")?;
+    let symbol_kind = string_array(batch, 4, "symbol_kind")?;
+    let enclosing_scope = string_array(batch, 5, "enclosing_scope")?;
+    let byte_range_start = i64_array(batch, 6, "byte_range_start")?;
+    let byte_range_end = i64_array(batch, 7, "byte_range_end")?;
+    let line_range_start = i64_array(batch, 8, "line_range_start")?;
+    let line_range_end = i64_array(batch, 9, "line_range_end")?;
+    let anchor_hash = string_array(batch, 10, "anchor_hash")?;
+    let tokens = list_array(batch, 11, "tokens")?;
+
+    let mut snapshots = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let file_path_b64 = required_string_value(file_path_b64, row, "file_path_b64")?;
+        let file_path = git_path_from_b64(&file_path_b64)
+            .with_context(|| format!("row {row}: invalid file_path_b64"))?;
+        snapshots.push(SymbolSnapshotArtifact {
+            key: SnapshotKey {
+                stable_symbol_id: required_string_value(
+                    key_stable_symbol_id,
+                    row,
+                    "key_stable_symbol_id",
+                )?,
+                commit: required_string_value(key_commit, row, "key_commit")?,
+            },
+            file_path,
+            entity_name: required_string_value(entity_name, row, "entity_name")?,
+            symbol_kind: required_string_value(symbol_kind, row, "symbol_kind")?,
+            enclosing_scope: optional_string_value(enclosing_scope, row),
+            byte_range: [
+                i64_to_usize(byte_range_start.value(row), "byte_range_start")?,
+                i64_to_usize(byte_range_end.value(row), "byte_range_end")?,
+            ],
+            line_range: [
+                i64_to_usize(line_range_start.value(row), "line_range_start")?,
+                i64_to_usize(line_range_end.value(row), "line_range_end")?,
+            ],
+            anchor_hash: required_string_value(anchor_hash, row, "anchor_hash")?,
+            tokens: required_string_list_value(tokens, row, "tokens")?,
+        });
+    }
+    Ok(snapshots)
+}
+
+fn temporal_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<TemporalEdgeArtifact>> {
+    let source_kind = string_array(batch, 0, "source_kind")?;
+    let source_path_b64 = string_array(batch, 1, "source_path_b64")?;
+    let source_stable_symbol_id = string_array(batch, 2, "source_stable_symbol_id")?;
+    let source_commit = string_array(batch, 3, "source_commit")?;
+    let target_kind = string_array(batch, 4, "target_kind")?;
+    let target_path_b64 = string_array(batch, 5, "target_path_b64")?;
+    let target_stable_symbol_id = string_array(batch, 6, "target_stable_symbol_id")?;
+    let target_commit = string_array(batch, 7, "target_commit")?;
+    let relation = string_array(batch, 8, "relation")?;
+    let parent = string_array(batch, 9, "parent")?;
+    let change_kind = string_array(batch, 10, "change_kind")?;
+    let rename_prev_path_b64 = string_array(batch, 11, "rename_prev_path_b64")?;
+    let rename_prev_stable_symbol_id = string_array(batch, 12, "rename_prev_stable_symbol_id")?;
+    let rename_prev_commit = string_array(batch, 13, "rename_prev_commit")?;
+
+    let mut edges = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let source_kind = required_string_value(source_kind, row, "source_kind")?;
+        let target_kind = required_string_value(target_kind, row, "target_kind")?;
+        let relation_value = required_string_value(relation, row, "relation")?;
+        edges.push(TemporalEdgeArtifact {
+            source: endpoint_from_columns(
+                row,
+                "source",
+                &source_kind,
+                optional_string_value(source_path_b64, row),
+                optional_string_value(source_stable_symbol_id, row),
+                optional_string_value(source_commit, row),
+            )?,
+            target: endpoint_from_columns(
+                row,
+                "target",
+                &target_kind,
+                optional_string_value(target_path_b64, row),
+                optional_string_value(target_stable_symbol_id, row),
+                optional_string_value(target_commit, row),
+            )?,
+            relation: relation_from_str(&relation_value)
+                .with_context(|| format!("row {row}: invalid relation `{relation_value}`"))?,
+            parent: optional_string_value(parent, row),
+            change_kind: change_kind_from_columns(
+                row,
+                optional_string_value(change_kind, row),
+                optional_string_value(rename_prev_path_b64, row),
+                optional_string_value(rename_prev_stable_symbol_id, row),
+                optional_string_value(rename_prev_commit, row),
+            )?,
+        });
+    }
+    Ok(edges)
+}
+
+fn rename_symbol_ids(edge: &TemporalEdgeArtifact) -> Option<Vec<&str>> {
+    let Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(previous))) = &edge.change_kind else {
+        return None;
+    };
+
+    let mut ids = Vec::with_capacity(3);
+    if let Some(id) = endpoint_stable_symbol_id(&edge.source) {
+        ids.push(id);
+    }
+    if let Some(id) = endpoint_stable_symbol_id(&edge.target) {
+        ids.push(id);
+    }
+    ids.push(&previous.stable_symbol_id);
+    ids.sort_unstable();
+    ids.dedup();
+    Some(ids)
+}
+
+fn endpoint_stable_symbol_id(endpoint: &EdgeEndpoint) -> Option<&str> {
+    match endpoint {
+        EdgeEndpoint::Symbol { stable_symbol_id } => Some(stable_symbol_id),
+        EdgeEndpoint::Snapshot { key } => Some(&key.stable_symbol_id),
+        EdgeEndpoint::File { .. } | EdgeEndpoint::Commit { .. } => None,
+    }
 }
 
 fn read_diagnostics(path: &Path, row_count: usize) -> anyhow::Result<Vec<String>> {
@@ -2186,6 +2497,26 @@ fn read_record_batches(path: &Path) -> anyhow::Result<Vec<RecordBatch>> {
     Ok(batches)
 }
 
+fn filtered_projected_batches<const N: usize>(
+    path: &Path,
+    columns: [&str; N],
+    row_filter: impl FnOnce(&SchemaDescriptor) -> RowFilter,
+) -> anyhow::Result<Vec<RecordBatch>> {
+    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("failed to read `{}`", path.display()))?;
+    let projection = ProjectionMask::columns(builder.parquet_schema(), columns);
+    let row_filter = row_filter(builder.parquet_schema());
+    builder
+        .with_batch_size(PARQUET_ROW_GROUP_SIZE)
+        .with_projection(projection)
+        .with_row_filter(row_filter)
+        .build()
+        .with_context(|| format!("failed to build Arrow reader for `{}`", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to decode `{}`", path.display()))
+}
+
 fn stream_record_batches<F>(path: &Path, mut callback: F) -> anyhow::Result<()>
 where
     F: FnMut(RecordBatch) -> anyhow::Result<()>,
@@ -2213,6 +2544,61 @@ fn string_array<'a>(
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| anyhow!("expected string column `{name}`"))
+}
+
+fn string_array_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a StringArray, ArrowError> {
+    let index = batch.schema().index_of(name)?;
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| ArrowError::CastError(format!("expected string column `{name}`")))
+}
+
+fn string_in_row_filter(
+    parquet_schema: &SchemaDescriptor,
+    column: &str,
+    expected: HashSet<String>,
+) -> RowFilter {
+    let projection = ProjectionMask::columns(parquet_schema, [column]);
+    let column = column.to_owned();
+    let predicate = move |batch: RecordBatch| -> Result<BooleanArray, ArrowError> {
+        let values = string_array_by_name(&batch, &column)?;
+        let mut keep = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            keep.push(!values.is_null(row) && expected.contains(values.value(row)));
+        }
+        Ok(BooleanArray::from(keep))
+    };
+    RowFilter::new(vec![Box::new(ArrowPredicateFn::new(projection, predicate))])
+}
+
+fn string_in_any_row_filter<const N: usize>(
+    parquet_schema: &SchemaDescriptor,
+    columns: [&str; N],
+    expected: HashSet<String>,
+) -> RowFilter {
+    let projection = ProjectionMask::columns(parquet_schema, columns);
+    let columns = columns.map(str::to_owned);
+    let predicate = move |batch: RecordBatch| -> Result<BooleanArray, ArrowError> {
+        let values = columns
+            .iter()
+            .map(|column| string_array_by_name(&batch, column))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut keep = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            keep.push(
+                values
+                    .iter()
+                    .any(|array| !array.is_null(row) && expected.contains(array.value(row))),
+            );
+        }
+        Ok(BooleanArray::from(keep))
+    };
+    RowFilter::new(vec![Box::new(ArrowPredicateFn::new(projection, predicate))])
 }
 
 fn optional_string_array_by_name<'a>(
@@ -3082,6 +3468,180 @@ mod parquet_temporal_test {
         assert_eq!(decoded.commits, artifact.commits);
         assert_eq!(decoded.symbol_snapshots, artifact.symbol_snapshots);
         assert_eq!(decoded.temporal_edges, artifact.temporal_edges);
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_history_reader_filters_temporal_shards_and_expands_renames() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut artifact = empty_artifact("symbol-history-filtered-temporal-shards");
+        let old_symbol = snapshot_key("sym-old", "c1");
+        let mid_symbol = snapshot_key("sym-mid", "c2");
+        let new_symbol = snapshot_key("sym-new", "c3");
+        let other_symbol = snapshot_key("sym-other", "c3");
+
+        artifact.commits = vec![
+            CommitArtifact {
+                sha: "c1".to_owned(),
+                parents: Vec::new(),
+                author_time: 1,
+                summary: "initial".to_owned(),
+            },
+            CommitArtifact {
+                sha: "c2".to_owned(),
+                parents: vec!["c1".to_owned()],
+                author_time: 2,
+                summary: "first rename".to_owned(),
+            },
+            CommitArtifact {
+                sha: "c3".to_owned(),
+                parents: vec!["c2".to_owned()],
+                author_time: 3,
+                summary: "second rename".to_owned(),
+            },
+        ];
+
+        let old_snapshot = SymbolSnapshotArtifact {
+            key: old_symbol.clone(),
+            file_path: GitPath::from_bytes(b"src/old.rs".to_vec()),
+            entity_name: "alpha".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [0, 10],
+            line_range: [1, 2],
+            anchor_hash: "anchor-old".to_owned(),
+            tokens: Vec::new(),
+        };
+        let mid_snapshot = SymbolSnapshotArtifact {
+            key: mid_symbol.clone(),
+            file_path: GitPath::from_bytes(b"src/mid.rs".to_vec()),
+            entity_name: "beta".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [10, 20],
+            line_range: [3, 4],
+            anchor_hash: "anchor-mid".to_owned(),
+            tokens: Vec::new(),
+        };
+        let new_snapshot = SymbolSnapshotArtifact {
+            key: new_symbol.clone(),
+            file_path: GitPath::from_bytes(b"src/new.rs".to_vec()),
+            entity_name: "gamma".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [20, 30],
+            line_range: [5, 6],
+            anchor_hash: "anchor-new".to_owned(),
+            tokens: Vec::new(),
+        };
+        let other_snapshot = SymbolSnapshotArtifact {
+            key: other_symbol.clone(),
+            file_path: GitPath::from_bytes(b"src/other.rs".to_vec()),
+            entity_name: "other".to_owned(),
+            symbol_kind: "function".to_owned(),
+            enclosing_scope: None,
+            byte_range: [30, 40],
+            line_range: [7, 8],
+            anchor_hash: "anchor-other".to_owned(),
+            tokens: Vec::new(),
+        };
+        artifact.symbol_snapshots = vec![
+            old_snapshot.clone(),
+            mid_snapshot.clone(),
+            new_snapshot.clone(),
+            other_snapshot,
+        ];
+
+        let rename_old_to_mid = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot {
+                key: old_symbol.clone(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: mid_symbol.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: Some("c1".to_owned()),
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(
+                old_symbol.clone(),
+            ))),
+        };
+        let rename_mid_to_new = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Snapshot {
+                key: mid_symbol.clone(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: new_symbol.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: Some("c2".to_owned()),
+            change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(
+                mid_symbol.clone(),
+            ))),
+        };
+        let touch_new = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "c3".to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot {
+                key: new_symbol.clone(),
+            },
+            relation: RelationKind::Touches,
+            parent: Some("c2".to_owned()),
+            change_kind: Some(ChangeKind::Modified),
+        };
+        let touch_other = TemporalEdgeArtifact {
+            source: EdgeEndpoint::Commit {
+                sha: "c3".to_owned(),
+            },
+            target: EdgeEndpoint::Snapshot { key: other_symbol },
+            relation: RelationKind::Touches,
+            parent: Some("c2".to_owned()),
+            change_kind: Some(ChangeKind::Added),
+        };
+        artifact.temporal_edges = vec![
+            rename_old_to_mid.clone(),
+            rename_mid_to_new.clone(),
+            touch_new.clone(),
+            touch_other,
+        ];
+        artifact.diagnostics = vec!["diagnostic excluded from reduced history".to_owned()];
+
+        let dir = write_artifact_parquet(
+            &artifact,
+            tempdir.path(),
+            WriteOptions::default(),
+            Vec::new(),
+        )?;
+        let manifest = read_artifact_header_parquet(&dir)?;
+
+        let mid_snapshots = read_symbol_snapshots_for_symbols(
+            &dir,
+            &manifest,
+            &std::collections::HashSet::from(["sym-mid".to_owned()]),
+        )?;
+        assert_eq!(mid_snapshots, vec![mid_snapshot.clone()]);
+
+        let old_edges = read_temporal_edges_for_symbols(
+            &dir,
+            &manifest,
+            &std::collections::HashSet::from(["sym-old".to_owned()]),
+        )?;
+        assert_eq!(old_edges, vec![rename_old_to_mid.clone()]);
+
+        let history = read_temporal_artifact_parquet_for_symbol_history(&dir, "sym-new")?;
+        assert_eq!(history.commits, artifact.commits);
+        assert_eq!(
+            history.symbol_snapshots,
+            vec![old_snapshot, mid_snapshot, new_snapshot]
+        );
+        assert_eq!(
+            history.temporal_edges,
+            vec![rename_old_to_mid, rename_mid_to_new, touch_new]
+        );
+        assert!(history.diagnostics.is_empty());
+        assert!(history.files.is_empty());
+        assert!(history.symbols.is_empty());
+        assert!(history.edges.is_empty());
         Ok(())
     }
 
