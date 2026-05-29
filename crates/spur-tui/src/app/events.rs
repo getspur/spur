@@ -400,6 +400,14 @@ impl App {
             } => {
                 self.notebook_socket_nonce = Some(socket_nonce.clone());
             }
+            SpurEventBody::DatasourcesChanged { session, entries } => {
+                self.dashboard.set_datasource_snapshot(entries.clone());
+                if let Some(ref mut detail) = self.session_detail {
+                    if detail.session_id() == session {
+                        detail.set_datasource_snapshot(entries.clone());
+                    }
+                }
+            }
             SpurEventBody::SessionAttachRejected {
                 acp_session_id,
                 holder,
@@ -498,7 +506,6 @@ impl App {
             | SpurEventBody::PrCreated { .. }
             | SpurEventBody::IssueUpdated { .. }
             | SpurEventBody::PlanSnapshotUpdated { .. }
-            | SpurEventBody::DatasourcesChanged { .. }
             | SpurEventBody::AgentExtNotification { .. } => {}
             // Catch-all for future variants — log so we notice.
             _ => {

@@ -54,6 +54,42 @@ async fn send_notebook_command_uses_supplied_socket_path() {
 }
 
 #[tokio::test]
+async fn slash_notebook_data_add_serializes_attach_datasource() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("control.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind mock socket");
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept command");
+        let request = read_frame(&mut stream).await;
+        let request: serde_json::Value = serde_json::from_slice(&request).expect("request json");
+        assert_eq!(request["daemon"], "notebook.v1");
+        assert_eq!(request["command"], "attach_datasource");
+        assert_eq!(request["path"], json!("./data/sales.csv"));
+        assert_eq!(request["name"], json!("sales"));
+        assert_eq!(request["group"], json!("quarterly"));
+
+        let response = serde_json::to_vec(&json!({
+            "ok": true,
+            "path": null,
+            "error": null
+        }))
+        .expect("response json");
+        write_frame(&mut stream, &response).await;
+    });
+
+    let response = spur_tui::notebook_daemon::send_notebook_command(
+        "data add ./data/sales.csv --group quarterly",
+        &socket_path,
+    )
+    .await
+    .expect("command response");
+
+    assert!(response.ok);
+    server.await.expect("server task");
+}
+
+#[tokio::test]
 async fn send_notebook_command_retries_until_lazy_socket_binds() {
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("control.sock");
