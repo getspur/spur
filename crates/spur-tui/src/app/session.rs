@@ -154,7 +154,7 @@ impl App {
             brain_name: None,
             pending_first_user_message: None,
             pending_permission: None,
-            notebook_socket_nonces: std::collections::HashMap::new(),
+            notebook_socket_nonce: None,
             lineage: ExecutorLineage::new(),
             #[cfg(feature = "analytics")]
             analytics_engine: None,
