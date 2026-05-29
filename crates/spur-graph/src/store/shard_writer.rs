@@ -346,6 +346,8 @@ mod tests {
             sha: format!("commit-{author_time}"),
             parents: Vec::new(),
             author_time,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "test commit".to_owned(),
         };
         let mut edges = (0..edge_count)

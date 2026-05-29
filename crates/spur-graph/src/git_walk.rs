@@ -325,7 +325,7 @@ fn load_incremental_base(
     worktree: &Path,
     first_ref: &str,
     walk_strategy: WalkStrategy,
-    mut sink: Option<&mut TemporalShardSink>,
+    sink: Option<&mut TemporalShardSink>,
 ) -> Result<Option<IncrementalBase>> {
     let Some(pointer) = commit_index::load_pointer(worktree)? else {
         return Ok(None);
@@ -390,7 +390,7 @@ fn load_incremental_base(
         return Ok(None);
     }
 
-    if let Some(sink) = sink.as_deref_mut() {
+    if let Some(sink) = sink {
         match graph_location.format {
             ArtifactFormat::Parquet => {
                 stream_temporal_artifact_parquet_into_sink(&graph_location.path, sink)?
@@ -532,9 +532,14 @@ fn walk_commit_range(
 fn read_commit(worktree: &Path, sha: &str) -> Result<CommitArtifact> {
     let stdout = run_git(
         worktree,
-        &["show", "-s", "--format=%H%x00%P%x00%ct%x00%s", sha],
+        &[
+            "show",
+            "-s",
+            "--format=%H%x00%P%x00%ct%x00%an%x00%ae%x00%s",
+            sha,
+        ],
     )?;
-    let mut fields = stdout.trim_end_matches('\n').splitn(4, '\0');
+    let mut fields = stdout.trim_end_matches('\n').splitn(6, '\0');
     let actual_sha = fields
         .next()
         .filter(|field| !field.is_empty())
@@ -550,12 +555,16 @@ fn read_commit(worktree: &Path, sha: &str) -> Result<CommitArtifact> {
         .with_context(|| format!("git show omitted author time for commit `{sha}`"))?
         .parse::<i64>()
         .with_context(|| format!("git show emitted invalid author time for commit `{sha}`"))?;
+    let author_name = fields.next().unwrap_or_default().to_owned();
+    let author_email = fields.next().unwrap_or_default().to_owned();
     let summary = fields.next().unwrap_or_default().to_owned();
 
     Ok(CommitArtifact {
         sha: actual_sha.to_owned(),
         parents,
         author_time,
+        author_name,
+        author_email,
         summary,
     })
 }
@@ -588,13 +597,18 @@ fn read_commit_gix(repo: &gix::Repository, sha: &str) -> Result<CommitArtifact> 
         .parent_ids()
         .map(|parent| parent.to_hex().to_string())
         .collect();
-    let author_time = commit.author()?.seconds();
+    let author = commit.author()?.trim();
+    let author_time = author.seconds();
+    let author_name = String::from_utf8_lossy(author.name.as_ref()).into_owned();
+    let author_email = String::from_utf8_lossy(author.email.as_ref()).into_owned();
     let summary = commit_subject(&commit);
 
     Ok(CommitArtifact {
         sha: commit.id.to_hex().to_string(),
         parents,
         author_time,
+        author_name,
+        author_email,
         summary,
     })
 }
