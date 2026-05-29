@@ -563,35 +563,39 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_reuse_sqlite_connections_after_warmup() {
-        let dir = TempDir::new().unwrap();
-        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
-            .await
-            .unwrap();
-
-        let opens_after_spawn = adapter
-            .metrics()
-            .sqlite_open_total
-            .load(std::sync::atomic::Ordering::Relaxed);
-        assert!(
-            opens_after_spawn > 0,
-            "adapter open must warm persistent SQLite connections"
-        );
-
-        for _ in 0..8 {
-            adapter
-                .read(|s| Ok(s.count_issues()?))
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let dir = TempDir::new().unwrap();
+            let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
                 .await
-                .expect("read should complete");
-        }
+                .unwrap();
 
-        assert_eq!(
-            adapter
+            let opens_after_spawn = adapter
                 .metrics()
                 .sqlite_open_total
-                .load(std::sync::atomic::Ordering::Relaxed),
-            opens_after_spawn,
-            "reads must reuse the warmed reader connections instead of opening per call"
-        );
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                opens_after_spawn > 0,
+                "adapter open must warm persistent SQLite connections"
+            );
+
+            for _ in 0..8 {
+                adapter
+                    .read(|s| Ok(s.count_issues()?))
+                    .await
+                    .expect("read should complete");
+            }
+
+            assert_eq!(
+                adapter
+                    .metrics()
+                    .sqlite_open_total
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                opens_after_spawn,
+                "reads must reuse the warmed reader connections instead of opening per call"
+            );
+        })
+        .await
+        .expect("read-open reuse assertion should complete before the deadline");
     }
 
     #[tokio::test(flavor = "multi_thread")]
