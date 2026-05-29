@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use spur_acp::ContentBlock;
 use spur_acp::SessionId;
+use spur_acp::{Column, ContentBlock, DatasourceEntry, DatasourceKind};
 use spur_graph::validation::compute_anchor_hash;
 use spur_graph::{artifact_from_facts, build_facts, write_artifact_parquet, WriteOptions};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
@@ -55,6 +55,63 @@ fn brain_session_includes_workers_in_empty_query() {
         "expected worker:claude-code in hits, got {:?}",
         hits.iter().map(|h| &h.display).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn datasource_mention_section_renders() {
+    let mut reg = MentionRegistry::for_brain_session(Vec::new());
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let before = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
+    assert!(
+        !before.iter().any(|hit| hit.section_header == Some("Data")),
+        "data section should not render before snapshot update: {before:?}"
+    );
+
+    reg.set_datasource_snapshot(vec![DatasourceEntry {
+        name: "sales".into(),
+        path: "./data/sales.csv".into(),
+        kind: DatasourceKind::Csv,
+        group: Some("quarterly".into()),
+        columns: vec![
+            Column {
+                name: "region".into(),
+                sql_type: "VARCHAR".into(),
+            },
+            Column {
+                name: "revenue".into(),
+                sql_type: "DOUBLE".into(),
+            },
+        ],
+        row_count: Some(128),
+    }]);
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
+    let data_header = hits
+        .iter()
+        .position(|hit| hit.section_header == Some("Data"))
+        .expect("Data section header should render after datasource snapshot update");
+    let sales = hits[data_header + 1..]
+        .iter()
+        .find(|hit| hit.kind == MentionKind::Datasource)
+        .expect("datasource row should render after Data header");
+
+    assert_eq!(sales.display, "sales");
+    assert_eq!(sales.uri, "datasource://sales");
+    assert_eq!(sales.atom_text.as_deref(), Some("@sales"));
+    assert!(sales
+        .secondary
+        .as_deref()
+        .unwrap_or("")
+        .contains("quarterly"));
+
+    let hint = reg
+        .lookup_datasource_hint("datasource://sales")
+        .expect("datasource prompt hint should be cached with the row");
+    assert!(hint.contains("columns:"));
+    assert!(hint.contains("region VARCHAR"));
+    assert!(hint.contains("revenue DOUBLE"));
 }
 
 #[test]
