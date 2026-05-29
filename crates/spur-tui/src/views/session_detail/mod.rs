@@ -797,6 +797,7 @@ mod invalidate_protocols_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }
@@ -914,6 +915,7 @@ mod cancel_state_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }
@@ -1518,6 +1520,7 @@ mod composer_routing_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }
@@ -1604,6 +1607,7 @@ mod composer_routing_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }
@@ -1824,6 +1828,7 @@ mod tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         }
     }
@@ -2034,6 +2039,7 @@ mod tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            notebook_ready: false,
             theme: crate::theme::fallback_theme(),
         };
 
