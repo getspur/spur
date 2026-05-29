@@ -20,10 +20,10 @@ pub use delegation::{
     DelegationStatus, PlanCandidate, PlanSubtask, TimeoutFallback,
 };
 pub use events::{
-    GraphEdgeEvent, GraphNodeEvent, HistoryEntry, IssueDetailEvent, IssueSummaryEvent,
-    LicenseBindingMode, LicensePlan, LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind,
-    PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent, SpurEvent,
-    SpurEventBody,
+    Column, DatasourceEntry, DatasourceKind, GraphEdgeEvent, GraphNodeEvent, HistoryEntry,
+    IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan, LicenseStateEvent,
+    LicenseStatusEvent, LicenseSubjectKind, PlanLifecycleEvent, PlanOwnerStateEvent,
+    PlanSummaryCountsEvent, PlanSummaryEvent, SpurEvent, SpurEventBody,
 };
 pub use outcome::{BackendTag, OutcomeBlobKind, OutcomeKey, OutcomeRef};
 pub use peer_message::{
