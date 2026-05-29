@@ -17,7 +17,8 @@
         5,
         6,
         7,
-        8
+        8,
+        9
       ]
     },
     {
@@ -25,14 +26,14 @@
       "path": "src/helpers.ts",
       "content_oid": "1521b0b7654bca3780979ee440bad6400bfb1594",
       "node_ids": [
-        9,
         10,
         11,
         12,
         13,
         14,
         15,
-        16
+        16,
+        17
       ]
     }
   ],
@@ -164,6 +165,23 @@
       "qualified_name": "Greeting",
       "symbol_kind": "function",
       "anchor_hash": "3769049393491808800",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "90d74fe4b59265ab",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        416,
+        476
+      ],
+      "line_range": [
+        26,
+        30
+      ],
+      "entity_name": "Root",
+      "qualified_name": "Root",
+      "symbol_kind": "function",
+      "anchor_hash": "11003640583028418372",
       "enclosing_scope": null
     },
     {
@@ -362,6 +380,16 @@
       "bind_method": "singleton"
     },
     {
+      "source_stable_symbol_id": "90d74fe4b59265ab",
+      "target_stable_symbol_id": "b7935e272e1df724",
+      "target_label": "Greeting",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
       "source_stable_symbol_id": "9156eac9b8c3b2ba",
       "target_stable_symbol_id": "8070bc0cbf8984f8",
       "target_label": null,
@@ -374,6 +402,15 @@
       "source_stable_symbol_id": "925e9bcc2a4a5ecd",
       "target_stable_symbol_id": "88c2887e42a7e154",
       "target_label": "boot",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "925e9bcc2a4a5ecd",
+      "target_stable_symbol_id": "b157cefaf7fe3c8c",
+      "target_label": "App",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
@@ -418,6 +455,15 @@
     {
       "source_stable_symbol_id": "f6656417814146db",
       "target_stable_symbol_id": "06b57d27bc6da2d7",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "90d74fe4b59265ab",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
