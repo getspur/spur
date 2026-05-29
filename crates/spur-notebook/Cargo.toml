@@ -15,6 +15,7 @@ async-channel = "2"
 blake3 = "1"
 chrono.workspace = true
 directories.workspace = true
+fs4 = "0.13"
 jute = { path = "jute-notebook/src-tauri" }
 rmcp.workspace = true
 serde.workspace = true
