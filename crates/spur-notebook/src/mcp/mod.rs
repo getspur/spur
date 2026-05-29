@@ -629,6 +629,124 @@ fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, 
     }
 }
 
+#[cfg(feature = "datasource-introspect")]
+const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatasourceSetupCell {
+    id: String,
+    has_metadata_marker: bool,
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_setup_source(entries: &[jute::commands::DatasourceEntry]) -> String {
+    let mut source = String::from(DATASOURCE_SETUP_SENTINEL);
+    source.push_str("\n# This cell is managed by SPUR. Re-run it after datasource changes.\n");
+    source.push_str("import duckdb\n\n");
+
+    if entries.is_empty() {
+        source.push_str("# No datasources are attached.\n");
+        return source;
+    }
+
+    for entry in entries {
+        let sql = format!(
+            "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
+            sql_identifier(&entry.name),
+            datasource_scan_expression(entry)
+        );
+        source.push_str("duckdb.sql(");
+        source.push_str(&python_string_literal(&sql));
+        source.push_str(")\n");
+    }
+
+    source
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String {
+    let literal = sql_string_literal(&entry.path);
+    match entry.kind {
+        jute::commands::DatasourceKind::Csv => format!("read_csv_auto({literal})"),
+        jute::commands::DatasourceKind::Parquet => format!("read_parquet({literal})"),
+        jute::commands::DatasourceKind::Json => format!("read_json_auto({literal})"),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn sql_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn python_string_literal(value: &str) -> String {
+    serde_json::to_string(value).expect("string literal serializes")
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn find_datasource_setup_cell(root: &NotebookRoot) -> Option<DatasourceSetupCell> {
+    root.cells.iter().find_map(|cell| {
+        let id = notebook_cell_id(cell)?;
+        let has_metadata_marker = notebook_cell_metadata(cell)
+            .spur
+            .as_ref()
+            .and_then(|spur| spur.datasource_setup)
+            .unwrap_or(false);
+        if has_metadata_marker || notebook_cell_source(cell).contains(DATASOURCE_SETUP_SENTINEL) {
+            Some(DatasourceSetupCell {
+                id: id.to_string(),
+                has_metadata_marker,
+            })
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn notebook_cell_id(cell: &jute::backend::notebook::Cell) -> Option<&str> {
+    match cell {
+        jute::backend::notebook::Cell::Raw(cell) => cell.id.as_deref(),
+        jute::backend::notebook::Cell::Markdown(cell) => cell.id.as_deref(),
+        jute::backend::notebook::Cell::Code(cell) => cell.id.as_deref(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn notebook_cell_metadata(
+    cell: &jute::backend::notebook::Cell,
+) -> &jute::backend::notebook::CellMetadata {
+    match cell {
+        jute::backend::notebook::Cell::Raw(cell) => &cell.metadata,
+        jute::backend::notebook::Cell::Markdown(cell) => &cell.metadata,
+        jute::backend::notebook::Cell::Code(cell) => &cell.metadata,
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn notebook_cell_source(cell: &jute::backend::notebook::Cell) -> String {
+    let source = match cell {
+        jute::backend::notebook::Cell::Raw(cell) => &cell.source,
+        jute::backend::notebook::Cell::Markdown(cell) => &cell.source,
+        jute::backend::notebook::Cell::Code(cell) => &cell.source,
+    };
+    multiline_to_string(source)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn multiline_to_string(source: &jute::backend::notebook::MultilineString) -> String {
+    match source {
+        jute::backend::notebook::MultilineString::Single(source) => source.clone(),
+        jute::backend::notebook::MultilineString::Multi(lines) => lines.join(""),
+    }
+}
+
 impl NotebookDaemonControl {
     fn new_with_parts(
         bridge: Arc<AgentBridge>,
@@ -886,6 +1004,7 @@ impl NotebookDaemonControl {
         };
 
         self.jute_state.attach_datasource(entry.clone());
+        self.refresh_datasource_setup_cell().await?;
         self.persist_catalog_to_current_notebook().await?;
 
         let result = serde_json::to_value(entry).map_err(|error| BridgeError::Handler {
@@ -894,6 +1013,76 @@ impl NotebookDaemonControl {
         })?;
 
         Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn refresh_datasource_setup_cell(&self) -> Result<(), BridgeError> {
+        let entries = self.jute_state.datasource_catalog.lock().list();
+        let source = datasource_setup_source(&entries);
+        let (root, _) = self.jute_state.get_notebook().snapshot();
+
+        if let Some(setup_cell) = find_datasource_setup_cell(&root) {
+            self.apply_notebook_store_command(jute::commands::DaemonControlCommand::ApplyEdit {
+                id: setup_cell.id.clone(),
+                source,
+            })
+            .await?;
+            if !setup_cell.has_metadata_marker {
+                self.mark_datasource_setup_cell(&setup_cell.id)?;
+            }
+            return Ok(());
+        }
+
+        let result = self
+            .apply_notebook_store_command(jute::commands::DaemonControlCommand::InsertCell {
+                kind: jute::notebook_store::CellKind::Code,
+                after_id: None,
+                source,
+                last_edited_by: Some("brain".to_string()),
+            })
+            .await?;
+        let id = match result {
+            jute::commands::DaemonControlResult::Delta(jute::notebook_store::NotebookDelta {
+                kind: jute::notebook_store::DeltaKind::CellInserted { cell, .. },
+                ..
+            }) => cell.id,
+            result => {
+                return Err(BridgeError::Handler {
+                    code: "setup_cell_update_failed".to_string(),
+                    message: format!("insert setup cell returned unexpected result: {result:?}"),
+                });
+            }
+        };
+        self.mark_datasource_setup_cell(&id)
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn apply_notebook_store_command(
+        &self,
+        command: jute::commands::DaemonControlCommand,
+    ) -> Result<jute::commands::DaemonControlResult, BridgeError> {
+        jute::commands::handle_daemon_control_request(
+            jute::commands::DaemonControlRequest::new(command),
+            &self.jute_state,
+        )
+        .await
+        .into_result()
+        .map_err(|error| BridgeError::Handler {
+            code: error.code,
+            message: error.message,
+        })
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn mark_datasource_setup_cell(&self, id: &str) -> Result<(), BridgeError> {
+        self.jute_state
+            .get_notebook()
+            .apply(jute::notebook_store::NotebookOp::MarkDatasourceSetupCell { id: id.to_string() })
+            .map(|_| ())
+            .map_err(|error| BridgeError::Handler {
+                code: "setup_cell_update_failed".to_string(),
+                message: error.to_string(),
+            })
     }
 
     #[cfg(not(feature = "datasource-introspect"))]
@@ -1773,6 +1962,78 @@ mod tests {
         assert!(response.path.is_none());
         assert!(response.entries.is_none());
         assert!(response.error.is_none());
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_inserts_idempotent_setup_cell() {
+        let tempdir = tempfile::tempdir().expect("csv fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+        )
+        .await
+        .expect("write notebook fixture");
+
+        let jute_state = Arc::new(State::new());
+        let notebook_root: NotebookRoot =
+            serde_json::from_value(empty_notebook()).expect("empty notebook parses");
+        jute_state
+            .get_notebook()
+            .load(notebook_path.clone(), notebook_root);
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(notebook_path);
+        }
+
+        for _ in 0..2 {
+            let response = control
+                .handle(daemon_request(
+                    jute::commands::DaemonControlCommand::AttachDatasource {
+                        name: "sales".to_owned(),
+                        path: csv.display().to_string(),
+                        group: None,
+                    },
+                ))
+                .await;
+            assert!(response.ok, "{:?}", response.error);
+        }
+
+        let (root, _) = jute_state.get_notebook().snapshot();
+        let notebook = serde_json::to_value(root).expect("notebook serializes");
+        let setup_cells = notebook["cells"]
+            .as_array()
+            .expect("cells array")
+            .iter()
+            .filter(|cell| {
+                cell["cell_type"] == "code"
+                    && cell["source"]
+                        .as_str()
+                        .is_some_and(|source| source.contains("CREATE OR REPLACE VIEW"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(setup_cells.len(), 1);
+        let setup_cell = setup_cells[0];
+        assert_eq!(
+            setup_cell["metadata"]["spur"]["datasource_setup"],
+            json!(true)
+        );
+        let source = setup_cell["source"].as_str().expect("setup source");
+        assert!(source.contains("# SPUR datasource setup cell v1"));
+        assert_eq!(source.matches("CREATE OR REPLACE VIEW").count(), 1);
+        assert!(source.contains("read_csv_auto"));
+        assert!(source.contains("sales"));
     }
 
     #[tokio::test]

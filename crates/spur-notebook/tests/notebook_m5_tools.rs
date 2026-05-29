@@ -316,6 +316,7 @@ impl MockNotebook {
                             spur: Some(SpurCellMetadata {
                                 version: cell.version,
                                 last_edited_by: cell.last_edited_by.clone(),
+                                datasource_setup: None,
                             }),
                             jute_deck: None,
                             other: Default::default(),
