@@ -27,6 +27,7 @@ fn view_ctx<'a>(lineage: &'a ExecutorLineage, plans: &'a PlanProjectionStore) ->
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        notebook_ready: false,
         theme: spur_tui::theme::fallback_theme(),
     }
 }
