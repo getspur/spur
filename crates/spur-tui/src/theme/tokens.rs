@@ -32,6 +32,7 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("status_bar.cost.fg", "warning"),
     ("status_bar.mode.fg", "accent_alt"),
     ("status_bar.brand.fg", "accent"),
+    ("status_bar.notebook.fg", "success"),
     ("status_bar.alert_critical.fg", "danger"),
     ("status_bar.alert_warning.fg", "warning"),
     ("status_bar.flag_on.fg", "success"),
