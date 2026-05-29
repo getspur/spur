@@ -1,0 +1,34 @@
+# cargo-nextest configuration — https://nexte.st/
+#
+# The `ci` profile is used by .github/workflows/ci.yml (`--profile ci`).
+# Note: nextest does NOT run doctests; ci.yml keeps a separate `cargo test --doc`
+# step for those. The madsim deterministic-sim tests are cfg-gated
+# (spur-test-madsim is empty unless built with RUSTFLAGS="--cfg madsim"), so they
+# are excluded from the default run and belong in a dedicated future lane.
+
+[profile.default]
+# Local runs: surface flakiness rather than hide it — no retries by default.
+retries = 0
+
+[profile.ci]
+# Retry transient failures up to twice, but a test that only passes on retry is
+# reported as FLAKY (in output and JUnit), not silently green.
+retries = { backoff = "fixed", count = 2, delay = "1s" }
+# Run the entire suite; don't stop at the first failure.
+fail-fast = false
+# Print failure output immediately and again in the final summary.
+failure-output = "immediate-final"
+# Keep the final summary focused on what needs attention.
+final-status-level = "flaky"
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml — uploaded as a CI artifact.
+path = "junit.xml"
+
+# --- Partitioning (deferred on purpose) ---------------------------------------
+# nextest can shard a run across N machines:
+#   cargo nextest run --partition hashed:1/N   (job 1 of N), etc.
+# Not wired into a CI matrix yet: every shard would recompile the whole
+# workspace (no shared compile cache across jobs today), and this workspace is
+# compile-dominated, so sharding would add wall-clock rather than remove it.
+# Revisit once a shared object cache (sccache GHA/GCS) is in place.
