@@ -66,6 +66,7 @@ pub(crate) struct CompiledQueries {
     pub(crate) tags: Query,
     pub(crate) symbols: Query,
     pub(crate) spur_edges: Option<Query>,
+    pub(crate) jsx_edges: Option<Query>,
     pub(crate) inline_spur_edges: Option<Query>,
 }
 
@@ -1169,6 +1170,17 @@ fn extract_file_from_tree(
             &edge_captures,
         );
     }
+    if let Some(jsx_edges) = queries.jsx_edges.as_ref() {
+        let edge_captures = run_query(jsx_edges, root_node, source);
+        emit_edges(
+            config,
+            builder,
+            file_node,
+            source,
+            &definitions,
+            &edge_captures,
+        );
+    }
     if language_label == "rust" {
         emit_rust_dyn_trait_edges(builder, file_node, source, &definitions, root_node);
     }
@@ -1180,6 +1192,7 @@ fn compile_queries(config: &LanguageConfig, language: Language) -> anyhow::Resul
     let mut tags = None;
     let mut tags_source = None;
     let mut spur_edges = None;
+    let mut jsx_edges = None;
     let mut inline_spur_edges = None;
     for (name, source) in config.queries {
         match *name {
@@ -1191,6 +1204,11 @@ fn compile_queries(config: &LanguageConfig, language: Language) -> anyhow::Resul
             }
             "spur-edges" => {
                 spur_edges = Some(Query::new(&config.language, source).with_context(|| {
+                    format!("failed to compile tree-sitter query `{name}` for `{language_label}`")
+                })?);
+            }
+            "jsx-edges" => {
+                jsx_edges = Some(Query::new(&config.language, source).with_context(|| {
                     format!("failed to compile tree-sitter query `{name}` for `{language_label}`")
                 })?);
             }
@@ -1224,6 +1242,7 @@ fn compile_queries(config: &LanguageConfig, language: Language) -> anyhow::Resul
         tags: tags.with_context(|| format!("missing `{language_label}` tags query"))?,
         symbols,
         spur_edges,
+        jsx_edges,
         inline_spur_edges,
     })
 }
