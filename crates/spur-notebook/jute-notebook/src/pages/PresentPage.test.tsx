@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
           initialText: source,
           source,
           version: 1,
+          juteDeckMetadata: undefined as { layout: string } | undefined,
         },
       },
     },
@@ -85,5 +86,36 @@ describe("PresentPage", () => {
     expect(container.querySelector("[data-slide]")).toHaveClass(
       "from-indigo-900",
     );
+  });
+
+  it("labels code slides with the notebook language", () => {
+    mocks.state.serverState.notebookMetadata = {
+      language_info: { name: "rust" },
+    };
+    mocks.state.serverState.cells["slide-1"] = {
+      type: "code",
+      initialText: "fn main() {}",
+      source: "fn main() {}",
+      version: 1,
+      juteDeckMetadata: { layout: "code" },
+    };
+
+    const { container } = render(<PresentPage />);
+
+    expect(container).toHaveTextContent("rust");
+  });
+
+  it("falls back to python when notebook language is absent", () => {
+    mocks.state.serverState.cells["slide-1"] = {
+      type: "code",
+      initialText: "puts 'hello'",
+      source: "puts 'hello'",
+      version: 1,
+      juteDeckMetadata: { layout: "code" },
+    };
+
+    const { container } = render(<PresentPage />);
+
+    expect(container).toHaveTextContent("python");
   });
 });
