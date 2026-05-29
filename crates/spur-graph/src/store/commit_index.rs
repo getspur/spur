@@ -170,6 +170,8 @@ mod tests {
                 sha: "abc".into(),
                 parents: vec![],
                 author_time: 0,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "init".into(),
             }],
             refs: [("main".into(), "abc".into())].into(),
@@ -179,5 +181,26 @@ mod tests {
         let s = serde_json::to_string(&a).unwrap();
         let back: CommitIndexArtifact = serde_json::from_str(&s).unwrap();
         assert_eq!(a, back);
+    }
+
+    #[test]
+    fn artifact_without_author_identity_deserializes_with_empty_defaults() {
+        let text = r#"{
+            "schema_version": 1,
+            "commits": [{
+                "sha": "abc",
+                "parents": [],
+                "author_time": 0,
+                "summary": "init"
+            }],
+            "refs": { "main": "abc" },
+            "indexed_at": "2026-05-20T12:00:00Z",
+            "walk_strategy": "reachable"
+        }"#;
+
+        let artifact: CommitIndexArtifact = serde_json::from_str(text).unwrap();
+
+        assert_eq!(artifact.commits[0].author_name, "");
+        assert_eq!(artifact.commits[0].author_email, "");
     }
 }

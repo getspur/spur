@@ -1003,6 +1003,8 @@ fn synthetic_history_artifact(
             sha: sha.clone(),
             parents: previous_sha.iter().cloned().collect(),
             author_time: SYNTHETIC_START_TIME + index as i64,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: format!("history snapshot {index}"),
         };
         graph.commits.push(commit.clone());
@@ -1098,6 +1100,8 @@ fn synthetic_resolve_artifact(
             sha: sha.clone(),
             parents: previous_sha.iter().cloned().collect(),
             author_time: SYNTHETIC_START_TIME + index as i64,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: format!("resolve snapshot {index}"),
         };
         graph.commits.push(commit.clone());

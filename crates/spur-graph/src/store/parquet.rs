@@ -128,6 +128,8 @@ struct CommitRow {
     sha: String,
     parents: Vec<String>,
     author_time: i64,
+    author_name: String,
+    author_email: String,
     summary: String,
 }
 
@@ -1422,6 +1424,8 @@ fn write_commits(
             sha: row.sha.clone(),
             parents: row.parents.clone(),
             author_time: row.author_time,
+            author_name: row.author_name.clone(),
+            author_email: row.author_email.clone(),
             summary: row.summary.clone(),
         })
         .collect();
@@ -1438,6 +1442,8 @@ fn write_commits(
           }
           required int64 author_time;
           required binary summary (STRING);
+          optional binary author_name (STRING);
+          optional binary author_email (STRING);
         }
         ",
         &["sha", "summary"],
@@ -1447,6 +1453,16 @@ fn write_commits(
             ColumnData::RequiredListString(rows.iter().map(|row| row.parents.clone()).collect()),
             ColumnData::RequiredI64(rows.iter().map(|row| row.author_time).collect()),
             ColumnData::RequiredString(rows.iter().map(|row| row.summary.clone()).collect()),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| Some(row.author_name.clone()))
+                    .collect(),
+            ),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| Some(row.author_email.clone()))
+                    .collect(),
+            ),
         ],
     )?;
     Ok(rows.len())
@@ -1741,7 +1757,7 @@ fn writer_properties(
         .set_compression(Compression::ZSTD(
             ZstdLevel::try_new(3).context("invalid zstd compression level")?,
         ))
-        .set_max_row_group_size(PARQUET_ROW_GROUP_SIZE)
+        .set_max_row_group_row_count(Some(PARQUET_ROW_GROUP_SIZE))
         .set_dictionary_enabled(false)
         .set_statistics_enabled(EnabledStatistics::Page);
 
@@ -2055,12 +2071,20 @@ fn read_commits(path: &Path, row_count: usize) -> anyhow::Result<Vec<CommitArtif
         let sha = string_array(&batch, 0, "sha")?;
         let parents = list_array(&batch, 1, "parents")?;
         let author_time = i64_array(&batch, 2, "author_time")?;
-        let summary = string_array(&batch, 3, "summary")?;
+        let summary = string_array_by_name(&batch, "summary")?;
+        let author_name = optional_string_array_by_name(&batch, "author_name")?;
+        let author_email = optional_string_array_by_name(&batch, "author_email")?;
         for row in 0..batch.num_rows() {
             commits.push(CommitArtifact {
                 sha: required_string_value(sha, row, "sha")?,
                 parents: required_string_list_value(parents, row, "parents")?,
                 author_time: author_time.value(row),
+                author_name: author_name
+                    .and_then(|values| optional_string_value(values, row))
+                    .unwrap_or_default(),
+                author_email: author_email
+                    .and_then(|values| optional_string_value(values, row))
+                    .unwrap_or_default(),
                 summary: required_string_value(summary, row, "summary")?,
             });
         }
@@ -3280,12 +3304,16 @@ mod parquet_temporal_test {
                 sha: "c1".to_owned(),
                 parents: Vec::new(),
                 author_time: 1_700_000_001,
+                author_name: "Ada Lovelace".to_owned(),
+                author_email: "ada@example.test".to_owned(),
                 summary: "initial import".to_owned(),
             },
             CommitArtifact {
                 sha: "c2".to_owned(),
                 parents: vec!["c1".to_owned(), "merge-parent".to_owned()],
                 author_time: 1_700_000_123,
+                author_name: "Grace Hopper".to_owned(),
+                author_email: "grace@example.test".to_owned(),
                 summary: "merge branch".to_owned(),
             },
         ];
@@ -3296,6 +3324,51 @@ mod parquet_temporal_test {
 
         assert_eq!(written, rows.len());
         assert_eq!(decoded, rows);
+        Ok(())
+    }
+
+    #[test]
+    fn commits_without_author_columns_load_with_empty_author_identity() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let path = tempdir.path().join("commits.parquet");
+
+        write_table(
+            &path,
+            r"
+            message schema {
+              required binary sha (STRING);
+              optional group parents (LIST) {
+                repeated group list {
+                  required binary element (STRING);
+                }
+              }
+              required int64 author_time;
+              required binary summary (STRING);
+            }
+            ",
+            &["sha", "summary"],
+            &["sha"],
+            vec![
+                ColumnData::RequiredString(vec!["legacy-c1".to_owned()]),
+                ColumnData::RequiredListString(vec![vec!["legacy-parent".to_owned()]]),
+                ColumnData::RequiredI64(vec![1_700_000_321]),
+                ColumnData::RequiredString(vec!["legacy commit".to_owned()]),
+            ],
+        )?;
+
+        let decoded = read_commits(&path, 1)?;
+
+        assert_eq!(
+            decoded,
+            vec![CommitArtifact {
+                sha: "legacy-c1".to_owned(),
+                parents: vec!["legacy-parent".to_owned()],
+                author_time: 1_700_000_321,
+                author_name: String::new(),
+                author_email: String::new(),
+                summary: "legacy commit".to_owned(),
+            }]
+        );
         Ok(())
     }
 
@@ -3389,12 +3462,16 @@ mod parquet_temporal_test {
                 sha: "c1".to_owned(),
                 parents: Vec::new(),
                 author_time: 1_700_000_001,
+                author_name: "Ada Lovelace".to_owned(),
+                author_email: "ada@example.test".to_owned(),
                 summary: "initial import".to_owned(),
             },
             CommitArtifact {
                 sha: "c2".to_owned(),
                 parents: vec!["c1".to_owned()],
                 author_time: 1_700_000_123,
+                author_name: "Grace Hopper".to_owned(),
+                author_email: "grace@example.test".to_owned(),
                 summary: "rename alpha to beta".to_owned(),
             },
         ];
@@ -3486,18 +3563,24 @@ mod parquet_temporal_test {
                 sha: "c1".to_owned(),
                 parents: Vec::new(),
                 author_time: 1,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "initial".to_owned(),
             },
             CommitArtifact {
                 sha: "c2".to_owned(),
                 parents: vec!["c1".to_owned()],
                 author_time: 2,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "first rename".to_owned(),
             },
             CommitArtifact {
                 sha: "c3".to_owned(),
                 parents: vec!["c2".to_owned()],
                 author_time: 3,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "second rename".to_owned(),
             },
         ];
@@ -3683,12 +3766,16 @@ mod parquet_temporal_test {
                 sha: "c1".to_owned(),
                 parents: Vec::new(),
                 author_time: 30,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "newer".to_owned(),
             },
             CommitArtifact {
                 sha: "c2".to_owned(),
                 parents: vec!["c1".to_owned()],
                 author_time: 10,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "older clock".to_owned(),
             },
         ];
@@ -3747,12 +3834,16 @@ mod parquet_temporal_test {
                 sha: "c1".to_owned(),
                 parents: Vec::new(),
                 author_time: 1,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "first".to_owned(),
             },
             CommitArtifact {
                 sha: "c2".to_owned(),
                 parents: vec!["c1".to_owned()],
                 author_time: 2,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "second".to_owned(),
             },
         ];
@@ -3934,6 +4025,8 @@ mod parquet_temporal_test {
             sha: "c1".to_owned(),
             parents: Vec::new(),
             author_time: 1_700_000_001,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "initial import".to_owned(),
         }];
         artifact.symbol_snapshots = vec![SymbolSnapshotArtifact {

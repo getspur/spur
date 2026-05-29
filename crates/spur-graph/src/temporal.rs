@@ -1130,18 +1130,24 @@ mod tests {
             sha: "c1".into(),
             parents: vec![],
             author_time: 0,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "init".into(),
         };
         let c2 = CommitArtifact {
             sha: "c2".into(),
             parents: vec!["c1".into()],
             author_time: 1,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "rename".into(),
         };
         let c3 = CommitArtifact {
             sha: "c3".into(),
             parents: vec!["c2".into()],
             author_time: 2,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: "later".into(),
         };
 
@@ -1261,24 +1267,32 @@ mod tests {
                 sha: "root".into(),
                 parents: vec![],
                 author_time: 0,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "root".into(),
             },
             CommitArtifact {
                 sha: "left".into(),
                 parents: vec!["root".into()],
                 author_time: 1,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "left".into(),
             },
             CommitArtifact {
                 sha: "right".into(),
                 parents: vec!["root".into()],
                 author_time: 2,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "right".into(),
             },
             CommitArtifact {
                 sha: "merge".into(),
                 parents: vec!["left".into(), "right".into()],
                 author_time: 3,
+                author_name: String::new(),
+                author_email: String::new(),
                 summary: "merge".into(),
             },
         ];

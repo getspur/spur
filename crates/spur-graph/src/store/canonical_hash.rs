@@ -211,6 +211,8 @@ mod tests {
             sha: sha.to_owned(),
             parents: Vec::new(),
             author_time: 1,
+            author_name: String::new(),
+            author_email: String::new(),
             summary: format!("commit {sha}"),
         }
     }

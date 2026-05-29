@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -1431,6 +1431,11 @@ fn code_symbol_history_events(
     let reachable = parse_as_of(args)?
         .map(|as_of| reachable_commits(commits, &as_of))
         .transpose()?;
+    let commits_by_sha = commits
+        .commits
+        .iter()
+        .map(|commit| (commit.sha.as_str(), commit))
+        .collect::<HashMap<_, _>>();
 
     Ok(history
         .into_iter()
@@ -1440,11 +1445,23 @@ fn code_symbol_history_events(
                 .is_none_or(|reachable| reachable.contains(sha))
         })
         .map(|(sha, change_kind, key)| {
-            json!({
-                "commit": sha,
-                "change_kind": change_kind,
-                "snapshot": key,
-            })
+            if let Some(commit) = commits_by_sha.get(sha.as_str()) {
+                json!({
+                    "commit": sha,
+                    "author_time": commit.author_time,
+                    "author_name": commit.author_name,
+                    "author_email": commit.author_email,
+                    "summary": commit.summary,
+                    "change_kind": change_kind,
+                    "snapshot": key,
+                })
+            } else {
+                json!({
+                    "commit": sha,
+                    "change_kind": change_kind,
+                    "snapshot": key,
+                })
+            }
         })
         .collect::<Vec<_>>())
 }
@@ -4484,12 +4501,16 @@ mod tests {
                     sha: "commit-a".to_string(),
                     parents: Vec::new(),
                     author_time: 1,
+                    author_name: String::new(),
+                    author_email: String::new(),
                     summary: "add target".to_string(),
                 },
                 CommitArtifact {
                     sha: "commit-b".to_string(),
                     parents: vec!["commit-a".to_string()],
                     author_time: 2,
+                    author_name: String::new(),
+                    author_email: String::new(),
                     summary: "modify target".to_string(),
                 },
             ],
