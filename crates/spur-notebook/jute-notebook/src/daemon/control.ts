@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   DaemonControlCommand,
   DaemonControlResponse,
+  DaemonNotebookSnapshot,
   RecentNotebookEntry,
 } from "@/bindings";
 
@@ -24,6 +25,18 @@ export function pathFromDaemonControlResponse(
 ): string {
   if (response.path) return response.path;
   throw new Error(`daemon ${command} response did not include path`);
+}
+
+export function snapshotFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): DaemonNotebookSnapshot {
+  if (response.ok && response.result?.type === "snapshot") {
+    return response.result.data;
+  }
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  throw new Error("daemon snapshot response did not include snapshot");
 }
 
 export function recentEntriesFromDaemonControlResponse(
