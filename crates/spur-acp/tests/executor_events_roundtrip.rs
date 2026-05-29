@@ -2,9 +2,9 @@
 
 use chrono::{TimeZone, Utc};
 use spur_acp::{
-    IssueSummaryEvent, PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent,
-    PlanSummaryCountsEvent, PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role,
-    SessionId, SpurEvent, SpurEventBody,
+    Column, DatasourceEntry, DatasourceKind, IssueSummaryEvent, PlanLifecycleEvent,
+    PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
+    ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
 };
 
 #[test]
@@ -183,6 +183,34 @@ fn issue_created_roundtrips() {
     let json = serde_json::to_string(&ev).unwrap();
     let round: SpurEvent = serde_json::from_str(&json).unwrap();
     assert!(matches!(round.body, SpurEventBody::IssueCreated { .. }));
+}
+
+#[test]
+fn datasources_changed_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::DatasourcesChanged {
+        session: SessionId("brain-data".into()),
+        entries: vec![DatasourceEntry {
+            name: "sales".into(),
+            path: "/tmp/sales.csv".into(),
+            kind: DatasourceKind::Csv,
+            group: Some("quarterly".into()),
+            columns: vec![Column {
+                name: "region".into(),
+                sql_type: "VARCHAR".into(),
+            }],
+            row_count: Some(2),
+        }],
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+
+    assert!(matches!(
+        round.body,
+        SpurEventBody::DatasourcesChanged { .. }
+    ));
+    assert!(json.contains("DatasourcesChanged"));
+    assert!(json.contains("sales"));
 }
 
 #[test]
