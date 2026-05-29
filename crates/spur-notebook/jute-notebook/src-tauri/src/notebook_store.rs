@@ -11,7 +11,7 @@ use std::{
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use serde_json::Map;
+use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use ts_rs::TS;
@@ -122,15 +122,13 @@ pub struct NotebookDelta {
 pub enum DeltaKind {
     /// A cell's source was replaced.
     CellWritten {
-        /// Cell identifier.
-        id: String,
+        /// Post-mutation cell, self-contained so the reducer needs no refetch.
+        cell: DaemonCell,
     },
     /// A new cell was inserted.
     CellInserted {
-        /// New cell identifier.
-        id: String,
-        /// Kind of inserted cell.
-        kind: CellKind,
+        /// Post-mutation inserted cell, self-contained so the reducer needs no refetch.
+        cell: DaemonCell,
         /// Existing cell identifier the new cell was inserted after.
         after_id: Option<String>,
     },
@@ -148,7 +146,46 @@ pub enum DeltaKind {
         event: RunCellEvent,
     },
     /// A notebook was loaded into the store.
-    Loaded,
+    Loaded {
+        /// Full notebook root after the load, self-contained for the reducer.
+        root: NotebookRoot,
+    },
+}
+
+/// Self-contained cell payload carried by deltas and daemon control reads.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct DaemonCell {
+    pub id: String,
+    pub kind: String,
+    #[ts(type = "number")]
+    pub version: u64,
+    pub last_edited_by: Option<String>,
+    pub source: String,
+    pub exec_count: Option<u32>,
+    pub status: String,
+    pub outputs: Vec<Value>,
+}
+
+/// Pending delta kind captured under the write lock before the version bump.
+///
+/// Self-contained variants (e.g. delete) carry their final payload immediately;
+/// cell-bearing variants only remember the cell id so the inline [`DaemonCell`]
+/// can be built from the post-mutation document after the version + metadata
+/// update is applied.
+enum PendingDelta {
+    CellWritten {
+        id: String,
+    },
+    CellInserted {
+        id: String,
+        after_id: Option<String>,
+    },
+    CellDeleted {
+        id: String,
+    },
 }
 
 /// Error returned by notebook store mutations.
@@ -197,18 +234,21 @@ impl NotebookStore {
     where
         P: Into<PathBuf>,
     {
-        let version = {
+        let (version, root_snapshot) = {
             let mut stored_path = self.path.lock();
             let mut inner = self.inner.write();
             *inner = root;
             *stored_path = Some(path.into());
             self.dirty.store(false, Ordering::SeqCst);
-            self.bump_version()
+            let version = self.bump_version();
+            (version, inner.clone())
         };
 
         let delta = NotebookDelta {
             version,
-            kind: DeltaKind::Loaded,
+            kind: DeltaKind::Loaded {
+                root: root_snapshot,
+            },
         };
         self.publish(&delta);
         delta
@@ -224,7 +264,7 @@ impl NotebookStore {
     /// Apply a notebook edit operation.
     pub fn apply(&self, op: NotebookOp) -> Result<NotebookDelta, StoreError> {
         let mut root = self.inner.write();
-        let (kind, metadata_update) = match op {
+        let (pending, metadata_update) = match op {
             NotebookOp::WriteCell {
                 id,
                 source,
@@ -238,8 +278,7 @@ impl NotebookStore {
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 set_cell_source(cell, source);
                 let metadata_update = Some((id.clone(), last_edited_by));
-                let kind = DeltaKind::CellWritten { id };
-                (kind, metadata_update)
+                (PendingDelta::CellWritten { id }, metadata_update)
             }
             NotebookOp::InsertCell {
                 kind,
@@ -259,8 +298,7 @@ impl NotebookStore {
                 root.cells
                     .insert(insert_at, make_cell(kind, id.clone(), source));
                 let metadata_update = Some((id.clone(), last_edited_by));
-                let kind = DeltaKind::CellInserted { id, kind, after_id };
-                (kind, metadata_update)
+                (PendingDelta::CellInserted { id, after_id }, metadata_update)
             }
             NotebookOp::DeleteCell {
                 id,
@@ -270,7 +308,7 @@ impl NotebookStore {
                 let index = find_cell_index(&root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 root.cells.remove(index);
-                (DeltaKind::CellDeleted { id }, None)
+                (PendingDelta::CellDeleted { id }, None)
             }
             NotebookOp::SetJuteDeckMetadata {
                 id,
@@ -285,25 +323,37 @@ impl NotebookStore {
                 merge_jute_deck_metadata(&mut merged, patch);
                 metadata.jute_deck = Some(merged);
                 let metadata_update = Some((id.clone(), Some("brain".to_string())));
-                let kind = DeltaKind::CellWritten { id };
-                (kind, metadata_update)
+                (PendingDelta::CellWritten { id }, metadata_update)
             }
             NotebookOp::ApplyEdit { id, source } => {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 set_cell_source(cell, source);
                 let metadata_update = Some((id.clone(), None));
-                let kind = DeltaKind::CellWritten { id };
-                (kind, metadata_update)
+                (PendingDelta::CellWritten { id }, metadata_update)
             }
         };
 
+        // Two-phase: bump the version and stamp the spur metadata first, then
+        // build the inline cell from the now-final document so its version and
+        // last_edited_by match the delta.
         let version = self.bump_version();
         if let Some((id, last_edited_by)) = metadata_update {
             if let Some(cell) = find_cell_mut(&mut root, &id) {
                 set_cell_spur_metadata(cell, version, last_edited_by);
             }
         }
+
+        let kind = match pending {
+            PendingDelta::CellWritten { id } => DeltaKind::CellWritten {
+                cell: daemon_cell(&root, &id).ok_or(StoreError::CellNotFound { id })?,
+            },
+            PendingDelta::CellInserted { id, after_id } => DeltaKind::CellInserted {
+                cell: daemon_cell(&root, &id).ok_or(StoreError::CellNotFound { id })?,
+                after_id,
+            },
+            PendingDelta::CellDeleted { id } => DeltaKind::CellDeleted { id },
+        };
 
         let delta = NotebookDelta { version, kind };
         self.dirty.store(true, Ordering::SeqCst);
@@ -452,6 +502,69 @@ fn find_cell<'a>(root: &'a NotebookRoot, id: &str) -> Option<&'a Cell> {
     root.cells
         .iter()
         .find(|cell| cell_id(cell).is_some_and(|cell_id| cell_id == id))
+}
+
+/// Build a self-contained [`DaemonCell`] from the current document, or `None`
+/// when no cell with `id` exists. This is the layering-correct home for the
+/// root→cell conversion; `commands` re-exports it for the daemon read path.
+pub(crate) fn daemon_cell(root: &NotebookRoot, id: &str) -> Option<DaemonCell> {
+    let cell = find_cell(root, id)?;
+    let (kind, source, version, last_edited_by, exec_count, outputs) = match cell {
+        Cell::Raw(cell) => {
+            let spur = cell.metadata.spur.as_ref();
+            (
+                "raw",
+                multiline_to_string(&cell.source),
+                spur.map(|spur| spur.version).unwrap_or_default(),
+                spur.and_then(|spur| spur.last_edited_by.clone()),
+                None,
+                Vec::new(),
+            )
+        }
+        Cell::Markdown(cell) => {
+            let spur = cell.metadata.spur.as_ref();
+            (
+                "markdown",
+                multiline_to_string(&cell.source),
+                spur.map(|spur| spur.version).unwrap_or_default(),
+                spur.and_then(|spur| spur.last_edited_by.clone()),
+                None,
+                Vec::new(),
+            )
+        }
+        Cell::Code(cell) => {
+            let spur = cell.metadata.spur.as_ref();
+            (
+                "code",
+                multiline_to_string(&cell.source),
+                spur.map(|spur| spur.version).unwrap_or_default(),
+                spur.and_then(|spur| spur.last_edited_by.clone()),
+                cell.execution_count,
+                cell.outputs
+                    .iter()
+                    .map(|output| serde_json::to_value(output).unwrap_or(Value::Null))
+                    .collect(),
+            )
+        }
+    };
+
+    Some(DaemonCell {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        version,
+        last_edited_by,
+        source,
+        exec_count,
+        status: "idle".to_string(),
+        outputs,
+    })
+}
+
+fn multiline_to_string(source: &MultilineString) -> String {
+    match source {
+        MultilineString::Single(source) => source.clone(),
+        MultilineString::Multi(lines) => lines.join(""),
+    }
 }
 
 fn find_cell_mut<'a>(root: &'a mut NotebookRoot, id: &str) -> Option<&'a mut Cell> {
@@ -750,12 +863,78 @@ mod tests {
         assert_eq!(second_delta.version, delta.version);
         assert!(matches!(
             first_delta.kind,
-            DeltaKind::CellWritten { id } if id == CELL_ID
+            DeltaKind::CellWritten { cell } if cell.id == CELL_ID
         ));
         assert!(matches!(
             second_delta.kind,
-            DeltaKind::CellWritten { id } if id == CELL_ID
+            DeltaKind::CellWritten { cell } if cell.id == CELL_ID
         ));
+    }
+
+    #[test]
+    fn cell_written_delta_carries_post_mutation_cell() {
+        let store = store_with_notebook();
+
+        let delta = store
+            .apply(NotebookOp::WriteCell {
+                id: CELL_ID.to_string(),
+                source: "answer = 42".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+
+        let DeltaKind::CellWritten { cell } = delta.kind else {
+            panic!("expected CellWritten delta");
+        };
+        assert_eq!(cell.id, CELL_ID);
+        assert_eq!(cell.kind, "code");
+        assert_eq!(cell.source, "answer = 42");
+        // Two-phase build must reflect the post-bump version + metadata.
+        assert_eq!(cell.version, delta.version);
+        assert_eq!(cell.last_edited_by.as_deref(), Some("brain"));
+    }
+
+    #[test]
+    fn cell_inserted_delta_carries_post_mutation_cell() {
+        let store = store_with_notebook();
+
+        let delta = store
+            .apply(NotebookOp::InsertCell {
+                kind: CellKind::Markdown,
+                after_id: Some(CELL_ID.to_string()),
+                source: "notes".to_string(),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+
+        let DeltaKind::CellInserted { cell, after_id } = delta.kind else {
+            panic!("expected CellInserted delta");
+        };
+        assert_eq!(after_id.as_deref(), Some(CELL_ID));
+        assert_eq!(cell.kind, "markdown");
+        assert_eq!(cell.source, "notes");
+        assert_eq!(cell.version, delta.version);
+        assert_eq!(cell.last_edited_by.as_deref(), Some("brain"));
+    }
+
+    #[test]
+    fn loaded_delta_carries_root() {
+        let store = NotebookStore::new(Arc::new(SaveCoordinator::default()));
+
+        let delta = store.load("/tmp/test.ipynb", notebook_with_source("loaded body"));
+
+        let DeltaKind::Loaded { root } = delta.kind else {
+            panic!("expected Loaded delta");
+        };
+        assert_eq!(root.cells.len(), 1);
+        let Cell::Code(cell) = &root.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.source,
+            MultilineString::Single("loaded body".to_string())
+        );
     }
 
     #[test]
@@ -814,7 +993,7 @@ mod tests {
 
         assert!(matches!(
             delta.kind,
-            DeltaKind::CellWritten { id } if id == OTHER_CELL_ID
+            DeltaKind::CellWritten { cell } if cell.id == OTHER_CELL_ID
         ));
         let (snapshot, _version) = store.snapshot();
         let Cell::Code(cell) = &snapshot.cells[1] else {
@@ -888,7 +1067,7 @@ mod tests {
 
         assert!(matches!(
             delta.kind,
-            DeltaKind::CellWritten { id } if id == CELL_ID
+            DeltaKind::CellWritten { cell } if cell.id == CELL_ID
         ));
         let (snapshot, _version) = store.snapshot();
         let Cell::Code(cell) = &snapshot.cells[0] else {

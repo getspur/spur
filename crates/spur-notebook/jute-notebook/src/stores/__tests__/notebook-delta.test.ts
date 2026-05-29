@@ -25,7 +25,7 @@ describe("reconcileNotebookDelta", () => {
     __resetNotebookRuntimeConfigCacheForTesting();
   });
 
-  test("updates a cell source after a CellWritten delta", async () => {
+  test("upserts the inline cell from a CellWritten delta without refetching", async () => {
     const cellId = "cell-1";
     const updatedCell: DaemonCell = {
       id: cellId,
@@ -38,7 +38,7 @@ describe("reconcileNotebookDelta", () => {
       outputs: [],
     };
 
-    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    invokeMock.mockImplementation(async (command: string) => {
       if (command === "notebook_runtime_config") return { inProcStore: true };
       if (command === "start_kernel") return "kernel-1";
       if (command === "kernel_slot_info") {
@@ -51,10 +51,6 @@ describe("reconcileNotebookDelta", () => {
           mem_mb: 0,
         };
       }
-      if (command === "read_notebook_store_cell") {
-        expect(args).toEqual({ id: cellId });
-        return updatedCell;
-      }
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -64,7 +60,7 @@ describe("reconcileNotebookDelta", () => {
 
     const delta: NotebookDelta = {
       version: 2,
-      kind: { type: "cellWritten", id: cellId },
+      kind: { type: "cellWritten", cell: updatedCell },
     };
     await reconcileNotebookDelta(notebook, delta);
 
@@ -72,6 +68,9 @@ describe("reconcileNotebookDelta", () => {
       state.cells[cellId]?.source;
     expect(selectSource(notebook.store.getState())).toBe("answer = 42");
     expect(notebook.store.getState().cells[cellId]?.lastEditedBy).toBe("brain");
+    // No cell-refetch invoke: the mock throws on any unexpected command, so the
+    // reducer applying the inline cell is what keeps this test green.
+    expect(notebook.store.getState().cells[cellId]?.version).toBe(2);
   });
 });
 

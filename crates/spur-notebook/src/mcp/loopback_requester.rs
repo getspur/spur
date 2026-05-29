@@ -345,10 +345,13 @@ fn inserted_cell_result(result: Value) -> Result<Value, BridgeError> {
             "expected delta kind cellInserted, got {actual_kind}"
         )));
     }
+    // CellInserted now nests the cell payload, so the id lives under `cell`.
     let id = kind
-        .get("id")
+        .get("cell")
+        .and_then(Value::as_object)
+        .and_then(|cell| cell.get("id"))
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid_daemon_result("insert delta did not include id"))?;
+        .ok_or_else(|| invalid_daemon_result("insert delta did not include cell id"))?;
     Ok(json!({ "id": id, "version": version }))
 }
 
