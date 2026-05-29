@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 162);
+        assert_eq!(TokenMap::dark_default().0.len(), 163);
     }
 
     #[test]
