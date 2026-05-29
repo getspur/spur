@@ -4,12 +4,14 @@
 use std::{
     env,
     ffi::OsString,
+    io::ErrorKind,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::Duration,
 };
 
+use anyhow::Context as _;
 use jute::state::State;
 use spur_core::notebook::notebook_binary_path;
 #[cfg(target_os = "macos")]
@@ -18,6 +20,9 @@ use spur_notebook::mcp::{self, bridge::AgentBridge};
 use tauri::AppHandle;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+const DAEMON_SPAWN_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_SPAWN_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 fn handle_file_associations(
     app: &AppHandle,
@@ -146,22 +151,95 @@ async fn connect_or_spawn_daemon(
     socket_path: &PathBuf,
     config: mcp::NotebookConfig,
 ) -> anyhow::Result<UnixStream> {
+    connect_or_spawn_daemon_with(socket_path, config, &spawn_notebook_app).await
+}
+
+async fn connect_or_spawn_daemon_with<F>(
+    socket_path: &Path,
+    config: mcp::NotebookConfig,
+    spawn_daemon: &F,
+) -> anyhow::Result<UnixStream>
+where
+    F: Fn(&Path, mcp::NotebookConfig) -> anyhow::Result<()> + Sync,
+{
+    if let Some(stream) = try_connect_daemon(socket_path).await? {
+        return Ok(stream);
+    }
+
+    let _spawn_lock = acquire_daemon_spawn_lock(socket_path).await?;
+    if let Some(stream) = try_connect_daemon(socket_path).await? {
+        return Ok(stream);
+    }
+
+    spawn_daemon(socket_path, config)?;
+    wait_for_daemon_socket(socket_path).await
+}
+
+async fn try_connect_daemon(socket_path: &Path) -> anyhow::Result<Option<UnixStream>> {
     match UnixStream::connect(socket_path).await {
-        Ok(stream) => Ok(stream),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            spawn_notebook_app(socket_path, config)?;
-            wait_for_daemon_socket(socket_path).await
-        }
+        Ok(stream) => Ok(Some(stream)),
+        Err(error) if daemon_socket_needs_spawn(error.kind()) => Ok(None),
         Err(error) => Err(error).map_err(Into::into),
     }
 }
 
-fn spawn_notebook_app(socket_path: &PathBuf, config: mcp::NotebookConfig) -> anyhow::Result<()> {
+fn daemon_socket_needs_spawn(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::NotFound | ErrorKind::ConnectionRefused)
+}
+
+struct DaemonSpawnLock {
+    _file: std::fs::File,
+}
+
+async fn acquire_daemon_spawn_lock(socket_path: &Path) -> anyhow::Result<DaemonSpawnLock> {
+    use fs4::fs_std::FileExt as _;
+
+    let lock_path = daemon_spawn_lock_path(socket_path);
+    if let Some(parent) = lock_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    let deadline = tokio::time::Instant::now() + DAEMON_SPAWN_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(true) => return Ok(DaemonSpawnLock { _file: file }),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to acquire notebook daemon spawn lock {}",
+                        lock_path.display()
+                    )
+                });
+            }
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            anyhow::bail!(
+                "timed out acquiring notebook daemon spawn lock {}",
+                lock_path.display()
+            );
+        }
+        tokio::time::sleep(DAEMON_SPAWN_LOCK_RETRY_INTERVAL.min(deadline - now)).await;
+    }
+}
+
+fn daemon_spawn_lock_path(socket_path: &Path) -> PathBuf {
+    let mut lock_path = socket_path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn spawn_notebook_app(socket_path: &Path, config: mcp::NotebookConfig) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -204,7 +282,7 @@ fn notebook_daemon_args(socket_path: &Path, config: mcp::NotebookConfig) -> Vec<
     ]
 }
 
-async fn wait_for_daemon_socket(socket_path: &PathBuf) -> anyhow::Result<UnixStream> {
+async fn wait_for_daemon_socket(socket_path: &Path) -> anyhow::Result<UnixStream> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let error = match UnixStream::connect(socket_path).await {
@@ -585,5 +663,80 @@ mod tests {
 
         assert_eq!(socket, Some(socket_path));
         assert!(!config.in_proc_store);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_daemon_connects_share_one_spawned_listener() {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener as StdUnixListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::thread::JoinHandle;
+        use tokio::io::AsyncWriteExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("shared.sock");
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let listener_thread = Arc::new(Mutex::new(None::<JoinHandle<std::io::Result<()>>>));
+
+        let spawn_count_for_spawn = Arc::clone(&spawn_count);
+        let listener_thread_for_spawn = Arc::clone(&listener_thread);
+        let spawn_daemon =
+            move |socket_path: &Path, _config: mcp::NotebookConfig| -> anyhow::Result<()> {
+                if spawn_count_for_spawn.fetch_add(1, Ordering::SeqCst) != 0 {
+                    anyhow::bail!("spawn hook called more than once");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                if let Some(parent) = socket_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let listener = StdUnixListener::bind(socket_path)?;
+                let handle = std::thread::spawn(move || -> std::io::Result<()> {
+                    let (mut first, _) = listener.accept()?;
+                    let (mut second, _) = listener.accept()?;
+                    let mut byte = [0_u8; 1];
+                    first.read_exact(&mut byte)?;
+                    second.read_exact(&mut byte)?;
+                    Ok(())
+                });
+                *listener_thread_for_spawn
+                    .lock()
+                    .expect("listener thread lock") = Some(handle);
+                Ok(())
+            };
+        let config = mcp::NotebookConfig {
+            in_proc_store: false,
+        };
+
+        let (first, second) = tokio::join!(
+            connect_or_spawn_daemon_with(&socket_path, config, &spawn_daemon),
+            connect_or_spawn_daemon_with(&socket_path, config, &spawn_daemon)
+        );
+        let mut first = first.expect("first caller should connect");
+        let mut second = second.expect("second caller should connect");
+
+        first.write_all(b"x").await.expect("write first byte");
+        second.write_all(b"y").await.expect("write second byte");
+        drop(first);
+        drop(second);
+
+        let handle = listener_thread
+            .lock()
+            .expect("listener thread lock")
+            .take()
+            .expect("listener thread should be spawned");
+        handle
+            .join()
+            .expect("listener thread panicked")
+            .expect("listener");
+        let lock = tokio::time::timeout(
+            Duration::from_secs(1),
+            acquire_daemon_spawn_lock(&socket_path),
+        )
+        .await
+        .expect("spawn lock should not leak")
+        .expect("reacquire spawn lock");
+        drop(lock);
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
     }
 }
