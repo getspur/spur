@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _, Result};
 use serde::Serialize;
-use spur_graph::{artifact_content_hash_blake3_hex, load_artifact, GraphIndexArtifact};
+use spur_graph::{load_artifact, write_artifact_parquet, WriteOptions};
 
-const DEFAULT_FIXTURE_PATH: &str = "/Volumes/Projects/spur/.spur/graph-index.json";
+const DEFAULT_FIXTURE_PATH: &str = "/Volumes/Projects/spur/.spur/graph/current.parquet";
 const DEFAULT_OUTPUT_PATH: &str = "crates/spur-graph/benches/baselines.json";
 const DEFAULT_SAMPLE_COUNT: usize = 10;
 
@@ -136,7 +136,7 @@ fn capture_baselines(options: &CaptureOptions) -> Result<()> {
     })?;
 
     eprintln!(
-        "capturing JSON baselines: fixture={}, samples={}",
+        "capturing Parquet baselines: fixture={}, samples={}",
         fixture_path.display(),
         options.samples
     );
@@ -163,21 +163,22 @@ fn capture_baselines(options: &CaptureOptions) -> Result<()> {
         )
     })?;
 
-    let temp_dir = env::temp_dir().join(format!("spur-graph-json-baselines-{}", process::id()));
+    let temp_dir = env::temp_dir().join(format!("spur-graph-parquet-baselines-{}", process::id()));
     fs::create_dir_all(&temp_dir)
         .with_context(|| format!("failed to create `{}`", temp_dir.display()))?;
 
     let mut write_ms_samples = Vec::with_capacity(options.samples);
     let write_result = (|| -> Result<()> {
         for sample_index in 0..options.samples {
-            let output_path = temp_dir.join(format!("artifact-{sample_index:02}.json"));
+            let output_path = temp_dir.join(format!("artifact-{sample_index:02}.parquet"));
             let started = Instant::now();
-            write_legacy_json_artifact(&artifact, &output_path).with_context(|| {
-                format!(
-                    "failed to write sample artifact `{}`",
-                    output_path.display()
-                )
-            })?;
+            write_artifact_parquet(&artifact, &output_path, WriteOptions::default(), Vec::new())
+                .with_context(|| {
+                    format!(
+                        "failed to write sample artifact `{}`",
+                        output_path.display()
+                    )
+                })?;
             let elapsed_ms = duration_ms(started.elapsed());
             eprintln!("write sample {:02}: {:.3}ms", sample_index + 1, elapsed_ms);
             write_ms_samples.push(elapsed_ms);
@@ -257,17 +258,6 @@ fn sample_load_artifact(fixture_path: &Path) -> Result<(f64, u64)> {
     std::hint::black_box(&artifact);
     let peak_rss_kb = peak_rss_kb().context("failed to capture peak RSS")?;
     Ok((elapsed_ms, peak_rss_kb))
-}
-
-fn write_legacy_json_artifact(artifact: &GraphIndexArtifact, path: &Path) -> Result<()> {
-    let mut artifact_with_hash = artifact.clone();
-    artifact_with_hash.header.content_hash_blake3 = Some(
-        artifact_content_hash_blake3_hex(artifact)
-            .context("failed to compute graph artifact content hash")?,
-    );
-    let json =
-        serde_json::to_string_pretty(&artifact_with_hash).context("failed to encode artifact")?;
-    fs::write(path, json).with_context(|| format!("failed to write `{}`", path.display()))
 }
 
 fn duration_ms(duration: Duration) -> f64 {

@@ -25,34 +25,19 @@ fn load_artifact_dispatches_directory_to_parquet_reader() {
 }
 
 #[test]
-fn load_artifact_dispatches_file_to_legacy_json_reader() {
+fn load_artifact_rejects_file_path_with_parquet_directory_error() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let expected = fixture_artifact();
-    let json_path = tempdir.path().join("legacy-graph-index.json");
-    std::fs::write(
-        &json_path,
-        serde_json::to_string_pretty(&expected).expect("encode legacy artifact"),
-    )
-    .expect("write legacy artifact");
+    let artifact_path = tempdir.path().join("graph-index.json");
+    std::fs::write(&artifact_path, "{}").expect("write file artifact");
 
-    let loaded = load_artifact(&json_path).expect("load legacy JSON artifact through dispatcher");
+    let error = load_artifact(&artifact_path).expect_err("file path should be rejected");
 
-    assert_eq!(loaded.graph_content_hash, GRAPH_CONTENT_HASH);
-    assert_common_artifact_fields_eq(&loaded, &expected);
-    assert!(loaded.file_node_ids.is_empty());
-    assert!(loaded.symbol_node_ids.is_empty());
-}
-
-fn assert_common_artifact_fields_eq(actual: &GraphIndexArtifact, expected: &GraphIndexArtifact) {
-    assert_eq!(actual.header, expected.header);
-    assert_eq!(actual.manifest_version, expected.manifest_version);
-    assert_eq!(actual.graph_content_hash, expected.graph_content_hash);
-    assert_eq!(actual.file_manifests, expected.file_manifests);
-    assert_eq!(actual.files, expected.files);
-    assert_eq!(actual.symbols, expected.symbols);
-    assert_eq!(actual.edges, expected.edges);
-    assert_eq!(actual.tombstones, expected.tombstones);
-    assert_eq!(actual.diagnostics, expected.diagnostics);
+    assert!(
+        error
+            .to_string()
+            .contains("expected a Parquet artifact directory"),
+        "unexpected error: {error:#}"
+    );
 }
 
 fn fixture_artifact() -> GraphIndexArtifact {
