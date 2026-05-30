@@ -22,7 +22,11 @@ use rmcp::{
 };
 use serde_json::Value;
 use spur_acp::SpurEventBody;
-use spur_graph::GRAPH_INDEX_VERSION_TEMPORAL;
+use spur_graph::{
+    write_artifact_parquet, write_current_pointer, GraphFileArtifact, GraphFileManifestEntry,
+    GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId, WriteOptions,
+    GRAPH_INDEX_VERSION_TEMPORAL,
+};
 use spur_license::policy::PolicyResolver;
 use spur_license::FeatureGate;
 use spur_mcp::events::McpEventSink;
@@ -315,37 +319,7 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
 #[tokio::test]
 async fn tools_call_code_graph_metadata_tools_are_reachable() {
     let (dir, server) = test_server_with_real_pm().await;
-    std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
-    std::fs::write(
-        dir.path().join(".spur/graph-index.json"),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "header": {
-                "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
-            },
-            "manifest_version": "worker-test",
-            "graph_content_hash": "worker-hash",
-            "files": [
-                { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
-            ],
-            "symbols": [
-                {
-                    "stable_symbol_id": "symbol-launch",
-                    "file_path": "src/lib.rs",
-                    "byte_range": [0, 8],
-                    "line_range": [1, 3],
-                    "entity_name": "launch_order",
-                    "qualified_name": "launch_order",
-                    "symbol_kind": "function",
-                    "anchor_hash": "hash-symbol-launch",
-                    "enclosing_scope": null
-                }
-            ],
-            "edges": [],
-            "tombstones": []
-        }))
-        .expect("encode graph fixture"),
-    )
-    .expect("write graph fixture");
+    write_worker_graph_fixture(dir.path());
     let _cwd = CwdGuard::enter(dir.path());
     let token = server.issue_token("d-1", Duration::from_secs(60));
 
@@ -380,6 +354,55 @@ async fn tools_call_code_graph_metadata_tools_are_reachable() {
     }
 
     server.shutdown(Duration::from_secs(5)).await;
+}
+
+fn write_worker_graph_fixture(worktree: &Path) {
+    let artifact = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            content_hash_blake3: None,
+        },
+        manifest_version: "worker-test".to_string(),
+        graph_content_hash: "worker-hash".to_string(),
+        file_manifests: vec![GraphFileManifestEntry {
+            stable_file_id: "file-src-lib".to_string(),
+            path: "src/lib.rs".to_string(),
+            content_oid: "0000000000000000000000000000000000000000".to_string(),
+            node_ids: Vec::new(),
+        }],
+        files: vec![GraphFileArtifact {
+            stable_file_id: "file-src-lib".to_string(),
+            file_path: "src/lib.rs".to_string(),
+        }],
+        file_node_ids: vec![NodeId(1)],
+        symbols: vec![GraphSymbolArtifact {
+            stable_symbol_id: "symbol-launch".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            byte_range: [0, 8],
+            line_range: [1, 3],
+            entity_name: "launch_order".to_string(),
+            qualified_name: "launch_order".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "hash-symbol-launch".to_string(),
+            enclosing_scope: None,
+        }],
+        symbol_node_ids: vec![NodeId(1_001)],
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    };
+    let artifact_base = worktree.join(".spur/graph");
+    let written = write_artifact_parquet(
+        &artifact,
+        &artifact_base,
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
+    write_current_pointer(worktree, &written).expect("write CURRENT pointer");
 }
 
 // ─── T23: per-delegation summary event emission ───────────────────────────
