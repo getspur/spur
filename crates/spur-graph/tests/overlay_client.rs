@@ -259,6 +259,69 @@ fn deleted_symbol_is_shadowed_and_unchanged_callee_becomes_unresolved() {
     assert_clients_match(&overlay, &full, "deleted-id");
 }
 
+#[test]
+fn changed_file_adding_call_to_unchanged_symbol_is_reflected_in_callers() {
+    // base: `mover` (in the to-be-changed file) does NOT yet call `unchanged_target`.
+    let base = artifact(
+        "base-newcall",
+        vec![file("src/changed.rs"), file("src/unchanged.rs")],
+        vec![
+            symbol("mover-id", "src/changed.rs", [1, 4], "mover", "mover"),
+            symbol(
+                "unchanged-target-id",
+                "src/unchanged.rs",
+                [10, 14],
+                "unchanged_target",
+                "unchanged_target",
+            ),
+        ],
+        vec![],
+    );
+    // delta (changed.rs only): `mover` now calls `unchanged_target`. The target lives
+    // outside the delta's extraction scope, so the edge is UNRESOLVED in the delta —
+    // exactly what build_facts_for_paths produces for a cross-boundary call.
+    let delta = artifact(
+        "delta-newcall",
+        vec![file("src/changed.rs")],
+        vec![symbol(
+            "mover-id",
+            "src/changed.rs",
+            [1, 6],
+            "mover",
+            "mover",
+        )],
+        vec![edge("mover-id", None, Some("unchanged_target"))],
+    );
+    let overlay = overlay_from_parts(base, delta, ["src/changed.rs"]);
+
+    // Oracle: a full rebuild resolves the edge to the unchanged target.
+    let full = InMemoryClient::new(Arc::new(artifact(
+        "full-newcall",
+        vec![file("src/changed.rs"), file("src/unchanged.rs")],
+        vec![
+            symbol("mover-id", "src/changed.rs", [1, 6], "mover", "mover"),
+            symbol(
+                "unchanged-target-id",
+                "src/unchanged.rs",
+                [10, 14],
+                "unchanged_target",
+                "unchanged_target",
+            ),
+        ],
+        vec![edge(
+            "mover-id",
+            Some("unchanged-target-id"),
+            Some("unchanged_target"),
+        )],
+    )));
+
+    assert_eq!(
+        caller_records(overlay.find_caller_edges("unchanged-target-id")),
+        caller_records(full.find_caller_edges("unchanged-target-id")),
+        "find_caller_edges(unchanged-target-id) must include the new caller from the changed file"
+    );
+}
+
 fn assert_clients_match(
     actual: &impl spur_graph::GraphQueryClient,
     expected: &impl spur_graph::GraphQueryClient,
