@@ -376,6 +376,7 @@ const MAX_MCP_CODE_READ_SYMBOL_CONTEXT_LINES: usize = 50;
 const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
+const COLD_OPEN_GRAPH_REBUILD_TIMEOUT: Duration = Duration::from_secs(120);
 
 tokio::task_local! {
     static SCOPED_CODE_GRAPH_WORKTREE_ROOT: PathBuf;
@@ -2126,34 +2127,12 @@ async fn try_rebuild_artifact(
     rebuild_candidate: RebuildCandidate,
     base_seed: Option<&'static str>,
 ) -> RebuildAttempt {
-    let RebuildCandidate { worktree, key } = rebuild_candidate;
-    let mut task = tokio::spawn(async move {
-        rebuild_coordinator
-            .get_or_build(key, move || {
-                let previous_artifact = Arc::clone(&previous_artifact);
-                let worktree = worktree.clone();
-                async move {
-                    #[cfg(any(test, feature = "test-support"))]
-                    apply_graph_rebuild_delay_for_test().await;
-                    tokio::task::spawn_blocking(move || {
-                        let (artifact, _mode, stats) =
-                            spur_graph::store::build::artifact_from_facts_incremental(
-                                &previous_artifact,
-                                &worktree,
-                            )?;
-                        if let Some(base) = base_seed {
-                            emit_base_seed_stats(base, stats);
-                        }
-                        Ok(Arc::new(artifact))
-                    })
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("in-memory graph rebuild task failed: {error}")
-                    })?
-                }
-            })
-            .await
-    });
+    let mut task = spawn_incremental_rebuild_task(
+        rebuild_coordinator,
+        previous_artifact,
+        rebuild_candidate,
+        base_seed,
+    );
 
     match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
         Ok(Ok(Ok(artifact))) => RebuildAttempt::Fresh(artifact),
@@ -2196,6 +2175,66 @@ async fn try_rebuild_artifact(
             RebuildAttempt::StaleBudgetExceeded
         }
     }
+}
+
+async fn try_rebuild_artifact_blocking(
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    previous_artifact: Arc<GraphIndexArtifact>,
+    rebuild_candidate: RebuildCandidate,
+    base_seed: Option<&'static str>,
+) -> anyhow::Result<Arc<GraphIndexArtifact>> {
+    let task = spawn_incremental_rebuild_task(
+        rebuild_coordinator,
+        previous_artifact,
+        rebuild_candidate,
+        base_seed,
+    );
+    match tokio::time::timeout(COLD_OPEN_GRAPH_REBUILD_TIMEOUT, task).await {
+        Ok(Ok(artifact)) => artifact,
+        Ok(Err(error)) => Err(anyhow::anyhow!(
+            "in-memory graph rebuild task failed: {error}"
+        )),
+        Err(_) => Err(anyhow::anyhow!(
+            "in-memory graph rebuild exceeded hard timeout of {:?}",
+            COLD_OPEN_GRAPH_REBUILD_TIMEOUT
+        )),
+    }
+}
+
+fn spawn_incremental_rebuild_task(
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    previous_artifact: Arc<GraphIndexArtifact>,
+    rebuild_candidate: RebuildCandidate,
+    base_seed: Option<&'static str>,
+) -> tokio::task::JoinHandle<anyhow::Result<Arc<GraphIndexArtifact>>> {
+    let RebuildCandidate { worktree, key } = rebuild_candidate;
+    tokio::spawn(async move {
+        rebuild_coordinator
+            .get_or_build(key, move || {
+                let previous_artifact = Arc::clone(&previous_artifact);
+                let worktree = worktree.clone();
+                async move {
+                    #[cfg(any(test, feature = "test-support"))]
+                    apply_graph_rebuild_delay_for_test().await;
+                    tokio::task::spawn_blocking(move || {
+                        let (artifact, _mode, stats) =
+                            spur_graph::store::build::artifact_from_facts_incremental(
+                                &previous_artifact,
+                                &worktree,
+                            )?;
+                        if let Some(base) = base_seed {
+                            emit_base_seed_stats(base, stats);
+                        }
+                        Ok(Arc::new(artifact))
+                    })
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("in-memory graph rebuild task failed: {error}")
+                    })?
+                }
+            })
+            .await
+    })
 }
 
 async fn try_rebuild_artifact_from_worktree(
@@ -2448,6 +2487,12 @@ pub(crate) async fn overlaid_graph_artifact_from_base_seed_for_worktree(
     let Some(seed) = load_base_seed_for_worktree(&worktree) else {
         return Err(graph_artifact_missing(&worktree));
     };
+    if base_seed_matches_clean_worktree(&worktree, &seed)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Arc::clone(&seed.artifact));
+    }
     let Some(rebuild_candidate) = rebuild_candidate_for_base_seed(&worktree, &seed.artifact).await
     else {
         return Err(McpHandlerError::Internal(format!(
@@ -2456,17 +2501,38 @@ pub(crate) async fn overlaid_graph_artifact_from_base_seed_for_worktree(
         )));
     };
 
-    match try_rebuild_artifact_from_seed(rebuild_coordinator, rebuild_candidate, seed).await {
-        RebuildAttempt::Fresh(artifact) => Ok(artifact),
-        RebuildAttempt::StaleBudgetExceeded => Err(McpHandlerError::Internal(format!(
-            "graph artifact not found and base-seed overlay exceeded the latency budget in {}",
-            worktree.display()
-        ))),
-        RebuildAttempt::StaleRebuildFailed => Err(McpHandlerError::Internal(format!(
-            "graph artifact not found and base-seed overlay failed in {}",
+    match try_rebuild_artifact_blocking(
+        rebuild_coordinator,
+        seed.artifact,
+        rebuild_candidate,
+        Some(seed.base),
+    )
+    .await
+    {
+        Ok(artifact) => Ok(artifact),
+        Err(error) => Err(McpHandlerError::Internal(format!(
+            "graph artifact not found and base-seed overlay failed in {}: {error}",
             worktree.display()
         ))),
     }
+}
+
+async fn base_seed_matches_clean_worktree(
+    worktree: &Path,
+    seed: &BaseArtifactSeed,
+) -> Option<bool> {
+    let indexed_commit_oid = non_empty_string(seed.indexed_commit_oid.clone())?;
+    tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
+        let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
+        if head_oid != indexed_commit_oid {
+            return Some(false);
+        }
+        let status = run_git_stdout(worktree, &["status", "--porcelain"]).await?;
+        Some(status.is_empty())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn rebuild_candidate_for_base_seed(
