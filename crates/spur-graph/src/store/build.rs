@@ -96,6 +96,11 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         query: "spur-edges",
         bytes: include_bytes!("../../queries/typescript/spur-edges.scm"),
     },
+    ManifestQueryBytes {
+        language: "typescript",
+        query: "jsx-edges",
+        bytes: include_bytes!("../../queries/typescript/jsx-edges.scm"),
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
