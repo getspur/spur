@@ -1428,6 +1428,7 @@ mod tests {
                         version,
                         last_edited_by: None,
                         datasource_setup: None,
+                        dag: None,
                     }),
                     jute_deck: None,
                     other: Default::default(),

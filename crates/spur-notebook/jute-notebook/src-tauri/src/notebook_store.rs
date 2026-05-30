@@ -22,9 +22,9 @@ use crate::{
     backend::{
         commands::RunCellEvent,
         notebook::{
-            Cell, CellMetadata, CodeCell, JuteDeckCellMetadata, MarkdownCell, MultilineString,
-            NotebookMetadata, NotebookRoot, Output, OutputDisplayData, OutputError,
-            OutputExecuteResult, OutputStream, RawCell,
+            Cell, CellDagMetadata, CellMetadata, CodeCell, JuteDeckCellMetadata, MarkdownCell,
+            MultilineString, NotebookMetadata, NotebookRoot, Output, OutputDisplayData,
+            OutputError, OutputExecuteResult, OutputStream, RawCell,
         },
     },
     commands::SaveCoordinator,
@@ -98,6 +98,15 @@ pub enum NotebookOp {
         id: String,
         /// Metadata patch. Only `Some` fields overwrite existing values.
         patch: JuteDeckCellMetadata,
+        /// Expected cell version for optimistic concurrency.
+        expected_version: u64,
+    },
+    /// Set SPUR DAG metadata for an existing cell after checking cell version.
+    SetSpurDagMetadata {
+        /// Cell identifier.
+        id: String,
+        /// DAG metadata patch.
+        patch: CellDagMetadata,
         /// Expected cell version for optimistic concurrency.
         expected_version: u64,
     },
@@ -341,6 +350,27 @@ impl NotebookStore {
                 let metadata_update = Some((id.clone(), Some("brain".to_string())));
                 (PendingDelta::CellWritten { id }, metadata_update)
             }
+            NotebookOp::SetSpurDagMetadata {
+                id,
+                patch,
+                expected_version,
+            } => {
+                self.ensure_cell_version(&root, &id, expected_version)?;
+                let cell = find_cell_mut(&mut root, &id)
+                    .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
+                let metadata = cell_metadata_mut(cell);
+                let spur = metadata.spur.get_or_insert_with(|| {
+                    crate::backend::notebook::SpurCellMetadata {
+                        version: 0,
+                        last_edited_by: None,
+                        datasource_setup: None,
+                        dag: None,
+                    }
+                });
+                spur.dag = Some(patch);
+                let metadata_update = Some((id.clone(), Some("brain".to_string())));
+                (PendingDelta::CellWritten { id }, metadata_update)
+            }
             NotebookOp::ApplyEdit { id, source } => {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
@@ -357,6 +387,7 @@ impl NotebookStore {
                         version: 0,
                         last_edited_by: None,
                         datasource_setup: None,
+                        dag: None,
                     }
                 });
                 spur.datasource_setup = Some(true);
@@ -732,10 +763,12 @@ fn set_cell_spur_metadata(cell: &mut Cell, version: u64, last_edited_by: Option<
         .spur
         .as_ref()
         .and_then(|spur| spur.datasource_setup);
+    let previous_dag = metadata.spur.as_ref().and_then(|spur| spur.dag.clone());
     metadata.spur = Some(crate::backend::notebook::SpurCellMetadata {
         version,
         last_edited_by: last_edited_by.or(previous_last_edited_by),
         datasource_setup: previous_datasource_setup,
+        dag: previous_dag,
     });
 }
 
@@ -815,8 +848,9 @@ mod tests {
 
     use super::*;
     use crate::backend::notebook::{
-        Cell, CellMetadata, CodeCell, JuteDeckCellMetadata, JuteDeckLayout, MultilineString,
-        NotebookMetadata, Output, OutputStream, SpurCellMetadata,
+        Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, JuteDeckCellMetadata,
+        JuteDeckLayout, MultilineString, NotebookMetadata, Output, OutputStream, PortSpec,
+        SpurCellMetadata,
     };
 
     const CELL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -830,6 +864,7 @@ mod tests {
                     version,
                     last_edited_by: None,
                     datasource_setup: None,
+                    dag: None,
                 }),
                 jute_deck: None,
                 other: Map::new(),
@@ -1203,6 +1238,104 @@ mod tests {
                 expected: 100,
                 actual: 1,
             }
+        );
+    }
+
+    #[test]
+    fn set_spur_dag_metadata_sets_patch() {
+        let store = store_with_notebook();
+
+        let patch = CellDagMetadata {
+            produces: vec![PortSpec {
+                port: "sales".to_string(),
+                repr: "dataframe".to_string(),
+                display: Some("Sales".to_string()),
+            }],
+            consumes: vec!["config".to_string()],
+            source: Some(DagSource {
+                kind: "cell".to_string(),
+                port: "raw".to_string(),
+            }),
+        };
+        let delta = store
+            .apply(NotebookOp::SetSpurDagMetadata {
+                id: CELL_ID.to_string(),
+                patch: patch.clone(),
+                expected_version: 1,
+            })
+            .expect("dag metadata patch applies");
+
+        assert!(matches!(
+            delta.kind,
+            DeltaKind::CellWritten { cell } if cell.id == CELL_ID
+        ));
+        let (snapshot, _version) = store.snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        let spur = cell.metadata.spur.as_ref().expect("spur metadata present");
+        assert_eq!(spur.dag.as_ref(), Some(&patch));
+        assert_eq!(spur.version, delta.version);
+        assert_eq!(spur.last_edited_by.as_deref(), Some("brain"));
+    }
+
+    #[test]
+    fn set_spur_dag_metadata_rejects_stale_version() {
+        let store = store_with_notebook();
+
+        let err = store
+            .apply(NotebookOp::SetSpurDagMetadata {
+                id: CELL_ID.to_string(),
+                patch: CellDagMetadata::default(),
+                expected_version: 100,
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            StoreError::OptimisticConcurrency {
+                expected: 100,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn spur_dag_metadata_survives_later_cell_write() {
+        let store = store_with_notebook();
+
+        let patch = CellDagMetadata {
+            produces: vec![PortSpec {
+                port: "sales".to_string(),
+                repr: "dataframe".to_string(),
+                display: None,
+            }],
+            ..Default::default()
+        };
+        store
+            .apply(NotebookOp::SetSpurDagMetadata {
+                id: CELL_ID.to_string(),
+                patch: patch.clone(),
+                expected_version: 1,
+            })
+            .expect("dag metadata patch applies");
+
+        store
+            .apply(NotebookOp::WriteCell {
+                id: CELL_ID.to_string(),
+                source: "updated".to_string(),
+                expected_version: Some(2),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .expect("write applies");
+
+        let (snapshot, _version) = store.snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.metadata.spur.as_ref().unwrap().dag.as_ref(),
+            Some(&patch)
         );
     }
 

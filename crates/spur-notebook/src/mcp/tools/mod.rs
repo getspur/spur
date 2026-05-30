@@ -17,6 +17,8 @@ pub mod insert_cell;
 pub mod interrupt;
 pub mod kernel_info;
 pub mod list_datasources;
+pub mod notebook_dag_status;
+pub mod notebook_push_source;
 pub mod read_cell;
 pub mod restart_kernel;
 pub mod run_cell;
@@ -41,6 +43,8 @@ pub fn tools() -> Vec<Tool> {
         read_cell::tool(),
         kernel_info::tool(),
         list_datasources::tool(),
+        notebook_push_source::tool(),
+        notebook_dag_status::tool(),
         insert_cell::tool(),
         write_cell::tool(),
         set_cell_metadata::tool(),
@@ -70,6 +74,15 @@ pub fn tools() -> Vec<Tool> {
 
 fn empty_params() -> Value {
     json!({})
+}
+
+pub(super) fn parse_byte_payload(method: &str, value: Value) -> Result<Vec<u8>, McpError> {
+    serde_json::from_value(value).map_err(|error| {
+        McpError::invalid_params(
+            format!("{method} payload must be an array of bytes"),
+            Some(json!({ "error": error.to_string() })),
+        )
+    })
 }
 
 pub(super) fn daemon_unavailable() -> McpError {
@@ -221,6 +234,8 @@ mod tests {
         assert!(names
             .iter()
             .any(|name| name == "notebook.set_cell_metadata"));
+        assert!(names.iter().any(|name| name == "notebook_push_source"));
+        assert!(names.iter().any(|name| name == "notebook_dag_status"));
     }
 
     #[test]
