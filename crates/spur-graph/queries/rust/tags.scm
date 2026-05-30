@@ -14,8 +14,17 @@
 (union_item
   name: (type_identifier) @name) @definition.struct
 
+(field_declaration
+  name: (field_identifier) @name) @definition.field
+
 (type_item
   name: (type_identifier) @name) @definition.type_alias
+
+(const_item
+  name: (identifier) @name) @definition.constant
+
+(static_item
+  name: (identifier) @name) @definition.constant
 
 (macro_definition
   name: (identifier) @name) @definition.macro

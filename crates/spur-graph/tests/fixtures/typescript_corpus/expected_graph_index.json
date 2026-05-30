@@ -33,7 +33,9 @@
         14,
         15,
         16,
-        17
+        17,
+        18,
+        19
       ]
     }
   ],
@@ -253,6 +255,40 @@
       "enclosing_scope": null
     },
     {
+      "stable_symbol_id": "4470fd57a3060a64",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        102,
+        106
+      ],
+      "line_range": [
+        8,
+        8
+      ],
+      "entity_name": "Fast",
+      "qualified_name": "Mode::Fast",
+      "symbol_kind": "enum_variant",
+      "anchor_hash": "10235812994623284965",
+      "enclosing_scope": "Mode"
+    },
+    {
+      "stable_symbol_id": "fe633dde0d47a2f9",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        110,
+        114
+      ],
+      "line_range": [
+        9,
+        9
+      ],
+      "entity_name": "Slow",
+      "qualified_name": "Mode::Slow",
+      "symbol_kind": "enum_variant",
+      "anchor_hash": "1355098826792083538",
+      "enclosing_scope": "Mode"
+    },
+    {
       "stable_symbol_id": "02775bcca5346806",
       "file_path": "src/helpers.ts",
       "byte_range": [
@@ -428,6 +464,24 @@
     {
       "source_stable_symbol_id": "b157cefaf7fe3c8c",
       "target_stable_symbol_id": "88c2887e42a7e154",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ba77b7195f718134",
+      "target_stable_symbol_id": "4470fd57a3060a64",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ba77b7195f718134",
+      "target_stable_symbol_id": "fe633dde0d47a2f9",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",

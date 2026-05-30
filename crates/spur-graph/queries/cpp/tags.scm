@@ -45,6 +45,10 @@
   name: (qualified_identifier
           name: (type_identifier) @name)) @definition.enum
 
+(enumerator_list
+  (enumerator
+    name: (identifier) @name) @definition.enum_variant)
+
 ; -------- methods declared inside a class/struct body --------
 
 (field_declaration
