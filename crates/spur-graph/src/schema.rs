@@ -1,7 +1,6 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
-use std::io::BufReader;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -734,16 +733,8 @@ pub fn load_artifact(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
         return crate::store::parquet::read_artifact_parquet(path);
     }
 
-    if metadata.is_file() {
-        tracing::warn!(
-            path = %path.display(),
-            "spur-graph: loading legacy JSON graph artifact; JSON artifacts are deprecated and will be removed after the Parquet cutover"
-        );
-        return load_legacy_json(path);
-    }
-
     Err(anyhow!(
-        "graph index artifact path `{}` is neither a file nor a directory",
+        "expected a Parquet artifact directory at `{}`",
         path.display()
     ))
 }
@@ -760,70 +751,10 @@ pub fn load_artifact_slim(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
         return crate::store::parquet::read_artifact_parquet_slim(path);
     }
 
-    if metadata.is_file() {
-        return load_artifact(path);
-    }
-
     Err(anyhow!(
-        "graph index artifact path `{}` is neither a file nor a directory",
+        "expected a Parquet artifact directory at `{}`",
         path.display()
     ))
-}
-
-fn load_legacy_json(path: &Path) -> anyhow::Result<GraphIndexArtifact> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read graph index artifact `{}`", path.display()))?;
-    let mut artifact: GraphIndexArtifact = serde_json::from_str(&content)
-        .map_err(|err| anyhow!("invalid graph index JSON in `{}`: {err}", path.display()))?;
-    validate_graph_index_version(&artifact.header.graph_index_version)?;
-    if artifact.header.graph_index_version != GRAPH_INDEX_VERSION_TEMPORAL {
-        rehash_legacy_snapshot_ids(&mut artifact);
-    }
-
-    deduplicate_symbols(&mut artifact);
-    validate_ranges(&artifact)?;
-
-    Ok(artifact)
-}
-
-/// Reads only the top-level graph index header from an artifact file.
-///
-/// This intentionally avoids allocating large artifact arrays such as `files`
-/// and `symbols` in memory, but still parses the full JSON stream (`O(file_size)`
-/// I/O/CPU) to reach the header field.
-pub fn read_artifact_header(path: &Path) -> anyhow::Result<GraphIndexHeader> {
-    #[derive(Deserialize)]
-    struct ArtifactHeaderEnvelope {
-        header: GraphIndexHeader,
-    }
-
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to read graph index artifact `{}`", path.display()))?;
-    let reader = BufReader::new(file);
-    let envelope: ArtifactHeaderEnvelope = serde_json::from_reader(reader)
-        .map_err(|err| anyhow!("invalid graph index JSON in `{}`: {err}", path.display()))?;
-
-    Ok(envelope.header)
-}
-
-fn validate_graph_index_version(version: &str) -> anyhow::Result<()> {
-    if is_supported_graph_index_version(version) {
-        return Ok(());
-    }
-
-    Err(anyhow!("unsupported graph_index_version `{version}`"))
-}
-
-fn is_supported_graph_index_version(version: &str) -> bool {
-    matches!(
-        version,
-        GRAPH_INDEX_VERSION_TEMPORAL
-            | "3"
-            | "1"
-            | "v1"
-            | "spur-graph-phase2"
-            | "fixture-2026-05-11"
-    )
 }
 
 pub(crate) fn rehash_legacy_snapshot_ids(artifact: &mut GraphIndexArtifact) {
@@ -974,37 +905,6 @@ pub fn symbol_id_from_uri(uri: &str) -> String {
         .to_owned()
 }
 
-fn deduplicate_symbols(artifact: &mut GraphIndexArtifact) {
-    let mut seen = HashSet::new();
-    let mut duplicate_diagnostics = Vec::new();
-    artifact.symbols.retain(|symbol| {
-        if seen.insert(symbol.stable_symbol_id.clone()) {
-            true
-        } else {
-            duplicate_diagnostics.push(format!(
-                "duplicate stable_symbol_id `{}` ignored after first occurrence",
-                symbol.stable_symbol_id
-            ));
-            false
-        }
-    });
-    artifact.diagnostics.extend(duplicate_diagnostics);
-}
-
-fn validate_ranges(artifact: &GraphIndexArtifact) -> anyhow::Result<()> {
-    for symbol in &artifact.symbols {
-        if symbol.byte_range[1] < symbol.byte_range[0] {
-            return Err(anyhow!(
-                "graph index symbol `{}` has reversed byte_range [{}, {}]",
-                symbol.stable_symbol_id,
-                symbol.byte_range[0],
-                symbol.byte_range[1]
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod change_kind_tests {
     use super::*;
@@ -1107,25 +1007,5 @@ mod temporal_artifact_tests {
     #[test]
     fn temporal_graph_index_version_is_v4() {
         assert_eq!(GRAPH_INDEX_VERSION_TEMPORAL, "4");
-    }
-
-    #[test]
-    fn load_artifact_rejects_unknown_graph_index_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("future.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "header":{"graph_index_version":"future"},
-                "files":[],
-                "symbols":[]
-            }"#,
-        )
-        .unwrap();
-
-        let error = load_artifact(&path).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported graph_index_version `future`"));
     }
 }

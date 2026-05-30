@@ -73,7 +73,6 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
             tracing::debug!(
                 requested_path = %output.display(),
                 resolved_path = %resolved.path.display(),
-                format = ?resolved.format,
                 "spur-graph: resolved previous artifact for graph build"
             );
             match load_previous_artifact_for_graph_build(&resolved.path) {

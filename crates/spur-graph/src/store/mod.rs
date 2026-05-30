@@ -24,7 +24,7 @@ pub use parquet::{
 };
 pub use pointer::{
     read_current_pointer, resolve_artifact_location, write_current_pointer, ArtifactCacheKey,
-    ArtifactFormat, ResolvedArtifact,
+    ResolvedArtifact,
 };
 pub use shard_writer::TemporalShardSink;
 pub use temporal_shards::{ShardIndexEntry, TemporalShardConfig};
