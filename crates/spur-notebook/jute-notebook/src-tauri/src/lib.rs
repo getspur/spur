@@ -20,6 +20,7 @@ pub mod state;
 pub mod window;
 
 const NOTEBOOK_CHANGED_EVENT: &str = "notebook://changed";
+const DATASOURCES_CHANGED_EVENT: &str = "datasources://changed";
 
 /// Spawn the process-wide notebook delta forwarder.
 ///
@@ -37,6 +38,29 @@ pub fn spawn_notebook_delta_forwarder(app: tauri::AppHandle, state: Arc<state::S
                 }
                 Err(RecvError::Lagged(skipped)) => {
                     warn!(skipped, "notebook delta receiver lagged");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Spawn the process-wide datasource catalog forwarder.
+///
+/// The forwarder owns a broadcast::Receiver for daemon events and emits
+/// `datasources://changed` for every datasource catalog update.
+pub fn spawn_datasources_changed_forwarder(app: tauri::AppHandle, state: Arc<state::State>) {
+    let mut receiver = state.event_tx.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(state::DaemonEvent::DatasourcesChanged(entries)) => {
+                    if let Err(error) = app.emit(DATASOURCES_CHANGED_EVENT, entries) {
+                        warn!(%error, "failed to emit datasource catalog update");
+                    }
+                }
+                Err(RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "datasource catalog receiver lagged");
                 }
                 Err(RecvError::Closed) => break,
             }

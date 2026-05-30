@@ -338,6 +338,10 @@ fn main() {
                 app.handle().clone(),
                 Arc::clone(&state_for_setup),
             );
+            jute::spawn_datasources_changed_forwarder(
+                app.handle().clone(),
+                Arc::clone(&state_for_setup),
+            );
             #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {

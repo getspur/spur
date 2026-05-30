@@ -387,7 +387,7 @@ impl State {
             .clone()
     }
 
-    fn emit_datasources_changed(&self, entries: Vec<DatasourceEntry>) {
+    pub(crate) fn emit_datasources_changed(&self, entries: Vec<DatasourceEntry>) {
         let _ = self.event_tx.send(DaemonEvent::DatasourcesChanged(entries));
     }
 }
