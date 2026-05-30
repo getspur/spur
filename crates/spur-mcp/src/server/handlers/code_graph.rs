@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -240,7 +240,7 @@ mod file_oid_cache {
         }
     }
 
-    fn parse_git_oid(oid: &str) -> Option<[u8; 20]> {
+    pub(super) fn parse_git_oid(oid: &str) -> Option<[u8; 20]> {
         if oid.len() != 40 {
             return None;
         }
@@ -1894,17 +1894,19 @@ impl GraphResponseMetadata {
             .as_ref()
             .and_then(|pointer| non_empty_string(pointer.indexed_commit_oid.clone()));
         let git = match worktree.as_deref() {
-            Some(worktree) => worktree_git_metadata(worktree).await,
+            Some(worktree) => worktree_git_metadata(worktree, indexed_head_oid.as_deref()).await,
             None => None,
         };
         let worktree_head_oid = git.as_ref().map(|git| git.head_oid.clone());
-        let worktree_dirty = git.as_ref().and_then(|git| {
-            compute_worktree_dirty(
+        let worktree_dirty = match git.as_ref() {
+            Some(git) => compute_worktree_dirty(
                 indexed_head_oid.as_deref(),
                 &git.head_oid,
                 git.has_uncommitted_changes,
-            )
-        });
+            ),
+            None if worktree.is_some() => Some(true),
+            None => None,
+        };
         let mut dirty_oids = BTreeMap::new();
         let response_file_oids_match = match (
             response_files,
@@ -1927,15 +1929,21 @@ impl GraphResponseMetadata {
             }
             _ => None,
         };
-        let rebuild_candidate = match (
-            response_file_oids_match,
-            worktree.as_ref(),
-            worktree_head_oid.as_deref(),
-        ) {
-            (Some(false), Some(worktree), Some(head_oid)) if !dirty_oids.is_empty() => {
+        let supplemental_oids = match (worktree.as_ref(), git.as_ref()) {
+            (Some(worktree), Some(git)) if !git.supplemental_changed.is_empty() => {
+                supplemental_changed_oids(worktree, &git.supplemental_changed)
+            }
+            _ => BTreeMap::new(),
+        };
+        let rebuild_candidate = match (worktree.as_ref(), worktree_head_oid.as_deref()) {
+            (Some(worktree), Some(head_oid))
+                if !dirty_oids.is_empty() || !supplemental_oids.is_empty() =>
+            {
+                let mut key_oids = dirty_oids.clone();
+                key_oids.extend(supplemental_oids);
                 Some(RebuildCandidate {
                     worktree: worktree.clone(),
-                    key: RebuildKey::from(head_oid, &dirty_oids),
+                    key: RebuildKey::from(head_oid, &key_oids),
                 })
             }
             _ => None,
@@ -2033,15 +2041,20 @@ async fn rebuild_key_for_loaded_artifact(
     worktree: &Path,
     artifact: &GraphIndexArtifact,
 ) -> Option<LoadedRebuildKey> {
-    let git = worktree_git_metadata(worktree).await?;
-    let dirty_oids = if git.has_uncommitted_changes {
+    let git = worktree_git_metadata(worktree, None).await?;
+    let mut dirty_oids = if git.has_uncommitted_changes {
         dirty_indexed_file_oids(worktree, &git.head_oid, artifact)
     } else {
         BTreeMap::new()
     };
+    dirty_oids.extend(supplemental_changed_oids(
+        worktree,
+        &git.supplemental_changed,
+    ));
     Some(LoadedRebuildKey {
         key: RebuildKey::from(&git.head_oid, &dirty_oids),
-        retain_temporal_index_on_miss: !git.has_uncommitted_changes,
+        retain_temporal_index_on_miss: !git.has_uncommitted_changes
+            && git.supplemental_changed.is_empty(),
     })
 }
 
@@ -2606,7 +2619,7 @@ async fn rebuild_candidate_for_base_seed(
     // does not need git; `head_oid` only namespaces the rebuild single-flight key
     // and the file-oid cache, so a stable fallback (the base seed's indexed commit,
     // else the base content hash) is correct.
-    let head_oid = match worktree_git_metadata(worktree).await {
+    let head_oid = match worktree_git_metadata(worktree, fallback_head_oid).await {
         Some(git) => git.head_oid,
         None => fallback_head_oid
             .filter(|oid| !oid.is_empty())
@@ -4266,25 +4279,128 @@ fn non_empty_string(value: Option<String>) -> Option<String> {
 struct WorktreeGitMetadata {
     head_oid: String,
     has_uncommitted_changes: bool,
+    supplemental_changed: Vec<String>,
 }
 
-async fn worktree_git_metadata(worktree: &Path) -> Option<WorktreeGitMetadata> {
+async fn worktree_git_metadata(
+    worktree: &Path,
+    indexed_head_oid: Option<&str>,
+) -> Option<WorktreeGitMetadata> {
     tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
         let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
-        // `--untracked-files=no` scopes dirtiness to tracked changes: the flag
-        // answers "is the graph trustworthy?", not "does the filesystem have
-        // new files?". Untracked artifacts (logs, scratch RCAs) routinely
-        // litter active worktrees and would otherwise pin the flag to `true`.
-        let status =
-            run_git_stdout(worktree, &["status", "--porcelain", "--untracked-files=no"]).await?;
+        let allowed_extensions = overlay_trigger_extensions();
+        let status = run_git_stdout(
+            worktree,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )
+        .await?;
+        let mut status_report =
+            parse_git_status_for_overlay(worktree, &status, &allowed_extensions);
+
+        if indexed_head_oid.is_some_and(|indexed| indexed != head_oid) {
+            let indexed_head_oid = indexed_head_oid?;
+            let range = format!("{indexed_head_oid}..HEAD");
+            let diff = run_git_stdout(worktree, &["diff", "--name-only", "-z", &range]).await?;
+            status_report
+                .supplemental_changed
+                .extend(supported_git_paths(
+                    worktree,
+                    diff.split('\0'),
+                    &allowed_extensions,
+                ));
+        }
+
         Some(WorktreeGitMetadata {
             head_oid,
-            has_uncommitted_changes: !status.is_empty(),
+            has_uncommitted_changes: status_report.has_uncommitted_changes,
+            supplemental_changed: status_report.supplemental_changed.into_iter().collect(),
         })
     })
     .await
     .ok()
     .flatten()
+}
+
+struct GitStatusOverlayReport {
+    has_uncommitted_changes: bool,
+    supplemental_changed: BTreeSet<String>,
+}
+
+fn parse_git_status_for_overlay(
+    worktree: &Path,
+    status: &str,
+    allowed_extensions: &[&str],
+) -> GitStatusOverlayReport {
+    let mut has_uncommitted_changes = false;
+    let mut supplemental_changed = BTreeSet::new();
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+
+    while let Some(entry) = entries.next() {
+        let Some(status_code) = entry.get(..2) else {
+            continue;
+        };
+        let path = entry.get(3..).unwrap_or_default();
+        if status_code == "??" {
+            if let Some(path) = supported_git_path(worktree, path, allowed_extensions) {
+                has_uncommitted_changes = true;
+                supplemental_changed.insert(path);
+            }
+        } else {
+            has_uncommitted_changes = true;
+        }
+
+        if status_code.starts_with('R') || status_code.starts_with('C') {
+            let _ = entries.next();
+        }
+    }
+
+    GitStatusOverlayReport {
+        has_uncommitted_changes,
+        supplemental_changed,
+    }
+}
+
+fn overlay_trigger_extensions() -> Vec<&'static str> {
+    spur_graph::extract::languages::all_supported_extensions()
+        .into_iter()
+        .filter(|extension| *extension != "md")
+        .collect()
+}
+
+fn supported_git_paths<'a>(
+    worktree: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+    allowed_extensions: &[&str],
+) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|path| !path.is_empty())
+        .filter_map(move |path| supported_git_path(worktree, path, allowed_extensions))
+        .collect()
+}
+
+fn supported_git_path(worktree: &Path, path: &str, allowed_extensions: &[&str]) -> Option<String> {
+    let extension = Path::new(path).extension()?.to_str()?;
+    if !allowed_extensions
+        .iter()
+        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+    {
+        return None;
+    }
+    Some(worktree_relative_slash_path(worktree, &worktree.join(path)))
+}
+
+fn supplemental_changed_oids(worktree: &Path, paths: &[String]) -> BTreeMap<PathBuf, [u8; 20]> {
+    paths
+        .iter()
+        .map(|path| {
+            let current_oid = fs::read(worktree.join(path))
+                .ok()
+                .and_then(|bytes| file_oid_cache::parse_git_oid(&git_blob_oid(&bytes)))
+                .unwrap_or([0; 20]);
+            (PathBuf::from(path), current_oid)
+        })
+        .collect()
 }
 
 async fn run_git_stdout(worktree: &Path, args: &[&str]) -> Option<String> {
@@ -5125,7 +5241,7 @@ mod tests {
         assert_eq!(body.get("graph_built_at"), Some(&Value::Null));
         assert_eq!(body.get("indexed_head_oid"), Some(&Value::Null));
         assert_eq!(body.get("worktree_head_oid"), Some(&Value::Null));
-        assert_eq!(body.get("worktree_dirty"), Some(&Value::Null));
+        assert_eq!(body.get("worktree_dirty"), Some(&Value::Bool(true)));
         assert_eq!(body.get("response_file_oids_match"), Some(&Value::Null));
     }
 
@@ -5489,12 +5605,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_file_oids_match_edit_to_returned_file_returns_false() {
+    async fn response_file_oids_match_edit_to_returned_file_overlays_when_supported() {
         for case in response_file_oid_handler_cases() {
             assert_response_file_oids_match(
                 &case,
                 |dir| append_to_fixture_file(dir, case.returned_file, "// returned edit\n"),
-                false,
+                case.name != "code_read_symbol",
             )
             .await;
         }
@@ -5940,37 +6056,33 @@ mod tests {
     async fn code_callers_counts_legacy_references_edges_as_references_other() {
         let _lock = CWD_LOCK.lock().expect("cwd lock");
         let dir = TempDir::new().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
-        std::fs::write(
-            dir.path().join(".spur/graph-index.json"),
-            serde_json::to_string_pretty(&json!({
-                "header": {
-                    "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
-                },
-                "manifest_version": "test",
-                "graph_content_hash": "test",
-                "files": [
-                    { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
-                ],
-                "symbols": [
-                    symbol("caller", "src/lib.rs", [1, 1], "caller", "caller"),
-                    symbol("root", "src/lib.rs", [3, 3], "root", "root")
-                ],
-                "edges": [
-                    {
-                        "source_stable_symbol_id": "caller",
-                        "target_stable_symbol_id": "root",
-                        "target_label": "root",
-                        "relation": "references",
-                        "confidence": "syntax_exact",
-                        "confidence_score": 1.0
-                    }
-                ],
-                "tombstones": []
-            }))
-            .expect("encode artifact"),
-        )
-        .expect("write artifact");
+        let artifact = serde_json::from_value(json!({
+            "header": {
+                "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
+            },
+            "manifest_version": "test",
+            "graph_content_hash": "test",
+            "files": [
+                { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
+            ],
+            "symbols": [
+                symbol("caller", "src/lib.rs", [1, 1], "caller", "caller"),
+                symbol("root", "src/lib.rs", [3, 3], "root", "root")
+            ],
+            "edges": [
+                {
+                    "source_stable_symbol_id": "caller",
+                    "target_stable_symbol_id": "root",
+                    "target_label": "root",
+                    "relation": "references",
+                    "confidence": "syntax_exact",
+                    "confidence_score": 1.0
+                }
+            ],
+            "tombstones": []
+        }))
+        .expect("fixture artifact");
+        write_graph_fixture_artifact(&dir, artifact);
         let _cwd = enter_dir(dir.path());
         let server = test_server();
 
@@ -6514,7 +6626,7 @@ mod tests {
         let _lock = CWD_LOCK.lock().expect("cwd lock");
         let dir = TempDir::new().expect("tempdir");
         let indexed_head_oid = init_clean_git_fixture(dir.path());
-        write_fixture_artifact(&dir);
+        write_fixture_artifact_with_file_manifests(&dir);
         write_fixture_pointer(&dir, &indexed_head_oid);
         let _cwd = enter_dir(dir.path());
         let server = test_server();
@@ -6558,7 +6670,7 @@ mod tests {
         let _lock = CWD_LOCK.lock().expect("cwd lock");
         let dir = TempDir::new().expect("tempdir");
         let indexed_head_oid = init_clean_git_fixture(dir.path());
-        write_fixture_artifact(&dir);
+        write_fixture_artifact_with_file_manifests(&dir);
         write_fixture_pointer(&dir, &indexed_head_oid);
         let _cwd = enter_dir(dir.path());
         let server = test_server();
