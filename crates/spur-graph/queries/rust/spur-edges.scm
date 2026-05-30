@@ -1,5 +1,10 @@
 ; SPUR-specific graph edges that are outside the standard tags.scm surface.
 
+; Enum variants are SPUR-specific symbols; the canonical Rust tags query
+; captures enum declarations but not their variants.
+(enum_variant
+  name: (identifier) @name) @definition.enum_variant
+
 (use_declaration
   argument: (identifier) @import.name) @import
 

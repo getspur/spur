@@ -21,7 +21,8 @@
         9,
         10,
         11,
-        12
+        12,
+        13
       ]
     },
     {
@@ -29,11 +30,11 @@
       "path": "src/utils.rs",
       "content_oid": "cf63867bec87bd095c26bb4b345f8606406c475e",
       "node_ids": [
-        13,
         14,
         15,
         16,
-        17
+        17,
+        18
       ]
     }
   ],
@@ -81,6 +82,23 @@
       "symbol_kind": "enum",
       "anchor_hash": "9722627701547306242",
       "enclosing_scope": "inline"
+    },
+    {
+      "stable_symbol_id": "88715eb9664f575d",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        78,
+        82
+      ],
+      "line_range": [
+        5,
+        5
+      ],
+      "entity_name": "Fast",
+      "qualified_name": "inline::Mode::Fast",
+      "symbol_kind": "enum_variant",
+      "anchor_hash": "10235812994623284965",
+      "enclosing_scope": "Mode"
     },
     {
       "stable_symbol_id": "9ce57cf00efb9967",
@@ -318,6 +336,15 @@
     {
       "source_stable_symbol_id": "3c12493bdaca1457",
       "target_stable_symbol_id": "a2189e8da277ec66",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "51e4143c6a874467",
+      "target_stable_symbol_id": "88715eb9664f575d",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
