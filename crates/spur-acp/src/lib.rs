@@ -39,6 +39,7 @@ pub use crate::domain::events::{
     LoadOutcome, PeerInfluenceSummary, PlanLifecycleEvent, PlanLoadWarningEvent,
     PlanOwnerStateEvent, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask,
     PlanSummaryCountsEvent, PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role,
+    Table,
 };
 pub use domain::{
     ArtifactKind, AttemptSetupError, CancelOutcome, CancellationControl, DelegationAbortHandle,

@@ -86,6 +86,16 @@ fn datasource_search_text(entry: &DatasourceEntry) -> String {
         text.push(' ');
         text.push_str(&column.sql_type);
     }
+    for table in &entry.tables {
+        text.push(' ');
+        text.push_str(&table.name);
+        for column in &table.columns {
+            text.push(' ');
+            text.push_str(&column.name);
+            text.push(' ');
+            text.push_str(&column.sql_type);
+        }
+    }
     text
 }
 
@@ -115,6 +125,25 @@ fn datasource_prompt_hint(entry: &DatasourceEntry, uri: &str) -> String {
             text.push_str(&column.sql_type);
         }
     }
+    text.push_str("\ntables:");
+    if entry.tables.is_empty() {
+        text.push_str(" none");
+    } else {
+        for table in &entry.tables {
+            text.push_str("\n- ");
+            text.push_str(&table.name);
+            if let Some(row_count) = table.row_count {
+                text.push_str(" row_count=");
+                text.push_str(&row_count.to_string());
+            }
+            for column in &table.columns {
+                text.push_str("\n  - ");
+                text.push_str(&column.name);
+                text.push(' ');
+                text.push_str(&column.sql_type);
+            }
+        }
+    }
     text
 }
 
@@ -123,5 +152,6 @@ fn datasource_kind_label(kind: DatasourceKind) -> &'static str {
         DatasourceKind::Csv => "csv",
         DatasourceKind::Parquet => "parquet",
         DatasourceKind::Json => "json",
+        DatasourceKind::DuckDb => "duckdb",
     }
 }
