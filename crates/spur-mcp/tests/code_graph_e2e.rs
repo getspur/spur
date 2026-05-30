@@ -1060,7 +1060,7 @@ async fn linked_worktree_cold_open_modified_file_awaits_overlay_past_latency_bud
 }
 
 #[tokio::test]
-async fn code_search_reflects_unsaved_edit_after_rebuild() {
+async fn code_search_uses_overlay_for_unsaved_edit_without_rebuild() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
@@ -1088,7 +1088,62 @@ async fn code_search_reflects_unsaved_edit_after_rebuild() {
 
     assert!(candidate_entity_names(&body).contains("freshly_indexed_unsaved_symbol"));
     assert_eq!(body["worktree_dirty"], false);
+    assert_eq!(body["response_file_oids_match"], true);
     assert_eq!(body["rebuild_status"], "fresh");
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn root_parquet_self_pointer_uses_overlay_for_unsaved_edit_without_rebuild() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact_with_pointer(worktree.path());
+    let mut source =
+        std::fs::read_to_string(worktree.path().join("src/lib.rs")).expect("read fixture source");
+    source
+        .push_str("\npub fn root_overlay_unsaved_symbol() -> bool {\n    orchestrate_order()\n}\n");
+    std::fs::write(worktree.path().join("src/lib.rs"), source).expect("write unsaved fixture edit");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let search = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "root_overlay_unsaved_symbol",
+                "mode": "exact",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+    assert!(candidate_entity_names(&search).contains("root_overlay_unsaved_symbol"));
+    assert_eq!(search["worktree_dirty"], false);
+    assert_eq!(search["response_file_oids_match"], true);
+    assert_eq!(search["rebuild_status"], "fresh");
+
+    let callers = tool_body(
+        call_tool(
+            &server,
+            "code_callers",
+            json!({ "selector": ROOT_SYMBOL, "include_unresolved": true }),
+        )
+        .await,
+    );
+    assert_eq!(
+        entity_names(callers["callers"].as_array().expect("callers")),
+        BTreeSet::from([
+            "launch_order".to_string(),
+            "root_overlay_unsaved_symbol".to_string()
+        ])
+    );
+    assert_eq!(callers["worktree_dirty"], false);
+    assert_eq!(callers["response_file_oids_match"], true);
+    assert_eq!(callers["rebuild_status"], "fresh");
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
 }
 
 #[tokio::test]
@@ -1252,7 +1307,7 @@ async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search
 }
 
 #[tokio::test]
-async fn code_search_concurrent_dirty_requests_dedupe_rebuild() {
+async fn code_search_concurrent_dirty_requests_use_overlay_without_rebuild() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
@@ -1283,11 +1338,11 @@ async fn code_search_concurrent_dirty_requests_dedupe_rebuild() {
         assert!(candidate_entity_names(&body).contains("concurrent_unsaved_symbol"));
         assert_eq!(body["rebuild_status"], "fresh");
     }
-    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 1);
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
 }
 
 #[tokio::test]
-async fn code_search_rebuild_budget_exceeded_serves_stale() {
+async fn code_search_overlay_ignores_rebuild_budget() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
@@ -1314,13 +1369,10 @@ async fn code_search_rebuild_budget_exceeded_serves_stale() {
         .await,
     );
 
-    assert_eq!(body["rebuild_status"], "stale_budget_exceeded");
-    assert_eq!(body["worktree_dirty"], true);
-    assert_eq!(body["total_matches"], 0);
-    assert!(body["candidates"]
-        .as_array()
-        .expect("stale candidates")
-        .is_empty());
+    assert_eq!(body["rebuild_status"], "fresh");
+    assert_eq!(body["worktree_dirty"], false);
+    assert!(candidate_entity_names(&body).contains("budget_exceeded_unsaved_symbol"));
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
 }
 
 #[tokio::test]
