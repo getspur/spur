@@ -1092,7 +1092,8 @@ impl NotebookDaemonControl {
         self.refresh_datasource_setup_cell().await?;
         self.persist_catalog_to_current_notebook().await?;
 
-        let result = serde_json::to_value(entry).map_err(|error| BridgeError::Handler {
+        let result = serde_json::to_value(jute::commands::DaemonControlResult::Datasource(entry))
+            .map_err(|error| BridgeError::Handler {
             code: "datasource_entry_encode_failed".to_string(),
             message: error.to_string(),
         })?;
@@ -2020,9 +2021,7 @@ mod tests {
             .await;
 
         assert!(response.ok);
-        let entry: jute::commands::DatasourceEntry =
-            serde_json::from_value(response.result.expect("datasource entry result"))
-                .expect("datasource entry decodes");
+        let entry = datasource_entry_from_response(&response);
 
         assert_eq!(entry.name, "sales");
         assert_eq!(entry.path, csv.display().to_string());
@@ -2093,9 +2092,7 @@ mod tests {
             .await;
 
         assert!(response.ok, "{:?}", response.error);
-        let entry: jute::commands::DatasourceEntry =
-            serde_json::from_value(response.result.expect("datasource entry result"))
-                .expect("datasource entry decodes");
+        let entry = datasource_entry_from_response(&response);
         assert_eq!(entry.kind, jute::commands::DatasourceKind::DuckDb);
         assert!(entry.columns.is_empty());
         assert_eq!(entry.row_count, None);
@@ -2130,9 +2127,7 @@ mod tests {
             .await;
 
         assert!(response.ok, "{:?}", response.error);
-        let entry: jute::commands::DatasourceEntry =
-            serde_json::from_value(response.result.expect("datasource entry result"))
-                .expect("datasource entry decodes");
+        let entry = datasource_entry_from_response(&response);
         assert_eq!(entry.kind, jute::commands::DatasourceKind::Sqlite);
         assert!(entry.columns.is_empty());
         assert_eq!(entry.row_count, None);
@@ -2172,9 +2167,7 @@ mod tests {
         let _ = lock_holder.wait();
 
         assert!(response.ok, "{:?}", response.error);
-        let entry: jute::commands::DatasourceEntry =
-            serde_json::from_value(response.result.expect("datasource entry result"))
-                .expect("datasource entry decodes");
+        let entry = datasource_entry_from_response(&response);
         assert_eq!(entry.name, "analyst");
         assert!(entry.path.ends_with(".spur/analyst.duckdb"));
         assert_eq!(entry.kind, jute::commands::DatasourceKind::DuckDb);
@@ -2654,9 +2647,7 @@ mod tests {
             .await;
 
         assert!(response.ok, "{:?}", response.error);
-        let entry: jute::commands::DatasourceEntry =
-            serde_json::from_value(response.result.expect("datasource entry result"))
-                .expect("datasource entry decodes");
+        let entry = datasource_entry_from_response(&response);
         let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
             .expect("catalog event is pushed")
@@ -2727,9 +2718,7 @@ mod tests {
             .await;
 
         assert!(response.ok, "{:?}", response.error);
-        let entry: jute::commands::DatasourceEntry =
-            serde_json::from_value(response.result.expect("datasource entry result"))
-                .expect("datasource entry decodes");
+        let entry = datasource_entry_from_response(&response);
 
         let serialized: Value = serde_json::from_slice(
             &tokio::fs::read(&notebook_path)
@@ -2771,6 +2760,17 @@ mod tests {
         DaemonControlRequest {
             id: None,
             request: jute::commands::DaemonControlRequest::new(command),
+        }
+    }
+
+    fn datasource_entry_from_response(
+        response: &DaemonControlResponse,
+    ) -> jute::commands::DatasourceEntry {
+        match serde_json::from_value(response.result.clone().expect("datasource control result"))
+            .expect("daemon control result decodes")
+        {
+            jute::commands::DaemonControlResult::Datasource(entry) => entry,
+            result => panic!("unexpected daemon control result: {result:?}"),
         }
     }
 

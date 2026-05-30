@@ -41,6 +41,13 @@ function datasourceEntry(overrides: Partial<DatasourceEntry>): DatasourceEntry {
   };
 }
 
+function datasourceResult(overrides: Partial<DatasourceEntry> = {}) {
+  return {
+    type: "datasource" as const,
+    data: datasourceEntry(overrides),
+  };
+}
+
 function droppedFile(path: string) {
   const file = new File(["region,revenue\nwest,12\n"], "sales.csv", {
     type: "text/csv",
@@ -59,11 +66,11 @@ describe("DatasourceSidebar", () => {
     daemonControlMock
       .mockResolvedValueOnce({
         ok: true,
-        result: datasourceEntry({}),
+        result: datasourceResult(),
       })
       .mockResolvedValueOnce({
         ok: true,
-        result: datasourceEntry({
+        result: datasourceResult({
           name: "inventory",
           path: "/tmp/inventory.parquet",
           kind: "parquet",

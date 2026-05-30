@@ -12,4 +12,8 @@ export type SpurCellMetadata = {
    * Agent that last edited the cell through notebook MCP tools.
    */
   last_edited_by?: string;
+  /**
+   * Marks the SPUR-managed datasource setup cell.
+   */
+  datasource_setup?: boolean;
 };

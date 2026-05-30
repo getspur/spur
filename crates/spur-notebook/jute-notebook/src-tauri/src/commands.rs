@@ -340,6 +340,8 @@ pub enum DaemonControlResult {
     Cell(DaemonCell),
     /// Full notebook snapshot.
     Snapshot(DaemonNotebookSnapshot),
+    /// Datasource catalog entry.
+    Datasource(DatasourceEntry),
 }
 
 /// Full notebook snapshot returned by daemon control.
@@ -1505,6 +1507,51 @@ mod tests {
         };
         assert_eq!(entry.kind, DatasourceKind::Csv);
         assert_eq!(entry.columns[0].sql_type, "DOUBLE");
+    }
+
+    #[test]
+    fn daemon_control_response_decodes_tagged_datasource_result() {
+        let entry = DatasourceEntry {
+            name: "sales".to_string(),
+            path: "/tmp/sales.csv".to_string(),
+            kind: DatasourceKind::Csv,
+            group: Some("quarterly".to_string()),
+            columns: vec![Column {
+                name: "amount".to_string(),
+                sql_type: "DOUBLE".to_string(),
+            }],
+            row_count: Some(42),
+            tables: Vec::new(),
+        };
+
+        let bare_frame = serde_json::json!({
+            "ok": true,
+            "result": entry,
+        });
+        let bare_bytes = serde_json::to_vec(&bare_frame).expect("bare frame serializes");
+        let bare_error = serde_json::from_slice::<DaemonControlResponse>(&bare_bytes)
+            .expect_err("bare datasource result should fail strict tagged parsing");
+        assert!(
+            bare_error.to_string().contains("missing field `type`"),
+            "unexpected bare datasource parse error: {bare_error}"
+        );
+
+        let result = serde_json::to_value(DaemonControlResult::Datasource(entry.clone()))
+            .expect("datasource result serializes");
+        assert_eq!(result["type"], "datasource");
+
+        let frame = serde_json::json!({
+            "ok": true,
+            "result": result,
+        });
+        let bytes = serde_json::to_vec(&frame).expect("daemon response serializes");
+        let response: DaemonControlResponse =
+            serde_json::from_slice(&bytes).expect("tagged datasource response decodes");
+
+        match response.result {
+            Some(DaemonControlResult::Datasource(decoded)) => assert_eq!(decoded, entry),
+            result => panic!("unexpected daemon control result: {result:?}"),
+        }
     }
 
     #[tokio::test]

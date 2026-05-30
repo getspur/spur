@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   daemonControl,
+  datasourceEntryFromDaemonControlResponse,
   pathFromDaemonControlResponse,
   recentEntriesFromDaemonControlResponse,
 } from "./control";
@@ -64,6 +65,51 @@ describe("daemon control adapter", () => {
     expect(() => pathFromDaemonControlResponse({ ok: true }, "open")).toThrow(
       "daemon open response did not include path",
     );
+  });
+
+  test("unwraps tagged attach_datasource results", () => {
+    expect(
+      datasourceEntryFromDaemonControlResponse({
+        ok: true,
+        result: {
+          type: "datasource",
+          data: {
+            name: "sales",
+            path: "/tmp/sales.csv",
+            kind: "csv",
+            group: "quarterly",
+            columns: [{ name: "amount", sqlType: "DOUBLE" }],
+            rowCount: 42,
+            tables: [],
+          },
+        },
+      }),
+    ).toEqual({
+      name: "sales",
+      path: "/tmp/sales.csv",
+      kind: "csv",
+      group: "quarterly",
+      columns: [{ name: "amount", sqlType: "DOUBLE" }],
+      rowCount: 42,
+      tables: [],
+    });
+  });
+
+  test("rejects bare attach_datasource results", () => {
+    expect(() =>
+      datasourceEntryFromDaemonControlResponse({
+        ok: true,
+        result: {
+          name: "sales",
+          path: "/tmp/sales.csv",
+          kind: "csv",
+          group: "quarterly",
+          columns: [{ name: "amount", sqlType: "DOUBLE" }],
+          rowCount: 42,
+          tables: [],
+        } as never,
+      }),
+    ).toThrow("daemon attach_datasource response did not include datasource");
   });
 
   test("sends void commands through daemon_control and discards the response", async () => {
