@@ -199,6 +199,7 @@ fn datasources_changed_roundtrips() {
                 sql_type: "VARCHAR".into(),
             }],
             row_count: Some(2),
+            tables: Vec::new(),
         }],
     });
 
