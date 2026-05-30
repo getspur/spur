@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -358,6 +358,12 @@ mod file_oid_cache {
 mod rebuild_singleflight;
 pub(crate) use rebuild_singleflight::RebuildCoordinator;
 use rebuild_singleflight::RebuildKey;
+
+static SHARED_REBUILD_COORDINATOR: OnceLock<Arc<RebuildCoordinator>> = OnceLock::new();
+
+pub(crate) fn shared_rebuild_coordinator() -> Arc<RebuildCoordinator> {
+    Arc::clone(SHARED_REBUILD_COORDINATOR.get_or_init(|| Arc::new(RebuildCoordinator::new())))
+}
 
 const MAX_MCP_CODE_SUBGRAPH_RADIUS: u8 = 3;
 const DEFAULT_MCP_CODE_SUBGRAPH_MAX_NODES: usize = 40;
@@ -2360,9 +2366,8 @@ async fn open_code_search_backend_for_request(
     let resolved = match resolve_artifact_location(&worktree, None) {
         Ok(resolved) => resolved,
         Err(_) => {
-            let Some(rebuild_coordinator) = rebuild_coordinator else {
-                return Err(graph_artifact_missing(&worktree));
-            };
+            let rebuild_coordinator =
+                rebuild_coordinator.unwrap_or_else(shared_rebuild_coordinator);
             return open_code_search_backend_from_base_seed(worktree, rebuild_coordinator).await;
         }
     };
@@ -2427,6 +2432,19 @@ async fn open_code_search_backend_from_base_seed(
     worktree: PathBuf,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> Result<CodeSearchBackend, McpHandlerError> {
+    let artifact =
+        overlaid_graph_artifact_from_base_seed_for_worktree(worktree, rebuild_coordinator).await?;
+    Ok(CodeSearchBackend::InMemory {
+        client: InMemoryClient::new(Arc::clone(&artifact)),
+        artifact,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn overlaid_graph_artifact_from_base_seed_for_worktree(
+    worktree: PathBuf,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> Result<Arc<GraphIndexArtifact>, McpHandlerError> {
     let Some(seed) = load_base_seed_for_worktree(&worktree) else {
         return Err(graph_artifact_missing(&worktree));
     };
@@ -2439,10 +2457,7 @@ async fn open_code_search_backend_from_base_seed(
     };
 
     match try_rebuild_artifact_from_seed(rebuild_coordinator, rebuild_candidate, seed).await {
-        RebuildAttempt::Fresh(artifact) => Ok(CodeSearchBackend::InMemory {
-            client: InMemoryClient::new(Arc::clone(&artifact)),
-            artifact,
-        }),
+        RebuildAttempt::Fresh(artifact) => Ok(artifact),
         RebuildAttempt::StaleBudgetExceeded => Err(McpHandlerError::Internal(format!(
             "graph artifact not found and base-seed overlay exceeded the latency budget in {}",
             worktree.display()
@@ -3988,7 +4003,7 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
         .map(|entry| entry.content_oid.as_str())
 }
 
-fn scoped_worktree_root() -> Option<PathBuf> {
+pub(crate) fn scoped_worktree_root() -> Option<PathBuf> {
     SCOPED_CODE_GRAPH_WORKTREE_ROOT.try_with(Clone::clone).ok()
 }
 
