@@ -32,7 +32,6 @@ use crate::schema::{
 use crate::store::parquet::{
     load_temporal_artifact_metadata_parquet, stream_temporal_artifact_parquet_into_sink,
 };
-use crate::store::pointer::ArtifactFormat;
 use crate::store::{
     commit_index, load_temporal_artifact_parquet, resolve_artifact_location, TemporalShardSink,
 };
@@ -360,25 +359,14 @@ fn load_incremental_base(
         }
     };
 
-    let mut graph = match graph_location.format {
-        ArtifactFormat::Parquet => {
-            tracing::debug!(
-                path = %graph_location.path.display(),
-                "spur-graph: loading temporal-only Parquet graph artifact for incremental walk"
-            );
-            if sink.is_some() {
-                load_temporal_artifact_metadata_parquet(&graph_location.path)?
-            } else {
-                load_temporal_artifact_parquet(&graph_location.path)?
-            }
-        }
-        ArtifactFormat::LegacyJson => {
-            tracing::debug!(
-                path = %graph_location.path.display(),
-                "spur-graph: loading full legacy JSON graph artifact for incremental walk"
-            );
-            crate::schema::load_artifact(&graph_location.path)?
-        }
+    tracing::debug!(
+        path = %graph_location.path.display(),
+        "spur-graph: loading temporal-only Parquet graph artifact for incremental walk"
+    );
+    let mut graph = if sink.is_some() {
+        load_temporal_artifact_metadata_parquet(&graph_location.path)?
+    } else {
+        load_temporal_artifact_parquet(&graph_location.path)?
     };
     graph.header.content_hash_blake3 = None;
     if !graph.commits.iter().any(|commit| commit.sha == stored_tip) {
@@ -391,12 +379,7 @@ fn load_incremental_base(
     }
 
     if let Some(sink) = sink {
-        match graph_location.format {
-            ArtifactFormat::Parquet => {
-                stream_temporal_artifact_parquet_into_sink(&graph_location.path, sink)?
-            }
-            ArtifactFormat::LegacyJson => drain_temporal_graph_into_sink(&mut graph, sink)?,
-        }
+        stream_temporal_artifact_parquet_into_sink(&graph_location.path, sink)?;
     }
 
     Ok(Some(IncrementalBase {
@@ -404,65 +387,6 @@ fn load_incremental_base(
         commits,
         stored_tip,
     }))
-}
-
-#[derive(Default)]
-struct TemporalRowsForCommit {
-    edges: Vec<TemporalEdgeArtifact>,
-    snapshots: Vec<SymbolSnapshotArtifact>,
-}
-
-fn drain_temporal_graph_into_sink(
-    graph: &mut GraphIndexArtifact,
-    sink: &mut TemporalShardSink,
-) -> Result<()> {
-    let commits_by_sha: HashMap<_, _> = graph
-        .commits
-        .iter()
-        .cloned()
-        .map(|commit| (commit.sha.clone(), commit))
-        .collect();
-    let mut rows_by_commit: BTreeMap<String, TemporalRowsForCommit> = BTreeMap::new();
-
-    for edge in std::mem::take(&mut graph.temporal_edges) {
-        let commit_sha = temporal_edge_commit(&edge)
-            .context("legacy temporal edge has no commit endpoint")?
-            .to_owned();
-        rows_by_commit
-            .entry(commit_sha)
-            .or_default()
-            .edges
-            .push(edge);
-    }
-
-    for snapshot in std::mem::take(&mut graph.symbol_snapshots) {
-        rows_by_commit
-            .entry(snapshot.key.commit.clone())
-            .or_default()
-            .snapshots
-            .push(snapshot);
-    }
-
-    for (commit_sha, mut rows) in rows_by_commit {
-        let commit = commits_by_sha
-            .get(&commit_sha)
-            .with_context(|| format!("temporal row references unknown commit `{commit_sha}`"))?;
-        sink.append_commit(commit, &mut rows.edges, &mut rows.snapshots)?;
-    }
-
-    Ok(())
-}
-
-fn temporal_edge_commit(edge: &TemporalEdgeArtifact) -> Option<&str> {
-    match &edge.target {
-        EdgeEndpoint::Snapshot { key } => Some(&key.commit),
-        EdgeEndpoint::Commit { sha } => Some(sha),
-        EdgeEndpoint::File { .. } | EdgeEndpoint::Symbol { .. } => match &edge.source {
-            EdgeEndpoint::Snapshot { key } => Some(&key.commit),
-            EdgeEndpoint::Commit { sha } => Some(sha),
-            EdgeEndpoint::File { .. } | EdgeEndpoint::Symbol { .. } => None,
-        },
-    }
 }
 
 fn planned_commits(

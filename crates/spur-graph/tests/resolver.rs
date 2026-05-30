@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use spur_graph::{
     artifact_from_facts, build_facts, resolve_artifact_location, write_current_pointer,
-    ArtifactFormat, GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer,
-    GraphSymbolArtifact, RelationKind, ResolvedArtifact, SourceKind,
+    GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer, GraphSymbolArtifact,
+    RelationKind, ResolvedArtifact, SourceKind,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,7 +12,6 @@ enum ExpectedChoice {
     Explicit,
     Current,
     Pointer,
-    Legacy,
     Missing,
 }
 
@@ -21,87 +20,46 @@ struct ResolverCase {
     explicit_override: bool,
     current: bool,
     pointer: bool,
-    legacy: bool,
 }
 
 #[test]
-fn explicit_current_pointer_legacy() {
-    assert_case(ResolverCase::new(true, true, true, true));
+fn explicit_current_pointer() {
+    assert_case(ResolverCase::new(true, true, true));
 }
 
 #[test]
-fn explicit_current_pointer_no_legacy() {
-    assert_case(ResolverCase::new(true, true, true, false));
+fn explicit_current_no_pointer() {
+    assert_case(ResolverCase::new(true, true, false));
 }
 
 #[test]
-fn explicit_current_no_pointer_legacy() {
-    assert_case(ResolverCase::new(true, true, false, true));
+fn explicit_no_current_pointer() {
+    assert_case(ResolverCase::new(true, false, true));
 }
 
 #[test]
-fn explicit_current_no_pointer_no_legacy() {
-    assert_case(ResolverCase::new(true, true, false, false));
+fn explicit_no_current_no_pointer() {
+    assert_case(ResolverCase::new(true, false, false));
 }
 
 #[test]
-fn explicit_no_current_pointer_legacy() {
-    assert_case(ResolverCase::new(true, false, true, true));
+fn no_explicit_current_pointer() {
+    assert_case(ResolverCase::new(false, true, true));
 }
 
 #[test]
-fn explicit_no_current_pointer_no_legacy() {
-    assert_case(ResolverCase::new(true, false, true, false));
+fn no_explicit_current_no_pointer() {
+    assert_case(ResolverCase::new(false, true, false));
 }
 
 #[test]
-fn explicit_no_current_no_pointer_legacy() {
-    assert_case(ResolverCase::new(true, false, false, true));
+fn no_explicit_no_current_pointer() {
+    assert_case(ResolverCase::new(false, false, true));
 }
 
 #[test]
-fn explicit_no_current_no_pointer_no_legacy() {
-    assert_case(ResolverCase::new(true, false, false, false));
-}
-
-#[test]
-fn no_explicit_current_pointer_legacy() {
-    assert_case(ResolverCase::new(false, true, true, true));
-}
-
-#[test]
-fn no_explicit_current_pointer_no_legacy() {
-    assert_case(ResolverCase::new(false, true, true, false));
-}
-
-#[test]
-fn no_explicit_current_no_pointer_legacy() {
-    assert_case(ResolverCase::new(false, true, false, true));
-}
-
-#[test]
-fn no_explicit_current_no_pointer_no_legacy() {
-    assert_case(ResolverCase::new(false, true, false, false));
-}
-
-#[test]
-fn no_explicit_no_current_pointer_legacy() {
-    assert_case(ResolverCase::new(false, false, true, true));
-}
-
-#[test]
-fn no_explicit_no_current_pointer_no_legacy() {
-    assert_case(ResolverCase::new(false, false, true, false));
-}
-
-#[test]
-fn no_explicit_no_current_no_pointer_legacy() {
-    assert_case(ResolverCase::new(false, false, false, true));
-}
-
-#[test]
-fn no_explicit_no_current_no_pointer_no_legacy() {
-    assert_case(ResolverCase::new(false, false, false, false));
+fn no_explicit_no_current_no_pointer() {
+    assert_case(ResolverCase::new(false, false, false));
 }
 
 #[test]
@@ -114,12 +72,7 @@ fn explicit_override_accepts_parquet_directory() {
     let resolved = resolve_artifact_location(worktree, Some(&parquet_dir))
         .expect("explicit parquet should resolve");
 
-    assert_resolved(
-        &resolved,
-        &parquet_dir,
-        ArtifactFormat::Parquet,
-        "explicit-parquet-hash",
-    );
+    assert_resolved(&resolved, &parquet_dir, "explicit-parquet-hash");
 }
 
 #[test]
@@ -271,12 +224,11 @@ fn helper() {}
 }
 
 impl ResolverCase {
-    fn new(explicit_override: bool, current: bool, pointer: bool, legacy: bool) -> Self {
+    fn new(explicit_override: bool, current: bool, pointer: bool) -> Self {
         Self {
             explicit_override,
             current,
             pointer,
-            legacy,
         }
     }
 }
@@ -287,7 +239,7 @@ fn assert_case(case: ResolverCase) {
     let paths = FixturePaths::new(worktree);
 
     if case.explicit_override {
-        write_legacy_json(&paths.explicit);
+        write_parquet_manifest(&paths.explicit, "explicit-hash");
     }
     if case.current {
         write_parquet_manifest(&paths.current, "current-hash");
@@ -297,9 +249,6 @@ fn assert_case(case: ResolverCase) {
         write_parquet_manifest(&paths.pointer, "pointer-hash");
         write_pointer_file(worktree, &paths.pointer);
     }
-    if case.legacy {
-        write_legacy_json(&paths.legacy);
-    }
 
     let explicit = case.explicit_override.then_some(paths.explicit.as_path());
     let expected = expected_choice(case);
@@ -308,29 +257,15 @@ fn assert_case(case: ResolverCase) {
     match expected {
         ExpectedChoice::Explicit => {
             let resolved = actual.expect("explicit override should resolve");
-            assert_resolved(&resolved, &paths.explicit, ArtifactFormat::LegacyJson, "");
+            assert_resolved(&resolved, &paths.explicit, "explicit-hash");
         }
         ExpectedChoice::Current => {
             let resolved = actual.expect("CURRENT should resolve");
-            assert_resolved(
-                &resolved,
-                &paths.current,
-                ArtifactFormat::Parquet,
-                "current-hash",
-            );
+            assert_resolved(&resolved, &paths.current, "current-hash");
         }
         ExpectedChoice::Pointer => {
             let resolved = actual.expect("pointer file should resolve");
-            assert_resolved(
-                &resolved,
-                &paths.pointer,
-                ArtifactFormat::Parquet,
-                "pointer-hash",
-            );
-        }
-        ExpectedChoice::Legacy => {
-            let resolved = actual.expect("legacy JSON should resolve");
-            assert_resolved(&resolved, &paths.legacy, ArtifactFormat::LegacyJson, "");
+            assert_resolved(&resolved, &paths.pointer, "pointer-hash");
         }
         ExpectedChoice::Missing => {
             let err = actual.expect_err("missing artifacts should fail");
@@ -349,68 +284,30 @@ fn expected_choice(case: ResolverCase) -> ExpectedChoice {
         ExpectedChoice::Current
     } else if case.pointer {
         ExpectedChoice::Pointer
-    } else if case.legacy {
-        ExpectedChoice::Legacy
     } else {
         ExpectedChoice::Missing
     }
 }
 
-fn assert_resolved(
-    resolved: &ResolvedArtifact,
-    expected_path: &Path,
-    expected_format: ArtifactFormat,
-    expected_parquet_hash: &str,
-) {
+fn assert_resolved(resolved: &ResolvedArtifact, expected_path: &Path, expected_parquet_hash: &str) {
     assert_eq!(resolved.path, canonicalize(expected_path));
-    assert_eq!(resolved.format, expected_format);
-    match resolved.format {
-        ArtifactFormat::LegacyJson => match &resolved.cache_key {
-            spur_graph::ArtifactCacheKey::LegacyJson { path, .. } => {
-                assert_eq!(path, &canonicalize(expected_path));
-            }
-            other => panic!("expected legacy cache key, got {other:?}"),
-        },
-        ArtifactFormat::Parquet => match &resolved.cache_key {
-            spur_graph::ArtifactCacheKey::Parquet { graph_content_hash } => {
-                assert_eq!(graph_content_hash, expected_parquet_hash);
-            }
-            other => panic!("expected parquet cache key, got {other:?}"),
-        },
-    }
+    assert_eq!(resolved.cache_key.graph_content_hash, expected_parquet_hash);
 }
 
 struct FixturePaths {
     explicit: PathBuf,
     current: PathBuf,
     pointer: PathBuf,
-    legacy: PathBuf,
 }
 
 impl FixturePaths {
     fn new(worktree: &Path) -> Self {
         Self {
-            explicit: worktree.join("explicit.json"),
+            explicit: worktree.join("artifacts/explicit.parquet"),
             current: worktree.join("artifacts/current.parquet"),
             pointer: worktree.join("artifacts/pointer.parquet"),
-            legacy: worktree.join(".spur/graph-index.json"),
         }
     }
-}
-
-fn write_legacy_json(path: &Path) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("mkdir legacy parent");
-    }
-    fs::write(
-        path,
-        r#"{
-  "header": { "graph_index_version": "legacy" },
-  "files": [],
-  "symbols": []
-}"#,
-    )
-    .expect("write legacy JSON");
 }
 
 fn write_parquet_manifest(path: &Path, graph_content_hash: &str) {

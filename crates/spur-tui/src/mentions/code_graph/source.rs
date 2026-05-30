@@ -5,16 +5,14 @@ use std::time::SystemTime;
 
 use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
 use spur_graph::{
-    load_artifact_slim, read_artifact_header, read_artifact_header_parquet,
-    resolve_artifact_location, ArtifactFormat, CodeMentionAuthoritative, CodeMentionDisplayMeta,
-    CodeMentionExtractionHints, CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec,
-    GraphFileArtifact, GraphIndexArtifact, GraphSymbolArtifact, ResolvedArtifact,
-    CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
+    load_artifact_slim, read_artifact_header_parquet, resolve_artifact_location,
+    CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints, CodeMentionKind,
+    CodeMentionPayload, CodeMentionValidationSpec, GraphFileArtifact, GraphIndexArtifact,
+    GraphSymbolArtifact, ResolvedArtifact, CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
 };
 
 struct CodeGraphCacheKey {
     path: PathBuf,
-    format: ArtifactFormat,
     mtime: Option<SystemTime>,
     len: Option<u64>,
     content_hash: Option<String>,
@@ -94,44 +92,15 @@ impl MentionSource for CodeGraphMentionSource {
             .as_ref()
             .and_then(|metadata| metadata.modified().ok());
         let len = metadata.as_ref().map(|metadata| metadata.len());
-        let cached_fast = resolved.format == ArtifactFormat::LegacyJson
-            && matches!(
-                (&self.cache_key, modified, len),
-                (
-                    Some(CodeGraphCacheKey {
-                        path,
-                        format,
-                        mtime: cached_mtime,
-                        len: cached_len,
-                        ..
-                    }),
-                    Some(current_mtime),
-                    Some(current_len)
-                )
-                    if path == &resolved.path
-                        && *format == resolved.format
-                        && *cached_mtime == Some(current_mtime)
-                        && *cached_len == Some(current_len)
-            );
-        if cached_fast {
-            let span = tracing::debug_span!(
-                "code_graph_build",
-                path = %resolved.path.display(),
-                cached = "fast"
-            );
-            let _guard = span.enter();
-            return Ok(self.cached_entries.clone());
-        }
 
         if let Some(cache_key) = self.cache_key.as_mut() {
-            if cache_key.path == resolved.path && cache_key.format == resolved.format {
+            if cache_key.path == resolved.path {
                 if let Ok(current_hash) = read_resolved_content_hash(&resolved) {
                     if let (Some(cached_hash), Some(current_hash)) =
                         (cache_key.content_hash.as_deref(), current_hash.as_deref())
                     {
                         if cached_hash == current_hash {
                             cache_key.path = resolved.path.clone();
-                            cache_key.format = resolved.format;
                             cache_key.mtime = modified;
                             cache_key.len = len;
                             let span = tracing::debug_span!(
@@ -180,10 +149,7 @@ impl MentionSource for CodeGraphMentionSource {
             self.reload_count += 1;
         }
 
-        let content_hash = match resolved.format {
-            ArtifactFormat::Parquet => Some(artifact.graph_content_hash.clone()),
-            ArtifactFormat::LegacyJson => artifact.header.content_hash_blake3.clone(),
-        };
+        let content_hash = Some(artifact.graph_content_hash.clone());
         for diagnostic in &artifact.diagnostics {
             tracing::warn!(
                 diagnostic = diagnostic.as_str(),
@@ -205,7 +171,6 @@ impl MentionSource for CodeGraphMentionSource {
         );
         self.cache_key = Some(CodeGraphCacheKey {
             path: resolved.path,
-            format: resolved.format,
             mtime: modified,
             len,
             content_hash,
@@ -219,12 +184,9 @@ impl MentionSource for CodeGraphMentionSource {
 }
 
 fn read_resolved_content_hash(resolved: &ResolvedArtifact) -> anyhow::Result<Option<String>> {
-    match resolved.format {
-        ArtifactFormat::Parquet => Ok(Some(
-            read_artifact_header_parquet(&resolved.path)?.graph_content_hash,
-        )),
-        ArtifactFormat::LegacyJson => Ok(read_artifact_header(&resolved.path)?.content_hash_blake3),
-    }
+    Ok(Some(
+        read_artifact_header_parquet(&resolved.path)?.graph_content_hash,
+    ))
 }
 
 fn entries_and_payloads(
@@ -394,28 +356,18 @@ mod tests {
     use std::time::Duration;
 
     fn write_fixture(path: &Path, file_path: &str) {
-        write_fixture_with_hash(path, file_path, None);
+        let content_hash = format!("hash-{}", file_path.replace('/', "-"));
+        write_fixture_with_hash(path, file_path, &content_hash);
     }
 
-    fn write_fixture_with_hash(path: &Path, file_path: &str, content_hash_blake3: Option<&str>) {
-        let header = match content_hash_blake3 {
-            Some(hash) => format!(
-                r#""header": {{ "graph_index_version": "v1", "content_hash_blake3": "{hash}" }}"#
-            ),
-            None => r#""header": { "graph_index_version": "v1" }"#.to_string(),
-        };
-        let artifact = format!(
-            r#"{{
-  {header},
-  "manifest_version": "v1",
-  "file_manifests": [],
-  "files": [
-    {{ "stable_file_id": "file-1", "file_path": "{file_path}" }}
-  ],
-  "symbols": []
-}}"#
-        );
-        fs::write(path, artifact).expect("write fixture");
+    fn write_fixture_with_hash(path: &Path, file_path: &str, content_hash: &str) {
+        write_artifact_parquet(
+            &graph_artifact("file-1", file_path, content_hash),
+            path,
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write fixture");
     }
 
     fn rewrite_until_mtime_changes(path: &Path, file_path: &str, previous: SystemTime) {
@@ -479,7 +431,7 @@ mod tests {
     #[test]
     fn build_uses_mtime_cache_and_reloads_on_change() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let artifact_path = temp.path().join("graph-index.json");
+        let artifact_path = temp.path().join("graph-index.parquet");
         write_fixture(&artifact_path, "src/main.rs");
         let mut source = CodeGraphMentionSource::new(&artifact_path);
 
@@ -504,12 +456,9 @@ mod tests {
 
         let stable_metadata = fs::metadata(&artifact_path).expect("metadata");
         let stable_mtime = stable_metadata.modified().expect("modified");
-        let previous_len = stable_metadata.len();
         write_fixture(&artifact_path, "src/lib_rewritten_with_longer_name.rs");
         let stable_filetime = FileTime::from_system_time(stable_mtime);
         set_file_mtime(&artifact_path, stable_filetime).expect("restore mtime");
-        let current_len = fs::metadata(&artifact_path).expect("metadata").len();
-        assert_ne!(current_len, previous_len);
 
         let fourth = source.build(Path::new(".")).expect("fourth build");
         assert_eq!(fourth.len(), 1);
@@ -520,7 +469,7 @@ mod tests {
     #[test]
     fn code_payloads_cache_hit_reuses_arc_instances() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let artifact_path = temp.path().join("graph-index.json");
+        let artifact_path = temp.path().join("graph-index.parquet");
         write_fixture(&artifact_path, "src/main.rs");
         let mut source = CodeGraphMentionSource::new(&artifact_path);
 
@@ -544,21 +493,20 @@ mod tests {
     #[test]
     fn build_uses_content_hash_when_metadata_changes_but_content_does_not() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let artifact_path = temp.path().join("graph-index.json");
-        write_fixture_with_hash(&artifact_path, "src/main.rs", Some("hash-same"));
+        let artifact_path = temp.path().join("graph-index.parquet");
+        write_fixture_with_hash(&artifact_path, "src/main.rs", "hash-same");
         let mut source = CodeGraphMentionSource::new(&artifact_path);
 
         let first = source.build(Path::new(".")).expect("first build");
         assert_eq!(first.len(), 1);
         assert_eq!(source.reload_count, 1);
 
-        let fixture_bytes = fs::read(&artifact_path).expect("read fixture bytes");
         let previous_mtime = fs::metadata(&artifact_path)
             .expect("metadata")
             .modified()
             .expect("modified");
         rewrite_until_mtime_changes_with(&artifact_path, previous_mtime, || {
-            fs::write(&artifact_path, &fixture_bytes).expect("rewrite identical bytes");
+            write_fixture_with_hash(&artifact_path, "src/main.rs", "hash-same");
         });
 
         let second = source.build(Path::new(".")).expect("second build");
@@ -608,8 +556,8 @@ mod tests {
     #[test]
     fn build_reloads_when_hash_changes() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let artifact_path = temp.path().join("graph-index.json");
-        write_fixture_with_hash(&artifact_path, "src/main.rs", Some("hash-before"));
+        let artifact_path = temp.path().join("graph-index.parquet");
+        write_fixture_with_hash(&artifact_path, "src/main.rs", "hash-before");
         let mut source = CodeGraphMentionSource::new(&artifact_path);
 
         let first = source.build(Path::new(".")).expect("first build");
@@ -621,7 +569,7 @@ mod tests {
             .modified()
             .expect("modified");
         rewrite_until_mtime_changes_with(&artifact_path, previous_mtime, || {
-            write_fixture_with_hash(&artifact_path, "src/lib.rs", Some("hash-after"));
+            write_fixture_with_hash(&artifact_path, "src/lib.rs", "hash-after");
         });
 
         let second = source.build(Path::new(".")).expect("second build");

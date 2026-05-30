@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 
 use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::build::BuildStats;
-use crate::store::pointer::{resolve_artifact_location, ArtifactFormat};
+use crate::store::pointer::resolve_artifact_location;
 use crate::store::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
     write_current_pointer, write_sections_dataset, ArtifactStagingDir, WriteOptions,
@@ -209,8 +209,7 @@ fn load_pointer_artifact(
         .git_common_dir
         .canonicalize()
         .unwrap_or_else(|_| ctx.git_common_dir.clone());
-    let artifact =
-        read_resolved_base_artifact(common_dir, &resolved.path, resolved.format, source)?;
+    let artifact = read_resolved_base_artifact(common_dir, &resolved.path, source)?;
     let indexed_commit_oid = pointer
         .filter(|pointer| {
             pointer.graph_content_hash == artifact.graph_content_hash
@@ -232,76 +231,27 @@ fn read_graph_index_pointer(pointer_root: &Path) -> Option<GraphIndexPointer> {
 fn read_resolved_base_artifact(
     common_dir: PathBuf,
     path: &Path,
-    format: ArtifactFormat,
     source: &'static str,
 ) -> Option<Arc<GraphIndexArtifact>> {
-    match format {
-        ArtifactFormat::Parquet => {
-            let manifest = match read_artifact_header_parquet(path) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    tracing::debug!(
-                        target: "spur_graph::base_seed",
-                        source,
-                        path = %path.display(),
-                        error = %error,
-                        "spur-graph: base artifact manifest unreadable"
-                    );
-                    return None;
-                }
-            };
-            let key = BaseArtifactCacheKey {
-                common_dir,
-                manifest_version: manifest.manifest_version,
-                graph_content_hash: manifest.graph_content_hash,
-            };
-            read_cached_base_artifact(key, path, source)
-        }
-        ArtifactFormat::LegacyJson => read_uncached_base_artifact(common_dir, path, source),
-    }
-}
-
-fn read_uncached_base_artifact(
-    common_dir: PathBuf,
-    path: &Path,
-    source: &'static str,
-) -> Option<Arc<GraphIndexArtifact>> {
-    let artifact = match crate::load_artifact(path) {
-        Ok(artifact) => artifact,
+    let manifest = match read_artifact_header_parquet(path) {
+        Ok(manifest) => manifest,
         Err(error) => {
             tracing::debug!(
                 target: "spur_graph::base_seed",
                 source,
                 path = %path.display(),
                 error = %error,
-                "spur-graph: base artifact unreadable"
+                "spur-graph: base artifact manifest unreadable"
             );
             return None;
         }
     };
     let key = BaseArtifactCacheKey {
         common_dir,
-        manifest_version: artifact.manifest_version.clone(),
-        graph_content_hash: artifact.graph_content_hash.clone(),
+        manifest_version: manifest.manifest_version,
+        graph_content_hash: manifest.graph_content_hash,
     };
-
-    if let Some(cached) = base_artifact_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.artifacts.get(&key).cloned())
-    {
-        return Some(cached);
-    }
-
-    let artifact = Arc::new(artifact);
-    let Ok(mut cache) = base_artifact_cache().lock() else {
-        return Some(artifact);
-    };
-    if let Some(cached) = cache.artifacts.get(&key) {
-        return Some(Arc::clone(cached));
-    }
-    cache.insert(key, Arc::clone(&artifact));
-    Some(artifact)
+    read_cached_base_artifact(key, path, source)
 }
 
 fn read_cached_base_artifact(
