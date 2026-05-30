@@ -121,6 +121,7 @@ fn node_kind_discriminators_are_stable_contracts() {
     assert_eq!(NodeKind::Method.discriminator(), "method");
     assert_eq!(NodeKind::Struct.discriminator(), "struct");
     assert_eq!(NodeKind::Enum.discriminator(), "enum");
+    assert_eq!(NodeKind::EnumVariant.discriminator(), "enum_variant");
     assert_eq!(NodeKind::Trait.discriminator(), "trait");
     assert_eq!(NodeKind::Impl.discriminator(), "impl");
     assert_eq!(NodeKind::Field.discriminator(), "field");
