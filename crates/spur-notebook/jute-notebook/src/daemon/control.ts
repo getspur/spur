@@ -39,8 +39,12 @@ export function attachDatasourceCommand(
 export function datasourceEntryFromDaemonControlResponse(
   response: DaemonControlResponse,
 ): DatasourceEntry {
-  if (response.ok && isDatasourceEntry(response.result)) {
-    return response.result;
+  if (
+    response.ok &&
+    response.result?.type === "datasource" &&
+    isDatasourceEntry(response.result.data)
+  ) {
+    return response.result.data;
   }
   if (response.error) {
     throw new Error(response.error.message);
