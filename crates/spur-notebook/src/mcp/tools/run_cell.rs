@@ -8,10 +8,12 @@ use serde_json::{json, Value};
 use tauri::Emitter;
 use tracing::warn;
 
+use crate::dag::{notebook_port_root, wrap_python_cell};
 use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.run_cell";
 const RUN_CELL_EVENT_NAME: &str = "notebook://run_cell_event";
+const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 
 #[derive(Debug, Deserialize)]
 struct RunCellParams {
@@ -60,8 +62,9 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         McpError::internal_error("notebook.run_cell requires notebook daemon state", None)
     })?;
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
+    let code = wrap_python_cell(port_root_for_kernel_id(&kernel_id), &params.code);
 
-    let rx = run_cell_events(&kernel_id, &params.code, state)
+    let rx = run_cell_events(&kernel_id, &code, state)
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -94,6 +97,13 @@ async fn resolve_kernel_id(
             None,
         )
     })
+}
+
+fn port_root_for_kernel_id(kernel_id: &str) -> std::path::PathBuf {
+    let path = kernel_id
+        .strip_prefix(NOTEBOOK_SLOT_PREFIX)
+        .unwrap_or(kernel_id);
+    notebook_port_root(path)
 }
 
 struct RunCellSummary {
