@@ -331,6 +331,11 @@ impl ReactiveEngineClient {
         Self { source_tx }
     }
 
+    #[doc(hidden)]
+    pub fn new_for_test(source_tx: mpsc::Sender<SourcePush>) -> Self {
+        Self::new(source_tx)
+    }
+
     pub async fn push_source(&self, push: SourcePush) -> Result<(), EngineError> {
         self.source_tx
             .send(push)
