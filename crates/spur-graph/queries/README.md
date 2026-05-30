@@ -34,9 +34,10 @@ The shared capture vocabulary is:
 | `@definition.section` | `NodeKind::Section` |
 | `@definition.enum_variant` | `NodeKind::EnumVariant` |
 
-`@definition.constant` is captured for Rust, Python, and conservative
-TypeScript top-level `const` bindings. `@definition.enum_variant` is captured
-for Rust, TypeScript, and C++ enum members.
+`@definition.constant` is captured for Rust, Python, TypeScript top-level
+non-function `const` bindings, and C++ namespace/file-scope `const` and
+`constexpr` variables. `@definition.enum_variant` is captured for Rust,
+TypeScript, and C++ enum members.
 
 ## Coverage Matrix
 
@@ -53,7 +54,7 @@ Legend:
 | Python | - | Y | - | Y | - | - | - | - | - | - | - | - | - | Y | - |
 | TypeScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
 | Tsx | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
-| Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | TODO | Y |
+| Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
 
 Notes:
@@ -67,9 +68,11 @@ Notes:
   emitted as plain fields. C++ captures simple class data members.
 - Rust captures `const_item` and `static_item` as `@definition.constant`.
   Python follows the canonical module-level assignment constant pattern.
-  TypeScript captures top-level `const` bindings with simple non-function
-  initializer forms; complex expressions and exported const wrappers remain a
-  conservative follow-up if needed.
+  TypeScript captures top-level and exported `const` bindings with non-function
+  initializer forms; direct arrow/function initializer forms are emitted as
+  `@definition.function` only. C++ captures namespace/file-scope `const` and
+  `constexpr` variables; const class members remain fields, and const locals,
+  parameters, and function return types are intentionally skipped.
 - Rust captures enum members as `@definition.enum_variant` (mapped to
   `NodeKind::EnumVariant`); TypeScript enum members and C++ `enumerator`s do
   the same.

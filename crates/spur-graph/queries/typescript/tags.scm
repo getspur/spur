@@ -99,13 +99,16 @@
     "const"
     (variable_declarator
       name: (identifier) @name
-      value: [
-        (number)
-        (string)
-        (identifier)
-        (member_expression)
-        (call_expression)
-        (new_expression)
-        (object)
-        (array)
-      ]) @definition.constant))
+      value: (_) @value) @definition.constant)
+  (#not-match? @value "^\\s*(async\\s*)?(\\([^)]*\\)|[A-Za-z_$][A-Za-z0-9_$]*)\\s*=>")
+  (#not-match? @value "^\\s*(async\\s+)?function\\b"))
+
+(program
+  (export_statement
+    (lexical_declaration
+      "const"
+      (variable_declarator
+        name: (identifier) @name
+        value: (_) @value) @definition.constant))
+  (#not-match? @value "^\\s*(async\\s*)?(\\([^)]*\\)|[A-Za-z_$][A-Za-z0-9_$]*)\\s*=>")
+  (#not-match? @value "^\\s*(async\\s+)?function\\b"))
