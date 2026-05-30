@@ -177,6 +177,47 @@
 (preproc_function_def
   name: (identifier) @name) @definition.macro
 
+; -------- namespace/file-scope constants --------
+;
+; These patterns are intentionally scoped to translation_unit and namespace
+; bodies so const class fields and const locals stay out of the constant set.
+
+(translation_unit
+  (declaration
+    [
+      (type_qualifier)
+      "constexpr"
+    ]
+    declarator: (init_declarator
+      declarator: (identifier) @name)) @definition.constant)
+
+(translation_unit
+  (declaration
+    [
+      (type_qualifier)
+      "constexpr"
+    ]
+    declarator: (identifier) @name) @definition.constant)
+
+(namespace_definition
+  body: (declaration_list
+    (declaration
+      [
+        (type_qualifier)
+        "constexpr"
+      ]
+      declarator: (init_declarator
+        declarator: (identifier) @name)) @definition.constant))
+
+(namespace_definition
+  body: (declaration_list
+    (declaration
+      [
+        (type_qualifier)
+        "constexpr"
+      ]
+      declarator: (identifier) @name) @definition.constant))
+
 ; -------- fields (class data members) --------
 ;
 ; field_declaration captures both methods (handled above) and data members.

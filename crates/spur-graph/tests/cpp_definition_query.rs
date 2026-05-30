@@ -73,6 +73,52 @@ enum class Color {
 }
 
 #[test]
+fn cpp_tags_query_captures_namespace_scope_constants_only() {
+    let source = r#"
+const int FILE_LIMIT = 5;
+
+namespace demo {
+constexpr double PI = 3.14;
+static constexpr int BUFFER_SIZE = 10;
+const int answer();
+
+int scale(const int factor) {
+  const int local_limit = factor * BUFFER_SIZE;
+  return local_limit;
+}
+}
+"#;
+    let sexp = root_sexp(source);
+    assert!(sexp.contains("translation_unit"), "{sexp}");
+    assert!(sexp.contains("namespace_definition"), "{sexp}");
+    assert!(sexp.contains("declaration"), "{sexp}");
+    assert!(sexp.contains("init_declarator"), "{sexp}");
+
+    assert_eq!(
+        definition_names(source, "definition.constant"),
+        ["FILE_LIMIT", "PI", "BUFFER_SIZE"]
+    );
+}
+
+#[test]
+fn cpp_tags_query_keeps_const_class_members_as_fields_only() {
+    let source = r#"
+struct Config {
+  const int retries;
+};
+"#;
+    let sexp = root_sexp(source);
+    assert!(sexp.contains("field_declaration_list"), "{sexp}");
+    assert!(sexp.contains("field_declaration"), "{sexp}");
+
+    assert_eq!(definition_names(source, "definition.field"), ["retries"]);
+    assert!(
+        !definition_names(source, "definition.constant").contains(&"retries".to_owned()),
+        "const class data members must not be double-emitted as constants"
+    );
+}
+
+#[test]
 fn cpp_extractor_preserves_enum_member_parent_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
