@@ -12,7 +12,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use spur_graph::git_blob_oid;
-use spur_graph::store::cache::{emit_base_seed_stats, load_base_seed_for_worktree};
+use spur_graph::store::cache::{
+    emit_base_seed_stats, load_base_seed_for_worktree, BaseArtifactSeed,
+};
 use spur_graph::temporal::{
     resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
@@ -472,7 +474,7 @@ pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError>
 }
 
 pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
-    let backend = open_code_search_backend_for_request()?;
+    let backend = open_code_search_backend_for_request(None).await?;
     let search = code_search_body_for_client(args, backend.client())?;
     let files = backend.search_response_file_set(&search)?;
     let source = backend.metadata_source();
@@ -487,8 +489,9 @@ async fn code_search_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    let backend =
-        open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
+    let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
+        .await
+        .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
     let search = code_search_body_for_client(args, backend.client())
         .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
@@ -506,7 +509,7 @@ async fn code_search_response(
                 )
                 .await
             }
-            CodeSearchBackend::LegacyJson { artifact, .. } => {
+            CodeSearchBackend::InMemory { artifact, .. } => {
                 try_rebuild_artifact(
                     Arc::clone(&rebuild_coordinator),
                     Arc::clone(artifact),
@@ -559,7 +562,7 @@ async fn code_graph_backend_value(
     args: &Value,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<Value, McpHandlerError> {
-    let backend = open_code_search_backend_for_request()?;
+    let backend = open_code_search_backend_for_request(None).await?;
     let mut body = handler(args, backend.client()).map_err(CodeGraphError::into_handler_error)?;
     let files = backend.response_file_set_from_body(&body)?;
     GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
@@ -573,8 +576,9 @@ async fn code_graph_backend_response(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
-    let backend =
-        open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
+    let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
+        .await
+        .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
     let mut body = handler(args, backend.client()).map_err(|mut error| {
         if error.metadata.is_none() && error.temporal_code.is_none() {
@@ -596,7 +600,7 @@ async fn code_graph_backend_response(
                 )
                 .await
             }
-            CodeSearchBackend::LegacyJson { artifact, .. } => {
+            CodeSearchBackend::InMemory { artifact, .. } => {
                 try_rebuild_artifact(
                     Arc::clone(&rebuild_coordinator),
                     Arc::clone(artifact),
@@ -638,10 +642,12 @@ async fn code_graph_backend_response(
 
 async fn code_graph_backend_response_without_rebuild(
     args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
-    let backend =
-        open_code_search_backend_for_request().map_err(CodeGraphError::without_metadata)?;
+    let backend = open_code_search_backend_for_request(Some(rebuild_coordinator))
+        .await
+        .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
     let mut body = handler(args, backend.client()).map_err(|mut error| {
         if error.metadata.is_none() && error.temporal_code.is_none() {
@@ -667,7 +673,7 @@ struct CodeSearchBody {
 
 enum CodeSearchBackend {
     Parquet(Box<ParquetClient>),
-    LegacyJson {
+    InMemory {
         artifact: Arc<GraphIndexArtifact>,
         client: InMemoryClient,
     },
@@ -677,7 +683,7 @@ impl CodeSearchBackend {
     fn client(&self) -> &dyn GraphQueryClient {
         match self {
             Self::Parquet(client) => client.as_ref(),
-            Self::LegacyJson { client, .. } => client,
+            Self::InMemory { client, .. } => client,
         }
     }
 
@@ -686,7 +692,7 @@ impl CodeSearchBackend {
             Self::Parquet(client) => {
                 GraphMetadataSource::from_parquet_manifest(client.as_ref().manifest())
             }
-            Self::LegacyJson { artifact, .. } => GraphMetadataSource::from_artifact(artifact),
+            Self::InMemory { artifact, .. } => GraphMetadataSource::from_artifact(artifact),
         }
     }
 
@@ -700,7 +706,7 @@ impl CodeSearchBackend {
                 &search.result,
                 &search.options,
             ),
-            Self::LegacyJson { artifact, .. } => {
+            Self::InMemory { artifact, .. } => {
                 Ok(empty_code_search_file_set(artifact, &search.body)
                     .unwrap_or_else(|| response_file_set_from_body(artifact, &search.body)))
             }
@@ -733,7 +739,7 @@ impl CodeSearchBackend {
                 }
                 Ok(files)
             }
-            Self::LegacyJson { artifact, .. } => Ok(response_file_set_from_body(artifact, body)),
+            Self::InMemory { artifact, .. } => Ok(response_file_set_from_body(artifact, body)),
         }
     }
 }
@@ -1089,9 +1095,14 @@ pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerEr
 
 async fn code_read_symbol_response(
     args: &Value,
-    _rebuild_coordinator: Arc<RebuildCoordinator>,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    code_graph_backend_response_without_rebuild(args, code_read_symbol_with_client).await
+    code_graph_backend_response_without_rebuild(
+        args,
+        rebuild_coordinator,
+        code_read_symbol_with_client,
+    )
+    .await
 }
 
 fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
@@ -1522,7 +1533,7 @@ fn temporal_index_for_as_of(
     if parse_as_of(args)?.is_none() {
         return Ok(None);
     }
-    if let Ok(backend) = open_code_search_backend_for_request() {
+    if let Ok(backend) = open_existing_code_search_backend_for_request() {
         if backend.metadata_source().graph_content_hash == loaded.artifact().graph_content_hash {
             return Ok(Some(backend.client().temporal_index()));
         }
@@ -2186,13 +2197,7 @@ async fn try_rebuild_artifact_from_worktree(
     rebuild_candidate: RebuildCandidate,
 ) -> RebuildAttempt {
     if let Some(seed) = load_base_seed_for_worktree(&rebuild_candidate.worktree) {
-        return try_rebuild_artifact(
-            rebuild_coordinator,
-            seed.artifact,
-            rebuild_candidate,
-            Some(seed.base),
-        )
-        .await;
+        return try_rebuild_artifact_from_seed(rebuild_coordinator, rebuild_candidate, seed).await;
     }
 
     let RebuildCandidate { worktree, key } = rebuild_candidate;
@@ -2256,6 +2261,20 @@ async fn try_rebuild_artifact_from_worktree(
             RebuildAttempt::StaleBudgetExceeded
         }
     }
+}
+
+async fn try_rebuild_artifact_from_seed(
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    rebuild_candidate: RebuildCandidate,
+    seed: BaseArtifactSeed,
+) -> RebuildAttempt {
+    try_rebuild_artifact(
+        rebuild_coordinator,
+        seed.artifact,
+        rebuild_candidate,
+        Some(seed.base),
+    )
+    .await
 }
 
 async fn code_graph_response(id: Value, result: CodeGraphResult) -> JsonRpcResponse {
@@ -2334,10 +2353,36 @@ where
 }
 
 #[allow(clippy::result_large_err)]
-fn open_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandlerError> {
+async fn open_code_search_backend_for_request(
+    rebuild_coordinator: Option<Arc<RebuildCoordinator>>,
+) -> Result<CodeSearchBackend, McpHandlerError> {
+    let worktree = current_worktree()?;
+    let resolved = match resolve_artifact_location(&worktree, None) {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            let Some(rebuild_coordinator) = rebuild_coordinator else {
+                return Err(graph_artifact_missing(&worktree));
+            };
+            return open_code_search_backend_from_base_seed(worktree, rebuild_coordinator).await;
+        }
+    };
+
+    open_resolved_code_search_backend(&worktree, resolved)
+}
+
+#[allow(clippy::result_large_err)]
+fn open_existing_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandlerError> {
     let worktree = current_worktree()?;
     let resolved = resolve_artifact_location(&worktree, None)
         .map_err(|_| graph_artifact_missing(&worktree))?;
+    open_resolved_code_search_backend(&worktree, resolved)
+}
+
+#[allow(clippy::result_large_err)]
+fn open_resolved_code_search_backend(
+    worktree: &Path,
+    resolved: spur_graph::ResolvedArtifact,
+) -> Result<CodeSearchBackend, McpHandlerError> {
     let artifact_path = resolved.path;
 
     match resolved.format {
@@ -2356,7 +2401,7 @@ fn open_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandle
         ArtifactFormat::LegacyJson => match load_artifact(&artifact_path) {
             Ok(artifact) => {
                 let artifact = Arc::new(artifact);
-                Ok(CodeSearchBackend::LegacyJson {
+                Ok(CodeSearchBackend::InMemory {
                     client: InMemoryClient::new(Arc::clone(&artifact)),
                     artifact,
                 })
@@ -2375,6 +2420,50 @@ fn open_code_search_backend_for_request() -> Result<CodeSearchBackend, McpHandle
             ))),
         },
     }
+}
+
+#[allow(clippy::result_large_err)]
+async fn open_code_search_backend_from_base_seed(
+    worktree: PathBuf,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+) -> Result<CodeSearchBackend, McpHandlerError> {
+    let Some(seed) = load_base_seed_for_worktree(&worktree) else {
+        return Err(graph_artifact_missing(&worktree));
+    };
+    let Some(rebuild_candidate) = rebuild_candidate_for_base_seed(&worktree, &seed.artifact).await
+    else {
+        return Err(McpHandlerError::Internal(format!(
+            "graph artifact not found and base-seed overlay could not determine git state in {}",
+            worktree.display()
+        )));
+    };
+
+    match try_rebuild_artifact_from_seed(rebuild_coordinator, rebuild_candidate, seed).await {
+        RebuildAttempt::Fresh(artifact) => Ok(CodeSearchBackend::InMemory {
+            client: InMemoryClient::new(Arc::clone(&artifact)),
+            artifact,
+        }),
+        RebuildAttempt::StaleBudgetExceeded => Err(McpHandlerError::Internal(format!(
+            "graph artifact not found and base-seed overlay exceeded the latency budget in {}",
+            worktree.display()
+        ))),
+        RebuildAttempt::StaleRebuildFailed => Err(McpHandlerError::Internal(format!(
+            "graph artifact not found and base-seed overlay failed in {}",
+            worktree.display()
+        ))),
+    }
+}
+
+async fn rebuild_candidate_for_base_seed(
+    worktree: &Path,
+    base_artifact: &GraphIndexArtifact,
+) -> Option<RebuildCandidate> {
+    let git = worktree_git_metadata(worktree).await?;
+    let dirty_oids = dirty_indexed_file_oids(worktree, &git.head_oid, base_artifact);
+    Some(RebuildCandidate {
+        worktree: worktree.to_path_buf(),
+        key: RebuildKey::from(&git.head_oid, &dirty_oids),
+    })
 }
 
 #[allow(clippy::result_large_err)]
