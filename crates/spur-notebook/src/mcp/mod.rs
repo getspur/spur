@@ -622,6 +622,8 @@ fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, 
         Some("csv") => Ok(jute::commands::DatasourceKind::Csv),
         Some("parquet" | "parq") => Ok(jute::commands::DatasourceKind::Parquet),
         Some("json" | "jsonl" | "ndjson") => Ok(jute::commands::DatasourceKind::Json),
+        Some("duckdb") => Ok(jute::commands::DatasourceKind::DuckDb),
+        Some("sqlite" | "db") => Ok(jute::commands::DatasourceKind::Sqlite),
         _ => Err(BridgeError::Handler {
             code: "unsupported_datasource_kind".to_string(),
             message: format!(
@@ -630,6 +632,21 @@ fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, 
             ),
         }),
     }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_group_for_attach(path: &Path, group: Option<String>) -> Option<String> {
+    group.or_else(|| is_spur_analyst_index(path).then(|| "SPUR".to_owned()))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn is_spur_analyst_index(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("analyst.duckdb")
+        && path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some(".spur")
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -647,6 +664,7 @@ fn datasource_setup_source(entries: &[jute::commands::DatasourceEntry]) -> Strin
     let mut source = String::from(DATASOURCE_SETUP_SENTINEL);
     source.push_str("\n# This cell is managed by SPUR. Re-run it after datasource changes.\n");
     source.push_str("import duckdb\n\n");
+    source.push_str(&datasource_setup_bootstrap_preamble(entries));
 
     if entries.is_empty() {
         source.push_str("# No datasources are attached.\n");
@@ -654,17 +672,65 @@ fn datasource_setup_source(entries: &[jute::commands::DatasourceEntry]) -> Strin
     }
 
     for entry in entries {
-        let sql = format!(
-            "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
-            sql_identifier(&entry.name),
-            datasource_scan_expression(entry)
-        );
-        source.push_str("duckdb.sql(");
-        source.push_str(&python_string_literal(&sql));
-        source.push_str(")\n");
+        for sql in datasource_setup_statements(entry) {
+            source.push_str("duckdb.sql(");
+            source.push_str(&python_string_literal(&sql));
+            source.push_str(")\n");
+        }
     }
 
     source
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_setup_bootstrap_preamble(entries: &[jute::commands::DatasourceEntry]) -> String {
+    let needs_sqlite = entries
+        .iter()
+        .any(|entry| entry.kind == jute::commands::DatasourceKind::Sqlite);
+    if !needs_sqlite {
+        return String::new();
+    }
+
+    let mut source = String::new();
+    source.push_str("# sqlite_scanner is core/signed; first run may need network access.\n");
+    source.push_str("duckdb.sql(\"INSTALL sqlite;\")\n");
+    source.push_str("duckdb.sql(\"LOAD sqlite;\")\n\n");
+    source
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_setup_statements(entry: &jute::commands::DatasourceEntry) -> Vec<String> {
+    if matches!(
+        entry.kind,
+        jute::commands::DatasourceKind::DuckDb | jute::commands::DatasourceKind::Sqlite
+    ) {
+        let attach_options = match entry.kind {
+            jute::commands::DatasourceKind::DuckDb => "READ_ONLY",
+            jute::commands::DatasourceKind::Sqlite => "TYPE sqlite, READ_ONLY",
+            _ => unreachable!("only attached datasource kinds reach this branch"),
+        };
+        let mut statements = vec![format!(
+            "ATTACH IF NOT EXISTS {} AS {} ({attach_options})",
+            sql_string_literal(&entry.path),
+            sql_identifier(&entry.name)
+        )];
+        statements.extend(entry.tables.iter().map(|table| {
+            format!(
+                "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}.{}.{}",
+                sql_identifier(&format!("{}__{}", entry.name, table.name)),
+                sql_identifier(&entry.name),
+                sql_identifier("main"),
+                sql_identifier(&table.name)
+            )
+        }));
+        return statements;
+    }
+
+    vec![format!(
+        "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
+        sql_identifier(&entry.name),
+        datasource_scan_expression(entry)
+    )]
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -674,6 +740,12 @@ fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String
         jute::commands::DatasourceKind::Csv => format!("read_csv_auto({literal})"),
         jute::commands::DatasourceKind::Parquet => format!("read_parquet({literal})"),
         jute::commands::DatasourceKind::Json => format!("read_json_auto({literal})"),
+        jute::commands::DatasourceKind::DuckDb => {
+            unreachable!("DuckDB files are mounted through ATTACH")
+        }
+        jute::commands::DatasourceKind::Sqlite => {
+            unreachable!("SQLite files are mounted through ATTACH")
+        }
     }
 }
 
@@ -990,20 +1062,30 @@ impl NotebookDaemonControl {
     ) -> Result<DaemonControlSuccess, BridgeError> {
         let path = normalize_datasource_path(path)?;
         let kind = infer_datasource_kind(&path)?;
-        let schema = crate::datasource::introspect_datasource(&path, kind).map_err(|error| {
-            BridgeError::Handler {
-                code: "datasource_introspection_failed".to_string(),
-                message: error.to_string(),
+        let schema = match crate::datasource::introspect_datasource(&path, kind) {
+            Ok(schema) => schema,
+            Err(error) => {
+                warn!(
+                    %error,
+                    path = %path.display(),
+                    "datasource schema probe failed; attaching with pending metadata"
+                );
+                crate::datasource::DatasourceSchema {
+                    columns: Vec::new(),
+                    row_count: None,
+                    tables: Vec::new(),
+                }
             }
-        })?;
+        };
 
         let entry = jute::commands::DatasourceEntry {
             name,
             path: path.display().to_string(),
             kind,
-            group,
+            group: datasource_group_for_attach(&path, group),
             columns: schema.columns,
             row_count: schema.row_count,
+            tables: schema.tables,
         };
 
         self.jute_state.attach_datasource(entry.clone());
@@ -1968,6 +2050,379 @@ mod tests {
     }
 
     #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn infer_datasource_kind_detects_sqlite_extensions() {
+        assert_eq!(
+            infer_datasource_kind(Path::new("local.sqlite")).expect("sqlite kind"),
+            jute::commands::DatasourceKind::Sqlite
+        );
+        assert_eq!(
+            infer_datasource_kind(Path::new("local.db")).expect("db kind"),
+            jute::commands::DatasourceKind::Sqlite
+        );
+        assert_eq!(
+            infer_datasource_kind(Path::new("warehouse.duckdb")).expect("duckdb kind"),
+            jute::commands::DatasourceKind::DuckDb
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_probe_is_non_fatal_on_missing_extension() {
+        let tempdir = tempfile::tempdir().expect("duckdb fixture dir");
+        let duckdb = tempdir.path().join("broken.duckdb");
+        std::fs::write(&duckdb, "not a duckdb database").expect("write broken fixture");
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "warehouse".to_owned(),
+                    path: duckdb.display().to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::DuckDb);
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert!(entry.tables.is_empty());
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_sqlite_probe_failure_is_non_fatal() {
+        let tempdir = tempfile::tempdir().expect("sqlite fixture dir");
+        let sqlite = tempdir.path().join("offline.sqlite");
+        std::fs::write(&sqlite, "not a sqlite database").expect("write broken fixture");
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "local".to_owned(),
+                    path: sqlite.display().to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::Sqlite);
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert!(entry.tables.is_empty());
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_analyst_index_read_only_pending_when_busy() {
+        let tempdir = tempfile::tempdir().expect("analyst fixture dir");
+        let spur_dir = tempdir.path().join(".spur");
+        std::fs::create_dir(&spur_dir).expect("create .spur dir");
+        let analyst = spur_dir.join("analyst.duckdb");
+        create_analyst_fixture(&analyst);
+        let (mut lock_holder, _ready_dir) = spawn_analyst_lock_holder(&analyst);
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "analyst".to_owned(),
+                    path: analyst.display().to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+        let _ = lock_holder.kill();
+        let _ = lock_holder.wait();
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        assert_eq!(entry.name, "analyst");
+        assert!(entry.path.ends_with(".spur/analyst.duckdb"));
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::DuckDb);
+        assert_eq!(entry.group.as_deref(), Some("SPUR"));
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert!(entry.tables.is_empty());
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn hold_duckdb_writer_for_lock_test() {
+        let Some(path) = std::env::var_os("SPUR_HOLD_ANALYST_LOCK_PATH") else {
+            return;
+        };
+        let ready = std::env::var_os("SPUR_HOLD_ANALYST_LOCK_READY")
+            .expect("ready path provided for lock holder");
+        let _conn = duckdb::Connection::open(std::path::PathBuf::from(path))
+            .expect("open analyst writer lock holder");
+        std::fs::write(ready, b"ready").expect("write lock holder ready file");
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn create_analyst_fixture(path: &Path) {
+        let conn = duckdb::Connection::open(path).expect("open analyst fixture");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE nodes(stable_symbol_id VARCHAR, qualified_name VARCHAR);
+            INSERT INTO nodes VALUES ('sym-1', 'crate::symbol');
+            CREATE VIEW v_blast_radius AS
+                SELECT stable_symbol_id, 1 AS blast_radius_score FROM nodes;
+            "#,
+        )
+        .expect("create analyst fixture");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn spawn_analyst_lock_holder(path: &Path) -> (std::process::Child, tempfile::TempDir) {
+        let tempdir = tempfile::tempdir().expect("lock holder ready dir");
+        let ready = tempdir.path().join("ready");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("--exact")
+            .arg("mcp::tests::hold_duckdb_writer_for_lock_test")
+            .arg("--nocapture")
+            .env("SPUR_HOLD_ANALYST_LOCK_PATH", path)
+            .env("SPUR_HOLD_ANALYST_LOCK_READY", &ready)
+            .spawn()
+            .expect("spawn lock holder");
+        for _ in 0..100 {
+            if ready.exists() {
+                return (child, tempdir);
+            }
+            if let Some(status) = child.try_wait().expect("poll lock holder") {
+                panic!("lock holder exited before ready: {status}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        panic!("lock holder did not become ready");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn setup_cell_emits_attach_and_views() {
+        let entry = jute::commands::DatasourceEntry {
+            name: "warehouse".to_string(),
+            path: "/tmp/warehouse.duckdb".to_string(),
+            kind: jute::commands::DatasourceKind::DuckDb,
+            group: None,
+            columns: Vec::new(),
+            row_count: None,
+            tables: vec![
+                jute::commands::Table {
+                    name: "inventory".to_string(),
+                    columns: Vec::new(),
+                    row_count: None,
+                },
+                jute::commands::Table {
+                    name: "sales".to_string(),
+                    columns: Vec::new(),
+                    row_count: None,
+                },
+            ],
+        };
+
+        let source = datasource_setup_source(&[entry]);
+        let sql = duckdb_sql_calls(&source);
+
+        assert!(source.contains("import duckdb"));
+        assert_eq!(
+            sql[0],
+            "ATTACH IF NOT EXISTS '/tmp/warehouse.duckdb' AS \"warehouse\" (READ_ONLY)"
+        );
+        assert_eq!(
+            &sql[1..],
+            [
+                "CREATE OR REPLACE VIEW \"warehouse__inventory\" AS SELECT * FROM \"warehouse\".\"main\".\"inventory\"",
+                "CREATE OR REPLACE VIEW \"warehouse__sales\" AS SELECT * FROM \"warehouse\".\"main\".\"sales\""
+            ]
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn setup_cell_bootstrap_preamble_is_empty_for_native_kinds() {
+        let entries = [
+            test_datasource_entry("sales"),
+            jute::commands::DatasourceEntry {
+                name: "warehouse".to_string(),
+                path: "/tmp/warehouse.duckdb".to_string(),
+                kind: jute::commands::DatasourceKind::DuckDb,
+                group: None,
+                columns: Vec::new(),
+                row_count: None,
+                tables: Vec::new(),
+            },
+        ];
+
+        assert_eq!(datasource_setup_bootstrap_preamble(&entries), "");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn setup_cell_bootstrap_preamble_installs_sqlite_once() {
+        let entries = [
+            jute::commands::DatasourceEntry {
+                name: "local".to_string(),
+                path: "/tmp/local.sqlite".to_string(),
+                kind: jute::commands::DatasourceKind::Sqlite,
+                group: None,
+                columns: Vec::new(),
+                row_count: None,
+                tables: Vec::new(),
+            },
+            jute::commands::DatasourceEntry {
+                name: "cache".to_string(),
+                path: "/tmp/cache.db".to_string(),
+                kind: jute::commands::DatasourceKind::Sqlite,
+                group: None,
+                columns: Vec::new(),
+                row_count: None,
+                tables: Vec::new(),
+            },
+        ];
+        let preamble = datasource_setup_bootstrap_preamble(&entries);
+
+        assert!(preamble.contains("first run may need network access"));
+        assert_eq!(
+            duckdb_sql_calls(&preamble),
+            vec!["INSTALL sqlite;", "LOAD sqlite;"]
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn portability_duckdb_setup_cell_sql_runs_on_vanilla_duckdb() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let db_path = tempdir.path().join("warehouse.duckdb");
+        {
+            let conn = duckdb::Connection::open(&db_path)?;
+            conn.execute_batch(
+                "CREATE TABLE sales(region VARCHAR); INSERT INTO sales VALUES ('west');",
+            )?;
+        }
+        let entry = jute::commands::DatasourceEntry {
+            name: "warehouse".to_string(),
+            path: db_path.display().to_string(),
+            kind: jute::commands::DatasourceKind::DuckDb,
+            group: None,
+            columns: Vec::new(),
+            row_count: None,
+            tables: vec![jute::commands::Table {
+                name: "sales".to_string(),
+                columns: Vec::new(),
+                row_count: Some(1),
+            }],
+        };
+        let source = datasource_setup_source(&[entry]);
+        let conn = duckdb::Connection::open_in_memory()?;
+
+        for sql in duckdb_sql_calls(&source) {
+            conn.execute_batch(&sql)?;
+        }
+        let count: i64 =
+            conn.query_row("SELECT count(*) FROM \"warehouse__sales\"", [], |row| {
+                row.get(0)
+            })?;
+
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn analyst_index_setup_cell_can_query_nodes_and_blast_radius() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let spur_dir = tempdir.path().join(".spur");
+        std::fs::create_dir(&spur_dir)?;
+        let db_path = spur_dir.join("analyst.duckdb");
+        {
+            let conn = duckdb::Connection::open(&db_path)?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE nodes(stable_symbol_id VARCHAR, qualified_name VARCHAR);
+                INSERT INTO nodes VALUES ('sym-1', 'crate::symbol');
+                CREATE VIEW v_blast_radius AS
+                    SELECT stable_symbol_id, 1 AS blast_radius_score FROM nodes;
+                "#,
+            )?;
+        }
+        let schema = crate::datasource::introspect_datasource(
+            &db_path,
+            jute::commands::DatasourceKind::DuckDb,
+        )?;
+        let entry = jute::commands::DatasourceEntry {
+            name: "analyst".to_string(),
+            path: db_path.display().to_string(),
+            kind: jute::commands::DatasourceKind::DuckDb,
+            group: Some("SPUR".to_string()),
+            columns: schema.columns,
+            row_count: schema.row_count,
+            tables: schema.tables,
+        };
+        let source = datasource_setup_source(&[entry]);
+        let conn = duckdb::Connection::open_in_memory()?;
+
+        for sql in duckdb_sql_calls(&source) {
+            conn.execute_batch(&sql)?;
+        }
+
+        let node_count: i64 =
+            conn.query_row("SELECT count(*) FROM \"analyst__nodes\"", [], |row| {
+                row.get(0)
+            })?;
+        let blast_radius_score: i64 = conn.query_row(
+            "SELECT blast_radius_score FROM \"analyst__v_blast_radius\"",
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(node_count, 1);
+        assert_eq!(blast_radius_score, 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
     async fn attach_inserts_idempotent_setup_cell() {
         let tempdir = tempfile::tempdir().expect("csv fixture dir");
@@ -2161,7 +2616,8 @@ mod tests {
                                 "sqlType": "VARCHAR"
                             }
                         ],
-                        "rowCount": 2
+                        "rowCount": 2,
+                        "tables": []
                     }
                 ]
             })
@@ -2339,7 +2795,19 @@ mod tests {
                 sql_type: "VARCHAR".to_owned(),
             }],
             row_count: Some(2),
+            tables: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn duckdb_sql_calls(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let literal = line.strip_prefix("duckdb.sql(")?.strip_suffix(')')?;
+                serde_json::from_str(literal).ok()
+            })
+            .collect()
     }
 
     struct BufferedNotebookBridge {

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use duckdb::Connection;
-use jute::commands::{Column, DatasourceKind};
+use jute::commands::{Column, DatasourceKind, Table};
 
 /// Schema metadata discovered for a datasource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,8 @@ pub struct DatasourceSchema {
     pub columns: Vec<Column>,
     /// Best-effort row count.
     pub row_count: Option<u64>,
+    /// Tables discovered for multi-table datasources.
+    pub tables: Vec<Table>,
 }
 
 /// Probe a datasource using a read-only `DuckDB` query.
@@ -23,10 +25,89 @@ pub fn introspect_datasource(path: &Path, kind: DatasourceKind) -> Result<Dataso
     let path = path
         .to_str()
         .context("datasource path must be valid UTF-8")?;
+    if matches!(kind, DatasourceKind::DuckDb | DatasourceKind::Sqlite) {
+        return introspect_attached_database(path, kind);
+    }
+
     let scan = scan_expression(path, kind);
     let conn = Connection::open_in_memory().context("failed to open DuckDB schema probe")?;
 
-    let describe_sql = format!("DESCRIBE SELECT * FROM {scan}");
+    let columns = describe_columns(&conn, &scan, path)?;
+    let row_count = row_count(&conn, &scan);
+
+    Ok(DatasourceSchema {
+        columns,
+        row_count,
+        tables: Vec::new(),
+    })
+}
+
+fn introspect_attached_database(path: &str, kind: DatasourceKind) -> Result<DatasourceSchema> {
+    const PROBE_ALIAS: &str = "__spur_probe";
+    let attach_options = match kind {
+        DatasourceKind::DuckDb => "READ_ONLY",
+        DatasourceKind::Sqlite => "TYPE sqlite, READ_ONLY",
+        _ => unreachable!("only attached datasource kinds reach this probe"),
+    };
+    let kind_label = match kind {
+        DatasourceKind::DuckDb => "DuckDB",
+        DatasourceKind::Sqlite => "SQLite",
+        _ => unreachable!("only attached datasource kinds reach this probe"),
+    };
+
+    let conn = Connection::open_in_memory().context("failed to open DuckDB schema probe")?;
+    conn.execute_batch(&format!(
+        "ATTACH {} AS {} ({attach_options})",
+        sql_string_literal(path),
+        sql_identifier(PROBE_ALIAS)
+    ))
+    .with_context(|| format!("failed to attach {kind_label} datasource {path}"))?;
+
+    let mut statement = conn
+        .prepare(
+            "SELECT table_name AS relation_name FROM duckdb_tables() \
+             WHERE database_name = '__spur_probe' AND schema_name = 'main' AND NOT internal \
+             UNION \
+             SELECT view_name AS relation_name FROM duckdb_views() \
+             WHERE database_name = '__spur_probe' AND schema_name = 'main' AND NOT internal \
+             ORDER BY relation_name",
+        )
+        .with_context(|| format!("failed to prepare {kind_label} table probe for {path}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .with_context(|| format!("failed to run {kind_label} table probe for {path}"))?;
+
+    let mut table_names = Vec::new();
+    for row in rows {
+        table_names.push(
+            row.with_context(|| format!("failed to read {kind_label} table row for {path}"))?,
+        );
+    }
+
+    let mut tables = Vec::with_capacity(table_names.len());
+    for table_name in table_names {
+        let table_ref = format!(
+            "{}.{}.{}",
+            sql_identifier(PROBE_ALIAS),
+            sql_identifier("main"),
+            sql_identifier(&table_name)
+        );
+        tables.push(Table {
+            name: table_name,
+            columns: describe_columns(&conn, &table_ref, path)?,
+            row_count: row_count(&conn, &table_ref),
+        });
+    }
+
+    Ok(DatasourceSchema {
+        columns: Vec::new(),
+        row_count: None,
+        tables,
+    })
+}
+
+fn describe_columns(conn: &Connection, relation: &str, path: &str) -> Result<Vec<Column>> {
+    let describe_sql = format!("DESCRIBE SELECT * FROM {relation}");
     let mut statement = conn
         .prepare(&describe_sql)
         .with_context(|| format!("failed to prepare schema probe for {path}"))?;
@@ -43,14 +124,15 @@ pub fn introspect_datasource(path: &Path, kind: DatasourceKind) -> Result<Dataso
     for row in rows {
         columns.push(row.with_context(|| format!("failed to read schema row for {path}"))?);
     }
+    Ok(columns)
+}
 
-    let count_sql = format!("SELECT count(*) FROM {scan}");
-    let row_count = conn
+fn row_count(conn: &Connection, relation: &str) -> Option<u64> {
+    let count_sql = format!("SELECT count(*) FROM {relation}");
+    let count = conn
         .query_row(&count_sql, [], |row| row.get::<_, i64>(0))
-        .ok()
-        .and_then(|count| u64::try_from(count).ok());
-
-    Ok(DatasourceSchema { columns, row_count })
+        .ok()?;
+    u64::try_from(count).ok()
 }
 
 fn scan_expression(path: &str, kind: DatasourceKind) -> String {
@@ -59,7 +141,13 @@ fn scan_expression(path: &str, kind: DatasourceKind) -> String {
         DatasourceKind::Csv => format!("read_csv_auto({literal})"),
         DatasourceKind::Parquet => format!("read_parquet({literal})"),
         DatasourceKind::Json => format!("read_json_auto({literal})"),
+        DatasourceKind::DuckDb => unreachable!("DuckDB files are probed through ATTACH"),
+        DatasourceKind::Sqlite => unreachable!("SQLite files are probed through ATTACH"),
     }
+}
+
+fn sql_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -68,6 +156,7 @@ fn sql_string_literal(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use duckdb::Connection;
 
     #[test]
@@ -76,6 +165,89 @@ mod tests {
         let selected: i64 = conn.query_row("SELECT 1", [], |row| row.get(0))?;
 
         assert_eq!(selected, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn attach_duckdb_introspects_all_tables() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let db_path = tempdir.path().join("warehouse.duckdb");
+        {
+            let conn = Connection::open(&db_path)?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sales(region VARCHAR, revenue DOUBLE);
+                INSERT INTO sales VALUES ('west', 10.0), ('east', 20.0);
+                CREATE TABLE inventory(sku VARCHAR, quantity INTEGER);
+                INSERT INTO inventory VALUES ('a', 3);
+                "#,
+            )?;
+        }
+
+        let schema = introspect_datasource(&db_path, DatasourceKind::DuckDb)?;
+
+        assert!(schema.columns.is_empty());
+        assert_eq!(schema.row_count, None);
+        assert_eq!(
+            schema.tables,
+            vec![
+                jute::commands::Table {
+                    name: "inventory".to_string(),
+                    columns: vec![
+                        Column {
+                            name: "sku".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        Column {
+                            name: "quantity".to_string(),
+                            sql_type: "INTEGER".to_string(),
+                        },
+                    ],
+                    row_count: Some(1),
+                },
+                jute::commands::Table {
+                    name: "sales".to_string(),
+                    columns: vec![
+                        Column {
+                            name: "region".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        Column {
+                            name: "revenue".to_string(),
+                            sql_type: "DOUBLE".to_string(),
+                        },
+                    ],
+                    row_count: Some(2),
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn attach_analyst_index_introspects_tables_and_views() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let db_path = tempdir.path().join("analyst.duckdb");
+        {
+            let conn = Connection::open(&db_path)?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE nodes(stable_symbol_id VARCHAR, qualified_name VARCHAR);
+                INSERT INTO nodes VALUES ('sym-1', 'crate::symbol');
+                CREATE VIEW v_blast_radius AS
+                    SELECT stable_symbol_id, 1 AS blast_radius_score FROM nodes;
+                "#,
+            )?;
+        }
+
+        let schema = introspect_datasource(&db_path, DatasourceKind::DuckDb)?;
+        let names = schema
+            .tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["nodes", "v_blast_radius"]);
         Ok(())
     }
 }
