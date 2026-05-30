@@ -2493,13 +2493,12 @@ pub(crate) async fn overlaid_graph_artifact_from_base_seed_for_worktree(
     {
         return Ok(Arc::clone(&seed.artifact));
     }
-    let Some(rebuild_candidate) = rebuild_candidate_for_base_seed(&worktree, &seed.artifact).await
-    else {
-        return Err(McpHandlerError::Internal(format!(
-            "graph artifact not found and base-seed overlay could not determine git state in {}",
-            worktree.display()
-        )));
-    };
+    let rebuild_candidate = rebuild_candidate_for_base_seed(
+        &worktree,
+        &seed.artifact,
+        seed.indexed_commit_oid.as_deref(),
+    )
+    .await;
 
     match try_rebuild_artifact_blocking(
         rebuild_coordinator,
@@ -2538,13 +2537,27 @@ async fn base_seed_matches_clean_worktree(
 async fn rebuild_candidate_for_base_seed(
     worktree: &Path,
     base_artifact: &GraphIndexArtifact,
-) -> Option<RebuildCandidate> {
-    let git = worktree_git_metadata(worktree).await?;
-    let dirty_oids = dirty_indexed_file_oids(worktree, &git.head_oid, base_artifact);
-    Some(RebuildCandidate {
+    fallback_head_oid: Option<&str>,
+) -> RebuildCandidate {
+    // Prefer the live worktree HEAD, but never fail the request when git is
+    // momentarily unavailable — the 200ms probe can time out under load, and a
+    // sibling worker mutating the shared `.git` can hold an index lock that makes
+    // `git status` exit non-zero. The overlay rebuild walks the filesystem and
+    // does not need git; `head_oid` only namespaces the rebuild single-flight key
+    // and the file-oid cache, so a stable fallback (the base seed's indexed commit,
+    // else the base content hash) is correct.
+    let head_oid = match worktree_git_metadata(worktree).await {
+        Some(git) => git.head_oid,
+        None => fallback_head_oid
+            .filter(|oid| !oid.is_empty())
+            .unwrap_or(base_artifact.graph_content_hash.as_str())
+            .to_string(),
+    };
+    let dirty_oids = dirty_indexed_file_oids(worktree, &head_oid, base_artifact);
+    RebuildCandidate {
         worktree: worktree.to_path_buf(),
-        key: RebuildKey::from(&git.head_oid, &dirty_oids),
-    })
+        key: RebuildKey::from(&head_oid, &dirty_oids),
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -4659,6 +4672,43 @@ mod tests {
         )
         .expect("write parquet artifact");
         write_current_pointer(dir.path(), &parquet_dir).expect("write CURRENT pointer");
+    }
+
+    fn minimal_base_artifact() -> GraphIndexArtifact {
+        GraphIndexArtifact {
+            header: GraphIndexHeader {
+                graph_index_version: "base-seed-test".to_string(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "base-seed-test".to_string(),
+            graph_content_hash: "base-seed-content-hash".to_string(),
+            file_manifests: Vec::new(),
+            files: Vec::new(),
+            file_node_ids: Vec::new(),
+            symbols: Vec::new(),
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        }
+    }
+
+    // Regression: a base-seed overlay against a worktree where git metadata is
+    // momentarily unavailable (here: not a git repo at all) must still yield a
+    // rebuild candidate rather than hard-erroring with "could not determine git
+    // state". The overlay rebuild walks the filesystem and does not need git;
+    // head_oid is only a cache-key namespace, so a stable fallback is correct.
+    #[tokio::test]
+    async fn rebuild_candidate_for_base_seed_survives_missing_git_metadata() {
+        let dir = TempDir::new().expect("temp dir");
+        let base = minimal_base_artifact();
+        let candidate =
+            super::rebuild_candidate_for_base_seed(dir.path(), &base, Some("bae7ecdfdeadbeef"))
+                .await;
+        assert_eq!(candidate.worktree, dir.path());
     }
 
     fn write_commit_index_fixture(dir: &TempDir) {
