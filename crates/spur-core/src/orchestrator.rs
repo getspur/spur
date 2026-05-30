@@ -234,7 +234,7 @@ async fn read_notebook_daemon_events(
         let frame = match serde_json::from_slice::<NotebookDaemonDatasourcesFrame>(&bytes) {
             Ok(frame) => frame,
             Err(error) => {
-                tracing::debug!(%error, "failed to decode notebook daemon event frame");
+                tracing::warn!(%error, "failed to decode notebook daemon event frame");
                 continue;
             }
         };
