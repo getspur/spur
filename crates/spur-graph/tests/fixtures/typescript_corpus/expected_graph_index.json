@@ -3,12 +3,12 @@
     "graph_index_version": "4"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "a7fef1609be9f584ad08fa40cc79032a46f9081b93ce80bade71f8ebcb8eab83",
+  "graph_content_hash": "744a96af7bbcf39a88d66acddab644e8a09ded16f50b698f7b4cc05289184ca7",
   "file_manifests": [
     {
       "stable_file_id": "f6656417814146db",
       "path": "src/app.tsx",
-      "content_oid": "408858a9a04565d88c7ff77bd03bd9e7dbafdd45",
+      "content_oid": "7e059269ea659fdcee7f8c4e8713ee3e7ed86437",
       "node_ids": [
         1,
         2,
