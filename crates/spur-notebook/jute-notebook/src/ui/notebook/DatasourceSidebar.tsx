@@ -1,4 +1,4 @@
-import type { Event as TauriEvent } from "@tauri-apps/api/event";
+import { type Event as TauriEvent, listen } from "@tauri-apps/api/event";
 import { type DragDropEvent, getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
@@ -8,6 +8,7 @@ import {
   DatabaseIcon,
   FileUpIcon,
   PlusIcon,
+  Trash2Icon,
 } from "lucide-react";
 import {
   type DragEvent,
@@ -22,7 +23,9 @@ import type { DatasourceEntry } from "@/bindings";
 import {
   attachDatasourceCommand,
   daemonControl,
+  datasourceEntriesFromEventPayload,
   datasourceEntryFromDaemonControlResponse,
+  detachDatasourceCommand,
 } from "@/daemon/control";
 
 type DroppedFile = File & {
@@ -43,6 +46,9 @@ const DATASOURCE_EXTENSIONS = [
   "json",
   "jsonl",
   "ndjson",
+  "duckdb",
+  "db",
+  "sqlite",
 ];
 
 export default function DatasourceSidebar() {
@@ -53,15 +59,30 @@ export default function DatasourceSidebar() {
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const dropzoneRef = useRef<HTMLElement | null>(null);
+  const entriesRef = useRef<DatasourceEntry[]>([]);
 
   const groupedEntries = useMemo(
     () => groupDatasourceEntries(entries),
     [entries],
   );
 
+  useEffect(() => {
+    entriesRef.current = entries;
+  }, [entries]);
+
   const attachPath = useCallback(
     async (path: string) => {
       const name = datasourceNameFromPath(path);
+      const collidingEntry = entriesRef.current.find(
+        (entry) => entry.name === name && entry.path !== path,
+      );
+      if (collidingEntry) {
+        setError(
+          `Datasource "${name}" is already attached from ${collidingEntry.path}. Remove it before attaching ${path}.`,
+        );
+        return;
+      }
+
       setPendingPath(path);
       setError(null);
 
@@ -83,6 +104,16 @@ export default function DatasourceSidebar() {
     },
     [group],
   );
+
+  const handleDetachDatasource = useCallback(async (name: string) => {
+    setError(null);
+
+    try {
+      await daemonControl(detachDatasourceCommand({ name }));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
 
   const handleAddDatasource = useCallback(async () => {
     const selected = await open({
@@ -111,6 +142,38 @@ export default function DatasourceSidebar() {
     },
     [attachPath],
   );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    try {
+      void listen("datasources://changed", (event) => {
+        try {
+          const nextEntries = datasourceEntriesFromEventPayload(event.payload);
+          entriesRef.current = nextEntries;
+          setEntries(nextEntries);
+        } catch (caught) {
+          setError(errorMessage(caught));
+        }
+      })
+        .then((cleanup) => {
+          if (disposed) {
+            cleanup();
+          } else {
+            unlisten = cleanup;
+          }
+        })
+        .catch(() => undefined);
+    } catch {
+      return undefined;
+    }
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -279,7 +342,11 @@ export default function DatasourceSidebar() {
                   </h3>
                   <div className="space-y-2">
                     {datasourceGroup.entries.map((entry) => (
-                      <DatasourceListItem entry={entry} key={entry.name} />
+                      <DatasourceListItem
+                        entry={entry}
+                        key={entry.name}
+                        onRemove={handleDetachDatasource}
+                      />
                     ))}
                   </div>
                 </section>
@@ -292,7 +359,15 @@ export default function DatasourceSidebar() {
   );
 }
 
-function DatasourceListItem({ entry }: { entry: DatasourceEntry }) {
+function DatasourceListItem({
+  entry,
+  onRemove,
+}: {
+  entry: DatasourceEntry;
+  onRemove: (name: string) => void;
+}) {
+  const hasTables = entry.tables.length > 0;
+
   return (
     <article className="rounded border border-gray-200 bg-white p-3">
       <div className="flex items-start justify-between gap-2">
@@ -307,29 +382,69 @@ function DatasourceListItem({ entry }: { entry: DatasourceEntry }) {
             {entry.path}
           </p>
         </div>
-        <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] uppercase text-gray-500">
-          {entry.kind}
-        </span>
-      </div>
-
-      <div className="mt-3 space-y-1">
-        {entry.columns.map((column) => (
-          <div
-            className="grid grid-cols-[minmax(0,1fr),auto] items-center gap-2 text-xs"
-            key={column.name}
+        <div className="flex shrink-0 items-center gap-1">
+          <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] uppercase text-gray-500">
+            {entry.kind}
+          </span>
+          <button
+            aria-label={`Remove ${entry.name}`}
+            className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-900"
+            onClick={() => onRemove(entry.name)}
+            title={`Remove ${entry.name}`}
+            type="button"
           >
-            <span className="truncate text-gray-700">{column.name}</span>
-            <span className="truncate text-gray-400">{column.sqlType}</span>
-          </div>
-        ))}
+            <Trash2Icon size={14} strokeWidth={1.5} />
+          </button>
+        </div>
       </div>
 
-      {entry.rowCount !== null && (
+      {hasTables ? (
+        <div className="mt-3 space-y-3">
+          {entry.tables.map((table) => (
+            <div className="space-y-1" key={table.name}>
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate font-medium text-gray-700">
+                  {table.name}
+                </span>
+                {table.rowCount !== null && (
+                  <span className="shrink-0 text-gray-400">
+                    {table.rowCount.toLocaleString()} rows
+                  </span>
+                )}
+              </div>
+              {table.columns.map((column) => (
+                <DatasourceColumnRow column={column} key={column.name} />
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1">
+          {entry.columns.map((column) => (
+            <DatasourceColumnRow column={column} key={column.name} />
+          ))}
+        </div>
+      )}
+
+      {!hasTables && entry.rowCount !== null && (
         <p className="mt-3 text-xs text-gray-400">
           {entry.rowCount.toLocaleString()} rows
         </p>
       )}
     </article>
+  );
+}
+
+function DatasourceColumnRow({
+  column,
+}: {
+  column: DatasourceEntry["columns"][number];
+}) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr),auto] items-center gap-2 text-xs">
+      <span className="truncate text-gray-700">{column.name}</span>
+      <span className="truncate text-gray-400">{column.sqlType}</span>
+    </div>
   );
 }
 
