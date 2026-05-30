@@ -323,10 +323,11 @@ fn perf_fixture(baselines: &Baselines) -> &'static PerfFixture {
         let repo_root = fixture_path
             .parent()
             .and_then(Path::parent)
+            .and_then(Path::parent)
             .map(Path::to_path_buf)
             .unwrap_or_else(|| {
                 panic!(
-                    "fixture path `{}` is expected to live under <repo>/.spur/graph-index.json",
+                    "fixture path `{}` is expected to live under <repo>/.spur/graph/<artifact>",
                     fixture_path.display()
                 )
             });
