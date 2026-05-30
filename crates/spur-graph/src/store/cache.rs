@@ -53,6 +53,7 @@ struct BaseArtifactCache {
 pub struct BaseArtifactSeed {
     pub base: &'static str,
     pub artifact: Arc<GraphIndexArtifact>,
+    pub indexed_commit_oid: Option<String>,
 }
 
 pub fn write_with_dedup(
@@ -128,24 +129,16 @@ pub fn load_base_seed_for_worktree(worktree_root: &Path) -> Option<BaseArtifactS
         }
     };
 
-    if let Some(artifact) = load_pointer_artifact(&worktree_root, &worktree_root, "self_pointer") {
+    if let Some(seed) = load_pointer_artifact(&worktree_root, &worktree_root, "self_pointer") {
         emit_base_seed_selection("self_pointer");
-        return Some(BaseArtifactSeed {
-            base: "self_pointer",
-            artifact,
-        });
+        return Some(seed);
     }
 
     if let Some(main_root) = main_worktree_root(&worktree_root) {
         if main_root != worktree_root {
-            if let Some(artifact) =
-                load_pointer_artifact(&worktree_root, &main_root, "main_worktree")
-            {
+            if let Some(seed) = load_pointer_artifact(&worktree_root, &main_root, "main_worktree") {
                 emit_base_seed_selection("main_worktree");
-                return Some(BaseArtifactSeed {
-                    base: "main_worktree",
-                    artifact,
-                });
+                return Some(seed);
             }
         }
     }
@@ -185,7 +178,8 @@ fn load_pointer_artifact(
     worktree_root: &Path,
     pointer_root: &Path,
     source: &'static str,
-) -> Option<Arc<GraphIndexArtifact>> {
+) -> Option<BaseArtifactSeed> {
+    let pointer = read_graph_index_pointer(pointer_root);
     let resolved = match resolve_artifact_location(pointer_root, None) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -215,7 +209,24 @@ fn load_pointer_artifact(
         .git_common_dir
         .canonicalize()
         .unwrap_or_else(|_| ctx.git_common_dir.clone());
-    read_resolved_base_artifact(common_dir, &resolved.path, resolved.format, source)
+    let artifact =
+        read_resolved_base_artifact(common_dir, &resolved.path, resolved.format, source)?;
+    let indexed_commit_oid = pointer
+        .filter(|pointer| {
+            pointer.graph_content_hash == artifact.graph_content_hash
+                && pointer.manifest_version == artifact.manifest_version
+        })
+        .and_then(|pointer| pointer.indexed_commit_oid);
+    Some(BaseArtifactSeed {
+        base: source,
+        artifact,
+        indexed_commit_oid,
+    })
+}
+
+fn read_graph_index_pointer(pointer_root: &Path) -> Option<GraphIndexPointer> {
+    let bytes = fs::read(pointer_root.join(POINTER_PATH)).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn read_resolved_base_artifact(
