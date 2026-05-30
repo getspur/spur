@@ -5,3 +5,8 @@
 
 (class_definition
   name: (identifier) @name) @definition.class
+
+(module
+  (expression_statement
+    (assignment
+      left: (identifier) @name) @definition.constant))

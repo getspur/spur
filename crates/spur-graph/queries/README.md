@@ -34,10 +34,9 @@ The shared capture vocabulary is:
 | `@definition.section` | `NodeKind::Section` |
 | `@definition.enum_variant` | `NodeKind::EnumVariant` |
 
-`@definition.constant` is part of the contract vocabulary but is not yet
-captured by any checked-in language row. `@definition.enum_variant` is captured
-for Rust today; other languages with enum members (TypeScript, C++) remain
-`TODO`.
+`@definition.constant` is captured for Rust, Python, and conservative
+TypeScript top-level `const` bindings. `@definition.enum_variant` is captured
+for Rust, TypeScript, and C++ enum members.
 
 ## Coverage Matrix
 
@@ -50,28 +49,35 @@ Legend:
 
 | Language | module | function | method | class | interface | struct | enum | impl | trait | type_alias | macro | field | section | constant | enum_variant |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Rust | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | TODO | - | TODO | Y |
-| Python | - | Y | - | Y | - | - | - | - | - | - | - | - | - | TODO | - |
-| TypeScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | TODO | - | TODO | TODO |
-| Tsx | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | TODO | - | TODO | TODO |
-| Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | TODO | TODO |
+| Rust | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | Y | - | Y | Y |
+| Python | - | Y | - | Y | - | - | - | - | - | - | - | - | - | Y | - |
+| TypeScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
+| Tsx | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
+| Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | TODO | Y |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
 
 Notes:
 
 - Python methods are captured as `@definition.function` and reclassified by
   the adapter when the function is nested inside a class.
-- C++ is the only current language capturing `@definition.field`.
-- No current language captures `@definition.constant`. Canonical Python
-  `tags.scm` patterns usually include module-level constants, but SPUR does not
-  yet.
+- Rust captures named struct fields as `@definition.field`; tuple-struct
+  positional fields are intentionally skipped. TypeScript captures class fields
+  with no initializer or a simple non-function initializer. Function-valued
+  class fields are captured as `@definition.function` instead of also being
+  emitted as plain fields. C++ captures simple class data members.
+- Rust captures `const_item` and `static_item` as `@definition.constant`.
+  Python follows the canonical module-level assignment constant pattern.
+  TypeScript captures top-level `const` bindings with simple non-function
+  initializer forms; complex expressions and exported const wrappers remain a
+  conservative follow-up if needed.
 - Rust captures enum members as `@definition.enum_variant` (mapped to
-  `NodeKind::EnumVariant`); TypeScript enum members and C++ `enumerator`s
-  remain `TODO`.
+  `NodeKind::EnumVariant`); TypeScript enum members and C++ `enumerator`s do
+  the same.
 - Rust `union_item` is captured as `@definition.struct` (folded into the
   `struct` column above), matching how C++ models unions.
-- `python/symbols.scm` currently duplicates `python/tags.scm`; snapshot
-  extraction uses the tags query when there is no separate symbols policy.
+- `python/symbols.scm` used to duplicate `python/tags.scm`. Snapshot extraction
+  now reuses Python `tags.scm`, matching Rust/TypeScript/C++ and avoiding a
+  stale duplicate symbol policy.
 
 ## Reference Capture Divergence
 
