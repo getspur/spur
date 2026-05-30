@@ -25,8 +25,8 @@ pub fn introspect_datasource(path: &Path, kind: DatasourceKind) -> Result<Dataso
     let path = path
         .to_str()
         .context("datasource path must be valid UTF-8")?;
-    if kind == DatasourceKind::DuckDb {
-        return introspect_duckdb(path);
+    if matches!(kind, DatasourceKind::DuckDb | DatasourceKind::Sqlite) {
+        return introspect_attached_database(path, kind);
     }
 
     let scan = scan_expression(path, kind);
@@ -42,16 +42,26 @@ pub fn introspect_datasource(path: &Path, kind: DatasourceKind) -> Result<Dataso
     })
 }
 
-fn introspect_duckdb(path: &str) -> Result<DatasourceSchema> {
+fn introspect_attached_database(path: &str, kind: DatasourceKind) -> Result<DatasourceSchema> {
     const PROBE_ALIAS: &str = "__spur_probe";
+    let attach_options = match kind {
+        DatasourceKind::DuckDb => "READ_ONLY",
+        DatasourceKind::Sqlite => "TYPE sqlite, READ_ONLY",
+        _ => unreachable!("only attached datasource kinds reach this probe"),
+    };
+    let kind_label = match kind {
+        DatasourceKind::DuckDb => "DuckDB",
+        DatasourceKind::Sqlite => "SQLite",
+        _ => unreachable!("only attached datasource kinds reach this probe"),
+    };
 
     let conn = Connection::open_in_memory().context("failed to open DuckDB schema probe")?;
     conn.execute_batch(&format!(
-        "ATTACH {} AS {} (READ_ONLY)",
+        "ATTACH {} AS {} ({attach_options})",
         sql_string_literal(path),
         sql_identifier(PROBE_ALIAS)
     ))
-    .with_context(|| format!("failed to attach DuckDB datasource {path}"))?;
+    .with_context(|| format!("failed to attach {kind_label} datasource {path}"))?;
 
     let mut statement = conn
         .prepare(
@@ -62,15 +72,16 @@ fn introspect_duckdb(path: &str) -> Result<DatasourceSchema> {
              WHERE database_name = '__spur_probe' AND schema_name = 'main' AND NOT internal \
              ORDER BY relation_name",
         )
-        .with_context(|| format!("failed to prepare DuckDB table probe for {path}"))?;
+        .with_context(|| format!("failed to prepare {kind_label} table probe for {path}"))?;
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
-        .with_context(|| format!("failed to run DuckDB table probe for {path}"))?;
+        .with_context(|| format!("failed to run {kind_label} table probe for {path}"))?;
 
     let mut table_names = Vec::new();
     for row in rows {
-        table_names
-            .push(row.with_context(|| format!("failed to read DuckDB table row for {path}"))?);
+        table_names.push(
+            row.with_context(|| format!("failed to read {kind_label} table row for {path}"))?,
+        );
     }
 
     let mut tables = Vec::with_capacity(table_names.len());
@@ -131,6 +142,7 @@ fn scan_expression(path: &str, kind: DatasourceKind) -> String {
         DatasourceKind::Parquet => format!("read_parquet({literal})"),
         DatasourceKind::Json => format!("read_json_auto({literal})"),
         DatasourceKind::DuckDb => unreachable!("DuckDB files are probed through ATTACH"),
+        DatasourceKind::Sqlite => unreachable!("SQLite files are probed through ATTACH"),
     }
 }
 

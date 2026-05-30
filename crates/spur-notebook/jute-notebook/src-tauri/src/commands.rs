@@ -127,6 +127,8 @@ pub enum DatasourceKind {
     Json,
     /// DuckDB database file.
     DuckDb,
+    /// SQLite database file.
+    Sqlite,
 }
 
 /// Column metadata captured for a notebook datasource.
