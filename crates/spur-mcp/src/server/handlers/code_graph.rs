@@ -19,13 +19,13 @@ use spur_graph::temporal::{
     resolve_symbol_at_indexed, symbol_history, Resolution, ResolutionFailure, TemporalIndex,
 };
 use spur_graph::{
-    artifact_from_facts, bounded_subgraph_with_budget, build_facts, edge_kind, load_artifact,
-    resolve_artifact_location, resolve_selector, resolve_worktree_root_from, ArtifactFormat,
-    CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
-    GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
-    OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode, SearchOptions,
-    SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget,
-    CODE_SYMBOL_URI_PREFIX,
+    artifact_from_facts, bounded_subgraph_with_budget, build_facts, discover_files, edge_kind,
+    load_artifact, resolve_artifact_location, resolve_selector, resolve_worktree_root_from,
+    ArtifactFormat, CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact,
+    GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact,
+    InMemoryClient, OverlayClient, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient,
+    SearchFilters, SearchMode, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
+    SnapshotKey, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -505,9 +505,28 @@ async fn code_search_response(
     let files = backend
         .search_response_file_set(&search)
         .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
-    let mut analysis = GraphResponseMetadata::analyze_source_inner(source, Some(&files)).await;
+    let mut analysis =
+        GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files)).await;
 
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
+        match overlay_response_for_backend(
+            &backend,
+            &rebuild_candidate,
+            source.clone(),
+            args,
+            |args, client| code_search_with_artifact(args, client).map_err(CodeGraphError::from),
+        )
+        .await
+        {
+            Ok(fresh_body) => return Ok(fresh_body),
+            Err(error) => {
+                tracing::warn!(
+                    target: "spur_mcp::path_a",
+                    error = ?error,
+                    "code graph overlay refresh failed; falling back to rebuild"
+                );
+            }
+        }
         let rebuild = match &backend {
             CodeSearchBackend::Parquet(_) => {
                 try_rebuild_artifact_from_worktree(
@@ -596,9 +615,28 @@ async fn code_graph_backend_response(
     let files = backend
         .response_file_set_from_body(&body)
         .map_err(CodeGraphError::from)?;
-    let mut analysis = GraphResponseMetadata::analyze_source_inner(source, Some(&files)).await;
+    let mut analysis =
+        GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files)).await;
 
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
+        match overlay_response_for_backend(
+            &backend,
+            &rebuild_candidate,
+            source.clone(),
+            args,
+            &handler,
+        )
+        .await
+        {
+            Ok(fresh_body) => return Ok(fresh_body),
+            Err(error) => {
+                tracing::warn!(
+                    target: "spur_mcp::path_a",
+                    error = ?error,
+                    "code graph overlay refresh failed; falling back to rebuild"
+                );
+            }
+        }
         let rebuild = match &backend {
             CodeSearchBackend::Parquet(_) => {
                 try_rebuild_artifact_from_worktree(
@@ -645,6 +683,44 @@ async fn code_graph_backend_response(
 
     analysis.metadata.insert_into(&mut body);
     Ok(body)
+}
+
+async fn overlay_response_for_backend(
+    backend: &CodeSearchBackend,
+    rebuild_candidate: &RebuildCandidate,
+    source: GraphMetadataSource,
+    args: &Value,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> CodeGraphResult {
+    let (mut fresh_body, fresh_files) = {
+        let overlay = overlay_client_for_backend(backend, rebuild_candidate).map_err(|error| {
+            CodeGraphError::without_metadata(McpHandlerError::Internal(format!(
+                "failed to construct code graph overlay: {error}"
+            )))
+        })?;
+        let fresh_body = handler(args, &overlay)?;
+        let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
+        (fresh_body, fresh_files)
+    };
+    GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files))
+        .await
+        .metadata
+        .with_rebuild_status(RebuildStatus::Fresh)
+        .insert_into(&mut fresh_body);
+    Ok(fresh_body)
+}
+
+fn overlay_client_for_backend<'a>(
+    backend: &'a CodeSearchBackend,
+    rebuild_candidate: &RebuildCandidate,
+) -> anyhow::Result<OverlayClient<&'a dyn GraphQueryClient>> {
+    let base_files = backend.base_file_set()?;
+    let changed_paths = changed_paths_for_overlay(&rebuild_candidate.worktree, base_files)?;
+    OverlayClient::new(
+        backend.client(),
+        &rebuild_candidate.worktree,
+        &changed_paths,
+    )
 }
 
 async fn code_graph_backend_response_without_rebuild(
@@ -700,6 +776,13 @@ impl CodeSearchBackend {
                 GraphMetadataSource::from_parquet_manifest(client.as_ref().manifest())
             }
             Self::InMemory { artifact, .. } => GraphMetadataSource::from_artifact(artifact),
+        }
+    }
+
+    fn base_file_set(&self) -> anyhow::Result<Vec<(String, String)>> {
+        match self {
+            Self::Parquet(client) => client.file_oids(),
+            Self::InMemory { artifact, .. } => Ok(all_indexed_file_set(artifact)),
         }
     }
 
@@ -3962,6 +4045,43 @@ fn response_file_set_from_body(
     files
 }
 
+fn response_file_set_from_client(
+    client: &dyn GraphQueryClient,
+    body: &Value,
+) -> Result<Vec<(String, String)>, McpHandlerError> {
+    let mut paths = Vec::new();
+    collect_response_file_paths(body, &mut paths);
+    let mut files = response_file_set_for_client_paths(client, paths)?;
+    if files.is_empty() {
+        if let Some(symbol_id) = response_symbol_id(body) {
+            if let Some(symbol) = client.symbol_by_id(symbol_id).map_err(graph_query_error)? {
+                files = response_file_set_for_client_paths(client, [symbol.file_path.as_str()])?;
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn response_file_set_for_client_paths<'a>(
+    client: &dyn GraphQueryClient,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<(String, String)>, McpHandlerError> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for path in paths {
+        if !seen.insert(path.to_string()) {
+            continue;
+        }
+        if let Some(manifest) = client
+            .file_manifest_by_path(path)
+            .map_err(graph_query_error)?
+        {
+            files.push((manifest.path, manifest.content_oid));
+        }
+    }
+    Ok(files)
+}
+
 fn search_response_file_set_for_parquet(
     client: &ParquetClient,
     result: &SearchResult,
@@ -4080,6 +4200,52 @@ fn indexed_file_oid_for_path<'a>(artifact: &'a GraphIndexArtifact, path: &str) -
         .iter()
         .find(|entry| entry.path == path)
         .map(|entry| entry.content_oid.as_str())
+}
+
+fn changed_paths_for_overlay(
+    worktree: &Path,
+    base_files: Vec<(String, String)>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let worktree = worktree.canonicalize().map_err(|error| {
+        anyhow::anyhow!("failed to canonicalize `{}`: {error}", worktree.display())
+    })?;
+    let allowed_extensions = spur_graph::extract::languages::all_supported_extensions();
+    let current_files = discover_files(&worktree, &allowed_extensions)?;
+    let base_oids = base_files.into_iter().collect::<BTreeMap<_, _>>();
+    let mut changed = BTreeMap::new();
+
+    for path in current_files {
+        let rel_path = worktree_relative_slash_path(&worktree, &path);
+        let bytes = fs::read(&path)
+            .map_err(|error| anyhow::anyhow!("failed to read `{}`: {error}", path.display()))?;
+        let content_oid = git_blob_oid(&bytes);
+        if base_oids
+            .get(&rel_path)
+            .is_none_or(|base_oid| base_oid != &content_oid)
+        {
+            changed.insert(rel_path.clone(), PathBuf::from(rel_path));
+        }
+    }
+
+    for base_path in base_oids.keys() {
+        if !worktree.join(base_path).is_file() {
+            changed.insert(base_path.clone(), PathBuf::from(base_path));
+        }
+    }
+
+    Ok(changed.into_values().collect())
+}
+
+fn worktree_relative_slash_path(worktree: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(worktree).unwrap_or(path);
+    relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub(crate) fn scoped_worktree_root() -> Option<PathBuf> {

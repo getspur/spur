@@ -73,6 +73,67 @@ pub trait GraphQueryClient {
     }
 }
 
+impl<T: GraphQueryClient + ?Sized> GraphQueryClient for &T {
+    fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+        (**self).search_symbols(opts)
+    }
+
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        (**self).find_caller_edges(sid)
+    }
+
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        (**self).find_unresolved_caller_edges_by_labels(target_labels)
+    }
+
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        (**self).find_callee_edges(sid)
+    }
+
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        (**self).resolve_selector(selector)
+    }
+
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        (**self).symbol_by_id(sid)
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        (**self).symbols_by_file(path)
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        (**self).symbols_by_path_name(path, name)
+    }
+
+    fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+        (**self).file_manifest_by_path(path)
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        (**self).file_exists(path)
+    }
+
+    fn temporal_index(&self) -> Arc<TemporalIndex> {
+        (**self).temporal_index()
+    }
+
+    fn symbol_history(
+        &self,
+        commits: &CommitIndexArtifact,
+        symbol_id: &str,
+    ) -> anyhow::Result<Vec<(GitSha, ChangeKind, SnapshotKey)>> {
+        (**self).symbol_history(commits, symbol_id)
+    }
+}
+
 #[derive(Clone)]
 pub struct InMemoryClient {
     artifact: Arc<GraphIndexArtifact>,
