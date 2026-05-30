@@ -10,6 +10,16 @@
 (enum_item
   name: (type_identifier) @name) @definition.enum
 
+; Canonical Rust definition items not covered by the baseline tags surface.
+(union_item
+  name: (type_identifier) @name) @definition.struct
+
+(type_item
+  name: (type_identifier) @name) @definition.type_alias
+
+(macro_definition
+  name: (identifier) @name) @definition.macro
+
 (trait_item
   name: (type_identifier) @name) @definition.trait
 

@@ -99,8 +99,11 @@ pub(crate) fn rust_config() -> LanguageConfig {
             ("definition.method", NodeKind::Method),
             ("definition.struct", NodeKind::Struct),
             ("definition.enum", NodeKind::Enum),
+            ("definition.enum_variant", NodeKind::EnumVariant),
             ("definition.trait", NodeKind::Trait),
             ("definition.impl", NodeKind::Impl),
+            ("definition.type_alias", NodeKind::TypeAlias),
+            ("definition.macro", NodeKind::Macro),
         ],
         relation_kind_map: None,
         is_method: Some(has_impl_ancestor),
@@ -342,9 +345,32 @@ pub(crate) fn emit_definitions<'tree>(
     source: &str,
     captures: &[CaptureHit<'tree>],
 ) -> Vec<DefinitionBinding<'tree>> {
+    emit_definitions_with_parents(
+        config,
+        builder,
+        relative_path,
+        file_id,
+        file_node_id,
+        source,
+        captures,
+        &[],
+    )
+}
+
+pub(crate) fn emit_definitions_with_parents<'tree>(
+    config: &LanguageConfig,
+    builder: &mut FactBuilder<'_>,
+    relative_path: &str,
+    file_id: FileId,
+    file_node_id: NodeId,
+    source: &str,
+    captures: &[CaptureHit<'tree>],
+    parent_bindings: &[DefinitionBinding<'tree>],
+) -> Vec<DefinitionBinding<'tree>> {
     let definitions = definition_candidates(config, source, captures);
 
-    let mut bindings: Vec<DefinitionBinding<'tree>> = Vec::new();
+    let mut bindings = parent_bindings.to_vec();
+    let mut emitted = Vec::new();
     for (kind, node, label) in definitions {
         // Language adapters must provide an inner @name capture for every definition.
         // If a grammar edge case lacks one, skip it until the query is extended.
@@ -355,9 +381,11 @@ pub(crate) fn emit_definitions<'tree>(
         let fqn = scoped_name(parent.fqn.unwrap_or(""), &fqn_segment(kind, &label));
         let node_id = builder.add_node(relative_path, label, fqn.clone(), kind, file_id, node);
         builder.add_edge(parent.node_id, Some(node_id), RelationKind::Contains, None);
-        bindings.push(DefinitionBinding { node, node_id, fqn });
+        let binding = DefinitionBinding { node, node_id, fqn };
+        bindings.push(binding.clone());
+        emitted.push(binding);
     }
-    bindings
+    emitted
 }
 
 pub(crate) fn extracted_symbols<'tree>(
@@ -938,11 +966,12 @@ fn definition_rank(kind: NodeKind) -> u8 {
         NodeKind::Class => 2,
         NodeKind::Interface => 3,
         NodeKind::Enum => 4,
-        NodeKind::Trait => 5,
-        NodeKind::Impl => 6,
-        NodeKind::Method => 7,
-        NodeKind::Function => 8,
-        NodeKind::Section => 9,
+        NodeKind::EnumVariant => 5,
+        NodeKind::Trait => 6,
+        NodeKind::Impl => 7,
+        NodeKind::Method => 8,
+        NodeKind::Function => 9,
+        NodeKind::Section => 10,
         _ => 10,
     }
 }
@@ -973,8 +1002,11 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
         NodeKind::Impl => "impl",
         NodeKind::Trait => "trait",
         NodeKind::Enum => "enum",
+        NodeKind::EnumVariant => "enum_variant",
         NodeKind::Method => "method",
+        NodeKind::Field => "field",
         NodeKind::TypeAlias => "type_alias",
+        NodeKind::Macro => "macro",
         NodeKind::Section => "section",
         _ => "symbol",
     }
@@ -1028,6 +1060,187 @@ fn is_literal_kind(kind: &str) -> bool {
             kind,
             "string" | "integer" | "float" | "number" | "true" | "false" | "null" | "none" | "nil"
         )
+}
+
+#[cfg(test)]
+mod gate_contract {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use tree_sitter::Query;
+
+    use super::*;
+
+    #[test]
+    fn every_registered_language_satisfies_query_contract() {
+        assert_registry_extensions_are_unique();
+
+        for descriptor in language_registry() {
+            let language = descriptor.language;
+            let config = (descriptor.factory)();
+            let label = language.label();
+
+            let tags_source = config
+                .queries
+                .iter()
+                .find_map(|(name, source)| (*name == "tags").then_some(*source))
+                .unwrap_or_else(|| panic!("{label}: missing `tags` query"));
+            assert!(
+                !tags_source.trim().is_empty(),
+                "{label}: `tags` query source must not be empty"
+            );
+
+            let definition_captures = compiled_definition_captures(label, &config);
+            let mapped_definitions: BTreeSet<_> = config
+                .definition_kind_map
+                .iter()
+                .map(|(capture_name, _)| (*capture_name).to_owned())
+                .collect();
+
+            assert!(
+                !mapped_definitions.is_empty(),
+                "{label}: definition_kind_map must not be empty"
+            );
+
+            let orphan_captures: BTreeSet<_> = definition_captures
+                .difference(&mapped_definitions)
+                .cloned()
+                .collect();
+            assert!(
+                orphan_captures.is_empty(),
+                "{label}: @definition.* captures missing from definition_kind_map: {orphan_captures:?}"
+            );
+
+            let unused_mappings: BTreeSet<_> = mapped_definitions
+                .difference(&definition_captures)
+                .cloned()
+                .collect();
+            assert!(
+                unused_mappings.is_empty(),
+                "{label}: definition_kind_map entries missing from compiled queries: {unused_mappings:?}"
+            );
+
+            for (capture_name, kind) in config.definition_kind_map {
+                assert_ne!(
+                    symbol_kind(*kind),
+                    "symbol",
+                    "{label}: `{capture_name}` maps to {kind:?}, but symbol_kind() falls back to `symbol`"
+                );
+            }
+
+            let expected_definitions: BTreeSet<_> = expected_definition_captures(language)
+                .iter()
+                .map(|capture_name| (*capture_name).to_owned())
+                .collect();
+            let missing_expected: BTreeSet<_> = expected_definitions
+                .difference(&definition_captures)
+                .cloned()
+                .collect();
+            assert!(
+                missing_expected.is_empty(),
+                "{label}: expected definition captures missing from compiled queries: {missing_expected:?}"
+            );
+        }
+    }
+
+    fn assert_registry_extensions_are_unique() {
+        let mut owners: BTreeMap<&str, Language> = BTreeMap::new();
+        for descriptor in language_registry() {
+            assert!(
+                !descriptor.extensions.is_empty(),
+                "{}: registry entry must declare at least one extension",
+                descriptor.label
+            );
+            for extension in descriptor.extensions {
+                assert!(
+                    !extension.is_empty(),
+                    "{}: registry extension must not be empty",
+                    descriptor.label
+                );
+                if let Some(previous) = owners.insert(*extension, descriptor.language) {
+                    assert_eq!(
+                        previous,
+                        descriptor.language,
+                        "extension `{extension}` is registered for both {} and {}",
+                        previous.label(),
+                        descriptor.language.label()
+                    );
+                }
+            }
+        }
+    }
+
+    fn compiled_definition_captures(
+        language_label: &str,
+        config: &LanguageConfig,
+    ) -> BTreeSet<String> {
+        let mut captures = BTreeSet::new();
+        for (name, source) in config.queries {
+            let query_language = query_language_for(config, name, language_label);
+            let query = Query::new(query_language, source).unwrap_or_else(|err| {
+                panic!("failed to compile tree-sitter query `{name}` for `{language_label}`: {err}")
+            });
+            captures.extend(
+                query
+                    .capture_names()
+                    .iter()
+                    .filter(|capture_name| capture_name.starts_with("definition."))
+                    .map(|capture_name| (*capture_name).to_owned()),
+            );
+        }
+        captures
+    }
+
+    fn query_language_for<'a>(
+        config: &'a LanguageConfig,
+        query_name: &str,
+        language_label: &str,
+    ) -> &'a TsLanguage {
+        match query_name {
+            "inline-spur-edges" => config.inline_language.as_ref().unwrap_or_else(|| {
+                panic!("{language_label}: query `inline-spur-edges` requires an inline language")
+            }),
+            _ => &config.language,
+        }
+    }
+
+    fn expected_definition_captures(language: Language) -> &'static [&'static str] {
+        match language {
+            Language::Rust => &[
+                "definition.module",
+                "definition.function",
+                "definition.method",
+                "definition.struct",
+                "definition.enum",
+                "definition.enum_variant",
+                "definition.trait",
+                "definition.impl",
+                "definition.type_alias",
+                "definition.macro",
+            ],
+            Language::Python => &["definition.function", "definition.class"],
+            Language::TypeScript | Language::Tsx => &[
+                "definition.class",
+                "definition.interface",
+                "definition.enum",
+                "definition.function",
+                "definition.method",
+                "definition.type_alias",
+                "definition.module",
+            ],
+            Language::Cpp => &[
+                "definition.module",
+                "definition.class",
+                "definition.struct",
+                "definition.enum",
+                "definition.function",
+                "definition.method",
+                "definition.type_alias",
+                "definition.macro",
+                "definition.field",
+            ],
+            Language::Markdown => &["definition.section"],
+        }
+    }
 }
 
 fn contained_capture_text(
