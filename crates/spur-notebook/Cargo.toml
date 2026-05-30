@@ -47,7 +47,7 @@ tempfile = "3"
 tauri-build = { version = "2", features = [] }
 
 [features]
-default = []
+default = ["datasource-introspect"]
 # Tauri 2.0.4 (per tauri/src/lib.rs:338) gates "production mode" on this Cargo
 # feature: `!cfg!(feature = "custom-protocol")` means dev. With this feature
 # OFF, the runtime tries to load `devUrl` (http://localhost:1420) which doesn't
@@ -56,8 +56,10 @@ default = []
 # ourselves. Despite the v2 migration guide claiming this feature is ignored,
 # 2.0.4 source clearly checks it (`cfg!(feature = "custom-protocol")`).
 custom-protocol = ["tauri/custom-protocol"]
-# Accepts DuckDB's compile-cost/binary-size delta only for datasource schema
-# probing; keep it default-off until attach-time introspection ships.
+# Pulls in bundled DuckDB for attach-time datasource schema probing — covers
+# both DuckDB and SQLite (the latter via DuckDB's runtime sqlite_scanner).
+# Default-ON since Scope B shipped; accepts the ~4-min cold bundled-libduckdb
+# build. Tests/cheap builds opt out with `--no-default-features`.
 datasource-introspect = ["dep:duckdb"]
 
 [lints]
