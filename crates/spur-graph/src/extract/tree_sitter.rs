@@ -10,8 +10,9 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator as _};
 
 use crate::discovery::discover_files;
 use crate::extract::languages::{
-    all_supported_extensions, emit_definitions, emit_edges, emit_rust_dyn_trait_edges,
-    extracted_symbols, language_registry, Language, LanguageConfig, LanguageDescriptor,
+    all_supported_extensions, emit_definitions, emit_definitions_with_parents, emit_edges,
+    emit_rust_dyn_trait_edges, extracted_symbols, language_registry, Language, LanguageConfig,
+    LanguageDescriptor,
 };
 use crate::extract::markdown::extract_markdown_file;
 use crate::extract::mcp_tools::emit_mcp_tools;
@@ -206,7 +207,10 @@ impl BytesExtractor {
             .parser
             .parse(source.as_bytes(), None)
             .ok_or(ExtractError::NoTree)?;
-        let captures = run_query(&self.queries.symbols, tree.root_node(), source);
+        let mut captures = run_query(&self.queries.symbols, tree.root_node(), source);
+        if let Some(spur_edges) = self.queries.spur_edges.as_ref() {
+            captures.extend(run_query(spur_edges, tree.root_node(), source));
+        }
         Ok(extracted_symbols(&self.config, source, &captures))
     }
 
@@ -1139,7 +1143,7 @@ fn extract_file_from_tree(
     let file_node = builder.add_file_node(&relative_path, file_id, root_node);
 
     let tag_captures = run_query(&queries.tags, root_node, source);
-    let definitions = emit_definitions(
+    let mut definitions = emit_definitions(
         config,
         builder,
         &relative_path,
@@ -1161,6 +1165,17 @@ fn extract_file_from_tree(
     }
     if let Some(spur_edges) = queries.spur_edges.as_ref() {
         let edge_captures = run_query(spur_edges, root_node, source);
+        let edge_definitions = emit_definitions_with_parents(
+            config,
+            builder,
+            &relative_path,
+            file_id,
+            file_node,
+            source,
+            &edge_captures,
+            &definitions,
+        );
+        definitions.extend(edge_definitions);
         emit_edges(
             config,
             builder,
