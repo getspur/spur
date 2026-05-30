@@ -1,3 +1,5 @@
+import type { Event as TauriEvent } from "@tauri-apps/api/event";
+import { type DragDropEvent, getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
@@ -7,7 +9,14 @@ import {
   FileUpIcon,
   PlusIcon,
 } from "lucide-react";
-import { DragEvent, useCallback, useMemo, useState } from "react";
+import {
+  type DragEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type { DatasourceEntry } from "@/bindings";
 import {
@@ -43,6 +52,7 @@ export default function DatasourceSidebar() {
   const [dragActive, setDragActive] = useState(false);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const dropzoneRef = useRef<HTMLElement | null>(null);
 
   const groupedEntries = useMemo(
     () => groupDatasourceEntries(entries),
@@ -101,6 +111,63 @@ export default function DatasourceSidebar() {
     },
     [attachPath],
   );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    const handleDragDropEvent = (event: TauriEvent<DragDropEvent>) => {
+      const payload = event.payload;
+
+      if (payload.type === "leave") {
+        setDragActive(false);
+        return;
+      }
+
+      const insideDropzone = isPositionInsideElement(
+        dropzoneRef.current,
+        payload.position,
+      );
+
+      if (payload.type === "enter" || payload.type === "over") {
+        setDragActive(insideDropzone);
+        return;
+      }
+
+      setDragActive(false);
+      if (!insideDropzone) return;
+
+      const path = payload.paths[0];
+      if (!path) return;
+
+      if (!isDatasourcePath(path)) {
+        setError("Unsupported datasource type");
+        return;
+      }
+
+      void attachPath(path);
+    };
+
+    try {
+      void getCurrentWebview()
+        .onDragDropEvent(handleDragDropEvent)
+        .then((cleanup) => {
+          if (disposed) {
+            cleanup();
+          } else {
+            unlisten = cleanup;
+          }
+        })
+        .catch(() => undefined);
+    } catch {
+      return undefined;
+    }
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [attachPath]);
 
   if (collapsed) {
     return (
@@ -172,6 +239,7 @@ export default function DatasourceSidebar() {
               : "border-gray-300 bg-gray-100 text-gray-500",
           )}
           data-testid="datasource-dropzone"
+          ref={dropzoneRef}
           onDragEnter={(event) => {
             event.preventDefault();
             setDragActive(true);
@@ -317,6 +385,25 @@ function firstDroppedPath(event: DragEvent<HTMLElement>): string | null {
 
   const textPath = event.dataTransfer.getData("text/plain").trim();
   return textPath.split(/\r?\n/).find(Boolean) ?? null;
+}
+
+function isDatasourcePath(path: string): boolean {
+  const extension = path.split(/[\\/]/).pop()?.split(".").pop()?.toLowerCase();
+  return Boolean(extension && DATASOURCE_EXTENSIONS.includes(extension));
+}
+
+function isPositionInsideElement(
+  element: HTMLElement | null,
+  position: { x: number; y: number },
+): boolean {
+  if (!element) return false;
+
+  const rect = element.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const x = position.x / scale;
+  const y = position.y / scale;
+
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 function errorMessage(caught: unknown): string {
