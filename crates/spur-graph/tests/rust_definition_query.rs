@@ -48,6 +48,15 @@ fn definition_names(
     names
 }
 
+fn root_sexp(source: &str) -> String {
+    let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+    let mut parser = Parser::new();
+    parser.set_language(&language).expect("configure parser");
+    let tree = parser.parse(source, None).expect("parse source");
+
+    tree.root_node().to_sexp()
+}
+
 #[test]
 fn rust_spur_edges_query_captures_enum_variant_definitions() {
     let source = r"
@@ -88,6 +97,41 @@ union Payload {
     assert_eq!(
         definition_names(RUST_TAGS_QUERY, source, "definition.struct"),
         ["Payload"]
+    );
+}
+
+#[test]
+fn rust_tags_query_captures_named_fields() {
+    let source = r#"
+struct Request {
+    id: u64,
+    name: String,
+}
+
+struct Tuple(u64);
+"#;
+    let sexp = root_sexp(source);
+    assert!(sexp.contains("field_declaration"), "{sexp}");
+
+    assert_eq!(
+        definition_names(RUST_TAGS_QUERY, source, "definition.field"),
+        ["id", "name"]
+    );
+}
+
+#[test]
+fn rust_tags_query_captures_constants() {
+    let source = r#"
+const LIMIT: usize = 8;
+static GLOBAL: &str = "x";
+"#;
+    let sexp = root_sexp(source);
+    assert!(sexp.contains("const_item"), "{sexp}");
+    assert!(sexp.contains("static_item"), "{sexp}");
+
+    assert_eq!(
+        definition_names(RUST_TAGS_QUERY, source, "definition.constant"),
+        ["LIMIT", "GLOBAL"]
     );
 }
 
@@ -158,5 +202,70 @@ union Payload {
             .iter()
             .any(|node| node.kind == NodeKind::Struct && node.label == "Payload"),
         "expected Payload union symbol as struct kind"
+    );
+}
+
+#[test]
+fn rust_extractor_indexes_fields_and_constants_with_parent_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+struct Request {
+    id: u64,
+    name: String,
+}
+
+struct Tuple(u64);
+
+const LIMIT: usize = 8;
+static GLOBAL: &str = "x";
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root, None).expect("extract").0;
+
+    let request_node = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Struct && node.label == "Request")
+        .expect("Request struct symbol");
+    let id_node = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Field && node.label == "id")
+        .expect("id field symbol");
+
+    assert!(
+        facts.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Contains
+                && edge.source_node_id == request_node.node_id
+                && edge.target_node_id == Some(id_node.node_id)
+        }),
+        "expected id field to be contained by Request"
+    );
+    assert!(
+        facts
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Constant && node.label == "LIMIT"),
+        "expected LIMIT constant symbol"
+    );
+    assert!(
+        facts
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Constant && node.label == "GLOBAL"),
+        "expected GLOBAL constant symbol"
+    );
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Field && node.label == "Tuple"),
+        "tuple struct positional fields must not be emitted as named fields"
     );
 }

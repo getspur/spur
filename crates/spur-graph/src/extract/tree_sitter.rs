@@ -88,12 +88,11 @@ impl SymbolQueryPolicy {
 
 fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
     match language {
-        Language::Rust | Language::TypeScript | Language::Tsx | Language::Cpp => {
-            SymbolQueryPolicy::ReuseTags
-        }
-        Language::Python => {
-            SymbolQueryPolicy::Dedicated(include_str!("../../queries/python/symbols.scm"))
-        }
+        Language::Rust
+        | Language::Python
+        | Language::TypeScript
+        | Language::Tsx
+        | Language::Cpp => SymbolQueryPolicy::ReuseTags,
         Language::Markdown => {
             SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
         }
@@ -592,6 +591,14 @@ impl<'a> FactBuilder<'a> {
                         );
                     }
                 }
+            } else if edge.relation == RelationKind::Imports {
+                resolve_bare_pending_edge(
+                    self,
+                    &edge,
+                    &indexes,
+                    &mut ambiguous_unresolved,
+                    &mut phantom_blocked_calls,
+                );
             } else if let Some(candidates) =
                 ambiguous_symbols_by_label.get(&edge.target_name).copied()
             {
@@ -673,6 +680,65 @@ fn resolve_bare_pending_edge(
     ambiguous_unresolved: &mut usize,
     phantom_blocked_calls: &mut usize,
 ) {
+    if edge.relation == RelationKind::Calls {
+        let candidates = callable_symbol_candidates(builder, edge, indexes);
+        if let Some(target) =
+            same_file_duplicate_function_candidate(edge, Some(&candidates), indexes)
+        {
+            builder.add_pending_edge_with_bind_method(
+                edge,
+                Some(target),
+                Some("same_file_duplicate"),
+            );
+            return;
+        }
+
+        match candidates.as_slice() {
+            [target] if *target != edge.source => {
+                resolve_singleton_bare_target(
+                    builder,
+                    edge,
+                    *target,
+                    indexes,
+                    phantom_blocked_calls,
+                );
+                return;
+            }
+            candidates if candidates.len() > 1 => {
+                *ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = %edge.target_name,
+                    candidates = candidates.len(),
+                    "spur-graph: ambiguous callable pending edge target; leaving unresolved"
+                );
+                builder.add_pending_edge(edge, None);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if edge.relation == RelationKind::Imports {
+        let candidates = import_resolution_candidates(builder, edge, indexes);
+        match candidates.as_slice() {
+            [target] if *target != edge.source => {
+                builder.add_pending_edge(edge, Some(*target));
+                return;
+            }
+            candidates if candidates.len() > 1 => {
+                *ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = %edge.target_name,
+                    candidates = candidates.len(),
+                    "spur-graph: ambiguous import pending edge target; leaving unresolved"
+                );
+                builder.add_pending_edge(edge, None);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     if let Some(candidates) = indexes
         .ambiguous_symbols_by_label
         .get(&edge.target_name)
@@ -715,6 +781,16 @@ fn resolve_bare_pending_edge(
         return;
     }
 
+    resolve_singleton_bare_target(builder, edge, target, indexes, phantom_blocked_calls);
+}
+
+fn resolve_singleton_bare_target(
+    builder: &mut FactBuilder<'_>,
+    edge: &PendingEdge,
+    target: NodeId,
+    indexes: &PendingResolutionIndexes<'_>,
+    phantom_blocked_calls: &mut usize,
+) {
     match indexes.node_kind_by_id.get(&target).copied() {
         Some(NodeKind::Method) => {
             if edge.relation == RelationKind::Calls
@@ -742,6 +818,87 @@ fn resolve_bare_pending_edge(
             builder.add_pending_edge(edge, Some(target));
         }
     }
+}
+
+fn callable_symbol_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let mut candidates = builder
+        .symbol_index
+        .get(&edge.target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| *target != edge.source)
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(is_callable_target_kind)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+fn import_resolution_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let mut candidates = builder
+        .symbol_index
+        .get(&edge.target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| *target != edge.source)
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(is_import_resolution_candidate_kind)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+fn is_callable_target_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Function
+            | NodeKind::Method
+            | NodeKind::Class
+            | NodeKind::Struct
+            | NodeKind::EnumVariant
+            | NodeKind::Macro
+    )
+}
+
+fn is_import_resolution_candidate_kind(kind: NodeKind) -> bool {
+    // Keep impls in the ambiguity set for historical Rust type imports
+    // (`struct Helper` plus `impl Helper`); this filter exists to keep member
+    // symbols such as fields and methods from shadowing imports.
+    matches!(
+        kind,
+        NodeKind::Module
+            | NodeKind::Function
+            | NodeKind::Class
+            | NodeKind::Interface
+            | NodeKind::Struct
+            | NodeKind::Impl
+            | NodeKind::Enum
+            | NodeKind::EnumVariant
+            | NodeKind::Trait
+            | NodeKind::TypeAlias
+            | NodeKind::Macro
+            | NodeKind::Constant
+    )
 }
 
 fn same_file_duplicate_function_candidate(
@@ -1528,10 +1685,10 @@ mod tests {
             symbol_query_policy(Language::Cpp),
             SymbolQueryPolicy::ReuseTags
         );
-        assert!(matches!(
+        assert_eq!(
             symbol_query_policy(Language::Python),
-            SymbolQueryPolicy::Dedicated(_)
-        ));
+            SymbolQueryPolicy::ReuseTags
+        );
         assert!(matches!(
             symbol_query_policy(Language::Markdown),
             SymbolQueryPolicy::Dedicated(_)
@@ -1637,6 +1794,198 @@ mod tests {
         assert_eq!(edge.source_node_id, source);
         assert_eq!(edge.target_node_id, None);
         assert_eq!(edge.target_label.as_deref(), Some("flush"));
+    }
+
+    #[test]
+    fn bare_call_ignores_non_callable_same_label_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "fn caller() { helper(); }\nfn helper() {}\nstruct App { helper: Helper }\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let file_id = FileId(builder.next_file_id());
+        let source = builder.add_node(
+            "src/lib.rs",
+            "caller".to_owned(),
+            "caller".to_owned(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        let function = builder.add_node(
+            "src/lib.rs",
+            "helper".to_owned(),
+            "helper".to_owned(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        builder.add_node(
+            "src/lib.rs",
+            "helper".to_owned(),
+            "App::helper".to_owned(),
+            NodeKind::Field,
+            file_id,
+            root_node,
+        );
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "helper".to_owned(),
+            relation: RelationKind::Calls,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        assert_eq!(builder.facts.edges.len(), 1);
+        let edge = &builder.facts.edges[0];
+        assert_eq!(edge.source_node_id, source);
+        assert_eq!(edge.target_node_id, Some(function));
+        assert_eq!(edge.target_label.as_deref(), Some("helper"));
+        assert_eq!(edge.bind_method.as_deref(), Some("singleton"));
+    }
+
+    #[test]
+    fn import_ignores_non_importable_same_label_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "use crate::utils::helper;\nfn helper() {}\nstruct App { helper: Helper }\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let file_id = FileId(builder.next_file_id());
+        let source = builder.add_node(
+            "src/lib.rs",
+            "src/lib.rs".to_owned(),
+            "src/lib.rs".to_owned(),
+            NodeKind::File,
+            file_id,
+            root_node,
+        );
+        let function = builder.add_node(
+            "src/utils.rs",
+            "helper".to_owned(),
+            "helper".to_owned(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        builder.add_node(
+            "src/lib.rs",
+            "helper".to_owned(),
+            "App::helper".to_owned(),
+            NodeKind::Field,
+            file_id,
+            root_node,
+        );
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "helper".to_owned(),
+            relation: RelationKind::Imports,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        assert_eq!(builder.facts.edges.len(), 1);
+        let edge = &builder.facts.edges[0];
+        assert_eq!(edge.source_node_id, source);
+        assert_eq!(edge.target_node_id, Some(function));
+        assert_eq!(edge.target_label.as_deref(), Some("helper"));
+    }
+
+    #[test]
+    fn rust_use_list_import_ignores_same_label_field_during_extraction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+use crate::utils::{helper, Helper};
+
+pub struct App {
+    helper: Helper,
+}
+
+impl App {
+    pub fn run(&self) {
+        helper();
+    }
+}
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(
+            root.join("src/utils.rs"),
+            r#"
+pub struct Helper;
+
+pub fn helper() {}
+"#,
+        )
+        .expect("write utils.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let helper = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Function && node.label == "helper")
+            .expect("helper function");
+
+        assert!(
+            facts.edges.iter().any(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_node_id == Some(helper.node_id)
+                    && edge.target_label.as_deref() == Some("helper")
+            }),
+            "expected helper import to resolve to the function, not the same-label field"
+        );
+        assert!(
+            !facts.edges.iter().any(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_node_id.is_none()
+                    && edge.target_label.as_deref() == Some("helper")
+            }),
+            "helper import should not also leave an unresolved duplicate edge"
+        );
+
+        let artifact = crate::store::build::artifact_from_facts(&facts, root).expect("artifact");
+        let helper_artifact = artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.symbol_kind == "function" && symbol.entity_name == "helper")
+            .expect("helper artifact symbol");
+        assert!(
+            artifact.edges.iter().any(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_stable_symbol_id.as_deref()
+                        == Some(helper_artifact.stable_symbol_id.as_str())
+                    && edge.target_label.as_deref() == Some("helper")
+            }),
+            "expected helper import artifact edge to keep the resolved function target"
+        );
     }
 
     #[test]
