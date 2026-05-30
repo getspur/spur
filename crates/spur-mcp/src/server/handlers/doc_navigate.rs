@@ -10,12 +10,15 @@ use globset::Glob;
 use lance_index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery as _, QueryBase as _};
 use serde_json::{json, Value};
-use spur_graph::store::lance_sections::{SECTIONS_DATASET_DIR, SECTIONS_TABLE};
+use spur_graph::store::lance_sections::{
+    write_sections_dataset, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+};
 use spur_graph::temporal::{resolve_symbol_at_indexed, symbol_history, Resolution, TemporalIndex};
 use spur_graph::{
     load_artifact, resolve_artifact_location, resolve_worktree_root_from, CommitIndexArtifact,
     GraphIndexArtifact, CODE_SYMBOL_URI_PREFIX,
 };
+use uuid::Uuid;
 
 use crate::handlers::McpHandlerError;
 
@@ -49,13 +52,17 @@ impl McpCallbackServer {
 pub(crate) async fn doc_navigate(args: &Value) -> Result<Value, McpHandlerError> {
     let request = DocNavigateRequest::parse(args)?;
     let worktree = current_worktree()?;
-    let resolved = resolve_artifact_location(&worktree, None)
-        .map_err(|_| graph_artifact_missing(&worktree))?;
-    let table = open_sections_table(&resolved.path).await?;
+    let source = open_doc_artifact_for_request(&worktree).await?;
+    let table = open_sections_table(source.artifact_dir()).await?;
 
     let mut hits = if let Some(root) = request.root.as_deref() {
-        let root =
-            resolve_root_for_as_of(&resolved.path, &worktree, root, request.as_of.as_deref())?;
+        let root = resolve_root_for_as_of(
+            source.artifact_dir(),
+            &worktree,
+            root,
+            request.as_of.as_deref(),
+            source.artifact(),
+        )?;
         child_hits(&table, &root).await?
     } else {
         fts_hits(&table, &request).await?
@@ -74,6 +81,93 @@ pub(crate) async fn doc_navigate(args: &Value) -> Result<Value, McpHandlerError>
             .map(|hit| hit.into_value(request.include_lede))
             .collect::<Vec<_>>()
     }))
+}
+
+struct DocArtifactSource {
+    artifact_dir: PathBuf,
+    artifact: Option<Arc<GraphIndexArtifact>>,
+    _temp_dir: Option<OverlayDocTempDir>,
+}
+
+impl DocArtifactSource {
+    fn resolved(artifact_dir: PathBuf) -> Self {
+        Self {
+            artifact_dir,
+            artifact: None,
+            _temp_dir: None,
+        }
+    }
+
+    fn overlay(
+        artifact_dir: PathBuf,
+        artifact: Arc<GraphIndexArtifact>,
+        temp_dir: OverlayDocTempDir,
+    ) -> Self {
+        Self {
+            artifact_dir,
+            artifact: Some(artifact),
+            _temp_dir: Some(temp_dir),
+        }
+    }
+
+    fn artifact_dir(&self) -> &Path {
+        &self.artifact_dir
+    }
+
+    fn artifact(&self) -> Option<&Arc<GraphIndexArtifact>> {
+        self.artifact.as_ref()
+    }
+}
+
+struct OverlayDocTempDir {
+    path: PathBuf,
+}
+
+impl OverlayDocTempDir {
+    fn new() -> Result<Self, McpHandlerError> {
+        let path = std::env::temp_dir().join(format!("spur-doc-overlay-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).map_err(|error| {
+            McpHandlerError::Internal(format!(
+                "failed to create temporary doc_navigate overlay directory `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for OverlayDocTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+async fn open_doc_artifact_for_request(
+    worktree: &Path,
+) -> Result<DocArtifactSource, McpHandlerError> {
+    match resolve_artifact_location(worktree, None) {
+        Ok(resolved) => Ok(DocArtifactSource::resolved(resolved.path)),
+        Err(_) => {
+            let artifact = super::code_graph::overlaid_graph_artifact_from_base_seed_for_worktree(
+                worktree.to_path_buf(),
+                super::code_graph::shared_rebuild_coordinator(),
+            )
+            .await?;
+            let temp_dir = OverlayDocTempDir::new()?;
+            let artifact_dir = temp_dir.path().join("artifact");
+            write_sections_dataset(&artifact, worktree, &artifact_dir).map_err(|error| {
+                McpHandlerError::Internal(format!(
+                    "failed to build doc_navigate overlay sections in {}: {error}",
+                    worktree.display()
+                ))
+            })?;
+            Ok(DocArtifactSource::overlay(artifact_dir, artifact, temp_dir))
+        }
+    }
 }
 
 struct DocNavigateRequest {
@@ -281,16 +375,20 @@ fn resolve_root_for_as_of(
     worktree: &Path,
     root: &str,
     as_of: Option<&str>,
+    artifact: Option<&Arc<GraphIndexArtifact>>,
 ) -> Result<String, McpHandlerError> {
     let Some(as_of) = as_of else {
         return Ok(root.to_string());
     };
-    let artifact = Arc::new(load_artifact(artifact_dir).map_err(|error| {
-        McpHandlerError::Internal(format!(
-            "failed to load graph artifact `{}`: {error}",
-            artifact_dir.display()
-        ))
-    })?);
+    let artifact = match artifact {
+        Some(artifact) => Arc::clone(artifact),
+        None => Arc::new(load_artifact(artifact_dir).map_err(|error| {
+            McpHandlerError::Internal(format!(
+                "failed to load graph artifact `{}`: {error}",
+                artifact_dir.display()
+            ))
+        })?),
+    };
     let commits = load_commit_index(worktree)?;
     resolve_symbol_as_of(&artifact, &commits, root, as_of)
 }
@@ -367,17 +465,13 @@ fn load_commit_index(worktree: &Path) -> Result<CommitIndexArtifact, McpHandlerE
 }
 
 fn current_worktree() -> Result<PathBuf, McpHandlerError> {
+    if let Some(worktree) = super::code_graph::scoped_worktree_root() {
+        return Ok(worktree);
+    }
     let current_dir = std::env::current_dir().map_err(|error| {
         McpHandlerError::Internal(format!("failed to read current directory: {error}"))
     })?;
     Ok(resolve_worktree_root_from(current_dir))
-}
-
-fn graph_artifact_missing(worktree: &Path) -> McpHandlerError {
-    McpHandlerError::NotFound(format!(
-        "graph artifact not found; run `spur graph build` in {}",
-        worktree.display()
-    ))
 }
 
 fn optional_string(args: &Value, field: &str) -> Result<Option<String>, McpHandlerError> {
