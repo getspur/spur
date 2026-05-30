@@ -83,6 +83,9 @@ function buildBlocks(
       ];
     return [{ kind: "output", outputs: cellOutputs(cell) }];
   }
+  // Store-sourced cells cannot reach html today: notebook.ts:425 filters loaded cells
+  // and notebook.ts:707 drops daemon kinds outside code/markdown. Only direct test
+  // fixtures hit this branch until CellType is widened.
   if (kind === "html") return [{ kind: "html", html: source }];
 
   // markdown / raw
