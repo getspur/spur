@@ -153,5 +153,6 @@ fn datasource_kind_label(kind: DatasourceKind) -> &'static str {
         DatasourceKind::Parquet => "parquet",
         DatasourceKind::Json => "json",
         DatasourceKind::DuckDb => "duckdb",
+        DatasourceKind::Sqlite => "sqlite",
     }
 }
