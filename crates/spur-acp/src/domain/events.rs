@@ -98,6 +98,7 @@ pub enum DatasourceKind {
     Parquet,
     Json,
     DuckDb,
+    Sqlite,
 }
 
 /// Column metadata captured for a notebook datasource.
