@@ -98,15 +98,43 @@ class Runner {
 fn typescript_tags_query_captures_top_level_non_function_constants() {
     let source = r#"
 const LIMIT = 5;
+const ROUTE = prefix + "/run";
 const makeRunner = () => new Runner();
 "#;
     let sexp = root_sexp(source);
     assert!(sexp.contains("lexical_declaration"), "{sexp}");
 
-    assert_eq!(definition_names(source, "definition.constant"), ["LIMIT"]);
+    assert_eq!(
+        definition_names(source, "definition.constant"),
+        ["LIMIT", "ROUTE"]
+    );
     assert!(
         !definition_names(source, "definition.constant").contains(&"makeRunner".to_owned()),
         "function-valued const bindings must remain function definitions"
+    );
+}
+
+#[test]
+fn typescript_tags_query_captures_exported_non_function_constants() {
+    let source = r#"
+export const SETTINGS = makeSettings({ mode: "fast" });
+export const buildRunner = () => new Runner();
+"#;
+    let sexp = root_sexp(source);
+    assert!(sexp.contains("export_statement"), "{sexp}");
+    assert!(sexp.contains("lexical_declaration"), "{sexp}");
+
+    assert_eq!(
+        definition_names(source, "definition.constant"),
+        ["SETTINGS"]
+    );
+    assert!(
+        !definition_names(source, "definition.constant").contains(&"buildRunner".to_owned()),
+        "exported function-valued const bindings must remain function definitions"
+    );
+    assert!(
+        definition_names(source, "definition.function").contains(&"buildRunner".to_owned()),
+        "exported function-valued const bindings should still be function definitions"
     );
 }
 
