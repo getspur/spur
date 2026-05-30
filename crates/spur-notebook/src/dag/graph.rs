@@ -5,8 +5,9 @@ use std::{
 };
 
 use jute::backend::notebook::{CellDagMetadata, DagSource};
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DagEdge {
     pub producer: String,
     pub consumer: String,
