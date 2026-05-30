@@ -1146,6 +1146,65 @@ async fn worker_code_search_freshness_uses_registered_worktree_root() {
 }
 
 #[tokio::test]
+async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search_and_callers() {
+    skip_if_no_loopback!(
+        "worker_linked_worktree_without_self_graph_overlays_root_for_code_search_and_callers"
+    );
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let parent = TempDir::new().expect("temp parent");
+    let main = parent.path().join("main");
+    let worker = parent.path().join("worker");
+    std::fs::create_dir(&main).expect("create main checkout");
+    copy_fixture_crate(&main);
+    commit_fixture(&main);
+    build_graph_artifact(&main);
+    add_linked_worktree(&main, &worker, "worker-overlay-http-identical");
+    assert_no_graph_artifact(&worker);
+
+    let (_beads, pm) = common::beads::init_beads_pm(&main).await;
+    let _cwd = enter_dir(&main);
+    let server = WorkerMcpServer::start("worker-overlay-http-brain".into(), worker_mcp_deps(pm))
+        .await
+        .expect("worker MCP server starts");
+    let delegation_id = "worker-overlay-http-delegation";
+    server.register_delegation_worktree_root(delegation_id.to_string(), worker.clone());
+    let token = server.issue_token(delegation_id, Duration::from_secs(60));
+
+    let search = call_worker_tool(
+        &server,
+        &token,
+        "code_search",
+        json!({
+            "query": ROOT_SYMBOL,
+            "mode": "exact",
+            "limit": 20
+        }),
+    )
+    .await;
+    assert!(
+        search.get("error").is_none(),
+        "worker code_search should overlay root graph, got: {search}"
+    );
+    assert!(candidate_entity_names(&search).contains(ROOT_SYMBOL));
+
+    let callers = call_worker_tool(
+        &server,
+        &token,
+        "code_callers",
+        json!({ "selector": ROOT_SYMBOL }),
+    )
+    .await;
+    assert!(
+        callers.get("error").is_none(),
+        "worker code_callers should overlay root graph, got: {callers}"
+    );
+    assert_eq!(
+        entity_names(callers["callers"].as_array().expect("callers")),
+        BTreeSet::from(["launch_order".to_string()])
+    );
+}
+
+#[tokio::test]
 async fn code_search_concurrent_dirty_requests_dedupe_rebuild() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
