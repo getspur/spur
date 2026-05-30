@@ -232,6 +232,59 @@ pub struct SpurCellMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub datasource_setup: Option<bool>,
+
+    /// Reactive DAG wiring metadata for this cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dag: Option<CellDagMetadata>,
+}
+
+/// Reactive DAG metadata persisted under `cell.metadata.spur.dag`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub struct CellDagMetadata {
+    /// Ports this cell produces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub produces: Vec<PortSpec>,
+
+    /// Ports this cell consumes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumes: Vec<String>,
+
+    /// Source port that feeds this cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<DagSource>,
+}
+
+/// Produced DAG port descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub struct PortSpec {
+    /// Port identifier.
+    pub port: String,
+
+    /// Representation type for this port.
+    pub repr: String,
+
+    /// Optional display label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display: Option<String>,
+}
+
+/// Source descriptor for a consumed DAG port.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub struct DagSource {
+    /// Source kind.
+    pub kind: String,
+
+    /// Source port identifier.
+    pub port: String,
 }
 
 /// jute-deck per-cell metadata.
@@ -600,6 +653,67 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000"
         );
         assert_eq!(serialized["cells"][0]["metadata"]["spur"]["version"], 7);
+    }
+
+    #[test]
+    fn spur_dag_metadata_survives_round_trip() {
+        let json = r#"
+            {
+                "metadata": {},
+                "nbformat_minor": 5,
+                "nbformat": 4,
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "metadata": {
+                            "spur": {
+                                "version": 7,
+                                "dag": {
+                                    "produces": [
+                                        {
+                                            "port": "sales",
+                                            "repr": "dataframe",
+                                            "display": "Sales"
+                                        }
+                                    ],
+                                    "consumes": ["config"],
+                                    "source": {
+                                        "kind": "cell",
+                                        "port": "raw"
+                                    }
+                                }
+                            }
+                        },
+                        "source": "x = 1",
+                        "execution_count": null,
+                        "outputs": []
+                    }
+                ]
+            }
+        "#;
+
+        let notebook: NotebookRoot = serde_json::from_str(json).unwrap();
+        let Cell::Code(cell) = &notebook.cells[0] else {
+            panic!("expected a code cell");
+        };
+        let dag = cell.metadata.spur.as_ref().unwrap().dag.as_ref().unwrap();
+        assert_eq!(dag.produces[0].port, "sales");
+        assert_eq!(dag.produces[0].repr, "dataframe");
+        assert_eq!(dag.produces[0].display.as_deref(), Some("Sales"));
+        assert_eq!(dag.consumes, vec!["config"]);
+        assert_eq!(dag.source.as_ref().unwrap().kind, "cell");
+        assert_eq!(dag.source.as_ref().unwrap().port, "raw");
+
+        let serialized = serde_json::to_value(&notebook).unwrap();
+        assert_eq!(
+            serialized["cells"][0]["metadata"]["spur"]["dag"]["produces"][0]["port"],
+            "sales"
+        );
+        assert_eq!(
+            serialized["cells"][0]["metadata"]["spur"]["dag"]["source"]["port"],
+            "raw"
+        );
     }
 
     #[test]

@@ -158,6 +158,10 @@ impl ServerHandler for NotebookMcpServer {
             "notebook_list_datasources" => {
                 tools::list_datasources::call(&self.deps, arguments).await
             }
+            "notebook_push_source" => {
+                tools::notebook_push_source::call(&self.deps, arguments).await
+            }
+            "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,
@@ -207,10 +211,14 @@ pub struct NotebookMcpServerHandle {
     socket_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+    reactive_engine: Option<crate::dag::engine::ReactiveEngineHandle>,
 }
 
 impl NotebookMcpServerHandle {
     pub async fn shutdown(mut self) {
+        if let Some(engine) = self.reactive_engine.take() {
+            engine.shutdown().await;
+        }
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -225,6 +233,7 @@ impl NotebookMcpServerHandle {
 
 impl Drop for NotebookMcpServerHandle {
     fn drop(&mut self) {
+        self.reactive_engine.take();
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -400,6 +409,7 @@ async fn start_server_with_bridge_requester(
         socket_path,
         shutdown_tx: Some(shutdown_tx),
         task,
+        reactive_engine: None,
     })
 }
 
@@ -410,6 +420,7 @@ pub struct NotebookDaemonControl {
     jute_state: Arc<State>,
     windows: Arc<dyn DaemonWindowOps>,
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
+    reactive_engine: Arc<tokio::sync::Mutex<Option<crate::dag::ReactiveEngineClient>>>,
     last_record_path: Option<PathBuf>,
     recents_record_path: Option<PathBuf>,
 }
@@ -836,6 +847,7 @@ impl NotebookDaemonControl {
             jute_state,
             windows,
             state: Arc::new(tokio::sync::Mutex::new(NotebookDaemonState::default())),
+            reactive_engine: Arc::new(tokio::sync::Mutex::new(None)),
             last_record_path,
             recents_record_path: None,
         }
@@ -1186,6 +1198,19 @@ impl NotebookDaemonControl {
 
     pub async fn current_path(&self) -> Option<PathBuf> {
         self.state.lock().await.current_path.clone()
+    }
+
+    pub async fn reactive_engine_client(&self) -> Option<crate::dag::ReactiveEngineClient> {
+        self.reactive_engine.lock().await.clone()
+    }
+
+    pub async fn set_reactive_engine_client(&self, client: crate::dag::ReactiveEngineClient) {
+        *self.reactive_engine.lock().await = Some(client);
+    }
+
+    #[doc(hidden)]
+    pub async fn set_current_path_for_test(&self, path: PathBuf) {
+        self.state.lock().await.current_path = Some(path);
     }
 
     async fn handle_notebook_store_control(
@@ -1722,7 +1747,21 @@ pub async fn start_daemon_server(
         app: Some(app_for_deps),
         daemon: Some(control.clone()),
     });
-    let handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
+    let reactive_engine = match crate::dag::engine::spawn_reactive_engine(
+        Arc::clone(&deps),
+        crate::dag::engine::ReactiveEngineConfig::default(),
+    ) {
+        Ok(handle) => {
+            control.set_reactive_engine_client(handle.client()).await;
+            Some(handle)
+        }
+        Err(error) => {
+            warn!(%error, "failed to start notebook reactive engine");
+            None
+        }
+    };
+    let mut handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
+    handle.reactive_engine = reactive_engine;
     control.restore_last_open_notebook().await;
     Ok((handle, control))
 }
@@ -1765,6 +1804,7 @@ async fn start_multiplexed_server(
         socket_path,
         shutdown_tx: Some(shutdown_tx),
         task,
+        reactive_engine: None,
     })
 }
 
