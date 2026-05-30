@@ -1,4 +1,8 @@
-use jute::{backend::commands::RunCellEvent, commands::run_cell_events, state::State};
+use jute::{
+    backend::{commands::RunCellEvent, notebook::Cell},
+    commands::run_cell_events,
+    state::State,
+};
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -21,6 +25,8 @@ struct RunCellParams {
     #[serde(default)]
     kernel_id: Option<String>,
     code: String,
+    #[serde(default)]
+    expected_version: Option<u64>,
 }
 
 pub fn tool() -> Tool {
@@ -38,7 +44,8 @@ pub fn tool() -> Tool {
             "properties": {
                 "cell_id": { "type": "string", "minLength": 1 },
                 "kernel_id": { "type": "string" },
-                "code": { "type": "string" }
+                "code": { "type": "string" },
+                "expected_version": { "type": "integer", "minimum": 1 }
             },
             "additionalProperties": false
         })),
@@ -61,6 +68,9 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     let state = deps.state.as_ref().ok_or_else(|| {
         McpError::internal_error("notebook.run_cell requires notebook daemon state", None)
     })?;
+    if let Some(expected_version) = params.expected_version {
+        ensure_expected_version(state, &params.cell_id, expected_version)?;
+    }
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
     let code = wrap_python_cell(port_root_for_kernel_id(&kernel_id), &params.code);
 
@@ -81,6 +91,67 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         "exec_count": summary.exec_count,
         "outputs": summary.outputs,
     })))
+}
+
+fn ensure_expected_version(
+    state: &State,
+    cell_id: &str,
+    expected_version: u64,
+) -> Result<(), McpError> {
+    if expected_version == 0 {
+        return Err(McpError::invalid_params(
+            "notebook.run_cell expected_version must be >= 1",
+            None,
+        ));
+    }
+
+    let (root, _) = state.get_notebook().snapshot();
+    let actual = root
+        .cells
+        .iter()
+        .find_map(|cell| {
+            let (id, version) = match cell {
+                Cell::Raw(cell) => (
+                    &cell.id,
+                    cell.metadata.spur.as_ref().map(|spur| spur.version),
+                ),
+                Cell::Markdown(cell) => (
+                    &cell.id,
+                    cell.metadata.spur.as_ref().map(|spur| spur.version),
+                ),
+                Cell::Code(cell) => (
+                    &cell.id,
+                    cell.metadata.spur.as_ref().map(|spur| spur.version),
+                ),
+            };
+            (id.as_deref() == Some(cell_id)).then_some(version)
+        })
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                "notebook.run_cell cell_id was not found",
+                Some(json!({ "cell_id": cell_id })),
+            )
+        })?
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                "notebook.run_cell cell has no spur version",
+                Some(json!({ "cell_id": cell_id })),
+            )
+        })?;
+
+    if actual != expected_version {
+        return Err(McpError::invalid_params(
+            "notebook.run_cell stale_version",
+            Some(json!({
+                "code": "stale_version",
+                "cell_id": cell_id,
+                "expected": expected_version,
+                "actual": actual,
+            })),
+        ));
+    }
+
+    Ok(())
 }
 
 async fn resolve_kernel_id(
@@ -180,7 +251,7 @@ mod tests {
     use jute::{
         backend::notebook::{
             Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, NotebookRoot, Output,
-            OutputStream,
+            OutputStream, SpurCellMetadata,
         },
         state::State,
     };
@@ -219,7 +290,12 @@ mod tests {
             cells: vec![Cell::Code(CodeCell {
                 id: Some("code-1".to_string()),
                 metadata: CellMetadata {
-                    spur: None,
+                    spur: Some(SpurCellMetadata {
+                        version: 1,
+                        last_edited_by: None,
+                        datasource_setup: None,
+                        dag: None,
+                    }),
                     jute_deck: None,
                     other: Map::new(),
                 },
@@ -274,6 +350,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expected_version_rejects_stale_cell_before_dispatch() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_code_cell());
+        let deps = deps_with_state(state);
+
+        let error = call(
+            &deps,
+            json!({
+                "cell_id": "code-1",
+                "kernel_id": "missing",
+                "code": "print('new')",
+                "expected_version": 99
+            }),
+        )
+        .await
+        .expect_err("stale expected_version is rejected before kernel dispatch");
+
+        assert!(error.message.contains("stale_version"));
+        assert_eq!(
+            error.data.and_then(|data| data.get("code").cloned()),
+            Some(json!("stale_version"))
+        );
+    }
+
+    #[tokio::test]
     async fn event_drain_updates_notebook_store_cell_outputs() {
         let state = Arc::new(State::new());
         state
@@ -284,6 +387,7 @@ mod tests {
             cell_id: "code-1".to_string(),
             kernel_id: Some("kernel-1".to_string()),
             code: "print('new')".to_string(),
+            expected_version: None,
         };
         let (tx, rx) = async_channel::unbounded();
 

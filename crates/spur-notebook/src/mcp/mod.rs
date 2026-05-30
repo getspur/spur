@@ -207,10 +207,14 @@ pub struct NotebookMcpServerHandle {
     socket_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+    reactive_engine: Option<crate::dag::engine::ReactiveEngineHandle>,
 }
 
 impl NotebookMcpServerHandle {
     pub async fn shutdown(mut self) {
+        if let Some(engine) = self.reactive_engine.take() {
+            engine.shutdown().await;
+        }
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -225,6 +229,7 @@ impl NotebookMcpServerHandle {
 
 impl Drop for NotebookMcpServerHandle {
     fn drop(&mut self) {
+        self.reactive_engine.take();
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -400,6 +405,7 @@ async fn start_server_with_bridge_requester(
         socket_path,
         shutdown_tx: Some(shutdown_tx),
         task,
+        reactive_engine: None,
     })
 }
 
@@ -1721,7 +1727,18 @@ pub async fn start_daemon_server(
         app: Some(app_for_deps),
         daemon: Some(control.clone()),
     });
-    let handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
+    let reactive_engine = match crate::dag::engine::spawn_reactive_engine(
+        Arc::clone(&deps),
+        crate::dag::engine::ReactiveEngineConfig::default(),
+    ) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            warn!(%error, "failed to start notebook reactive engine");
+            None
+        }
+    };
+    let mut handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
+    handle.reactive_engine = reactive_engine;
     control.restore_last_open_notebook().await;
     Ok((handle, control))
 }
@@ -1764,6 +1781,7 @@ async fn start_multiplexed_server(
         socket_path,
         shutdown_tx: Some(shutdown_tx),
         task,
+        reactive_engine: None,
     })
 }
 
