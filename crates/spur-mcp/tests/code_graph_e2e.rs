@@ -19,9 +19,9 @@ use spur_graph::store::cache::write_with_dedup;
 use spur_graph::{
     artifact_from_facts, build_facts, build_facts_for_paths, write_artifact_parquet,
     write_current_pointer, ChangeKind, CommitArtifact, CommitIndexArtifact, Confidence,
-    EdgeEndpoint, GraphEdgeArtifact, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
-    NodeId, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
-    WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
+    EdgeEndpoint, GraphEdgeArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
+    GraphSymbolArtifact, NodeId, RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
+    TemporalEdgeArtifact, WalkStrategy, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 use spur_mcp::server::{community_feature_gate, DetachedContinuationCtx};
 use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
@@ -299,7 +299,7 @@ fn write_temporal_fixture_artifact_for_backend(worktree: &Path, backend: CodeGra
     };
     match backend {
         CodeGraphFixtureBackend::Parquet => write_graph_artifact(worktree, &graph),
-        CodeGraphFixtureBackend::InMemory => write_legacy_graph_artifact(worktree, &graph),
+        CodeGraphFixtureBackend::InMemory => write_graph_artifact(worktree, &graph),
     }
 
     let commits = CommitIndexArtifact {
@@ -656,16 +656,6 @@ fn write_graph_artifact(worktree: &Path, artifact: &GraphIndexArtifact) {
     )
     .expect("write parquet artifact");
     write_current_pointer(worktree, &written).expect("write CURRENT pointer");
-}
-
-fn write_legacy_graph_artifact(worktree: &Path, artifact: &GraphIndexArtifact) {
-    let spur_dir = worktree.join(".spur");
-    std::fs::create_dir_all(&spur_dir).expect("create .spur");
-    std::fs::write(
-        spur_dir.join("graph-index.json"),
-        serde_json::to_string_pretty(artifact).expect("encode legacy JSON graph artifact"),
-    )
-    .expect("write legacy JSON graph artifact");
 }
 
 fn symbol_id(artifact: &GraphIndexArtifact, entity_name: &str) -> String {
@@ -1089,6 +1079,118 @@ async fn code_search_uses_overlay_for_unsaved_edit_without_rebuild() {
     assert!(candidate_entity_names(&body).contains("freshly_indexed_unsaved_symbol"));
     assert_eq!(body["worktree_dirty"], false);
     assert_eq!(body["response_file_oids_match"], true);
+    assert_eq!(body["rebuild_status"], "fresh");
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn code_search_uses_overlay_for_untracked_source_without_rebuild() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    std::fs::write(
+        worktree.path().join("src/untracked_overlay.rs"),
+        "pub fn untracked_overlay_symbol() -> bool {\n    true\n}\n",
+    )
+    .expect("write untracked source file");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "untracked_overlay_symbol",
+                "mode": "exact",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+
+    assert!(candidate_entity_names(&body).contains("untracked_overlay_symbol"));
+    assert_eq!(body["rebuild_status"], "fresh");
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn code_search_ignores_untracked_non_source_scratch_file() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    std::fs::write(
+        worktree.path().join("scratch-output.log"),
+        "untracked scratch output\n",
+    )
+    .expect("write untracked scratch file");
+    std::fs::write(
+        worktree.path().join("scratch-notes.md"),
+        "# Scratch notes\n\nuntracked scratch output\n",
+    )
+    .expect("write untracked markdown scratch file");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "orchestrate_order",
+                "mode": "exact",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        candidate_entity_names(&body),
+        BTreeSet::from(["orchestrate_order".to_string()])
+    );
+    assert_eq!(body["rebuild_status"], "not_needed");
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn code_search_uses_overlay_for_committed_unindexed_source_without_rebuild() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact_with_pointer(worktree.path());
+    std::fs::write(
+        worktree.path().join("src/committed_overlay.rs"),
+        "pub fn committed_overlay_symbol() -> bool {\n    true\n}\n",
+    )
+    .expect("write committed source file");
+    git(worktree.path(), &["add", "src/committed_overlay.rs"]);
+    git(
+        worktree.path(),
+        &["commit", "-m", "add committed overlay source"],
+    );
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_search",
+            json!({
+                "query": "committed_overlay_symbol",
+                "mode": "exact",
+                "limit": 20
+            }),
+        )
+        .await,
+    );
+
+    assert!(candidate_entity_names(&body).contains("committed_overlay_symbol"));
     assert_eq!(body["rebuild_status"], "fresh");
     assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
 }
@@ -1772,34 +1874,44 @@ async fn code_file_symbols_returns_candidate_rows_for_worktree_relative_file() {
 async fn code_file_symbols_uses_symbol_uri_selector_for_legacy_empty_qualified_name() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
-    std::fs::create_dir_all(worktree.path().join(".spur")).expect("create .spur");
-    std::fs::write(
-        worktree.path().join(".spur/graph-index.json"),
-        serde_json::to_string_pretty(&json!({
-            "header": {
-                "graph_index_version": "fixture-2026-05-11"
-            },
-            "manifest_version": "v4",
-            "graph_content_hash": "legacy-empty-qualified-name",
-            "files": [
-                { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
-            ],
-            "symbols": [
-                {
-                    "stable_symbol_id": "legacy-empty-qualified-name-id",
-                    "file_path": "src/lib.rs",
-                    "byte_range": [0, 8],
-                    "line_range": [1, 3],
-                    "entity_name": "legacy_symbol",
-                    "symbol_kind": "function",
-                    "anchor_hash": "hash-legacy-empty-qualified-name-id",
-                    "enclosing_scope": null
-                }
-            ]
-        }))
-        .expect("encode legacy artifact"),
-    )
-    .expect("write legacy artifact");
+    let artifact = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            content_hash_blake3: None,
+        },
+        manifest_version: "v4".to_string(),
+        graph_content_hash: "legacy-empty-qualified-name".to_string(),
+        file_manifests: vec![GraphFileManifestEntry {
+            stable_file_id: "file-src-lib".to_string(),
+            path: "src/lib.rs".to_string(),
+            content_oid: "0000000000000000000000000000000000000000".to_string(),
+            node_ids: Vec::new(),
+        }],
+        files: vec![spur_graph::GraphFileArtifact {
+            stable_file_id: "file-src-lib".to_string(),
+            file_path: "src/lib.rs".to_string(),
+        }],
+        file_node_ids: vec![NodeId(1)],
+        symbols: vec![GraphSymbolArtifact {
+            stable_symbol_id: "legacy-empty-qualified-name-id".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            byte_range: [0, 8],
+            line_range: [1, 3],
+            entity_name: "legacy_symbol".to_string(),
+            qualified_name: String::new(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "hash-legacy-empty-qualified-name-id".to_string(),
+            enclosing_scope: None,
+        }],
+        symbol_node_ids: vec![NodeId(1_001)],
+        edges: Vec::new(),
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    };
+    write_graph_artifact(worktree.path(), &artifact);
     let _cwd = enter_dir(worktree.path());
     let server = test_server();
 
