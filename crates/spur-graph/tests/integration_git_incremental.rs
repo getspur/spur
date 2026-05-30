@@ -13,8 +13,9 @@ use spur_graph::store::cache::{
 };
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, git,
-    read_artifact_header_parquet, read_current_pointer, BuildMode, GraphIndexArtifact,
-    GraphIndexPointer, SourceKind,
+    read_artifact_header_parquet, read_current_pointer, write_artifact_parquet,
+    write_current_pointer, BuildMode, GraphIndexArtifact, GraphIndexPointer, SourceKind,
+    WriteOptions,
 };
 use support::git_repo::{path_str, GitRepo};
 
@@ -433,6 +434,39 @@ fn fresh_linked_worktree_seeds_incremental_from_main_with_one_modified_file() {
 }
 
 #[test]
+fn fresh_linked_worktree_seeds_incremental_from_main_current_without_pointer() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.write("src/keep.rs", "pub fn keep() {}\n");
+    repo.git(&["add", "src/lib.rs", "src/keep.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+    repo.git(&["branch", "worker"]);
+
+    let main_artifact = build_full(repo.path());
+    write_current_only_cache(repo.path(), &main_artifact);
+    assert!(!repo.path().join(".spur/graph-index.pointer.json").exists());
+    assert!(canonical_artifact_path_opt(repo.path(), &main_artifact).is_none());
+
+    let worker = repo.temp.path().join("worker");
+    repo.git(&["worktree", "add", path_str(&worker), "worker"]);
+    assert!(!worker.join(".spur/graph/CURRENT").exists());
+    assert!(!worker.join(".spur/graph-index.pointer.json").exists());
+
+    let (base, lines) = capture_base_seed_trace(|| {
+        let seed = load_base_seed_for_worktree(&worker).expect("main worktree base artifact");
+        let (rebuilt, mode, stats) =
+            artifact_from_facts_incremental(&seed.artifact, &worker).expect("incremental rebuild");
+        assert_eq!(seed.base, "main_worktree");
+        assert_eq!(mode, BuildMode::Incremental);
+        emit_base_seed_stats(seed.base, stats);
+        rebuilt
+    });
+
+    assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
+    assert_base_seed_trace(&lines, "main_worktree", 0, 2);
+}
+
+#[test]
 fn main_worktree_uses_self_pointer_as_incremental_seed() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn lib() {}\n");
@@ -497,7 +531,7 @@ fn missing_self_and_main_pointers_returns_none_and_full_rebuild_still_works() {
 }
 
 #[test]
-fn main_pointer_manifest_mismatch_returns_none_and_full_rebuild_still_works() {
+fn main_pointer_manifest_mismatch_uses_current_when_available() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn lib() {}\n");
     repo.git(&["add", "src/lib.rs"]);
@@ -519,9 +553,9 @@ fn main_pointer_manifest_mismatch_returns_none_and_full_rebuild_still_works() {
     let worker = repo.temp.path().join("worker");
     repo.git(&["worktree", "add", path_str(&worker), "worker"]);
 
-    let base = load_base_artifact_for_worktree(&worker);
+    let base = load_base_artifact_for_worktree(&worker).expect("main CURRENT base artifact");
 
-    assert!(base.is_none());
+    assert_eq!(base.graph_content_hash, main_artifact.graph_content_hash);
     let rebuilt = build_full(&worker);
     assert_eq!(rebuilt.graph_content_hash, main_artifact.graph_content_hash);
 }
@@ -605,14 +639,29 @@ fn write_git_cache(root: &Path, artifact: &GraphIndexArtifact) {
     write_with_dedup(artifact, root, &ctx).expect("write git cache");
 }
 
+fn write_current_only_cache(root: &Path, artifact: &GraphIndexArtifact) {
+    let artifact_base = root.join(".spur/graph");
+    let written = write_artifact_parquet(
+        artifact,
+        &artifact_base,
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write worktree graph artifact");
+    write_current_pointer(root, &written).expect("write CURRENT pointer");
+}
+
 fn canonical_artifact_path(root: &Path, artifact: &GraphIndexArtifact) -> PathBuf {
+    canonical_artifact_path_opt(root, artifact).expect("canonical artifact")
+}
+
+fn canonical_artifact_path_opt(root: &Path, artifact: &GraphIndexArtifact) -> Option<PathBuf> {
     let ctx = git::detect(root).expect("git context");
     lookup_canonical(
         &ctx.git_common_dir,
         &artifact.manifest_version,
         &artifact.graph_content_hash,
     )
-    .expect("canonical artifact")
 }
 
 fn read_pointer(root: &Path) -> GraphIndexPointer {

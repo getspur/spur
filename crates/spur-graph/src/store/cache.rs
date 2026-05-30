@@ -11,9 +11,10 @@ use anyhow::{Context as _, Result};
 
 use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::build::BuildStats;
+use crate::store::pointer::{resolve_artifact_location, ArtifactFormat};
 use crate::store::{
-    read_artifact_parquet, write_artifact_parquet, write_current_pointer, write_sections_dataset,
-    ArtifactStagingDir, WriteOptions,
+    read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
+    write_current_pointer, write_sections_dataset, ArtifactStagingDir, WriteOptions,
 };
 use crate::{git, git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
@@ -185,40 +186,19 @@ fn load_pointer_artifact(
     pointer_root: &Path,
     source: &'static str,
 ) -> Option<Arc<GraphIndexArtifact>> {
-    let pointer_path = pointer_root.join(POINTER_PATH);
-    let pointer = match read_pointer_file(&pointer_path) {
-        Ok(Some(pointer)) => pointer,
-        Ok(None) => {
-            tracing::debug!(
-                target: "spur_graph::base_seed",
-                source,
-                path = %pointer_path.display(),
-                "spur-graph: base pointer missing"
-            );
-            return None;
-        }
+    let resolved = match resolve_artifact_location(pointer_root, None) {
+        Ok(resolved) => resolved,
         Err(error) => {
             tracing::debug!(
                 target: "spur_graph::base_seed",
                 source,
-                path = %pointer_path.display(),
+                path = %pointer_root.display(),
                 error = %error,
-                "spur-graph: base pointer unreadable"
+                "spur-graph: base artifact location unavailable"
             );
             return None;
         }
     };
-    if pointer.schema != POINTER_SCHEMA {
-        tracing::debug!(
-            target: "spur_graph::base_seed",
-            source,
-            path = %pointer_path.display(),
-            schema = %pointer.schema,
-            "spur-graph: base pointer schema is incompatible"
-        );
-        return None;
-    }
-
     let ctx = match git::detect(worktree_root) {
         Some(ctx) => ctx,
         None => {
@@ -235,29 +215,82 @@ fn load_pointer_artifact(
         .git_common_dir
         .canonicalize()
         .unwrap_or_else(|_| ctx.git_common_dir.clone());
-    let canonical = match lookup_canonical(
-        &common_dir,
-        &pointer.manifest_version,
-        &pointer.graph_content_hash,
-    ) {
-        Some(path) => path,
-        None => {
+    read_resolved_base_artifact(common_dir, &resolved.path, resolved.format, source)
+}
+
+fn read_resolved_base_artifact(
+    common_dir: PathBuf,
+    path: &Path,
+    format: ArtifactFormat,
+    source: &'static str,
+) -> Option<Arc<GraphIndexArtifact>> {
+    match format {
+        ArtifactFormat::Parquet => {
+            let manifest = match read_artifact_header_parquet(path) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::debug!(
+                        target: "spur_graph::base_seed",
+                        source,
+                        path = %path.display(),
+                        error = %error,
+                        "spur-graph: base artifact manifest unreadable"
+                    );
+                    return None;
+                }
+            };
+            let key = BaseArtifactCacheKey {
+                common_dir,
+                manifest_version: manifest.manifest_version,
+                graph_content_hash: manifest.graph_content_hash,
+            };
+            read_cached_base_artifact(key, path, source)
+        }
+        ArtifactFormat::LegacyJson => read_uncached_base_artifact(common_dir, path, source),
+    }
+}
+
+fn read_uncached_base_artifact(
+    common_dir: PathBuf,
+    path: &Path,
+    source: &'static str,
+) -> Option<Arc<GraphIndexArtifact>> {
+    let artifact = match crate::load_artifact(path) {
+        Ok(artifact) => artifact,
+        Err(error) => {
             tracing::debug!(
                 target: "spur_graph::base_seed",
                 source,
-                manifest_version = %pointer.manifest_version,
-                graph_content_hash = %pointer.graph_content_hash,
-                "spur-graph: canonical base artifact missing"
+                path = %path.display(),
+                error = %error,
+                "spur-graph: base artifact unreadable"
             );
             return None;
         }
     };
     let key = BaseArtifactCacheKey {
         common_dir,
-        manifest_version: pointer.manifest_version,
-        graph_content_hash: pointer.graph_content_hash,
+        manifest_version: artifact.manifest_version.clone(),
+        graph_content_hash: artifact.graph_content_hash.clone(),
     };
-    read_cached_base_artifact(key, &canonical, source)
+
+    if let Some(cached) = base_artifact_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.artifacts.get(&key).cloned())
+    {
+        return Some(cached);
+    }
+
+    let artifact = Arc::new(artifact);
+    let Ok(mut cache) = base_artifact_cache().lock() else {
+        return Some(artifact);
+    };
+    if let Some(cached) = cache.artifacts.get(&key) {
+        return Some(Arc::clone(cached));
+    }
+    cache.insert(key, Arc::clone(&artifact));
+    Some(artifact)
 }
 
 fn read_cached_base_artifact(
@@ -326,18 +359,6 @@ impl BaseArtifactCache {
                 self.artifacts.remove(&evicted);
             }
         }
-    }
-}
-
-fn read_pointer_file(path: &Path) -> Result<Option<GraphIndexPointer>> {
-    match File::open(path) {
-        Ok(file) => {
-            let pointer = serde_json::from_reader(file)
-                .with_context(|| format!("invalid graph index pointer `{}`", path.display()))?;
-            Ok(Some(pointer))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
     }
 }
 
