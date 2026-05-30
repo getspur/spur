@@ -565,6 +565,7 @@ fn buckets_from_facts(
             | NodeKind::Impl
             | NodeKind::Trait
             | NodeKind::Enum
+            | NodeKind::EnumVariant
             | NodeKind::Method
             | NodeKind::Field
             | NodeKind::Constant
