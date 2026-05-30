@@ -68,11 +68,6 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
     },
     ManifestQueryBytes {
         language: "python",
-        query: "symbols",
-        bytes: include_bytes!("../../queries/python/symbols.scm"),
-    },
-    ManifestQueryBytes {
-        language: "python",
         query: "spur-edges",
         bytes: include_bytes!("../../queries/python/spur-edges.scm"),
     },
@@ -1036,6 +1031,14 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 edge.target_stable_symbol_id = None;
                 continue;
             };
+            let matches = if edge.relation == RelationKind::Imports {
+                matches
+                    .iter()
+                    .filter(|target| is_import_rebind_candidate_kind(&target.symbol_kind))
+                    .collect::<Vec<_>>()
+            } else {
+                matches.iter().collect::<Vec<_>>()
+            };
             if matches.len() > 1 {
                 ambiguous_unresolved += 1;
                 tracing::debug!(
@@ -1067,6 +1070,27 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             "spur-graph: left ambiguous cross-file edges unresolved"
         );
     }
+}
+
+fn is_import_rebind_candidate_kind(kind: &str) -> bool {
+    // Keep impls in the ambiguity set to avoid changing existing Rust type
+    // import behavior; this filter only removes member symbols from import
+    // rebinding after fields/methods are extracted.
+    matches!(
+        kind,
+        "module"
+            | "function"
+            | "class"
+            | "interface"
+            | "struct"
+            | "impl"
+            | "enum"
+            | "enum_variant"
+            | "trait"
+            | "type_alias"
+            | "macro"
+            | "constant"
+    )
 }
 
 fn same_directory_path(left: &str, right: &str) -> bool {
