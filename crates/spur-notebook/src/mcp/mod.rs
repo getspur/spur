@@ -1006,6 +1006,9 @@ impl NotebookDaemonControl {
                 DaemonControlCommand::AttachDatasource { name, path, group } => {
                     self.attach_datasource(name, path, group).await
                 }
+                DaemonControlCommand::DetachDatasource { name } => {
+                    self.detach_datasource(name).await
+                }
                 DaemonControlCommand::ListRecents {} => self
                     .list_recent_entries()
                     .await
@@ -1114,6 +1117,16 @@ impl NotebookDaemonControl {
     }
 
     #[cfg(feature = "datasource-introspect")]
+    async fn detach_datasource(&self, name: String) -> Result<DaemonControlSuccess, BridgeError> {
+        let removed = self.jute_state.detach_datasource(&name);
+        if removed.is_some() {
+            self.refresh_datasource_setup_cell().await?;
+            self.persist_catalog_to_current_notebook().await?;
+        }
+        Ok(DaemonControlSuccess::empty())
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     async fn refresh_datasource_setup_cell(&self) -> Result<(), BridgeError> {
         let entries = self.jute_state.datasource_catalog.lock().list();
         let source = datasource_setup_source(&entries);
@@ -1181,6 +1194,14 @@ impl NotebookDaemonControl {
                 code: "setup_cell_update_failed".to_string(),
                 message: error.to_string(),
             })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn detach_datasource(&self, _name: String) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
     }
 
     #[cfg(not(feature = "datasource-introspect"))]
@@ -2713,6 +2734,44 @@ mod tests {
 
     #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
+    async fn detach_datasource_command_routes_through_daemon_control() {
+        let jute_state = Arc::new(State::new());
+        let mut events = jute_state.event_tx.subscribe();
+        let entry = test_datasource_entry("sales");
+        jute_state.attach_datasource(entry);
+        let _ = events.recv().await.expect("initial attach event");
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "detach_datasource",
+            "name": "sales"
+        }))
+        .expect("detach datasource command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(jute_state.datasource_catalog.lock().list(), Vec::new());
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("detach catalog event is pushed")
+            .expect("catalog event receiver stays open");
+        assert_eq!(
+            event,
+            jute::state::DaemonEvent::DatasourcesChanged(Vec::new())
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
     async fn catalog_hydrates_from_metadata() {
         let workspace_dir = std::env::current_dir().expect("current dir");
         let tempdir = tempfile::Builder::new()
@@ -2782,6 +2841,7 @@ mod tests {
         assert!(relative_path.ends_with("sales.csv"));
 
         let rehydrated = State::new();
+        let mut events = rehydrated.event_tx.subscribe();
         let load_response = jute::commands::handle_daemon_control_request(
             jute::commands::DaemonControlRequest::new(
                 jute::commands::DaemonControlCommand::LoadNotebook {
@@ -2793,7 +2853,18 @@ mod tests {
         .await;
 
         assert!(load_response.ok, "{:?}", load_response.error);
-        assert_eq!(rehydrated.datasource_catalog.lock().list(), vec![entry]);
+        assert_eq!(
+            rehydrated.datasource_catalog.lock().list(),
+            vec![entry.clone()]
+        );
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("hydrated catalog event is pushed")
+            .expect("catalog event receiver stays open");
+        assert_eq!(
+            event,
+            jute::state::DaemonEvent::DatasourcesChanged(vec![entry])
+        );
     }
 
     fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {

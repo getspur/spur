@@ -227,6 +227,8 @@ pub enum DaemonControlCommand {
         path: String,
         group: Option<String>,
     },
+    /// Detach a datasource from the current notebook.
+    DetachDatasource { name: String },
     /// List daemon recents.
     ListRecents {},
     /// Remove a path from daemon recents.
@@ -737,7 +739,9 @@ async fn handle_daemon_control_inner(
                 &root.metadata,
                 Some(Path::new(&path)),
             );
+            let entries = catalog.list();
             *state.datasource_catalog.lock() = catalog;
+            state.emit_datasources_changed(entries);
             let delta = notebook.load(PathBuf::from(path), root);
             Ok(DaemonControlResult::Delta(delta))
         }
