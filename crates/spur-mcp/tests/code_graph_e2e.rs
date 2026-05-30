@@ -203,6 +203,20 @@ fn commit_fixture(worktree: &Path) {
     git(worktree, &["commit", "-m", "fixture"]);
 }
 
+fn add_linked_worktree(main: &Path, worker: &Path, branch: &str) {
+    let worker_arg = worker.to_str().expect("worker path is UTF-8");
+    git(
+        main,
+        &["worktree", "add", "-q", "-b", branch, worker_arg, "HEAD"],
+    );
+}
+
+fn assert_no_graph_artifact(worktree: &Path) {
+    assert!(!worktree.join(".spur/graph/CURRENT").exists());
+    assert!(!worktree.join(".spur/graph-index.pointer.json").exists());
+    assert!(!worktree.join(".spur/graph-index.json").exists());
+}
+
 fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     let (facts, _file_counts) = build_facts(worktree, None).expect("build graph facts");
     let artifact = artifact_from_facts(&facts, worktree).expect("build graph artifact");
@@ -801,6 +815,18 @@ fn error_data(response: &Value) -> &Value {
     &response["error"]["data"]
 }
 
+fn assert_successful_tool_response(response: &Value) {
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("graph artifact not found"),
+        "tool should not return graph_artifact_missing: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "tool should succeed: {response}"
+    );
+}
+
 fn assert_code_symbol_history_rename_chain(body: &Value, backend: CodeGraphFixtureBackend) {
     let keys = body
         .as_object()
@@ -891,6 +917,99 @@ fn qualified_names(rows: &[Value]) -> BTreeSet<String> {
                 .to_string()
         })
         .collect()
+}
+
+#[tokio::test]
+async fn linked_worktree_without_self_graph_overlays_root_for_code_search_and_callers() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let parent = TempDir::new().expect("temp parent");
+    let main = parent.path().join("main");
+    let worker = parent.path().join("worker");
+    std::fs::create_dir(&main).expect("create main checkout");
+    copy_fixture_crate(&main);
+    commit_fixture(&main);
+    build_graph_artifact(&main);
+    add_linked_worktree(&main, &worker, "worker-overlay-identical");
+    assert_no_graph_artifact(&worker);
+    let _cwd = enter_dir(&worker);
+    let server = test_server();
+
+    let search_response = call_tool(
+        &server,
+        "code_search",
+        json!({
+            "query": ROOT_SYMBOL,
+            "mode": "exact",
+            "limit": 20
+        }),
+    )
+    .await;
+    assert_successful_tool_response(&search_response);
+    let search = tool_body(search_response);
+    assert!(candidate_entity_names(&search).contains(ROOT_SYMBOL));
+
+    let callers_response =
+        call_tool(&server, "code_callers", json!({ "selector": ROOT_SYMBOL })).await;
+    assert_successful_tool_response(&callers_response);
+    let callers = tool_body(callers_response);
+    assert_eq!(
+        entity_names(callers["callers"].as_array().expect("callers")),
+        BTreeSet::from(["launch_order".to_string()])
+    );
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 1);
+}
+
+#[tokio::test]
+async fn linked_worktree_without_self_graph_overlays_modified_file_for_code_search_and_callers() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let parent = TempDir::new().expect("temp parent");
+    let main = parent.path().join("main");
+    let worker = parent.path().join("worker");
+    std::fs::create_dir(&main).expect("create main checkout");
+    copy_fixture_crate(&main);
+    commit_fixture(&main);
+    build_graph_artifact(&main);
+    add_linked_worktree(&main, &worker, "worker-overlay-modified");
+    assert_no_graph_artifact(&worker);
+    let worker_source_path = worker.join("src/lib.rs");
+    let mut worker_source =
+        std::fs::read_to_string(&worker_source_path).expect("read worker fixture source");
+    worker_source
+        .push_str("\npub fn worker_overlay_symbol() -> bool {\n    orchestrate_order()\n}\n");
+    std::fs::write(&worker_source_path, worker_source).expect("write worker overlay source");
+    let _cwd = enter_dir(&worker);
+    let server = test_server();
+
+    let search_response = call_tool(
+        &server,
+        "code_search",
+        json!({
+            "query": "worker_overlay_symbol",
+            "mode": "exact",
+            "limit": 20
+        }),
+    )
+    .await;
+    assert_successful_tool_response(&search_response);
+    let search = tool_body(search_response);
+    assert!(candidate_entity_names(&search).contains("worker_overlay_symbol"));
+
+    let callers_response = call_tool(
+        &server,
+        "code_callers",
+        json!({ "selector": ROOT_SYMBOL, "include_unresolved": true }),
+    )
+    .await;
+    assert_successful_tool_response(&callers_response);
+    let callers = tool_body(callers_response);
+    assert_eq!(
+        entity_names(callers["callers"].as_array().expect("callers")),
+        BTreeSet::from([
+            "launch_order".to_string(),
+            "worker_overlay_symbol".to_string()
+        ])
+    );
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 1);
 }
 
 #[tokio::test]
