@@ -201,7 +201,7 @@ pub fn init_db(path: &Path) -> Result<Connection> {
 
 // ─── Row Helpers ─────────────────────────────────────────────────────
 
-fn session_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
+fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     Ok(SessionRecord {
         id: row.get(0)?,
         agent: row.get(1)?,
