@@ -247,6 +247,7 @@ fn test_datasource_entry(name: &str) -> DatasourceEntry {
             sql_type: "VARCHAR".to_owned(),
         }],
         row_count: Some(2),
+        tables: Vec::new(),
     }
 }
 

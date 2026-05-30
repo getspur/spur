@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 #![cfg(madsim)]
 
 extern crate madsim_tokio as tokio;

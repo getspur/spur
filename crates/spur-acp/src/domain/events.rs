@@ -97,6 +97,7 @@ pub enum DatasourceKind {
     Csv,
     Parquet,
     Json,
+    DuckDb,
 }
 
 /// Column metadata captured for a notebook datasource.
@@ -105,6 +106,15 @@ pub enum DatasourceKind {
 pub struct Column {
     pub name: String,
     pub sql_type: String,
+}
+
+/// Table metadata captured for a multi-table notebook datasource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Table {
+    pub name: String,
+    pub columns: Vec<Column>,
+    pub row_count: Option<u64>,
 }
 
 /// Catalog entry describing one datasource attached to a notebook.
@@ -117,6 +127,8 @@ pub struct DatasourceEntry {
     pub group: Option<String>,
     pub columns: Vec<Column>,
     pub row_count: Option<u64>,
+    #[serde(default)]
+    pub tables: Vec<Table>,
 }
 
 /// Artifact kinds emitted by an executor.

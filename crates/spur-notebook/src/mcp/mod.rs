@@ -622,6 +622,7 @@ fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, 
         Some("csv") => Ok(jute::commands::DatasourceKind::Csv),
         Some("parquet" | "parq") => Ok(jute::commands::DatasourceKind::Parquet),
         Some("json" | "jsonl" | "ndjson") => Ok(jute::commands::DatasourceKind::Json),
+        Some("duckdb" | "db") => Ok(jute::commands::DatasourceKind::DuckDb),
         _ => Err(BridgeError::Handler {
             code: "unsupported_datasource_kind".to_string(),
             message: format!(
@@ -647,6 +648,7 @@ fn datasource_setup_source(entries: &[jute::commands::DatasourceEntry]) -> Strin
     let mut source = String::from(DATASOURCE_SETUP_SENTINEL);
     source.push_str("\n# This cell is managed by SPUR. Re-run it after datasource changes.\n");
     source.push_str("import duckdb\n\n");
+    source.push_str(&datasource_setup_bootstrap_preamble(entries));
 
     if entries.is_empty() {
         source.push_str("# No datasources are attached.\n");
@@ -654,17 +656,46 @@ fn datasource_setup_source(entries: &[jute::commands::DatasourceEntry]) -> Strin
     }
 
     for entry in entries {
-        let sql = format!(
-            "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
-            sql_identifier(&entry.name),
-            datasource_scan_expression(entry)
-        );
-        source.push_str("duckdb.sql(");
-        source.push_str(&python_string_literal(&sql));
-        source.push_str(")\n");
+        for sql in datasource_setup_statements(entry) {
+            source.push_str("duckdb.sql(");
+            source.push_str(&python_string_literal(&sql));
+            source.push_str(")\n");
+        }
     }
 
     source
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_setup_bootstrap_preamble(_entries: &[jute::commands::DatasourceEntry]) -> String {
+    String::new()
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_setup_statements(entry: &jute::commands::DatasourceEntry) -> Vec<String> {
+    if entry.kind == jute::commands::DatasourceKind::DuckDb {
+        let mut statements = vec![format!(
+            "ATTACH IF NOT EXISTS {} AS {} (READ_ONLY)",
+            sql_string_literal(&entry.path),
+            sql_identifier(&entry.name)
+        )];
+        statements.extend(entry.tables.iter().map(|table| {
+            format!(
+                "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}.{}.{}",
+                sql_identifier(&format!("{}__{}", entry.name, table.name)),
+                sql_identifier(&entry.name),
+                sql_identifier("main"),
+                sql_identifier(&table.name)
+            )
+        }));
+        return statements;
+    }
+
+    vec![format!(
+        "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
+        sql_identifier(&entry.name),
+        datasource_scan_expression(entry)
+    )]
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -674,6 +705,9 @@ fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String
         jute::commands::DatasourceKind::Csv => format!("read_csv_auto({literal})"),
         jute::commands::DatasourceKind::Parquet => format!("read_parquet({literal})"),
         jute::commands::DatasourceKind::Json => format!("read_json_auto({literal})"),
+        jute::commands::DatasourceKind::DuckDb => {
+            unreachable!("DuckDB files are mounted through ATTACH")
+        }
     }
 }
 
@@ -990,12 +1024,21 @@ impl NotebookDaemonControl {
     ) -> Result<DaemonControlSuccess, BridgeError> {
         let path = normalize_datasource_path(path)?;
         let kind = infer_datasource_kind(&path)?;
-        let schema = crate::datasource::introspect_datasource(&path, kind).map_err(|error| {
-            BridgeError::Handler {
-                code: "datasource_introspection_failed".to_string(),
-                message: error.to_string(),
+        let schema = match crate::datasource::introspect_datasource(&path, kind) {
+            Ok(schema) => schema,
+            Err(error) => {
+                warn!(
+                    %error,
+                    path = %path.display(),
+                    "datasource schema probe failed; attaching with pending metadata"
+                );
+                crate::datasource::DatasourceSchema {
+                    columns: Vec::new(),
+                    row_count: None,
+                    tables: Vec::new(),
+                }
             }
-        })?;
+        };
 
         let entry = jute::commands::DatasourceEntry {
             name,
@@ -1004,6 +1047,7 @@ impl NotebookDaemonControl {
             group,
             columns: schema.columns,
             row_count: schema.row_count,
+            tables: schema.tables,
         };
 
         self.jute_state.attach_datasource(entry.clone());
@@ -1969,6 +2013,142 @@ mod tests {
 
     #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
+    async fn attach_probe_is_non_fatal_on_missing_extension() {
+        let tempdir = tempfile::tempdir().expect("duckdb fixture dir");
+        let duckdb = tempdir.path().join("broken.duckdb");
+        std::fs::write(&duckdb, "not a duckdb database").expect("write broken fixture");
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "warehouse".to_owned(),
+                    path: duckdb.display().to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::DuckDb);
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert!(entry.tables.is_empty());
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn setup_cell_emits_attach_and_views() {
+        let entry = jute::commands::DatasourceEntry {
+            name: "warehouse".to_string(),
+            path: "/tmp/warehouse.duckdb".to_string(),
+            kind: jute::commands::DatasourceKind::DuckDb,
+            group: None,
+            columns: Vec::new(),
+            row_count: None,
+            tables: vec![
+                jute::commands::Table {
+                    name: "inventory".to_string(),
+                    columns: Vec::new(),
+                    row_count: None,
+                },
+                jute::commands::Table {
+                    name: "sales".to_string(),
+                    columns: Vec::new(),
+                    row_count: None,
+                },
+            ],
+        };
+
+        let source = datasource_setup_source(&[entry]);
+        let sql = duckdb_sql_calls(&source);
+
+        assert!(source.contains("import duckdb"));
+        assert_eq!(
+            sql[0],
+            "ATTACH IF NOT EXISTS '/tmp/warehouse.duckdb' AS \"warehouse\" (READ_ONLY)"
+        );
+        assert_eq!(
+            &sql[1..],
+            [
+                "CREATE OR REPLACE VIEW \"warehouse__inventory\" AS SELECT * FROM \"warehouse\".\"main\".\"inventory\"",
+                "CREATE OR REPLACE VIEW \"warehouse__sales\" AS SELECT * FROM \"warehouse\".\"main\".\"sales\""
+            ]
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn setup_cell_bootstrap_preamble_is_empty_for_native_kinds() {
+        let entries = [
+            test_datasource_entry("sales"),
+            jute::commands::DatasourceEntry {
+                name: "warehouse".to_string(),
+                path: "/tmp/warehouse.duckdb".to_string(),
+                kind: jute::commands::DatasourceKind::DuckDb,
+                group: None,
+                columns: Vec::new(),
+                row_count: None,
+                tables: Vec::new(),
+            },
+        ];
+
+        assert_eq!(datasource_setup_bootstrap_preamble(&entries), "");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn portability_duckdb_setup_cell_sql_runs_on_vanilla_duckdb() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let db_path = tempdir.path().join("warehouse.duckdb");
+        {
+            let conn = duckdb::Connection::open(&db_path)?;
+            conn.execute_batch(
+                "CREATE TABLE sales(region VARCHAR); INSERT INTO sales VALUES ('west');",
+            )?;
+        }
+        let entry = jute::commands::DatasourceEntry {
+            name: "warehouse".to_string(),
+            path: db_path.display().to_string(),
+            kind: jute::commands::DatasourceKind::DuckDb,
+            group: None,
+            columns: Vec::new(),
+            row_count: None,
+            tables: vec![jute::commands::Table {
+                name: "sales".to_string(),
+                columns: Vec::new(),
+                row_count: Some(1),
+            }],
+        };
+        let source = datasource_setup_source(&[entry]);
+        let conn = duckdb::Connection::open_in_memory()?;
+
+        for sql in duckdb_sql_calls(&source) {
+            conn.execute_batch(&sql)?;
+        }
+        let count: i64 =
+            conn.query_row("SELECT count(*) FROM \"warehouse__sales\"", [], |row| {
+                row.get(0)
+            })?;
+
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
     async fn attach_inserts_idempotent_setup_cell() {
         let tempdir = tempfile::tempdir().expect("csv fixture dir");
         let csv = tempdir.path().join("sales.csv");
@@ -2161,7 +2341,8 @@ mod tests {
                                 "sqlType": "VARCHAR"
                             }
                         ],
-                        "rowCount": 2
+                        "rowCount": 2,
+                        "tables": []
                     }
                 ]
             })
@@ -2339,7 +2520,19 @@ mod tests {
                 sql_type: "VARCHAR".to_owned(),
             }],
             row_count: Some(2),
+            tables: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn duckdb_sql_calls(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let literal = line.strip_prefix("duckdb.sql(")?.strip_suffix(')')?;
+                serde_json::from_str(literal).ok()
+            })
+            .collect()
     }
 
     struct BufferedNotebookBridge {
