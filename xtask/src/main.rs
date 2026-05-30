@@ -377,9 +377,15 @@ fn tauri_build_command(workspace_root: &Path) -> Command {
     let spur_notebook_dir = workspace_root.join("crates/spur-notebook");
     let jute_dir = spur_notebook_dir.join("jute-notebook");
     let mut cmd = Command::new(jute_dir.join(tauri_cli_bin()));
-    cmd.args(["build", "--bundles", "app", "--features", "datasource-introspect"])
-        .current_dir(spur_notebook_dir)
-        .env_remove("TAURI_CONFIG");
+    cmd.args([
+        "build",
+        "--bundles",
+        "app",
+        "--features",
+        "datasource-introspect",
+    ])
+    .current_dir(spur_notebook_dir)
+    .env_remove("TAURI_CONFIG");
     apply_macos_rustc_wrapper_workaround(&mut cmd);
     cmd
 }
