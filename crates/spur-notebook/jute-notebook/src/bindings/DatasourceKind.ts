@@ -3,4 +3,4 @@
 /**
  * Local datasource file type supported by the notebook daemon.
  */
-export type DatasourceKind = "csv" | "parquet" | "json";
+export type DatasourceKind = "csv" | "parquet" | "json" | "duck_db" | "sqlite";

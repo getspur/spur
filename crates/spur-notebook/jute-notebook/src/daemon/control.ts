@@ -95,7 +95,9 @@ function isDatasourceEntry(value: unknown): value is DatasourceEntry {
     typeof candidate.path === "string" &&
     (candidate.kind === "csv" ||
       candidate.kind === "parquet" ||
-      candidate.kind === "json") &&
+      candidate.kind === "json" ||
+      candidate.kind === "duck_db" ||
+      candidate.kind === "sqlite") &&
     (candidate.group === null || typeof candidate.group === "string") &&
     Array.isArray(candidate.columns) &&
     candidate.columns.every(
@@ -105,6 +107,23 @@ function isDatasourceEntry(value: unknown): value is DatasourceEntry {
         typeof column.name === "string" &&
         typeof column.sqlType === "string",
     ) &&
-    (candidate.rowCount === null || typeof candidate.rowCount === "number")
+    (candidate.rowCount === null || typeof candidate.rowCount === "number") &&
+    (candidate.tables === undefined ||
+      (Array.isArray(candidate.tables) &&
+        candidate.tables.every(
+          (table) =>
+            typeof table === "object" &&
+            table !== null &&
+            typeof table.name === "string" &&
+            Array.isArray(table.columns) &&
+            table.columns.every(
+              (column) =>
+                typeof column === "object" &&
+                column !== null &&
+                typeof column.name === "string" &&
+                typeof column.sqlType === "string",
+            ) &&
+            (table.rowCount === null || typeof table.rowCount === "number"),
+        )))
   );
 }

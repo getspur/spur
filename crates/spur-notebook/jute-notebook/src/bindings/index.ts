@@ -40,5 +40,6 @@ export * from "./RecentsChangedEvent";
 export * from "./NotebookRoot";
 export * from "./DisplayDataTransient";
 export * from "./DatasourceKind";
+export * from "./Table";
 export * from "./NotebookMetadata";
 export * from "./CellMetadata";

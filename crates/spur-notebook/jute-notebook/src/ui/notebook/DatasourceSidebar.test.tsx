@@ -36,6 +36,7 @@ function datasourceEntry(overrides: Partial<DatasourceEntry>): DatasourceEntry {
       { name: "revenue", sqlType: "BIGINT" },
     ],
     rowCount: 2,
+    tables: [],
     ...overrides,
   };
 }
