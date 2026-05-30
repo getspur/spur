@@ -36,6 +36,7 @@ url = "2.5.0"
 uuid.workspace = true
 
 [dev-dependencies]
+spur-acp = { path = "../spur-acp" }
 tauri = { version = "2.0.4", features = ["test"] }
 tempfile = "3"
 
