@@ -218,6 +218,7 @@ pub(crate) fn cpp_config() -> LanguageConfig {
             ("definition.type_alias", NodeKind::TypeAlias),
             ("definition.macro", NodeKind::Macro),
             ("definition.field", NodeKind::Field),
+            ("definition.constant", NodeKind::Constant),
         ],
         relation_kind_map: None,
         is_method: Some(has_cpp_class_ancestor),
@@ -1255,6 +1256,7 @@ mod gate_contract {
                 "definition.type_alias",
                 "definition.macro",
                 "definition.field",
+                "definition.constant",
             ],
             Language::Markdown => &["definition.section"],
         }
