@@ -321,7 +321,29 @@ pub struct ReactiveEngineHandle {
     task: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+pub struct ReactiveEngineClient {
+    source_tx: mpsc::Sender<SourcePush>,
+}
+
+impl ReactiveEngineClient {
+    pub(crate) fn new(source_tx: mpsc::Sender<SourcePush>) -> Self {
+        Self { source_tx }
+    }
+
+    pub async fn push_source(&self, push: SourcePush) -> Result<(), EngineError> {
+        self.source_tx
+            .send(push)
+            .await
+            .map_err(|_send_error| EngineError::SourceQueueClosed)
+    }
+}
+
 impl ReactiveEngineHandle {
+    pub fn client(&self) -> ReactiveEngineClient {
+        ReactiveEngineClient::new(self.source_tx.clone())
+    }
+
     pub async fn push_source(&self, push: SourcePush) -> Result<(), EngineError> {
         self.source_tx
             .send(push)

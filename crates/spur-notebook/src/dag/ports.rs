@@ -119,6 +119,20 @@ impl PortStore {
         })
     }
 
+    pub fn open_read_only_at(notebook_root: impl AsRef<Path>) -> Result<Self, PortStoreError> {
+        let notebook_root = notebook_root.as_ref().to_path_buf();
+        let ports_dir = notebook_root.join("ports");
+        let manifest_path = ports_dir.join(MANIFEST_FILE);
+        let manifest = Self::load_manifest(&manifest_path)?;
+
+        Ok(Self {
+            notebook_root,
+            ports_dir,
+            manifest_path,
+            manifest,
+        })
+    }
+
     pub fn notebook_root(&self) -> &Path {
         &self.notebook_root
     }

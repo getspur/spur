@@ -158,6 +158,10 @@ impl ServerHandler for NotebookMcpServer {
             "notebook_list_datasources" => {
                 tools::list_datasources::call(&self.deps, arguments).await
             }
+            "notebook_push_source" => {
+                tools::notebook_push_source::call(&self.deps, arguments).await
+            }
+            "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,
@@ -416,6 +420,7 @@ pub struct NotebookDaemonControl {
     jute_state: Arc<State>,
     windows: Arc<dyn DaemonWindowOps>,
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
+    reactive_engine: Arc<tokio::sync::Mutex<Option<crate::dag::ReactiveEngineClient>>>,
     last_record_path: Option<PathBuf>,
     recents_record_path: Option<PathBuf>,
 }
@@ -842,6 +847,7 @@ impl NotebookDaemonControl {
             jute_state,
             windows,
             state: Arc::new(tokio::sync::Mutex::new(NotebookDaemonState::default())),
+            reactive_engine: Arc::new(tokio::sync::Mutex::new(None)),
             last_record_path,
             recents_record_path: None,
         }
@@ -1191,6 +1197,19 @@ impl NotebookDaemonControl {
 
     pub async fn current_path(&self) -> Option<PathBuf> {
         self.state.lock().await.current_path.clone()
+    }
+
+    pub async fn reactive_engine_client(&self) -> Option<crate::dag::ReactiveEngineClient> {
+        self.reactive_engine.lock().await.clone()
+    }
+
+    pub async fn set_reactive_engine_client(&self, client: crate::dag::ReactiveEngineClient) {
+        *self.reactive_engine.lock().await = Some(client);
+    }
+
+    #[doc(hidden)]
+    pub async fn set_current_path_for_test(&self, path: PathBuf) {
+        self.state.lock().await.current_path = Some(path);
     }
 
     async fn handle_notebook_store_control(
@@ -1731,7 +1750,10 @@ pub async fn start_daemon_server(
         Arc::clone(&deps),
         crate::dag::engine::ReactiveEngineConfig::default(),
     ) {
-        Ok(handle) => Some(handle),
+        Ok(handle) => {
+            control.set_reactive_engine_client(handle.client()).await;
+            Some(handle)
+        }
         Err(error) => {
             warn!(%error, "failed to start notebook reactive engine");
             None
