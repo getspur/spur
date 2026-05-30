@@ -22,7 +22,8 @@
         10,
         11,
         12,
-        13
+        13,
+        14
       ]
     },
     {
@@ -30,11 +31,11 @@
       "path": "src/utils.rs",
       "content_oid": "cf63867bec87bd095c26bb4b345f8606406c475e",
       "node_ids": [
-        14,
         15,
         16,
         17,
-        18
+        18,
+        19
       ]
     }
   ],
@@ -116,6 +117,23 @@
       "symbol_kind": "struct",
       "anchor_hash": "563938687619549275",
       "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "d800fd4b1dd22259",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        114,
+        128
+      ],
+      "line_range": [
+        10,
+        10
+      ],
+      "entity_name": "helper",
+      "qualified_name": "App::helper",
+      "symbol_kind": "field",
+      "anchor_hash": "13611592890216430805",
+      "enclosing_scope": "App"
     },
     {
       "stable_symbol_id": "be1aa2b3e0311fc2",
@@ -345,6 +363,15 @@
     {
       "source_stable_symbol_id": "51e4143c6a874467",
       "target_stable_symbol_id": "88715eb9664f575d",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "9ce57cf00efb9967",
+      "target_stable_symbol_id": "d800fd4b1dd22259",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
