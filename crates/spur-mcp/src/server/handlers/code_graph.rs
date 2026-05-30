@@ -21,11 +21,11 @@ use spur_graph::temporal::{
 use spur_graph::{
     artifact_from_facts, bounded_subgraph_with_budget, build_facts, discover_files, edge_kind,
     load_artifact, resolve_artifact_location, resolve_selector, resolve_worktree_root_from,
-    ArtifactFormat, CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact,
-    GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact,
-    InMemoryClient, OverlayClient, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient,
-    SearchFilters, SearchMode, SearchOptions, SearchResult, SearchSymbol, SelectorResolution,
-    SnapshotKey, SubgraphBudget, CODE_SYMBOL_URI_PREFIX,
+    CandidateRow, CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
+    GraphIndexArtifact, GraphIndexPointer, GraphQueryClient, GraphSymbolArtifact, InMemoryClient,
+    OverlayClient, OwnedCalleeRecord, OwnedCallerRecord, ParquetClient, SearchFilters, SearchMode,
+    SearchOptions, SearchResult, SearchSymbol, SelectorResolution, SnapshotKey, SubgraphBudget,
+    CODE_SYMBOL_URI_PREFIX,
 };
 
 use crate::handlers::McpHandlerError;
@@ -2512,41 +2512,18 @@ fn open_resolved_code_search_backend(
 ) -> Result<CodeSearchBackend, McpHandlerError> {
     let artifact_path = resolved.path;
 
-    match resolved.format {
-        ArtifactFormat::Parquet => ParquetClient::open(&artifact_path)
-            .map(|client| CodeSearchBackend::Parquet(Box::new(client)))
-            .map_err(|error| {
-                if !artifact_path.exists() {
-                    graph_artifact_missing(&worktree)
-                } else {
-                    McpHandlerError::Internal(format!(
-                        "failed to open graph artifact `{}`: {error}",
-                        artifact_path.display()
-                    ))
-                }
-            }),
-        ArtifactFormat::LegacyJson => match load_artifact(&artifact_path) {
-            Ok(artifact) => {
-                let artifact = Arc::new(artifact);
-                Ok(CodeSearchBackend::InMemory {
-                    client: InMemoryClient::new(Arc::clone(&artifact)),
-                    artifact,
-                })
+    ParquetClient::open(&artifact_path)
+        .map(|client| CodeSearchBackend::Parquet(Box::new(client)))
+        .map_err(|error| {
+            if !artifact_path.exists() {
+                graph_artifact_missing(&worktree)
+            } else {
+                McpHandlerError::Internal(format!(
+                    "failed to open graph artifact `{}`: {error}",
+                    artifact_path.display()
+                ))
             }
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == ErrorKind::NotFound) =>
-            {
-                Err(graph_artifact_missing(&worktree))
-            }
-            Err(_) if !artifact_path.exists() => Err(graph_artifact_missing(&worktree)),
-            Err(error) => Err(McpHandlerError::Internal(format!(
-                "failed to load graph artifact `{}`: {error}",
-                artifact_path.display()
-            ))),
-        },
-    }
+        })
 }
 
 #[allow(clippy::result_large_err)]
@@ -4651,10 +4628,11 @@ mod tests {
     }
 
     fn write_fixture_artifact(dir: &TempDir) {
-        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
-        std::fs::write(
-            dir.path().join(".spur/graph-index.json"),
-            serde_json::to_string_pretty(&json!({
+        write_graph_fixture_artifact(dir, fixture_artifact());
+    }
+
+    fn fixture_artifact() -> GraphIndexArtifact {
+        serde_json::from_value(json!({
                 "header": {
                     "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
                 },
@@ -4698,9 +4676,7 @@ mod tests {
                 ],
                 "tombstones": []
             }))
-            .expect("encode artifact"),
-        )
-        .expect("write artifact");
+        .expect("fixture artifact")
     }
 
     fn write_wide_subgraph_artifact(dir: &TempDir, child_count: usize, edge_count: usize) {
@@ -4727,25 +4703,58 @@ mod tests {
             .map(|index| edge("wide-root", &child_ids[index % child_ids.len()]))
             .collect::<Vec<_>>();
 
-        std::fs::create_dir_all(dir.path().join(".spur")).expect("create .spur");
-        std::fs::write(
-            dir.path().join(".spur/graph-index.json"),
-            serde_json::to_string_pretty(&json!({
-                "header": {
-                    "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
-                },
-                "manifest_version": "test",
-                "graph_content_hash": "wide-test",
-                "files": [
-                    { "stable_file_id": "file-src-wide", "file_path": "src/wide.rs" }
-                ],
-                "symbols": symbols,
-                "edges": edges,
-                "tombstones": []
-            }))
-            .expect("encode artifact"),
+        let artifact = serde_json::from_value(json!({
+            "header": {
+                "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
+            },
+            "manifest_version": "test",
+            "graph_content_hash": "wide-test",
+            "files": [
+                { "stable_file_id": "file-src-wide", "file_path": "src/wide.rs" }
+            ],
+            "symbols": symbols,
+            "edges": edges,
+            "tombstones": []
+        }))
+        .expect("wide fixture artifact");
+        write_graph_fixture_artifact(dir, artifact);
+    }
+
+    fn write_graph_fixture_artifact(dir: &TempDir, mut artifact: GraphIndexArtifact) {
+        if artifact.file_node_ids.is_empty() {
+            artifact.file_node_ids = (0..artifact.files.len())
+                .map(|index| NodeId((index as u64) + 1))
+                .collect();
+        }
+        if artifact.symbol_node_ids.is_empty() {
+            artifact.symbol_node_ids = (0..artifact.symbols.len())
+                .map(|index| NodeId((index as u64) + 1_001))
+                .collect();
+        }
+        if artifact.file_manifests.is_empty() {
+            artifact.file_manifests = artifact
+                .files
+                .iter()
+                .map(|file| GraphFileManifestEntry {
+                    stable_file_id: file.stable_file_id.clone(),
+                    path: file.file_path.clone(),
+                    content_oid: "0000000000000000000000000000000000000000".to_string(),
+                    node_ids: Vec::new(),
+                })
+                .collect();
+        }
+        let artifact_dir = dir
+            .path()
+            .join(".spur/graph")
+            .join(format!("{}.parquet", artifact.graph_content_hash));
+        let parquet_dir = write_artifact_parquet(
+            &artifact,
+            &artifact_dir,
+            WriteOptions::default(),
+            Vec::new(),
         )
-        .expect("write artifact");
+        .expect("write Parquet fixture artifact");
+        write_current_pointer(dir.path(), &parquet_dir).expect("write CURRENT pointer");
     }
 
     fn write_current_parquet_fixture(dir: &TempDir) {
@@ -5324,7 +5333,7 @@ mod tests {
                 "manifest_version": "test",
                 "source_kind": "git",
                 "indexed_commit_oid": indexed_head_oid,
-                "canonical_artifact_path": dir.path().join(".spur/graph-index.json")
+                "canonical_artifact_path": dir.path().join(".spur/graph/test.parquet")
             }))
             .expect("encode pointer"),
         )
@@ -5332,34 +5341,23 @@ mod tests {
     }
 
     fn write_fixture_artifact_with_file_manifests(dir: &TempDir) {
-        write_fixture_artifact(dir);
-        let artifact_path = dir.path().join(".spur/graph-index.json");
-        let mut artifact: Value =
-            serde_json::from_slice(&std::fs::read(&artifact_path).expect("read fixture artifact"))
-                .expect("parse fixture artifact");
-        let files = artifact["files"]
-            .as_array()
-            .expect("fixture files")
+        let mut artifact = fixture_artifact();
+        artifact.file_manifests = artifact
+            .files
             .iter()
             .map(|file| {
-                let path = file["file_path"].as_str().expect("file path");
-                let content_oid = super::current_file_oid(dir.path(), path)
+                let content_oid = super::current_file_oid(dir.path(), &file.file_path)
                     .expect("read fixture file oid")
                     .expect("fixture file oid");
-                json!({
-                    "stable_file_id": file["stable_file_id"],
-                    "path": path,
-                    "content_oid": content_oid,
-                    "node_ids": []
-                })
+                GraphFileManifestEntry {
+                    stable_file_id: file.stable_file_id.clone(),
+                    path: file.file_path.clone(),
+                    content_oid,
+                    node_ids: Vec::new(),
+                }
             })
-            .collect::<Vec<_>>();
-        artifact["file_manifests"] = Value::Array(files);
-        std::fs::write(
-            artifact_path,
-            serde_json::to_string_pretty(&artifact).expect("encode fixture artifact"),
-        )
-        .expect("write fixture artifact");
+            .collect();
+        write_graph_fixture_artifact(dir, artifact);
     }
 
     struct HandlerCase {

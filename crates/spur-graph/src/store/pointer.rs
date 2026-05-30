@@ -7,31 +7,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context as _};
 
-use crate::{GraphIndexArtifact, GraphIndexPointer};
+use crate::GraphIndexPointer;
 
 use super::parquet::read_artifact_header_parquet;
 
 const CURRENT_PATH: &str = ".spur/graph/CURRENT";
 const POINTER_PATH: &str = ".spur/graph-index.pointer.json";
-const LEGACY_ARTIFACT_PATH: &str = ".spur/graph-index.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedArtifact {
     pub path: PathBuf,
-    pub format: ArtifactFormat,
     pub cache_key: ArtifactCacheKey,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArtifactFormat {
-    LegacyJson,
-    Parquet,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArtifactCacheKey {
-    LegacyJson { path: PathBuf, mtime: SystemTime },
-    Parquet { graph_content_hash: String },
+pub struct ArtifactCacheKey {
+    pub graph_content_hash: String,
 }
 
 pub fn resolve_artifact_location(
@@ -140,17 +131,6 @@ pub fn resolve_artifact_location(
         }
     }
 
-    let legacy_path = worktree_root.join(LEGACY_ARTIFACT_PATH);
-    tracing::debug!(
-        priority = 4,
-        source = "legacy_worktree_json",
-        path = %legacy_path.display(),
-        "spur-graph: considering artifact location"
-    );
-    if let Some(resolved) = resolve_legacy_json_path(&legacy_path, 4, "legacy_worktree_json") {
-        return Ok(resolved);
-    }
-
     Err(anyhow!(
         "no valid spur graph artifact found under `{}`",
         worktree_root.display()
@@ -198,7 +178,15 @@ pub fn read_current_pointer(worktree_root: &Path) -> anyhow::Result<PathBuf> {
 fn resolve_path(path: &Path, priority: u8, source: &'static str) -> Option<ResolvedArtifact> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => resolve_parquet_path(path, priority, source),
-        Ok(metadata) if metadata.is_file() => resolve_legacy_json_path(path, priority, source),
+        Ok(metadata) if metadata.is_file() => {
+            tracing::warn!(
+                priority,
+                source,
+                path = %path.display(),
+                "spur-graph: skipping artifact location; path is not a Parquet directory"
+            );
+            None
+        }
         Ok(_) => {
             tracing::warn!(
                 priority,
@@ -312,116 +300,10 @@ fn resolve_parquet_path(
     );
     Some(ResolvedArtifact {
         path: canonical,
-        format: ArtifactFormat::Parquet,
-        cache_key: ArtifactCacheKey::Parquet {
+        cache_key: ArtifactCacheKey {
             graph_content_hash: manifest.graph_content_hash,
         },
     })
-}
-
-fn resolve_legacy_json_path(
-    path: &Path,
-    priority: u8,
-    source: &'static str,
-) -> Option<ResolvedArtifact> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            tracing::debug!(
-                priority,
-                source,
-                path = %path.display(),
-                "spur-graph: skipping legacy JSON artifact; file does not exist"
-            );
-            return None;
-        }
-        Err(err) => {
-            tracing::warn!(
-                priority,
-                source,
-                path = %path.display(),
-                error = %err,
-                "spur-graph: skipping legacy JSON artifact; failed to inspect file"
-            );
-            return None;
-        }
-    };
-    if !metadata.is_file() {
-        tracing::warn!(
-            priority,
-            source,
-            path = %path.display(),
-            "spur-graph: skipping legacy JSON artifact; path is not a file"
-        );
-        return None;
-    }
-    if let Err(err) = parse_legacy_json(path) {
-        tracing::warn!(
-            priority,
-            source,
-            path = %path.display(),
-            error = %err,
-            "spur-graph: skipping legacy JSON artifact; JSON is invalid"
-        );
-        return None;
-    }
-
-    let canonical = match path.canonicalize() {
-        Ok(path) => path,
-        Err(err) => {
-            tracing::warn!(
-                priority,
-                source,
-                path = %path.display(),
-                error = %err,
-                "spur-graph: skipping legacy JSON artifact; failed to canonicalize path"
-            );
-            return None;
-        }
-    };
-    let mtime = match metadata.modified() {
-        Ok(mtime) => mtime,
-        Err(err) => {
-            tracing::warn!(
-                priority,
-                source,
-                path = %canonical.display(),
-                error = %err,
-                "spur-graph: skipping legacy JSON artifact; failed to read mtime"
-            );
-            return None;
-        }
-    };
-
-    tracing::warn!(
-        priority,
-        source,
-        path = %canonical.display(),
-        "spur-graph: loading legacy JSON graph artifact; JSON artifacts are deprecated and will be removed after the Parquet cutover"
-    );
-    tracing::debug!(
-        priority,
-        source,
-        path = %canonical.display(),
-        "spur-graph: selected legacy JSON artifact"
-    );
-    Some(ResolvedArtifact {
-        path: canonical.clone(),
-        format: ArtifactFormat::LegacyJson,
-        cache_key: ArtifactCacheKey::LegacyJson {
-            path: canonical,
-            mtime,
-        },
-    })
-}
-
-fn parse_legacy_json(path: &Path) -> anyhow::Result<()> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to read graph index artifact `{}`", path.display()))?;
-    let reader = BufReader::new(file);
-    let _: GraphIndexArtifact = serde_json::from_reader(reader)
-        .map_err(|err| anyhow!("invalid graph index JSON in `{}`: {err}", path.display()))?;
-    Ok(())
 }
 
 fn read_pointer_file(path: &Path) -> anyhow::Result<Option<GraphIndexPointer>> {

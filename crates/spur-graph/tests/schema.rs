@@ -1,7 +1,7 @@
 use spur_graph::{
-    graph_edge_kind_or_default, load_artifact, Confidence, EdgeId, EvidenceId, FileId, GraphEdge,
-    GraphEdgeArtifact, GraphEdgeKind, GraphNode, GraphSymbolArtifact, NodeId, NodeKind,
-    RelationKind, RunId, SourceSpan, SpanId, SymbolSnapshotArtifact,
+    Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphEdgeArtifact, GraphEdgeKind, GraphNode,
+    GraphSymbolArtifact, NodeId, NodeKind, RelationKind, RunId, SourceSpan, SpanId,
+    SymbolSnapshotArtifact,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -97,95 +97,6 @@ fn graph_edge_kind_round_trips_all_public_values_and_legacy_omission() {
     }"#;
     let decoded: GraphEdgeArtifact = serde_json::from_str(legacy).unwrap();
     assert_eq!(decoded.edge_kind, None);
-}
-
-#[test]
-fn graph_edge_artifact_bind_method_defaults_to_none_for_legacy_json() {
-    let legacy = r#"{
-        "source_stable_symbol_id":"source",
-        "target_stable_symbol_id":"target",
-        "target_label":"target",
-        "relation":"calls",
-        "confidence":"syntax_exact",
-        "confidence_score":1.0,
-        "edge_kind":"calls"
-    }"#;
-
-    let decoded: GraphEdgeArtifact = serde_json::from_str(legacy).unwrap();
-
-    assert_eq!(decoded.bind_method, None);
-}
-
-#[test]
-fn legacy_artifact_references_edges_without_edge_kind_count_as_references_other() {
-    let dir = TempDir::new().unwrap();
-    let artifact_path = dir.path().join("graph-index.json");
-    std::fs::write(
-        &artifact_path,
-        serde_json::to_string_pretty(&serde_json::json!({
-            "header": {
-                "graph_index_version": "v1"
-            },
-            "manifest_version": "test",
-            "graph_content_hash": "test",
-            "files": [
-                { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" }
-            ],
-            "symbols": [
-                {
-                    "stable_symbol_id": "source",
-                    "file_path": "src/lib.rs",
-                    "byte_range": [0, 8],
-                    "line_range": [1, 1],
-                    "entity_name": "source",
-                    "qualified_name": "source",
-                    "symbol_kind": "function",
-                    "anchor_hash": "hash-source",
-                    "enclosing_scope": null
-                },
-                {
-                    "stable_symbol_id": "target",
-                    "file_path": "src/lib.rs",
-                    "byte_range": [10, 18],
-                    "line_range": [3, 3],
-                    "entity_name": "target",
-                    "qualified_name": "target",
-                    "symbol_kind": "function",
-                    "anchor_hash": "hash-target",
-                    "enclosing_scope": null
-                }
-            ],
-            "edges": [
-                {
-                    "source_stable_symbol_id": "source",
-                    "target_stable_symbol_id": "target",
-                    "target_label": "target",
-                    "relation": "references",
-                    "confidence": "syntax_exact",
-                    "confidence_score": 1.0
-                }
-            ],
-            "tombstones": []
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let artifact = load_artifact(&artifact_path).unwrap();
-    assert_eq!(artifact.edges[0].edge_kind, None);
-
-    let mut references_hof = 0usize;
-    let mut references_other = 0usize;
-    for edge in &artifact.edges {
-        match graph_edge_kind_or_default(edge.relation, edge.edge_kind) {
-            GraphEdgeKind::ReferencesHof => references_hof += 1,
-            GraphEdgeKind::ReferencesOther => references_other += 1,
-            GraphEdgeKind::Calls | GraphEdgeKind::CallsDyn => {}
-        }
-    }
-
-    assert_eq!(references_hof, 0);
-    assert_eq!(references_other, 1);
 }
 
 #[test]
