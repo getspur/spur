@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::SessionId;
-use spur_acp::{Column, ContentBlock, DatasourceEntry, DatasourceKind};
+use spur_acp::{Column, ContentBlock, DatasourceEntry, DatasourceKind, Table};
 use spur_graph::validation::compute_anchor_hash;
 use spur_graph::{artifact_from_facts, build_facts, write_artifact_parquet, WriteOptions};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
@@ -85,6 +85,14 @@ fn datasource_mention_section_renders() {
             },
         ],
         row_count: Some(128),
+        tables: vec![Table {
+            name: "line_items".into(),
+            columns: vec![Column {
+                name: "sku".into(),
+                sql_type: "VARCHAR".into(),
+            }],
+            row_count: Some(512),
+        }],
     }]);
 
     let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
@@ -112,6 +120,9 @@ fn datasource_mention_section_renders() {
     assert!(hint.contains("columns:"));
     assert!(hint.contains("region VARCHAR"));
     assert!(hint.contains("revenue DOUBLE"));
+    assert!(hint.contains("tables:"));
+    assert!(hint.contains("line_items"));
+    assert!(hint.contains("sku VARCHAR"));
 }
 
 #[test]
