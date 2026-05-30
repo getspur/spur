@@ -622,7 +622,8 @@ fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, 
         Some("csv") => Ok(jute::commands::DatasourceKind::Csv),
         Some("parquet" | "parq") => Ok(jute::commands::DatasourceKind::Parquet),
         Some("json" | "jsonl" | "ndjson") => Ok(jute::commands::DatasourceKind::Json),
-        Some("duckdb" | "db") => Ok(jute::commands::DatasourceKind::DuckDb),
+        Some("duckdb") => Ok(jute::commands::DatasourceKind::DuckDb),
+        Some("sqlite" | "db") => Ok(jute::commands::DatasourceKind::Sqlite),
         _ => Err(BridgeError::Handler {
             code: "unsupported_datasource_kind".to_string(),
             message: format!(
@@ -682,15 +683,34 @@ fn datasource_setup_source(entries: &[jute::commands::DatasourceEntry]) -> Strin
 }
 
 #[cfg(feature = "datasource-introspect")]
-fn datasource_setup_bootstrap_preamble(_entries: &[jute::commands::DatasourceEntry]) -> String {
-    String::new()
+fn datasource_setup_bootstrap_preamble(entries: &[jute::commands::DatasourceEntry]) -> String {
+    let needs_sqlite = entries
+        .iter()
+        .any(|entry| entry.kind == jute::commands::DatasourceKind::Sqlite);
+    if !needs_sqlite {
+        return String::new();
+    }
+
+    let mut source = String::new();
+    source.push_str("# sqlite_scanner is core/signed; first run may need network access.\n");
+    source.push_str("duckdb.sql(\"INSTALL sqlite;\")\n");
+    source.push_str("duckdb.sql(\"LOAD sqlite;\")\n\n");
+    source
 }
 
 #[cfg(feature = "datasource-introspect")]
 fn datasource_setup_statements(entry: &jute::commands::DatasourceEntry) -> Vec<String> {
-    if entry.kind == jute::commands::DatasourceKind::DuckDb {
+    if matches!(
+        entry.kind,
+        jute::commands::DatasourceKind::DuckDb | jute::commands::DatasourceKind::Sqlite
+    ) {
+        let attach_options = match entry.kind {
+            jute::commands::DatasourceKind::DuckDb => "READ_ONLY",
+            jute::commands::DatasourceKind::Sqlite => "TYPE sqlite, READ_ONLY",
+            _ => unreachable!("only attached datasource kinds reach this branch"),
+        };
         let mut statements = vec![format!(
-            "ATTACH IF NOT EXISTS {} AS {} (READ_ONLY)",
+            "ATTACH IF NOT EXISTS {} AS {} ({attach_options})",
             sql_string_literal(&entry.path),
             sql_identifier(&entry.name)
         )];
@@ -722,6 +742,9 @@ fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String
         jute::commands::DatasourceKind::Json => format!("read_json_auto({literal})"),
         jute::commands::DatasourceKind::DuckDb => {
             unreachable!("DuckDB files are mounted through ATTACH")
+        }
+        jute::commands::DatasourceKind::Sqlite => {
+            unreachable!("SQLite files are mounted through ATTACH")
         }
     }
 }
@@ -2027,6 +2050,23 @@ mod tests {
     }
 
     #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn infer_datasource_kind_detects_sqlite_extensions() {
+        assert_eq!(
+            infer_datasource_kind(Path::new("local.sqlite")).expect("sqlite kind"),
+            jute::commands::DatasourceKind::Sqlite
+        );
+        assert_eq!(
+            infer_datasource_kind(Path::new("local.db")).expect("db kind"),
+            jute::commands::DatasourceKind::Sqlite
+        );
+        assert_eq!(
+            infer_datasource_kind(Path::new("warehouse.duckdb")).expect("duckdb kind"),
+            jute::commands::DatasourceKind::DuckDb
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
     async fn attach_probe_is_non_fatal_on_missing_extension() {
         let tempdir = tempfile::tempdir().expect("duckdb fixture dir");
@@ -2057,6 +2097,43 @@ mod tests {
             serde_json::from_value(response.result.expect("datasource entry result"))
                 .expect("datasource entry decodes");
         assert_eq!(entry.kind, jute::commands::DatasourceKind::DuckDb);
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert!(entry.tables.is_empty());
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_sqlite_probe_failure_is_non_fatal() {
+        let tempdir = tempfile::tempdir().expect("sqlite fixture dir");
+        let sqlite = tempdir.path().join("offline.sqlite");
+        std::fs::write(&sqlite, "not a sqlite database").expect("write broken fixture");
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "local".to_owned(),
+                    path: sqlite.display().to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::Sqlite);
         assert!(entry.columns.is_empty());
         assert_eq!(entry.row_count, None);
         assert!(entry.tables.is_empty());
@@ -2219,6 +2296,38 @@ mod tests {
         ];
 
         assert_eq!(datasource_setup_bootstrap_preamble(&entries), "");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn setup_cell_bootstrap_preamble_installs_sqlite_once() {
+        let entries = [
+            jute::commands::DatasourceEntry {
+                name: "local".to_string(),
+                path: "/tmp/local.sqlite".to_string(),
+                kind: jute::commands::DatasourceKind::Sqlite,
+                group: None,
+                columns: Vec::new(),
+                row_count: None,
+                tables: Vec::new(),
+            },
+            jute::commands::DatasourceEntry {
+                name: "cache".to_string(),
+                path: "/tmp/cache.db".to_string(),
+                kind: jute::commands::DatasourceKind::Sqlite,
+                group: None,
+                columns: Vec::new(),
+                row_count: None,
+                tables: Vec::new(),
+            },
+        ];
+        let preamble = datasource_setup_bootstrap_preamble(&entries);
+
+        assert!(preamble.contains("first run may need network access"));
+        assert_eq!(
+            duckdb_sql_calls(&preamble),
+            vec!["INSTALL sqlite;", "LOAD sqlite;"]
+        );
     }
 
     #[cfg(feature = "datasource-introspect")]
