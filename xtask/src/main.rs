@@ -126,7 +126,10 @@ fn linux_install_build_command(workspace_root: &Path, debug: bool, extra: &[Stri
         workspace_root,
         debug,
         &["spur-cli", "spur-notebook"],
-        &["spur-notebook/custom-protocol"],
+        &[
+            "spur-notebook/custom-protocol",
+            "spur-notebook/datasource-introspect",
+        ],
         extra,
     )
 }
@@ -189,7 +192,7 @@ fn remote_install_build_command(workspace_root: &Path) -> Command {
             "-p",
             "spur-notebook",
             "--features",
-            "spur-notebook/custom-protocol",
+            "spur-notebook/custom-protocol,spur-notebook/datasource-introspect",
             "--locked",
         ])
         .current_dir(workspace_root);
@@ -374,7 +377,7 @@ fn tauri_build_command(workspace_root: &Path) -> Command {
     let spur_notebook_dir = workspace_root.join("crates/spur-notebook");
     let jute_dir = spur_notebook_dir.join("jute-notebook");
     let mut cmd = Command::new(jute_dir.join(tauri_cli_bin()));
-    cmd.args(["build", "--bundles", "app"])
+    cmd.args(["build", "--bundles", "app", "--features", "datasource-introspect"])
         .current_dir(spur_notebook_dir)
         .env_remove("TAURI_CONFIG");
     apply_macos_rustc_wrapper_workaround(&mut cmd);
@@ -684,7 +687,7 @@ mod tests {
                 "-p".to_string(),
                 "spur-notebook".to_string(),
                 "--features".to_string(),
-                "spur-notebook/custom-protocol".to_string(),
+                "spur-notebook/custom-protocol,spur-notebook/datasource-introspect".to_string(),
                 "--locked".to_string(),
             ]
         );
@@ -765,7 +768,7 @@ mod tests {
                 "-p".to_string(),
                 "spur-notebook".to_string(),
                 "--features".to_string(),
-                "spur-notebook/custom-protocol".to_string(),
+                "spur-notebook/custom-protocol,spur-notebook/datasource-introspect".to_string(),
                 "--locked".to_string(),
             ]
         );
@@ -789,7 +792,9 @@ mod tests {
             vec![
                 "build".to_string(),
                 "--bundles".to_string(),
-                "app".to_string()
+                "app".to_string(),
+                "--features".to_string(),
+                "datasource-introspect".to_string()
             ]
         );
         assert_eq!(
