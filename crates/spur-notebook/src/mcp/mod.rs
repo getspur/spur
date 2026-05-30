@@ -634,6 +634,21 @@ fn infer_datasource_kind(path: &Path) -> Result<jute::commands::DatasourceKind, 
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn datasource_group_for_attach(path: &Path, group: Option<String>) -> Option<String> {
+    group.or_else(|| is_spur_analyst_index(path).then(|| "SPUR".to_owned()))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn is_spur_analyst_index(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("analyst.duckdb")
+        && path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some(".spur")
+}
+
+#[cfg(feature = "datasource-introspect")]
 const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
 
 #[cfg(feature = "datasource-introspect")]
@@ -1044,7 +1059,7 @@ impl NotebookDaemonControl {
             name,
             path: path.display().to_string(),
             kind,
-            group,
+            group: datasource_group_for_attach(&path, group),
             columns: schema.columns,
             row_count: schema.row_count,
             tables: schema.tables,
@@ -2049,6 +2064,104 @@ mod tests {
     }
 
     #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn attach_analyst_index_read_only_pending_when_busy() {
+        let tempdir = tempfile::tempdir().expect("analyst fixture dir");
+        let spur_dir = tempdir.path().join(".spur");
+        std::fs::create_dir(&spur_dir).expect("create .spur dir");
+        let analyst = spur_dir.join("analyst.duckdb");
+        create_analyst_fixture(&analyst);
+        let (mut lock_holder, _ready_dir) = spawn_analyst_lock_holder(&analyst);
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "analyst".to_owned(),
+                    path: analyst.display().to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+        let _ = lock_holder.kill();
+        let _ = lock_holder.wait();
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry: jute::commands::DatasourceEntry =
+            serde_json::from_value(response.result.expect("datasource entry result"))
+                .expect("datasource entry decodes");
+        assert_eq!(entry.name, "analyst");
+        assert!(entry.path.ends_with(".spur/analyst.duckdb"));
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::DuckDb);
+        assert_eq!(entry.group.as_deref(), Some("SPUR"));
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert!(entry.tables.is_empty());
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn hold_duckdb_writer_for_lock_test() {
+        let Some(path) = std::env::var_os("SPUR_HOLD_ANALYST_LOCK_PATH") else {
+            return;
+        };
+        let ready = std::env::var_os("SPUR_HOLD_ANALYST_LOCK_READY")
+            .expect("ready path provided for lock holder");
+        let _conn = duckdb::Connection::open(std::path::PathBuf::from(path))
+            .expect("open analyst writer lock holder");
+        std::fs::write(ready, b"ready").expect("write lock holder ready file");
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn create_analyst_fixture(path: &Path) {
+        let conn = duckdb::Connection::open(path).expect("open analyst fixture");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE nodes(stable_symbol_id VARCHAR, qualified_name VARCHAR);
+            INSERT INTO nodes VALUES ('sym-1', 'crate::symbol');
+            CREATE VIEW v_blast_radius AS
+                SELECT stable_symbol_id, 1 AS blast_radius_score FROM nodes;
+            "#,
+        )
+        .expect("create analyst fixture");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn spawn_analyst_lock_holder(path: &Path) -> (std::process::Child, tempfile::TempDir) {
+        let tempdir = tempfile::tempdir().expect("lock holder ready dir");
+        let ready = tempdir.path().join("ready");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("--exact")
+            .arg("mcp::tests::hold_duckdb_writer_for_lock_test")
+            .arg("--nocapture")
+            .env("SPUR_HOLD_ANALYST_LOCK_PATH", path)
+            .env("SPUR_HOLD_ANALYST_LOCK_READY", &ready)
+            .spawn()
+            .expect("spawn lock holder");
+        for _ in 0..100 {
+            if ready.exists() {
+                return (child, tempdir);
+            }
+            if let Some(status) = child.try_wait().expect("poll lock holder") {
+                panic!("lock holder exited before ready: {status}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        panic!("lock holder did not become ready");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     #[test]
     fn setup_cell_emits_attach_and_views() {
         let entry = jute::commands::DatasourceEntry {
@@ -2144,6 +2257,59 @@ mod tests {
             })?;
 
         assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn analyst_index_setup_cell_can_query_nodes_and_blast_radius() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let spur_dir = tempdir.path().join(".spur");
+        std::fs::create_dir(&spur_dir)?;
+        let db_path = spur_dir.join("analyst.duckdb");
+        {
+            let conn = duckdb::Connection::open(&db_path)?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE nodes(stable_symbol_id VARCHAR, qualified_name VARCHAR);
+                INSERT INTO nodes VALUES ('sym-1', 'crate::symbol');
+                CREATE VIEW v_blast_radius AS
+                    SELECT stable_symbol_id, 1 AS blast_radius_score FROM nodes;
+                "#,
+            )?;
+        }
+        let schema = crate::datasource::introspect_datasource(
+            &db_path,
+            jute::commands::DatasourceKind::DuckDb,
+        )?;
+        let entry = jute::commands::DatasourceEntry {
+            name: "analyst".to_string(),
+            path: db_path.display().to_string(),
+            kind: jute::commands::DatasourceKind::DuckDb,
+            group: Some("SPUR".to_string()),
+            columns: schema.columns,
+            row_count: schema.row_count,
+            tables: schema.tables,
+        };
+        let source = datasource_setup_source(&[entry]);
+        let conn = duckdb::Connection::open_in_memory()?;
+
+        for sql in duckdb_sql_calls(&source) {
+            conn.execute_batch(&sql)?;
+        }
+
+        let node_count: i64 =
+            conn.query_row("SELECT count(*) FROM \"analyst__nodes\"", [], |row| {
+                row.get(0)
+            })?;
+        let blast_radius_score: i64 = conn.query_row(
+            "SELECT blast_radius_score FROM \"analyst__v_blast_radius\"",
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(node_count, 1);
+        assert_eq!(blast_radius_score, 1);
         Ok(())
     }
 

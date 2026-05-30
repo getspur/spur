@@ -55,9 +55,12 @@ fn introspect_duckdb(path: &str) -> Result<DatasourceSchema> {
 
     let mut statement = conn
         .prepare(
-            "SELECT table_name FROM duckdb_tables() \
+            "SELECT table_name AS relation_name FROM duckdb_tables() \
              WHERE database_name = '__spur_probe' AND schema_name = 'main' AND NOT internal \
-             ORDER BY table_name",
+             UNION \
+             SELECT view_name AS relation_name FROM duckdb_views() \
+             WHERE database_name = '__spur_probe' AND schema_name = 'main' AND NOT internal \
+             ORDER BY relation_name",
         )
         .with_context(|| format!("failed to prepare DuckDB table probe for {path}"))?;
     let rows = statement
@@ -115,9 +118,10 @@ fn describe_columns(conn: &Connection, relation: &str, path: &str) -> Result<Vec
 
 fn row_count(conn: &Connection, relation: &str) -> Option<u64> {
     let count_sql = format!("SELECT count(*) FROM {relation}");
-    conn.query_row(&count_sql, [], |row| row.get::<_, i64>(0))
-        .ok()
-        .and_then(|count| u64::try_from(count).ok())
+    let count = conn
+        .query_row(&count_sql, [], |row| row.get::<_, i64>(0))
+        .ok()?;
+    u64::try_from(count).ok()
 }
 
 fn scan_expression(path: &str, kind: DatasourceKind) -> String {
@@ -205,6 +209,33 @@ mod tests {
                 },
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn attach_analyst_index_introspects_tables_and_views() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let db_path = tempdir.path().join("analyst.duckdb");
+        {
+            let conn = Connection::open(&db_path)?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE nodes(stable_symbol_id VARCHAR, qualified_name VARCHAR);
+                INSERT INTO nodes VALUES ('sym-1', 'crate::symbol');
+                CREATE VIEW v_blast_radius AS
+                    SELECT stable_symbol_id, 1 AS blast_radius_score FROM nodes;
+                "#,
+            )?;
+        }
+
+        let schema = introspect_datasource(&db_path, DatasourceKind::DuckDb)?;
+        let names = schema
+            .tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["nodes", "v_blast_radius"]);
         Ok(())
     }
 }
