@@ -15,6 +15,7 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId, SpurEventBody};
+use spur_graph::store::cache::write_with_dedup;
 use spur_graph::{
     artifact_from_facts, build_facts, build_facts_for_paths, write_artifact_parquet,
     write_current_pointer, ChangeKind, CommitArtifact, CommitIndexArtifact, Confidence,
@@ -221,6 +222,14 @@ fn build_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     let (facts, _file_counts) = build_facts(worktree, None).expect("build graph facts");
     let artifact = artifact_from_facts(&facts, worktree).expect("build graph artifact");
     write_graph_artifact(worktree, &artifact);
+    artifact
+}
+
+fn build_graph_artifact_with_pointer(worktree: &Path) -> GraphIndexArtifact {
+    let (facts, _file_counts) = build_facts(worktree, None).expect("build graph facts");
+    let artifact = artifact_from_facts(&facts, worktree).expect("build graph artifact");
+    let ctx = spur_graph::git::detect(worktree).expect("git worktree metadata");
+    write_with_dedup(&artifact, worktree, &ctx).expect("write graph artifact with pointer");
     artifact
 }
 
@@ -928,7 +937,7 @@ async fn linked_worktree_without_self_graph_overlays_root_for_code_search_and_ca
     std::fs::create_dir(&main).expect("create main checkout");
     copy_fixture_crate(&main);
     commit_fixture(&main);
-    build_graph_artifact(&main);
+    build_graph_artifact_with_pointer(&main);
     add_linked_worktree(&main, &worker, "worker-overlay-identical");
     assert_no_graph_artifact(&worker);
     let _cwd = enter_dir(&worker);
@@ -956,7 +965,7 @@ async fn linked_worktree_without_self_graph_overlays_root_for_code_search_and_ca
         entity_names(callers["callers"].as_array().expect("callers")),
         BTreeSet::from(["launch_order".to_string()])
     );
-    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 1);
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 0);
 }
 
 #[tokio::test]
@@ -968,7 +977,7 @@ async fn linked_worktree_without_self_graph_overlays_modified_file_for_code_sear
     std::fs::create_dir(&main).expect("create main checkout");
     copy_fixture_crate(&main);
     commit_fixture(&main);
-    build_graph_artifact(&main);
+    build_graph_artifact_with_pointer(&main);
     add_linked_worktree(&main, &worker, "worker-overlay-modified");
     assert_no_graph_artifact(&worker);
     let worker_source_path = worker.join("src/lib.rs");
@@ -1009,6 +1018,44 @@ async fn linked_worktree_without_self_graph_overlays_modified_file_for_code_sear
             "worker_overlay_symbol".to_string()
         ])
     );
+    assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 1);
+}
+
+#[tokio::test]
+async fn linked_worktree_cold_open_modified_file_awaits_overlay_past_latency_budget() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let parent = TempDir::new().expect("temp parent");
+    let main = parent.path().join("main");
+    let worker = parent.path().join("worker");
+    std::fs::create_dir(&main).expect("create main checkout");
+    copy_fixture_crate(&main);
+    commit_fixture(&main);
+    build_graph_artifact_with_pointer(&main);
+    add_linked_worktree(&main, &worker, "worker-overlay-budget");
+    assert_no_graph_artifact(&worker);
+    let worker_source_path = worker.join("src/lib.rs");
+    let mut worker_source =
+        std::fs::read_to_string(&worker_source_path).expect("read worker fixture source");
+    worker_source.push_str("\npub fn budget_overlay_symbol() -> bool {\n    true\n}\n");
+    std::fs::write(&worker_source_path, worker_source).expect("write worker overlay source");
+    let _cwd = enter_dir(&worker);
+    let server = test_server();
+    let _budget = server.__test_set_code_graph_rebuild_budget(std::time::Duration::from_millis(1));
+    let _delay = server.__test_set_code_graph_rebuild_delay(std::time::Duration::from_millis(25));
+
+    let search_response = call_tool(
+        &server,
+        "code_search",
+        json!({
+            "query": "budget_overlay_symbol",
+            "mode": "exact",
+            "limit": 20
+        }),
+    )
+    .await;
+    assert_successful_tool_response(&search_response);
+    let search = tool_body(search_response);
+    assert!(candidate_entity_names(&search).contains("budget_overlay_symbol"));
     assert_eq!(server.__test_code_graph_rebuild_invocation_count(), 1);
 }
 
