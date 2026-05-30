@@ -24,7 +24,6 @@ pub const CODE_GRAPH_INDEX_ENV: &str = "SPUR_CODE_GRAPH_INDEX";
 pub const CODE_GRAPH_MISSING_HINT: &str = "Run 'spur graph build' to enable code-graph mentions";
 const CODE_GRAPH_POINTER_SCHEMA: &str = "spur-graph-pointer-v1";
 const CODE_GRAPH_POINTER_PATH: &str = ".spur/graph-index.pointer.json";
-const CODE_GRAPH_LEGACY_INDEX_PATH: &str = ".spur/graph-index.json";
 
 /// Maximum number of worker rows pinned to the top of the empty-query
 /// picker view. See design spec §4.4 / §10.1.
@@ -154,7 +153,6 @@ impl MentionRegistry {
     /// 1. `SPUR_CODE_GRAPH_INDEX=<path>` env var, if set and non-empty.
     /// 2. `<worktree_root>/.spur/graph/CURRENT`.
     /// 3. `<worktree_root>/.spur/graph-index.pointer.json`.
-    /// 4. `<worktree_root>/.spur/graph-index.json` legacy fallback.
     pub fn with_code_graph_from_env(mut self) -> Self {
         self.code_graph_auto_discovery = true;
         let worktree_root = spur_graph::resolve_worktree_root();
@@ -350,11 +348,7 @@ impl MentionRegistry {
         let resolver_token_unchanged = self.code_graph_auto_discovery
             && matches!(
                 self.code_graph_token,
-                Some(CodeGraphToken::Pointer { .. })
-                    | Some(CodeGraphToken::Resolved {
-                        cache_key: spur_graph::ArtifactCacheKey::Parquet { .. },
-                        ..
-                    })
+                Some(CodeGraphToken::Pointer { .. }) | Some(CodeGraphToken::Resolved { .. })
             );
         for source in &mut self.sources {
             let source_name = source.name();
@@ -747,8 +741,6 @@ fn source_cache_ttl(name: &'static str) -> Duration {
 }
 
 fn discover_code_graph_candidate(worktree_root: &Path) -> Option<CodeGraphCandidate> {
-    debug_assert_eq!(CODE_GRAPH_LEGACY_INDEX_PATH, ".spur/graph-index.json");
-
     if let Some(path) = std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|v| !v.is_empty()) {
         let explicit_override = PathBuf::from(path);
         let resolved =
@@ -803,11 +795,10 @@ fn resolved_token(resolved: &spur_graph::ResolvedArtifact) -> CodeGraphToken {
 }
 
 fn current_pointer_selected(worktree_root: &Path, resolved: &spur_graph::ResolvedArtifact) -> bool {
-    resolved.format == spur_graph::ArtifactFormat::Parquet
-        && spur_graph::read_current_pointer(worktree_root)
-            .ok()
-            .as_ref()
-            == Some(&resolved.path)
+    spur_graph::read_current_pointer(worktree_root)
+        .ok()
+        .as_ref()
+        == Some(&resolved.path)
 }
 
 fn pointer_token(
@@ -922,7 +913,7 @@ mod tests {
         let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
         assert_eq!(registry.code_graph_hint(), Some(CODE_GRAPH_MISSING_HINT));
 
-        let artifact_path = root.join(".spur/canonical/graph-a.json");
+        let artifact_path = root.join(".spur/canonical/graph-a.parquet");
         write_graph_fixture(&artifact_path, "lazy-file", "src/lazy.rs", "hash-a");
         write_pointer(
             root,
@@ -952,8 +943,8 @@ mod tests {
         fs::create_dir(root.join(".git")).unwrap();
         let _restore = ProcessEnvRestore::enter(root);
 
-        let artifact_a = root.join(".spur/canonical/graph-a.json");
-        let artifact_b = root.join(".spur/canonical/graph-b.json");
+        let artifact_a = root.join(".spur/canonical/graph-a.parquet");
+        let artifact_b = root.join(".spur/canonical/graph-b.parquet");
         write_graph_fixture(&artifact_a, "first-file", "src/first.rs", "hash-a");
         write_graph_fixture(&artifact_b, "second-file", "src/second.rs", "hash-b");
         write_pointer(root, &artifact_a, "hash-a", "manifest-a", Some("commit-a"));
@@ -981,7 +972,7 @@ mod tests {
         fs::create_dir(root.join(".git")).unwrap();
         let _restore = ProcessEnvRestore::enter(root);
 
-        let artifact_path = root.join(".spur/canonical/graph.json");
+        let artifact_path = root.join(".spur/canonical/graph.parquet");
         let stable_mtime = FileTime::from_unix_time(1_700_000_000, 0);
         write_graph_fixture(&artifact_path, "old-file", "src/old.rs", "hash-a");
         set_file_mtime(&artifact_path, stable_mtime).unwrap();
@@ -1029,8 +1020,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         fs::create_dir(root.join(".git")).unwrap();
-        let env_artifact = root.join("env-graph.json");
-        let pointer_artifact = root.join(".spur/canonical/pointer-graph.json");
+        let env_artifact = root.join("env-graph.parquet");
+        let pointer_artifact = root.join(".spur/canonical/pointer-graph.parquet");
         write_graph_fixture(&env_artifact, "env-file", "src/env.rs", "env-hash");
         write_graph_fixture(
             &pointer_artifact,
@@ -1058,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn code_graph_without_pointer_falls_back_to_legacy_worktree_artifact() {
+    fn code_graph_auto_discovery_uses_current_parquet() {
         let _guard = crate::theme::runtime::test_support::TEST_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
@@ -1066,43 +1057,6 @@ mod tests {
         let root = tmp.path();
         fs::create_dir(root.join(".git")).unwrap();
         let _restore = ProcessEnvRestore::enter(root);
-
-        let legacy_artifact = root.join(".spur/graph-index.json");
-        write_graph_fixture(
-            &legacy_artifact,
-            "legacy-file",
-            "src/legacy.rs",
-            "legacy-hash",
-        );
-
-        let mut registry = MentionRegistry::for_direct_session().with_code_graph_from_env();
-        let hits = registry.query(CompletionScope::PreSession, root, "legacy", 10);
-
-        assert!(
-            hits.iter()
-                .any(|hit| hit.kind == MentionKind::CodeFile && hit.display == "src/legacy.rs"),
-            "expected legacy worktree artifact fallback, got {hits:?}"
-        );
-        assert_eq!(registry.code_graph_hint(), None);
-    }
-
-    #[test]
-    fn code_graph_auto_discovery_prefers_current_parquet_over_legacy_json() {
-        let _guard = crate::theme::runtime::test_support::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        fs::create_dir(root.join(".git")).unwrap();
-        let _restore = ProcessEnvRestore::enter(root);
-
-        let legacy_artifact = root.join(".spur/graph-index.json");
-        write_graph_fixture(
-            &legacy_artifact,
-            "legacy-file",
-            "src/legacy.rs",
-            "legacy-hash",
-        );
 
         let parquet_dir = write_artifact_parquet(
             &graph_artifact("parquet-file", "src/parquet.rs", "parquet-hash"),
@@ -1120,10 +1074,6 @@ mod tests {
             hits.iter()
                 .any(|hit| hit.kind == MentionKind::CodeFile && hit.display == "src/parquet.rs"),
             "expected resolver to prefer CURRENT parquet artifact, got {hits:?}"
-        );
-        assert!(
-            !hits.iter().any(|hit| hit.display == "src/legacy.rs"),
-            "legacy fallback should not win when CURRENT parquet is valid, got {hits:?}"
         );
         assert_eq!(registry.code_graph_hint(), None);
     }
@@ -1354,25 +1304,13 @@ mod tests {
     }
 
     fn write_graph_fixture(path: &Path, stable_file_id: &str, file_path: &str, content_hash: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        let artifact = serde_json::json!({
-            "header": {
-                "graph_index_version": TEST_GRAPH_INDEX_VERSION,
-                "content_hash_blake3": content_hash
-            },
-            "manifest_version": "registry-test-manifest",
-            "graph_content_hash": content_hash,
-            "files": [
-                {
-                    "stable_file_id": stable_file_id,
-                    "file_path": file_path
-                }
-            ],
-            "symbols": []
-        });
-        fs::write(path, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
+        write_artifact_parquet(
+            &graph_artifact(stable_file_id, file_path, content_hash),
+            path,
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .unwrap();
     }
 
     fn graph_artifact(

@@ -18,14 +18,14 @@ const EDGES_BY_DST_PRESENT: bool = false;
 
 ## Fixture
 
-- Path: `/Volumes/Projects/spur/.spur/graph-index.json`
-- JSON bytes: 46612076 (44.45 MiB)
+- Path: `/Volumes/Projects/spur/.spur/graph/current.parquet`
+- Parquet artifact fixture
 - Files: 1557
 - Symbols: 27875
 - Total edges in JSON: 116561
 - Resolved edges used for edge benchmarks: 47771
 - Unresolved edges in JSON: 68790
-- Note: the legacy JSON fixture does not store extractor `NodeId` values for every endpoint, so the benchmark assigned dense surrogate IDs from stable endpoint IDs. The Parquet column types, sort keys, and query shapes match the spec.
+- Note: older baseline captures used dense surrogate IDs from stable endpoint IDs. The Parquet column types, sort keys, and query shapes match the spec.
 
 ## Row Group Size
 
