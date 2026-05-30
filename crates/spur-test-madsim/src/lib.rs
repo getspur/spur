@@ -14,9 +14,9 @@
 //!
 //! # Patterns this crate consolidates
 //!
-//! The first wave of madsim tests (notification_drain, session_pump_retire,
-//! delegation_watchdog, peer_mailbox_drain, native_shutdown) converged on a
-//! few patterns worth sharing rather than reinventing per site.
+//! The first wave of madsim tests (`notification_drain`, `session_pump_retire`,
+//! `delegation_watchdog`, `peer_mailbox_drain`, `native_shutdown`) converged
+//! on a few patterns worth sharing rather than reinventing per site.
 //!
 //! ## Source-include
 //!
@@ -40,6 +40,7 @@
 //! absolute-deadline form onto the relative form using madsim's simulated
 //! clock.
 
+#![allow(unexpected_cfgs)]
 #![cfg(madsim)]
 
 extern crate madsim_tokio as tokio;

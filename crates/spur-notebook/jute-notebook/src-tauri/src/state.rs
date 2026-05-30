@@ -395,6 +395,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn kernel_slot_generation_starts_at_one_and_increments_with_stable_slot_id() {
@@ -462,5 +463,39 @@ mod tests {
         let second = state.get_notebook();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn catalog_loads_pre_tables_entries() {
+        let metadata: NotebookMetadata = serde_json::from_value(json!({
+            "spur": {
+                "datasources": {
+                    "schema_version": 1,
+                    "entries": [
+                        {
+                            "name": "sales",
+                            "path": "/tmp/sales.csv",
+                            "kind": "csv",
+                            "group": null,
+                            "columns": [
+                                {
+                                    "name": "region",
+                                    "sqlType": "VARCHAR"
+                                }
+                            ],
+                            "rowCount": 2
+                        }
+                    ]
+                }
+            }
+        }))
+        .expect("legacy metadata decodes");
+
+        let catalog = DatasourceCatalog::hydrate_from_metadata(&metadata, None);
+
+        assert_eq!(catalog.schema_version, DATASOURCE_CATALOG_SCHEMA_VERSION);
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].name, "sales");
+        assert!(catalog.entries[0].tables.is_empty());
     }
 }

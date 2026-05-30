@@ -125,6 +125,8 @@ pub enum DatasourceKind {
     Parquet,
     /// JSON file.
     Json,
+    /// DuckDB database file.
+    DuckDb,
 }
 
 /// Column metadata captured for a notebook datasource.
@@ -136,6 +138,20 @@ pub struct Column {
     pub name: String,
     /// SQL type reported by the datasource engine.
     pub sql_type: String,
+}
+
+/// Table metadata captured for a multi-table notebook datasource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct Table {
+    /// Table name.
+    pub name: String,
+    /// Columns discovered for the table.
+    pub columns: Vec<Column>,
+    /// Row count when known.
+    #[ts(type = "number | null")]
+    pub row_count: Option<u64>,
 }
 
 /// Catalog entry describing one datasource attached to a notebook.
@@ -156,6 +172,9 @@ pub struct DatasourceEntry {
     /// Row count when known.
     #[ts(type = "number | null")]
     pub row_count: Option<u64>,
+    /// Tables discovered for multi-table datasources.
+    #[serde(default)]
+    pub tables: Vec<Table>,
 }
 
 /// A daemon control protocol request.
@@ -1480,6 +1499,7 @@ mod tests {
                 sql_type: "DOUBLE".to_string(),
             }],
             row_count: Some(42),
+            tables: Vec::new(),
         };
         assert_eq!(entry.kind, DatasourceKind::Csv);
         assert_eq!(entry.columns[0].sql_type, "DOUBLE");
