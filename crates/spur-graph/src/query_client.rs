@@ -433,6 +433,19 @@ impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
                 Self::push_caller_record(&mut records, &mut seen, record);
             }
         }
+        // New call edges introduced in changed files whose target lives outside the
+        // delta's extraction scope (e.g. a changed file adding a call to an unchanged
+        // symbol) land as unresolved-by-label in the delta. Match them to this target
+        // and re-point. Delta callers live in changed files, so they are intentionally
+        // NOT dropped by the shadowed filter — they are the authoritative new version.
+        for record in self
+            .delta
+            .find_unresolved_caller_edges_by_labels(&target_labels)
+        {
+            if let Some(record) = self.repoint_caller_record(record, sid) {
+                Self::push_caller_record(&mut records, &mut seen, record);
+            }
+        }
         if target_is_shadowed {
             for record in self
                 .base
