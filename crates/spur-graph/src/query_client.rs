@@ -31,11 +31,12 @@ use crate::store::parquet::{
 };
 use crate::temporal::{symbol_history_indexed, GitSha, TemporalIndex};
 use crate::{
-    compare_symbols, find_callee_edges, find_caller_edges, read_artifact_header_parquet,
-    resolve_selector, search_symbols, ChangeKind, CommitIndexArtifact, GraphArtifactManifest,
-    GraphEdgeArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact,
-    OwnedCalleeRecord, OwnedCallerRecord, RelationKind, SearchOptions, SearchResult, SearchSymbol,
-    SelectorResolution, SnapshotKey, CODE_SYMBOL_URI_PREFIX,
+    artifact_from_facts, build_facts_for_paths, compare_symbols, find_callee_edges,
+    find_caller_edges, read_artifact_header_parquet, resolve_selector, search_symbols, ChangeKind,
+    CommitIndexArtifact, GraphArtifactManifest, GraphEdgeArtifact, GraphFileManifestEntry,
+    GraphIndexArtifact, GraphSymbolArtifact, OwnedCalleeRecord, OwnedCallerRecord, RelationKind,
+    SearchOptions, SearchResult, SearchSymbol, SelectorResolution, SnapshotKey,
+    CODE_SYMBOL_URI_PREFIX,
 };
 use crate::{CandidateRow, NodeId, ResolvedSymbol, SearchFilters, SearchMode};
 
@@ -44,6 +45,12 @@ pub type CodeSelectorResolution = SelectorResolution;
 pub trait GraphQueryClient {
     fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult>;
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord>;
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        _target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        Vec::new()
+    }
     fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord>;
     fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution>;
     fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>>;
@@ -94,6 +101,38 @@ impl GraphQueryClient for InMemoryClient {
         find_caller_edges(&self.artifact, sid)
             .into_iter()
             .map(OwnedCallerRecord::from)
+            .collect()
+    }
+
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        if target_labels.is_empty() {
+            return Vec::new();
+        }
+        self.artifact
+            .edges
+            .iter()
+            .filter(|edge| is_caller_relation(edge.relation))
+            .filter(|edge| edge.target_stable_symbol_id.is_none())
+            .filter(|edge| {
+                edge.target_label
+                    .as_ref()
+                    .is_some_and(|label| target_labels.contains(label))
+            })
+            .filter_map(|edge| {
+                let caller = self
+                    .artifact
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.stable_symbol_id == edge.source_stable_symbol_id)?;
+                Some(OwnedCallerRecord::Unresolved {
+                    caller: caller.clone(),
+                    edge: edge.clone(),
+                    target_label: edge.target_label.clone().unwrap_or_default(),
+                })
+            })
             .collect()
     }
 
@@ -171,6 +210,434 @@ impl GraphQueryClient for InMemoryClient {
             self.temporal_index
                 .get_or_init(|| Arc::new(TemporalIndex::new(Arc::clone(&self.artifact)))),
         )
+    }
+}
+
+pub struct OverlayClient<B: GraphQueryClient> {
+    base: B,
+    delta: InMemoryClient,
+    shadowed: HashSet<String>,
+    remap: HashMap<String, String>,
+}
+
+impl<B: GraphQueryClient> OverlayClient<B> {
+    pub fn new(base: B, root: &Path, changed_files: &[PathBuf]) -> anyhow::Result<Self> {
+        let facts = build_facts_for_paths(root, changed_files)?;
+        let artifact = artifact_from_facts(&facts, root)?;
+        let shadowed = changed_files
+            .iter()
+            .filter_map(|path| normalize_worktree_path(root, path).ok())
+            .collect::<HashSet<_>>();
+        Self::from_artifacts(base, Arc::new(artifact), shadowed)
+    }
+
+    pub fn from_artifacts(
+        base: B,
+        delta_artifact: Arc<GraphIndexArtifact>,
+        shadowed: HashSet<String>,
+    ) -> anyhow::Result<Self> {
+        let remap = build_overlay_remap(&base, &delta_artifact)?;
+        Ok(Self {
+            base,
+            delta: InMemoryClient::new(delta_artifact),
+            shadowed,
+            remap,
+        })
+    }
+
+    fn is_shadowed_path(&self, path: &str) -> bool {
+        self.shadowed.contains(path)
+    }
+
+    fn is_delta_symbol(&self, sid: &str) -> bool {
+        self.delta
+            .symbol_by_id(sid)
+            .ok()
+            .flatten()
+            .is_some_and(|symbol| self.is_shadowed_path(&symbol.file_path))
+    }
+
+    fn remapped_id_for(&self, old_id: &str) -> Option<&str> {
+        self.remap.get(old_id).map(String::as_str)
+    }
+
+    fn old_ids_for_new<'a>(&'a self, new_id: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.remap
+            .iter()
+            .filter(move |(_, mapped)| mapped.as_str() == new_id)
+            .map(|(old, _)| old.as_str())
+    }
+
+    fn target_labels_for_symbol(symbol: &GraphSymbolArtifact) -> HashSet<String> {
+        HashSet::from([
+            symbol.entity_name.clone(),
+            symbol.qualified_name.clone(),
+            symbol.stable_symbol_id.clone(),
+        ])
+    }
+
+    fn push_caller_record(
+        records: &mut Vec<OwnedCallerRecord>,
+        seen: &mut HashSet<EdgeDedupeKey>,
+        record: OwnedCallerRecord,
+    ) {
+        if seen.insert(caller_key(&record)) {
+            records.push(record);
+        }
+    }
+
+    fn repoint_caller_record(
+        &self,
+        record: OwnedCallerRecord,
+        target_sid: &str,
+    ) -> Option<OwnedCallerRecord> {
+        let target = self.symbol_by_id(target_sid).ok().flatten()?;
+        match record {
+            OwnedCallerRecord::Resolved { caller, mut edge }
+            | OwnedCallerRecord::Unresolved {
+                caller, mut edge, ..
+            } => {
+                edge.target_stable_symbol_id = Some(target.stable_symbol_id);
+                edge.target_label
+                    .get_or_insert_with(|| target.entity_name.clone());
+                Some(OwnedCallerRecord::Resolved { caller, edge })
+            }
+        }
+    }
+
+    fn re_resolve_callee_record(&self, record: OwnedCalleeRecord) -> OwnedCalleeRecord {
+        match record {
+            OwnedCalleeRecord::Resolved { symbol, mut edge } => {
+                if let Some(target_id) = edge.target_stable_symbol_id.as_deref() {
+                    if let Some(new_id) = self.remapped_id_for(target_id) {
+                        edge.target_stable_symbol_id = Some(new_id.to_owned());
+                        if let Ok(Some(new_symbol)) = self.symbol_by_id(new_id) {
+                            return OwnedCalleeRecord::Resolved {
+                                symbol: new_symbol,
+                                edge,
+                            };
+                        }
+                    }
+                }
+
+                if !self.is_shadowed_path(&symbol.file_path) {
+                    return OwnedCalleeRecord::Resolved { symbol, edge };
+                }
+
+                let label = edge
+                    .target_label
+                    .clone()
+                    .unwrap_or_else(|| symbol.entity_name.clone());
+                if let Some(new_symbol) = self.resolve_label_to_symbol(&label) {
+                    edge.target_stable_symbol_id = Some(new_symbol.stable_symbol_id.clone());
+                    return OwnedCalleeRecord::Resolved {
+                        symbol: new_symbol,
+                        edge,
+                    };
+                }
+
+                edge.target_stable_symbol_id = None;
+                OwnedCalleeRecord::Unresolved {
+                    edge,
+                    target_label: label,
+                }
+            }
+            OwnedCalleeRecord::Unresolved {
+                mut edge,
+                target_label,
+            } => {
+                if let Some(symbol) = self.resolve_label_to_symbol(&target_label) {
+                    edge.target_stable_symbol_id = Some(symbol.stable_symbol_id.clone());
+                    OwnedCalleeRecord::Resolved { symbol, edge }
+                } else {
+                    OwnedCalleeRecord::Unresolved { edge, target_label }
+                }
+            }
+        }
+    }
+
+    fn resolve_label_to_symbol(&self, label: &str) -> Option<GraphSymbolArtifact> {
+        match self.resolve_selector(label).ok()? {
+            SelectorResolution::Resolved(resolved) => {
+                self.symbol_by_id(&resolved.stable_symbol_id).ok().flatten()
+            }
+            SelectorResolution::Ambiguous { .. } | SelectorResolution::NotFound => None,
+        }
+    }
+
+    fn filter_base_resolution(
+        &self,
+        resolution: SelectorResolution,
+    ) -> anyhow::Result<SelectorResolution> {
+        Ok(match resolution {
+            SelectorResolution::Resolved(resolved) => {
+                if self.symbol_by_id(&resolved.stable_symbol_id)?.is_some() {
+                    SelectorResolution::Resolved(resolved)
+                } else {
+                    SelectorResolution::NotFound
+                }
+            }
+            SelectorResolution::Ambiguous { candidates } => {
+                let symbols = candidates
+                    .into_iter()
+                    .filter(|candidate| !self.is_shadowed_path(&candidate.file_path))
+                    .filter_map(|candidate| self.symbol_by_id(&candidate.id).ok().flatten())
+                    .collect::<Vec<_>>();
+                resolution_from_symbols(symbols)
+            }
+            SelectorResolution::NotFound => SelectorResolution::NotFound,
+        })
+    }
+}
+
+impl<B: GraphQueryClient> GraphQueryClient for OverlayClient<B> {
+    fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+        let mut unbounded = opts.clone();
+        unbounded.limit = 200;
+        let mut candidates = self
+            .base
+            .search_symbols(&unbounded)?
+            .candidates
+            .into_iter()
+            .filter(|symbol| !self.is_shadowed_path(&symbol.file_path))
+            .collect::<Vec<_>>();
+        candidates.extend(self.delta.search_symbols(&unbounded)?.candidates);
+        candidates.sort_by(|left, right| compare_symbols(left, right, opts));
+        candidates.dedup_by(|left, right| left.stable_symbol_id == right.stable_symbol_id);
+
+        let total_matches = candidates.len();
+        let limit = opts.limit.clamp(1, 200);
+        let truncated = total_matches > limit;
+        candidates.truncate(limit);
+        Ok(SearchResult {
+            candidates,
+            total_matches,
+            truncated,
+        })
+    }
+
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        let Some(target_symbol) = self.symbol_by_id(sid).ok().flatten() else {
+            return Vec::new();
+        };
+        let target_is_shadowed = self.is_shadowed_path(&target_symbol.file_path);
+        let target_labels = Self::target_labels_for_symbol(&target_symbol);
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+
+        for record in self.delta.find_caller_edges(sid) {
+            Self::push_caller_record(&mut records, &mut seen, record);
+        }
+        for record in self.base.find_caller_edges(sid) {
+            if !caller_record_is_shadowed(&record, &self.shadowed) {
+                Self::push_caller_record(&mut records, &mut seen, record);
+            }
+        }
+        if target_is_shadowed {
+            for record in self
+                .base
+                .find_unresolved_caller_edges_by_labels(&target_labels)
+            {
+                if caller_record_is_shadowed(&record, &self.shadowed) {
+                    continue;
+                }
+                if let Some(record) = self.repoint_caller_record(record, sid) {
+                    Self::push_caller_record(&mut records, &mut seen, record);
+                }
+            }
+        }
+
+        for old_id in self.old_ids_for_new(sid) {
+            for record in self.base.find_caller_edges(old_id) {
+                if caller_record_is_shadowed(&record, &self.shadowed) {
+                    continue;
+                }
+                if let Some(record) = self.repoint_caller_record(record, sid) {
+                    Self::push_caller_record(&mut records, &mut seen, record);
+                }
+            }
+        }
+
+        records
+    }
+
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        if self.is_delta_symbol(sid) {
+            return self
+                .delta
+                .find_callee_edges(sid)
+                .into_iter()
+                .map(|record| self.re_resolve_callee_record(record))
+                .collect();
+        }
+        if self.symbol_by_id(sid).ok().flatten().is_none() {
+            return Vec::new();
+        }
+        self.base
+            .find_callee_edges(sid)
+            .into_iter()
+            .map(|record| self.re_resolve_callee_record(record))
+            .collect()
+    }
+
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        let delta_resolution = self.delta.resolve_selector(selector)?;
+        if !matches!(delta_resolution, SelectorResolution::NotFound) {
+            return Ok(delta_resolution);
+        }
+        let base_resolution = self.base.resolve_selector(selector)?;
+        self.filter_base_resolution(base_resolution)
+    }
+
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        if let Some(symbol) = self.delta.symbol_by_id(sid)? {
+            return Ok(Some(symbol));
+        }
+        Ok(self
+            .base
+            .symbol_by_id(sid)?
+            .filter(|symbol| !self.is_shadowed_path(&symbol.file_path)))
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        if self.is_shadowed_path(path) {
+            self.delta.symbols_by_file(path)
+        } else {
+            self.base.symbols_by_file(path)
+        }
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        if self.is_shadowed_path(path) {
+            self.delta.symbols_by_path_name(path, name)
+        } else {
+            self.base.symbols_by_path_name(path, name)
+        }
+    }
+
+    fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+        if self.is_shadowed_path(path) {
+            self.delta.file_manifest_by_path(path)
+        } else {
+            self.base.file_manifest_by_path(path)
+        }
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        Ok(self.delta.file_exists(path)?
+            || (!self.is_shadowed_path(path) && self.base.file_exists(path)?))
+    }
+
+    fn temporal_index(&self) -> Arc<TemporalIndex> {
+        self.base.temporal_index()
+    }
+
+    fn symbol_history(
+        &self,
+        commits: &CommitIndexArtifact,
+        symbol_id: &str,
+    ) -> anyhow::Result<Vec<(GitSha, ChangeKind, SnapshotKey)>> {
+        self.base.symbol_history(commits, symbol_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EdgeDedupeKey {
+    source_stable_symbol_id: String,
+    target_stable_symbol_id: Option<String>,
+    target_label: Option<String>,
+    relation: RelationKind,
+    edge_kind: Option<crate::GraphEdgeKind>,
+    bind_method: Option<String>,
+}
+
+fn build_overlay_remap<B: GraphQueryClient>(
+    base: &B,
+    delta_artifact: &GraphIndexArtifact,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut remap = HashMap::new();
+    for delta_symbol in &delta_artifact.symbols {
+        let mut candidates =
+            base.symbols_by_path_name(&delta_symbol.file_path, &delta_symbol.qualified_name)?;
+        if candidates.is_empty() && delta_symbol.qualified_name != delta_symbol.entity_name {
+            candidates =
+                base.symbols_by_path_name(&delta_symbol.file_path, &delta_symbol.entity_name)?;
+        }
+        if candidates.is_empty() {
+            candidates = base
+                .symbols_by_file(&delta_symbol.file_path)?
+                .into_iter()
+                .filter(|base_symbol| base_symbol.symbol_kind == delta_symbol.symbol_kind)
+                .filter(|base_symbol| {
+                    ranges_overlap(base_symbol.line_range, delta_symbol.line_range)
+                })
+                .collect();
+        }
+
+        candidates.sort_by(|left, right| {
+            line_distance(left.line_range, delta_symbol.line_range)
+                .cmp(&line_distance(right.line_range, delta_symbol.line_range))
+                .then_with(|| left.stable_symbol_id.cmp(&right.stable_symbol_id))
+        });
+        for base_symbol in candidates {
+            if base_symbol.stable_symbol_id != delta_symbol.stable_symbol_id {
+                remap.insert(
+                    base_symbol.stable_symbol_id,
+                    delta_symbol.stable_symbol_id.clone(),
+                );
+            }
+        }
+    }
+    Ok(remap)
+}
+
+fn normalize_worktree_path(root: &Path, path: &Path) -> anyhow::Result<String> {
+    let relative = if path.is_absolute() {
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
+        path.strip_prefix(&root).unwrap_or(path)
+    } else {
+        path
+    };
+    Ok(relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn ranges_overlap(left: [usize; 2], right: [usize; 2]) -> bool {
+    left[0] <= right[1] && right[0] <= left[1]
+}
+
+fn line_distance(left: [usize; 2], right: [usize; 2]) -> usize {
+    left[0].abs_diff(right[0]) + left[1].abs_diff(right[1])
+}
+
+fn caller_record_is_shadowed(record: &OwnedCallerRecord, shadowed: &HashSet<String>) -> bool {
+    match record {
+        OwnedCallerRecord::Resolved { caller, .. }
+        | OwnedCallerRecord::Unresolved { caller, .. } => shadowed.contains(&caller.file_path),
+    }
+}
+
+fn caller_key(record: &OwnedCallerRecord) -> EdgeDedupeKey {
+    edge_key(record.edge())
+}
+
+fn edge_key(edge: &GraphEdgeArtifact) -> EdgeDedupeKey {
+    EdgeDedupeKey {
+        source_stable_symbol_id: edge.source_stable_symbol_id.clone(),
+        target_stable_symbol_id: edge.target_stable_symbol_id.clone(),
+        target_label: edge.target_label.clone(),
+        relation: edge.relation,
+        edge_kind: edge.edge_kind,
+        bind_method: edge.bind_method.clone(),
     }
 }
 
@@ -716,6 +1183,39 @@ impl GraphQueryClient for ParquetClient {
     fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
         self.try_find_caller_edges(sid)
             .unwrap_or_else(|error| panic!("failed to query Parquet caller edges: {error:#}"))
+    }
+
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        let edges = self
+            .unresolved_edges_by_target_labels(target_labels)
+            .unwrap_or_else(|error| {
+                panic!("failed to query Parquet unresolved caller edges: {error:#}")
+            });
+        let caller_ids = edges
+            .iter()
+            .filter(|edge| is_caller_relation(edge.relation))
+            .map(|edge| edge.source_stable_symbol_id.clone())
+            .collect::<HashSet<_>>();
+        let callers = self
+            .symbols_by_ids(&caller_ids)
+            .unwrap_or_else(|error| panic!("failed to query Parquet callers: {error:#}"));
+        edges
+            .into_iter()
+            .filter(|edge| is_caller_relation(edge.relation))
+            .filter_map(|edge| {
+                callers
+                    .get(&edge.source_stable_symbol_id)
+                    .cloned()
+                    .map(|caller| OwnedCallerRecord::Unresolved {
+                        caller,
+                        target_label: edge.target_label.clone().unwrap_or_default(),
+                        edge,
+                    })
+            })
+            .collect()
     }
 
     fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
