@@ -1,12 +1,13 @@
 import "@testing-library/jest-dom/vitest";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
 } from "@testing-library/react";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { DatasourceEntry } from "@/bindings";
 
@@ -14,8 +15,11 @@ import DatasourceSidebar from "./DatasourceSidebar";
 
 const daemonControlMock = vi.hoisted(() => vi.fn());
 const dragDropCallbacks = vi.hoisted(() => [] as TauriDragDropCallback[]);
+const eventCallbacks = vi.hoisted(() => new Map<string, TauriEventCallback>());
+const listenMock = vi.hoisted(() => vi.fn());
 const onDragDropEventMock = vi.hoisted(() => vi.fn());
 const openMock = vi.hoisted(() => vi.fn());
+const unlistenEventMock = vi.hoisted(() => vi.fn());
 const unlistenMock = vi.hoisted(() => vi.fn());
 
 type TauriDragDropCallback = (event: {
@@ -25,6 +29,8 @@ type TauriDragDropCallback = (event: {
     position: { x: number; y: number };
   };
 }) => void;
+
+type TauriEventCallback = (event: { payload: unknown }) => void;
 
 vi.mock("@/daemon/control", async () => {
   const actual =
@@ -40,6 +46,10 @@ vi.mock("@/daemon/control", async () => {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: openMock,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: listenMock,
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -72,9 +82,19 @@ function datasourceResult(overrides: Partial<DatasourceEntry> = {}) {
 }
 
 describe("DatasourceSidebar", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     daemonControlMock.mockReset();
     dragDropCallbacks.length = 0;
+    eventCallbacks.clear();
+    listenMock.mockReset();
+    listenMock.mockImplementation((eventName: string, callback: TauriEventCallback) => {
+      eventCallbacks.set(eventName, callback);
+      return Promise.resolve(unlistenEventMock);
+    });
     onDragDropEventMock.mockReset();
     onDragDropEventMock.mockImplementation(
       (callback: TauriDragDropCallback) => {
@@ -83,6 +103,7 @@ describe("DatasourceSidebar", () => {
       },
     );
     openMock.mockReset();
+    unlistenEventMock.mockReset();
     unlistenMock.mockReset();
   });
 
@@ -163,5 +184,103 @@ describe("DatasourceSidebar", () => {
       }),
     );
     expect(await screen.findByText("sku")).toBeInTheDocument();
+  });
+
+  test("datasources_changed_event_replaces_list", async () => {
+    render(<DatasourceSidebar />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [datasourceEntry({ name: "sales", path: "/tmp/sales.csv" })],
+      });
+    });
+
+    expect(await screen.findByText("sales")).toBeInTheDocument();
+
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "inventory",
+            path: "/tmp/inventory.parquet",
+            columns: [{ name: "sku", sqlType: "VARCHAR" }],
+          }),
+        ],
+      });
+    });
+
+    expect(screen.queryByText("sales")).not.toBeInTheDocument();
+    expect(await screen.findByText("inventory")).toBeInTheDocument();
+    expect(screen.getByText("sku")).toBeInTheDocument();
+  });
+
+  test("remove_button_dispatches_detach_datasource", async () => {
+    daemonControlMock.mockResolvedValueOnce({
+      ok: true,
+      result: { type: "empty", data: null },
+    });
+
+    render(<DatasourceSidebar />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [datasourceEntry({ name: "sales", path: "/tmp/sales.csv" })],
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove sales" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "detach_datasource",
+        name: "sales",
+      }),
+    );
+  });
+
+  test("multi_table_entry_renders_tables", async () => {
+    render(<DatasourceSidebar />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "warehouse",
+            path: "/tmp/warehouse.duckdb",
+            kind: "duck_db",
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "orders",
+                columns: [{ name: "order_id", sqlType: "BIGINT" }],
+                rowCount: 12,
+              },
+              {
+                name: "customers",
+                columns: [{ name: "customer_name", sqlType: "VARCHAR" }],
+                rowCount: null,
+              },
+            ],
+          }),
+        ],
+      });
+    });
+
+    expect(await screen.findByText("orders")).toBeInTheDocument();
+    expect(screen.getByText("order_id")).toBeInTheDocument();
+    expect(screen.getByText("12 rows")).toBeInTheDocument();
+    expect(screen.getByText("customers")).toBeInTheDocument();
+    expect(screen.getByText("customer_name")).toBeInTheDocument();
   });
 });

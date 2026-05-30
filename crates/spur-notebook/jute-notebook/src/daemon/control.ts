@@ -13,7 +13,12 @@ export type AttachDatasourceCommand = Extract<
   DaemonControlCommand,
   { command: "attach_datasource" }
 >;
+export type DetachDatasourceCommand = Extract<
+  DaemonControlCommand,
+  { command: "detach_datasource" }
+>;
 export type AttachDatasourceInput = Omit<AttachDatasourceCommand, "command">;
+export type DetachDatasourceInput = Omit<DetachDatasourceCommand, "command">;
 type EnrichedRecentEntry = NonNullable<
   DaemonControlResponse["entries"]
 >[number] &
@@ -36,6 +41,15 @@ export function attachDatasourceCommand(
   };
 }
 
+export function detachDatasourceCommand(
+  input: DetachDatasourceInput,
+): DetachDatasourceCommand {
+  return {
+    command: "detach_datasource",
+    name: input.name,
+  };
+}
+
 export function datasourceEntryFromDaemonControlResponse(
   response: DaemonControlResponse,
 ): DatasourceEntry {
@@ -52,6 +66,15 @@ export function datasourceEntryFromDaemonControlResponse(
   throw new Error(
     "daemon attach_datasource response did not include datasource",
   );
+}
+
+export function datasourceEntriesFromEventPayload(
+  payload: unknown,
+): DatasourceEntry[] {
+  if (Array.isArray(payload) && payload.every(isDatasourceEntry)) {
+    return payload;
+  }
+  throw new Error("datasources://changed payload did not include entries");
 }
 
 export function pathFromDaemonControlResponse(
