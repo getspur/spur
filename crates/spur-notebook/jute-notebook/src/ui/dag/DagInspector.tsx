@@ -1,10 +1,15 @@
 import clsx from "clsx";
-import type { ReactNode } from "react";
+import { PlayIcon } from "lucide-react";
+import { type ReactNode, Suspense, lazy, useState } from "react";
+import { useStore } from "zustand";
 
-import type { NodeStatus } from "@/stores/notebook";
+import { type NodeStatus, useNotebook } from "@/stores/notebook";
 
+import CellInputFallback from "../notebook/CellInputFallback";
 import type { DagPortManifest } from "./dagStatus";
 import type { DagNodeData } from "./useDagGraph";
+
+const CellInput = lazy(() => import("../notebook/CellInput"));
 
 type DagInspectorProps = {
   node?: DagNodeData;
@@ -17,6 +22,40 @@ export default function DagInspector({
   portManifest,
   status,
 }: DagInspectorProps) {
+  const notebook = useNotebook();
+  const [lastRunSourceByCell, setLastRunSourceByCell] = useState<
+    Record<string, string>
+  >({});
+  const [runningCellId, setRunningCellId] = useState<string | null>(null);
+  const currentSource = useStore(notebook.store, (state) => {
+    if (!node) return undefined;
+    return (
+      state.editBuffer.cellSources[node.id]?.source ??
+      state.serverState.cells[node.id]?.source ??
+      node.code
+    );
+  });
+  const lastRunSource = node && (lastRunSourceByCell[node.id] ?? node.code);
+  const isEdited =
+    node && currentSource !== undefined && currentSource !== lastRunSource;
+  const isRunning =
+    node && (runningCellId === node.id || status?.state === "running");
+
+  const runNode = async () => {
+    if (!node) return;
+    setRunningCellId(node.id);
+    try {
+      await notebook.execute(node.id);
+      const sourceAtRun = currentSource ?? node.code;
+      setLastRunSourceByCell((previous) => ({
+        ...previous,
+        [node.id]: sourceAtRun,
+      }));
+    } finally {
+      setRunningCellId(null);
+    }
+  };
+
   if (!node) {
     return (
       <aside
@@ -89,15 +128,34 @@ export default function DagInspector({
       </PortList>
 
       <section className="min-h-0">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-normal text-gray-500">
-          Code
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="text-[11px] font-semibold uppercase tracking-normal text-gray-500">
+            Code
+          </div>
+          <div className="flex items-center gap-2">
+            {isEdited && (
+              <span className="rounded bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800">
+                Edited
+              </span>
+            )}
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 rounded border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-800 transition-colors hover:border-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={Boolean(isRunning)}
+              onClick={() => {
+                void runNode();
+              }}
+            >
+              <PlayIcon size={14} />
+              <span>{isRunning ? "Running" : "Run node"}</span>
+            </button>
+          </div>
         </div>
-        <textarea
-          aria-label="Selected DAG node code"
-          className="h-48 w-full resize-none rounded border border-gray-200 bg-gray-50 p-3 font-mono text-xs leading-5 text-gray-800 outline-none"
-          readOnly
-          value={node.code}
-        />
+        <div className="h-48 overflow-auto rounded border border-gray-200 bg-white text-xs">
+          <Suspense fallback={<CellInputFallback cellId={node.id} />}>
+            <CellInput cellId={node.id} />
+          </Suspense>
+        </div>
       </section>
     </aside>
   );

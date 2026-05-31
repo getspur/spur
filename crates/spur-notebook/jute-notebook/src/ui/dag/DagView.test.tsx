@@ -10,8 +10,43 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import DagView from "./DagView";
 
+type TestCellState = {
+  type: string;
+  initialText: string;
+  source: string;
+  version: number;
+  dagMetadata?: {
+    produces: Array<{ port: string; repr: string; display?: string }>;
+    consumes: string[];
+    source?: { kind: string; port: string };
+  };
+};
+
+type TestStoreState = {
+  serverState: {
+    lastAppliedVersion: number;
+    notebookMetadata: Record<string, never>;
+    cellIds: string[];
+    cells: Record<string, TestCellState>;
+  };
+  viewState: {
+    selectedCellId: string | null;
+    isLoading: boolean;
+    viewMode: string;
+  };
+  editBuffer: {
+    cellSources: Record<
+      string,
+      { source: string; version: number; lastEditedBy?: string }
+    >;
+  };
+  dagStatus: Record<string, never>;
+};
+
 const invokeMock = vi.hoisted(() => vi.fn());
-const storeState = vi.hoisted(() => ({
+const executeMock = vi.hoisted(() => vi.fn());
+const storeListeners = vi.hoisted(() => new Set<() => void>());
+const storeState = vi.hoisted<TestStoreState>(() => ({
   serverState: {
     lastAppliedVersion: 0,
     notebookMetadata: {},
@@ -63,12 +98,32 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@/stores/notebook", () => ({
   useNotebook: () => ({
+    execute: executeMock,
     store: {
       getInitialState: () => storeState,
       getState: () => storeState,
-      subscribe: () => () => {},
+      subscribe: (listener: () => void) => {
+        storeListeners.add(listener);
+        return () => storeListeners.delete(listener);
+      },
     },
   }),
+}));
+
+vi.mock("../notebook/CellInput", () => ({
+  default: ({ cellId }: { cellId: string }) => (
+    <textarea
+      aria-label="Selected DAG node code"
+      defaultValue={storeState.serverState.cells[cellId].initialText}
+      onChange={(event) => {
+        storeState.editBuffer.cellSources[cellId] = {
+          source: event.target.value,
+          version: storeState.serverState.cells[cellId].version + 1,
+        };
+        storeListeners.forEach((listener) => listener());
+      }}
+    />
+  ),
 }));
 
 vi.mock("@xyflow/react", () => ({
@@ -128,6 +183,7 @@ describe("DagView", () => {
   beforeEach(() => {
     cleanup();
     invokeMock.mockReset();
+    executeMock.mockReset();
     invokeMock.mockResolvedValue({
       notebook_version: 3,
       nodes: [
@@ -166,6 +222,8 @@ describe("DagView", () => {
       ],
       port_manifest: { customers: 2, summary: 1 },
     });
+    storeState.editBuffer.cellSources = {};
+    storeListeners.clear();
   });
 
   test("lists only cells with DAG metadata", () => {
@@ -184,7 +242,7 @@ describe("DagView", () => {
     ).not.toBeNull();
   });
 
-  test("seeds status on mount and selects a read-only inspector node", async () => {
+  test("seeds status on mount and selects an inspector node", async () => {
     render(<DagView />);
 
     await waitFor(() => {
@@ -207,11 +265,35 @@ describe("DagView", () => {
     expect(screen.getByRole("complementary")).toHaveTextContent("fresh");
     expect(screen.getByRole("complementary")).toHaveTextContent("customers");
     expect(screen.getByRole("complementary")).toHaveTextContent("v2");
-    expect(screen.getByLabelText("Selected DAG node code")).toHaveAttribute(
-      "readonly",
-    );
-    expect(screen.getByLabelText("Selected DAG node code")).toHaveValue(
+    expect(await screen.findByLabelText("Selected DAG node code")).toHaveValue(
       "summary = customers.describe()",
     );
+  });
+
+  test("edits and runs the selected inspector node through notebook plumbing", async () => {
+    executeMock.mockResolvedValue(undefined);
+
+    render(<DagView />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /select consumer-cell/i }),
+    );
+
+    const editor = screen.getByLabelText("Selected DAG node code");
+    fireEvent.change(editor, {
+      target: { value: "summary = customers.head()" },
+    });
+
+    expect(storeState.editBuffer.cellSources["consumer-cell"]).toMatchObject({
+      source: "summary = customers.head()",
+    });
+    expect(screen.getByText("Edited")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /run node/i }));
+
+    await waitFor(() => {
+      expect(executeMock).toHaveBeenCalledWith("consumer-cell");
+    });
+    expect(screen.queryByText("Edited")).not.toBeInTheDocument();
   });
 });
