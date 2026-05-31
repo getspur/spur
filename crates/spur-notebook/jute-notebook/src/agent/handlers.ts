@@ -1,3 +1,5 @@
+import type { NotebookDelta } from "@/bindings";
+import { daemonControl } from "@/daemon/control";
 import { type CellType, type Notebook, selectCell } from "@/stores/notebook";
 
 import {
@@ -159,10 +161,10 @@ function deleteCell(notebook: Notebook, params: unknown): AgentDeleteCell {
   return { deleted: true };
 }
 
-function setCellMetadata(
+async function setCellMetadata(
   notebook: Notebook,
   params: AgentSetCellMetadata,
-): { ok: true; version: number } {
+): Promise<{ ok: true; version: number }> {
   const { id, patch, expected_version } = params;
   if (!id || typeof patch !== "object" || patch === null) {
     throw new AgentHandlerError(
@@ -177,20 +179,34 @@ function setCellMetadata(
     );
   }
 
-  // Atomic check + mutation: NO await between these two lines.
-  const cell = notebook.getCellSnapshotById(id);
-  if (!cell) {
-    throw new AgentHandlerError("cell_not_found", `cell ${id} not found`);
-  }
-  const currentVersion = cell.metadata?.spur?.version ?? 0;
-  if (currentVersion !== expected_version) {
+  const response = await daemonControl({
+    command: "set_cell_metadata",
+    id,
+    patch,
+    expected_version,
+  });
+  if (!response.ok) {
     throw new AgentHandlerError(
-      "stale_version",
-      `expected version ${expected_version}, actual ${currentVersion}`,
+      response.error?.code ?? "metadata_update_failed",
+      response.error?.message ?? "Failed to update cell metadata",
     );
   }
-  const nextVersion = notebook.mergeCellJuteDeckMetadata(id, patch);
-  return { ok: true, version: nextVersion };
+  if (response.result?.type !== "delta") {
+    throw new AgentHandlerError(
+      "metadata_update_failed",
+      "notebook.set_cell_metadata did not return a notebook delta",
+    );
+  }
+
+  const delta = response.result.data as NotebookDelta;
+  if (delta.kind.type !== "cellWritten") {
+    throw new AgentHandlerError(
+      "metadata_update_failed",
+      "notebook.set_cell_metadata did not update a cell",
+    );
+  }
+  notebook.applyNotebookDelta(delta);
+  return { ok: true, version: delta.version };
 }
 
 function readCellId(params: unknown): string {
