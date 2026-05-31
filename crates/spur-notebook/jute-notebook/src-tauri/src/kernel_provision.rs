@@ -12,6 +12,9 @@ use crate::{
 static PYTHON3_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
 static DENO_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
 
+// DuckDB 1.5.x is compatible with the stable v1.2.0 C-API extension envelope.
+const MANAGED_KERNEL_DUCKDB_VERSION: &str = "1.5.3";
+
 /// Ensure the bundled `python3` kernelspec is installed for this app.
 pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     let _guard = PYTHON3_KERNELSPEC_LOCK.lock().await;
@@ -161,6 +164,7 @@ where
             "--python".to_string(),
             path_to_string(&python, "ipykernel_install")?,
             "ipykernel".to_string(),
+            format!("duckdb=={MANAGED_KERNEL_DUCKDB_VERSION}"),
         ])
         .await
         .map_err(|cause| Error::KernelProvisionFailed {
@@ -467,7 +471,7 @@ fn format_command_failure(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> St
 
 #[cfg(test)]
 mod tests {
-    use std::{future::Future, path::PathBuf, pin::Pin};
+    use std::{future::Future, path::PathBuf, pin::Pin, sync::Mutex};
 
     use uuid::Uuid;
 
@@ -489,6 +493,76 @@ mod tests {
             _args: Vec<String>,
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
             Box::pin(async { panic!("valid kernelspec should skip python") })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRunner {
+        uv_args: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ProvisionRunner for RecordingRunner {
+        fn run_uv(
+            &self,
+            args: Vec<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+            self.uv_args.lock().unwrap().push(args.clone());
+            Box::pin(async move {
+                if args.first().map(String::as_str) == Some("venv") {
+                    let venv = args.last().ok_or_else(|| "missing venv path".to_string())?;
+                    let python = venv_python_path(&PathBuf::from(venv));
+                    let parent = python
+                        .parent()
+                        .ok_or_else(|| format!("{} has no parent", python.display()))?;
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    tokio::fs::write(&python, b"")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })
+        }
+
+        fn run_python(
+            &self,
+            python: PathBuf,
+            args: Vec<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+            Box::pin(async move {
+                let prefix = args
+                    .windows(2)
+                    .find_map(|pair| {
+                        (pair[0] == "--prefix").then(|| PathBuf::from(pair[1].clone()))
+                    })
+                    .ok_or_else(|| "missing kernelspec prefix".to_string())?;
+                let installed = prefix
+                    .join("share")
+                    .join("jupyter")
+                    .join("kernels")
+                    .join("python3");
+                tokio::fs::create_dir_all(&installed)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tokio::fs::write(
+                    installed.join("kernel.json"),
+                    serde_json::json!({
+                        "argv": [
+                            python.to_string_lossy().to_string(),
+                            "-m",
+                            "ipykernel_launcher",
+                            "-f",
+                            "{connection_file}"
+                        ],
+                        "display_name": "Python 3 (SPUR)",
+                        "language": "python"
+                    })
+                    .to_string(),
+                )
+                .await
+                .map_err(|error| error.to_string())
+            })
         }
     }
 
@@ -526,6 +600,30 @@ mod tests {
         ensure_python3_kernelspec_in_dir(&root, &PanicRunner)
             .await
             .unwrap();
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn provisioning_installs_pinned_duckdb_package() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let runner = RecordingRunner::default();
+
+        ensure_python3_kernelspec_in_dir(&root, &runner)
+            .await
+            .unwrap();
+
+        let uv_args = runner.uv_args.lock().unwrap();
+        let pip_install_args = uv_args
+            .iter()
+            .find(|args| {
+                args.first().map(String::as_str) == Some("pip")
+                    && args.get(1).map(String::as_str) == Some("install")
+            })
+            .expect("expected uv pip install command");
+
+        assert!(pip_install_args.contains(&"ipykernel".to_string()));
+        assert!(pip_install_args.contains(&format!("duckdb=={MANAGED_KERNEL_DUCKDB_VERSION}")));
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
