@@ -68,7 +68,12 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     })?;
 
     let runner = RunCellCommandRunner::new(Arc::new(deps.clone()));
-    let mut engine = ReactiveEngine::new(state.get_notebook(), runner, notebook_port_root(path));
+    let mut engine = ReactiveEngine::new(
+        state.get_notebook(),
+        runner,
+        &path,
+        notebook_port_root(&path),
+    );
     let report = engine
         .run_cell_and_cascade(&params.cell_id)
         .await
