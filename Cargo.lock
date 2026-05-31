@@ -3170,6 +3170,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys 0.5.0",
+]
+
+[[package]]
 name = "dirs"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6286,10 +6295,13 @@ name = "jute"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "arrow-schema",
  "async-channel",
+ "blake3",
  "bytes",
  "cfg-if",
  "dashmap 5.5.3",
+ "directories 6.0.0",
  "futures-util",
  "hmac",
  "parking_lot",
@@ -6309,6 +6321,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-opener",
  "tauri-plugin-shell",
+ "tempfile",
  "thiserror 1.0.69",
  "time",
  "tokio",
@@ -11157,7 +11170,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "directories",
+ "directories 5.0.1",
  "file-rotate",
  "fs4",
  "futures",
@@ -11239,7 +11252,7 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
- "directories",
+ "directories 5.0.1",
  "file-rotate",
  "indicatif",
  "reqwest 0.12.28",
@@ -11276,7 +11289,7 @@ version = "1.1.20"
 dependencies = [
  "anyhow",
  "chrono",
- "directories",
+ "directories 5.0.1",
  "duckdb",
  "filetime",
  "rusqlite",
@@ -11299,7 +11312,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dashmap 6.1.0",
- "directories",
+ "directories 5.0.1",
  "fs4",
  "futures",
  "libc",
@@ -11412,7 +11425,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "directories",
+ "directories 5.0.1",
  "ed25519-dalek",
  "licenseseat",
  "proptest",
@@ -11507,7 +11520,7 @@ dependencies = [
  "async-channel",
  "blake3",
  "chrono",
- "directories",
+ "directories 5.0.1",
  "duckdb",
  "fs4",
  "jute",
@@ -11517,6 +11530,7 @@ dependencies = [
  "serde_json",
  "spur-acp",
  "spur-core",
+ "spur-rest-table-gateway",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -11628,7 +11642,7 @@ dependencies = [
  "chrono",
  "criterion",
  "crossterm 0.28.1",
- "directories",
+ "directories 5.0.1",
  "divan",
  "filetime",
  "futures",
