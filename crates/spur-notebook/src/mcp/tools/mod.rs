@@ -19,6 +19,7 @@ pub mod kernel_info;
 pub mod list_datasources;
 pub mod notebook_dag_status;
 pub mod notebook_push_source;
+pub mod notebook_set_dag_metadata;
 pub mod read_cell;
 pub mod restart_kernel;
 pub mod run_cell;
@@ -45,6 +46,7 @@ pub fn tools() -> Vec<Tool> {
         list_datasources::tool(),
         notebook_push_source::tool(),
         notebook_dag_status::tool(),
+        notebook_set_dag_metadata::tool(),
         insert_cell::tool(),
         write_cell::tool(),
         set_cell_metadata::tool(),
@@ -234,6 +236,7 @@ mod tests {
         assert!(names
             .iter()
             .any(|name| name == "notebook.set_cell_metadata"));
+        assert!(names.iter().any(|name| name == "notebook_set_dag_metadata"));
         assert!(names.iter().any(|name| name == "notebook_push_source"));
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
     }
@@ -255,6 +258,7 @@ mod tests {
             "notebook.venv_delete",
             "notebook.venv_list_python_versions",
             "notebook.set_cell_metadata",
+            "notebook_set_dag_metadata",
             "notebook.list_recents",
             "notebook.set_pinned",
             "notebook.remove_from_recents",

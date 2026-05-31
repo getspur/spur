@@ -162,6 +162,9 @@ impl ServerHandler for NotebookMcpServer {
                 tools::notebook_push_source::call(&self.deps, arguments).await
             }
             "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
+            "notebook_set_dag_metadata" => {
+                tools::notebook_set_dag_metadata::call(&self.deps, arguments).await
+            }
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,

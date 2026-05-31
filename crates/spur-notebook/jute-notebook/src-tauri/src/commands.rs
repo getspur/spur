@@ -22,7 +22,7 @@ use crate::{
     backend::{
         commands::{self, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
-        notebook::NotebookRoot,
+        notebook::{CellDagMetadata, NotebookRoot},
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
     state::{notebook_slot_id, window_slot_id, KernelSlot, State},
@@ -785,6 +785,23 @@ async fn handle_daemon_control_inner(
                     .map(DaemonControlResult::Delta)
                     .map_err(store_error_response);
             }
+            if let Some(dag) = patch.get("spur").and_then(|spur| spur.get("dag")) {
+                let dag =
+                    serde_json::from_value::<CellDagMetadata>(dag.clone()).map_err(|error| {
+                        DaemonControlResponse::failure(
+                            "invalid_params",
+                            format!("invalid spur dag metadata patch: {error}"),
+                        )
+                    })?;
+                return notebook
+                    .apply(NotebookOp::SetSpurDagMetadata {
+                        id,
+                        patch: dag,
+                        expected_version,
+                    })
+                    .map(DaemonControlResult::Delta)
+                    .map_err(store_error_response);
+            }
             let patch = serde_json::from_value(patch).map_err(|error| {
                 DaemonControlResponse::failure(
                     "invalid_params",
@@ -1450,7 +1467,8 @@ mod tests {
 
     use super::*;
     use crate::backend::notebook::{
-        Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, SpurCellMetadata,
+        Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
+        NotebookMetadata, PortSpec, SpurCellMetadata,
     };
     use crate::notebook_store::DeltaKind;
 
@@ -1774,6 +1792,67 @@ mod tests {
                 .and_then(|spur| spur.last_edited_by.as_deref()),
             Some("brain")
         );
+    }
+
+    #[tokio::test]
+    async fn daemon_set_cell_metadata_spur_dag_patch_sets_metadata() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_source("initial", 1));
+        let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "set_cell_metadata",
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "patch": {
+                "spur": {
+                    "dag": {
+                        "produces": [{ "port": "x", "repr": "arrow" }],
+                        "consumes": [],
+                        "source": { "kind": "param", "port": "p" }
+                    }
+                }
+            },
+            "expected_version": 1
+        }))
+        .unwrap();
+
+        let response = handle_daemon_control_request(request, &state).await;
+        let result = response.into_result().unwrap();
+        let DaemonControlResult::Delta(NotebookDelta {
+            kind: DeltaKind::CellWritten { cell },
+            version,
+            ..
+        }) = result
+        else {
+            panic!("expected cellWritten delta");
+        };
+        assert_eq!(cell.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(version, 2);
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.metadata
+                .spur
+                .as_ref()
+                .and_then(|spur| spur.dag.clone()),
+            Some(CellDagMetadata {
+                produces: vec![PortSpec {
+                    port: "x".to_string(),
+                    repr: "arrow".to_string(),
+                    display: None,
+                }],
+                consumes: Vec::new(),
+                source: Some(DagSource {
+                    kind: "param".to_string(),
+                    port: "p".to_string(),
+                }),
+            })
+        );
+        assert_eq!(cell.metadata.spur.as_ref().unwrap().version, 2);
     }
 
     #[tokio::test]
