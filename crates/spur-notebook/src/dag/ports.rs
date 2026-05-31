@@ -416,6 +416,45 @@ mod tests {
     }
 
     #[test]
+    fn js_manifest_shape_deserializes_into_port_manifest() {
+        let manifest_json = r#"{
+  "ports": {
+    "sales": {
+      "path": "/tmp/spur-notebook/ports/sales@v1.arrow",
+      "version": 1,
+      "schema": {
+        "fields": [
+          {
+            "name": "id",
+            "data_type": "Int64",
+            "nullable": false,
+            "dict_id": 0,
+            "dict_is_ordered": false,
+            "metadata": {}
+          }
+        ],
+        "metadata": {}
+      }
+    }
+  }
+}"#;
+
+        let manifest: PortManifest =
+            serde_json::from_str(manifest_json).expect("JS manifest shape deserializes");
+        let entry = manifest.ports.get("sales").expect("sales port entry");
+
+        assert_eq!(
+            PathBuf::from("/tmp/spur-notebook/ports/sales@v1.arrow"),
+            entry.path
+        );
+        assert_eq!(1, entry.version);
+        assert_eq!(
+            Schema::new(vec![Field::new("id", DataType::Int64, false)]),
+            entry.schema
+        );
+    }
+
+    #[test]
     fn put_get_round_trip_preserves_arrow_data_and_bumps_version() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = PortStore::open_at(dir.path()).expect("open store");

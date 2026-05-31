@@ -1,5 +1,5 @@
 use jute::commands::{install_kernel_in_slot, start_local_kernel};
-use jute::kernel_provision::ensure_python3_kernelspec;
+use jute::kernel_provision::{ensure_deno_kernelspec, ensure_python3_kernelspec};
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -55,11 +55,17 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     let state = deps.state.as_ref().ok_or_else(|| {
         McpError::internal_error("notebook.start_kernel requires notebook daemon state", None)
     })?;
-    let app = deps.app.as_ref().ok_or_else(|| {
-        McpError::internal_error("notebook.start_kernel requires a Tauri app handle", None)
-    })?;
 
-    ensure_python3_kernelspec(app).await.map_err(|error| {
+    match provisioning_target_for_spec(&params.spec_name) {
+        KernelspecProvisioningTarget::Deno => ensure_deno_kernelspec().await,
+        KernelspecProvisioningTarget::Python3 => {
+            let app = deps.app.as_ref().ok_or_else(|| {
+                McpError::internal_error("notebook.start_kernel requires a Tauri app handle", None)
+            })?;
+            ensure_python3_kernelspec(app).await
+        }
+    }
+    .map_err(|error| {
         McpError::internal_error(
             "notebook.start_kernel failed to provision kernelspec",
             Some(json!({ "error": error.to_string() })),
@@ -82,6 +88,19 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         "slot_id": slot_id,
         "generation": generation,
     })))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KernelspecProvisioningTarget {
+    Deno,
+    Python3,
+}
+
+fn provisioning_target_for_spec(spec_name: &str) -> KernelspecProvisioningTarget {
+    match spec_name {
+        "deno" => KernelspecProvisioningTarget::Deno,
+        _ => KernelspecProvisioningTarget::Python3,
+    }
 }
 
 async fn resolve_slot_id(deps: &ServerDeps, explicit_slot_id: Option<String>) -> String {
@@ -130,5 +149,21 @@ mod tests {
             resolve_slot_id(&deps_without_notebook(), Some("custom:slot".to_string())).await;
 
         assert_eq!(slot_id, "custom:slot");
+    }
+
+    #[test]
+    fn deno_spec_uses_deno_kernelspec_provisioning() {
+        assert_eq!(
+            provisioning_target_for_spec("deno"),
+            KernelspecProvisioningTarget::Deno
+        );
+        assert_eq!(
+            provisioning_target_for_spec("python3"),
+            KernelspecProvisioningTarget::Python3
+        );
+        assert_eq!(
+            provisioning_target_for_spec("custom"),
+            KernelspecProvisioningTarget::Python3
+        );
     }
 }

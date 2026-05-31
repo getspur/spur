@@ -3,18 +3,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use jute::commands::{install_kernel_in_slot, start_local_kernel};
 use jute::state::{notebook_slot_id, KernelSlot, State};
+use jute::{
+    backend::notebook::{
+        Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, NotebookRoot,
+        SpurCellMetadata,
+    },
+    commands::{install_kernel_in_slot, start_local_kernel},
+};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 #[cfg(feature = "datasource-introspect")]
 use spur_notebook::mcp::tools::list_datasources;
-use spur_notebook::mcp::{
-    bridge::{
-        AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester, TauriBridgeRequester,
+use spur_notebook::{
+    dag::{notebook_port_root, PortStore},
+    mcp::{
+        bridge::{
+            AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester, TauriBridgeRequester,
+        },
+        tools::{kernel_info, read_cell, run_cell, save, snapshot, start_kernel, stop_kernel},
+        DaemonControlRequest, DaemonWindowOps, NotebookDaemonControl, ServerDeps,
     },
-    tools::{kernel_info, read_cell, run_cell, save, snapshot, stop_kernel},
-    DaemonControlRequest, DaemonWindowOps, NotebookDaemonControl, ServerDeps,
 };
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -319,6 +328,14 @@ struct TestKernelSpec {
     _temp_dir: tempfile::TempDir,
 }
 
+struct TestDenoKernelSpec {
+    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+    _home: EnvVarGuard,
+    _runtime_dir: EnvVarGuard,
+    _deno_path: EnvVarGuard,
+    _temp_dir: tempfile::TempDir,
+}
+
 async fn command_succeeds(command: &str, args: &[&str]) -> bool {
     let Ok(Ok(status)) = timeout(
         Duration::from_secs(120),
@@ -333,6 +350,30 @@ async fn command_succeeds(command: &str, args: &[&str]) -> bool {
         return false;
     };
     status.success()
+}
+
+fn deno_binary_for_test() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("DENO_PATH").map(PathBuf::from) {
+        if path.is_absolute() && path.exists() {
+            return Some(path);
+        }
+    }
+
+    let paths = std::env::var_os("PATH")?;
+    let names = if cfg!(windows) {
+        vec!["deno.exe", "deno"]
+    } else {
+        vec!["deno"]
+    };
+    for dir in std::env::split_paths(&paths) {
+        for name in &names {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 async fn python_modules_available(python: &str, modules: &[&str]) -> bool {
@@ -391,6 +432,48 @@ async fn install_python_packages_into(python: &str, target: &Path, packages: &[&
 
 async fn install_test_python3_kernelspec() -> Option<TestKernelSpec> {
     install_test_python3_kernelspec_with(&[]).await
+}
+
+async fn install_test_deno_kernelspec() -> Option<TestDenoKernelSpec> {
+    let Some(deno) = deno_binary_for_test() else {
+        eprintln!("skipping Deno port contract test: deno binary is not available");
+        return None;
+    };
+    let deno_string = deno.to_string_lossy().into_owned();
+    if !command_succeeds(&deno_string, &["--version"]).await {
+        eprintln!(
+            "skipping Deno port contract test: deno binary did not run: {}",
+            deno.display()
+        );
+        return None;
+    }
+
+    let env_lock = TEST_KERNELSPEC_ENV.lock().await;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-deno-kernelspec-")
+        .tempdir()
+        .expect("temp dir");
+    let home = temp_dir.path().join("home");
+    let runtime_dir = temp_dir.path().join("runtime");
+    tokio::fs::create_dir_all(&home).await.expect("home dir");
+    tokio::fs::create_dir_all(&runtime_dir)
+        .await
+        .expect("runtime dir");
+
+    let home = EnvVarGuard::set("HOME", home.as_os_str());
+    let runtime_dir = EnvVarGuard::set("JUPYTER_RUNTIME_DIR", runtime_dir.as_os_str());
+    let deno_path = EnvVarGuard::set("DENO_PATH", deno.as_os_str());
+    jute::kernel_provision::ensure_deno_kernelspec()
+        .await
+        .expect("deno kernelspec provisions");
+
+    Some(TestDenoKernelSpec {
+        _env_lock: env_lock,
+        _home: home,
+        _runtime_dir: runtime_dir,
+        _deno_path: deno_path,
+        _temp_dir: temp_dir,
+    })
 }
 
 async fn install_test_python3_kernelspec_with(extra_packages: &[&str]) -> Option<TestKernelSpec> {
@@ -472,6 +555,132 @@ async fn install_test_python3_kernelspec_with(extra_packages: &[&str]) -> Option
         _jupyter_path: jupyter_path,
         _temp_dir: temp_dir,
     })
+}
+
+fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
+    NotebookRoot {
+        metadata: NotebookMetadata {
+            kernelspec: None,
+            language_info: None,
+            orig_nbformat: None,
+            title: None,
+            authors: None,
+            jute_deck: None,
+            other: Default::default(),
+        },
+        nbformat_minor: 5,
+        nbformat: 4,
+        cells: ids
+            .iter()
+            .map(|id| {
+                Cell::Code(CodeCell {
+                    id: Some((*id).to_string()),
+                    metadata: CellMetadata {
+                        spur: Some(SpurCellMetadata {
+                            version: 1,
+                            last_edited_by: None,
+                            datasource_setup: None,
+                            dag: None,
+                        }),
+                        jute_deck: None,
+                        other: Default::default(),
+                    },
+                    source: MultilineString::Single(String::new()),
+                    execution_count: None,
+                    outputs: Vec::new(),
+                })
+            })
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn deno_write_port_is_readable_from_deno_and_rust() {
+    let Some(_kernelspec) = install_test_deno_kernelspec().await else {
+        return;
+    };
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-deno-port-contract-")
+        .tempdir()
+        .expect("temp dir");
+    let notebook_path = temp_dir.path().join("deno-port.ipynb");
+    let notebook_path_string = notebook_path.to_string_lossy().into_owned();
+    let slot_id = notebook_slot_id(&notebook_path_string);
+    let state = Arc::new(State::new());
+    state.get_notebook().load(
+        notebook_path.clone(),
+        notebook_with_code_cells(&["deno-put", "deno-get"]),
+    );
+    let deps = deps_with_state(state);
+
+    let started = structured(
+        start_kernel::call(
+            &deps,
+            json!({
+                "spec_name": "deno",
+                "slot_id": slot_id,
+            }),
+        )
+        .await
+        .expect("deno kernel starts"),
+    );
+    assert_eq!(started["slot_id"], slot_id);
+
+    let put = structured(
+        run_cell::call(
+            &deps,
+            json!({
+                "cell_id": "deno-put",
+                "kernel_id": slot_id,
+                "code": "await spur.put('t', [{ id: 1 }, { id: 2 }]);",
+            }),
+        )
+        .await
+        .expect("deno put cell runs"),
+    );
+    assert_eq!(put["status"], "ok", "put outputs={:?}", put["outputs"]);
+
+    let get = structured(
+        run_cell::call(
+            &deps,
+            json!({
+                "cell_id": "deno-get",
+                "kernel_id": slot_id,
+                "code": concat!(
+                    "const table = spur.get('t');\n",
+                    "if (table.numRows !== 2) {\n",
+                    "  throw new Error(`expected 2 rows, got ${table.numRows}`);\n",
+                    "}\n",
+                    "table"
+                ),
+            }),
+        )
+        .await
+        .expect("deno get cell runs"),
+    );
+    assert_eq!(get["status"], "ok", "get outputs={:?}", get["outputs"]);
+
+    let root = notebook_port_root(&notebook_path);
+    let store = PortStore::open_read_only_at(root).expect("port store opens read-only");
+    let entry_schema = store
+        .manifest()
+        .get("t")
+        .expect("port manifest contains t")
+        .schema
+        .clone();
+    let read = store.get("t").expect("rust reads deno-written port");
+    let row_count = read
+        .batches
+        .iter()
+        .map(arrow_array::RecordBatch::num_rows)
+        .sum::<usize>();
+
+    assert_eq!(row_count, 2);
+    assert_eq!(entry_schema, read.schema.as_ref().clone());
+    assert_eq!(read.schema.fields().len(), 1);
+    assert_eq!(read.schema.field(0).name(), "id");
+
+    let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
 }
 
 #[tokio::test]
