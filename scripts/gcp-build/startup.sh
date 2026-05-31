@@ -90,6 +90,25 @@ if ! command -v duckdb >/dev/null 2>&1; then
     rm -f /tmp/duckdb_cli.zip /tmp/duckdb
 fi
 
+# Deno (system-wide). The spur-notebook Deno Jupyter kernel provisions a
+# kernelspec whose argv is `deno jupyter --kernel --conn {connection_file}`
+# (crates/spur-notebook/.../kernel_provision.rs). Without `deno` on PATH the
+# kernel-provisioning + deno-kernel integration tests silently skip on the VM
+# (deno_binary_for_test() returns None). Pinned for reproducible reprovisions;
+# installed to /usr/local/bin so every OS Login user — and find_binary_on_path —
+# resolves it.
+DENO_VERSION=v2.8.1
+INSTALLED_DENO=$(deno --version 2>/dev/null | awk 'NR==1 {print "v"$2}' || echo "")
+if [[ "$INSTALLED_DENO" != "$DENO_VERSION" ]]; then
+    echo "Installing Deno ${DENO_VERSION}..."
+    command -v unzip >/dev/null 2>&1 || apt-get install -y --no-install-recommends unzip
+    curl -fsSL "https://github.com/denoland/deno/releases/download/${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
+        -o /tmp/deno.zip
+    unzip -o /tmp/deno.zip -d /tmp
+    install -m 0755 /tmp/deno /usr/local/bin/deno
+    rm -f /tmp/deno.zip /tmp/deno
+fi
+
 # Drop a profile.d snippet so every login shell sees the right env.
 # Note: CARGO_TARGET_DIR and SCCACHE_BASEDIRS are NOT set here — build.sh sets
 # them per-invocation so each worktree gets an isolated target/ and so sccache
