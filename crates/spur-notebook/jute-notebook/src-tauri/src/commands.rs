@@ -1577,7 +1577,7 @@ mod tests {
         );
 
         assert!(wrapped.contains("globalThis.spur"));
-        assert!(wrapped.contains("npm:apache-arrow"));
+        assert!(wrapped.contains("npm:apache-arrow@21.1.0"));
         assert!(wrapped.ends_with("await spur.put('sales', [{ id: 1 }]);"));
     }
 

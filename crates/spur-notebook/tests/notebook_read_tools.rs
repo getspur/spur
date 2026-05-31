@@ -644,7 +644,7 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
                     "  Utf8,\n",
                     "  tableFromArrays,\n",
                     "  vectorFromArray,\n",
-                    "} = await import('npm:apache-arrow');\n",
+                    "} = await import('npm:apache-arrow@21.1.0');\n",
                     "const table = tableFromArrays({\n",
                     "  id: vectorFromArray([1, 2], new Int32()),\n",
                     "  occurred_at: vectorFromArray([\n",

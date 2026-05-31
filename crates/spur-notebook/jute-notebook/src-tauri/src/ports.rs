@@ -293,7 +293,7 @@ pub fn javascript_bootstrap(notebook_root: impl AsRef<Path>) -> String {
 
     r#"
 // --- SPUR port helper bootstrap ---
-const _spurArrow = await import("npm:apache-arrow");
+const _spurArrow = await import("npm:apache-arrow@21.1.0");
 const {
   RecordBatch,
   RecordBatchFileWriter,
@@ -781,7 +781,7 @@ mod tests {
             serde_json::to_string(&root.join("ports").display().to_string()).unwrap();
 
         assert!(wrapped.contains("globalThis.spur"));
-        assert!(wrapped.contains("npm:apache-arrow"));
+        assert!(wrapped.contains("npm:apache-arrow@21.1.0"));
         assert!(wrapped.contains(PORT_MIME));
         assert!(wrapped.contains(&root_literal));
         assert!(wrapped.contains(&ports_literal));
