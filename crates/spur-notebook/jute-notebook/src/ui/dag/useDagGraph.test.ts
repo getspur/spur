@@ -80,6 +80,59 @@ describe("buildDagGraph", () => {
     ).toEqual([{ port: "root", version: 3 }]);
   });
 
+  test("derives diamond edges when legacy metadata omits empty arrays", () => {
+    const graph = buildDagGraph(["root", "left", "right", "join"], {
+      root: cell(
+        "root = load()",
+        {
+          produces: [{ port: "root", repr: "dataframe" }],
+        } as NonNullable<NotebookCellState["dagMetadata"]>,
+        3,
+      ),
+      left: cell(
+        "left = root.filter(kind='left')",
+        {
+          produces: [{ port: "left", repr: "dataframe" }],
+          consumes: ["root"],
+        },
+        4,
+      ),
+      right: cell(
+        "right = root.filter(kind='right')",
+        {
+          produces: [{ port: "right", repr: "dataframe" }],
+          consumes: ["root"],
+        },
+        5,
+      ),
+      join: cell(
+        "joined = left.merge(right)",
+        {
+          consumes: ["left", "right"],
+        } as NonNullable<NotebookCellState["dagMetadata"]>,
+        6,
+      ),
+    });
+
+    expect(graph.nodes.map((node) => node.id)).toEqual([
+      "root",
+      "left",
+      "right",
+      "join",
+    ]);
+    expect(
+      graph.edges.map((edge) => [edge.source, edge.target, edge.port]),
+    ).toEqual([
+      ["left", "join", "left"],
+      ["right", "join", "right"],
+      ["root", "left", "root"],
+      ["root", "right", "root"],
+    ]);
+    expect(
+      graph.nodes.find((node) => node.id === "join")?.data.produces,
+    ).toEqual([]);
+  });
+
   test("marks stale edges from live dag status run-input versions", () => {
     const graph = buildDagGraph(
       ["root", "consumer"],

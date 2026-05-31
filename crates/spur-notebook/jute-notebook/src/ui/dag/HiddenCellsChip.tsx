@@ -67,8 +67,8 @@ function isDagCell(cell: NotebookCellState): boolean {
   const dagMetadata = cell.dagMetadata;
   return Boolean(
     dagMetadata &&
-      (dagMetadata.produces.length > 0 ||
-        dagMetadata.consumes.length > 0 ||
+      ((dagMetadata.produces?.length ?? 0) > 0 ||
+        (dagMetadata.consumes?.length ?? 0) > 0 ||
         dagMetadata.source),
   );
 }

@@ -245,11 +245,11 @@ pub struct SpurCellMetadata {
 #[ts(export)]
 pub struct CellDagMetadata {
     /// Ports this cell produces.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub produces: Vec<PortSpec>,
 
     /// Ports this cell consumes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub consumes: Vec<String>,
 
     /// Source port that feeds this cell.
