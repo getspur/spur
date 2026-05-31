@@ -25,6 +25,80 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("Notebook kernel startup", () => {
+  test("starts the Deno kernel from notebook kernelspec metadata", async () => {
+    const cellId = "deno-cell";
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "start_kernel") {
+        expect(args).toEqual({ specName: "deno" });
+        return "kernel-deno";
+      }
+      if (command === "kernel_slot_info") {
+        expect(args).toEqual({ kernelId: "kernel-deno" });
+        return {
+          kernel_id: "kernel-deno",
+          spec_name: "deno",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook({
+      ...notebookRoot(cellId, "console.log('hello')"),
+      metadata: {
+        kernelspec: {
+          name: "deno",
+          display_name: "Deno",
+        },
+      },
+    });
+    await notebook.kernelStartPromise;
+
+    expect(invokeMock).toHaveBeenCalledWith("start_kernel", {
+      specName: "deno",
+    });
+    expect(notebook.store.getState().viewState.kernelSpecName).toBe("deno");
+  });
+
+  test("defaults to the Python kernel when notebook kernelspec metadata is absent", async () => {
+    const cellId = "python-cell";
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "start_kernel") {
+        expect(args).toEqual({ specName: "python3" });
+        return "kernel-python";
+      }
+      if (command === "kernel_slot_info") {
+        expect(args).toEqual({ kernelId: "kernel-python" });
+        return {
+          kernel_id: "kernel-python",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook(notebookRoot(cellId, "answer = 42"));
+    await notebook.kernelStartPromise;
+
+    expect(invokeMock).toHaveBeenCalledWith("start_kernel", {
+      specName: "python3",
+    });
+    expect(notebook.store.getState().viewState.kernelSpecName).toBe("python3");
+  });
+});
+
 describe("reconcileNotebookDelta", () => {
   test("upserts the inline cell from a CellWritten delta without refetching", async () => {
     const cellId = "cell-1";
