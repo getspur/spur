@@ -20,6 +20,7 @@ import { useNotebook } from "@/stores/notebook";
 
 import DagInspector from "./DagInspector";
 import DagNode from "./DagNode";
+import HiddenCellsChip from "./HiddenCellsChip";
 import { loadNotebookDagStatus, runNotebookCascade } from "./dagStatus";
 import { type PositionedDagGraphNode, layoutDagGraph } from "./layout";
 import { type DagGraph, type DagNodeData, buildDagGraph } from "./useDagGraph";
@@ -34,6 +35,7 @@ export default function DagView() {
   const notebook = useNotebook();
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   const [isRunningStale, setIsRunningStale] = useState(false);
+  const [runError, setRunError] = useState<string | undefined>();
   const [cellIds, cells] = useStore(
     notebook.store,
     useShallow((state) => [state.serverState.cellIds, state.serverState.cells]),
@@ -65,8 +67,10 @@ export default function DagView() {
   const staleNodeIds = useMemo(() => staleNodes(graph), [graph]);
   const staleRootIds = useMemo(() => staleRoots(graph), [graph]);
   const staleCount = staleNodeIds.length;
+  const dagNodeCount = nodes.length;
 
   useEffect(() => {
+    if (dagNodeCount === 0) return;
     let cancelled = false;
 
     void loadNotebookDagStatus()
@@ -81,7 +85,7 @@ export default function DagView() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [dagNodeCount]);
 
   const runStale = useCallback(async () => {
     if (staleRootIds.length === 0) return;
@@ -90,6 +94,8 @@ export default function DagView() {
       for (const cellId of staleRootIds) {
         await runNotebookCascade(cellId);
       }
+    } catch (error) {
+      setRunError(errorMessage(error));
     } finally {
       setIsRunningStale(false);
     }
@@ -97,30 +103,44 @@ export default function DagView() {
 
   if (nodes.length === 0) {
     return (
-      <section className="mx-auto mt-8 w-full max-w-4xl px-6 text-sm text-gray-500">
-        No DAG cells found.
+      <section className="mx-auto mt-8 w-full max-w-4xl px-6">
+        <div className="mb-4 flex justify-end">
+          <HiddenCellsChip cellIds={cellIds} cells={cells} />
+        </div>
+        <div className="rounded border border-dashed border-gray-300 bg-white px-6 py-8 text-sm">
+          <h1 className="text-base font-semibold text-gray-950">
+            No DAG cells yet
+          </h1>
+          <p className="mt-2 max-w-xl text-gray-500">
+            Add produces or consumes metadata to a code cell and it will appear
+            here as part of the notebook data flow.
+          </p>
+        </div>
       </section>
     );
   }
 
   return (
     <section className="h-[calc(100vh-9rem)] min-h-[520px] w-full px-4 py-4">
-      <div className="flex h-full flex-col overflow-hidden rounded border border-gray-200 bg-gray-50">
+      <div className="relative flex h-full flex-col overflow-hidden rounded border border-gray-200 bg-gray-50">
         <header className="flex shrink-0 items-center justify-between border-b border-gray-200 bg-white px-4 py-3">
           <div>
             <h1 className="text-sm font-semibold text-gray-950">Data Flow</h1>
             <p className="text-xs text-gray-500">{nodes.length} DAG nodes</p>
           </div>
-          <button
-            type="button"
-            className="inline-flex items-center rounded border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-800 transition-colors hover:border-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={staleCount === 0 || isRunningStale}
-            onClick={() => {
-              void runStale();
-            }}
-          >
-            {isRunningStale ? "Running stale" : `Run stale (${staleCount})`}
-          </button>
+          <div className="flex items-center gap-2">
+            <HiddenCellsChip cellIds={cellIds} cells={cells} />
+            <button
+              type="button"
+              className="inline-flex items-center rounded border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-800 transition-colors hover:border-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={staleCount === 0 || isRunningStale}
+              onClick={() => {
+                void runStale();
+              }}
+            >
+              {isRunningStale ? "Running stale" : `Run stale (${staleCount})`}
+            </button>
+          </div>
         </header>
         <div className="flex min-h-0 flex-1">
           <ReactFlow
@@ -140,10 +160,19 @@ export default function DagView() {
           </ReactFlow>
           <DagInspector
             node={selectedNode}
+            onRunError={(error) => setRunError(errorMessage(error))}
             portManifest={portManifest}
             status={selectedNode ? dagStatus[selectedNode.id] : undefined}
           />
         </div>
+        {runError ? (
+          <div
+            className="absolute bottom-6 right-6 max-w-sm rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 shadow-lg"
+            role="alert"
+          >
+            {runError}
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -187,6 +216,7 @@ function toFlowEdges(
     target: edge.target,
     label: edge.port,
     type: "smoothstep",
+    className: edge.stale ? "dag-edge-stale" : undefined,
     markerEnd: {
       type: MarkerType.ArrowClosed,
     },
@@ -259,4 +289,8 @@ function topologicalOrder(graph: DagGraph): string[] {
   return ordered.length === ids.length
     ? ordered
     : [...ordered, ...ids.filter((id) => !ordered.includes(id))];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "DAG run action failed";
 }

@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes dag-stale-edge-dash {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+
+.react-flow__edge.dag-edge-stale .react-flow__edge-path {
+  stroke-dasharray: 7 5;
+  animation: dag-stale-edge-dash 900ms linear infinite;
+}
+
 @layer base {
   body {
     /* Mimic native apps, which do not have selectable text by default. */
