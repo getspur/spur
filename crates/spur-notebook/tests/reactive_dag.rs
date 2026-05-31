@@ -343,7 +343,7 @@ fn cell_stdout(root: &NotebookRoot, cell_id: &str) -> String {
 
 #[tokio::test]
 async fn push_source_reruns_only_downstream_cells_in_dependency_order() {
-    let (deps, mut rx, temp, _path) = harness(notebook(vec![
+    let (deps, mut rx, temp, path) = harness(notebook(vec![
         code_cell(
             "source",
             "source()",
@@ -370,7 +370,7 @@ async fn push_source_reruns_only_downstream_cells_in_dependency_order() {
     );
     assert_eq!(body["accepted"], true);
     let push = rx.recv().await.expect("source push queued");
-    let mut engine = ReactiveEngine::new(store, runner.clone(), temp.path().join("ports"));
+    let mut engine = ReactiveEngine::new(store, runner.clone(), path, temp.path().join("ports"));
 
     engine
         .process_source_push(push)
@@ -387,7 +387,7 @@ async fn push_source_reruns_only_downstream_cells_in_dependency_order() {
 
 #[tokio::test]
 async fn run_cell_cascade_reruns_target_then_downstream_cells() {
-    let (deps, _rx, temp, _path) = harness(notebook(vec![
+    let (deps, _rx, temp, path) = harness(notebook(vec![
         code_cell("source", "source()", 1, dag(&["raw"], &[], None)),
         code_cell("left", "left()", 1, dag(&["left"], &["raw"], None)),
         code_cell("join", "join()", 1, dag(&[], &["left"], None)),
@@ -405,7 +405,7 @@ async fn run_cell_cascade_reruns_target_then_downstream_cells() {
     let mut ports = PortStore::open_at(&port_root).expect("open ports");
     ports.put("raw", &ipc_bytes()).expect("seed raw");
     ports.put("left", &ipc_bytes()).expect("seed left");
-    let mut engine = ReactiveEngine::new(store, runner.clone(), port_root.clone());
+    let mut engine = ReactiveEngine::new(store, runner.clone(), path, port_root.clone());
 
     let report = engine
         .run_cell_and_cascade("source")
@@ -433,7 +433,7 @@ async fn run_cell_cascade_reruns_target_then_downstream_cells() {
 
 #[tokio::test]
 async fn run_cell_cascade_marks_descendants_upstream_failed() {
-    let (deps, _rx, temp, _path) = harness(notebook(vec![
+    let (deps, _rx, temp, path) = harness(notebook(vec![
         code_cell("source", "source()", 1, dag(&["raw"], &[], None)),
         code_cell("left", "left()", 1, dag(&["left"], &["raw"], None)),
         code_cell("join", "join()", 1, dag(&[], &["left"], None)),
@@ -446,7 +446,7 @@ async fn run_cell_cascade_marks_descendants_upstream_failed() {
     let mut ports = PortStore::open_at(&port_root).expect("open ports");
     ports.put("raw", &ipc_bytes()).expect("seed raw");
     ports.put("left", &ipc_bytes()).expect("seed left");
-    let mut engine = ReactiveEngine::new(store, runner.clone(), port_root);
+    let mut engine = ReactiveEngine::new(store, runner.clone(), path, port_root);
 
     let report = engine
         .run_cell_and_cascade("source")
@@ -543,7 +543,7 @@ async fn headless_source_push_autosaves_new_outputs_to_disk() {
         .await
         .expect("push source accepted");
     let push = rx.recv().await.expect("source push queued");
-    let mut engine = ReactiveEngine::new(store, runner, temp.path().join("ports"));
+    let mut engine = ReactiveEngine::new(store, runner, path.clone(), temp.path().join("ports"));
 
     engine
         .process_source_push(push)
@@ -560,7 +560,7 @@ async fn headless_source_push_autosaves_new_outputs_to_disk() {
 
 #[tokio::test]
 async fn mid_run_human_edit_causes_stale_retry_without_clobbering_cell() {
-    let (deps, mut rx, temp, _path) = harness(notebook(vec![code_cell(
+    let (deps, mut rx, temp, path) = harness(notebook(vec![code_cell(
         "source",
         "old_source()",
         1,
@@ -580,7 +580,12 @@ async fn mid_run_human_edit_causes_stale_retry_without_clobbering_cell() {
         .await
         .expect("push source accepted");
     let push = rx.recv().await.expect("source push queued");
-    let mut engine = ReactiveEngine::new(store.clone(), runner.clone(), temp.path().join("ports"));
+    let mut engine = ReactiveEngine::new(
+        store.clone(),
+        runner.clone(),
+        path,
+        temp.path().join("ports"),
+    );
 
     engine
         .process_source_push(push)

@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -204,6 +204,7 @@ where
 {
     store: Arc<NotebookStore>,
     runner: R,
+    kernel_id: String,
     port_root: PathBuf,
     graph: Option<NotebookDag>,
 }
@@ -212,10 +213,18 @@ impl<R> ReactiveEngine<R>
 where
     R: CellRunner,
 {
-    pub fn new(store: Arc<NotebookStore>, runner: R, port_root: PathBuf) -> Self {
+    pub fn new(
+        store: Arc<NotebookStore>,
+        runner: R,
+        notebook_path: impl AsRef<Path>,
+        port_root: PathBuf,
+    ) -> Self {
+        let kernel_id =
+            jute::state::notebook_slot_id(notebook_path.as_ref().to_string_lossy().as_ref());
         Self {
             store,
             runner,
+            kernel_id,
             port_root,
             graph: None,
         }
@@ -461,7 +470,7 @@ where
             })?;
         Ok(CellRunRequest {
             cell_id: cell_id.to_owned(),
-            kernel_id: None,
+            kernel_id: Some(self.kernel_id.clone()),
             code: cell.source,
             expected_version,
         })
@@ -622,10 +631,10 @@ pub fn spawn_reactive_engine(
                         in_flight += 1;
                         let store = Arc::clone(&store);
                         let runner = runner.clone();
-                        let port_root = notebook_port_root(path);
+                        let port_root = notebook_port_root(&path);
                         let complete_tx = complete_tx.clone();
                         tokio::spawn(async move {
-                            let mut engine = ReactiveEngine::new(store, runner, port_root);
+                            let mut engine = ReactiveEngine::new(store, runner, &path, port_root);
                             if let Err(error) = engine.process_source_push(push).await {
                                 warn!(%error, "reactive source cascade failed");
                             }
@@ -820,8 +829,14 @@ mod tests {
         },
         commands::SaveCoordinator,
         notebook_store::NotebookStore,
+        state::State,
     };
     use tempfile::TempDir;
+
+    use crate::mcp::{
+        bridge::{AgentBridge, TauriBridgeRequester},
+        ServerDeps,
+    };
 
     #[derive(Clone, Default)]
     struct FakeRunner {
@@ -900,6 +915,7 @@ mod tests {
         let mut engine = ReactiveEngine::new(
             Arc::clone(&store),
             runner.clone(),
+            temp.path().join("reactive.ipynb"),
             temp.path().to_path_buf(),
         );
 
@@ -952,6 +968,7 @@ mod tests {
         let mut engine = ReactiveEngine::new(
             Arc::clone(&store),
             runner.clone(),
+            temp.path().join("reactive.ipynb"),
             temp.path().to_path_buf(),
         );
 
@@ -996,6 +1013,7 @@ mod tests {
         let mut engine = ReactiveEngine::new(
             Arc::clone(&store),
             runner.clone(),
+            temp.path().join("reactive.ipynb"),
             temp.path().to_path_buf(),
         );
 
@@ -1039,6 +1057,7 @@ mod tests {
         let mut engine = ReactiveEngine::new(
             Arc::clone(&store),
             runner.clone(),
+            temp.path().join("reactive.ipynb"),
             temp.path().to_path_buf(),
         );
 
@@ -1078,6 +1097,7 @@ mod tests {
         let mut engine = ReactiveEngine::new(
             Arc::clone(&store),
             runner.clone(),
+            temp.path().join("reactive.ipynb"),
             temp.path().to_path_buf(),
         );
 
@@ -1108,6 +1128,68 @@ mod tests {
                 { "id": "c", "state": "stale", "execution_count": null },
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn run_cell_request_uses_notebook_path_slot_id() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let expected_slot = jute::state::notebook_slot_id(notebook_path.to_string_lossy().as_ref());
+        let store = store_with_notebook(notebook(vec![cell(
+            "a",
+            "a = 1",
+            1,
+            dag(vec![], vec![], None),
+        )]));
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            notebook_path,
+            temp.path().join("ports"),
+        );
+
+        engine.run_cell("a").await.expect("run cell");
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].kernel_id, Some(expected_slot));
+    }
+
+    #[tokio::test]
+    async fn daemonless_command_runner_gets_explicit_kernel_id_before_dispatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let root = notebook(vec![cell("a", "a = 1", 1, dag(vec![], vec![], None))]);
+        let state = Arc::new(State::new());
+        state.get_notebook().load(notebook_path.clone(), root);
+        let deps = ServerDeps {
+            bridge: Arc::new(TauriBridgeRequester::without_app(Arc::new(
+                AgentBridge::new(),
+            ))),
+            state: Some(Arc::clone(&state)),
+            app: None,
+            daemon: None,
+        };
+        let runner = RunCellCommandRunner::new(Arc::new(deps));
+        let mut engine = ReactiveEngine::new(
+            state.get_notebook(),
+            runner,
+            notebook_path,
+            temp.path().join("ports"),
+        );
+
+        let error = engine
+            .run_cell("a")
+            .await
+            .expect_err("empty test slot cannot dispatch a run");
+        let message = error.to_string();
+
+        assert!(
+            !message.contains("requires kernel_id when no notebook is open"),
+            "{message}"
+        );
+        assert!(message.contains("failed to dispatch"), "{message}");
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub async fn notebook_run_cascade(
         daemon: None,
     };
     let runner = RunCellCommandRunner::new(Arc::new(deps));
-    let mut engine = ReactiveEngine::new(notebook, runner, notebook_port_root(path));
+    let mut engine = ReactiveEngine::new(notebook, runner, &path, notebook_port_root(&path));
     let report = engine
         .run_cell_and_cascade(&cell_id)
         .await
@@ -80,7 +80,7 @@ pub async fn notebook_run_cell(
         daemon: None,
     };
     let runner = RunCellCommandRunner::new(Arc::new(deps));
-    let mut engine = ReactiveEngine::new(notebook, runner, notebook_port_root(path));
+    let mut engine = ReactiveEngine::new(notebook, runner, &path, notebook_port_root(&path));
     let report = engine.run_cell(&cell_id).await.map_err(|error| {
         jute::Error::NotebookDaemon(format!("notebook_run_cell failed: {error}"))
     })?;
