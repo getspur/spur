@@ -65,16 +65,25 @@ pub struct ServerDeps {
 }
 
 impl ServerDeps {
+    pub fn new(
+        bridge: Arc<dyn BridgeRequester>,
+        state: Option<Arc<State>>,
+        app: Option<tauri::AppHandle>,
+        daemon: Option<NotebookDaemonControl>,
+    ) -> Self {
+        Self {
+            bridge,
+            state,
+            app,
+            daemon,
+        }
+    }
+
     /// Build a `ServerDeps` carrying only a bridge — used by the standalone
     /// `start_server` path and by tool-level unit tests that exercise the
     /// bridge contract directly.
     pub fn from_bridge(bridge: Arc<dyn BridgeRequester>) -> Self {
-        Self {
-            bridge,
-            state: None,
-            app: None,
-            daemon: None,
-        }
+        Self::new(bridge, None, None, None)
     }
 }
 
@@ -1924,12 +1933,12 @@ pub async fn start_daemon_server(
         windows,
         None,
     );
-    let deps = Arc::new(ServerDeps {
-        bridge: requester,
-        state: Some(state),
-        app: Some(app_for_deps),
-        daemon: Some(control.clone()),
-    });
+    let deps = Arc::new(ServerDeps::new(
+        requester,
+        Some(state),
+        Some(app_for_deps),
+        Some(control.clone()),
+    ));
     let reactive_engine = match crate::dag::engine::spawn_reactive_engine(
         Arc::clone(&deps),
         crate::dag::engine::ReactiveEngineConfig::default(),

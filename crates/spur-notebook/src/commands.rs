@@ -4,13 +4,8 @@ use jute::backend::notebook::{Cell, CellDagMetadata, NotebookRoot};
 use serde_json::{json, Value};
 
 use crate::{
-    dag::{
-        engine::RunCellCommandRunner, notebook_port_root, NotebookDag, PortStore, ReactiveEngine,
-    },
-    mcp::{
-        bridge::{AgentBridge, TauriBridgeRequester},
-        ServerDeps,
-    },
+    dag::{notebook_port_root, notebook_run_context, NotebookDag, PortStore},
+    mcp::bridge::{AgentBridge, TauriBridgeRequester},
 };
 
 /// Return the active notebook DAG snapshot for the Tauri frontend.
@@ -32,17 +27,17 @@ pub async fn notebook_run_cascade(
     let path = notebook.path().ok_or_else(|| {
         jute::Error::NotebookDaemon("notebook_run_cascade requires an open notebook".to_string())
     })?;
-    let deps = ServerDeps {
-        bridge: Arc::new(TauriBridgeRequester::without_app(Arc::clone(
+    let mut context = notebook_run_context(
+        &path,
+        Arc::clone(state.inner()),
+        Arc::new(TauriBridgeRequester::without_app(Arc::clone(
             bridge.inner(),
         ))),
-        state: Some(Arc::clone(state.inner())),
-        app: None,
-        daemon: None,
-    };
-    let runner = RunCellCommandRunner::new(Arc::new(deps));
-    let mut engine = ReactiveEngine::new(notebook, runner, &path, notebook_port_root(&path));
-    let report = engine
+        None,
+        None,
+    );
+    let report = context
+        .engine
         .run_cell_and_cascade(&cell_id)
         .await
         .map_err(|error| {
@@ -71,17 +66,16 @@ pub async fn notebook_run_cell(
     let path = notebook.path().ok_or_else(|| {
         jute::Error::NotebookDaemon("notebook_run_cell requires an open notebook".to_string())
     })?;
-    let deps = ServerDeps {
-        bridge: Arc::new(TauriBridgeRequester::without_app(Arc::clone(
+    let mut context = notebook_run_context(
+        &path,
+        Arc::clone(state.inner()),
+        Arc::new(TauriBridgeRequester::without_app(Arc::clone(
             bridge.inner(),
         ))),
-        state: Some(Arc::clone(state.inner())),
-        app: None,
-        daemon: None,
-    };
-    let runner = RunCellCommandRunner::new(Arc::new(deps));
-    let mut engine = ReactiveEngine::new(notebook, runner, &path, notebook_port_root(&path));
-    let report = engine.run_cell(&cell_id).await.map_err(|error| {
+        None,
+        None,
+    );
+    let report = context.engine.run_cell(&cell_id).await.map_err(|error| {
         jute::Error::NotebookDaemon(format!("notebook_run_cell failed: {error}"))
     })?;
 
@@ -196,7 +190,12 @@ fn cell_execution_count(cell: &Cell) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
@@ -206,7 +205,61 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    use crate::{
+        dag::{
+            engine::{CellRunOutcome, CellRunRequest, CellRunStatus, CellRunner, EngineError},
+            notebook_run_context_with_runner,
+        },
+        mcp::bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
+    };
+
     use super::*;
+
+    #[derive(Default)]
+    struct TestBridge;
+
+    impl BridgeRequester for TestBridge {
+        fn listener_registered(&self) -> bool {
+            true
+        }
+
+        fn window_alive(&self) -> bool {
+            true
+        }
+
+        fn notebook_open(&self) -> bool {
+            true
+        }
+
+        fn request<'a>(
+            &'a self,
+            _method: &'static str,
+            _params: Value,
+            _timeout: Duration,
+        ) -> BridgeRequestFuture<'a> {
+            Box::pin(async { Err(BridgeError::NotebookNotOpen) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingRunner {
+        requests: Arc<Mutex<Vec<CellRunRequest>>>,
+    }
+
+    impl CellRunner for RecordingRunner {
+        fn run_cell<'a>(
+            &'a self,
+            request: CellRunRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<CellRunOutcome, EngineError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.requests.lock().expect("requests").push(request);
+                Ok(CellRunOutcome {
+                    status: CellRunStatus::Succeeded,
+                })
+            })
+        }
+    }
 
     fn notebook(cells: Vec<Cell>) -> NotebookRoot {
         NotebookRoot {
@@ -301,5 +354,42 @@ mod tests {
             json!({ "producer": "producer", "consumer": "consumer", "port": "raw" })
         );
         assert_eq!(snapshot["port_manifest"]["raw"], 1);
+    }
+
+    #[tokio::test]
+    async fn command_run_context_resolves_kernel_with_daemon_none_and_dispatches() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("nb.ipynb");
+        let state = Arc::new(jute::state::State::new());
+        state.get_notebook().load(
+            &notebook_path,
+            notebook(vec![cell("producer", vec!["raw"], vec![], None)]),
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+
+        let mut context = notebook_run_context_with_runner(
+            &notebook_path,
+            Arc::clone(&state),
+            Arc::new(TestBridge),
+            None,
+            None,
+            {
+                let requests = Arc::clone(&requests);
+                move |_deps| RecordingRunner { requests }
+            },
+        );
+
+        assert!(context.deps.daemon.is_none());
+        context.engine.run_cell("producer").await.expect("run cell");
+
+        let requests = requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].cell_id, "producer");
+        assert_eq!(
+            requests[0].kernel_id,
+            Some(jute::state::notebook_slot_id(
+                notebook_path.to_string_lossy().as_ref()
+            ))
+        );
     }
 }
