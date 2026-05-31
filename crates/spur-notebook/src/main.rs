@@ -298,6 +298,11 @@ fn main() {
     let daemon_control_for_setup = Arc::clone(&daemon_control);
     #[cfg(target_os = "macos")]
     let daemon_control_for_run = Arc::clone(&daemon_control);
+    #[expect(
+        clippy::exit,
+        reason = "tauri::generate_context! expands through process::exit"
+    )]
+    let context = tauri::generate_context!();
 
     tauri::Builder::default()
         .manage(state_for_manage)
@@ -381,7 +386,7 @@ fn main() {
             Ok(())
         })
         .menu(jute::menu::setup_menu)
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while running tauri application")
         .run(
             #[allow(unused_variables)]

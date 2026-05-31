@@ -1,4 +1,4 @@
-use std::{future::Future, path::PathBuf, pin::Pin};
+use std::{env, future::Future, path::PathBuf, pin::Pin};
 
 use tauri::AppHandle;
 use tauri_plugin_shell::ShellExt;
@@ -10,6 +10,7 @@ use crate::{
 };
 
 static PYTHON3_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
+static DENO_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Ensure the bundled `python3` kernelspec is installed for this app.
 pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
@@ -22,6 +23,18 @@ pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     let runner = AppProvisionRunner { app: app.clone() };
 
     ensure_python3_kernelspec_in_dir(&spur_jupyter, &runner).await
+}
+
+/// Ensure the bundled `deno` kernelspec is installed for this app.
+pub async fn ensure_deno_kernelspec() -> Result<(), Error> {
+    let _guard = DENO_KERNELSPEC_LOCK.lock().await;
+    let spur_jupyter =
+        environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {
+            stage: "home_dir",
+            cause: "could not determine home directory".to_string(),
+        })?;
+
+    ensure_deno_kernelspec_in_dir(&spur_jupyter).await
 }
 
 trait ProvisionRunner: Sync {
@@ -55,6 +68,61 @@ impl ProvisionRunner for AppProvisionRunner {
         args: Vec<String>,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(run_python_process(python, args))
+    }
+}
+
+async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result<(), Error> {
+    let kernelspec = spur_jupyter
+        .join("kernels")
+        .join("deno")
+        .join("kernel.json");
+    if kernelspec_is_valid(&kernelspec).await {
+        return Ok(());
+    }
+
+    let deno = deno_binary_path()?;
+    let Some(parent) = kernelspec.parent() else {
+        return Err(Error::KernelProvisionFailed {
+            stage: "prepare_deno_kernelspec_dir",
+            cause: format!("{} has no parent directory", kernelspec.display()),
+        });
+    };
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| Error::KernelProvisionFailed {
+            stage: "prepare_deno_kernelspec_dir",
+            cause: error.to_string(),
+        })?;
+
+    let payload = serde_json::json!({
+        "argv": [
+            path_to_string(&deno, "deno_kernelspec_write")?,
+            "jupyter",
+            "--kernel",
+            "--conn",
+            "{connection_file}"
+        ],
+        "display_name": "Deno",
+        "language": "typescript"
+    });
+
+    tokio::fs::write(&kernelspec, payload.to_string())
+        .await
+        .map_err(|error| Error::KernelProvisionFailed {
+            stage: "deno_kernelspec_write",
+            cause: error.to_string(),
+        })?;
+
+    if kernelspec_is_valid(&kernelspec).await {
+        Ok(())
+    } else {
+        Err(Error::KernelProvisionFailed {
+            stage: "kernelspec_validate",
+            cause: format!(
+                "{} was not created with a valid deno argv",
+                kernelspec.display()
+            ),
+        })
     }
 }
 
@@ -271,6 +339,60 @@ fn venv_python_path(venv: &std::path::Path) -> PathBuf {
     }
 }
 
+fn deno_binary_path() -> Result<PathBuf, Error> {
+    if let Some(path) = env::var_os("DENO_PATH") {
+        return existing_absolute_binary(PathBuf::from(path), "deno_path");
+    }
+
+    find_binary_on_path("deno").ok_or_else(|| Error::KernelProvisionFailed {
+        stage: "deno_path",
+        cause: "could not resolve deno from PATH; set DENO_PATH to the deno binary".to_string(),
+    })
+}
+
+fn find_binary_on_path(binary: &str) -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    for dir in env::split_paths(&paths) {
+        for name in binary_path_names(binary) {
+            let candidate = dir.join(name);
+            if let Ok(candidate) = existing_absolute_binary(candidate, "deno_path") {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn binary_path_names(binary: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec![format!("{binary}.exe"), binary.to_string()]
+    } else {
+        vec![binary.to_string()]
+    }
+}
+
+fn existing_absolute_binary(path: PathBuf, stage: &'static str) -> Result<PathBuf, Error> {
+    let path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map_err(|error| Error::KernelProvisionFailed {
+                stage,
+                cause: error.to_string(),
+            })?
+            .join(path)
+    };
+
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(Error::KernelProvisionFailed {
+            stage,
+            cause: format!("{} does not exist", path.display()),
+        })
+    }
+}
+
 fn path_to_string(path: &std::path::Path, stage: &'static str) -> Result<String, Error> {
     path.to_str()
         .map(ToOwned::to_owned)
@@ -405,6 +527,48 @@ mod tests {
             .await
             .unwrap();
 
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_deno_kernelspec_writes_template_from_env_override() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let deno = root
+            .join("bin")
+            .join(if cfg!(windows) { "deno.exe" } else { "deno" });
+        tokio::fs::create_dir_all(deno.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&deno, b"").await.unwrap();
+
+        let previous_deno_path = std::env::var_os("DENO_PATH");
+        std::env::set_var("DENO_PATH", &deno);
+
+        ensure_deno_kernelspec_in_dir(&root).await.unwrap();
+
+        let kernelspec = root.join("kernels").join("deno").join("kernel.json");
+        let contents = tokio::fs::read(&kernelspec).await.unwrap();
+        let spec = serde_json::from_slice::<serde_json::Value>(&contents).unwrap();
+        assert_eq!(
+            spec,
+            serde_json::json!({
+                "argv": [
+                    deno.to_string_lossy(),
+                    "jupyter",
+                    "--kernel",
+                    "--conn",
+                    "{connection_file}"
+                ],
+                "display_name": "Deno",
+                "language": "typescript"
+            })
+        );
+        assert!(kernelspec_is_valid(&kernelspec).await);
+
+        match previous_deno_path {
+            Some(value) => std::env::set_var("DENO_PATH", value),
+            None => std::env::remove_var("DENO_PATH"),
+        }
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

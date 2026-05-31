@@ -1,6 +1,6 @@
 use jute::{
     backend::{commands::RunCellEvent, notebook::Cell},
-    commands::run_cell_events,
+    commands::{run_cell_events, spec_name_for_slot},
     state::State,
 };
 use rmcp::{
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tauri::Emitter;
 use tracing::warn;
 
-use crate::dag::{notebook_port_root, wrap_python_cell};
+use crate::dag::{notebook_port_root, wrap_js_cell, wrap_python_cell};
 use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.run_cell";
@@ -73,7 +73,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     }
     ensure_code_cell(state, &params.cell_id)?;
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
-    let code = wrap_python_cell(port_root_for_kernel_id(&kernel_id), &params.code);
+    let code = wrap_cell_for_kernel(state, &kernel_id, &params.code)?;
 
     let rx = run_cell_events(&kernel_id, &code, state)
         .await
@@ -206,6 +206,21 @@ fn port_root_for_kernel_id(kernel_id: &str) -> std::path::PathBuf {
     notebook_port_root(path)
 }
 
+fn wrap_cell_for_kernel(state: &State, kernel_id: &str, code: &str) -> Result<String, McpError> {
+    let root = port_root_for_kernel_id(kernel_id);
+    let spec_name = spec_name_for_slot(state, kernel_id).map_err(|error| {
+        McpError::internal_error(
+            "notebook.run_cell failed to resolve kernel spec",
+            Some(json!({ "error": error.to_string() })),
+        )
+    })?;
+    if spec_name == "deno" {
+        Ok(wrap_js_cell(root, code))
+    } else {
+        Ok(wrap_python_cell(root, code))
+    }
+}
+
 struct RunCellSummary {
     outputs: Vec<Value>,
     exec_count: Option<u32>,
@@ -282,7 +297,7 @@ mod tests {
             Cell, CellMetadata, CodeCell, MarkdownCell, MultilineString, NotebookMetadata,
             NotebookRoot, Output, OutputStream, SpurCellMetadata,
         },
-        state::State,
+        state::{KernelSlot, State},
     };
     use serde_json::Map;
 
@@ -377,6 +392,21 @@ mod tests {
 
         assert!(description.contains("blocks until the kernel emits Finished or Disconnect"));
         assert!(description.contains("Long-running cells will hold the MCP request open"));
+    }
+
+    #[test]
+    fn deno_kernel_uses_javascript_port_bootstrap() {
+        let state = State::new();
+        state
+            .kernels
+            .insert("kernel-1".to_string(), KernelSlot::new("deno".to_string()));
+
+        let wrapped =
+            wrap_cell_for_kernel(&state, "kernel-1", "spur.get('t')").expect("deno kernel wraps");
+
+        assert!(wrapped.contains("globalThis.spur"));
+        assert!(wrapped.contains("npm:apache-arrow"));
+        assert!(wrapped.ends_with("spur.get('t')"));
     }
 
     #[tokio::test]
