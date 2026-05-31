@@ -365,7 +365,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::{Array as _, Int64Array, RecordBatch, StringArray};
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
     fn batch(ids: Vec<i64>, labels: Vec<&str>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -452,6 +452,59 @@ mod tests {
             Schema::new(vec![Field::new("id", DataType::Int64, false)]),
             entry.schema
         );
+    }
+
+    #[test]
+    fn arrow_data_type_serde_json_oracle() {
+        let cases = [
+            (DataType::Boolean, serde_json::json!("Boolean")),
+            (DataType::Int8, serde_json::json!("Int8")),
+            (DataType::Int16, serde_json::json!("Int16")),
+            (DataType::Int32, serde_json::json!("Int32")),
+            (DataType::Int64, serde_json::json!("Int64")),
+            (DataType::UInt8, serde_json::json!("UInt8")),
+            (DataType::UInt16, serde_json::json!("UInt16")),
+            (DataType::UInt32, serde_json::json!("UInt32")),
+            (DataType::UInt64, serde_json::json!("UInt64")),
+            (DataType::Float16, serde_json::json!("Float16")),
+            (DataType::Float32, serde_json::json!("Float32")),
+            (DataType::Float64, serde_json::json!("Float64")),
+            (DataType::Utf8, serde_json::json!("Utf8")),
+            (DataType::LargeUtf8, serde_json::json!("LargeUtf8")),
+            (DataType::Binary, serde_json::json!("Binary")),
+            (DataType::LargeBinary, serde_json::json!("LargeBinary")),
+            (DataType::Null, serde_json::json!("Null")),
+            (DataType::Date32, serde_json::json!("Date32")),
+            (DataType::Date64, serde_json::json!("Date64")),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                serde_json::json!({ "Timestamp": ["Microsecond", null] }),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                serde_json::json!({ "Timestamp": ["Microsecond", "UTC"] }),
+            ),
+            (
+                DataType::Time64(TimeUnit::Nanosecond),
+                serde_json::json!({ "Time64": "Nanosecond" }),
+            ),
+            (
+                DataType::Decimal128(12, 4),
+                serde_json::json!({ "Decimal128": [12, 4] }),
+            ),
+            (
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                serde_json::json!({ "Dictionary": ["Int32", "Utf8"] }),
+            ),
+        ];
+
+        for (data_type, expected) in cases {
+            assert_eq!(
+                expected,
+                serde_json::to_value(&data_type).expect("DataType serializes"),
+                "serde spelling for {data_type:?}"
+            );
+        }
     }
 
     #[test]

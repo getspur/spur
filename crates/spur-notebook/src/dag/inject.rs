@@ -51,7 +51,7 @@ class _Spur:
         with _spur_ipc.new_file(str(arrow_path), table.schema) as writer:
             writer.write_table(table)
 
-        schema = self._schema_json(table.schema)
+        schema = self._schema_json(table.schema, port)
         manifest.setdefault("ports", {{}})[port] = {{
             "path": str(arrow_path),
             "version": version,
@@ -136,16 +136,16 @@ class _Spur:
         if port in (".", "..") or "/" in port or "\\" in port or "\0" in port:
             raise ValueError(f"SPUR port name is not valid for an on-disk port file: {{port}}")
 
-    def _schema_json(self, schema):
+    def _schema_json(self, schema, port):
         return {{
-            "fields": [self._field_json(field) for field in schema],
+            "fields": [self._field_json(field, port) for field in schema],
             "metadata": self._metadata_json(schema.metadata),
         }}
 
-    def _field_json(self, field):
+    def _field_json(self, field, port):
         return {{
             "name": field.name,
-            "data_type": self._data_type_json(field.type),
+            "data_type": self._data_type_json(field.type, port),
             "nullable": field.nullable,
             "dict_id": 0,
             "dict_is_ordered": False,
@@ -166,29 +166,77 @@ class _Spur:
     def _decode_metadata_value(self, value):
         return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
-    def _data_type_json(self, data_type):
-        type_name = str(data_type)
-        scalars = {{
-            "bool": "Boolean",
-            "int8": "Int8",
-            "int16": "Int16",
-            "int32": "Int32",
-            "int64": "Int64",
-            "uint8": "UInt8",
-            "uint16": "UInt16",
-            "uint32": "UInt32",
-            "uint64": "UInt64",
-            "float": "Float32",
-            "float32": "Float32",
-            "double": "Float64",
-            "float64": "Float64",
-            "string": "Utf8",
-            "large_string": "LargeUtf8",
-            "binary": "Binary",
-            "large_binary": "LargeBinary",
-            "null": "Null",
+    def _data_type_json(self, data_type, port):
+        import pyarrow as _spur_pa
+
+        if _spur_pa.types.is_boolean(data_type):
+            return "Boolean"
+        if _spur_pa.types.is_int8(data_type):
+            return "Int8"
+        if _spur_pa.types.is_int16(data_type):
+            return "Int16"
+        if _spur_pa.types.is_int32(data_type):
+            return "Int32"
+        if _spur_pa.types.is_int64(data_type):
+            return "Int64"
+        if _spur_pa.types.is_uint8(data_type):
+            return "UInt8"
+        if _spur_pa.types.is_uint16(data_type):
+            return "UInt16"
+        if _spur_pa.types.is_uint32(data_type):
+            return "UInt32"
+        if _spur_pa.types.is_uint64(data_type):
+            return "UInt64"
+        if _spur_pa.types.is_float16(data_type):
+            return "Float16"
+        if _spur_pa.types.is_float32(data_type):
+            return "Float32"
+        if _spur_pa.types.is_float64(data_type):
+            return "Float64"
+        if _spur_pa.types.is_string(data_type):
+            return "Utf8"
+        if _spur_pa.types.is_large_string(data_type):
+            return "LargeUtf8"
+        if _spur_pa.types.is_binary(data_type):
+            return "Binary"
+        if _spur_pa.types.is_large_binary(data_type):
+            return "LargeBinary"
+        if _spur_pa.types.is_null(data_type):
+            return "Null"
+        if _spur_pa.types.is_date32(data_type):
+            return "Date32"
+        if _spur_pa.types.is_date64(data_type):
+            return "Date64"
+        if _spur_pa.types.is_timestamp(data_type):
+            return {{"Timestamp": [self._time_unit_json(data_type.unit, port, data_type), data_type.tz]}}
+        if _spur_pa.types.is_time32(data_type):
+            return {{"Time32": self._time_unit_json(data_type.unit, port, data_type)}}
+        if _spur_pa.types.is_time64(data_type):
+            return {{"Time64": self._time_unit_json(data_type.unit, port, data_type)}}
+        if _spur_pa.types.is_decimal128(data_type):
+            return {{"Decimal128": [data_type.precision, data_type.scale]}}
+        if _spur_pa.types.is_decimal256(data_type):
+            return {{"Decimal256": [data_type.precision, data_type.scale]}}
+        if _spur_pa.types.is_dictionary(data_type):
+            return {{
+                "Dictionary": [
+                    self._data_type_json(data_type.index_type, port),
+                    self._data_type_json(data_type.value_type, port),
+                ]
+            }}
+        raise TypeError(f"SPUR port '{{port}}': unsupported Arrow type for manifest schema: {{data_type}}")
+
+    def _time_unit_json(self, unit, port, data_type):
+        units = {{
+            "s": "Second",
+            "ms": "Millisecond",
+            "us": "Microsecond",
+            "ns": "Nanosecond",
         }}
-        return scalars.get(type_name, "Utf8")
+        try:
+            return units[str(unit)]
+        except KeyError:
+            raise TypeError(f"SPUR port '{{port}}': unsupported Arrow time unit for manifest schema: {{data_type}}") from None
 
     def _preview_html(self, port, version, table):
         rows = table.slice(0, min(table.num_rows, 5)).to_pylist()
@@ -332,7 +380,7 @@ class _Spur {
 
     this._runtime.fs.writeBytes(arrowPath, tableToIPC(table, "file"));
 
-    const schema = this._schemaJson(table.schema);
+    const schema = this._schemaJson(table.schema, port);
     manifest.ports ??= {};
     manifest.ports[port] = {
       path: arrowPath,
@@ -415,17 +463,17 @@ class _Spur {
     }
   }
 
-  _schemaJson(schema) {
+  _schemaJson(schema, port) {
     return {
-      fields: schema.fields.map((field) => this._fieldJson(field)),
+      fields: schema.fields.map((field) => this._fieldJson(field, port)),
       metadata: this._metadataJson(schema.metadata),
     };
   }
 
-  _fieldJson(field) {
+  _fieldJson(field, port) {
     return {
       name: field.name,
-      data_type: this._dataTypeJson(field.type),
+      data_type: this._dataTypeJson(field.type, port),
       nullable: Boolean(field.nullable),
       dict_id: 0,
       dict_is_ordered: false,
@@ -453,15 +501,21 @@ class _Spur {
     return String(value);
   }
 
-  _dataTypeJson(dataType) {
+  _dataTypeJson(dataType, port) {
     const typeName = String(dataType);
     const scalars = {
       Bool: "Boolean",
       Boolean: "Boolean",
+      bool: "Boolean",
+      boolean: "Boolean",
       Int8: "Int8",
       Int16: "Int16",
       Int32: "Int32",
       Int64: "Int64",
+      int8: "Int8",
+      int16: "Int16",
+      int32: "Int32",
+      int64: "Int64",
       Uint8: "UInt8",
       Uint16: "UInt16",
       Uint32: "UInt32",
@@ -470,18 +524,139 @@ class _Spur {
       UInt16: "UInt16",
       UInt32: "UInt32",
       UInt64: "UInt64",
+      uint8: "UInt8",
+      uint16: "UInt16",
+      uint32: "UInt32",
+      uint64: "UInt64",
       Float: "Float32",
       Float16: "Float16",
       Float32: "Float32",
       Float64: "Float64",
+      float: "Float32",
+      float16: "Float16",
+      float32: "Float32",
+      float64: "Float64",
       Utf8: "Utf8",
-      "Dictionary<Int32, Utf8>": "Utf8",
+      utf8: "Utf8",
       LargeUtf8: "LargeUtf8",
+      largeutf8: "LargeUtf8",
       Binary: "Binary",
+      binary: "Binary",
       LargeBinary: "LargeBinary",
+      largebinary: "LargeBinary",
       Null: "Null",
+      null: "Null",
+      Date32: "Date32",
+      date32: "Date32",
+      Date64: "Date64",
+      date64: "Date64",
     };
-    return scalars[typeName] ?? scalars[typeName.toLowerCase()] ?? "Utf8";
+    const scalar = scalars[typeName] ?? scalars[typeName.toLowerCase()];
+    if (scalar !== undefined) {
+      return scalar;
+    }
+
+    if (this._isArrowType(dataType, "Timestamp") || typeName.startsWith("Timestamp")) {
+      const timezone = dataType.timezone === undefined ? null : dataType.timezone;
+      return {
+        "Timestamp": [this._timeUnitJson(dataType.unit, port, dataType), timezone],
+      };
+    }
+    if (this._isArrowType(dataType, "Date") || typeName.startsWith("Date")) {
+      return this._dateTypeJson(dataType.unit, port, dataType);
+    }
+    if (this._isArrowType(dataType, "Time") || typeName.startsWith("Time")) {
+      const key = dataType.bitWidth === 64 || typeName.startsWith("Time64") ? "Time64" : "Time32";
+      return { [key]: this._timeUnitJson(dataType.unit, port, dataType) };
+    }
+    if (this._isArrowType(dataType, "Decimal") || typeName.startsWith("Decimal")) {
+      const key = dataType.bitWidth === 256 || typeName.startsWith("Decimal256")
+        ? "Decimal256"
+        : "Decimal128";
+      return { [key]: [dataType.precision, dataType.scale] };
+    }
+    if (this._isArrowType(dataType, "Dictionary") || typeName.startsWith("Dictionary")) {
+      const indexType = dataType.indices ?? dataType.indexType;
+      const valueType = dataType.dictionary ?? dataType.valueType;
+      if (indexType === undefined || valueType === undefined) {
+        throw new Error(`SPUR port '${port}': unsupported Arrow type for manifest schema: ${dataType}`);
+      }
+      return {
+        "Dictionary": [
+          this._dataTypeJson(indexType, port),
+          this._dataTypeJson(valueType, port),
+        ],
+      };
+    }
+
+    throw new Error(`SPUR port '${port}': unsupported Arrow type for manifest schema: ${dataType}`);
+  }
+
+  _isArrowType(dataType, typeName) {
+    const typeId = dataType?.typeId;
+    const typeEnum = _spurArrow.Type ?? {};
+    const enumIds = [typeEnum[typeName], typeEnum[typeName.toUpperCase()]]
+      .filter((value) => value !== undefined);
+    return (
+      dataType?.constructor?.name === typeName ||
+      enumIds.includes(typeId)
+    );
+  }
+
+  _timeUnitJson(unit, port, dataType) {
+    const timeUnit = _spurArrow.TimeUnit ?? {};
+    const enumUnits = [
+      [timeUnit.SECOND, "Second"],
+      [timeUnit.MILLISECOND, "Millisecond"],
+      [timeUnit.MICROSECOND, "Microsecond"],
+      [timeUnit.NANOSECOND, "Nanosecond"],
+    ].filter(([key]) => key !== undefined);
+    const units = new Map([
+      ...enumUnits,
+      [0, "Second"],
+      [1, "Millisecond"],
+      [2, "Microsecond"],
+      [3, "Nanosecond"],
+      ["SECOND", "Second"],
+      ["MILLISECOND", "Millisecond"],
+      ["MICROSECOND", "Microsecond"],
+      ["NANOSECOND", "Nanosecond"],
+      ["second", "Second"],
+      ["millisecond", "Millisecond"],
+      ["microsecond", "Microsecond"],
+      ["nanosecond", "Nanosecond"],
+      ["s", "Second"],
+      ["ms", "Millisecond"],
+      ["us", "Microsecond"],
+      ["ns", "Nanosecond"],
+    ]);
+    const serdeUnit = units.get(unit) ?? units.get(String(unit));
+    if (serdeUnit === undefined) {
+      throw new Error(`SPUR port '${port}': unsupported Arrow time unit for manifest schema: ${dataType}`);
+    }
+    return serdeUnit;
+  }
+
+  _dateTypeJson(unit, port, dataType) {
+    const dateUnit = _spurArrow.DateUnit ?? {};
+    const enumUnits = [
+      [dateUnit.DAY, "Date32"],
+      [dateUnit.MILLISECOND, "Date64"],
+    ].filter(([key]) => key !== undefined);
+    const units = new Map([
+      ...enumUnits,
+      [0, "Date32"],
+      [1, "Date64"],
+      ["DAY", "Date32"],
+      ["MILLISECOND", "Date64"],
+      ["day", "Date32"],
+      ["millisecond", "Date64"],
+    ]);
+    const serdeType = units.get(unit) ?? units.get(String(unit));
+    if (serdeType === undefined) {
+      throw new Error(`SPUR port '${port}': unsupported Arrow date unit for manifest schema: ${dataType}`);
+    }
+    return serdeType;
   }
 
   _previewHtml(port, version, table) {
@@ -623,6 +798,17 @@ mod tests {
         .expect("generated Python schema JSON matches arrow_schema serde");
 
         assert_eq!("id", schema.field(0).name());
+    }
+
+    #[test]
+    fn generated_helpers_fail_loud_instead_of_utf8_fallback() {
+        let python = python_bootstrap("/tmp/demo-root");
+        assert!(python.contains("unsupported Arrow type for manifest schema"));
+        assert!(!python.contains(r#"scalars.get(type_name, "Utf8")"#));
+
+        let javascript = javascript_bootstrap("/tmp/demo-root");
+        assert!(javascript.contains("unsupported Arrow type for manifest schema"));
+        assert!(!javascript.contains(r#"?? "Utf8""#));
     }
 
     #[test]
