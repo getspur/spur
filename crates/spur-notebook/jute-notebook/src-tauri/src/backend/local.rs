@@ -4,7 +4,7 @@
 //! future it could replace the Jupyter installation by directly invoking
 //! kernels, or introduce new APIs for developer experience.
 
-use std::process::Stdio;
+use std::{collections::BTreeMap, process::Stdio};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -87,12 +87,7 @@ impl LocalKernel {
             .iter()
             .map(|s| s.replace("{connection_file}", &connection_filename))
             .collect();
-        // TODO: Handle spec.env
-        let child = tokio::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .kill_on_drop(true)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        let child = kernel_command(&argv, &spec.env)
             .spawn()
             .map_err(Error::Subprocess)?;
 
@@ -152,4 +147,84 @@ async fn get_available_port() -> Result<u16, Error> {
         .local_addr()
         .map_err(|_| Error::KernelConnect("tcp listener has no local address".into()))?;
     Ok(addr.port())
+}
+
+fn kernel_command(argv: &[String], env: &BTreeMap<String, String>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .envs(env)
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: String, value: &str) -> Self {
+            let previous = std::env::var_os(&key);
+            std::env::set_var(&key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(&self.key, previous);
+            } else {
+                std::env::remove_var(&self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn kernel_command_applies_spec_env_and_preserves_parent_env() {
+        let unique = Uuid::new_v4().to_string().replace('-', "_");
+        let added_key = format!("SPUR_ENV_ADDED_{unique}");
+        let override_key = format!("SPUR_ENV_OVERRIDE_{unique}");
+        let parent_key = format!("SPUR_ENV_PARENT_{unique}");
+        let _parent_guard = EnvVarGuard::set(parent_key.clone(), "parent");
+        let _override_guard = EnvVarGuard::set(override_key.clone(), "parent");
+
+        let spec_env = BTreeMap::from([
+            (added_key.clone(), "added".to_string()),
+            (override_key.clone(), "spec".to_string()),
+        ]);
+        let output_file = tempfile::NamedTempFile::new().expect("create temp output file");
+        let output_path = output_file.path().to_owned();
+        let script = format!(
+            "printf '%s|%s|%s' \"${{{added_key}}}\" \"${{{override_key}}}\" \"${{{parent_key}}}\" > \"$1\""
+        );
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            script,
+            "kernel-env-test".to_string(),
+            output_path.to_string_lossy().into_owned(),
+        ];
+
+        let status = kernel_command(&argv, &spec_env)
+            .spawn()
+            .expect("spawn env echo child")
+            .wait()
+            .await
+            .expect("wait for env echo child");
+
+        assert!(status.success());
+        let output = fs::read_to_string(output_path)
+            .await
+            .expect("read env echo output");
+        assert_eq!(output, "added|spec|parent");
+    }
 }
