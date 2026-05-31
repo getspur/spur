@@ -122,7 +122,8 @@ export GCP_PROJECT GCP_ZONE
 log "Enumerating git-tracked files..."
 cd "$GIT_TOPLEVEL"
 FILE_LIST=$(mktemp)
-trap 'rm -f "$FILE_LIST"' EXIT
+XFER_LIST=$(mktemp)
+trap 'rm -f "$FILE_LIST" "$XFER_LIST"' EXIT
 git ls-files -z --cached --others --exclude-standard >"$FILE_LIST"
 COUNT=$(tr -cd '\0' <"$FILE_LIST" | wc -c | tr -d ' ')
 log "  $COUNT files"
@@ -144,10 +145,36 @@ gcloud compute ssh "$VM_NAME" \
     --tunnel-through-iap --quiet \
     --command="mkdir -p ~/$REMOTE_DIR $REMOTE_TARGET /mnt/cargo/cargo-home /mnt/cargo/rustup && link=\"\$HOME/$REMOTE_DIR/target\" && if [ \"\$(readlink \"\$link\" 2>/dev/null)\" != \"$REMOTE_TARGET\" ]; then rm -rf \"\$link\"; ln -s \"$REMOTE_TARGET\" \"\$link\"; fi" >/dev/null
 
+REMOTE_XFER_LIST="/tmp/spur-sync-xfer.${WORKTREE_KEY//\//_}"
 log "Syncing to $VM_NAME:~/$REMOTE_DIR ..."
-rsync -az --delete -0 --files-from="$FILE_LIST" \
+# Capture the exact set of files rsync transfers. --out-format='%n' emits one
+# path per created/updated entry and nothing for unchanged files, so $XFER_LIST
+# is precisely the delta we need to re-stamp below.
+rsync -az --delete -0 --files-from="$FILE_LIST" --out-format='%n' \
     -e "$TRANSPORT" \
-    "$GIT_TOPLEVEL/" "$VM_NAME:$REMOTE_DIR/"
+    "$GIT_TOPLEVEL/" "$VM_NAME:$REMOTE_DIR/" >"$XFER_LIST"
+
+# ---- normalize mtimes of just-synced files to the VM clock -----------------
+# Cargo decides whether to rebuild a path dependency (e.g. jute) by comparing
+# source-file mtimes against the cached artifact's mtime — not by content hash.
+# rsync -a (-> -t) preserves the dev machine's mtimes on the VM copy. When the
+# dev clock lags the VM clock even slightly, a freshly edited file lands with an
+# mtime OLDER than an artifact the VM built moments earlier, so cargo declares
+# the crate fresh and silently skips the edit (observed: a newly added method
+# never compiled in despite a clean source sync). Touching exactly the
+# transferred files to the VM's "now" guarantees changed sources are newer than
+# any prior artifact (correct rebuild) while leaving unchanged files untouched
+# (incremental cache intact). touch -c skips anything rsync reported but that no
+# longer exists (e.g. directory entries that were pruned).
+# See: docs/rca/2026-05-31-remote-cargo-stale-fingerprint.md
+if [[ -s "$XFER_LIST" ]]; then
+    log "Re-stamping $(wc -l <"$XFER_LIST" | tr -d ' ') synced path(s) to VM clock..."
+    rsync -az -e "$TRANSPORT" "$XFER_LIST" "$VM_NAME:$REMOTE_XFER_LIST"
+    gcloud compute ssh "$VM_NAME" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        --tunnel-through-iap --quiet \
+        --command="cd \"\$HOME/$REMOTE_DIR\" && while IFS= read -r f; do [ -n \"\$f\" ] && touch -c -- \"\$f\"; done < \"$REMOTE_XFER_LIST\""
+fi
 
 # ---- reconcile: prune files deleted locally since the last sync ------------
 # rsync's --delete is INERT when combined with --files-from (it transfers only

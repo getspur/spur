@@ -4,6 +4,7 @@
 # Two modes:
 #   1. Remote (default when <main_repo>/.spur/remote-cargo.enabled exists, or
 #      SPUR_REMOTE=1): for compile-heavy subcommands (build/check/test/clippy/doc)
+#      plus clean (which must clean the remote target, not the local one)
 #      dispatch to scripts/gcp-build/build.sh which runs cargo on the GCP VM with
 #      the GCS-backed sccache. Falls back to local cargo if the VM is missing and
 #      auto-spin fails.
@@ -47,6 +48,13 @@ fi
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
     build|check|test|clippy|doc)
+        REMOTE_CAPABLE=1 ;;
+    clean)
+        # clean must target wherever compilation happens. In remote mode the
+        # artifacts live in /mnt/cargo on the VM, so `spur-cargo clean -p <pkg>`
+        # has to run on the VM — otherwise it silently cleans the (unused) local
+        # target dir and the remote stale artifact survives, masking real
+        # staleness bugs. Falls back to local clean if the VM is unavailable.
         REMOTE_CAPABLE=1 ;;
     *)
         REMOTE_CAPABLE=0 ;;
