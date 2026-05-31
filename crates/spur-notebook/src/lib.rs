@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod dag;
 #[cfg(feature = "datasource-introspect")]
 pub mod datasource;

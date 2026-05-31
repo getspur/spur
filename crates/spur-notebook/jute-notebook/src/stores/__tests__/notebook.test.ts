@@ -35,10 +35,13 @@ describe("applyRunCellEvent", () => {
       viewState: {
         selectedCellId: null,
         isLoading: false,
+        viewMode: "cells",
       },
       editBuffer: {
         cellSources: {},
       },
+      dagStatus: {},
+      dagPortManifest: {},
     };
     let runState: RunCellEventApplicationState = {
       status: "running",

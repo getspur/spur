@@ -23,10 +23,13 @@ const mocks = vi.hoisted(() => {
     viewState: {
       selectedCellId: null,
       isLoading: false,
+      viewMode: "cells",
     },
     editBuffer: {
       cellSources: {},
     },
+    dagStatus: {},
+    dagPortManifest: {},
   });
   const state = makeState();
 
