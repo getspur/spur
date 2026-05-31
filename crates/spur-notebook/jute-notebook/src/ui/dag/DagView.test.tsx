@@ -336,6 +336,42 @@ describe("DagView", () => {
     ).not.toBeNull();
   });
 
+  test("renders sink cells when legacy metadata omits empty produces", () => {
+    storeState.serverState.cellIds = ["source-cell", "consumer-cell"];
+    storeState.serverState.cells = {
+      "source-cell": {
+        type: "code",
+        initialText: "customers = load()",
+        source: "customers = load()",
+        version: 1,
+        dagMetadata: {
+          produces: [{ port: "customers", repr: "dataframe" }],
+          consumes: [],
+        },
+      },
+      "consumer-cell": {
+        type: "code",
+        initialText: "summary = customers.describe()",
+        source: "summary = customers.describe()",
+        version: 1,
+        dagMetadata: {
+          consumes: ["customers"],
+          source: { kind: "cell", port: "customers" },
+        } as TestCellState["dagMetadata"],
+      },
+    };
+
+    const { container } = render(<DagView />);
+
+    expect(container).toHaveTextContent("source-cell");
+    expect(container).toHaveTextContent("consumer-cell");
+    expect(
+      container.querySelector(
+        '[data-edge="source-cell->consumer-cell:customers"]',
+      ),
+    ).not.toBeNull();
+  });
+
   test("shows hidden non-DAG cells in a header chip popover", () => {
     render(<DagView />);
 
