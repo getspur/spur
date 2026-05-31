@@ -292,8 +292,9 @@ pub fn javascript_bootstrap(notebook_root: impl AsRef<Path>) -> String {
     let mime_literal = serde_json::to_string(PORT_MIME).expect("mime string serializes");
 
     r#"
+{
 // --- SPUR port helper bootstrap ---
-const _spurArrow = await import("npm:apache-arrow");
+const _spurArrow = await import("npm:apache-arrow@21.1.0");
 const {
   RecordBatch,
   RecordBatchFileWriter,
@@ -732,6 +733,7 @@ globalThis.spur = new _Spur({
   runtime: _spurDenoRuntime,
 });
 // --- end SPUR port helper bootstrap ---
+}
 "#
     .replace("__SPUR_ROOT__", &root_literal)
     .replace("__SPUR_PORTS_DIR__", &ports_literal)
@@ -781,7 +783,7 @@ mod tests {
             serde_json::to_string(&root.join("ports").display().to_string()).unwrap();
 
         assert!(wrapped.contains("globalThis.spur"));
-        assert!(wrapped.contains("npm:apache-arrow"));
+        assert!(wrapped.contains("npm:apache-arrow@21.1.0"));
         assert!(wrapped.contains(PORT_MIME));
         assert!(wrapped.contains(&root_literal));
         assert!(wrapped.contains(&ports_literal));
