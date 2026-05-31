@@ -26,7 +26,8 @@ use serde_json::{json, Map, Value};
 use spur_notebook::{
     dag::{
         engine::{CellRunOutcome, CellRunner, EngineError},
-        CellRunRequest, CellRunStatus, ReactiveEngine, ReactiveEngineClient, SourcePush,
+        CellRunReport, CellRunRequest, CellRunStatus, PortStore, ReactiveEngine,
+        ReactiveEngineClient, SourcePush,
     },
     mcp::{
         bridge::{AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester},
@@ -47,6 +48,7 @@ struct StoreBackedRunner {
 #[derive(Clone)]
 enum RunnerAction {
     Succeed,
+    Fail,
     StaleAfterEdit { source: String },
 }
 
@@ -113,6 +115,23 @@ impl CellRunner for StoreBackedRunner {
                         .map_err(|error| EngineError::RunCell(error.to_string()))?;
                     Ok(CellRunOutcome {
                         status: CellRunStatus::Succeeded,
+                    })
+                }
+                RunnerAction::Fail => {
+                    self.store
+                        .apply_run_event(&request.cell_id, RunCellEvent::Started)
+                        .map_err(|error| EngineError::RunCell(error.to_string()))?;
+                    self.store
+                        .apply_run_event(
+                            &request.cell_id,
+                            RunCellEvent::Finished {
+                                exec_count: Some(request.expected_version as u32),
+                                status: "error".to_string(),
+                            },
+                        )
+                        .map_err(|error| EngineError::RunCell(error.to_string()))?;
+                    Ok(CellRunOutcome {
+                        status: CellRunStatus::Failed,
                     })
                 }
                 RunnerAction::StaleAfterEdit { source } => {
@@ -364,6 +383,90 @@ async fn push_source_reruns_only_downstream_cells_in_dependency_order() {
         .map(|request| request.cell_id)
         .collect::<Vec<_>>();
     assert_eq!(requests, ["source", "left", "join"]);
+}
+
+#[tokio::test]
+async fn run_cell_cascade_reruns_target_then_downstream_cells() {
+    let (deps, _rx, temp, _path) = harness(notebook(vec![
+        code_cell("source", "source()", 1, dag(&["raw"], &[], None)),
+        code_cell("left", "left()", 1, dag(&["left"], &["raw"], None)),
+        code_cell("join", "join()", 1, dag(&[], &["left"], None)),
+        code_cell(
+            "independent",
+            "independent()",
+            1,
+            dag(&["other"], &[], None),
+        ),
+    ]))
+    .await;
+    let store = deps.state.as_ref().expect("state").get_notebook();
+    let runner = StoreBackedRunner::new(Arc::clone(&store));
+    let port_root = temp.path().join("ports");
+    let mut ports = PortStore::open_at(&port_root).expect("open ports");
+    ports.put("raw", &ipc_bytes()).expect("seed raw");
+    ports.put("left", &ipc_bytes()).expect("seed left");
+    let mut engine = ReactiveEngine::new(store, runner.clone(), port_root.clone());
+
+    let report = engine
+        .run_cell_and_cascade("source")
+        .await
+        .expect("run cascade succeeds");
+
+    assert_eq!(
+        report.runs,
+        vec![
+            CellRunReport::new("source", CellRunStatus::Succeeded),
+            CellRunReport::new("left", CellRunStatus::Succeeded),
+            CellRunReport::new("join", CellRunStatus::Succeeded),
+        ]
+    );
+    let requests = runner
+        .requests()
+        .into_iter()
+        .map(|request| request.cell_id)
+        .collect::<Vec<_>>();
+    assert_eq!(requests, ["source", "left", "join"]);
+    let ports = PortStore::open_at(&port_root).expect("open ports");
+    assert_eq!(ports.get("raw").expect("raw bumped").version, 2);
+    assert_eq!(ports.get("left").expect("left unchanged").version, 1);
+}
+
+#[tokio::test]
+async fn run_cell_cascade_marks_descendants_upstream_failed() {
+    let (deps, _rx, temp, _path) = harness(notebook(vec![
+        code_cell("source", "source()", 1, dag(&["raw"], &[], None)),
+        code_cell("left", "left()", 1, dag(&["left"], &["raw"], None)),
+        code_cell("join", "join()", 1, dag(&[], &["left"], None)),
+    ]))
+    .await;
+    let store = deps.state.as_ref().expect("state").get_notebook();
+    let runner = StoreBackedRunner::new(Arc::clone(&store));
+    runner.push_action("left", RunnerAction::Fail);
+    let port_root = temp.path().join("ports");
+    let mut ports = PortStore::open_at(&port_root).expect("open ports");
+    ports.put("raw", &ipc_bytes()).expect("seed raw");
+    ports.put("left", &ipc_bytes()).expect("seed left");
+    let mut engine = ReactiveEngine::new(store, runner.clone(), port_root);
+
+    let report = engine
+        .run_cell_and_cascade("source")
+        .await
+        .expect("run cascade succeeds");
+
+    assert_eq!(
+        report.runs,
+        vec![
+            CellRunReport::new("source", CellRunStatus::Succeeded),
+            CellRunReport::new("left", CellRunStatus::Failed),
+            CellRunReport::new("join", CellRunStatus::UpstreamFailed),
+        ]
+    );
+    let requests = runner
+        .requests()
+        .into_iter()
+        .map(|request| request.cell_id)
+        .collect::<Vec<_>>();
+    assert_eq!(requests, ["source", "left"]);
 }
 
 #[test]
