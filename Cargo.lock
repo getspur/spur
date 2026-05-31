@@ -11575,6 +11575,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "duckdb",
  "futures",
  "indexmap 2.14.0",
  "reqwest 0.12.28",
