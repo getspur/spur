@@ -16,6 +16,7 @@ pub mod entity;
 pub mod kernel_provision;
 pub mod menu;
 pub mod notebook_store;
+pub mod ports;
 pub mod state;
 pub mod window;
 
