@@ -79,7 +79,10 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 # statically. This drops the runtime `libduckdb.dylib` dependency and lets
 # `cargo install --path crates/spur-cli` work without any system package.
 # Cost: a cold release build of duckdb ~4 minutes on macOS.
-duckdb = { version = "1.10502.0", features = ["bundled"] }
+# Version pinned here; the `bundled` feature is opted into per-consumer
+# (spur-context, spur-notebook, rest-table-gateway) so the loadable-extension
+# build (rest-table-gateway-ext) can take duckdb WITHOUT bundling.
+duckdb = { version = "1.10502.0" }
 
 # Logging
 tracing = "0.1"
