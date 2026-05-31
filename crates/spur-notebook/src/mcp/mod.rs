@@ -809,6 +809,9 @@ fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String
         jute::commands::DatasourceKind::Sqlite => {
             unreachable!("SQLite files are mounted through ATTACH")
         }
+        jute::commands::DatasourceKind::ApiTables => {
+            unreachable!("API table sources are registered as table functions")
+        }
     }
 }
 

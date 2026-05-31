@@ -50,23 +50,25 @@ fn datasource_entries_are_wire_compatible_from_acp_to_jute() {
     }
 }
 
-fn jute_kinds() -> [JuteDatasourceKind; 5] {
+fn jute_kinds() -> [JuteDatasourceKind; 6] {
     [
         JuteDatasourceKind::Csv,
         JuteDatasourceKind::Parquet,
         JuteDatasourceKind::Json,
         JuteDatasourceKind::DuckDb,
         JuteDatasourceKind::Sqlite,
+        JuteDatasourceKind::ApiTables,
     ]
 }
 
-fn acp_kinds() -> [AcpDatasourceKind; 5] {
+fn acp_kinds() -> [AcpDatasourceKind; 6] {
     [
         AcpDatasourceKind::Csv,
         AcpDatasourceKind::Parquet,
         AcpDatasourceKind::Json,
         AcpDatasourceKind::DuckDb,
         AcpDatasourceKind::Sqlite,
+        AcpDatasourceKind::ApiTables,
     ]
 }
 
@@ -185,6 +187,7 @@ fn acp_kind_for_jute(kind: JuteDatasourceKind) -> AcpDatasourceKind {
         JuteDatasourceKind::Json => AcpDatasourceKind::Json,
         JuteDatasourceKind::DuckDb => AcpDatasourceKind::DuckDb,
         JuteDatasourceKind::Sqlite => AcpDatasourceKind::Sqlite,
+        JuteDatasourceKind::ApiTables => AcpDatasourceKind::ApiTables,
     }
 }
 
@@ -195,6 +198,7 @@ fn jute_kind_for_acp(kind: AcpDatasourceKind) -> JuteDatasourceKind {
         AcpDatasourceKind::Json => JuteDatasourceKind::Json,
         AcpDatasourceKind::DuckDb => JuteDatasourceKind::DuckDb,
         AcpDatasourceKind::Sqlite => JuteDatasourceKind::Sqlite,
+        AcpDatasourceKind::ApiTables => JuteDatasourceKind::ApiTables,
     }
 }
 
