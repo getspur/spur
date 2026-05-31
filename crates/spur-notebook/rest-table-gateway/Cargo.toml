@@ -1,5 +1,5 @@
 [package]
-name = "spur-flight-gateway"
+name = "spur-rest-table-gateway"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
