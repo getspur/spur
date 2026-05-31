@@ -17,6 +17,10 @@ export type DetachDatasourceCommand = Extract<
   DaemonControlCommand,
   { command: "detach_datasource" }
 >;
+export type ListDatasourcesCommand = Extract<
+  DaemonControlCommand,
+  { command: "list_datasources" }
+>;
 export type AttachDatasourceInput = Omit<AttachDatasourceCommand, "command">;
 export type DetachDatasourceInput = Omit<DetachDatasourceCommand, "command">;
 type EnrichedRecentEntry = NonNullable<
@@ -50,6 +54,12 @@ export function detachDatasourceCommand(
   };
 }
 
+export function listDatasourcesCommand(): ListDatasourcesCommand {
+  return {
+    command: "list_datasources",
+  };
+}
+
 export function datasourceEntryFromDaemonControlResponse(
   response: DaemonControlResponse,
 ): DatasourceEntry {
@@ -68,10 +78,28 @@ export function datasourceEntryFromDaemonControlResponse(
   );
 }
 
+export function datasourceEntriesFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): DatasourceEntry[] {
+  if (
+    response.ok &&
+    response.result?.type === "datasources" &&
+    datasourceEntriesFromUnknown(response.result.data)
+  ) {
+    return response.result.data;
+  }
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  throw new Error(
+    "daemon list_datasources response did not include datasources",
+  );
+}
+
 export function datasourceEntriesFromEventPayload(
   payload: unknown,
 ): DatasourceEntry[] {
-  if (Array.isArray(payload) && payload.every(isDatasourceEntry)) {
+  if (datasourceEntriesFromUnknown(payload)) {
     return payload;
   }
   throw new Error("datasources://changed payload did not include entries");
@@ -153,4 +181,10 @@ function isDatasourceEntry(value: unknown): value is DatasourceEntry {
             (table.rowCount === null || typeof table.rowCount === "number"),
         )))
   );
+}
+
+function datasourceEntriesFromUnknown(
+  value: unknown,
+): value is DatasourceEntry[] {
+  return Array.isArray(value) && value.every(isDatasourceEntry);
 }

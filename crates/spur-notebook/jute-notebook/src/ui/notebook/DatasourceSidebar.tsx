@@ -23,9 +23,11 @@ import type { DatasourceEntry } from "@/bindings";
 import {
   attachDatasourceCommand,
   daemonControl,
+  datasourceEntriesFromDaemonControlResponse,
   datasourceEntriesFromEventPayload,
   datasourceEntryFromDaemonControlResponse,
   detachDatasourceCommand,
+  listDatasourcesCommand,
 } from "@/daemon/control";
 
 type DroppedFile = File & {
@@ -146,6 +148,19 @@ export default function DatasourceSidebar() {
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
+
+    void daemonControl(listDatasourcesCommand())
+      .then((response) => {
+        if (disposed) return;
+        const nextEntries = datasourceEntriesFromDaemonControlResponse(response);
+        entriesRef.current = nextEntries;
+        setEntries(nextEntries);
+      })
+      .catch((caught) => {
+        if (!disposed) {
+          setError(errorMessage(caught));
+        }
+      });
 
     try {
       void listen("datasources://changed", (event) => {
