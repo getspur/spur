@@ -6,6 +6,7 @@ import type { SpurCellMetadata } from "./SpurCellMetadata";
  * Metadata for a cell.
  */
 export type CellMetadata = {
+  [key: string]: unknown;
   /**
    * SPUR-managed cell metadata.
    */

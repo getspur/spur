@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { dispatchAgentRequest } from "@/agent/handlers";
 import type { DaemonCell, NotebookDelta, NotebookRoot } from "@/bindings";
 import { cellToSlide } from "@/ui/deck/cellToSlide";
 
@@ -328,6 +329,85 @@ describe("reconcileNotebookDelta", () => {
 
     notebook.store.getState().viewStateActions.setViewMode("cells");
     expect(notebook.store.getState().viewState.viewMode).toBe("cells");
+  });
+
+  test("agent set_cell_metadata with spur dag updates frontend export", async () => {
+    const cellId = "dag-cell-1";
+    const dag = {
+      produces: [{ port: "customers", repr: "dataframe" }],
+      consumes: ["raw_customers"],
+      source: { kind: "cell", port: "raw_customers" },
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      if (command === "daemon_control") {
+        expect(args).toEqual({
+          cmd: {
+            command: "set_cell_metadata",
+            id: cellId,
+            patch: { spur: { dag } },
+            expected_version: 1,
+          },
+        });
+        return {
+          ok: true,
+          result: {
+            type: "delta",
+            data: {
+              version: 2,
+              kind: {
+                type: "cellWritten",
+                cell: {
+                  id: cellId,
+                  kind: "code",
+                  version: 2,
+                  lastEditedBy: "brain",
+                  source: "customers = raw_customers.copy()",
+                  execCount: null,
+                  status: "idle",
+                  outputs: [],
+                  dagMetadata: dag,
+                },
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook(
+      notebookRoot(cellId, "customers = raw_customers.copy()"),
+    );
+    await notebook.kernelStartPromise;
+
+    const result = await dispatchAgentRequest(notebook, {
+      requestId: "request-1",
+      method: "notebook.set_cell_metadata",
+      params: {
+        id: cellId,
+        patch: { spur: { dag } },
+        expected_version: 1,
+      },
+    });
+
+    expect(result).toEqual({ ok: true, version: 2 });
+    expect(
+      notebook.store.getState().serverState.cells[cellId]?.dagMetadata,
+    ).toEqual(dag);
+    expect(notebook.export().cells[0]?.metadata.spur?.dag).toEqual(dag);
   });
 });
 
