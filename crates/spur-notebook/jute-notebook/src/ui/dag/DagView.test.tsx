@@ -198,6 +198,7 @@ vi.mock("@xyflow/react", () => ({
     children: ReactNode;
     edges: Array<{
       animated?: boolean;
+      className?: string;
       id: string;
       label?: string;
       source: string;
@@ -225,6 +226,7 @@ vi.mock("@xyflow/react", () => ({
           data-edge={`${edge.source}->${edge.target}:${edge.label}`}
           data-edge-animated={String(Boolean(edge.animated))}
           data-testid={`${edge.source}->${edge.target}:${edge.label}`}
+          className={edge.className}
           style={edge.style}
         >
           {edge.label}
@@ -281,6 +283,40 @@ describe("DagView", () => {
     storeState.editBuffer.cellSources = {};
     storeState.dagStatus = {};
     storeState.dagPortManifest = {};
+    storeState.serverState.cellIds = [
+      "plain-cell",
+      "source-cell",
+      "consumer-cell",
+    ];
+    storeState.serverState.cells = {
+      "plain-cell": {
+        type: "markdown",
+        initialText: "# Notes",
+        source: "# Notes",
+        version: 1,
+      },
+      "source-cell": {
+        type: "code",
+        initialText: "customers = load()",
+        source: "customers = load()",
+        version: 1,
+        dagMetadata: {
+          produces: [{ port: "customers", repr: "dataframe" }],
+          consumes: [],
+        },
+      },
+      "consumer-cell": {
+        type: "code",
+        initialText: "summary = customers.describe()",
+        source: "summary = customers.describe()",
+        version: 1,
+        dagMetadata: {
+          produces: [{ port: "summary", repr: "dataframe" }],
+          consumes: ["customers"],
+          source: { kind: "cell", port: "customers" },
+        },
+      },
+    };
     storeListeners.clear();
   });
 
@@ -298,6 +334,42 @@ describe("DagView", () => {
         '[data-edge="source-cell->consumer-cell:customers"]',
       ),
     ).not.toBeNull();
+  });
+
+  test("shows hidden non-DAG cells in a header chip popover", () => {
+    render(<DagView />);
+
+    const hiddenChip = screen.getByRole("button", {
+      name: /hidden cells \(1\)/i,
+    });
+    expect(screen.queryByText("plain-cell")).not.toBeInTheDocument();
+
+    fireEvent.click(hiddenChip);
+
+    expect(screen.getByText("plain-cell")).toBeInTheDocument();
+    expect(screen.getByText("markdown")).toBeInTheDocument();
+  });
+
+  test("renders an empty DAG hint while still surfacing hidden cells", () => {
+    storeState.serverState.cellIds = ["plain-cell"];
+    storeState.serverState.cells = {
+      "plain-cell": {
+        type: "markdown",
+        initialText: "# Notes",
+        source: "# Notes",
+        version: 1,
+      },
+    };
+
+    render(<DagView />);
+
+    expect(screen.getByText(/No DAG cells yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Add produces or consumes metadata/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /hidden cells \(1\)/i }),
+    ).toBeInTheDocument();
   });
 
   test("seeds status on mount and selects an inspector node", async () => {
@@ -442,6 +514,7 @@ describe("DagView", () => {
     await waitFor(() => {
       expect(edge).toHaveAttribute("data-edge-animated", "true");
       expect(edge).toHaveStyle({ stroke: "#d97706" });
+      expect(edge).toHaveClass("dag-edge-stale");
     });
 
     fireEvent.click(
@@ -503,5 +576,47 @@ describe("DagView", () => {
         cellId: "consumer-cell",
       });
     });
+  });
+
+  test("shows an error toast when a DAG run action fails", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "notebook_dag_status") {
+        return {
+          notebook_version: 3,
+          nodes: [
+            {
+              id: "source-cell",
+              state: "fresh",
+              execution_count: 1,
+            },
+            {
+              id: "consumer-cell",
+              state: "stale",
+              execution_count: 1,
+            },
+          ],
+          edges: [
+            {
+              producer: "source-cell",
+              consumer: "consumer-cell",
+              port: "customers",
+            },
+          ],
+          port_manifest: { customers: 2, summary: 1 },
+        };
+      }
+      if (command === "notebook_run_cascade") {
+        throw new Error("cascade unavailable");
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    render(<DagView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /run stale/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "cascade unavailable",
+    );
   });
 });

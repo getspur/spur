@@ -18,12 +18,14 @@ const CellInput = lazy(() => import("../notebook/CellInput"));
 
 type DagInspectorProps = {
   node?: DagNodeData;
+  onRunError?: (error: unknown) => void;
   portManifest: DagPortManifest;
   status?: NodeStatus;
 };
 
 export default function DagInspector({
   node,
+  onRunError,
   portManifest,
   status,
 }: DagInspectorProps) {
@@ -74,6 +76,8 @@ export default function DagInspector({
         ...previous,
         [node.id]: sourceAtRun,
       }));
+    } catch (error) {
+      onRunError?.(error);
     } finally {
       setRunningCellId(null);
     }
@@ -84,6 +88,8 @@ export default function DagInspector({
     setCascadingCellId(node.id);
     try {
       await runNotebookCascade(node.id);
+    } catch (error) {
+      onRunError?.(error);
     } finally {
       setCascadingCellId(null);
     }
