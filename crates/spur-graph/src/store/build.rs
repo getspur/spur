@@ -1039,6 +1039,12 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             } else {
                 matches.iter().collect::<Vec<_>>()
             };
+            // Import-candidate filtering above can remove every match, so the
+            // bucket lookup being non-empty does not guarantee `matches` is.
+            let Some(resolved) = matches.first() else {
+                edge.target_stable_symbol_id = None;
+                continue;
+            };
             if matches.len() > 1 {
                 ambiguous_unresolved += 1;
                 tracing::debug!(
@@ -1047,19 +1053,16 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                     "spur-graph: ambiguous cross-file target_label; leaving unresolved"
                 );
                 edge.target_stable_symbol_id = None;
+            } else if edge.relation == RelationKind::Calls
+                && resolved.symbol_kind == "method"
+                && !same_directory_path(&resolved.file_path, source_file_path)
+            {
+                edge.target_stable_symbol_id = None;
             } else {
-                let resolved = matches.first().expect("matches is non-empty");
-                if edge.relation == RelationKind::Calls
-                    && resolved.symbol_kind == "method"
-                    && !same_directory_path(&resolved.file_path, source_file_path)
-                {
-                    edge.target_stable_symbol_id = None;
-                } else {
-                    edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
-                    if edge.relation == RelationKind::Calls && resolved.symbol_kind == "function" {
-                        edge.bind_method
-                            .get_or_insert_with(|| "singleton".to_owned());
-                    }
+                edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+                if edge.relation == RelationKind::Calls && resolved.symbol_kind == "function" {
+                    edge.bind_method
+                        .get_or_insert_with(|| "singleton".to_owned());
                 }
             }
         }
@@ -1434,8 +1437,8 @@ mod tests {
 
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
-        compose_artifact, empty_bucket, manifest_version_from_query_bytes, BuildMode,
-        CurrentFileEntry, ManifestQueryBytes, GRAPH_INDEX_VERSION_TEMPORAL,
+        compose_artifact, empty_bucket, manifest_version_from_query_bytes, rebind_cross_file_edges,
+        BuildMode, CurrentFileEntry, ManifestQueryBytes, GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
@@ -1590,6 +1593,37 @@ mod tests {
         assert_eq!(
             b_bucket.edges,
             vec![edge("sym:b1", Some("sym:a1"), RelationKind::References)]
+        );
+    }
+
+    #[test]
+    fn rebind_leaves_import_unresolved_when_filter_empties_candidates() {
+        // Regression: an Imports edge whose target_label matches exactly one
+        // symbol whose kind is filtered out by is_import_rebind_candidate_kind
+        // (here a `method`) used to leave `matches` empty and panic on
+        // `matches.first().expect("matches is non-empty")` (build.rs:1051).
+        let mut def_bucket = empty_bucket("src/def.rs", "oid-def");
+        let mut method_symbol = symbol("sym:method", "src/def.rs");
+        method_symbol.entity_name = "shared".to_owned();
+        method_symbol.symbol_kind = "method".to_owned();
+        def_bucket.symbols.push(method_symbol);
+
+        let mut use_bucket = empty_bucket("src/use.rs", "oid-use");
+        let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
+        import_edge.target_label = Some("shared".to_owned());
+        use_bucket.edges.push(import_edge);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("src/def.rs".to_owned(), def_bucket);
+        buckets.insert("src/use.rs".to_owned(), use_bucket);
+
+        // Must not panic.
+        rebind_cross_file_edges(&mut buckets);
+
+        let resolved_edge = &buckets["src/use.rs"].edges[0];
+        assert_eq!(
+            resolved_edge.target_stable_symbol_id, None,
+            "import to a filtered-out kind must stay unresolved"
         );
     }
 
