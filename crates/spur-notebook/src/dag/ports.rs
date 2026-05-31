@@ -3,12 +3,21 @@ use std::{
     fs,
     io::{self, Cursor},
     path::{Path, PathBuf},
+    ptr::NonNull,
+    sync::Arc,
 };
 
 use arrow_array::RecordBatch;
-use arrow_ipc::{reader::FileReader, writer::FileWriter};
+use arrow_buffer::Buffer;
+use arrow_ipc::{
+    convert::fb_to_schema,
+    reader::{read_footer_length, FileDecoder, FileReader},
+    root_as_footer,
+    writer::FileWriter,
+};
 use arrow_schema::{ArrowError, Schema, SchemaRef};
 use directories::BaseDirs;
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -58,7 +67,10 @@ pub struct PortRead {
     pub version: u64,
     pub schema: SchemaRef,
     pub batches: Vec<RecordBatch>,
-    pub ipc_bytes: Vec<u8>,
+    /// Raw Arrow IPC File bytes, backed by the memory-mapped port file. The
+    /// decoded `batches` reference this same buffer, so reads are zero-copy and
+    /// the buffer can be re-shipped to other consumers without re-encoding.
+    pub ipc_bytes: Buffer,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,14 +189,20 @@ impl PortStore {
         Ok(entry)
     }
 
+    #[allow(unsafe_code)] // memmap2::Mmap::map: maps a write-once, atomically-renamed port file.
     pub fn get(&self, port: &str) -> Result<PortRead, PortStoreError> {
         let entry = self
             .manifest
             .ports
             .get(port)
             .ok_or_else(|| PortStoreError::MissingPort(port.to_owned()))?;
-        let ipc_bytes = fs::read(&entry.path).map_err(|source| io_error(&entry.path, source))?;
-        let (schema, batches) = read_ipc(&ipc_bytes)?;
+        let file = fs::File::open(&entry.path).map_err(|source| io_error(&entry.path, source))?;
+        // SAFETY: port files are written once via create + atomic rename and are
+        // never mutated in place (each `put` writes a new versioned file), so the
+        // mapped region stays valid and immutable for the lifetime of the mapping.
+        let mmap = unsafe { Mmap::map(&file).map_err(|source| io_error(&entry.path, source))? };
+        let ipc_bytes = mmap_to_buffer(mmap);
+        let (schema, batches) = decode_ipc_file(&ipc_bytes)?;
 
         Ok(PortRead {
             path: entry.path.clone(),
@@ -239,6 +257,79 @@ fn read_ipc(bytes: &[u8]) -> Result<(SchemaRef, Vec<RecordBatch>), PortStoreErro
     let schema = reader.schema();
     let batches = reader.by_ref().collect::<Result<Vec<_>, ArrowError>>()?;
     Ok((schema, batches))
+}
+
+/// Wrap a memory-mapped region in an Arrow [`Buffer`] without copying. The
+/// `Mmap` is moved into the buffer's allocation owner, keeping the mapping alive
+/// for exactly as long as the buffer (and any arrays sliced from it) are used.
+#[allow(unsafe_code)] // Buffer::from_custom_allocation: wraps the mmap; the Mmap owner backs it.
+fn mmap_to_buffer(mmap: Mmap) -> Buffer {
+    let len = mmap.len();
+    if len == 0 {
+        return Buffer::from_vec::<u8>(Vec::new());
+    }
+    let ptr = NonNull::new(mmap.as_ptr().cast_mut()).expect("mmap pointer is non-null");
+    // SAFETY: `ptr`/`len` describe the live mapped region, and the `Mmap` owner
+    // moved into the `Arc` backs that allocation for the buffer's lifetime.
+    unsafe { Buffer::from_custom_allocation(ptr, len, Arc::new(mmap)) }
+}
+
+/// Decode an Arrow IPC File from an in-memory [`Buffer`] without copying the
+/// column buffers: each [`RecordBatch`] slices directly into `buffer`. This is
+/// the zero-copy counterpart to [`read_ipc`], used for the mmap read path.
+fn decode_ipc_file(buffer: &Buffer) -> Result<(SchemaRef, Vec<RecordBatch>), PortStoreError> {
+    const ARROW_FOOTER_TRAILER_LEN: usize = 10;
+    if buffer.len() < ARROW_FOOTER_TRAILER_LEN {
+        return Err(arrow_parse_error(
+            "Arrow IPC file is smaller than its trailer",
+        ));
+    }
+
+    let trailer_start = buffer.len() - ARROW_FOOTER_TRAILER_LEN;
+    let footer_len = read_footer_length(
+        buffer[trailer_start..]
+            .try_into()
+            .expect("slice is exactly the trailer length"),
+    )?;
+    if footer_len > trailer_start {
+        return Err(arrow_parse_error("Arrow IPC footer length exceeds file"));
+    }
+    let footer = root_as_footer(&buffer[trailer_start - footer_len..trailer_start])
+        .map_err(|err| arrow_parse_error(format!("invalid Arrow IPC footer: {err}")))?;
+
+    let schema: SchemaRef =
+        Arc::new(fb_to_schema(footer.schema().ok_or_else(|| {
+            arrow_parse_error("Arrow IPC footer is missing a schema")
+        })?));
+
+    let mut decoder = FileDecoder::new(Arc::clone(&schema), footer.version());
+    if let Some(dictionaries) = footer.dictionaries() {
+        for block in dictionaries.iter() {
+            let data = block_slice(buffer, &block);
+            decoder.read_dictionary(&block, &data)?;
+        }
+    }
+
+    let mut batches = Vec::new();
+    if let Some(record_batches) = footer.recordBatches() {
+        for block in record_batches.iter() {
+            let data = block_slice(buffer, &block);
+            if let Some(batch) = decoder.read_record_batch(&block, &data)? {
+                batches.push(batch);
+            }
+        }
+    }
+
+    Ok((schema, batches))
+}
+
+fn block_slice(buffer: &Buffer, block: &arrow_ipc::Block) -> Buffer {
+    let len = block.bodyLength() as usize + block.metaDataLength() as usize;
+    buffer.slice_with_length(block.offset() as usize, len)
+}
+
+fn arrow_parse_error(message: impl Into<String>) -> PortStoreError {
+    PortStoreError::Arrow(ArrowError::ParseError(message.into()))
 }
 
 fn validate_path_segment(value: &str) -> Result<(), PortStoreError> {
