@@ -365,6 +365,21 @@ impl State {
         self.emit_datasources_changed(entries);
     }
 
+    /// Attach or replace multiple datasource entries, then notify subscribers once.
+    pub fn attach_datasources(&self, entries: Vec<DatasourceEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        let entries = {
+            let mut catalog = self.datasource_catalog.lock();
+            for entry in entries {
+                catalog.attach(entry);
+            }
+            catalog.list()
+        };
+        self.emit_datasources_changed(entries);
+    }
+
     /// Detach a datasource entry, notifying subscribers only when the catalog changes.
     pub fn detach_datasource(&self, name: &str) -> Option<DatasourceEntry> {
         let (removed, entries) = {

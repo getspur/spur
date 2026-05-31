@@ -1577,10 +1577,63 @@ impl NotebookDaemonControl {
             }
         }
         self.load_open_notebook(&path).await?;
+        #[cfg(feature = "datasource-introspect")]
+        if let Err(error) = self.reconcile_open_datasource_catalog().await {
+            warn!(
+                %error,
+                path = %path.display(),
+                "failed to reconcile datasource catalog after notebook open"
+            );
+        }
         if let Err(error) = self.persist_last_notebook(&path).await {
             warn!(%error, path = %path.display(), "failed to persist last notebook record");
         }
         Ok(path)
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn reconcile_open_datasource_catalog(&self) -> Result<(), BridgeError> {
+        let entries = self.jute_state.datasource_catalog.lock().list();
+        let mut reconciled = Vec::new();
+
+        for mut entry in entries {
+            if !entry.tables.is_empty() || !entry.columns.is_empty() {
+                continue;
+            }
+
+            let path = PathBuf::from(&entry.path);
+            let schema = match crate::datasource::introspect_datasource(&path, entry.kind) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    warn!(
+                        %error,
+                        path = %path.display(),
+                        "datasource schema probe failed during catalog reconcile; keeping metadata unchanged"
+                    );
+                    continue;
+                }
+            };
+
+            if entry.columns == schema.columns
+                && entry.row_count == schema.row_count
+                && entry.tables == schema.tables
+            {
+                continue;
+            }
+
+            entry.columns = schema.columns;
+            entry.row_count = schema.row_count;
+            entry.tables = schema.tables;
+            reconciled.push(entry);
+        }
+
+        if !reconciled.is_empty() {
+            self.jute_state.attach_datasources(reconciled);
+            self.refresh_datasource_setup_cell().await?;
+            self.persist_catalog_to_current_notebook().await?;
+        }
+
+        Ok(())
     }
 
     async fn load_open_notebook(&self, path: &Path) -> Result<(), BridgeError> {
@@ -3045,6 +3098,113 @@ mod tests {
             event,
             jute::state::DaemonEvent::DatasourcesChanged(vec![entry])
         );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn open_reconciles_empty_duckdb_catalog_metadata() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let db_path = tempdir.path().join("analyst.duckdb");
+        {
+            let conn = duckdb::Connection::open(&db_path)?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE nodes(stable_symbol_id VARCHAR, qualified_name VARCHAR);
+                INSERT INTO nodes VALUES ('sym-1', 'crate::symbol');
+                CREATE VIEW v_blast_radius AS
+                    SELECT stable_symbol_id, 1 AS blast_radius_score FROM nodes;
+                "#,
+            )?;
+        }
+
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        let empty_entry = jute::commands::DatasourceEntry {
+            name: "analyst".to_string(),
+            path: db_path.display().to_string(),
+            kind: jute::commands::DatasourceKind::DuckDb,
+            group: Some("SPUR".to_string()),
+            columns: Vec::new(),
+            row_count: None,
+            tables: Vec::new(),
+        };
+        let mut notebook = empty_notebook();
+        notebook["metadata"]["spur"]["datasources"] = json!({
+            "schema_version": 1,
+            "entries": [empty_entry],
+        });
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&notebook).expect("notebook serializes"),
+        )
+        .await?;
+
+        let jute_state = Arc::new(State::new());
+        let socket_path = tempdir.path().join("notebook.sock");
+        let requester: Arc<dyn BridgeRequester> =
+            Arc::new(LoopbackDaemonRequester::new(socket_path.clone()));
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            Arc::clone(&requester),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: requester,
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+        });
+        let _server = start_multiplexed_server(&socket_path, deps, control.clone()).await?;
+        let mut events = jute_state.event_tx.subscribe();
+
+        let response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: notebook_path.display().to_string(),
+            }))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let hydrated = timeout(Duration::from_secs(1), events.recv())
+            .await?
+            .expect("hydrated catalog event");
+        assert!(matches!(
+            hydrated,
+            jute::state::DaemonEvent::DatasourcesChanged(entries)
+                if entries.len() == 1 && entries[0].tables.is_empty()
+        ));
+        let reconciled = timeout(Duration::from_secs(1), events.recv())
+            .await?
+            .expect("reconciled catalog event");
+        let jute::state::DaemonEvent::DatasourcesChanged(entries) = reconciled;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == "analyst")
+            .expect("analyst entry is present");
+        assert!(entry.tables.iter().any(|table| table.name == "nodes"));
+        assert!(entry
+            .tables
+            .iter()
+            .any(|table| table.name == "v_blast_radius"));
+
+        let persisted: Value = serde_json::from_slice(&tokio::fs::read(&notebook_path).await?)?;
+        let tables = persisted["metadata"]["spur"]["datasources"]["entries"][0]["tables"]
+            .as_array()
+            .expect("persisted tables array");
+        assert!(tables.iter().any(|table| table["name"] == "nodes"));
+        let setup_source = persisted["cells"]
+            .as_array()
+            .expect("cells array")
+            .iter()
+            .find_map(|cell| {
+                cell["source"]
+                    .as_str()
+                    .filter(|source| source.contains("# SPUR datasource setup cell v1"))
+            })
+            .expect("datasource setup cell is persisted");
+        assert!(setup_source.contains("analyst__nodes"));
+
+        Ok(())
     }
 
     fn daemon_request(command: jute::commands::DaemonControlCommand) -> DaemonControlRequest {
