@@ -1,0 +1,21 @@
+{
+  "filters": [
+    {
+      "expression_class": "BOUND_OPERATOR",
+      "type": "OPERATOR_IS_NULL",
+      "alias": "",
+      "return_type": { "id": "BOOLEAN", "type_info": null },
+      "children": [
+        {
+          "expression_class": "BOUND_COLUMN_REF",
+          "type": "BOUND_COLUMN_REF",
+          "alias": "",
+          "return_type": { "id": "TIMESTAMP", "type_info": null },
+          "binding": { "table_index": 0, "column_index": 0 },
+          "depth": 0
+        }
+      ]
+    }
+  ],
+  "column_binding_names_by_index": ["deleted_at"]
+}
