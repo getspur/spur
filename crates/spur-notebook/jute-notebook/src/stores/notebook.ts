@@ -8,11 +8,12 @@ import { immer } from "zustand/middleware/immer";
 
 import type {
   Cell,
+  CellDagMetadata,
   CellMetadata,
   DaemonCell,
   JuteDeckCellMetadata,
-  NotebookMetadata,
   NotebookDelta,
+  NotebookMetadata,
   NotebookRoot,
   Output,
   OutputDisplayData,
@@ -41,8 +42,23 @@ export type NotebookCellState = {
   version: number;
   lastEditedBy?: string;
   datasourceSetup?: boolean;
+  dagMetadata?: CellDagMetadata;
   juteDeckMetadata?: JuteDeckCellMetadata;
   result?: CellResult;
+};
+
+export type NotebookViewMode = "cells" | "dag";
+
+export type NodeStatus = {
+  state:
+    | "fresh"
+    | "stale"
+    | "running"
+    | "failed"
+    | "upstream-failed"
+    | "never-run";
+  ranPortVersions: Record<string, number>;
+  executionCount?: number;
 };
 
 export type NotebookServerState = {
@@ -80,6 +96,9 @@ export type NotebookViewState = {
 
   /** In-memory generation of the running kernel slot. */
   kernelGeneration?: number;
+
+  /** Active in-place notebook view. */
+  viewMode: NotebookViewMode;
 };
 
 export type NotebookEditBuffer = {
@@ -100,6 +119,9 @@ export type NotebookStoreState = {
 
   /** Optimistic local overlays not yet reflected in serverState. */
   editBuffer: NotebookEditBuffer;
+
+  /** DAG execution status keyed by cell ID. */
+  dagStatus: Record<string, NodeStatus>;
 };
 
 export type CellType = "code" | "markdown";
@@ -246,6 +268,11 @@ function notebookViewStateActions(
         state.viewState.kernelSpecName = info.spec_name;
         state.viewState.kernelGeneration = info.generation;
       }),
+
+    setViewMode: (viewMode: NotebookViewMode) =>
+      set((state) => {
+        state.viewState.viewMode = viewMode;
+      }),
   };
 }
 
@@ -305,10 +332,12 @@ function createNotebookStore(): StoreApi<NotebookStore> {
         viewState: {
           selectedCellId: null,
           isLoading: false,
+          viewMode: "cells",
         },
         editBuffer: {
           cellSources: {},
         },
+        dagStatus: {},
       };
       const actions: NotebookStoreActions = {
         serverStateActions: notebookServerStateActions(set),
@@ -447,6 +476,7 @@ function loadNotebookRootDraft(
         version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
         lastEditedBy: cell.metadata.spur?.last_edited_by,
         datasourceSetup: cell.metadata.spur?.datasource_setup,
+        dagMetadata: cell.metadata.spur?.dag,
         juteDeckMetadata: cell.metadata.jute_deck,
       };
 
@@ -802,6 +832,7 @@ export class Notebook {
             cell.version,
             cell.lastEditedBy,
             cell.datasourceSetup,
+            cell.dagMetadata,
             cell.juteDeckMetadata,
           ),
         });
@@ -814,6 +845,7 @@ export class Notebook {
             cell.version,
             cell.lastEditedBy,
             cell.datasourceSetup,
+            cell.dagMetadata,
             cell.juteDeckMetadata,
           ),
         });
@@ -938,6 +970,7 @@ export class Notebook {
         cell.version,
         cell.lastEditedBy,
         cell.datasourceSetup,
+        cell.dagMetadata,
         cell.juteDeckMetadata,
       ),
     };
@@ -1309,6 +1342,7 @@ function cellMetadata(
   version: number,
   lastEditedBy?: string,
   datasourceSetup?: boolean,
+  dagMetadata?: CellDagMetadata,
   juteDeckMetadata?: JuteDeckCellMetadata,
 ): CellMetadata {
   const metadata: CellMetadata = {
@@ -1316,6 +1350,7 @@ function cellMetadata(
       version,
       last_edited_by: lastEditedBy,
       datasource_setup: datasourceSetup,
+      dag: dagMetadata,
     },
   };
   if (juteDeckMetadata !== undefined) {
