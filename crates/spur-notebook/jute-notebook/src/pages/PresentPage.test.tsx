@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => {
       cellSources: {},
     },
     dagStatus: {},
+    dagPortManifest: {},
   });
   const state = makeState();
 

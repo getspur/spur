@@ -41,6 +41,7 @@ describe("applyRunCellEvent", () => {
         cellSources: {},
       },
       dagStatus: {},
+      dagPortManifest: {},
     };
     let runState: RunCellEventApplicationState = {
       status: "running",

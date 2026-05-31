@@ -40,7 +40,21 @@ type TestStoreState = {
       { source: string; version: number; lastEditedBy?: string }
     >;
   };
-  dagStatus: Record<string, never>;
+  dagStatus: Record<
+    string,
+    {
+      state:
+        | "fresh"
+        | "stale"
+        | "running"
+        | "failed"
+        | "upstream-failed"
+        | "never-run";
+      ranPortVersions: Record<string, number>;
+      executionCount?: number;
+    }
+  >;
+  dagPortManifest: Record<string, number>;
 };
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -90,7 +104,48 @@ const storeState = vi.hoisted<TestStoreState>(() => ({
     cellSources: {},
   },
   dagStatus: {},
+  dagPortManifest: {},
 }));
+
+function applyDagStatusSnapshot(snapshot: {
+  nodes: Array<{
+    execution_count?: number | null;
+    id: string;
+    ranPortVersions?: Record<string, number>;
+    ran_port_versions?: Record<string, number>;
+    state:
+      | string
+      | {
+          execution_count?: number | null;
+        };
+  }>;
+  port_manifest: Record<string, number>;
+}) {
+  storeState.dagPortManifest = snapshot.port_manifest;
+  for (const node of snapshot.nodes) {
+    const state =
+      typeof node.state === "string"
+        ? node.state
+        : node.state.execution_count
+          ? "fresh"
+          : "never-run";
+    storeState.dagStatus[node.id] = {
+      state: state as TestStoreState["dagStatus"][string]["state"],
+      ranPortVersions:
+        node.ranPortVersions ??
+        node.ran_port_versions ??
+        (state === "running" || state === "fresh"
+          ? Object.fromEntries(
+              storeState.serverState.cells[node.id].dagMetadata?.consumes.map(
+                (port) => [port, snapshot.port_manifest[port]],
+              ) ?? [],
+            )
+          : (storeState.dagStatus[node.id]?.ranPortVersions ?? {})),
+      executionCount: node.execution_count ?? undefined,
+    };
+  }
+  storeListeners.forEach((listener) => listener());
+}
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -98,6 +153,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@/stores/notebook", () => ({
   useNotebook: () => ({
+    applyDagStatusSnapshot,
     execute: executeMock,
     store: {
       getInitialState: () => storeState,
@@ -223,6 +279,8 @@ describe("DagView", () => {
       port_manifest: { customers: 2, summary: 1 },
     });
     storeState.editBuffer.cellSources = {};
+    storeState.dagStatus = {};
+    storeState.dagPortManifest = {};
     storeListeners.clear();
   });
 
@@ -270,8 +328,56 @@ describe("DagView", () => {
     );
   });
 
-  test("edits and runs the selected inspector node through notebook plumbing", async () => {
+  test("edits and runs the selected inspector node through DAG plumbing", async () => {
     executeMock.mockResolvedValue(undefined);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "notebook_dag_status") {
+        return {
+          notebook_version: 3,
+          nodes: [
+            {
+              id: "source-cell",
+              state: {
+                kind: "code",
+                version: 1,
+                execution_count: 1,
+              },
+              dag: {
+                produces: [{ port: "customers", repr: "dataframe" }],
+                consumes: [],
+              },
+            },
+            {
+              id: "consumer-cell",
+              state: {
+                kind: "code",
+                version: 1,
+                execution_count: 1,
+              },
+              dag: {
+                produces: [{ port: "summary", repr: "dataframe" }],
+                consumes: ["customers"],
+                source: { kind: "cell", port: "customers" },
+              },
+            },
+          ],
+          edges: [
+            {
+              producer: "source-cell",
+              consumer: "consumer-cell",
+              port: "customers",
+            },
+          ],
+          port_manifest: { customers: 2, summary: 1 },
+        };
+      }
+      if (command === "daemon_control") {
+        return { ok: true, result: { type: "empty", data: {} } };
+      }
+      if (command === "notebook_run_cell")
+        return { cell_id: "consumer-cell", status: "fresh" };
+      throw new Error(`unexpected invoke: ${command}`);
+    });
 
     render(<DagView />);
 
@@ -292,8 +398,110 @@ describe("DagView", () => {
     fireEvent.click(screen.getByRole("button", { name: /run node/i }));
 
     await waitFor(() => {
-      expect(executeMock).toHaveBeenCalledWith("consumer-cell");
+      expect(invokeMock).toHaveBeenCalledWith("daemon_control", {
+        cmd: {
+          command: "apply_edit",
+          id: "consumer-cell",
+          source: "summary = customers.head()",
+        },
+      });
+      expect(invokeMock).toHaveBeenCalledWith("notebook_run_cell", {
+        cellId: "consumer-cell",
+      });
     });
+    expect(executeMock).not.toHaveBeenCalled();
     expect(screen.queryByText("Edited")).not.toBeInTheDocument();
+  });
+
+  test("renders downstream stale after a pushed DAG status update", async () => {
+    render(<DagView />);
+
+    const edge = await screen.findByTestId(
+      "source-cell->consumer-cell:customers",
+    );
+    expect(edge).toHaveAttribute("data-edge-animated", "false");
+
+    applyDagStatusSnapshot({
+      nodes: [
+        {
+          id: "source-cell",
+          state: "fresh",
+          ranPortVersions: {},
+          execution_count: 2,
+        },
+        {
+          id: "consumer-cell",
+          state: "stale",
+          ran_port_versions: { customers: 2 },
+          execution_count: 1,
+        },
+      ],
+      port_manifest: { customers: 3, summary: 1 },
+    });
+
+    await waitFor(() => {
+      expect(edge).toHaveAttribute("data-edge-animated", "true");
+      expect(edge).toHaveStyle({ stroke: "#d97706" });
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /select consumer-cell/i }),
+    );
+    expect(screen.getByRole("complementary")).toHaveTextContent("stale");
+  });
+
+  test("runs downstream from the inspector and stale roots from the DAG header", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "notebook_dag_status") {
+        return {
+          notebook_version: 3,
+          nodes: [
+            {
+              id: "source-cell",
+              state: "fresh",
+              execution_count: 1,
+            },
+            {
+              id: "consumer-cell",
+              state: "stale",
+              execution_count: 1,
+            },
+          ],
+          edges: [
+            {
+              producer: "source-cell",
+              consumer: "consumer-cell",
+              port: "customers",
+            },
+          ],
+          port_manifest: { customers: 2, summary: 1 },
+        };
+      }
+      if (command === "notebook_run_cascade") return { runs: [] };
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    render(<DagView />);
+
+    await screen.findByRole("button", { name: /run stale \(1\)/i });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /select source-cell/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /run downstream/i }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("notebook_run_cascade", {
+        cellId: "source-cell",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /run stale \(1\)/i }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("notebook_run_cascade", {
+        cellId: "consumer-cell",
+      });
+    });
   });
 });

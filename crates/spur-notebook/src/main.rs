@@ -326,6 +326,8 @@ fn main() {
             jute::commands::venv::venv_list,
             jute::commands::venv::venv_delete,
             spur_notebook::commands::notebook_dag_status,
+            spur_notebook::commands::notebook_run_cascade,
+            spur_notebook::commands::notebook_run_cell,
             spur_notebook::mcp::bridge::bridge_ready,
             spur_notebook::mcp::bridge::notebook_active_changed,
             spur_notebook::mcp::bridge::agent_response,

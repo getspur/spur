@@ -87,6 +87,8 @@ export function buildDagGraph(
     nodes: dagCellIds.map((id) => {
       const cell = cells[id];
       const dagMetadata = cell.dagMetadata;
+      const status = dagStatus[id];
+      const stalePorts = staleConsumedPorts(status, portManifest);
 
       return {
         id,
@@ -105,11 +107,9 @@ export function buildDagGraph(
             })) ?? [],
           consumes:
             dagMetadata?.consumes.map((port) => {
-              const status = dagStatus[id];
               const ranVersion = status?.ranPortVersions[port];
-              const stale = staleConsumedPorts(status, portManifest).includes(
-                port,
-              );
+              const stale =
+                status?.state === "stale" || stalePorts.includes(port);
               return {
                 port,
                 version: portManifest[port] ?? producerVersionByPort.get(port),
@@ -118,7 +118,7 @@ export function buildDagGraph(
               };
             }) ?? [],
           source: formatSource(dagMetadata?.source),
-          state: dagStatus[id]?.state ?? "never-run",
+          state: deriveNodeState(status, portManifest),
         },
       };
     }),
@@ -139,6 +139,20 @@ export function buildDagGraph(
         }));
     }),
   };
+}
+
+function deriveNodeState(
+  status: NodeStatus | undefined,
+  portManifest: DagPortManifest,
+): DagNodeState {
+  if (!status) return "never-run";
+  if (
+    status.state === "fresh" &&
+    staleConsumedPorts(status, portManifest).length > 0
+  ) {
+    return "stale";
+  }
+  return status.state;
 }
 
 function isDagCell(

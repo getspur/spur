@@ -43,6 +43,7 @@ describe("NotebookHeader", () => {
         cellSources: {},
       },
       dagStatus: {},
+      dagPortManifest: {},
       viewStateActions: {
         setViewMode: (viewMode: "cells" | "dag") =>
           set((state: any) => ({
