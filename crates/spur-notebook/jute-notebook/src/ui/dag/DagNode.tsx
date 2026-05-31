@@ -10,21 +10,50 @@ import type {
 
 type DagNodeProps = {
   data: DagNodeData;
+  onSelect?: (id: string) => void;
   selected?: boolean;
 };
 
 const STATE_BORDER_COLORS: Record<DagNodeState, string> = {
-  neutral: "border-gray-300",
+  fresh: "border-emerald-500 bg-emerald-50/30",
+  stale: "border-amber-500 bg-amber-50/40",
+  running: "animate-pulse border-blue-500 bg-blue-50/40",
+  failed: "border-red-500 bg-red-50/40",
+  "upstream-failed": "border-red-400 border-dashed bg-red-50/20",
+  "never-run": "border-gray-300 bg-white",
 };
 
-export default function DagNode({ data, selected = false }: DagNodeProps) {
+const STATE_BADGE_COLORS: Record<DagNodeState, string> = {
+  fresh: "bg-emerald-100 text-emerald-800",
+  stale: "bg-amber-100 text-amber-800",
+  running: "bg-blue-100 text-blue-800",
+  failed: "bg-red-100 text-red-800",
+  "upstream-failed": "bg-red-100 text-red-700",
+  "never-run": "bg-gray-100 text-gray-600",
+};
+
+export default function DagNode({
+  data,
+  onSelect,
+  selected = false,
+}: DagNodeProps) {
   return (
     <article
+      aria-label={`Select ${data.label}`}
       className={clsx(
-        "h-44 w-[280px] overflow-hidden rounded border bg-white text-left shadow-sm",
+        "h-44 w-[280px] overflow-hidden rounded border text-left shadow-sm transition-colors",
         STATE_BORDER_COLORS[data.state],
         selected && "ring-2 ring-gray-900/20",
       )}
+      onClick={() => onSelect?.(data.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect?.(data.id);
+        }
+      }}
+      role="button"
+      tabIndex={0}
     >
       <div className="border-b border-gray-100 px-3 py-2">
         <div className="flex min-w-0 items-center justify-between gap-2">
@@ -35,9 +64,19 @@ export default function DagNode({ data, selected = false }: DagNodeProps) {
             {data.cellType}
           </span>
         </div>
-        <p className="mt-1 truncate font-mono text-xs text-gray-500">
-          {data.codePreview}
-        </p>
+        <div className="mt-1 flex min-w-0 items-center justify-between gap-2">
+          <p className="truncate font-mono text-xs text-gray-500">
+            {data.codePreview}
+          </p>
+          <span
+            className={clsx(
+              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-normal",
+              STATE_BADGE_COLORS[data.state],
+            )}
+          >
+            {data.state}
+          </span>
+        </div>
       </div>
       <div className="grid gap-2 px-3 py-2 text-xs">
         <PortSection label="Consumes">
@@ -94,9 +133,16 @@ function ProducedPortChip({ port }: { port: DagProducedPort }) {
 
 function ConsumedPortChip({ port }: { port: DagConsumedPort }) {
   return (
-    <span className="max-w-full truncate rounded bg-sky-50 px-2 py-1 text-[11px] font-medium text-sky-800">
+    <span
+      className={clsx(
+        "max-w-full truncate rounded px-2 py-1 text-[11px] font-medium",
+        port.stale ? "bg-amber-100 text-amber-800" : "bg-sky-50 text-sky-800",
+      )}
+    >
       {port.port}
-      <span className="ml-1 text-sky-600">
+      <span
+        className={clsx("ml-1", port.stale ? "text-amber-700" : "text-sky-600")}
+      >
         {port.version === undefined ? "v?" : `v${port.version}`}
       </span>
     </span>

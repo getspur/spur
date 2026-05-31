@@ -288,6 +288,11 @@ impl NotebookStore {
         (inner.clone(), version)
     }
 
+    /// Return the path of the loaded notebook, if one has been loaded.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.path.lock().clone()
+    }
+
     /// Apply a notebook edit operation.
     pub fn apply(&self, op: NotebookOp) -> Result<NotebookDelta, StoreError> {
         let mut root = self.inner.write();

@@ -1,9 +1,16 @@
-import { render } from "@testing-library/react";
-import type { ReactNode } from "react";
-import { describe, expect, test, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import type { CSSProperties, ReactNode } from "react";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import DagView from "./DagView";
 
+const invokeMock = vi.hoisted(() => vi.fn());
 const storeState = vi.hoisted(() => ({
   serverState: {
     lastAppliedVersion: 0,
@@ -50,6 +57,10 @@ const storeState = vi.hoisted(() => ({
   dagStatus: {},
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+}));
+
 vi.mock("@/stores/notebook", () => ({
   useNotebook: () => ({
     store: {
@@ -75,15 +86,17 @@ vi.mock("@xyflow/react", () => ({
   }: {
     children: ReactNode;
     edges: Array<{
+      animated?: boolean;
       id: string;
       label?: string;
       source: string;
+      style?: CSSProperties;
       target: string;
     }>;
     nodes: Array<{ id: string; data: unknown; type?: string }>;
     nodeTypes: Record<
       string,
-      (props: { data: unknown; selected: boolean }) => ReactNode
+      (props: { data: unknown; id?: string; selected: boolean }) => ReactNode
     >;
   }) => (
     <div data-testid="react-flow">
@@ -91,7 +104,7 @@ vi.mock("@xyflow/react", () => ({
         const NodeComponent = nodeTypes[node.type ?? ""];
         return (
           <div key={node.id} data-node-id={node.id}>
-            {NodeComponent({ data: node.data, selected: false })}
+            {NodeComponent({ data: node.data, selected: false, id: node.id })}
           </div>
         );
       })}
@@ -99,6 +112,9 @@ vi.mock("@xyflow/react", () => ({
         <div
           key={edge.id}
           data-edge={`${edge.source}->${edge.target}:${edge.label}`}
+          data-edge-animated={String(Boolean(edge.animated))}
+          data-testid={`${edge.source}->${edge.target}:${edge.label}`}
+          style={edge.style}
         >
           {edge.label}
         </div>
@@ -109,6 +125,49 @@ vi.mock("@xyflow/react", () => ({
 }));
 
 describe("DagView", () => {
+  beforeEach(() => {
+    cleanup();
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({
+      notebook_version: 3,
+      nodes: [
+        {
+          id: "source-cell",
+          state: {
+            kind: "code",
+            version: 1,
+            execution_count: 1,
+          },
+          dag: {
+            produces: [{ port: "customers", repr: "dataframe" }],
+            consumes: [],
+          },
+        },
+        {
+          id: "consumer-cell",
+          state: {
+            kind: "code",
+            version: 1,
+            execution_count: 1,
+          },
+          dag: {
+            produces: [{ port: "summary", repr: "dataframe" }],
+            consumes: ["customers"],
+            source: { kind: "cell", port: "customers" },
+          },
+        },
+      ],
+      edges: [
+        {
+          producer: "source-cell",
+          consumer: "consumer-cell",
+          port: "customers",
+        },
+      ],
+      port_manifest: { customers: 2, summary: 1 },
+    });
+  });
+
   test("lists only cells with DAG metadata", () => {
     const { container } = render(<DagView />);
 
@@ -123,5 +182,36 @@ describe("DagView", () => {
         '[data-edge="source-cell->consumer-cell:customers"]',
       ),
     ).not.toBeNull();
+  });
+
+  test("seeds status on mount and selects a read-only inspector node", async () => {
+    render(<DagView />);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("notebook_dag_status", {});
+    });
+
+    const edge = await screen.findByTestId(
+      "source-cell->consumer-cell:customers",
+    );
+    expect(edge).toHaveAttribute("data-edge-animated", "false");
+    expect(edge).toHaveStyle({ stroke: "#94a3b8" });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /select consumer-cell/i }),
+    );
+
+    expect(screen.getByRole("complementary")).toHaveTextContent(
+      "consumer-cell",
+    );
+    expect(screen.getByRole("complementary")).toHaveTextContent("fresh");
+    expect(screen.getByRole("complementary")).toHaveTextContent("customers");
+    expect(screen.getByRole("complementary")).toHaveTextContent("v2");
+    expect(screen.getByLabelText("Selected DAG node code")).toHaveAttribute(
+      "readonly",
+    );
+    expect(screen.getByLabelText("Selected DAG node code")).toHaveValue(
+      "summary = customers.describe()",
+    );
   });
 });
