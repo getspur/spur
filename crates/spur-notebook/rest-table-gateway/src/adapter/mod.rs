@@ -1,6 +1,6 @@
-pub mod manifest;
-pub mod json_to_batch;
 pub mod http;
+pub mod json_to_batch;
+pub mod manifest;
 pub mod manifest_adapter;
 
 use std::collections::HashMap;
