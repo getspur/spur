@@ -5,12 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["duckdb-bundled"]
+duckdb-bundled = ["duckdb/bundled"]
+
 [dependencies]
 anyhow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 async-trait.workspace = true
-duckdb = { workspace = true, features = ["vtab"] }
+duckdb = { version = "=1.10502.0", features = ["vtab"] }
 futures.workspace = true
 reqwest = { workspace = true }
 serde = { workspace = true }

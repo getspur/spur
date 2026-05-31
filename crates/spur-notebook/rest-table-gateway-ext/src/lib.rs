@@ -1,0 +1,321 @@
+use std::{
+    env,
+    error::Error,
+    sync::{Arc, Mutex},
+};
+
+use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, SchemaRef};
+use duckdb::{
+    core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
+    duckdb_entrypoint_c_api,
+    vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
+    Connection, Result,
+};
+use spur_rest_table_gateway::{
+    adapter::{Adapter, ResolvedAuth, ScalarValue, ScanRequest, TableKind},
+    adapters::polymarket::PolymarketAdapter,
+    vtab::{
+        bridge::IoBridge,
+        table_fn::{ApiTableExtra, ApiTableVTab},
+    },
+};
+
+const DEFAULT_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
+const DEFAULT_CLOB_BASE: &str = "https://clob.polymarket.com";
+const CHUNK_SIZE: usize = 2048;
+
+#[duckdb_entrypoint_c_api(ext_name = "spur_rest", min_duckdb_version = "v1.2.0")]
+pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
+    let gamma_base =
+        env::var("SPUR_POLYMARKET_GAMMA_BASE").unwrap_or_else(|_| DEFAULT_GAMMA_BASE.to_string());
+    let clob_base =
+        env::var("SPUR_POLYMARKET_CLOB_BASE").unwrap_or_else(|_| DEFAULT_CLOB_BASE.to_string());
+
+    let adapter: Arc<dyn Adapter> = Arc::new(PolymarketAdapter::new(&gamma_base, &clob_base)?);
+    let bridge = Arc::new(IoBridge::new());
+    register_adapter(&con, adapter, bridge)?;
+    Ok(())
+}
+
+fn register_adapter(
+    con: &Connection,
+    adapter: Arc<dyn Adapter>,
+    bridge: Arc<IoBridge>,
+) -> Result<usize, Box<dyn Error>> {
+    let mut registered = 0;
+    for table in adapter.catalog() {
+        let fn_name = format!("{}_{}", adapter.name(), table.name);
+        match table.kind {
+            TableKind::Table => {
+                let extra = ApiTableExtra {
+                    bridge: Arc::clone(&bridge),
+                    adapter: Arc::clone(&adapter),
+                    table: table.name,
+                    schema: table.schema,
+                };
+                con.register_table_function_with_extra_info::<ApiTableVTab, _>(&fn_name, &extra)?;
+                registered += 1;
+            }
+            TableKind::TableFunction { arg_names } => {
+                let extra = ApiFunctionExtra {
+                    bridge: Arc::clone(&bridge),
+                    adapter: Arc::clone(&adapter),
+                    table: table.name,
+                    schema: table.schema,
+                    arg_names,
+                };
+                con.register_table_function_with_extra_info::<ApiFunctionVTab, _>(
+                    &fn_name, &extra,
+                )?;
+                registered += 1;
+            }
+        }
+    }
+    Ok(registered)
+}
+
+#[derive(Clone)]
+struct ApiFunctionExtra {
+    bridge: Arc<IoBridge>,
+    adapter: Arc<dyn Adapter>,
+    table: String,
+    schema: SchemaRef,
+    arg_names: Vec<String>,
+}
+
+struct ApiFunctionBindData {
+    bridge: Arc<IoBridge>,
+    adapter: Arc<dyn Adapter>,
+    table: String,
+    schema: SchemaRef,
+    tvf_args: Vec<ScalarValue>,
+}
+
+struct ApiFunctionInitData {
+    rows: Vec<RecordBatch>,
+    cursor: Mutex<ApiCursor>,
+}
+
+#[derive(Default)]
+struct ApiCursor {
+    batch_idx: usize,
+    row_idx: usize,
+}
+
+struct ApiFunctionVTab;
+
+impl VTab for ApiFunctionVTab {
+    type InitData = ApiFunctionInitData;
+    type BindData = ApiFunctionBindData;
+
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        let extra = unsafe { &*bind.get_extra_info::<ApiFunctionExtra>() };
+        for field in extra.schema.fields() {
+            let logical_type = LogicalTypeHandle::from(arrow_to_duckdb_type(field.data_type())?);
+            bind.add_result_column(field.name(), logical_type);
+        }
+
+        Ok(ApiFunctionBindData {
+            bridge: Arc::clone(&extra.bridge),
+            adapter: Arc::clone(&extra.adapter),
+            table: extra.table.clone(),
+            schema: Arc::clone(&extra.schema),
+            tvf_args: bind_named_args(bind, &extra.arg_names)?,
+        })
+    }
+
+    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
+        let bind_data = unsafe { &*init.get_bind_data::<ApiFunctionBindData>() };
+        let rows = bind_data.bridge.call(
+            Arc::clone(&bind_data.adapter),
+            ScanRequest {
+                table: bind_data.table.clone(),
+                predicates: vec![],
+                projection: None,
+                tvf_args: bind_data.tvf_args.clone(),
+                auth: ResolvedAuth::None,
+            },
+        )?;
+
+        Ok(ApiFunctionInitData {
+            rows,
+            cursor: Mutex::new(ApiCursor::default()),
+        })
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        let init_data = func.get_init_data();
+        let bind_data = func.get_bind_data();
+        let mut cursor = init_data
+            .cursor
+            .lock()
+            .map_err(|err| format!("table cursor lock poisoned: {err}"))?;
+
+        let mut emitted = 0;
+        while emitted < CHUNK_SIZE && cursor.batch_idx < init_data.rows.len() {
+            let batch = &init_data.rows[cursor.batch_idx];
+            if cursor.row_idx >= batch.num_rows() {
+                cursor.batch_idx += 1;
+                cursor.row_idx = 0;
+                continue;
+            }
+
+            let available = batch.num_rows() - cursor.row_idx;
+            let take = available.min(CHUNK_SIZE - emitted);
+            write_batch_rows(
+                batch,
+                &bind_data.schema,
+                cursor.row_idx,
+                take,
+                emitted,
+                output,
+            )?;
+            emitted += take;
+            cursor.row_idx += take;
+        }
+
+        output.set_len(emitted);
+        Ok(())
+    }
+
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![
+            (
+                "token_id".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Varchar),
+            ),
+            (
+                "depth".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Bigint),
+            ),
+        ])
+    }
+}
+
+fn bind_named_args(
+    bind: &BindInfo,
+    arg_names: &[String],
+) -> Result<Vec<ScalarValue>, Box<dyn Error>> {
+    let mut args = Vec::new();
+    for arg_name in arg_names {
+        match arg_name.as_str() {
+            "token_id" => {
+                let token_id = bind
+                    .get_named_parameter("token_id")
+                    .ok_or("polymarket_orderbook requires token_id")?
+                    .to_string();
+                args.push(ScalarValue::Utf8(token_id));
+            }
+            "depth" => {
+                if let Some(depth) = bind.get_named_parameter("depth") {
+                    args.push(ScalarValue::Int64(depth.to_int64()));
+                }
+            }
+            other => return Err(format!("unsupported table function argument: {other}").into()),
+        }
+    }
+    Ok(args)
+}
+
+fn arrow_to_duckdb_type(data_type: &DataType) -> Result<LogicalTypeId, Box<dyn Error>> {
+    Ok(match data_type {
+        DataType::Utf8 => LogicalTypeId::Varchar,
+        DataType::Int64 => LogicalTypeId::Bigint,
+        DataType::Float64 => LogicalTypeId::Double,
+        DataType::Boolean => LogicalTypeId::Boolean,
+        other => {
+            return Err(
+                format!("unsupported Arrow type for DuckDB table function: {other:?}").into(),
+            );
+        }
+    })
+}
+
+fn write_batch_rows(
+    batch: &RecordBatch,
+    schema: &SchemaRef,
+    source_start: usize,
+    len: usize,
+    output_start: usize,
+    output: &mut DataChunkHandle,
+) -> Result<(), Box<dyn Error>> {
+    for (column_idx, field) in schema.fields().iter().enumerate() {
+        let column = batch.column(column_idx);
+        match field.data_type() {
+            DataType::Utf8 => {
+                let array = column
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| format!("column {} expected Utf8 array", field.name()))?;
+                let mut vector = output.flat_vector(column_idx);
+                for row_offset in 0..len {
+                    let source_row = source_start + row_offset;
+                    let output_row = output_start + row_offset;
+                    if array.is_null(source_row) {
+                        vector.set_null(output_row);
+                    } else {
+                        vector.insert(output_row, array.value(source_row));
+                    }
+                }
+            }
+            DataType::Int64 => {
+                let array = column
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| format!("column {} expected Int64 array", field.name()))?;
+                let mut vector = output.flat_vector(column_idx);
+                for row_offset in 0..len {
+                    let source_row = source_start + row_offset;
+                    let output_row = output_start + row_offset;
+                    if array.is_null(source_row) {
+                        vector.set_null(output_row);
+                    } else {
+                        vector.as_mut_slice::<i64>()[output_row] = array.value(source_row);
+                    }
+                }
+            }
+            DataType::Float64 => {
+                let array = column
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| format!("column {} expected Float64 array", field.name()))?;
+                let mut vector = output.flat_vector(column_idx);
+                for row_offset in 0..len {
+                    let source_row = source_start + row_offset;
+                    let output_row = output_start + row_offset;
+                    if array.is_null(source_row) {
+                        vector.set_null(output_row);
+                    } else {
+                        vector.as_mut_slice::<f64>()[output_row] = array.value(source_row);
+                    }
+                }
+            }
+            DataType::Boolean => {
+                let array = column
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| format!("column {} expected Boolean array", field.name()))?;
+                let mut vector = output.flat_vector(column_idx);
+                for row_offset in 0..len {
+                    let source_row = source_start + row_offset;
+                    let output_row = output_start + row_offset;
+                    if array.is_null(source_row) {
+                        vector.set_null(output_row);
+                    } else {
+                        vector.as_mut_slice::<bool>()[output_row] = array.value(source_row);
+                    }
+                }
+            }
+            other => {
+                return Err(
+                    format!("unsupported Arrow type for DuckDB table function: {other:?}").into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}

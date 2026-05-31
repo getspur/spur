@@ -1,0 +1,10 @@
+[package]
+name = "spur-rest-table-gateway-load-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+duckdb = { version = "=1.10502.0", features = ["bundled"] }
