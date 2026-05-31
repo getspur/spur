@@ -15,9 +15,11 @@ path = "src/bin/ts-rs-export.rs"
 [dependencies]
 anyhow = "1.0.95"
 async-channel = "2.2.1"
+blake3 = "1"
 bytes = "1.5.0"
 cfg-if = "1.0.0"
 dashmap = "5.5.3"
+directories = "6"
 futures-util = "0.3.30"
 hmac = "0.12.1"
 parking_lot = "0.12"
@@ -62,6 +64,10 @@ winver = "1.0.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+arrow-schema = { workspace = true, features = ["serde"] }
+tempfile = "3"
 
 [features]
 # unused, workaround for https://github.com/SSheldon/rust-objc/issues/125
