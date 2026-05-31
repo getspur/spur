@@ -1,0 +1,15 @@
+[package]
+name = "spur-probe-duckdb-extension"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+name = "spur_probe"
+crate-type = ["cdylib"]
+
+[dependencies]
+duckdb = { version = "=1.10502.0", features = ["loadable-extension", "vtab"] }
+
