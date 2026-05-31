@@ -13,7 +13,7 @@ use jute::{
     backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot},
     notebook_store::{DeltaKind, NotebookDelta, NotebookStore},
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -238,30 +238,113 @@ where
 
         let graph = self.graph.as_ref().expect("graph was rebuilt");
         let stale = graph.stale_from_source(&push.source)?;
+        self.emit_dag_status_changed(BTreeMap::new())?;
+        self.cascade_from(stale).await
+    }
+
+    pub async fn run_cell_and_cascade(
+        &mut self,
+        cell_id: &str,
+    ) -> Result<CascadeReport, EngineError> {
+        self.rebuild_graph()?;
+
+        let port_versions = self.produced_port_versions(cell_id)?;
+        let outcome = self.run_cell_with_status_events(cell_id).await?;
+        let status = outcome.status;
+        let mut report = CascadeReport {
+            runs: vec![CellRunReport::new(cell_id, status)],
+        };
+
+        if status == CellRunStatus::Succeeded {
+            self.bump_produced_ports_if_unchanged(cell_id, &port_versions)?;
+            self.emit_run_report(cell_id, status)?;
+            let stale = self.downstream_of(cell_id)?;
+            report
+                .runs
+                .extend(self.cascade_from_ordered(stale).await?.runs);
+        } else {
+            self.emit_run_report(cell_id, status)?;
+        }
+
+        Ok(report)
+    }
+
+    pub async fn run_cell(&mut self, cell_id: &str) -> Result<CellRunReport, EngineError> {
+        self.rebuild_graph()?;
+
+        let port_versions = self.produced_port_versions(cell_id)?;
+        let outcome = self.run_cell_with_status_events(cell_id).await?;
+        let status = outcome.status;
+        let report = CellRunReport::new(cell_id, status);
+
+        if status == CellRunStatus::Succeeded {
+            self.bump_produced_ports_if_unchanged(cell_id, &port_versions)?;
+            let mut states = self
+                .downstream_of(cell_id)?
+                .into_iter()
+                .map(|downstream| (downstream, "stale"))
+                .collect::<BTreeMap<_, _>>();
+            states.insert(cell_id.to_owned(), CellRunStatus::Succeeded.as_dag_state());
+            self.emit_dag_status_changed(states)?;
+        } else {
+            self.emit_run_report(cell_id, status)?;
+        }
+
+        Ok(report)
+    }
+
+    async fn cascade_from(&mut self, seeds: Vec<String>) -> Result<CascadeReport, EngineError> {
         let mut blocked = BTreeSet::new();
         let mut report = CascadeReport::default();
 
-        for cell_id in stale {
+        for cell_id in seeds {
             if blocked.contains(&cell_id) {
                 report.runs.push(CellRunReport::new(
                     cell_id.clone(),
                     CellRunStatus::UpstreamFailed,
                 ));
+                self.emit_run_report(&cell_id, CellRunStatus::UpstreamFailed)?;
                 blocked.extend(self.downstream_of(&cell_id)?);
                 continue;
             }
 
-            let outcome = self.run_cell_with_retries(&cell_id).await?;
+            let outcome = self.run_cell_with_status_events(&cell_id).await?;
             let status = outcome.status;
             report
                 .runs
                 .push(CellRunReport::new(cell_id.clone(), status));
+            self.emit_run_report(&cell_id, status)?;
             if status == CellRunStatus::Failed {
                 blocked.extend(self.downstream_of(&cell_id)?);
             }
         }
 
         Ok(report)
+    }
+
+    async fn cascade_from_ordered(
+        &mut self,
+        seeds: BTreeSet<String>,
+    ) -> Result<CascadeReport, EngineError> {
+        let Some(graph) = &self.graph else {
+            return Ok(CascadeReport::default());
+        };
+        let ordered = graph
+            .topological_sort()?
+            .into_iter()
+            .filter(|cell_id| seeds.contains(cell_id))
+            .collect();
+        self.cascade_from(ordered).await
+    }
+
+    async fn run_cell_with_status_events(
+        &mut self,
+        cell_id: &str,
+    ) -> Result<CellRunOutcome, EngineError> {
+        let mut states = BTreeMap::new();
+        states.insert(cell_id.to_owned(), "running");
+        self.emit_dag_status_changed(states)?;
+        self.run_cell_with_retries(cell_id).await
     }
 
     async fn run_cell_with_retries(
@@ -280,6 +363,88 @@ where
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    fn emit_run_report(&self, cell_id: &str, status: CellRunStatus) -> Result<(), EngineError> {
+        let mut states = BTreeMap::new();
+        states.insert(cell_id.to_owned(), status.as_dag_state());
+        self.emit_dag_status_changed(states)
+    }
+
+    fn emit_dag_status_changed(
+        &self,
+        states: BTreeMap<String, &'static str>,
+    ) -> Result<(), EngineError> {
+        let (root, version) = self.store.snapshot();
+        let port_manifest = PortStore::open_read_only_at(&self.port_root)?
+            .manifest()
+            .iter()
+            .map(|(port, entry)| (port.clone(), entry.version))
+            .collect::<BTreeMap<_, _>>();
+        self.store
+            .publish_dag_status_changed(build_dag_status_snapshot(
+                &root,
+                version,
+                &states,
+                port_manifest,
+            ));
+        Ok(())
+    }
+
+    fn produced_port_versions(
+        &self,
+        cell_id: &str,
+    ) -> Result<BTreeMap<String, Option<u64>>, EngineError> {
+        let Some(graph) = &self.graph else {
+            return Ok(BTreeMap::new());
+        };
+        let Some(metadata) = graph.cell_metadata(cell_id) else {
+            return Ok(BTreeMap::new());
+        };
+        let store = PortStore::open_read_only_at(&self.port_root)?;
+        Ok(metadata
+            .produces
+            .iter()
+            .map(|produced| {
+                (
+                    produced.port.clone(),
+                    store
+                        .manifest()
+                        .get(&produced.port)
+                        .map(|entry| entry.version),
+                )
+            })
+            .collect())
+    }
+
+    fn bump_produced_ports_if_unchanged(
+        &self,
+        cell_id: &str,
+        before_versions: &BTreeMap<String, Option<u64>>,
+    ) -> Result<bool, EngineError> {
+        let Some(graph) = &self.graph else {
+            return Ok(false);
+        };
+        let Some(metadata) = graph.cell_metadata(cell_id) else {
+            return Ok(false);
+        };
+
+        let mut store = PortStore::open_at(&self.port_root)?;
+        let mut changed = false;
+        for produced in &metadata.produces {
+            let port = produced.port.as_str();
+            let read = match store.get(port) {
+                Ok(read) => read,
+                Err(PortStoreError::MissingPort(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let before = before_versions.get(port).copied().flatten();
+            if Some(read.version) == before {
+                store.put(port, &read.ipc_bytes)?;
+                changed = true;
+            }
+        }
+        Ok(changed)
     }
 
     fn cell_run_request(&self, cell_id: &str) -> Result<CellRunRequest, EngineError> {
@@ -312,6 +477,24 @@ where
             downstream.extend(graph.stale_from_port(&produced.port)?);
         }
         Ok(downstream)
+    }
+}
+
+impl CellRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::UpstreamFailed => "upstream_failed",
+        }
+    }
+
+    fn as_dag_state(self) -> &'static str {
+        match self {
+            Self::Succeeded => "fresh",
+            Self::Failed => "failed",
+            Self::UpstreamFailed => "upstream-failed",
+        }
     }
 }
 
@@ -581,6 +764,40 @@ fn cell_source(cell: &Cell) -> String {
     }
 }
 
+fn cell_execution_count(cell: &Cell) -> Option<u32> {
+    match cell {
+        Cell::Code(cell) => cell.execution_count,
+        Cell::Raw(_) | Cell::Markdown(_) => None,
+    }
+}
+
+fn build_dag_status_snapshot(
+    root: &NotebookRoot,
+    notebook_version: u64,
+    states: &BTreeMap<String, &'static str>,
+    port_manifest: BTreeMap<String, u64>,
+) -> Value {
+    let nodes = root
+        .cells
+        .iter()
+        .filter_map(|cell| {
+            let id = cell_id(cell)?;
+            let state = states.get(&id).copied()?;
+            Some(json!({
+                "id": id,
+                "state": state,
+                "execution_count": cell_execution_count(cell),
+            }))
+        })
+        .collect::<Vec<Value>>();
+
+    json!({
+        "notebook_version": notebook_version,
+        "nodes": nodes,
+        "port_manifest": port_manifest,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +975,167 @@ mod tests {
         assert_eq!(requests[0].expected_version, 2);
         assert_eq!(requests[1].expected_version, 2);
         assert_eq!(requests[1].code, "new_source()");
+    }
+
+    #[tokio::test]
+    async fn run_cell_and_cascade_runs_target_then_downstream_and_bumps_ports() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = store_with_notebook(notebook(vec![
+            cell("a", "a = 1", 1, dag(vec![port("a")], vec![], None)),
+            cell("b", "b = a", 1, dag(vec![port("b")], vec!["a"], None)),
+            cell("c", "c = b", 1, dag(vec![], vec!["b"], None)),
+            cell("z", "z = 1", 1, dag(vec![port("z")], vec![], None)),
+        ]));
+        let runner = FakeRunner::default();
+        let mut ports = PortStore::open_at(temp.path()).expect("open ports");
+        ports.put("a", &ipc_bytes()).expect("seed a");
+        ports.put("b", &ipc_bytes()).expect("seed b");
+        ports.put("z", &ipc_bytes()).expect("seed z");
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            temp.path().to_path_buf(),
+        );
+
+        let report = engine.run_cell_and_cascade("a").await.expect("run cascade");
+
+        assert_eq!(
+            report.runs,
+            vec![
+                CellRunReport::new("a", CellRunStatus::Succeeded),
+                CellRunReport::new("b", CellRunStatus::Succeeded),
+                CellRunReport::new("c", CellRunStatus::Succeeded),
+            ]
+        );
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .map(|request| request.cell_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        let ports = PortStore::open_at(temp.path()).expect("open ports");
+        assert_eq!(ports.get("a").expect("a bumped").version, 2);
+        assert_eq!(ports.get("b").expect("b unchanged").version, 1);
+        assert_eq!(ports.get("z").expect("z untouched").version, 1);
+    }
+
+    #[tokio::test]
+    async fn run_cell_and_cascade_blocks_descendants_after_downstream_failure() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = store_with_notebook(notebook(vec![
+            cell("a", "a = 1", 1, dag(vec![port("a")], vec![], None)),
+            cell("b", "b = a", 1, dag(vec![port("b")], vec!["a"], None)),
+            cell("c", "c = b", 1, dag(vec![], vec!["b"], None)),
+        ]));
+        let runner = FakeRunner::default();
+        runner.fail_run("b");
+        let mut ports = PortStore::open_at(temp.path()).expect("open ports");
+        ports.put("a", &ipc_bytes()).expect("seed a");
+        ports.put("b", &ipc_bytes()).expect("seed b");
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            temp.path().to_path_buf(),
+        );
+
+        let report = engine.run_cell_and_cascade("a").await.expect("run cascade");
+
+        assert_eq!(
+            report.runs,
+            vec![
+                CellRunReport::new("a", CellRunStatus::Succeeded),
+                CellRunReport::new("b", CellRunStatus::Failed),
+                CellRunReport::new("c", CellRunStatus::UpstreamFailed),
+            ]
+        );
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .map(|request| request.cell_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cell_marks_target_fresh_and_downstream_stale_without_cascade() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = store_with_notebook(notebook(vec![
+            cell("a", "a = 1", 1, dag(vec![port("a")], vec![], None)),
+            cell("b", "b = a", 1, dag(vec![port("b")], vec!["a"], None)),
+            cell("c", "c = b", 1, dag(vec![], vec!["b"], None)),
+        ]));
+        let runner = FakeRunner::default();
+        let mut ports = PortStore::open_at(temp.path()).expect("open ports");
+        ports.put("a", &ipc_bytes()).expect("seed a");
+        ports.put("b", &ipc_bytes()).expect("seed b");
+        let mut rx = store.subscribe();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            temp.path().to_path_buf(),
+        );
+
+        let report = engine.run_cell("a").await.expect("run cell");
+
+        assert_eq!(report, CellRunReport::new("a", CellRunStatus::Succeeded));
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .map(|request| request.cell_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+
+        let mut final_snapshot = None;
+        while let Ok(delta) = rx.try_recv() {
+            if let DeltaKind::DagStatusChanged { snapshot } = delta.kind {
+                final_snapshot = Some(snapshot);
+            }
+        }
+        let snapshot = final_snapshot.expect("final dag status snapshot");
+        assert_eq!(
+            snapshot["nodes"],
+            json!([
+                { "id": "a", "state": "fresh", "execution_count": null },
+                { "id": "b", "state": "stale", "execution_count": null },
+                { "id": "c", "state": "stale", "execution_count": null },
+            ])
+        );
+    }
+
+    #[test]
+    fn dag_status_snapshot_is_partial_and_uses_frontend_state_vocabulary() {
+        let root = notebook(vec![
+            cell("a", "a = 1", 1, dag(vec![port("a")], vec![], None)),
+            cell("b", "b = a", 1, dag(vec![], vec!["a"], None)),
+            cell("c", "c = 1", 1, dag(vec![], vec![], None)),
+        ]);
+        let states = BTreeMap::from([
+            ("a".to_string(), "fresh"),
+            ("b".to_string(), "upstream-failed"),
+        ]);
+        let snapshot =
+            build_dag_status_snapshot(&root, 42, &states, BTreeMap::from([("a".to_string(), 7)]));
+
+        assert_eq!(snapshot["notebook_version"], 42);
+        assert_eq!(snapshot["port_manifest"], json!({ "a": 7 }));
+        assert_eq!(
+            snapshot["nodes"],
+            json!([
+                { "id": "a", "state": "fresh", "execution_count": null },
+                { "id": "b", "state": "upstream-failed", "execution_count": null },
+            ])
+        );
+        let encoded = serde_json::to_string(&snapshot).expect("encode snapshot");
+        assert!(!encoded.contains("idle"));
+        assert!(!encoded.contains("succeeded"));
+        assert!(!encoded.contains("upstream_failed"));
+        assert!(!encoded.contains("\"c\""));
     }
 
     #[test]

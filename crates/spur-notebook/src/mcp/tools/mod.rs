@@ -19,6 +19,8 @@ pub mod kernel_info;
 pub mod list_datasources;
 pub mod notebook_dag_status;
 pub mod notebook_push_source;
+pub mod notebook_run_cascade;
+pub mod notebook_run_cell;
 pub mod notebook_set_dag_metadata;
 pub mod read_cell;
 pub mod restart_kernel;
@@ -46,6 +48,8 @@ pub fn tools() -> Vec<Tool> {
         list_datasources::tool(),
         notebook_push_source::tool(),
         notebook_dag_status::tool(),
+        notebook_run_cell::tool(),
+        notebook_run_cascade::tool(),
         notebook_set_dag_metadata::tool(),
         insert_cell::tool(),
         write_cell::tool(),
@@ -239,6 +243,8 @@ mod tests {
         assert!(names.iter().any(|name| name == "notebook_set_dag_metadata"));
         assert!(names.iter().any(|name| name == "notebook_push_source"));
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
+        assert!(names.iter().any(|name| name == "notebook_run_cell"));
+        assert!(names.iter().any(|name| name == "notebook_run_cascade"));
     }
 
     #[test]
