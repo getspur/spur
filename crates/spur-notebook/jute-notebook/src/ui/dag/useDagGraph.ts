@@ -1,6 +1,8 @@
-import type { NotebookCellState } from "@/stores/notebook";
+import type { NodeStatus, NotebookCellState } from "@/stores/notebook";
 
-export type DagNodeState = "neutral";
+import { type DagPortManifest, staleConsumedPorts } from "./dagStatus";
+
+export type DagNodeState = NodeStatus["state"];
 
 export type DagProducedPort = {
   port: string;
@@ -12,17 +14,21 @@ export type DagProducedPort = {
 export type DagConsumedPort = {
   port: string;
   version?: number;
+  ranVersion?: number;
+  stale?: boolean;
 };
 
 export type DagNodeData = {
   id: string;
   label: string;
   cellType: NotebookCellState["type"];
+  code: string;
   codePreview: string;
   produces: DagProducedPort[];
   consumes: DagConsumedPort[];
   source?: string;
   state: DagNodeState;
+  onSelect?: (id: string) => void;
 };
 
 export type DagGraphNode = {
@@ -35,6 +41,7 @@ export type DagGraphEdge = {
   source: string;
   target: string;
   port: string;
+  stale?: boolean;
 };
 
 export type DagGraph = {
@@ -45,7 +52,13 @@ export type DagGraph = {
 export function buildDagGraph(
   cellIds: string[],
   cells: Record<string, NotebookCellState>,
+  options: {
+    dagStatus?: Record<string, NodeStatus>;
+    portManifest?: DagPortManifest;
+  } = {},
 ): DagGraph {
+  const dagStatus = options.dagStatus ?? {};
+  const portManifest = options.portManifest ?? {};
   const dagCellIds = cellIds.filter((id) => isDagCell(cells[id]));
   const producerByPort = new Map<string, string>();
   const producerVersionByPort = new Map<string, number>();
@@ -81,21 +94,31 @@ export function buildDagGraph(
           id,
           label: id,
           cellType: cell.type,
+          code: cell.source,
           codePreview: firstSourceLine(cell.source),
           produces:
             dagMetadata?.produces.map((port) => ({
               port: port.port,
               repr: port.repr,
               display: port.display,
-              version: cell.version,
+              version: portManifest[port.port] ?? cell.version,
             })) ?? [],
           consumes:
-            dagMetadata?.consumes.map((port) => ({
-              port,
-              version: producerVersionByPort.get(port),
-            })) ?? [],
+            dagMetadata?.consumes.map((port) => {
+              const status = dagStatus[id];
+              const ranVersion = status?.ranPortVersions[port];
+              const stale = staleConsumedPorts(status, portManifest).includes(
+                port,
+              );
+              return {
+                port,
+                version: portManifest[port] ?? producerVersionByPort.get(port),
+                ...(ranVersion !== undefined ? { ranVersion } : {}),
+                ...(stale ? { stale } : {}),
+              };
+            }) ?? [],
           source: formatSource(dagMetadata?.source),
-          state: "neutral",
+          state: dagStatus[id]?.state ?? "never-run",
         },
       };
     }),
@@ -110,6 +133,9 @@ export function buildDagGraph(
           source: producer,
           target: consumer,
           port,
+          stale: staleConsumedPorts(dagStatus[consumer], portManifest).includes(
+            port,
+          ),
         }));
     }),
   };

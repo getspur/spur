@@ -79,4 +79,42 @@ describe("buildDagGraph", () => {
       graph.nodes.find((node) => node.id === "left")?.data.consumes,
     ).toEqual([{ port: "root", version: 3 }]);
   });
+
+  test("marks stale edges from live dag status run-input versions", () => {
+    const graph = buildDagGraph(
+      ["root", "consumer"],
+      {
+        root: cell(
+          "root = load()",
+          {
+            produces: [{ port: "root", repr: "dataframe" }],
+            consumes: [],
+          },
+          3,
+        ),
+        consumer: cell(
+          "consumer = root",
+          {
+            produces: [],
+            consumes: ["root"],
+          },
+          4,
+        ),
+      },
+      {
+        dagStatus: {
+          consumer: {
+            state: "stale",
+            ranPortVersions: { root: 1 },
+          },
+        },
+        portManifest: { root: 2 },
+      },
+    );
+
+    expect(graph.edges[0]).toMatchObject({ port: "root", stale: true });
+    expect(graph.nodes.find((node) => node.id === "consumer")?.data.state).toBe(
+      "stale",
+    );
+  });
 });
