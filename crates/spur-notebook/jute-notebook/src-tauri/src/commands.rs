@@ -262,6 +262,13 @@ pub enum DaemonControlCommand {
         #[ts(type = "number")]
         expected_version: u64,
     },
+    /// Merge cell metadata through the notebook bridge.
+    SetCellMetadata {
+        id: String,
+        patch: serde_json::Value,
+        #[ts(type = "number")]
+        expected_version: u64,
+    },
     /// Return the full notebook root and store version.
     Snapshot {},
     /// Apply a UI edit without an optimistic concurrency check.
@@ -753,6 +760,41 @@ async fn handle_daemon_control_inner(
             notebook
                 .apply(NotebookOp::DeleteCell {
                     id,
+                    expected_version,
+                })
+                .map(DaemonControlResult::Delta)
+                .map_err(store_error_response)
+        }
+        DaemonControlCommand::SetCellMetadata {
+            id,
+            patch,
+            expected_version,
+        } => {
+            validate_cell_id(&id)?;
+            if patch
+                .get("spur")
+                .and_then(|spur| spur.get("datasource_setup"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                return notebook
+                    .apply(NotebookOp::MarkDatasourceSetupCell {
+                        id,
+                        expected_version,
+                    })
+                    .map(DaemonControlResult::Delta)
+                    .map_err(store_error_response);
+            }
+            let patch = serde_json::from_value(patch).map_err(|error| {
+                DaemonControlResponse::failure(
+                    "invalid_params",
+                    format!("invalid cell metadata patch: {error}"),
+                )
+            })?;
+            notebook
+                .apply(NotebookOp::SetJuteDeckMetadata {
+                    id,
+                    patch,
                     expected_version,
                 })
                 .map(DaemonControlResult::Delta)

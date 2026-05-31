@@ -40,6 +40,7 @@ export type NotebookCellState = {
   source: string;
   version: number;
   lastEditedBy?: string;
+  datasourceSetup?: boolean;
   juteDeckMetadata?: JuteDeckCellMetadata;
   result?: CellResult;
 };
@@ -445,6 +446,7 @@ function loadNotebookRootDraft(
         source: multiline(cell.source),
         version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
         lastEditedBy: cell.metadata.spur?.last_edited_by,
+        datasourceSetup: cell.metadata.spur?.datasource_setup,
         juteDeckMetadata: cell.metadata.jute_deck,
       };
 
@@ -492,6 +494,7 @@ function applyDaemonCellSnapshotDraft(
       source: cell.source,
       version: cell.version,
       lastEditedBy: cell.lastEditedBy ?? undefined,
+      datasourceSetup: undefined,
     };
     return;
   }
@@ -798,6 +801,7 @@ export class Notebook {
           metadata: cellMetadata(
             cell.version,
             cell.lastEditedBy,
+            cell.datasourceSetup,
             cell.juteDeckMetadata,
           ),
         });
@@ -809,6 +813,7 @@ export class Notebook {
           metadata: cellMetadata(
             cell.version,
             cell.lastEditedBy,
+            cell.datasourceSetup,
             cell.juteDeckMetadata,
           ),
         });
@@ -867,6 +872,7 @@ export class Notebook {
       source: initialText,
       version: INITIAL_CELL_VERSION,
       lastEditedBy,
+      datasourceSetup: undefined,
     });
     return cellId;
   }
@@ -887,6 +893,7 @@ export class Notebook {
         source: initialText,
         version: INITIAL_CELL_VERSION,
         lastEditedBy,
+        datasourceSetup: undefined,
       },
       afterId,
     );
@@ -930,6 +937,7 @@ export class Notebook {
       metadata: cellMetadata(
         cell.version,
         cell.lastEditedBy,
+        cell.datasourceSetup,
         cell.juteDeckMetadata,
       ),
     };
@@ -937,7 +945,9 @@ export class Notebook {
 
   mergeCellJuteDeckMetadata(
     cellId: string,
-    patch: Partial<JuteDeckCellMetadata>,
+    patch: Partial<JuteDeckCellMetadata> & {
+      spur?: { datasource_setup?: boolean };
+    },
   ): number {
     const cell = selectCell(this.state, cellId);
     if (!cell) return 0;
@@ -955,11 +965,14 @@ export class Notebook {
     }
     if (patch.fragments !== undefined) merged.fragments = patch.fragments;
     if (patch.background !== undefined) merged.background = patch.background;
+    const datasourceSetup =
+      patch.spur?.datasource_setup ?? cell.datasourceSetup;
 
     const nextVersion = cell.version + 1;
     this.applyLocalCellSnapshot(cellId, {
       ...cell,
       juteDeckMetadata: merged,
+      datasourceSetup,
       version: nextVersion,
       lastEditedBy: "brain",
     });
@@ -1295,10 +1308,15 @@ function multiline(string: string | string[]): string {
 function cellMetadata(
   version: number,
   lastEditedBy?: string,
+  datasourceSetup?: boolean,
   juteDeckMetadata?: JuteDeckCellMetadata,
 ): CellMetadata {
   const metadata: CellMetadata = {
-    spur: { version, last_edited_by: lastEditedBy },
+    spur: {
+      version,
+      last_edited_by: lastEditedBy,
+      datasource_setup: datasourceSetup,
+    },
   };
   if (juteDeckMetadata !== undefined) {
     metadata.jute_deck = juteDeckMetadata;
