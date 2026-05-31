@@ -25,6 +25,7 @@ use crate::{
         notebook::{CellDagMetadata, NotebookRoot},
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
+    ports::{notebook_port_root, wrap_js_cell, wrap_python_cell},
     state::{notebook_slot_id, window_slot_id, KernelSlot, State},
     Error,
 };
@@ -38,6 +39,7 @@ pub mod venv;
 type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
 type BeforeSaveHook = dyn Fn(&Path, &mut NotebookRoot) + Send + Sync;
+const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 
 /// Snapshot of a stable kernel slot for agent read-side tools.
 #[derive(Debug, Clone, Serialize)]
@@ -1426,7 +1428,25 @@ pub async fn run_cell_events(
     state: &State,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
     let conn = kernel_connection_for_slot(state, kernel_id)?;
-    commands::run_cell(&conn, code).await
+    let spec_name = spec_name_for_slot(state, kernel_id)?;
+    let wrapped_code = wrap_cell_for_kernel(kernel_id, &spec_name, code);
+    commands::run_cell(&conn, &wrapped_code).await
+}
+
+fn port_root_for_kernel_id(kernel_id: &str) -> PathBuf {
+    let path = kernel_id
+        .strip_prefix(NOTEBOOK_SLOT_PREFIX)
+        .unwrap_or(kernel_id);
+    notebook_port_root(path)
+}
+
+fn wrap_cell_for_kernel(kernel_id: &str, spec_name: &str, code: &str) -> String {
+    let root = port_root_for_kernel_id(kernel_id);
+    if spec_name == "deno" {
+        wrap_js_cell(root, code)
+    } else {
+        wrap_python_cell(root, code)
+    }
 }
 
 /// Interrupt a Jupyter kernel slot.
@@ -1533,6 +1553,44 @@ mod tests {
     #[test]
     fn daemon_control_command_symbol_is_exported() {
         let _command = daemon_control;
+    }
+
+    #[test]
+    fn run_cell_chokepoint_wraps_python_code_with_port_bootstrap() {
+        let wrapped = wrap_cell_for_kernel(
+            "notebook:/tmp/demo-notebook.ipynb",
+            "python3",
+            "spur.put('sales', [1, 2])",
+        );
+
+        assert!(wrapped.contains("class _Spur"));
+        assert!(wrapped.contains("spur = _Spur"));
+        assert!(wrapped.ends_with("spur.put('sales', [1, 2])"));
+    }
+
+    #[test]
+    fn run_cell_chokepoint_wraps_deno_code_with_port_bootstrap() {
+        let wrapped = wrap_cell_for_kernel(
+            "notebook:/tmp/demo-notebook.ipynb",
+            "deno",
+            "await spur.put('sales', [{ id: 1 }]);",
+        );
+
+        assert!(wrapped.contains("globalThis.spur"));
+        assert!(wrapped.contains("npm:apache-arrow"));
+        assert!(wrapped.ends_with("await spur.put('sales', [{ id: 1 }]);"));
+    }
+
+    #[test]
+    fn run_cell_chokepoint_wraps_raw_code_once() {
+        let wrapped = wrap_cell_for_kernel(
+            "notebook:/tmp/demo-notebook.ipynb",
+            "python3",
+            "spur.get('sales')",
+        );
+
+        assert_eq!(wrapped.matches("class _Spur").count(), 1);
+        assert_eq!(wrapped.matches("spur = _Spur").count(), 1);
     }
 
     #[test]
