@@ -71,6 +71,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     if let Some(expected_version) = params.expected_version {
         ensure_expected_version(state, &params.cell_id, expected_version)?;
     }
+    ensure_code_cell(state, &params.cell_id)?;
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
     let code = wrap_python_cell(port_root_for_kernel_id(&kernel_id), &params.code);
 
@@ -129,7 +130,7 @@ fn ensure_expected_version(
         .ok_or_else(|| {
             McpError::invalid_params(
                 "notebook.run_cell cell_id was not found",
-                Some(json!({ "cell_id": cell_id })),
+                Some(json!({ "code": "cell_not_found", "cell_id": cell_id })),
             )
         })?
         .ok_or_else(|| {
@@ -152,6 +153,34 @@ fn ensure_expected_version(
     }
 
     Ok(())
+}
+
+fn ensure_code_cell(state: &State, cell_id: &str) -> Result<(), McpError> {
+    let (root, _) = state.get_notebook().snapshot();
+    for cell in &root.cells {
+        match cell {
+            Cell::Raw(cell) if cell.id.as_deref() == Some(cell_id) => {
+                return Err(not_code_cell(cell_id));
+            }
+            Cell::Markdown(cell) if cell.id.as_deref() == Some(cell_id) => {
+                return Err(not_code_cell(cell_id));
+            }
+            Cell::Code(cell) if cell.id.as_deref() == Some(cell_id) => return Ok(()),
+            Cell::Raw(_) | Cell::Markdown(_) | Cell::Code(_) => {}
+        }
+    }
+
+    Err(McpError::invalid_params(
+        "notebook.run_cell cell_not_found",
+        Some(json!({ "code": "cell_not_found", "cell_id": cell_id })),
+    ))
+}
+
+fn not_code_cell(cell_id: &str) -> McpError {
+    McpError::invalid_params(
+        "notebook.run_cell not_code_cell",
+        Some(json!({ "code": "not_code_cell", "cell_id": cell_id })),
+    )
 }
 
 async fn resolve_kernel_id(
@@ -250,8 +279,8 @@ mod tests {
 
     use jute::{
         backend::notebook::{
-            Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, NotebookRoot, Output,
-            OutputStream, SpurCellMetadata,
+            Cell, CellMetadata, CodeCell, MarkdownCell, MultilineString, NotebookMetadata,
+            NotebookRoot, Output, OutputStream, SpurCellMetadata,
         },
         state::State,
     };
@@ -310,6 +339,37 @@ mod tests {
         }
     }
 
+    fn notebook_with_markdown_cell() -> NotebookRoot {
+        NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                jute_deck: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: vec![Cell::Markdown(MarkdownCell {
+                id: Some("markdown-1".to_string()),
+                metadata: CellMetadata {
+                    spur: Some(SpurCellMetadata {
+                        version: 1,
+                        last_edited_by: None,
+                        datasource_setup: None,
+                        dag: None,
+                    }),
+                    jute_deck: None,
+                    other: Map::new(),
+                },
+                source: MultilineString::Single("not code".to_string()),
+                attachments: None,
+            })],
+        }
+    }
+
     #[test]
     fn tool_description_discloses_synchronous_contract() {
         let tool = tool();
@@ -333,7 +393,11 @@ mod tests {
 
     #[tokio::test]
     async fn empty_kernel_id_requires_open_notebook() {
-        let deps = deps_with_state(Arc::new(State::new()));
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_code_cell());
+        let deps = deps_with_state(state);
         let error = call(
             &deps,
             json!({ "cell_id": "code-1", "kernel_id": "", "code": "" }),
@@ -373,6 +437,32 @@ mod tests {
         assert_eq!(
             error.data.and_then(|data| data.get("code").cloned()),
             Some(json!("stale_version"))
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_cell_rejected_before_dispatch() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_markdown_cell());
+        let deps = deps_with_state(state);
+
+        let error = call(
+            &deps,
+            json!({
+                "cell_id": "markdown-1",
+                "kernel_id": "missing",
+                "code": "print('new')"
+            }),
+        )
+        .await
+        .expect_err("markdown cell is rejected before kernel dispatch");
+
+        assert!(error.message.contains("not_code_cell"));
+        assert_eq!(
+            error.data.and_then(|data| data.get("code").cloned()),
+            Some(json!("not_code_cell"))
         );
     }
 
