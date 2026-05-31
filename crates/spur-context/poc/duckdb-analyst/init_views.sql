@@ -11,23 +11,64 @@ CREATE OR REPLACE MACRO b64_decode_lenient(s) AS (
   from_base64(replace(replace(s, '-', '+'), '_', '/') || repeat('=', (4 - length(s) % 4) % 4))
 );
 
+-- Coverage guard: of the current symbol nodes the temporal walk is expected to
+-- track, at least 90% must join directly to a symbol_snapshots row by
+-- stable_symbol_id.
+--
+-- We count DISTINCT nodes, NOT raw join rows. A node joins all of its historical
+-- snapshots, so `COUNT(*) FROM nodes JOIN symbol_snapshots` is inflated by churn
+-- multiplicity (~2x here) and can sit above node_count even when half the symbols
+-- have no snapshot at all — it gives false PASS and false FAIL signals. Distinct
+-- coverage is the honest measure.
+--
+-- "Expected to track" deliberately excludes:
+--   * markdown `section` and synthetic `mcp_tool` — the git-walk symbol diff never
+--     emits these as snapshots, so counting them can never reach the threshold;
+--   * symbols in files the walk never saw (untracked / brand-new) — they have no
+--     committed history and legitimately have no snapshot.
+--
+-- The threshold is 90%, not 99%, on purpose: stable_symbol_id embeds the symbol's
+-- byte offset, so position drift (e.g. churny fields shifting within a file)
+-- leaves a few percent unmatched even on a healthy index. 90% still trips on a
+-- stale temporal store — e.g. an extractor/query upgrade that left new member
+-- kinds unwalked drops trackable coverage well below 90%. Raise toward 99% once
+-- node↔snapshot identity is made position-independent.
 CREATE OR REPLACE TEMP TABLE _assert_symbol_snapshot_direct_join_coverage AS
-WITH coverage AS (
+WITH walked_files AS (
+  SELECT DISTINCT file_path FROM symbol_snapshots WHERE file_path IS NOT NULL
+),
+trackable_nodes AS (
+  SELECT DISTINCT n.stable_symbol_id
+  FROM nodes n
+  JOIN walked_files w ON w.file_path = n.file_path
+  WHERE n.stable_symbol_id IS NOT NULL
+    AND n.symbol_kind NOT IN ('section', 'mcp_tool')
+),
+snapshot_ids AS (
+  SELECT DISTINCT stable_symbol_id FROM symbol_snapshots
+),
+coverage AS (
   SELECT
-    (SELECT COUNT(*) FROM nodes n JOIN symbol_snapshots s USING (stable_symbol_id)) AS direct_join_count,
-    (SELECT node_count FROM _meta LIMIT 1) AS node_count
+    (SELECT COUNT(*) FROM trackable_nodes) AS expected_nodes,
+    (SELECT COUNT(*) FROM trackable_nodes t
+       WHERE t.stable_symbol_id IN (SELECT stable_symbol_id FROM snapshot_ids)) AS covered_nodes
 )
 SELECT
   CASE
-    WHEN direct_join_count * 100 >= node_count * 99 THEN direct_join_count
-    ELSE error(
-      'direct stable_symbol_id coverage below 99%: '
-      || CAST(direct_join_count AS VARCHAR)
-      || ' joined rows for '
-      || CAST(node_count AS VARCHAR)
-      || ' nodes'
+    WHEN expected_nodes = 0 THEN error(
+      'symbol_snapshot coverage guard found no temporally-trackable nodes; '
+      || 'temporal index appears empty'
     )
-  END AS direct_join_count
+    WHEN covered_nodes * 100 >= expected_nodes * 90 THEN covered_nodes
+    ELSE error(
+      'distinct symbol_snapshot coverage below 90%: '
+      || CAST(covered_nodes AS VARCHAR)
+      || ' of '
+      || CAST(expected_nodes AS VARCHAR)
+      || ' temporally-trackable nodes joined '
+      || '(excludes section/mcp_tool and never-walked files)'
+    )
+  END AS covered_nodes
 FROM coverage;
 
 DROP TABLE _assert_symbol_snapshot_direct_join_coverage;

@@ -369,6 +369,23 @@ fn load_incremental_base(
         load_temporal_artifact_parquet(&graph_location.path)?
     };
     graph.header.content_hash_blake3 = None;
+    // The temporal store reuses persisted snapshot shards verbatim; only the
+    // structural artifact is rebuilt when the extractor/queries change. If the
+    // manifest version (which hashes the tree-sitter query bytes + schema +
+    // extractor versions) has moved since this artifact was written, the stored
+    // snapshots were produced by a different extractor and would silently miss
+    // any newly-emitted symbol kinds. Force a cold re-walk so history is
+    // re-extracted with the current extractor.
+    let expected_manifest_version = crate::store::build::current_manifest_version();
+    if graph.manifest_version != expected_manifest_version {
+        tracing::info!(
+            stored = graph.manifest_version,
+            expected = expected_manifest_version,
+            path = %graph_location.path.display(),
+            "spur-graph: extractor/query manifest version changed; selecting cold temporal walk"
+        );
+        return Ok(None);
+    }
     if !graph.commits.iter().any(|commit| commit.sha == stored_tip) {
         tracing::info!(
             stored_tip,
