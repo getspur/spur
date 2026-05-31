@@ -20,6 +20,7 @@ members = [
     "crates/spur-context",
     "crates/spur-graph",
     "crates/spur-notebook",
+    "crates/spur-notebook/flight-gateway",
     "crates/spur-notebook/jute-notebook/src-tauri",
     "xtask",
 ]
