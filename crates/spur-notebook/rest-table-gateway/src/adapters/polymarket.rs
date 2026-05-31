@@ -10,6 +10,7 @@ use crate::adapter::manifest_adapter::ManifestAdapter;
 use crate::adapter::{Adapter, ScalarValue, ScanRequest, TableDef, TableKind};
 use crate::error::{GatewayError, Result};
 
+/// Per live grounding, Gamma's `active` filter is reliable only for `active=true`.
 pub const MARKETS_MANIFEST: &str = "[source]\nname = \"polymarket\"\nbase_url = \"{gamma_base}\"\npagination = { style = \"offset\", limit_param = \"limit\", offset_param = \"offset\", page_size = 500 }\n[[table]]\nname = \"markets\"\npath = \"/markets\"\n[table.columns]\nid = { json = \"$.id\", type = \"Utf8\" }\nquestion = { json = \"$.question\", type = \"Utf8\" }\nactive = { json = \"$.active\", type = \"Boolean\" }\nvolume = { json = \"$.volume\", type = \"Float64\" }\n[table.filters]\nactive = { param = \"active\" }\n";
 
 pub struct PolymarketAdapter {
@@ -54,7 +55,7 @@ impl PolymarketAdapter {
         let resp = self
             .client
             .get(url)
-            .query(&[("token_id", token), ("depth", depth.to_string())])
+            .query(&[("token_id", token)])
             .send()
             .await
             .map_err(|e| GatewayError::Http(e.to_string()))?;
@@ -67,6 +68,9 @@ impl PolymarketAdapter {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        // The CLOB API has no depth query param, so limit the full book locally.
+        let take = (depth.max(0) as usize).min(levels.len());
+        let levels = &levels[..take];
         let price: Float64Array = levels
             .iter()
             .map(|l| {
@@ -124,7 +128,7 @@ impl Adapter for PolymarketAdapter {
 #[cfg(test)]
 mod tests {
     use arrow_array::Float64Array;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::PolymarketAdapter;
@@ -179,7 +183,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/book"))
             .and(query_param("token_id", "0xabc"))
-            .and(query_param("depth", "50"))
+            .and(query_param_is_missing("depth"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "bids": [
                     { "price": "0.51", "size": "120" },
@@ -221,5 +225,43 @@ mod tests {
             .downcast_ref::<Float64Array>()
             .expect("price should be Float64Array");
         assert_eq!(prices.value(0), 0.51);
+    }
+
+    #[tokio::test]
+    async fn orderbook_truncates_to_depth() {
+        let gamma = MockServer::start().await;
+        let clob = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/book"))
+            .and(query_param("token_id", "0xabc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "bids": [
+                    { "price": "0.55", "size": "100" },
+                    { "price": "0.54", "size": "90" },
+                    { "price": "0.53", "size": "80" },
+                    { "price": "0.52", "size": "70" },
+                    { "price": "0.51", "size": "60" }
+                ]
+            })))
+            .mount(&clob)
+            .await;
+
+        let adapter =
+            PolymarketAdapter::new(&gamma.uri(), &clob.uri()).expect("adapter should construct");
+
+        let batches = adapter
+            .scan(scan_request(
+                "orderbook",
+                vec![
+                    ScalarValue::Utf8("0xabc".to_string()),
+                    ScalarValue::Int64(3),
+                ],
+            ))
+            .await
+            .expect("orderbook scan should succeed");
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
     }
 }
