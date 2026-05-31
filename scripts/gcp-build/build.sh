@@ -149,6 +149,25 @@ rsync -az --delete -0 --files-from="$FILE_LIST" \
     -e "$TRANSPORT" \
     "$GIT_TOPLEVEL/" "$VM_NAME:$REMOTE_DIR/"
 
+# ---- reconcile: prune files deleted locally since the last sync ------------
+# rsync's --delete is INERT when combined with --files-from (it transfers only
+# the listed files and never recurses the destination, so it cannot prune
+# extraneous files). A file removed/renamed locally therefore lingers on the VM
+# and silently desyncs the remote build from local (stale modules, removed
+# tests). We ship the current manifest and let a VM-side helper delete exactly
+# (previous manifest - current manifest): only ever rsync-managed source that is
+# now gone, never VM-generated artifacts (node_modules/, dist/, target/) which
+# were never in any manifest. The baseline manifest persists on the cache disk
+# (/mnt/cargo) keyed by worktree, so it survives across builds and VM restarts.
+REMOTE_MANIFEST_CUR="/tmp/spur-sync-manifest.${WORKTREE_KEY//\//_}"
+STORED_MANIFEST="/mnt/cargo/sync-manifests/$WORKTREE_KEY.manifest"
+log "Reconciling remote workspace (pruning locally-deleted files)..."
+rsync -az -e "$TRANSPORT" "$FILE_LIST" "$VM_NAME:$REMOTE_MANIFEST_CUR"
+gcloud compute ssh "$VM_NAME" \
+    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+    --tunnel-through-iap --quiet \
+    --command="bash \"\$HOME/$REMOTE_DIR/scripts/gcp-build/_prune-remote.sh\" \"$REMOTE_DIR\" \"$REMOTE_MANIFEST_CUR\" \"$STORED_MANIFEST\""
+
 # ---- run cargo on the VM ---------------------------------------------------
 # Forward caller's $RUSTFLAGS so cfg/lint flags survive the SSH hop. The
 # remote bash re-parses `cargo $CARGO_ARGS` and would strip quotes from a
