@@ -88,6 +88,10 @@ describe("DatasourceSidebar", () => {
 
   beforeEach(() => {
     daemonControlMock.mockReset();
+    daemonControlMock.mockResolvedValue({
+      ok: true,
+      result: { type: "datasources", data: [] },
+    });
     dragDropCallbacks.length = 0;
     eventCallbacks.clear();
     listenMock.mockReset();
@@ -109,6 +113,10 @@ describe("DatasourceSidebar", () => {
 
   test("sidebar_attach_emits_command", async () => {
     daemonControlMock
+      .mockResolvedValueOnce({
+        ok: true,
+        result: { type: "datasources", data: [] },
+      })
       .mockResolvedValueOnce({
         ok: true,
         result: datasourceResult(),
@@ -218,11 +226,46 @@ describe("DatasourceSidebar", () => {
     expect(screen.getByText("sku")).toBeInTheDocument();
   });
 
-  test("remove_button_dispatches_detach_datasource", async () => {
+  test("mount_fetch_populates_list_without_datasources_changed_event", async () => {
     daemonControlMock.mockResolvedValueOnce({
       ok: true,
-      result: { type: "empty", data: null },
+      result: {
+        type: "datasources",
+        data: [
+          datasourceEntry({
+            name: "restored",
+            path: "/tmp/restored.duckdb",
+            kind: "duck_db",
+            group: "SPUR",
+            columns: [],
+            rowCount: null,
+            tables: [],
+          }),
+        ],
+      },
     });
+
+    render(<DatasourceSidebar />);
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "list_datasources",
+      }),
+    );
+    expect(await screen.findByText("restored")).toBeInTheDocument();
+    expect(eventCallbacks.has("datasources://changed")).toBe(true);
+  });
+
+  test("remove_button_dispatches_detach_datasource", async () => {
+    daemonControlMock
+      .mockResolvedValueOnce({
+        ok: true,
+        result: { type: "datasources", data: [] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        result: { type: "empty", data: null },
+      });
 
     render(<DatasourceSidebar />);
 

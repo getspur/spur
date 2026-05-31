@@ -12,4 +12,5 @@ export type DaemonControlResult =
   | { type: "delta"; data: NotebookDelta }
   | { type: "cell"; data: DaemonCell }
   | { type: "snapshot"; data: DaemonNotebookSnapshot }
-  | { type: "datasource"; data: DatasourceEntry };
+  | { type: "datasource"; data: DatasourceEntry }
+  | { type: "datasources"; data: Array<DatasourceEntry> };
