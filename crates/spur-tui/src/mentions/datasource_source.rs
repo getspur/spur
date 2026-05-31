@@ -154,5 +154,6 @@ fn datasource_kind_label(kind: DatasourceKind) -> &'static str {
         DatasourceKind::Json => "json",
         DatasourceKind::DuckDb => "duckdb",
         DatasourceKind::Sqlite => "sqlite",
+        DatasourceKind::ApiTables => "api_tables",
     }
 }

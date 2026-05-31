@@ -131,6 +131,8 @@ pub enum DatasourceKind {
     DuckDb,
     /// SQLite database file.
     Sqlite,
+    /// REST API table-function source.
+    ApiTables,
 }
 
 /// Column metadata captured for a notebook datasource.

@@ -99,6 +99,7 @@ pub enum DatasourceKind {
     Json,
     DuckDb,
     Sqlite,
+    ApiTables,
 }
 
 /// Column metadata captured for a notebook datasource.

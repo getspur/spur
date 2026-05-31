@@ -143,6 +143,7 @@ fn scan_expression(path: &str, kind: DatasourceKind) -> String {
         DatasourceKind::Json => format!("read_json_auto({literal})"),
         DatasourceKind::DuckDb => unreachable!("DuckDB files are probed through ATTACH"),
         DatasourceKind::Sqlite => unreachable!("SQLite files are probed through ATTACH"),
+        DatasourceKind::ApiTables => unreachable!("API table sources are not local files"),
     }
 }
 
