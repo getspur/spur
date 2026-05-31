@@ -168,6 +168,11 @@ pub enum DeltaKind {
         #[serde(skip_deserializing, default = "default_run_cell_event")]
         event: RunCellEvent,
     },
+    /// The reactive DAG status snapshot changed.
+    DagStatusChanged {
+        /// Full DAG status snapshot for frontend reducers.
+        snapshot: Value,
+    },
     /// A notebook was loaded into the store.
     Loaded {
         /// Full notebook root after the load, self-contained for the reducer.
@@ -286,6 +291,11 @@ impl NotebookStore {
         let inner = self.inner.read();
         let version = self.version.load(Ordering::SeqCst);
         (inner.clone(), version)
+    }
+
+    /// Return the path of the loaded notebook, if one has been loaded.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.path.lock().clone()
     }
 
     /// Apply a notebook edit operation.
@@ -484,6 +494,16 @@ impl NotebookStore {
     /// Subscribe to notebook deltas.
     pub fn subscribe(&self) -> broadcast::Receiver<NotebookDelta> {
         self.broadcast.subscribe()
+    }
+
+    /// Publish a reactive DAG status snapshot on the notebook delta channel.
+    pub fn publish_dag_status_changed(&self, snapshot: Value) -> NotebookDelta {
+        let delta = NotebookDelta {
+            version: self.version.load(Ordering::SeqCst),
+            kind: DeltaKind::DagStatusChanged { snapshot },
+        };
+        self.publish(&delta);
+        delta
     }
 
     fn ensure_cell_version(

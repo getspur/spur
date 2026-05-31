@@ -8,11 +8,12 @@ import { immer } from "zustand/middleware/immer";
 
 import type {
   Cell,
+  CellDagMetadata,
   CellMetadata,
   DaemonCell,
   JuteDeckCellMetadata,
-  NotebookMetadata,
   NotebookDelta,
+  NotebookMetadata,
   NotebookRoot,
   Output,
   OutputDisplayData,
@@ -30,6 +31,7 @@ type NotebookStoreActions = {
   serverStateActions: ReturnType<typeof notebookServerStateActions>;
   viewStateActions: ReturnType<typeof notebookViewStateActions>;
   editBufferActions: ReturnType<typeof notebookEditBufferActions>;
+  dagStateActions: ReturnType<typeof notebookDagStateActions>;
 };
 
 const INITIAL_CELL_VERSION = 1;
@@ -41,8 +43,48 @@ export type NotebookCellState = {
   version: number;
   lastEditedBy?: string;
   datasourceSetup?: boolean;
+  dagMetadata?: CellDagMetadata;
   juteDeckMetadata?: JuteDeckCellMetadata;
   result?: CellResult;
+};
+
+export type NotebookViewMode = "cells" | "dag";
+
+export type NodeStatus = {
+  state:
+    | "fresh"
+    | "stale"
+    | "running"
+    | "failed"
+    | "upstream-failed"
+    | "never-run";
+  ranPortVersions: Record<string, number>;
+  executionCount?: number;
+};
+
+export type DagPortManifest = Record<string, number>;
+
+type DagStatusChangedDelta = {
+  version: number;
+  kind: {
+    type: "dagStatusChanged";
+    snapshot: DagStatusSnapshot;
+  };
+};
+
+type DagStatusSnapshot = {
+  notebook_version?: number;
+  nodes?: DagStatusSnapshotNode[];
+  port_manifest?: DagPortManifest;
+};
+
+type DagStatusSnapshotNode = {
+  id?: unknown;
+  state?: unknown;
+  execution_count?: unknown;
+  executionCount?: unknown;
+  ran_port_versions?: unknown;
+  ranPortVersions?: unknown;
 };
 
 export type NotebookServerState = {
@@ -80,6 +122,9 @@ export type NotebookViewState = {
 
   /** In-memory generation of the running kernel slot. */
   kernelGeneration?: number;
+
+  /** Active in-place notebook view. */
+  viewMode: NotebookViewMode;
 };
 
 export type NotebookEditBuffer = {
@@ -100,6 +145,12 @@ export type NotebookStoreState = {
 
   /** Optimistic local overlays not yet reflected in serverState. */
   editBuffer: NotebookEditBuffer;
+
+  /** DAG execution status keyed by cell ID. */
+  dagStatus: Record<string, NodeStatus>;
+
+  /** Current DAG port versions keyed by port name. */
+  dagPortManifest: DagPortManifest;
 };
 
 export type CellType = "code" | "markdown";
@@ -139,6 +190,8 @@ type NotebookLocalDelta = {
       };
 };
 
+type AuthoritativeNotebookDelta = NotebookDelta | DagStatusChangedDelta;
+
 type NotebookStateDelta = NotebookDelta | NotebookLocalDelta;
 
 function isLocalNotebookDelta(
@@ -154,10 +207,11 @@ function shouldAdvanceAppliedVersion(delta: NotebookStateDelta): boolean {
 
 function hasAuthoritativeVersionGap(
   state: NotebookServerState,
-  delta: NotebookDelta,
+  delta: AuthoritativeNotebookDelta,
 ): boolean {
   return (
     delta.kind.type !== "loaded" &&
+    delta.kind.type !== "dagStatusChanged" &&
     delta.version > 0 &&
     state.lastAppliedVersion > 0 &&
     delta.version > state.lastAppliedVersion + 1
@@ -246,6 +300,11 @@ function notebookViewStateActions(
         state.viewState.kernelSpecName = info.spec_name;
         state.viewState.kernelGeneration = info.generation;
       }),
+
+    setViewMode: (viewMode: NotebookViewMode) =>
+      set((state) => {
+        state.viewState.viewMode = viewMode;
+      }),
   };
 }
 
@@ -290,6 +349,17 @@ function notebookEditBufferActions(
   };
 }
 
+function notebookDagStateActions(
+  set: (updater: (state: WritableDraft<NotebookStoreState>) => void) => void,
+) {
+  return {
+    applyDagStatusSnapshot: (snapshot: DagStatusSnapshot) =>
+      set((state) => {
+        applyDagStatusSnapshotDraft(state, snapshot);
+      }),
+  };
+}
+
 /** Initialize the Zustand store for a notebook and define mutators. */
 function createNotebookStore(): StoreApi<NotebookStore> {
   // @ts-ignore TypeScript says that the instantiation is too deep, infinite?
@@ -305,15 +375,19 @@ function createNotebookStore(): StoreApi<NotebookStore> {
         viewState: {
           selectedCellId: null,
           isLoading: false,
+          viewMode: "cells",
         },
         editBuffer: {
           cellSources: {},
         },
+        dagStatus: {},
+        dagPortManifest: {},
       };
       const actions: NotebookStoreActions = {
         serverStateActions: notebookServerStateActions(set),
         viewStateActions: notebookViewStateActions(set),
         editBufferActions: notebookEditBufferActions(set),
+        dagStateActions: notebookDagStateActions(set),
       };
       return { ...initialState, ...actions };
     }),
@@ -423,6 +497,113 @@ function applyNotebookDeltaDraft(
   return runCellApplication;
 }
 
+function applyDagStatusSnapshotDraft(
+  state: WritableDraft<NotebookStoreState>,
+  snapshot: DagStatusSnapshot,
+) {
+  const portManifest = normalizePortManifest(snapshot.port_manifest);
+  if (portManifest) {
+    state.dagPortManifest = portManifest;
+  }
+
+  for (const node of snapshot.nodes ?? []) {
+    if (typeof node.id !== "string" || node.id.length === 0) continue;
+    const nodeState = normalizeDagNodeState(node.state);
+    if (!nodeState) continue;
+
+    const existing = state.dagStatus[node.id];
+    const executionCount = normalizeExecutionCount(node);
+    const explicitRanPortVersions = normalizePortManifest(
+      node.ran_port_versions ?? node.ranPortVersions,
+    );
+    const ranPortVersions =
+      explicitRanPortVersions ??
+      inferRanPortVersions(
+        state.serverState.cells[node.id],
+        state.dagPortManifest,
+        nodeState,
+        existing?.ranPortVersions,
+      );
+
+    state.dagStatus[node.id] = {
+      state: nodeState,
+      ranPortVersions,
+      ...(executionCount !== undefined ? { executionCount } : {}),
+    };
+  }
+}
+
+function normalizePortManifest(value: unknown): DagPortManifest | undefined {
+  if (!isRecord(value)) return undefined;
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, number] => typeof entry[1] === "number",
+    ),
+  );
+}
+
+function normalizeDagNodeState(value: unknown): NodeStatus["state"] | undefined {
+  if (typeof value === "string") {
+    return isNodeStatusState(value) ? value : undefined;
+  }
+  if (isRecord(value)) {
+    return deriveSeedNodeState(normalizeOptionalNumber(value.execution_count));
+  }
+  return undefined;
+}
+
+function normalizeExecutionCount(
+  node: DagStatusSnapshotNode,
+): number | undefined {
+  if (isRecord(node.state)) {
+    return normalizeOptionalNumber(node.state.execution_count);
+  }
+  return normalizeOptionalNumber(node.execution_count ?? node.executionCount);
+}
+
+function inferRanPortVersions(
+  cell: NotebookCellState | undefined,
+  portManifest: DagPortManifest,
+  state: NodeStatus["state"],
+  existing: Record<string, number> | undefined,
+): Record<string, number> {
+  if (state !== "fresh" && state !== "running") {
+    return existing ?? {};
+  }
+  return Object.fromEntries(
+    (cell?.dagMetadata?.consumes ?? [])
+      .map((port) => [port, portManifest[port]] as const)
+      .filter((entry): entry is readonly [string, number] => {
+        return entry[1] !== undefined;
+      }),
+  );
+}
+
+function deriveSeedNodeState(
+  executionCount: number | undefined,
+): NodeStatus["state"] {
+  return executionCount && executionCount > 0 ? "fresh" : "never-run";
+}
+
+function isNodeStatusState(value: string): value is NodeStatus["state"] {
+  return (
+    value === "fresh" ||
+    value === "stale" ||
+    value === "running" ||
+    value === "failed" ||
+    value === "upstream-failed" ||
+    value === "never-run"
+  );
+}
+
+function normalizeOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function loadNotebookRootDraft(
   state: WritableDraft<NotebookServerState>,
   notebook: NotebookRoot,
@@ -447,6 +628,7 @@ function loadNotebookRootDraft(
         version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
         lastEditedBy: cell.metadata.spur?.last_edited_by,
         datasourceSetup: cell.metadata.spur?.datasource_setup,
+        dagMetadata: cell.metadata.spur?.dag,
         juteDeckMetadata: cell.metadata.jute_deck,
       };
 
@@ -718,7 +900,7 @@ function assertNever(value: never): never {
 
 export async function reconcileNotebookDelta(
   notebook: Notebook,
-  delta: NotebookDelta,
+  delta: AuthoritativeNotebookDelta,
 ) {
   const lastAppliedVersion = notebook.state.serverState.lastAppliedVersion;
   if (hasAuthoritativeVersionGap(notebook.state.serverState, delta)) {
@@ -802,6 +984,7 @@ export class Notebook {
             cell.version,
             cell.lastEditedBy,
             cell.datasourceSetup,
+            cell.dagMetadata,
             cell.juteDeckMetadata,
           ),
         });
@@ -814,6 +997,7 @@ export class Notebook {
             cell.version,
             cell.lastEditedBy,
             cell.datasourceSetup,
+            cell.dagMetadata,
             cell.juteDeckMetadata,
           ),
         });
@@ -836,6 +1020,10 @@ export class Notebook {
       version: 0,
       kind: { type: "loaded", root: notebook },
     });
+  }
+
+  applyDagStatusSnapshot(snapshot: DagStatusSnapshot) {
+    this.state.dagStateActions.applyDagStatusSnapshot(snapshot);
   }
 
   /** Load a notebook from a file path. */
@@ -938,6 +1126,7 @@ export class Notebook {
         cell.version,
         cell.lastEditedBy,
         cell.datasourceSetup,
+        cell.dagMetadata,
         cell.juteDeckMetadata,
       ),
     };
@@ -979,26 +1168,32 @@ export class Notebook {
     return nextVersion;
   }
 
-  applyNotebookDelta(delta: NotebookDelta) {
-    const kind = delta.kind;
+  applyNotebookDelta(delta: AuthoritativeNotebookDelta) {
+    if (delta.kind.type === "dagStatusChanged") {
+      this.applyDagStatusSnapshot(delta.kind.snapshot);
+      return;
+    }
+
+    const notebookDelta = delta as NotebookDelta;
+    const kind = notebookDelta.kind;
     if (kind.type === "loaded") {
-      this.state.serverStateActions.applyNotebookDelta(delta);
+      this.state.serverStateActions.applyNotebookDelta(notebookDelta);
       this.refs = new Map(
         this.state.serverState.cellIds.map((cellId) => [cellId, {}]),
       );
       this.state.viewStateActions.finishLoading();
       this.state.editBufferActions.clearAll();
     } else if (kind.type === "cellWritten") {
-      this.upsertStoreCell(delta, kind.cell);
+      this.upsertStoreCell(notebookDelta, kind.cell);
     } else if (kind.type === "cellInserted") {
-      this.upsertStoreCell(delta, kind.cell);
+      this.upsertStoreCell(notebookDelta, kind.cell);
     } else if (kind.type === "cellDeleted") {
       this.refs.delete(kind.id);
-      this.state.serverStateActions.applyNotebookDelta(delta);
+      this.state.serverStateActions.applyNotebookDelta(notebookDelta);
       this.state.viewStateActions.clearSelectedCellIfDeleted(kind.id);
       this.state.editBufferActions.clearCell(kind.id);
     } else if (kind.type === "runCellEvent") {
-      this.handleRunCellEvent(kind.cell_id, kind.event, delta.version);
+      this.handleRunCellEvent(kind.cell_id, kind.event, notebookDelta.version);
     } else {
       assertNever(kind);
     }
@@ -1309,6 +1504,7 @@ function cellMetadata(
   version: number,
   lastEditedBy?: string,
   datasourceSetup?: boolean,
+  dagMetadata?: CellDagMetadata,
   juteDeckMetadata?: JuteDeckCellMetadata,
 ): CellMetadata {
   const metadata: CellMetadata = {
@@ -1316,6 +1512,7 @@ function cellMetadata(
       version,
       last_edited_by: lastEditedBy,
       datasource_setup: datasourceSetup,
+      dag: dagMetadata,
     },
   };
   if (juteDeckMetadata !== undefined) {

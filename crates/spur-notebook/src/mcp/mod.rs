@@ -54,6 +54,7 @@ pub mod transport;
 /// `Emitter::emit`); the existing five tools only use `bridge`. `state` and
 /// `app` are `Option` so non-daemon entry points (`start_server`, unit tests)
 /// can construct a `ServerDeps` without a live Tauri runtime.
+#[derive(Clone)]
 pub struct ServerDeps {
     pub bridge: Arc<dyn BridgeRequester>,
     pub state: Option<Arc<State>>,
@@ -162,6 +163,10 @@ impl ServerHandler for NotebookMcpServer {
                 tools::notebook_push_source::call(&self.deps, arguments).await
             }
             "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
+            "notebook_run_cell" => tools::notebook_run_cell::call(&self.deps, arguments).await,
+            "notebook_run_cascade" => {
+                tools::notebook_run_cascade::call(&self.deps, arguments).await
+            }
             "notebook_set_dag_metadata" => {
                 tools::notebook_set_dag_metadata::call(&self.deps, arguments).await
             }
