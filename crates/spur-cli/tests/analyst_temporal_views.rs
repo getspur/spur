@@ -149,7 +149,7 @@ fn analyst_build_rejects_low_direct_symbol_snapshot_coverage() {
 
     assert!(
         !db_path.exists(),
-        "analyst DB should not be created when direct symbol snapshot coverage is below 99%"
+        "analyst DB should not be created when distinct symbol snapshot coverage is below 90%"
     );
 }
 
