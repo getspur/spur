@@ -65,12 +65,22 @@ pub fn rows_to_batch(cols: &[ColumnExtract], rows: &[Value]) -> Result<RecordBat
             ),
             DataType::Int64 => Arc::new(
                 rows.iter()
-                    .map(|r| json_path_get(r, &c.json_path).and_then(|v| v.as_i64()))
+                    .map(|r| {
+                        json_path_get(r, &c.json_path).and_then(|v| {
+                            v.as_i64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+                        })
+                    })
                     .collect::<Int64Array>(),
             ),
             DataType::Float64 => Arc::new(
                 rows.iter()
-                    .map(|r| json_path_get(r, &c.json_path).and_then(|v| v.as_f64()))
+                    .map(|r| {
+                        json_path_get(r, &c.json_path).and_then(|v| {
+                            v.as_f64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                        })
+                    })
                     .collect::<Float64Array>(),
             ),
             DataType::Boolean => Arc::new(
@@ -88,7 +98,7 @@ pub fn rows_to_batch(cols: &[ColumnExtract], rows: &[Value]) -> Result<RecordBat
 
 #[cfg(test)]
 mod tests {
-    use arrow_array::{Array, BooleanArray, Float64Array};
+    use arrow_array::{Array, BooleanArray, Float64Array, Int64Array};
     use arrow_schema::DataType;
     use serde_json::json;
 
@@ -137,5 +147,42 @@ mod tests {
             .downcast_ref::<BooleanArray>()
             .expect("active column");
         assert!(active.value(0));
+    }
+
+    #[test]
+    fn parses_numeric_strings() {
+        let rows = vec![json!({"vol":"782375.55","n":"42"}), json!({"vol":12.5})];
+        let cols = vec![
+            ColumnExtract {
+                name: "vol".to_string(),
+                data_type: DataType::Float64,
+                json_path: "$.vol".to_string(),
+            },
+            ColumnExtract {
+                name: "n".to_string(),
+                data_type: DataType::Int64,
+                json_path: "$.n".to_string(),
+            },
+        ];
+
+        let batch = rows_to_batch(&cols, &rows).expect("batch");
+
+        let vol = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("vol column");
+        assert_eq!(vol.value(0), 782375.55);
+        assert_eq!(vol.value(1), 12.5);
+        assert!(!vol.is_null(0));
+        assert!(!vol.is_null(1));
+
+        let n = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("n column");
+        assert_eq!(n.value(0), 42);
+        assert!(!n.is_null(0));
     }
 }
