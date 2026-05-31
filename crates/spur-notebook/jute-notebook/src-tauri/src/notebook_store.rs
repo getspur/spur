@@ -121,6 +121,8 @@ pub enum NotebookOp {
     MarkDatasourceSetupCell {
         /// Cell identifier.
         id: String,
+        /// Expected cell version for optimistic concurrency.
+        expected_version: u64,
     },
 }
 
@@ -378,7 +380,11 @@ impl NotebookStore {
                 let metadata_update = Some((id.clone(), None));
                 (PendingDelta::CellWritten { id }, metadata_update)
             }
-            NotebookOp::MarkDatasourceSetupCell { id } => {
+            NotebookOp::MarkDatasourceSetupCell {
+                id,
+                expected_version,
+            } => {
+                self.ensure_cell_version(&root, &id, expected_version)?;
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);

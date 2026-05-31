@@ -483,6 +483,15 @@ trait DaemonControlHandler: Clone + Send + 'static {
 struct NotebookDaemonState {
     current_path: Option<PathBuf>,
     window_label: Option<String>,
+    #[cfg(feature = "datasource-introspect")]
+    datasource_setup_cell: Option<TrackedDatasourceSetupCell>,
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedDatasourceSetupCell {
+    id: String,
+    version: u64,
 }
 
 #[derive(Debug)]
@@ -667,7 +676,34 @@ const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DatasourceSetupCell {
     id: String,
-    has_metadata_marker: bool,
+    version: u64,
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Deserialize)]
+struct BridgeInsertCellResult {
+    id: String,
+    version: u64,
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Deserialize)]
+struct BridgeWriteCellResult {
+    version: u64,
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Deserialize)]
+struct BridgeSetCellMetadataResult {
+    version: u64,
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Deserialize)]
+struct BridgeSnapshotCell {
+    id: String,
+    version: u64,
+    source: String,
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -776,61 +812,17 @@ fn python_string_literal(value: &str) -> String {
 }
 
 #[cfg(feature = "datasource-introspect")]
-fn find_datasource_setup_cell(root: &NotebookRoot) -> Option<DatasourceSetupCell> {
-    root.cells.iter().find_map(|cell| {
-        let id = notebook_cell_id(cell)?;
-        let has_metadata_marker = notebook_cell_metadata(cell)
-            .spur
-            .as_ref()
-            .and_then(|spur| spur.datasource_setup)
-            .unwrap_or(false);
-        if has_metadata_marker || notebook_cell_source(cell).contains(DATASOURCE_SETUP_SENTINEL) {
+fn find_datasource_setup_cell(cells: &[BridgeSnapshotCell]) -> Option<DatasourceSetupCell> {
+    cells.iter().find_map(|cell| {
+        if cell.source.contains(DATASOURCE_SETUP_SENTINEL) {
             Some(DatasourceSetupCell {
-                id: id.to_string(),
-                has_metadata_marker,
+                id: cell.id.clone(),
+                version: cell.version,
             })
         } else {
             None
         }
     })
-}
-
-#[cfg(feature = "datasource-introspect")]
-fn notebook_cell_id(cell: &jute::backend::notebook::Cell) -> Option<&str> {
-    match cell {
-        jute::backend::notebook::Cell::Raw(cell) => cell.id.as_deref(),
-        jute::backend::notebook::Cell::Markdown(cell) => cell.id.as_deref(),
-        jute::backend::notebook::Cell::Code(cell) => cell.id.as_deref(),
-    }
-}
-
-#[cfg(feature = "datasource-introspect")]
-fn notebook_cell_metadata(
-    cell: &jute::backend::notebook::Cell,
-) -> &jute::backend::notebook::CellMetadata {
-    match cell {
-        jute::backend::notebook::Cell::Raw(cell) => &cell.metadata,
-        jute::backend::notebook::Cell::Markdown(cell) => &cell.metadata,
-        jute::backend::notebook::Cell::Code(cell) => &cell.metadata,
-    }
-}
-
-#[cfg(feature = "datasource-introspect")]
-fn notebook_cell_source(cell: &jute::backend::notebook::Cell) -> String {
-    let source = match cell {
-        jute::backend::notebook::Cell::Raw(cell) => &cell.source,
-        jute::backend::notebook::Cell::Markdown(cell) => &cell.source,
-        jute::backend::notebook::Cell::Code(cell) => &cell.source,
-    };
-    multiline_to_string(source)
-}
-
-#[cfg(feature = "datasource-introspect")]
-fn multiline_to_string(source: &jute::backend::notebook::MultilineString) -> String {
-    match source {
-        jute::backend::notebook::MultilineString::Single(source) => source.clone(),
-        jute::backend::notebook::MultilineString::Multi(lines) => lines.join(""),
-    }
 }
 
 impl NotebookDaemonControl {
@@ -916,6 +908,7 @@ impl NotebookDaemonControl {
                 | DaemonControlCommand::LoadNotebook { .. }
                 | DaemonControlCommand::DeleteCell { .. }
                 | DaemonControlCommand::Snapshot {}
+                | DaemonControlCommand::SetCellMetadata { .. }
                 | DaemonControlCommand::ApplyEdit { .. }
                 | DaemonControlCommand::FlushNotebook {} => {
                     return self.handle_notebook_store_control(id, request).await;
@@ -994,6 +987,10 @@ impl NotebookDaemonControl {
                             let mut state = self.state.lock().await;
                             state.current_path = None;
                             state.window_label = None;
+                            #[cfg(feature = "datasource-introspect")]
+                            {
+                                state.datasource_setup_cell = None;
+                            }
                         }
                         if let Err(error) = self.clear_last_notebook().await {
                             warn!(%error, "failed to clear last notebook record");
@@ -1128,72 +1125,159 @@ impl NotebookDaemonControl {
 
     #[cfg(feature = "datasource-introspect")]
     async fn refresh_datasource_setup_cell(&self) -> Result<(), BridgeError> {
-        let entries = self.jute_state.datasource_catalog.lock().list();
-        let source = datasource_setup_source(&entries);
-        let (root, _) = self.jute_state.get_notebook().snapshot();
-
-        if let Some(setup_cell) = find_datasource_setup_cell(&root) {
-            self.apply_notebook_store_command(jute::commands::DaemonControlCommand::ApplyEdit {
-                id: setup_cell.id.clone(),
-                source,
-            })
-            .await?;
-            if !setup_cell.has_metadata_marker {
-                self.mark_datasource_setup_cell(&setup_cell.id)?;
-            }
+        if !self.requester.notebook_open() {
             return Ok(());
         }
 
-        let result = self
-            .apply_notebook_store_command(jute::commands::DaemonControlCommand::InsertCell {
-                kind: jute::notebook_store::CellKind::Code,
-                after_id: None,
-                source,
-                last_edited_by: Some("brain".to_string()),
+        let entries = self.jute_state.datasource_catalog.lock().list();
+        let source = datasource_setup_source(&entries);
+
+        if let Some(tracked) = self.tracked_datasource_setup_cell().await {
+            let version = self
+                .write_datasource_setup_cell(&tracked.id, tracked.version, source)
+                .await?;
+            self.set_tracked_datasource_setup_cell(TrackedDatasourceSetupCell {
+                id: tracked.id,
+                version,
             })
+            .await;
+            return Ok(());
+        }
+
+        if let Some(tracked) = self.find_existing_datasource_setup_cell().await? {
+            let version = self
+                .write_datasource_setup_cell(&tracked.id, tracked.version, source)
+                .await?;
+            self.set_tracked_datasource_setup_cell(TrackedDatasourceSetupCell {
+                id: tracked.id,
+                version,
+            })
+            .await;
+            return Ok(());
+        }
+
+        let inserted = self.insert_datasource_setup_cell(source).await?;
+        let version = self
+            .mark_datasource_setup_cell(&inserted.id, inserted.version)
             .await?;
-        let id = match result {
-            jute::commands::DaemonControlResult::Delta(jute::notebook_store::NotebookDelta {
-                kind: jute::notebook_store::DeltaKind::CellInserted { cell, .. },
-                ..
-            }) => cell.id,
-            result => {
-                return Err(BridgeError::Handler {
-                    code: "setup_cell_update_failed".to_string(),
-                    message: format!("insert setup cell returned unexpected result: {result:?}"),
-                });
-            }
-        };
-        self.mark_datasource_setup_cell(&id)
+        self.set_tracked_datasource_setup_cell(TrackedDatasourceSetupCell {
+            id: inserted.id,
+            version,
+        })
+        .await;
+        Ok(())
     }
 
     #[cfg(feature = "datasource-introspect")]
-    async fn apply_notebook_store_command(
+    async fn tracked_datasource_setup_cell(&self) -> Option<TrackedDatasourceSetupCell> {
+        self.state.lock().await.datasource_setup_cell.clone()
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn set_tracked_datasource_setup_cell(&self, tracked: TrackedDatasourceSetupCell) {
+        self.state.lock().await.datasource_setup_cell = Some(tracked);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn find_existing_datasource_setup_cell(
         &self,
-        command: jute::commands::DaemonControlCommand,
-    ) -> Result<jute::commands::DaemonControlResult, BridgeError> {
-        jute::commands::handle_daemon_control_request(
-            jute::commands::DaemonControlRequest::new(command),
-            &self.jute_state,
+    ) -> Result<Option<TrackedDatasourceSetupCell>, BridgeError> {
+        let value = self
+            .requester
+            .request("notebook.snapshot", json!({}), tools::BRIDGE_TIMEOUT)
+            .await?;
+        let cells: Vec<BridgeSnapshotCell> =
+            serde_json::from_value(value).map_err(|error| BridgeError::Handler {
+                code: "setup_cell_update_failed".to_string(),
+                message: format!("invalid notebook.snapshot bridge response: {error}"),
+            })?;
+        Ok(
+            find_datasource_setup_cell(&cells).map(|cell| TrackedDatasourceSetupCell {
+                id: cell.id,
+                version: cell.version,
+            }),
         )
-        .await
-        .into_result()
-        .map_err(|error| BridgeError::Handler {
-            code: error.code,
-            message: error.message,
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn insert_datasource_setup_cell(
+        &self,
+        source: String,
+    ) -> Result<BridgeInsertCellResult, BridgeError> {
+        let value = self
+            .requester
+            .request(
+                "notebook.insert_cell",
+                json!({
+                    "kind": "code",
+                    "source": source,
+                    "last_edited_by": "brain"
+                }),
+                tools::BRIDGE_TIMEOUT,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|error| BridgeError::Handler {
+            code: "setup_cell_update_failed".to_string(),
+            message: format!("invalid notebook.insert_cell bridge response: {error}"),
         })
     }
 
     #[cfg(feature = "datasource-introspect")]
-    fn mark_datasource_setup_cell(&self, id: &str) -> Result<(), BridgeError> {
-        self.jute_state
-            .get_notebook()
-            .apply(jute::notebook_store::NotebookOp::MarkDatasourceSetupCell { id: id.to_string() })
-            .map(|_| ())
-            .map_err(|error| BridgeError::Handler {
+    async fn write_datasource_setup_cell(
+        &self,
+        id: &str,
+        expected_version: u64,
+        source: String,
+    ) -> Result<u64, BridgeError> {
+        let value = self
+            .requester
+            .request(
+                "notebook.write_cell",
+                json!({
+                    "id": id,
+                    "source": source,
+                    "expected_version": expected_version,
+                    "last_edited_by": "brain"
+                }),
+                tools::BRIDGE_TIMEOUT,
+            )
+            .await?;
+        let result: BridgeWriteCellResult =
+            serde_json::from_value(value).map_err(|error| BridgeError::Handler {
                 code: "setup_cell_update_failed".to_string(),
-                message: error.to_string(),
-            })
+                message: format!("invalid notebook.write_cell bridge response: {error}"),
+            })?;
+        Ok(result.version)
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn mark_datasource_setup_cell(
+        &self,
+        id: &str,
+        expected_version: u64,
+    ) -> Result<u64, BridgeError> {
+        let value = self
+            .requester
+            .request(
+                "notebook.set_cell_metadata",
+                json!({
+                    "id": id,
+                    "patch": {
+                        "spur": {
+                            "datasource_setup": true
+                        }
+                    },
+                    "expected_version": expected_version
+                }),
+                tools::BRIDGE_TIMEOUT,
+            )
+            .await?;
+        let result: BridgeSetCellMetadataResult =
+            serde_json::from_value(value).map_err(|error| BridgeError::Handler {
+                code: "setup_cell_update_failed".to_string(),
+                message: format!("invalid notebook.set_cell_metadata bridge response: {error}"),
+            })?;
+        Ok(result.version)
     }
 
     #[cfg(not(feature = "datasource-introspect"))]
@@ -1487,6 +1571,10 @@ impl NotebookDaemonControl {
             let mut state = self.state.lock().await;
             state.current_path = Some(path.clone());
             state.window_label = Some(label);
+            #[cfg(feature = "datasource-introspect")]
+            {
+                state.datasource_setup_cell = None;
+            }
         }
         self.load_open_notebook(&path).await?;
         if let Err(error) = self.persist_last_notebook(&path).await {
@@ -2491,14 +2579,14 @@ mod tests {
         .expect("write notebook fixture");
 
         let jute_state = Arc::new(State::new());
-        let notebook_root: NotebookRoot =
-            serde_json::from_value(empty_notebook()).expect("empty notebook parses");
-        jute_state
-            .get_notebook()
-            .load(notebook_path.clone(), notebook_root);
+        let buffered_bridge = Arc::new(BufferedNotebookBridge::new(
+            notebook_path.clone(),
+            empty_notebook(),
+        ));
+        let requester: Arc<dyn BridgeRequester> = buffered_bridge.clone();
         let control = NotebookDaemonControl::new_for_test(
             Arc::new(AgentBridge::new()),
-            test_bridge_requester(),
+            requester,
             Arc::clone(&jute_state),
             Arc::new(RecordingWindowOps::default()),
             None,
@@ -2521,8 +2609,18 @@ mod tests {
             assert!(response.ok, "{:?}", response.error);
         }
 
-        let (root, _) = jute_state.get_notebook().snapshot();
-        let notebook = serde_json::to_value(root).expect("notebook serializes");
+        let calls = buffered_bridge.calls().await;
+        assert_eq!(
+            calls,
+            vec![
+                "notebook.snapshot",
+                "notebook.insert_cell",
+                "notebook.set_cell_metadata",
+                "notebook.write_cell"
+            ]
+        );
+
+        let notebook = buffered_bridge.notebook().await;
         let setup_cells = notebook["cells"]
             .as_array()
             .expect("cells array")
@@ -2546,6 +2644,88 @@ mod tests {
         assert_eq!(source.matches("CREATE OR REPLACE VIEW").count(), 1);
         assert!(source.contains("read_csv_auto"));
         assert!(source.contains("sales"));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn detach_updates_tracked_setup_cell_without_duplicate() {
+        let tempdir = tempfile::tempdir().expect("csv fixture dir");
+        let csv = tempdir.path().join("sales.csv");
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        std::fs::write(&csv, "region,revenue\nwest,10\neast,20\n").expect("write csv fixture");
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+        )
+        .await
+        .expect("write notebook fixture");
+
+        let jute_state = Arc::new(State::new());
+        let buffered_bridge = Arc::new(BufferedNotebookBridge::new(
+            notebook_path.clone(),
+            empty_notebook(),
+        ));
+        let requester: Arc<dyn BridgeRequester> = buffered_bridge.clone();
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            requester,
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(notebook_path);
+        }
+
+        let attach = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::AttachDatasource {
+                    name: "sales".to_owned(),
+                    path: csv.display().to_string(),
+                    group: None,
+                },
+            ))
+            .await;
+        assert!(attach.ok, "{:?}", attach.error);
+
+        let detach = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::DetachDatasource {
+                    name: "sales".to_owned(),
+                },
+            ))
+            .await;
+        assert!(detach.ok, "{:?}", detach.error);
+
+        let calls = buffered_bridge.calls().await;
+        assert_eq!(
+            calls,
+            vec![
+                "notebook.snapshot",
+                "notebook.insert_cell",
+                "notebook.set_cell_metadata",
+                "notebook.write_cell"
+            ]
+        );
+
+        let notebook = buffered_bridge.notebook().await;
+        let setup_cells = notebook["cells"]
+            .as_array()
+            .expect("cells array")
+            .iter()
+            .filter(|cell| {
+                cell["cell_type"] == "code"
+                    && cell["source"]
+                        .as_str()
+                        .is_some_and(|source| source.contains("# SPUR datasource setup cell v1"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(setup_cells.len(), 1);
+        let source = setup_cells[0]["source"].as_str().expect("setup source");
+        assert!(source.contains("# No datasources are attached."));
+        assert!(!source.contains("CREATE OR REPLACE VIEW"));
     }
 
     #[tokio::test]
@@ -2925,6 +3105,7 @@ mod tests {
         notebook: tokio::sync::Mutex<Value>,
         path: PathBuf,
         calls: tokio::sync::Mutex<Vec<String>>,
+        next_cell_id: std::sync::atomic::AtomicUsize,
     }
 
     impl BufferedNotebookBridge {
@@ -2933,11 +3114,16 @@ mod tests {
                 notebook: tokio::sync::Mutex::new(notebook),
                 path,
                 calls: tokio::sync::Mutex::new(Vec::new()),
+                next_cell_id: std::sync::atomic::AtomicUsize::new(1),
             }
         }
 
         async fn calls(&self) -> Vec<String> {
             self.calls.lock().await.clone()
+        }
+
+        async fn notebook(&self) -> Value {
+            self.notebook.lock().await.clone()
         }
     }
 
@@ -2977,7 +3163,11 @@ mod tests {
                             .unwrap_or("brain")
                             .to_string();
                         let is_code = kind == "code";
-                        let id = "inserted-cell".to_string();
+                        let id = format!(
+                            "inserted-cell-{}",
+                            self.next_cell_id
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        );
                         let mut cell = json!({
                             "cell_type": kind,
                             "id": id,
@@ -3000,6 +3190,80 @@ mod tests {
                             .expect("notebook cells")
                             .push(cell);
                         Ok(json!({ "id": id, "version": 1 }))
+                    }
+                    "notebook.write_cell" => {
+                        let id = params["id"].as_str().expect("write_cell id");
+                        let source = params["source"].as_str().expect("write_cell source");
+                        let expected_version = params["expected_version"]
+                            .as_u64()
+                            .expect("write_cell expected_version");
+                        let last_edited_by = params["last_edited_by"]
+                            .as_str()
+                            .unwrap_or("brain")
+                            .to_string();
+                        let mut notebook = self.notebook.lock().await;
+                        let cell = notebook["cells"]
+                            .as_array_mut()
+                            .expect("notebook cells")
+                            .iter_mut()
+                            .find(|cell| cell["id"] == id)
+                            .expect("cell exists");
+                        let actual_version = cell["metadata"]["spur"]["version"]
+                            .as_u64()
+                            .expect("cell version");
+                        assert_eq!(actual_version, expected_version);
+                        let next_version = actual_version + 1;
+                        cell["source"] = json!(source);
+                        cell["metadata"]["spur"]["version"] = json!(next_version);
+                        cell["metadata"]["spur"]["last_edited_by"] = json!(last_edited_by);
+                        Ok(json!({ "version": next_version }))
+                    }
+                    "notebook.set_cell_metadata" => {
+                        let id = params["id"].as_str().expect("set_cell_metadata id");
+                        let expected_version = params["expected_version"]
+                            .as_u64()
+                            .expect("set_cell_metadata expected_version");
+                        let patch = params["patch"].clone();
+                        let mut notebook = self.notebook.lock().await;
+                        let cell = notebook["cells"]
+                            .as_array_mut()
+                            .expect("notebook cells")
+                            .iter_mut()
+                            .find(|cell| cell["id"] == id)
+                            .expect("cell exists");
+                        let actual_version = cell["metadata"]["spur"]["version"]
+                            .as_u64()
+                            .expect("cell version");
+                        assert_eq!(actual_version, expected_version);
+                        if patch["spur"]["datasource_setup"] == json!(true) {
+                            cell["metadata"]["spur"]["datasource_setup"] = json!(true);
+                        }
+                        let next_version = actual_version + 1;
+                        cell["metadata"]["spur"]["version"] = json!(next_version);
+                        Ok(json!({ "ok": true, "version": next_version }))
+                    }
+                    "notebook.snapshot" => {
+                        let notebook = self.notebook.lock().await;
+                        let cells = notebook["cells"]
+                            .as_array()
+                            .expect("notebook cells")
+                            .iter()
+                            .map(|cell| {
+                                json!({
+                                    "id": cell["id"],
+                                    "kind": match cell["cell_type"].as_str().expect("cell type") {
+                                        "code" => "code",
+                                        "markdown" => "markdown",
+                                        kind => panic!("unexpected cell kind: {kind}"),
+                                    },
+                                    "version": cell["metadata"]["spur"]["version"],
+                                    "exec_count": cell["execution_count"].clone(),
+                                    "status": "idle",
+                                    "source": cell["source"],
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        Ok(json!(cells))
                     }
                     "notebook.load" => Ok(Value::Null),
                     _ => Err(BridgeError::Handler {

@@ -124,6 +124,14 @@ struct DeleteCellParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetCellMetadataParams {
+    id: String,
+    patch: Value,
+    #[serde(alias = "expectedVersion")]
+    expected_version: u64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DaemonSocketResponse {
     ok: bool,
@@ -202,6 +210,24 @@ fn command_from_bridge_method(
             }
             Ok(DaemonControlCommand::DeleteCell {
                 id: params.id,
+                expected_version: params.expected_version,
+            })
+        }
+        "notebook.set_cell_metadata" => {
+            let params: SetCellMetadataParams = decode_params(method, params)?;
+            if params.id.is_empty() {
+                return Err(invalid_params(
+                    "notebook.set_cell_metadata id must not be empty",
+                ));
+            }
+            if params.expected_version == 0 {
+                return Err(invalid_params(
+                    "notebook.set_cell_metadata expected_version must be >= 1",
+                ));
+            }
+            Ok(DaemonControlCommand::SetCellMetadata {
+                id: params.id,
+                patch: params.patch,
                 expected_version: params.expected_version,
             })
         }
@@ -292,6 +318,12 @@ fn bridge_response_from_daemon_result(
             let _ = delta_version(result, "cellDeleted")?;
             Ok(json!({ "deleted": true }))
         }
+        "notebook.set_cell_metadata" => delta_version(result, "cellWritten").map(|version| {
+            json!({
+                "ok": true,
+                "version": version
+            })
+        }),
         "notebook.read_cell" => daemon_cell_to_bridge_value(result),
         "notebook.snapshot" => daemon_snapshot_to_bridge_value(result),
         "notebook.load" => {
