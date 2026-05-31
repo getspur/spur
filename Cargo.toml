@@ -47,8 +47,10 @@ serde_json = "1"
 toml = "0.8"
 parquet = { version = "58", default-features = false, features = ["zstd"] }
 arrow-array = "58"
+arrow-buffer = "58"
 arrow-ipc = "58"
 arrow-schema = "58"
+memmap2 = "0.9"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
