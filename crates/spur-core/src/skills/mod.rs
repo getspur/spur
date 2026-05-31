@@ -81,6 +81,7 @@ fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
         );
         m.insert("writing-plans", include_str!("writing-plans/SKILL.md"));
         m.insert("writing-skills", include_str!("writing-skills/SKILL.md"));
+        m.insert("open-design", include_str!("open-design/SKILL.md"));
         m
     })
 }
@@ -696,6 +697,91 @@ mod tests {
         assert!(
             desc.contains("plan") || desc.contains("tasks"),
             "description should contain trigger phrases for matching, got: {desc}"
+        );
+    }
+
+    #[test]
+    fn open_design_description_contains_trigger_phrases() {
+        let raw = all_bundled_raw().get("open-design").unwrap();
+        let parsed = frontmatter::parse_source(raw);
+        let desc = parsed.description.as_deref().unwrap_or("").to_lowercase();
+        assert!(
+            desc.contains("design") || desc.contains("landing") || desc.contains("deck"),
+            "description should contain visual-design trigger phrases, got: {desc}"
+        );
+        assert_eq!(
+            parsed.role,
+            Some(crate::skills::SkillRole::Brain),
+            "open-design is a brain-role skill"
+        );
+    }
+
+    #[test]
+    fn open_design_skill_is_bundled_and_loadable() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("open-design", &fake).expect("open-design skill must be bundled");
+        // Drives the notebook through the MCP tool surface, not a Node daemon.
+        assert!(
+            body.contains("notebook_insert_cell"),
+            "skill must instruct driving the notebook via notebook_* tools"
+        );
+        assert!(
+            body.contains("text/html"),
+            "skill must instruct emitting the artifact as a text/html cell output"
+        );
+    }
+
+    #[test]
+    fn open_design_skill_covers_full_loop() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("open-design", &fake).unwrap();
+        for marker in [
+            "Discovery", // brief-lock step
+            "Direction", // direction picker step
+            "Plan",      // todo plan step
+            "Artifact",  // artifact emission step
+            "Critique",  // self-critique step
+            "references/directions.md",
+            "references/critique.md",
+            "notebook_read_cell",
+            "notebook_write_cell",
+        ] {
+            assert!(
+                body.contains(marker),
+                "open-design body must cover `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn open_design_directions_reference_lists_all_five() {
+        // The reference files live beside the bundled skill source.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/skills/open-design/references");
+        let directions =
+            std::fs::read_to_string(dir.join("directions.md")).expect("directions.md must exist");
+        for school in [
+            "Editorial Monocle",
+            "Modern Minimal",
+            "Warm Soft",
+            "Tech Utility",
+            "Brutalist Experimental",
+        ] {
+            assert!(
+                directions.contains(school),
+                "directions.md must list `{school}`"
+            );
+        }
+        assert!(
+            directions.contains("oklch"),
+            "directions must carry deterministic OKLch palettes"
+        );
+        let critique =
+            std::fs::read_to_string(dir.join("critique.md")).expect("critique.md must exist");
+        assert!(
+            critique.to_lowercase().contains("anti-ai-slop")
+                || critique.to_lowercase().contains("anti ai slop"),
+            "critique.md must include the anti-AI-slop checklist"
         );
     }
 }
