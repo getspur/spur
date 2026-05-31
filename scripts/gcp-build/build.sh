@@ -24,15 +24,28 @@ log() { echo "[build] $*" >&2; }
 # whether to fall back to local cargo. Anything else is propagated as-is.
 INFRA_UNAVAILABLE=200
 
+# Flags may appear in any order before the optional `--` cargo-args separator.
+#   --auto-spin       create/start the VM if it is not already RUNNING
+#   --frontend-test   skip cargo; run the notebook frontend (vitest) suite on
+#                     the VM instead. vitest is a per-project devDependency, so
+#                     this installs node_modules (when stale) then runs the
+#                     `test` npm script. Override the script via
+#                     SPUR_FRONTEND_TEST_CMD (default: `npm test` -> vitest run).
 AUTO_SPIN=0
-if [[ "${1:-}" == "--auto-spin" ]]; then
-    AUTO_SPIN=1; shift
-fi
-if [[ "${1:-}" == "--" ]]; then shift; fi
+FRONTEND_TEST=0
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --auto-spin)     AUTO_SPIN=1; shift ;;
+        --frontend-test) FRONTEND_TEST=1; shift ;;
+        --)              shift; break ;;
+        *)               break ;;
+    esac
+done
 CARGO_ARGS="${CARGO_ARGS:-${*:-build --release --workspace}}"
 NOTEBOOK_FRONTEND_DIR="crates/spur-notebook/jute-notebook"
 NOTEBOOK_FRONTEND_INSTALL_CMD="npm ci"
 NOTEBOOK_FRONTEND_BUILD_CMD="npm run build"
+NOTEBOOK_FRONTEND_TEST_CMD="${SPUR_FRONTEND_TEST_CMD:-npm test}"
 
 is_notebook_production_build() {
     local args="$1"
@@ -194,6 +207,34 @@ gcloud compute ssh "$VM_NAME" \
     --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
     --tunnel-through-iap --quiet \
     --command="bash \"\$HOME/$REMOTE_DIR/scripts/gcp-build/_prune-remote.sh\" \"$REMOTE_DIR\" \"$REMOTE_MANIFEST_CUR\" \"$STORED_MANIFEST\""
+
+# ---- run notebook frontend (vitest) tests on the VM ------------------------
+# vitest is not a system tool — it lives in the worktree's node_modules, which
+# is gitignored and therefore never synced. We install it on the VM (npm ci),
+# reusing the just-synced sources, then run the project's test script. Install
+# is skipped when node_modules is already present and no newer than the lockfile
+# (node_modules persists on the VM across syncs, so repeat TDD runs are fast).
+if [[ $FRONTEND_TEST -eq 1 ]]; then
+    log "Running notebook frontend tests on VM: $NOTEBOOK_FRONTEND_DIR ($NOTEBOOK_FRONTEND_TEST_CMD)"
+    gcloud compute ssh "$VM_NAME" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        --tunnel-through-iap --quiet \
+        --command="bash -lc '
+            set -e
+            cd ~/$REMOTE_DIR/$NOTEBOOK_FRONTEND_DIR
+            source /etc/profile.d/spur-build.sh 2>/dev/null || true
+            if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+                echo \"[build] Installing frontend deps: $NOTEBOOK_FRONTEND_INSTALL_CMD\"
+                $NOTEBOOK_FRONTEND_INSTALL_CMD
+            else
+                echo \"[build] node_modules current; skipping install\"
+            fi
+            echo \"[build] $NOTEBOOK_FRONTEND_TEST_CMD\"
+            $NOTEBOOK_FRONTEND_TEST_CMD
+        '"
+    log "Frontend tests done."
+    exit 0
+fi
 
 # ---- run cargo on the VM ---------------------------------------------------
 # Forward caller's $RUSTFLAGS so cfg/lint flags survive the SSH hop. The
