@@ -18,6 +18,7 @@ export type DaemonControlCommand =
       path: string;
       group: string | null;
     }
+  | { command: "add_api_datasource"; name: string; source: string }
   | { command: "detach_datasource"; name: string }
   | { command: "list_datasources" }
   | { command: "list_recents" }
