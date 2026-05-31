@@ -19,7 +19,7 @@ async-channel = "2"
 blake3 = "1"
 chrono.workspace = true
 directories.workspace = true
-duckdb = { workspace = true, optional = true }
+duckdb = { workspace = true, optional = true, features = ["bundled"] }
 fs4 = "0.13"
 jute = { path = "jute-notebook/src-tauri" }
 memmap2 = { workspace = true }
