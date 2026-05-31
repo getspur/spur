@@ -291,8 +291,8 @@ async fn save_writes_notebook_through_save_coordinator() {
     // AppHandle is wired up.
 }
 
-// Live-kernel tests below need a working python3 kernel on the host (and a
-// usable spawn path through start_local_kernel). They're gated behind
+// Live-kernel tests below need a working python3 or Deno kernel on the host
+// (and a usable spawn path through start_local_kernel). They're gated behind
 // `#[ignore]` so the default `cargo test -p spur-notebook --test
 // notebook_read_tools` invocation stays hermetic; run explicitly with
 // `cargo test -p spur-notebook --test notebook_read_tools -- --ignored`.
@@ -594,7 +594,10 @@ fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
     }
 }
 
+/// Deno-dependent cross-language port contract; run with
+/// `scripts/spur-cargo test -p spur-notebook --test notebook_read_tools deno_write_port_is_readable_from_deno_and_rust -- --ignored --nocapture`.
 #[tokio::test]
+#[ignore = "requires a working Deno kernel; run with --ignored"]
 async fn deno_write_port_is_readable_from_deno_and_rust() {
     let Some(_kernelspec) = install_test_deno_kernelspec().await else {
         return;
@@ -632,7 +635,30 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
             json!({
                 "cell_id": "deno-put",
                 "kernel_id": slot_id,
-                "code": "await spur.put('t', [{ id: 1 }, { id: 2 }]);",
+                "code": concat!(
+                    "const {\n",
+                    "  Decimal,\n",
+                    "  Dictionary,\n",
+                    "  Int32,\n",
+                    "  TimestampMillisecond,\n",
+                    "  Utf8,\n",
+                    "  tableFromArrays,\n",
+                    "  vectorFromArray,\n",
+                    "} = await import('npm:apache-arrow');\n",
+                    "const table = tableFromArrays({\n",
+                    "  id: vectorFromArray([1, 2], new Int32()),\n",
+                    "  occurred_at: vectorFromArray([\n",
+                    "    new Date('2026-01-02T03:04:05.000Z'),\n",
+                    "    new Date('2026-01-03T03:04:05.000Z'),\n",
+                    "  ], new TimestampMillisecond('UTC')),\n",
+                    "  amount: vectorFromArray([null, null], new Decimal(4, 12, 128)),\n",
+                    "  category: vectorFromArray(\n",
+                    "    ['alpha', 'beta'],\n",
+                    "    new Dictionary(new Utf8(), new Int32())\n",
+                    "  ),\n",
+                    "});\n",
+                    "await spur.put('t', table);",
+                ),
             }),
         )
         .await
@@ -677,8 +703,64 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
 
     assert_eq!(row_count, 2);
     assert_eq!(entry_schema, read.schema.as_ref().clone());
-    assert_eq!(read.schema.fields().len(), 1);
+    assert_eq!(read.schema.fields().len(), 4);
     assert_eq!(read.schema.field(0).name(), "id");
+    assert_eq!(
+        read.schema.field(0).data_type(),
+        &arrow_schema::DataType::Int32
+    );
+
+    let occurred_at = read
+        .schema
+        .field_with_name("occurred_at")
+        .expect("timestamp field exists");
+    assert_eq!(
+        occurred_at.data_type(),
+        &arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, Some("UTC".into()))
+    );
+    assert_ne!(occurred_at.data_type(), &arrow_schema::DataType::Utf8);
+    assert_eq!(
+        entry_schema
+            .field_with_name("occurred_at")
+            .expect("manifest timestamp field exists")
+            .data_type(),
+        occurred_at.data_type()
+    );
+
+    let amount = read
+        .schema
+        .field_with_name("amount")
+        .expect("decimal field exists");
+    assert_eq!(
+        amount.data_type(),
+        &arrow_schema::DataType::Decimal128(12, 4)
+    );
+    assert_eq!(
+        entry_schema
+            .field_with_name("amount")
+            .expect("manifest decimal field exists")
+            .data_type(),
+        amount.data_type()
+    );
+
+    let category = read
+        .schema
+        .field_with_name("category")
+        .expect("dictionary field exists");
+    assert_eq!(
+        category.data_type(),
+        &arrow_schema::DataType::Dictionary(
+            Box::new(arrow_schema::DataType::Int32),
+            Box::new(arrow_schema::DataType::Utf8)
+        )
+    );
+    assert_eq!(
+        entry_schema
+            .field_with_name("category")
+            .expect("manifest dictionary field exists")
+            .data_type(),
+        category.data_type()
+    );
 
     let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
 }
