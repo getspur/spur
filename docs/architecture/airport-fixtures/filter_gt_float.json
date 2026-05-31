@@ -1,0 +1,28 @@
+{
+  "filters": [
+    {
+      "expression_class": "BOUND_COMPARISON",
+      "type": "COMPARE_GREATERTHAN",
+      "alias": "",
+      "left": {
+        "expression_class": "BOUND_COLUMN_REF",
+        "type": "BOUND_COLUMN_REF",
+        "alias": "",
+        "return_type": { "id": "DOUBLE", "type_info": null },
+        "binding": { "table_index": 0, "column_index": 3 },
+        "depth": 0
+      },
+      "right": {
+        "expression_class": "BOUND_CONSTANT",
+        "type": "VALUE_CONSTANT",
+        "alias": "",
+        "value": {
+          "type": { "id": "DOUBLE", "type_info": null },
+          "is_null": false,
+          "value": 0.5
+        }
+      }
+    }
+  ],
+  "column_binding_names_by_index": ["id", "question", "active", "volume"]
+}
