@@ -1373,6 +1373,43 @@ mod tests {
     }
 
     #[test]
+    fn spur_dag_metadata_serializes_empty_vectors_and_round_trips() {
+        let metadata = CellDagMetadata {
+            produces: Vec::new(),
+            consumes: vec!["blast".to_string(), "cochange".to_string()],
+            source: None,
+        };
+
+        let value = serde_json::to_value(&metadata).expect("dag metadata serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "produces": [],
+                "consumes": ["blast", "cochange"]
+            })
+        );
+
+        let round_tripped: CellDagMetadata =
+            serde_json::from_value(value).expect("dag metadata deserializes");
+        assert_eq!(round_tripped, metadata);
+    }
+
+    #[test]
+    fn spur_dag_metadata_deserializes_missing_produces_as_empty_vec() {
+        let metadata: CellDagMetadata = serde_json::from_value(serde_json::json!({
+            "consumes": ["blast", "cochange"]
+        }))
+        .expect("legacy dag metadata deserializes");
+
+        assert!(metadata.produces.is_empty());
+        assert_eq!(
+            metadata.consumes,
+            vec!["blast".to_string(), "cochange".to_string()]
+        );
+        assert_eq!(metadata.source, None);
+    }
+
+    #[test]
     fn spur_dag_metadata_survives_later_cell_write() {
         let store = store_with_notebook();
 

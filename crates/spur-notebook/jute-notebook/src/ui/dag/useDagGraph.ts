@@ -69,14 +69,14 @@ export function buildDagGraph(
     const dagMetadata = cell.dagMetadata;
     if (!dagMetadata) continue;
 
-    for (const produced of dagMetadata.produces) {
+    for (const produced of dagMetadata.produces ?? []) {
       if (!producerByPort.has(produced.port)) {
         producerByPort.set(produced.port, id);
         producerVersionByPort.set(produced.port, cell.version);
       }
     }
 
-    for (const consumedPort of dagMetadata.consumes) {
+    for (const consumedPort of dagMetadata.consumes ?? []) {
       const consumers = consumersByPort.get(consumedPort) ?? new Set<string>();
       consumers.add(id);
       consumersByPort.set(consumedPort, consumers);
@@ -98,25 +98,23 @@ export function buildDagGraph(
           cellType: cell.type,
           code: cell.source,
           codePreview: firstSourceLine(cell.source),
-          produces:
-            dagMetadata?.produces.map((port) => ({
-              port: port.port,
-              repr: port.repr,
-              display: port.display,
-              version: portManifest[port.port] ?? cell.version,
-            })) ?? [],
-          consumes:
-            dagMetadata?.consumes.map((port) => {
-              const ranVersion = status?.ranPortVersions[port];
-              const stale =
-                status?.state === "stale" || stalePorts.includes(port);
-              return {
-                port,
-                version: portManifest[port] ?? producerVersionByPort.get(port),
-                ...(ranVersion !== undefined ? { ranVersion } : {}),
-                ...(stale ? { stale } : {}),
-              };
-            }) ?? [],
+          produces: (dagMetadata?.produces ?? []).map((port) => ({
+            port: port.port,
+            repr: port.repr,
+            display: port.display,
+            version: portManifest[port.port] ?? cell.version,
+          })),
+          consumes: (dagMetadata?.consumes ?? []).map((port) => {
+            const ranVersion = status?.ranPortVersions[port];
+            const stale =
+              status?.state === "stale" || stalePorts.includes(port);
+            return {
+              port,
+              version: portManifest[port] ?? producerVersionByPort.get(port),
+              ...(ranVersion !== undefined ? { ranVersion } : {}),
+              ...(stale ? { stale } : {}),
+            };
+          }),
           source: formatSource(dagMetadata?.source),
           state: deriveNodeState(status, portManifest),
         },
@@ -161,8 +159,8 @@ function isDagCell(
   const dagMetadata = cell?.dagMetadata;
   return Boolean(
     dagMetadata &&
-      (dagMetadata.produces.length > 0 ||
-        dagMetadata.consumes.length > 0 ||
+      ((dagMetadata.produces?.length ?? 0) > 0 ||
+        (dagMetadata.consumes?.length ?? 0) > 0 ||
         dagMetadata.source),
   );
 }
