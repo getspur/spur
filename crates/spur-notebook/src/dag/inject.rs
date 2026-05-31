@@ -222,8 +222,352 @@ spur = _Spur({root})
     )
 }
 
+pub fn javascript_bootstrap(notebook_root: impl AsRef<Path>) -> String {
+    let root = notebook_root.as_ref().display().to_string();
+    let ports_dir = notebook_root.as_ref().join("ports").display().to_string();
+    let manifest_path = notebook_root
+        .as_ref()
+        .join("ports")
+        .join("manifest.json")
+        .display()
+        .to_string();
+    let root_literal = serde_json::to_string(&root).expect("path string serializes");
+    let ports_literal = serde_json::to_string(&ports_dir).expect("path string serializes");
+    let manifest_literal = serde_json::to_string(&manifest_path).expect("path string serializes");
+    let mime_literal = serde_json::to_string(PORT_MIME).expect("mime string serializes");
+
+    r#"
+// --- SPUR port helper bootstrap ---
+const _spurArrow = await import("npm:apache-arrow");
+const {
+  RecordBatch,
+  RecordBatchFileWriter,
+  Table,
+  tableFromArrays,
+  tableFromIPC,
+  tableToIPC,
+} = _spurArrow;
+
+const _spurDenoRuntime = {
+  home() {
+    return Deno.env.get("HOME");
+  },
+  fs: {
+    mkdirp(path) {
+      Deno.mkdirSync(path, { recursive: true });
+    },
+    exists(path) {
+      try {
+        Deno.statSync(path);
+        return true;
+      } catch (error) {
+        if (error instanceof Deno.errors.NotFound) {
+          return false;
+        }
+        throw error;
+      }
+    },
+    readBytes(path) {
+      return Deno.readFileSync(path);
+    },
+    readText(path) {
+      return Deno.readTextFileSync(path);
+    },
+    writeBytes(path, bytes) {
+      Deno.writeFileSync(path, bytes);
+    },
+    writeText(path, text) {
+      Deno.writeTextFileSync(path, text);
+    },
+    rename(from, to) {
+      Deno.renameSync(from, to);
+    },
+    makeTempFile(dir) {
+      return Deno.makeTempFileSync({
+        dir,
+        prefix: "manifest.json.",
+        suffix: ".tmp",
+      });
+    },
+    remove(path) {
+      try {
+        Deno.removeSync(path);
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) {
+          throw error;
+        }
+      }
+    },
+  },
+  display(bundle) {
+    return Deno.jupyter.display(bundle, { raw: true });
+  },
+};
+
+class _Spur {
+  constructor({ root, portsDir, manifestPath, mime, runtime }) {
+    this._root = this._expandHome(root, runtime);
+    this._portsDir = this._expandHome(portsDir, runtime);
+    this._manifestPath = this._expandHome(manifestPath, runtime);
+    this._mime = mime;
+    this._runtime = runtime;
+    this._runtime.fs.mkdirp(this._portsDir);
+  }
+
+  get(port) {
+    this._validatePort(port);
+    const entry = this._loadManifest().ports?.[port];
+    if (entry === undefined) {
+      throw new Error(`SPUR port has not been written: ${port}`);
+    }
+    return tableFromIPC(this._runtime.fs.readBytes(entry.path));
+  }
+
+  put(port, value) {
+    this._validatePort(port);
+    const table = this._toTable(value);
+    const manifest = this._loadManifest();
+    const version = Number(manifest.ports?.[port]?.version ?? 0) + 1;
+    const arrowPath = `${this._portsDir}/${port}@v${version}.arrow`;
+
+    this._runtime.fs.writeBytes(arrowPath, tableToIPC(table, "file"));
+
+    const schema = this._schemaJson(table.schema);
+    manifest.ports ??= {};
+    manifest.ports[port] = {
+      path: arrowPath,
+      version,
+      schema,
+    };
+    this._storeManifest(manifest);
+
+    const bundle = {
+      [this._mime]: {
+        port,
+        version,
+        schema,
+      },
+      "text/html": this._previewHtml(port, version, table),
+    };
+    const display = this._runtime.display(bundle);
+    if (display?.catch !== undefined) {
+      display.catch((error) => {
+        console.warn("SPUR port display failed", error);
+      });
+    }
+    return { port, version, schema };
+  }
+
+  _toTable(value) {
+    if (Table.isTable?.(value) || value instanceof Table) {
+      return value;
+    }
+    if (value instanceof RecordBatch) {
+      return new Table(value.schema, [value]);
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 0 && this._isPlainObject(value[0])) {
+        const columns = {};
+        for (const name of Object.keys(value[0])) {
+          columns[name] = value.map((row) => row?.[name]);
+        }
+        return tableFromArrays(columns);
+      }
+      return tableFromArrays({ value });
+    }
+    if (this._isPlainObject(value)) {
+      return tableFromArrays(value);
+    }
+    return tableFromArrays({ value: [value] });
+  }
+
+  _loadManifest() {
+    if (!this._runtime.fs.exists(this._manifestPath)) {
+      return { ports: {} };
+    }
+    return JSON.parse(this._runtime.fs.readText(this._manifestPath));
+  }
+
+  _storeManifest(manifest) {
+    const tmpPath = this._runtime.fs.makeTempFile(this._portsDir);
+    try {
+      this._runtime.fs.writeText(tmpPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      this._runtime.fs.rename(tmpPath, this._manifestPath);
+    } finally {
+      if (this._runtime.fs.exists(tmpPath)) {
+        this._runtime.fs.remove(tmpPath);
+      }
+    }
+  }
+
+  _validatePort(port) {
+    if (typeof port !== "string" || port === "") {
+      throw new Error("SPUR port name cannot be empty");
+    }
+    if (
+      port === "." ||
+      port === ".." ||
+      port.includes("/") ||
+      port.includes("\\") ||
+      port.includes("\0")
+    ) {
+      throw new Error(`SPUR port name is not valid for an on-disk port file: ${port}`);
+    }
+  }
+
+  _schemaJson(schema) {
+    return {
+      fields: schema.fields.map((field) => this._fieldJson(field)),
+      metadata: this._metadataJson(schema.metadata),
+    };
+  }
+
+  _fieldJson(field) {
+    return {
+      name: field.name,
+      data_type: this._dataTypeJson(field.type),
+      nullable: Boolean(field.nullable),
+      dict_id: 0,
+      dict_is_ordered: false,
+      metadata: this._metadataJson(field.metadata),
+    };
+  }
+
+  _metadataJson(metadata) {
+    if (metadata === undefined || metadata === null) {
+      return {};
+    }
+    const entries =
+      metadata instanceof Map ? metadata.entries() : Object.entries(metadata);
+    const output = {};
+    for (const [key, value] of entries) {
+      output[this._decodeMetadata(key)] = this._decodeMetadata(value);
+    }
+    return output;
+  }
+
+  _decodeMetadata(value) {
+    if (value instanceof Uint8Array) {
+      return new TextDecoder().decode(value);
+    }
+    return String(value);
+  }
+
+  _dataTypeJson(dataType) {
+    const typeName = String(dataType);
+    const scalars = {
+      Bool: "Boolean",
+      Boolean: "Boolean",
+      Int8: "Int8",
+      Int16: "Int16",
+      Int32: "Int32",
+      Int64: "Int64",
+      Uint8: "UInt8",
+      Uint16: "UInt16",
+      Uint32: "UInt32",
+      Uint64: "UInt64",
+      UInt8: "UInt8",
+      UInt16: "UInt16",
+      UInt32: "UInt32",
+      UInt64: "UInt64",
+      Float: "Float32",
+      Float16: "Float16",
+      Float32: "Float32",
+      Float64: "Float64",
+      Utf8: "Utf8",
+      "Dictionary<Int32, Utf8>": "Utf8",
+      LargeUtf8: "LargeUtf8",
+      Binary: "Binary",
+      LargeBinary: "LargeBinary",
+      Null: "Null",
+    };
+    return scalars[typeName] ?? scalars[typeName.toLowerCase()] ?? "Utf8";
+  }
+
+  _previewHtml(port, version, table) {
+    const rowCount = table.numRows ?? 0;
+    const columnCount = table.numCols ?? table.schema.fields.length;
+    const headers = table.schema.fields.map((field) => field.name);
+    const title =
+      `<strong>SPUR port</strong> <code>${this._escapeHtml(port)}</code> ` +
+      `<span>v${version}</span>`;
+    if (headers.length === 0) {
+      return `<div>${title}<p>0 columns, ${rowCount} rows</p></div>`;
+    }
+
+    const rows = table.slice(0, Math.min(rowCount, 5)).toArray();
+    const thead = headers
+      .map((name) => `<th>${this._escapeHtml(name)}</th>`)
+      .join("");
+    const body = rows
+      .map((row) => {
+        const cells = headers
+          .map((name) => `<td>${this._escapeHtml(row?.[name] ?? "")}</td>`)
+          .join("");
+        return `<tr>${cells}</tr>`;
+      })
+      .join("");
+    return (
+      `<div>${title}<p>${rowCount} rows x ${columnCount} columns</p>` +
+      `<table><thead><tr>${thead}</tr></thead><tbody>${body}</tbody></table></div>`
+    );
+  }
+
+  _escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  _isPlainObject(value) {
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      (Object.getPrototypeOf(value) === Object.prototype ||
+        Object.getPrototypeOf(value) === null)
+    );
+  }
+
+  _expandHome(path, runtime) {
+    if (path === "~") {
+      return runtime.home();
+    }
+    if (path.startsWith("~/")) {
+      return `${runtime.home()}${path.slice(1)}`;
+    }
+    return path;
+  }
+}
+
+globalThis.spur = new _Spur({
+  root: __SPUR_ROOT__,
+  portsDir: __SPUR_PORTS_DIR__,
+  manifestPath: __SPUR_MANIFEST_PATH__,
+  mime: __SPUR_PORT_MIME__,
+  runtime: _spurDenoRuntime,
+});
+// --- end SPUR port helper bootstrap ---
+"#
+    .replace("__SPUR_ROOT__", &root_literal)
+    .replace("__SPUR_PORTS_DIR__", &ports_literal)
+    .replace("__SPUR_MANIFEST_PATH__", &manifest_literal)
+    .replace("__SPUR_PORT_MIME__", &mime_literal)
+}
+
 pub fn wrap_python_cell(notebook_root: impl AsRef<Path>, code: &str) -> String {
     let mut wrapped = python_bootstrap(notebook_root);
+    wrapped.push('\n');
+    wrapped.push_str(code);
+    wrapped
+}
+
+// JS analog of `wrap_python_cell`; `run_cell.rs` currently always calls
+// `wrap_python_cell`, so a future change must branch on kernel language.
+pub fn wrap_js_cell(notebook_root: impl AsRef<Path>, code: &str) -> String {
+    let mut wrapped = javascript_bootstrap(notebook_root);
     wrapped.push('\n');
     wrapped.push_str(code);
     wrapped
@@ -243,6 +587,24 @@ mod tests {
         assert!(wrapped.contains("spur = _Spur"));
         assert!(wrapped.contains(PORT_MIME));
         assert!(wrapped.ends_with("spur.put('sales', [1, 2])"));
+    }
+
+    #[test]
+    fn wrap_js_cell_installs_spur_helper_and_keeps_user_code() {
+        let notebook_path = "/tmp/demo-notebook.ipynb";
+        let root = notebook_port_root(notebook_path);
+        let wrapped = wrap_js_cell(&root, "await spur.put('sales', [{ id: 1 }]);");
+        let root_literal = serde_json::to_string(&root.display().to_string()).unwrap();
+        let ports_literal =
+            serde_json::to_string(&root.join("ports").display().to_string()).unwrap();
+
+        assert!(wrapped.contains("globalThis.spur"));
+        assert!(wrapped.contains("npm:apache-arrow"));
+        assert!(wrapped.contains(PORT_MIME));
+        assert!(wrapped.contains(&root_literal));
+        assert!(wrapped.contains(&ports_literal));
+        assert!(root.display().to_string().contains("/nb-"));
+        assert!(wrapped.ends_with("await spur.put('sales', [{ id: 1 }]);"));
     }
 
     #[test]
