@@ -19,6 +19,7 @@ export type DaemonControlCommand =
       group: string | null;
     }
   | { command: "detach_datasource"; name: string }
+  | { command: "list_datasources" }
   | { command: "list_recents" }
   | { command: "remove_from_recents"; path: string }
   | { command: "set_pinned"; path: string; pinned: boolean }

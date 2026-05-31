@@ -229,6 +229,8 @@ pub enum DaemonControlCommand {
     },
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
+    /// List datasources attached to the current notebook.
+    ListDatasources {},
     /// List daemon recents.
     ListRecents {},
     /// Remove a path from daemon recents.
@@ -351,6 +353,8 @@ pub enum DaemonControlResult {
     Snapshot(DaemonNotebookSnapshot),
     /// Datasource catalog entry.
     Datasource(DatasourceEntry),
+    /// Datasource catalog entries.
+    Datasources(Vec<DatasourceEntry>),
 }
 
 /// Full notebook snapshot returned by daemon control.
@@ -751,6 +755,10 @@ async fn handle_daemon_control_inner(
             state.emit_datasources_changed(entries);
             let delta = notebook.load(PathBuf::from(path), root);
             Ok(DaemonControlResult::Delta(delta))
+        }
+        DaemonControlCommand::ListDatasources {} => {
+            let entries = state.datasource_catalog.lock().list();
+            Ok(DaemonControlResult::Datasources(entries))
         }
         DaemonControlCommand::DeleteCell {
             id,

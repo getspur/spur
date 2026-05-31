@@ -602,7 +602,6 @@ impl DaemonControlSuccess {
         }
     }
 
-    #[cfg(feature = "datasource-introspect")]
     fn result(result: Value) -> Self {
         Self {
             path: None,
@@ -1008,6 +1007,20 @@ impl NotebookDaemonControl {
                 }
                 DaemonControlCommand::DetachDatasource { name } => {
                     self.detach_datasource(name).await
+                }
+                DaemonControlCommand::ListDatasources {} => {
+                    async {
+                        let entries = self.jute_state.datasource_catalog.lock().list();
+                        let result = serde_json::to_value(
+                            jute::commands::DaemonControlResult::Datasources(entries),
+                        )
+                        .map_err(|error| BridgeError::Handler {
+                            code: "datasources_encode_failed".to_owned(),
+                            message: error.to_string(),
+                        })?;
+                        Ok(DaemonControlSuccess::result(result))
+                    }
+                    .await
                 }
                 DaemonControlCommand::ListRecents {} => self
                     .list_recent_entries()
@@ -3008,6 +3021,47 @@ mod tests {
 
     #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
+    async fn list_datasources_command_routes_through_daemon_control() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "list_datasources"
+        }))
+        .expect("list datasources command deserializes");
+
+        let empty_response = control
+            .handle(DaemonControlRequest {
+                id: None,
+                request: request.clone(),
+            })
+            .await;
+
+        assert!(empty_response.ok, "{:?}", empty_response.error);
+        assert_eq!(
+            datasource_entries_from_response(&empty_response),
+            Vec::new()
+        );
+
+        let entry = test_datasource_entry("sales");
+        jute_state.attach_datasource(entry.clone());
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(datasource_entries_from_response(&response), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
     async fn catalog_hydrates_from_metadata() {
         let workspace_dir = std::env::current_dir().expect("current dir");
         let tempdir = tempfile::Builder::new()
@@ -3224,6 +3278,17 @@ mod tests {
             .expect("daemon control result decodes")
         {
             jute::commands::DaemonControlResult::Datasource(entry) => entry,
+            result => panic!("unexpected daemon control result: {result:?}"),
+        }
+    }
+
+    fn datasource_entries_from_response(
+        response: &DaemonControlResponse,
+    ) -> Vec<jute::commands::DatasourceEntry> {
+        match serde_json::from_value(response.result.clone().expect("datasources control result"))
+            .expect("daemon control result decodes")
+        {
+            jute::commands::DaemonControlResult::Datasources(entries) => entries,
             result => panic!("unexpected daemon control result: {result:?}"),
         }
     }
