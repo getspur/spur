@@ -440,7 +440,9 @@ where
             };
             let before = before_versions.get(port).copied().flatten();
             if Some(read.version) == before {
-                store.put(port, &read.ipc_bytes)?;
+                // `ipc_bytes` is now an arrow Buffer (zero-copy mmap of the port
+                // file); deref to &[u8] so it routes through PortPayload::IpcBytes.
+                store.put(port, &*read.ipc_bytes)?;
                 changed = true;
             }
         }
