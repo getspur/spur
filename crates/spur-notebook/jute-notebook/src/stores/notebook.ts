@@ -45,6 +45,7 @@ export type NotebookCellState = {
   datasourceSetup?: boolean;
   dagMetadata?: CellDagMetadata;
   juteDeckMetadata?: JuteDeckCellMetadata;
+  cellMetadataOther?: Record<string, unknown>;
   result?: CellResult;
 };
 
@@ -542,7 +543,9 @@ function normalizePortManifest(value: unknown): DagPortManifest | undefined {
   );
 }
 
-function normalizeDagNodeState(value: unknown): NodeStatus["state"] | undefined {
+function normalizeDagNodeState(
+  value: unknown,
+): NodeStatus["state"] | undefined {
   if (typeof value === "string") {
     return isNodeStatusState(value) ? value : undefined;
   }
@@ -621,15 +624,20 @@ function loadNotebookRootDraft(
   state.cellIds = cellIds;
   state.cells = Object.fromEntries(
     cells.map((cell, i) => {
+      const { spur, jute_deck, ...cellMetadataOther } = cell.metadata;
       const imported: NotebookCellState = {
         type: cell.cell_type,
         initialText: multiline(cell.source),
         source: multiline(cell.source),
-        version: cell.metadata.spur?.version ?? INITIAL_CELL_VERSION,
-        lastEditedBy: cell.metadata.spur?.last_edited_by,
-        datasourceSetup: cell.metadata.spur?.datasource_setup,
-        dagMetadata: cell.metadata.spur?.dag,
-        juteDeckMetadata: cell.metadata.jute_deck,
+        version: spur?.version ?? INITIAL_CELL_VERSION,
+        lastEditedBy: spur?.last_edited_by,
+        datasourceSetup: spur?.datasource_setup,
+        dagMetadata: spur?.dag,
+        juteDeckMetadata: jute_deck,
+        cellMetadataOther:
+          Object.keys(cellMetadataOther).length > 0
+            ? cellMetadataOther
+            : undefined,
       };
 
       if (cell.cell_type === "code") {
@@ -676,7 +684,10 @@ function applyDaemonCellSnapshotDraft(
       source: cell.source,
       version: cell.version,
       lastEditedBy: cell.lastEditedBy ?? undefined,
-      datasourceSetup: undefined,
+      datasourceSetup: cell.datasourceSetup ?? undefined,
+      dagMetadata: cell.dagMetadata,
+      juteDeckMetadata: cell.juteDeckMetadata,
+      cellMetadataOther: cell.metadataOther,
     };
     return;
   }
@@ -685,6 +696,10 @@ function applyDaemonCellSnapshotDraft(
   existing.source = cell.source;
   existing.version = cell.version;
   existing.lastEditedBy = cell.lastEditedBy ?? undefined;
+  existing.datasourceSetup = cell.datasourceSetup ?? undefined;
+  existing.dagMetadata = cell.dagMetadata;
+  existing.juteDeckMetadata = cell.juteDeckMetadata;
+  existing.cellMetadataOther = cell.metadataOther;
 }
 
 function updateResultDraft(
@@ -986,6 +1001,7 @@ export class Notebook {
             cell.datasourceSetup,
             cell.dagMetadata,
             cell.juteDeckMetadata,
+            cell.cellMetadataOther,
           ),
         });
       } else if (cell.type === "markdown") {
@@ -999,6 +1015,7 @@ export class Notebook {
             cell.datasourceSetup,
             cell.dagMetadata,
             cell.juteDeckMetadata,
+            cell.cellMetadataOther,
           ),
         });
       } else {
@@ -1128,6 +1145,7 @@ export class Notebook {
         cell.datasourceSetup,
         cell.dagMetadata,
         cell.juteDeckMetadata,
+        cell.cellMetadataOther,
       ),
     };
   }
@@ -1135,7 +1153,7 @@ export class Notebook {
   mergeCellJuteDeckMetadata(
     cellId: string,
     patch: Partial<JuteDeckCellMetadata> & {
-      spur?: { datasource_setup?: boolean };
+      spur?: { datasource_setup?: boolean; dag?: CellDagMetadata };
     },
   ): number {
     const cell = selectCell(this.state, cellId);
@@ -1156,12 +1174,14 @@ export class Notebook {
     if (patch.background !== undefined) merged.background = patch.background;
     const datasourceSetup =
       patch.spur?.datasource_setup ?? cell.datasourceSetup;
+    const dagMetadata = patch.spur?.dag ?? cell.dagMetadata;
 
     const nextVersion = cell.version + 1;
     this.applyLocalCellSnapshot(cellId, {
       ...cell,
       juteDeckMetadata: merged,
       datasourceSetup,
+      dagMetadata,
       version: nextVersion,
       lastEditedBy: "brain",
     });
@@ -1506,8 +1526,10 @@ function cellMetadata(
   datasourceSetup?: boolean,
   dagMetadata?: CellDagMetadata,
   juteDeckMetadata?: JuteDeckCellMetadata,
+  other?: Record<string, unknown>,
 ): CellMetadata {
   const metadata: CellMetadata = {
+    ...(other ?? {}),
     spur: {
       version,
       last_edited_by: lastEditedBy,

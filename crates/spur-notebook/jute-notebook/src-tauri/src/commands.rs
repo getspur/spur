@@ -1864,6 +1864,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_coordinator_preserves_authoritative_spur_dag_when_frontend_export_is_stale() {
+        let dir = std::env::temp_dir().join(format!("jute-save-dag-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notebook.ipynb");
+        let state = Arc::new(State::new());
+        let notebook = state.get_notebook();
+        notebook.load(path.clone(), notebook_with_source("initial", 1));
+        notebook
+            .apply(NotebookOp::SetSpurDagMetadata {
+                id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                patch: CellDagMetadata {
+                    produces: vec![PortSpec {
+                        port: "sales".to_string(),
+                        repr: "dataframe".to_string(),
+                        display: Some("Sales".to_string()),
+                    }],
+                    consumes: vec!["config".to_string()],
+                    source: Some(DagSource {
+                        kind: "cell".to_string(),
+                        port: "raw".to_string(),
+                    }),
+                },
+                expected_version: 1,
+            })
+            .unwrap();
+        notebook
+            .apply(NotebookOp::MarkDatasourceSetupCell {
+                id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                expected_version: 2,
+            })
+            .unwrap();
+
+        let mut stale_frontend_export = notebook_with_source("frontend edit", 4);
+        let Cell::Code(frontend_cell) = &mut stale_frontend_export.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert!(frontend_cell.metadata.spur.as_ref().unwrap().dag.is_none());
+
+        state
+            .save_coordinator
+            .save(path.clone(), stale_frontend_export)
+            .await
+            .unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: NotebookRoot = serde_json::from_str(&contents).unwrap();
+        assert_eq!(first_source(&parsed), "frontend edit");
+        let Cell::Code(cell) = &parsed.cells[0] else {
+            panic!("expected code cell");
+        };
+        let spur = cell.metadata.spur.as_ref().unwrap();
+        assert_eq!(spur.version, 4);
+        assert_eq!(spur.datasource_setup, Some(true));
+        let dag = spur.dag.as_ref().expect("save path must retain spur.dag");
+        assert_eq!(dag.produces[0].port, "sales");
+        assert_eq!(dag.produces[0].display.as_deref(), Some("Sales"));
+        assert_eq!(dag.consumes, vec!["config"]);
+        assert_eq!(dag.source.as_ref().unwrap().port, "raw");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn daemon_load_notebook_seeds_store_from_disk() {
         let dir = std::env::temp_dir().join(format!("jute-daemon-load-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
