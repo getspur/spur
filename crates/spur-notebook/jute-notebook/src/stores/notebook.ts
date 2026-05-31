@@ -36,6 +36,18 @@ type NotebookStoreActions = {
 
 const INITIAL_CELL_VERSION = 1;
 const AUTOSAVE_DEBOUNCE_MS = 5000;
+type SupportedKernelSpecName = "deno" | "python3";
+
+function supportedKernelSpecName(name?: string): SupportedKernelSpecName {
+  return name === "deno" || name === "python3" ? name : "python3";
+}
+
+function kernelSpecNameFromMetadata(
+  metadata: NotebookMetadata,
+): SupportedKernelSpecName {
+  return supportedKernelSpecName(metadata.kernelspec?.name);
+}
+
 export type NotebookCellState = {
   type: CellType;
   initialText: string;
@@ -958,6 +970,12 @@ export class Notebook {
 
   private directRunCellStates: Map<string, DirectRunCellState>;
 
+  private kernelStartInFlight?: Promise<void>;
+
+  private resolveInitialKernelStartPromise?: () => void;
+
+  private rejectInitialKernelStartPromise?: (error: unknown) => void;
+
   constructor() {
     const store = createNotebookStore();
     this.store = store;
@@ -966,12 +984,10 @@ export class Notebook {
 
     store.subscribe(() => this.scheduleAutosave());
 
-    this.kernelStartPromise = (async () => {
-      const kernelId = await invoke<string>("start_kernel", {
-        specName: "python3",
-      });
-      await this.setKernelSlotInfo(kernelId);
-    })();
+    this.kernelStartPromise = new Promise((resolve, reject) => {
+      this.resolveInitialKernelStartPromise = resolve;
+      this.rejectInitialKernelStartPromise = reject;
+    });
   }
 
   /** Access the current value of the notebook store, non-reactively. */
@@ -1203,6 +1219,7 @@ export class Notebook {
       );
       this.state.viewStateActions.finishLoading();
       this.state.editBufferActions.clearAll();
+      void this.ensureKernelStarted();
     } else if (kind.type === "cellWritten") {
       this.upsertStoreCell(notebookDelta, kind.cell);
     } else if (kind.type === "cellInserted") {
@@ -1227,9 +1244,7 @@ export class Notebook {
   }
 
   async refreshKernelSlotInfo(): Promise<KernelSlotInfo> {
-    if (!this.state.viewState.kernelId) {
-      await this.kernelStartPromise;
-    }
+    await this.ensureKernelStarted();
     const kernelId = this.state.viewState.kernelId;
     if (!kernelId) {
       throw new Error("Kernel has not started");
@@ -1238,24 +1253,20 @@ export class Notebook {
   }
 
   async restartKernel() {
-    if (!this.state.viewState.kernelId) {
-      await this.kernelStartPromise;
-    }
+    await this.ensureKernelStarted();
     const kernelId = this.state.viewState.kernelId;
     if (!kernelId) {
       throw new Error("Kernel has not started");
     }
     const restartedKernelId = await invoke<string>("restart_kernel", {
       slotId: kernelId,
-      specName: this.state.viewState.kernelSpecName ?? "python3",
+      specName: supportedKernelSpecName(this.state.viewState.kernelSpecName),
     });
     await this.setKernelSlotInfo(restartedKernelId);
   }
 
   async interruptKernel() {
-    if (!this.state.viewState.kernelId) {
-      await this.kernelStartPromise;
-    }
+    await this.ensureKernelStarted();
     const kernelId = this.state.viewState.kernelId;
     if (!kernelId) {
       throw new Error("Kernel has not started");
@@ -1264,9 +1275,7 @@ export class Notebook {
   }
 
   async execute(cellId: string) {
-    if (!this.state.viewState.kernelId) {
-      await this.kernelStartPromise;
-    }
+    await this.ensureKernelStarted();
 
     const editor = this.refs.get(cellId)?.editor;
     if (!editor) {
@@ -1506,6 +1515,42 @@ export class Notebook {
     } catch (error) {
       console.error("Failed to autosave notebook", error);
     }
+  }
+
+  private ensureKernelStarted(): Promise<void> {
+    if (this.state.viewState.kernelId) {
+      return Promise.resolve();
+    }
+    if (this.kernelStartInFlight) {
+      return this.kernelStartInFlight;
+    }
+
+    const specName = kernelSpecNameFromMetadata(
+      this.state.serverState.notebookMetadata,
+    );
+    const promise = (async () => {
+      const kernelId = await invoke<string>("start_kernel", { specName });
+      await this.setKernelSlotInfo(kernelId);
+    })();
+
+    this.kernelStartInFlight = promise;
+    this.kernelStartPromise = promise;
+    promise.then(
+      () => {
+        if (this.kernelStartInFlight === promise) {
+          this.kernelStartInFlight = undefined;
+        }
+        this.resolveInitialKernelStartPromise?.();
+      },
+      (error) => {
+        if (this.kernelStartInFlight === promise) {
+          this.kernelStartInFlight = undefined;
+        }
+        this.rejectInitialKernelStartPromise?.(error);
+      },
+    );
+
+    return promise;
   }
 
   private async setKernelSlotInfo(kernelId: string): Promise<KernelSlotInfo> {
