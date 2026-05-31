@@ -41,10 +41,12 @@ describe("dispatchDeckCommand", () => {
             path: "/tmp/deck.ipynb",
             selectedCellId: null,
             isLoading: false,
+            viewMode: "cells",
           },
           editBuffer: {
             cellSources: {},
           },
+          dagStatus: {},
         }),
       },
     } as unknown as Notebook;

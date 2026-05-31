@@ -268,6 +268,67 @@ describe("reconcileNotebookDelta", () => {
       )?.theme,
     ).toBe("spur-brand");
   });
+
+  test("loads DAG metadata and switches notebook view mode", async () => {
+    const cellId = "dag-cell-1";
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook({
+      metadata: {},
+      nbformat_minor: 5,
+      nbformat: 4,
+      cells: [
+        {
+          cell_type: "code",
+          id: cellId,
+          metadata: {
+            spur: {
+              version: 1,
+              dag: {
+                produces: [{ port: "customers", repr: "dataframe" }],
+                consumes: ["raw_customers"],
+                source: { kind: "cell", port: "raw_customers" },
+              },
+            },
+          },
+          source: "customers = raw_customers.copy()",
+          execution_count: null,
+          outputs: [],
+        },
+      ],
+    });
+    await notebook.kernelStartPromise;
+
+    const initialState = notebook.store.getState();
+    expect(initialState.serverState.cells[cellId]?.dagMetadata).toEqual({
+      produces: [{ port: "customers", repr: "dataframe" }],
+      consumes: ["raw_customers"],
+      source: { kind: "cell", port: "raw_customers" },
+    });
+    expect(initialState.viewState.viewMode).toBe("cells");
+    expect(initialState.dagStatus).toEqual({});
+
+    initialState.viewStateActions.setViewMode("dag");
+    expect(notebook.store.getState().viewState.viewMode).toBe("dag");
+
+    notebook.store.getState().viewStateActions.setViewMode("cells");
+    expect(notebook.store.getState().viewState.viewMode).toBe("cells");
+  });
 });
 
 function notebookRoot(cellId: string, source: string): NotebookRoot {

@@ -11,7 +11,11 @@ import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { useStore } from "zustand";
 
-import { type KernelSlotInfo, useNotebook } from "@/stores/notebook";
+import {
+  type KernelSlotInfo,
+  type NotebookViewMode,
+  useNotebook,
+} from "@/stores/notebook";
 
 import SettingsPanel from "../settings/SettingsPanel";
 import Header from "../shared/Header";
@@ -37,10 +41,35 @@ export default function NotebookHeader({ kernelName }: Props) {
     notebook.store,
     (state) => state.viewState.kernelGeneration,
   );
+  const viewMode = useStore(
+    notebook.store,
+    (state) => state.viewState.viewMode,
+  );
+  const setViewMode = useStore(
+    notebook.store,
+    (state) => state.viewStateActions.setViewMode,
+  );
   const [statsOpen, setStatsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [kernelStats, setKernelStats] = useState<KernelSlotInfo | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !event.metaKey ||
+        !event.shiftKey ||
+        event.key.toLowerCase() !== "g"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setViewMode(viewMode === "dag" ? "cells" : "dag");
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [setViewMode, viewMode]);
 
   useEffect(() => {
     if (!statsOpen) return;
@@ -154,6 +183,30 @@ export default function NotebookHeader({ kernelName }: Props) {
             </div>
           )}
         </div>
+
+        <div
+          className="ml-2 flex rounded border border-gray-200 bg-white p-0.5 text-xs"
+          role="group"
+          aria-label="Notebook view mode"
+        >
+          {(["cells", "dag"] as const).map((mode) => (
+            <button
+              key={mode}
+              className={clsx(
+                "rounded px-2 py-0.5 transition-colors",
+                viewMode === mode
+                  ? "bg-gray-900 text-white"
+                  : "text-gray-500 hover:bg-gray-100 hover:text-gray-900",
+              )}
+              type="button"
+              aria-pressed={viewMode === mode}
+              title={mode === "cells" ? "Notebook cells" : "DAG view"}
+              onClick={() => setViewMode(mode)}
+            >
+              {viewModeLabel(mode)}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Top-right UI components: home and open notebooks. */}
@@ -181,4 +234,8 @@ export default function NotebookHeader({ kernelName }: Props) {
       </div>
     </Header>
   );
+}
+
+function viewModeLabel(mode: NotebookViewMode): string {
+  return mode === "cells" ? "Notebook" : "DAG";
 }
