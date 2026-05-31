@@ -25,6 +25,25 @@ still builds `spur` and installs `Jute.app`; `cargo xtask install --remote`
 instead fetches the Linux `spur` and `spur-notebook` binaries only and does not
 build or install a `.app` bundle.
 
+## Remote Frontend (vitest) Tests
+
+`vitest` is a per-project devDependency under
+`crates/spur-notebook/jute-notebook/node_modules` — it is gitignored and never
+synced, so a bare `vitest` is not on the VM's PATH. Run the suite on the VM
+(reusing the same worktree sync as the build) with:
+
+```sh
+scripts/gcp-build/build.sh --auto-spin --frontend-test
+```
+
+This syncs the current worktree, runs `npm ci` on the VM only when
+`node_modules` is missing or older than `package-lock.json`, then runs the
+`test` npm script (`vitest run`). Override the command via
+`SPUR_FRONTEND_TEST_CMD` (e.g. `SPUR_FRONTEND_TEST_CMD='npx vitest run src/foo'`).
+
+`deno` is provisioned system-wide by `startup.sh` (pinned, `/usr/local/bin/deno`)
+so the spur-notebook Deno Jupyter kernel tests run on the VM instead of skipping.
+
 ## Runtime Constraints
 
 Remote binaries are built on the GCP VM image. Today that means Debian 12, so
