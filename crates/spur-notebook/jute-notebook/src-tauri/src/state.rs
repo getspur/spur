@@ -18,7 +18,7 @@ use crate::{
     backend::local::LocalKernel,
     backend::notebook::{NotebookMetadata, NotebookRoot},
     commands::{DatasourceEntry, SaveCoordinator},
-    notebook_store::NotebookStore,
+    notebook_store::{merge_authoritative_spur_metadata_for_save, NotebookStore},
 };
 
 /// Current schema version for notebook datasource catalog entries.
@@ -325,13 +325,15 @@ pub struct State {
     pub event_tx: tokio::sync::broadcast::Sender<DaemonEvent>,
 
     /// Lazily initialized authoritative notebook document store.
-    notebook: Mutex<Option<Arc<NotebookStore>>>,
+    notebook: Arc<Mutex<Option<Arc<NotebookStore>>>>,
 }
 
 impl Default for State {
     fn default() -> Self {
         let datasource_catalog = Arc::new(Mutex::new(DatasourceCatalog::default()));
         let catalog_for_save = Arc::clone(&datasource_catalog);
+        let notebook = Arc::new(Mutex::new(None::<Arc<NotebookStore>>));
+        let notebook_for_save = Arc::clone(&notebook);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             kernels: DashMap::new(),
@@ -340,11 +342,19 @@ impl Default for State {
                     catalog_for_save
                         .lock()
                         .persist_to_metadata(&mut contents.metadata, Some(path));
+                    let Some(store) = notebook_for_save.lock().as_ref().cloned() else {
+                        return;
+                    };
+                    if store.path().as_deref() != Some(path) {
+                        return;
+                    }
+                    let (authoritative, _version) = store.snapshot();
+                    merge_authoritative_spur_metadata_for_save(contents, &authoritative);
                 },
             ),
             datasource_catalog,
             event_tx,
-            notebook: Mutex::new(None),
+            notebook,
         }
     }
 }

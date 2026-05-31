@@ -1,4 +1,5 @@
 import type { Output } from "@/bindings";
+import type { CellDagMetadata } from "@/bindings/CellDagMetadata";
 import type { JuteDeckCellMetadata } from "@/bindings/JuteDeckCellMetadata";
 
 type AgentBridgeRequestBase = {
@@ -107,7 +108,9 @@ export type AgentWriteCell = {
 
 export type AgentSetCellMetadata = {
   id: string;
-  patch: Partial<JuteDeckCellMetadata>;
+  patch: Partial<JuteDeckCellMetadata> & {
+    spur?: { datasource_setup?: boolean; dag?: CellDagMetadata };
+  };
   expected_version: number;
 };
 

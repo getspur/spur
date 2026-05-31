@@ -191,6 +191,18 @@ pub struct DaemonCell {
     #[ts(type = "number")]
     pub version: u64,
     pub last_edited_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub datasource_setup: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dag_metadata: Option<CellDagMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub jute_deck_metadata: Option<JuteDeckCellMetadata>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    #[ts(skip)]
+    pub metadata_other: Map<String, Value>,
     pub source: String,
     pub exec_count: Option<u32>,
     pub status: String,
@@ -657,55 +669,81 @@ fn find_cell<'a>(root: &'a NotebookRoot, id: &str) -> Option<&'a Cell> {
 /// root→cell conversion; `commands` re-exports it for the daemon read path.
 pub(crate) fn daemon_cell(root: &NotebookRoot, id: &str) -> Option<DaemonCell> {
     let cell = find_cell(root, id)?;
-    let (kind, source, version, last_edited_by, exec_count, outputs) = match cell {
-        Cell::Raw(cell) => {
-            let spur = cell.metadata.spur.as_ref();
-            (
-                "raw",
-                multiline_to_string(&cell.source),
-                spur.map(|spur| spur.version).unwrap_or_default(),
-                spur.and_then(|spur| spur.last_edited_by.clone()),
-                None,
-                Vec::new(),
-            )
-        }
-        Cell::Markdown(cell) => {
-            let spur = cell.metadata.spur.as_ref();
-            (
-                "markdown",
-                multiline_to_string(&cell.source),
-                spur.map(|spur| spur.version).unwrap_or_default(),
-                spur.and_then(|spur| spur.last_edited_by.clone()),
-                None,
-                Vec::new(),
-            )
-        }
-        Cell::Code(cell) => {
-            let spur = cell.metadata.spur.as_ref();
-            (
-                "code",
-                multiline_to_string(&cell.source),
-                spur.map(|spur| spur.version).unwrap_or_default(),
-                spur.and_then(|spur| spur.last_edited_by.clone()),
-                cell.execution_count,
-                cell.outputs
-                    .iter()
-                    .map(|output| serde_json::to_value(output).unwrap_or(Value::Null))
-                    .collect(),
-            )
-        }
+    let metadata = cell_metadata(cell);
+    let spur = metadata.spur.as_ref();
+    let (kind, source, exec_count, outputs) = match cell {
+        Cell::Raw(cell) => ("raw", multiline_to_string(&cell.source), None, Vec::new()),
+        Cell::Markdown(cell) => (
+            "markdown",
+            multiline_to_string(&cell.source),
+            None,
+            Vec::new(),
+        ),
+        Cell::Code(cell) => (
+            "code",
+            multiline_to_string(&cell.source),
+            cell.execution_count,
+            cell.outputs
+                .iter()
+                .map(|output| serde_json::to_value(output).unwrap_or(Value::Null))
+                .collect(),
+        ),
     };
 
     Some(DaemonCell {
         id: id.to_string(),
         kind: kind.to_string(),
-        version,
-        last_edited_by,
+        version: spur.map(|spur| spur.version).unwrap_or_default(),
+        last_edited_by: spur.and_then(|spur| spur.last_edited_by.clone()),
+        datasource_setup: spur.and_then(|spur| spur.datasource_setup),
+        dag_metadata: spur.and_then(|spur| spur.dag.clone()),
+        jute_deck_metadata: metadata.jute_deck.clone(),
+        metadata_other: metadata.other.clone(),
         source,
         exec_count,
         status: "idle".to_string(),
         outputs,
     })
+}
+
+/// Merge authoritative Rust-owned SPUR metadata into notebook contents supplied
+/// by a frontend export without replacing live frontend-owned cell source or
+/// outputs. This protects GUI save paths from stale/lossy frontend metadata.
+pub(crate) fn merge_authoritative_spur_metadata_for_save(
+    contents: &mut NotebookRoot,
+    authoritative: &NotebookRoot,
+) {
+    for target_cell in &mut contents.cells {
+        let Some(id) = cell_id(target_cell).map(str::to_owned) else {
+            continue;
+        };
+        let Some(authoritative_cell) = find_cell(authoritative, &id) else {
+            continue;
+        };
+        let Some(authoritative_spur) = cell_metadata(authoritative_cell).spur.as_ref() else {
+            continue;
+        };
+
+        let target_metadata = cell_metadata_mut(target_cell);
+        let target_spur = target_metadata.spur.get_or_insert_with(|| {
+            crate::backend::notebook::SpurCellMetadata {
+                version: authoritative_spur.version,
+                last_edited_by: authoritative_spur.last_edited_by.clone(),
+                datasource_setup: authoritative_spur.datasource_setup,
+                dag: None,
+            }
+        });
+
+        if let Some(datasource_setup) = authoritative_spur.datasource_setup {
+            target_spur.datasource_setup = Some(datasource_setup);
+        }
+        if let Some(dag) = authoritative_spur.dag.clone() {
+            target_spur.dag = Some(dag);
+        }
+        if target_spur.last_edited_by.is_none() {
+            target_spur.last_edited_by = authoritative_spur.last_edited_by.clone();
+        }
+    }
 }
 
 fn multiline_to_string(source: &MultilineString) -> String {
@@ -719,6 +757,14 @@ fn find_cell_mut<'a>(root: &'a mut NotebookRoot, id: &str) -> Option<&'a mut Cel
     root.cells
         .iter_mut()
         .find(|cell| cell_id(cell).is_some_and(|cell_id| cell_id == id))
+}
+
+fn cell_metadata(cell: &Cell) -> &CellMetadata {
+    match cell {
+        Cell::Raw(cell) => &cell.metadata,
+        Cell::Markdown(cell) => &cell.metadata,
+        Cell::Code(cell) => &cell.metadata,
+    }
 }
 
 fn cell_id(cell: &Cell) -> Option<&str> {
