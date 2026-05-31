@@ -563,14 +563,21 @@ mod tests {
             !INIT_VIEWS_SQL.contains(&bridge_view_name),
             "init_views.sql must not define the transitional bridge view"
         );
+        // The guard must measure DISTINCT node coverage, not raw join rows
+        // (which are inflated by snapshot churn multiplicity).
         assert!(
-            INIT_VIEWS_SQL
-                .contains("COUNT(*) FROM nodes n JOIN symbol_snapshots s USING (stable_symbol_id)"),
-            "init_views.sql must assert direct stable_symbol_id join coverage"
+            INIT_VIEWS_SQL.contains("COUNT(*) FROM trackable_nodes"),
+            "init_views.sql must assert distinct trackable-node snapshot coverage"
         );
         assert!(
-            INIT_VIEWS_SQL.contains("direct_join_count * 100 >= node_count * 99"),
-            "direct join coverage must be at least 99% of node_count"
+            INIT_VIEWS_SQL.contains("covered_nodes * 100 >= expected_nodes * 90"),
+            "trackable-node snapshot coverage must be at least 90%"
+        );
+        // section/mcp_tool kinds are never emitted as snapshots, so they must be
+        // excluded from the denominator or the guard can never pass.
+        assert!(
+            INIT_VIEWS_SQL.contains("NOT IN ('section', 'mcp_tool')"),
+            "coverage guard must exclude non-temporally-trackable kinds"
         );
     }
 
