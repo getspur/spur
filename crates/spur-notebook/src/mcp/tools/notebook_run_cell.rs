@@ -7,10 +7,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{
-    dag::{engine::RunCellCommandRunner, notebook_port_root, ReactiveEngine},
-    mcp::ServerDeps,
-};
+use crate::{dag::notebook_run_context, mcp::ServerDeps};
 
 const METHOD: &str = "notebook_run_cell";
 
@@ -67,19 +64,23 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         )
     })?;
 
-    let runner = RunCellCommandRunner::new(Arc::new(deps.clone()));
-    let mut engine = ReactiveEngine::new(
-        state.get_notebook(),
-        runner,
+    let mut context = notebook_run_context(
         &path,
-        notebook_port_root(&path),
+        Arc::clone(state),
+        Arc::clone(&deps.bridge),
+        deps.app.clone(),
+        deps.daemon.clone(),
     );
-    let report = engine.run_cell(&params.cell_id).await.map_err(|error| {
-        McpError::internal_error(
-            "notebook_run_cell failed",
-            Some(json!({ "error": error.to_string() })),
-        )
-    })?;
+    let report = context
+        .engine
+        .run_cell(&params.cell_id)
+        .await
+        .map_err(|error| {
+            McpError::internal_error(
+                "notebook_run_cell failed",
+                Some(json!({ "error": error.to_string() })),
+            )
+        })?;
 
     Ok(CallToolResult::structured(json!({
         "cell_id": report.cell_id,

@@ -2,6 +2,7 @@ pub mod engine;
 pub mod graph;
 pub mod inject;
 pub mod ports;
+pub mod run_context;
 
 pub use engine::{
     CellRunReport, CellRunRequest, CellRunStatus, ReactiveEngine, ReactiveEngineClient,
@@ -13,3 +14,4 @@ pub use inject::{
     wrap_python_cell, PORT_MIME,
 };
 pub use ports::{PortEntry, PortManifest, PortPayload, PortRead, PortStore, PortStoreError};
+pub use run_context::{notebook_run_context, notebook_run_context_with_runner, NotebookRunContext};
