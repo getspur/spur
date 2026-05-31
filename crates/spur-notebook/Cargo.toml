@@ -27,6 +27,7 @@ rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 spur-core.workspace = true
+spur-rest-table-gateway = { path = "rest-table-gateway", default-features = false, optional = true }
 tauri = { version = "2.0.4", features = ["devtools", "macos-private-api"] }
 tauri-plugin-dialog = "2.2.0"
 tauri-plugin-fs = "2.2.0"
@@ -65,7 +66,7 @@ custom-protocol = ["tauri/custom-protocol"]
 # both DuckDB and SQLite (the latter via DuckDB's runtime sqlite_scanner).
 # Default-ON since Scope B shipped; accepts the ~4-min cold bundled-libduckdb
 # build. Tests/cheap builds opt out with `--no-default-features`.
-datasource-introspect = ["dep:duckdb"]
+datasource-introspect = ["dep:duckdb", "dep:spur-rest-table-gateway"]
 
 [lints]
 workspace = true

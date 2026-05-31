@@ -165,6 +165,9 @@ impl ServerHandler for NotebookMcpServer {
             "notebook.get_notebook" => tools::get_notebook::call(&self.deps, arguments).await,
             "notebook.read_cell" => tools::read_cell::call(&self.deps, arguments).await,
             "notebook.kernel_info" => tools::kernel_info::call(&self.deps, arguments).await,
+            "notebook_add_api_datasource" => {
+                tools::add_api_datasource::call(&self.deps, arguments).await
+            }
             "notebook_list_datasources" => {
                 tools::list_datasources::call(&self.deps, arguments).await
             }
@@ -686,6 +689,18 @@ fn is_spur_analyst_index(path: &Path) -> bool {
 }
 
 #[cfg(feature = "datasource-introspect")]
+const API_DATASOURCE_GROUP: &str = "API";
+
+#[cfg(feature = "datasource-introspect")]
+const POLYMARKET_SOURCE: &str = "polymarket";
+
+#[cfg(feature = "datasource-introspect")]
+const POLYMARKET_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
+
+#[cfg(feature = "datasource-introspect")]
+const POLYMARKET_CLOB_BASE: &str = "https://clob.polymarket.com";
+
+#[cfg(feature = "datasource-introspect")]
 const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
 
 #[cfg(feature = "datasource-introspect")]
@@ -750,19 +765,72 @@ fn datasource_setup_bootstrap_preamble(entries: &[jute::commands::DatasourceEntr
     let needs_sqlite = entries
         .iter()
         .any(|entry| entry.kind == jute::commands::DatasourceKind::Sqlite);
-    if !needs_sqlite {
-        return String::new();
-    }
+    let needs_api_tables = entries
+        .iter()
+        .any(|entry| entry.kind == jute::commands::DatasourceKind::ApiTables);
 
     let mut source = String::new();
-    source.push_str("# sqlite_scanner is core/signed; first run may need network access.\n");
-    source.push_str("duckdb.sql(\"INSTALL sqlite;\")\n");
-    source.push_str("duckdb.sql(\"LOAD sqlite;\")\n\n");
+    if needs_api_tables {
+        source.push_str(&api_tables_setup_bootstrap_preamble());
+    }
+    if needs_sqlite {
+        source.push_str("# sqlite_scanner is core/signed; first run may need network access.\n");
+        source.push_str("duckdb.sql(\"INSTALL sqlite;\")\n");
+        source.push_str("duckdb.sql(\"LOAD sqlite;\")\n\n");
+    }
     source
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn api_tables_setup_bootstrap_preamble() -> String {
+    let extension_path = spur_rest_extension_path().display().to_string();
+    let mut source = String::new();
+    source.push_str("_SPUR_DUCKDB_EXTENSION_PATH = ");
+    source.push_str(&python_string_literal(&extension_path));
+    source.push('\n');
+    source.push_str(
+        "_SPUR_DUCKDB_EXTENSION_SQL = _SPUR_DUCKDB_EXTENSION_PATH.replace(\"'\", \"''\")\n\n",
+    );
+    source.push_str("if \"_SPUR_DUCKDB_CONNECTION\" not in globals():\n");
+    source.push_str("    _SPUR_DUCKDB_CONNECTION = duckdb.connect(\n");
+    source.push_str("        database=\":memory:\",\n");
+    source.push_str("        config={\"allow_unsigned_extensions\": \"true\"},\n");
+    source.push_str("    )\n\n");
+    source.push_str("duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)\n");
+    source.push_str("duckdb.sql(f\"LOAD '{_SPUR_DUCKDB_EXTENSION_SQL}'\")\n\n");
+    source
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn spur_rest_extension_path() -> PathBuf {
+    let file_name = format!("spur_rest-{}.duckdb_extension", duckdb_extension_platform());
+    BaseDirs::new()
+        .map(|base_dirs| base_dirs.home_dir().join(".spur").join("extensions"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".spur").join("extensions"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".spur").join("extensions"))
+        .join(file_name)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn duckdb_extension_platform() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux_amd64",
+        ("linux", "aarch64") => "linux_arm64",
+        ("macos", "aarch64") => "osx_arm64",
+        ("macos", "x86_64") => "osx_amd64",
+        _ => "unknown",
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
 fn datasource_setup_statements(entry: &jute::commands::DatasourceEntry) -> Vec<String> {
+    if entry.kind == jute::commands::DatasourceKind::ApiTables {
+        return Vec::new();
+    }
+
     if matches!(
         entry.kind,
         jute::commands::DatasourceKind::DuckDb | jute::commands::DatasourceKind::Sqlite
@@ -812,6 +880,89 @@ fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String
         jute::commands::DatasourceKind::ApiTables => {
             unreachable!("API table sources are registered as table functions")
         }
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn api_datasource_tables(source: &str) -> Result<Vec<jute::commands::Table>, BridgeError> {
+    use spur_rest_table_gateway::adapter::Adapter as _;
+
+    let source = normalize_api_datasource_source(source)?;
+    let adapter = match source.as_str() {
+        POLYMARKET_SOURCE => spur_rest_table_gateway::adapters::polymarket::PolymarketAdapter::new(
+            POLYMARKET_GAMMA_BASE,
+            POLYMARKET_CLOB_BASE,
+        )
+        .map_err(|error| BridgeError::Handler {
+            code: "api_datasource_catalog_failed".to_string(),
+            message: error.to_string(),
+        })?,
+        _ => {
+            return Err(BridgeError::Handler {
+                code: "unsupported_api_datasource".to_string(),
+                message: format!("unsupported API datasource source: {source}"),
+            });
+        }
+    };
+    let adapter_name = adapter.name().to_string();
+
+    Ok(adapter
+        .catalog()
+        .into_iter()
+        .map(|table| api_datasource_table(&adapter_name, table))
+        .collect())
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn normalize_api_datasource_source(source: &str) -> Result<String, BridgeError> {
+    let source = source.trim().to_ascii_lowercase();
+    if source.is_empty() {
+        return Err(BridgeError::Handler {
+            code: "invalid_api_datasource_source".to_string(),
+            message: "API datasource source must not be empty".to_string(),
+        });
+    }
+    Ok(source)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn api_datasource_table(
+    adapter_name: &str,
+    table: spur_rest_table_gateway::adapter::TableDef,
+) -> jute::commands::Table {
+    jute::commands::Table {
+        name: format!("{}_{}", adapter_name, table.name),
+        columns: table
+            .schema
+            .fields()
+            .iter()
+            .map(|field| jute::commands::Column {
+                name: field.name().clone(),
+                sql_type: arrow_type_to_sql(field.data_type()).to_string(),
+            })
+            .collect(),
+        row_count: None,
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn arrow_type_to_sql(data_type: &arrow_schema::DataType) -> &'static str {
+    match data_type {
+        arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8 => "VARCHAR",
+        arrow_schema::DataType::Boolean => "BOOLEAN",
+        arrow_schema::DataType::Int8 => "TINYINT",
+        arrow_schema::DataType::Int16 => "SMALLINT",
+        arrow_schema::DataType::Int32 => "INTEGER",
+        arrow_schema::DataType::Int64 => "BIGINT",
+        arrow_schema::DataType::UInt8 => "UTINYINT",
+        arrow_schema::DataType::UInt16 => "USMALLINT",
+        arrow_schema::DataType::UInt32 => "UINTEGER",
+        arrow_schema::DataType::UInt64 => "UBIGINT",
+        arrow_schema::DataType::Float32 => "FLOAT",
+        arrow_schema::DataType::Float64 => "DOUBLE",
+        arrow_schema::DataType::Date32 | arrow_schema::DataType::Date64 => "DATE",
+        arrow_schema::DataType::Timestamp(_, _) => "TIMESTAMP",
+        _ => "VARCHAR",
     }
 }
 
@@ -1022,6 +1173,9 @@ impl NotebookDaemonControl {
                 DaemonControlCommand::AttachDatasource { name, path, group } => {
                     self.attach_datasource(name, path, group).await
                 }
+                DaemonControlCommand::AddApiDatasource { name, source } => {
+                    self.add_api_datasource(name, source).await
+                }
                 DaemonControlCommand::DetachDatasource { name } => {
                     self.detach_datasource(name).await
                 }
@@ -1131,6 +1285,43 @@ impl NotebookDaemonControl {
             columns: schema.columns,
             row_count: schema.row_count,
             tables: schema.tables,
+        };
+
+        self.jute_state.attach_datasource(entry.clone());
+        self.refresh_datasource_setup_cell().await?;
+        self.persist_catalog_to_current_notebook().await?;
+
+        let result = serde_json::to_value(jute::commands::DaemonControlResult::Datasource(entry))
+            .map_err(|error| BridgeError::Handler {
+            code: "datasource_entry_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+
+        Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn add_api_datasource(
+        &self,
+        name: String,
+        source: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        if name.trim().is_empty() {
+            return Err(BridgeError::Handler {
+                code: "invalid_api_datasource_name".to_string(),
+                message: "API datasource name must not be empty".to_string(),
+            });
+        }
+
+        let source = normalize_api_datasource_source(&source)?;
+        let entry = jute::commands::DatasourceEntry {
+            name,
+            path: source.clone(),
+            kind: jute::commands::DatasourceKind::ApiTables,
+            group: Some(API_DATASOURCE_GROUP.to_string()),
+            columns: Vec::new(),
+            row_count: None,
+            tables: api_datasource_tables(&source)?,
         };
 
         self.jute_state.attach_datasource(entry.clone());
@@ -1327,6 +1518,18 @@ impl NotebookDaemonControl {
         _name: String,
         _path: String,
         _group: Option<String>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn add_api_datasource(
+        &self,
+        _name: String,
+        _source: String,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
@@ -1630,6 +1833,10 @@ impl NotebookDaemonControl {
         let mut reconciled = Vec::new();
 
         for mut entry in entries {
+            if entry.kind == jute::commands::DatasourceKind::ApiTables {
+                continue;
+            }
+
             if !entry.tables.is_empty() || !entry.columns.is_empty() {
                 continue;
             }
@@ -2560,6 +2767,100 @@ mod tests {
 
     #[cfg(feature = "datasource-introspect")]
     #[test]
+    fn setup_cell_loads_api_tables_extension_without_attaching_source() {
+        let entry = api_datasource_entry("polymarket");
+
+        let source = datasource_setup_source(&[entry]);
+
+        assert!(source.contains(
+            "_SPUR_DUCKDB_CONNECTION = duckdb.connect(\n        database=\":memory:\",\n        config={\"allow_unsigned_extensions\": \"true\"},\n    )"
+        ));
+        assert!(source.contains("duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)"));
+        assert!(source.contains("spur_rest-"));
+        assert!(source.contains(".duckdb_extension"));
+        assert!(source.contains("duckdb.sql(f\"LOAD '{_SPUR_DUCKDB_EXTENSION_SQL}'\")"));
+        assert_eq!(source.matches("duckdb.sql(f\"LOAD").count(), 1);
+        assert!(!source.contains("ATTACH"));
+        assert!(!source.contains("CREATE OR REPLACE VIEW"));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn add_api_datasource_command_builds_polymarket_catalog_entry() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "add_api_datasource",
+            "name": "prediction",
+            "source": "polymarket"
+        }))
+        .expect("add_api_datasource command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry = datasource_entry_from_response(&response);
+        assert_eq!(entry.name, "prediction");
+        assert_eq!(entry.path, "polymarket");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
+        assert_eq!(entry.group.as_deref(), Some("API"));
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert_eq!(
+            entry.tables,
+            vec![
+                jute::commands::Table {
+                    name: "polymarket_markets".to_string(),
+                    columns: vec![
+                        jute::commands::Column {
+                            name: "id".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "question".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "active".to_string(),
+                            sql_type: "BOOLEAN".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "volume".to_string(),
+                            sql_type: "DOUBLE".to_string(),
+                        },
+                    ],
+                    row_count: None,
+                },
+                jute::commands::Table {
+                    name: "polymarket_orderbook".to_string(),
+                    columns: vec![
+                        jute::commands::Column {
+                            name: "price".to_string(),
+                            sql_type: "DOUBLE".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "size".to_string(),
+                            sql_type: "DOUBLE".to_string(),
+                        },
+                    ],
+                    row_count: None,
+                },
+            ]
+        );
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
     fn portability_duckdb_setup_cell_sql_runs_on_vanilla_duckdb() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let db_path = tempdir.path().join("warehouse.duckdb");
@@ -2948,6 +3249,115 @@ mod tests {
 
     #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
+    async fn add_api_datasource_mcp_tool_routes_through_daemon_control() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: test_bridge_requester(),
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+        });
+        let server = NotebookMcpServer::new(Arc::clone(&deps));
+        assert!(server
+            .tools()
+            .into_iter()
+            .any(|tool| tool.name == "notebook_add_api_datasource"));
+        let tempdir = tempfile::tempdir().expect("socket dir");
+        let socket_path = tempdir.path().join("notebook.sock");
+        let _server = start_multiplexed_server(&socket_path, deps, control)
+            .await
+            .expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("name".to_string(), json!("prediction"));
+        arguments.insert("source".to_string(), json!("polymarket"));
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("notebook_add_api_datasource").with_arguments(arguments),
+            )
+            .await
+            .expect("add api datasource succeeds");
+        let structured = result
+            .structured_content
+            .expect("add api datasource returns structured content");
+
+        assert_eq!(structured["entry"]["kind"], json!("api_tables"));
+        assert_eq!(structured["entry"]["path"], json!("polymarket"));
+        assert!(structured["entry"]["tables"]
+            .as_array()
+            .expect("tables array")
+            .iter()
+            .any(|table| table["name"] == "polymarket_markets"));
+        assert_eq!(jute_state.datasource_catalog.lock().list().len(), 1);
+
+        client.cancel().await.expect("client closes");
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn list_datasources_returns_api_tables_entries_without_envelope_changes() {
+        let jute_state = Arc::new(State::new());
+        jute_state.attach_datasource(api_datasource_entry("polymarket"));
+        let deps = ServerDeps {
+            bridge: test_bridge_requester(),
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: None,
+        };
+
+        let result = tools::list_datasources::call(&deps, json!({}))
+            .await
+            .expect("list datasources succeeds");
+        let structured = result
+            .structured_content
+            .expect("list datasources returns structured content");
+
+        assert_eq!(
+            structured,
+            json!({
+                "entries": [
+                    {
+                        "name": "polymarket",
+                        "path": "polymarket",
+                        "kind": "api_tables",
+                        "group": "API",
+                        "columns": [],
+                        "rowCount": null,
+                        "tables": [
+                            {
+                                "name": "polymarket_markets",
+                                "columns": [
+                                    {
+                                        "name": "id",
+                                        "sqlType": "VARCHAR"
+                                    }
+                                ],
+                                "rowCount": null
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
     async fn catalog_change_emits_daemon_event() {
         let tempdir = tempfile::tempdir().expect("csv fixture dir");
         let csv = tempdir.path().join("sales.csv");
@@ -3332,6 +3742,26 @@ mod tests {
             }],
             row_count: Some(2),
             tables: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn api_datasource_entry(name: &str) -> jute::commands::DatasourceEntry {
+        jute::commands::DatasourceEntry {
+            name: name.to_owned(),
+            path: "polymarket".to_string(),
+            kind: jute::commands::DatasourceKind::ApiTables,
+            group: Some("API".to_string()),
+            columns: Vec::new(),
+            row_count: None,
+            tables: vec![jute::commands::Table {
+                name: "polymarket_markets".to_string(),
+                columns: vec![jute::commands::Column {
+                    name: "id".to_string(),
+                    sql_type: "VARCHAR".to_string(),
+                }],
+                row_count: None,
+            }],
         }
     }
 

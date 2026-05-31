@@ -8,6 +8,7 @@ use tauri::Emitter;
 
 use super::{DaemonControlResponse, ServerDeps};
 
+pub mod add_api_datasource;
 pub mod daemon_files;
 pub mod daemon_lifecycle;
 pub mod daemon_recents;
@@ -45,6 +46,7 @@ pub fn tools() -> Vec<Tool> {
         get_notebook::tool(),
         read_cell::tool(),
         kernel_info::tool(),
+        add_api_datasource::tool(),
         list_datasources::tool(),
         notebook_push_source::tool(),
         notebook_dag_status::tool(),

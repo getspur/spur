@@ -231,6 +231,8 @@ pub enum DaemonControlCommand {
         path: String,
         group: Option<String>,
     },
+    /// Add an API-backed table-function datasource to the current notebook.
+    AddApiDatasource { name: String, source: String },
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.
