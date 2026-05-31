@@ -98,6 +98,100 @@ describe("listenForNotebookEvents", () => {
       notebook.store.getState().serverState.cells[cellId].result?.outputs,
     ).toEqual([{ output_type: "stream", name: "stdout", text: "hello\n" }]);
   });
+
+  test("merges dag_status_changed deltas into notebook dag status", async () => {
+    const sourceCellId = "source-cell";
+    const consumerCellId = "consumer-cell";
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        expect(args).toEqual({ kernelId: "kernel-1" });
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook({
+      metadata: {},
+      nbformat_minor: 5,
+      nbformat: 4,
+      cells: [
+        {
+          cell_type: "code",
+          id: sourceCellId,
+          metadata: {
+            spur: {
+              version: 1,
+              dag: {
+                produces: [{ port: "customers", repr: "dataframe" }],
+                consumes: [],
+              },
+            },
+          },
+          source: "customers = load()",
+          execution_count: null,
+          outputs: [],
+        },
+        {
+          cell_type: "code",
+          id: consumerCellId,
+          metadata: {
+            spur: {
+              version: 1,
+              dag: {
+                produces: [],
+                consumes: ["customers"],
+              },
+            },
+          },
+          source: "summary = customers.describe()",
+          execution_count: null,
+          outputs: [],
+        },
+      ],
+    });
+    await notebook.kernelStartPromise;
+
+    listenForNotebookEvents(notebook);
+    await flushPromises();
+
+    emit("notebook://changed", {
+      version: 2,
+      kind: {
+        type: "dagStatusChanged",
+        snapshot: {
+          notebook_version: 2,
+          nodes: [
+            {
+              id: consumerCellId,
+              state: "running",
+              execution_count: null,
+            },
+          ],
+          port_manifest: { customers: 3 },
+        },
+      },
+    } as unknown as NotebookDelta);
+    await flushPromises();
+
+    expect(notebook.store.getState().dagStatus[consumerCellId]).toEqual({
+      state: "running",
+      executionCount: undefined,
+      ranPortVersions: { customers: 3 },
+    });
+    expect(notebook.store.getState().dagPortManifest).toEqual({
+      customers: 3,
+    });
+  });
 });
 
 describe("listenForRecentNotebookChanges", () => {

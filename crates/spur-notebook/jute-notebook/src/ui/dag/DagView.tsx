@@ -20,13 +20,9 @@ import { useNotebook } from "@/stores/notebook";
 
 import DagInspector from "./DagInspector";
 import DagNode from "./DagNode";
-import {
-  type DagPortManifest,
-  buildDagStatusMap,
-  loadNotebookDagStatus,
-} from "./dagStatus";
+import { loadNotebookDagStatus, runNotebookCascade } from "./dagStatus";
 import { type PositionedDagGraphNode, layoutDagGraph } from "./layout";
-import { type DagNodeData, buildDagGraph } from "./useDagGraph";
+import { type DagGraph, type DagNodeData, buildDagGraph } from "./useDagGraph";
 
 type FlowDagNode = Node<DagNodeData, "dagCell">;
 
@@ -37,13 +33,14 @@ const nodeTypes = {
 export default function DagView() {
   const notebook = useNotebook();
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
-  const [dagStatus, setDagStatus] = useState(
-    notebook.store.getState().dagStatus,
-  );
-  const [portManifest, setPortManifest] = useState<DagPortManifest>({});
+  const [isRunningStale, setIsRunningStale] = useState(false);
   const [cellIds, cells] = useStore(
     notebook.store,
     useShallow((state) => [state.serverState.cellIds, state.serverState.cells]),
+  );
+  const [dagStatus, portManifest] = useStore(
+    notebook.store,
+    useShallow((state) => [state.dagStatus, state.dagPortManifest]),
   );
   const selectNode = useCallback((id: string) => setSelectedNodeId(id), []);
   const graph = useMemo(
@@ -65,6 +62,9 @@ export default function DagView() {
     () => graph.nodes.find((node) => node.id === selectedNodeId)?.data,
     [graph.nodes, selectedNodeId],
   );
+  const staleNodeIds = useMemo(() => staleNodes(graph), [graph]);
+  const staleRootIds = useMemo(() => staleRoots(graph), [graph]);
+  const staleCount = staleNodeIds.length;
 
   useEffect(() => {
     let cancelled = false;
@@ -72,8 +72,7 @@ export default function DagView() {
     void loadNotebookDagStatus()
       .then((snapshot) => {
         if (cancelled) return;
-        setDagStatus(buildDagStatusMap(snapshot));
-        setPortManifest(snapshot.port_manifest);
+        notebook.applyDagStatusSnapshot(snapshot);
       })
       .catch((error) => {
         console.warn("Failed to seed notebook DAG status", error);
@@ -83,6 +82,18 @@ export default function DagView() {
       cancelled = true;
     };
   }, []);
+
+  const runStale = useCallback(async () => {
+    if (staleRootIds.length === 0) return;
+    setIsRunningStale(true);
+    try {
+      for (const cellId of staleRootIds) {
+        await runNotebookCascade(cellId);
+      }
+    } finally {
+      setIsRunningStale(false);
+    }
+  }, [staleRootIds]);
 
   if (nodes.length === 0) {
     return (
@@ -94,27 +105,45 @@ export default function DagView() {
 
   return (
     <section className="h-[calc(100vh-9rem)] min-h-[520px] w-full px-4 py-4">
-      <div className="flex h-full overflow-hidden rounded border border-gray-200 bg-gray-50">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          onNodeClick={(_, node) => setSelectedNodeId(node.id)}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
-          minZoom={0.2}
-          maxZoom={1.5}
-          className="min-w-0 flex-1"
-        >
-          <Background gap={20} color="#e5e7eb" />
-          <MiniMap pannable zoomable nodeColor="#d1d5db" />
-          <Controls showInteractive={false} />
-        </ReactFlow>
-        <DagInspector
-          node={selectedNode}
-          portManifest={portManifest}
-          status={selectedNode ? dagStatus[selectedNode.id] : undefined}
-        />
+      <div className="flex h-full flex-col overflow-hidden rounded border border-gray-200 bg-gray-50">
+        <header className="flex shrink-0 items-center justify-between border-b border-gray-200 bg-white px-4 py-3">
+          <div>
+            <h1 className="text-sm font-semibold text-gray-950">Data Flow</h1>
+            <p className="text-xs text-gray-500">{nodes.length} DAG nodes</p>
+          </div>
+          <button
+            type="button"
+            className="inline-flex items-center rounded border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-800 transition-colors hover:border-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={staleCount === 0 || isRunningStale}
+            onClick={() => {
+              void runStale();
+            }}
+          >
+            {isRunningStale ? "Running stale" : `Run stale (${staleCount})`}
+          </button>
+        </header>
+        <div className="flex min-h-0 flex-1">
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            minZoom={0.2}
+            maxZoom={1.5}
+            className="min-w-0 flex-1"
+          >
+            <Background gap={20} color="#e5e7eb" />
+            <MiniMap pannable zoomable nodeColor="#d1d5db" />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+          <DagInspector
+            node={selectedNode}
+            portManifest={portManifest}
+            status={selectedNode ? dagStatus[selectedNode.id] : undefined}
+          />
+        </div>
       </div>
     </section>
   );
@@ -177,4 +206,57 @@ function toFlowEdges(
       fillOpacity: 0.9,
     },
   }));
+}
+
+function staleNodes(graph: DagGraph): string[] {
+  return graph.nodes
+    .filter((node) => node.data.state === "stale")
+    .map((node) => node.id);
+}
+
+function staleRoots(graph: DagGraph): string[] {
+  const stale = new Set(staleNodes(graph));
+  const staleWithStaleParent = new Set(
+    graph.edges
+      .filter((edge) => stale.has(edge.source) && stale.has(edge.target))
+      .map((edge) => edge.target),
+  );
+
+  return topologicalOrder(graph)
+    .filter((cellId) => stale.has(cellId))
+    .filter((cellId) => !staleWithStaleParent.has(cellId));
+}
+
+function topologicalOrder(graph: DagGraph): string[] {
+  const ids = graph.nodes.map((node) => node.id);
+  const idSet = new Set(ids);
+  const indegree = new Map(ids.map((id) => [id, 0]));
+  const outgoing = new Map<string, string[]>();
+
+  for (const edge of graph.edges) {
+    if (!idSet.has(edge.source) || !idSet.has(edge.target)) continue;
+    indegree.set(edge.target, (indegree.get(edge.target) ?? 0) + 1);
+    outgoing.set(edge.source, [
+      ...(outgoing.get(edge.source) ?? []),
+      edge.target,
+    ]);
+  }
+
+  const ready = ids.filter((id) => (indegree.get(id) ?? 0) === 0);
+  const ordered: string[] = [];
+
+  while (ready.length > 0) {
+    const id = ready.shift();
+    if (!id) break;
+    ordered.push(id);
+    for (const target of outgoing.get(id) ?? []) {
+      const nextIndegree = (indegree.get(target) ?? 0) - 1;
+      indegree.set(target, nextIndegree);
+      if (nextIndegree === 0) ready.push(target);
+    }
+  }
+
+  return ordered.length === ids.length
+    ? ordered
+    : [...ordered, ...ids.filter((id) => !ordered.includes(id))];
 }

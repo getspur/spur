@@ -47,6 +47,7 @@ describe("dispatchDeckCommand", () => {
             cellSources: {},
           },
           dagStatus: {},
+          dagPortManifest: {},
         }),
       },
     } as unknown as Notebook;

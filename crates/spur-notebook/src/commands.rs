@@ -1,9 +1,17 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use jute::backend::notebook::{Cell, CellDagMetadata, NotebookRoot};
 use serde_json::{json, Value};
 
-use crate::dag::{notebook_port_root, NotebookDag, PortStore};
+use crate::{
+    dag::{
+        engine::RunCellCommandRunner, notebook_port_root, NotebookDag, PortStore, ReactiveEngine,
+    },
+    mcp::{
+        bridge::{AgentBridge, TauriBridgeRequester},
+        ServerDeps,
+    },
+};
 
 /// Return the active notebook DAG snapshot for the Tauri frontend.
 #[tauri::command]
@@ -11,6 +19,76 @@ pub async fn notebook_dag_status(
     state: tauri::State<'_, std::sync::Arc<jute::state::State>>,
 ) -> Result<Value, jute::Error> {
     notebook_dag_status_for_state(&state)
+}
+
+/// Run a notebook cell through the reactive DAG engine and cascade downstream cells.
+#[tauri::command]
+pub async fn notebook_run_cascade(
+    state: tauri::State<'_, Arc<jute::state::State>>,
+    bridge: tauri::State<'_, Arc<AgentBridge>>,
+    cell_id: String,
+) -> Result<Value, jute::Error> {
+    let notebook = state.get_notebook();
+    let path = notebook.path().ok_or_else(|| {
+        jute::Error::NotebookDaemon("notebook_run_cascade requires an open notebook".to_string())
+    })?;
+    let deps = ServerDeps {
+        bridge: Arc::new(TauriBridgeRequester::without_app(Arc::clone(
+            bridge.inner(),
+        ))),
+        state: Some(Arc::clone(state.inner())),
+        app: None,
+        daemon: None,
+    };
+    let runner = RunCellCommandRunner::new(Arc::new(deps));
+    let mut engine = ReactiveEngine::new(notebook, runner, notebook_port_root(path));
+    let report = engine
+        .run_cell_and_cascade(&cell_id)
+        .await
+        .map_err(|error| {
+            jute::Error::NotebookDaemon(format!("notebook_run_cascade failed: {error}"))
+        })?;
+
+    Ok(json!({
+        "cell_id": cell_id,
+        "runs": report.runs.into_iter().map(|run| {
+            json!({
+                "cell_id": run.cell_id,
+                "status": run.status.as_str(),
+            })
+        }).collect::<Vec<_>>(),
+    }))
+}
+
+/// Run a notebook cell through the reactive DAG engine without cascading downstream cells.
+#[tauri::command]
+pub async fn notebook_run_cell(
+    state: tauri::State<'_, Arc<jute::state::State>>,
+    bridge: tauri::State<'_, Arc<AgentBridge>>,
+    cell_id: String,
+) -> Result<Value, jute::Error> {
+    let notebook = state.get_notebook();
+    let path = notebook.path().ok_or_else(|| {
+        jute::Error::NotebookDaemon("notebook_run_cell requires an open notebook".to_string())
+    })?;
+    let deps = ServerDeps {
+        bridge: Arc::new(TauriBridgeRequester::without_app(Arc::clone(
+            bridge.inner(),
+        ))),
+        state: Some(Arc::clone(state.inner())),
+        app: None,
+        daemon: None,
+    };
+    let runner = RunCellCommandRunner::new(Arc::new(deps));
+    let mut engine = ReactiveEngine::new(notebook, runner, notebook_port_root(path));
+    let report = engine.run_cell(&cell_id).await.map_err(|error| {
+        jute::Error::NotebookDaemon(format!("notebook_run_cell failed: {error}"))
+    })?;
+
+    Ok(json!({
+        "cell_id": report.cell_id,
+        "status": report.status.as_str(),
+    }))
 }
 
 fn notebook_dag_status_for_state(state: &jute::state::State) -> Result<Value, jute::Error> {

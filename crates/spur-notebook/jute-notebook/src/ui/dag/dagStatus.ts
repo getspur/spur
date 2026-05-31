@@ -35,7 +35,7 @@ export type NotebookDagStatusEdge = {
 
 type Invoke = (
   command: string,
-  args: Record<string, never>,
+  args: Record<string, never> | { cellId: string },
 ) => Promise<unknown>;
 
 export async function loadNotebookDagStatus(
@@ -43,6 +43,20 @@ export async function loadNotebookDagStatus(
 ): Promise<NotebookDagStatusSnapshot> {
   const response = await invoke("notebook_dag_status", {});
   return readStructuredContent(response);
+}
+
+export async function runNotebookCascade(
+  cellId: string,
+  invoke: Invoke = tauriInvoke,
+): Promise<void> {
+  await invoke("notebook_run_cascade", { cellId });
+}
+
+export async function runNotebookCell(
+  cellId: string,
+  invoke: Invoke = tauriInvoke,
+): Promise<void> {
+  await invoke("notebook_run_cell", { cellId });
 }
 
 export function buildDagStatusMap(

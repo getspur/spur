@@ -3,10 +3,15 @@ import { PlayIcon } from "lucide-react";
 import { type ReactNode, Suspense, lazy, useState } from "react";
 import { useStore } from "zustand";
 
+import { daemonControl } from "@/daemon/control";
 import { type NodeStatus, useNotebook } from "@/stores/notebook";
 
 import CellInputFallback from "../notebook/CellInputFallback";
-import type { DagPortManifest } from "./dagStatus";
+import {
+  type DagPortManifest,
+  runNotebookCascade,
+  runNotebookCell,
+} from "./dagStatus";
 import type { DagNodeData } from "./useDagGraph";
 
 const CellInput = lazy(() => import("../notebook/CellInput"));
@@ -27,6 +32,7 @@ export default function DagInspector({
     Record<string, string>
   >({});
   const [runningCellId, setRunningCellId] = useState<string | null>(null);
+  const [cascadingCellId, setCascadingCellId] = useState<string | null>(null);
   const currentSource = useStore(notebook.store, (state) => {
     if (!node) return undefined;
     return (
@@ -35,24 +41,51 @@ export default function DagInspector({
       node.code
     );
   });
+  const serverSource = useStore(notebook.store, (state) => {
+    if (!node) return undefined;
+    return state.serverState.cells[node.id]?.source;
+  });
   const lastRunSource = node && (lastRunSourceByCell[node.id] ?? node.code);
   const isEdited =
     node && currentSource !== undefined && currentSource !== lastRunSource;
   const isRunning =
     node && (runningCellId === node.id || status?.state === "running");
+  const isCascading = node && cascadingCellId === node.id;
 
   const runNode = async () => {
     if (!node) return;
     setRunningCellId(node.id);
     try {
-      await notebook.execute(node.id);
       const sourceAtRun = currentSource ?? node.code;
+      if (serverSource !== undefined && sourceAtRun !== serverSource) {
+        const response = await daemonControl({
+          command: "apply_edit",
+          id: node.id,
+          source: sourceAtRun,
+        });
+        if (!response.ok) {
+          throw new Error(
+            response.error?.message ?? "Failed to apply pending cell edit",
+          );
+        }
+      }
+      await runNotebookCell(node.id);
       setLastRunSourceByCell((previous) => ({
         ...previous,
         [node.id]: sourceAtRun,
       }));
     } finally {
       setRunningCellId(null);
+    }
+  };
+
+  const runDownstream = async () => {
+    if (!node) return;
+    setCascadingCellId(node.id);
+    try {
+      await runNotebookCascade(node.id);
+    } finally {
+      setCascadingCellId(null);
     }
   };
 
@@ -148,6 +181,17 @@ export default function DagInspector({
             >
               <PlayIcon size={14} />
               <span>{isRunning ? "Running" : "Run node"}</span>
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 rounded border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-800 transition-colors hover:border-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={Boolean(isCascading)}
+              onClick={() => {
+                void runDownstream();
+              }}
+            >
+              <PlayIcon size={14} />
+              <span>{isCascading ? "Running" : "Run downstream"}</span>
             </button>
           </div>
         </div>
