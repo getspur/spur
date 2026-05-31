@@ -9,7 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
-use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
+use spur_graph::store::{write_sections_dataset, ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
     resolve_artifact_location, resolve_worktree_root_from, write_artifact_parquet, BuildMode,
@@ -172,6 +172,11 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                     WriteOptions::default(),
                     temporal_shards,
                 )?;
+                // The non-temporal path writes the markdown-section Lance sidecar
+                // via write_with_dedup; this temporal staging path must do the
+                // same or `--with-temporal` builds ship without sections.lancedb
+                // and the analyst build warns + skips the lance_ns attach.
+                write_sections_dataset(&artifact, &root, staging.path())?;
                 let written_dir = staging.commit()?;
                 if !uses_output_override {
                     spur_graph::write_current_pointer(&root, &written_dir)?;
