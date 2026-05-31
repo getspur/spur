@@ -1,32 +1,32 @@
+import {
+  Background,
+  Controls,
+  type Edge,
+  Handle,
+  MarkerType,
+  MiniMap,
+  type Node,
+  type NodeProps,
+  type NodeTypes,
+  Position,
+  ReactFlow,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { useMemo } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
-import { type NotebookCellState, useNotebook } from "@/stores/notebook";
+import { useNotebook } from "@/stores/notebook";
 
-type DagCell = {
-  id: string;
-  cell: NotebookCellState;
-};
+import DagNode from "./DagNode";
+import { type PositionedDagGraphNode, layoutDagGraph } from "./layout";
+import { type DagNodeData, buildDagGraph } from "./useDagGraph";
 
-function formatList(values: string[]): string {
-  return values.length > 0 ? values.join(", ") : "None";
-}
+type FlowDagNode = Node<DagNodeData, "dagCell">;
 
-function formatProducedPorts(cell: NotebookCellState): string {
-  const produces = cell.dagMetadata?.produces ?? [];
-  if (produces.length === 0) return "None";
-  return produces
-    .map(
-      (port) =>
-        `${port.port} (${port.repr}${port.display ? `, ${port.display}` : ""})`,
-    )
-    .join(", ");
-}
-
-function formatSource(cell: NotebookCellState): string {
-  const source = cell.dagMetadata?.source;
-  return source ? `${source.kind}:${source.port}` : "None";
-}
+const nodeTypes = {
+  dagCell: DagFlowNode,
+} satisfies NodeTypes;
 
 export default function DagView() {
   const notebook = useNotebook();
@@ -34,15 +34,14 @@ export default function DagView() {
     notebook.store,
     useShallow((state) => [state.serverState.cellIds, state.serverState.cells]),
   );
-  const dagCells = cellIds
-    .map((id): DagCell | undefined => {
-      const cell = cells[id];
-      if (!cell?.dagMetadata) return undefined;
-      return { id, cell };
-    })
-    .filter((entry): entry is DagCell => entry !== undefined);
+  const graph = useMemo(
+    () => layoutDagGraph(buildDagGraph(cellIds, cells)),
+    [cellIds, cells],
+  );
+  const nodes = useMemo(() => toFlowNodes(graph.nodes), [graph.nodes]);
+  const edges = useMemo(() => toFlowEdges(graph.edges), [graph.edges]);
 
-  if (dagCells.length === 0) {
+  if (nodes.length === 0) {
     return (
       <section className="mx-auto mt-8 w-full max-w-4xl px-6 text-sm text-gray-500">
         No DAG cells found.
@@ -51,42 +50,70 @@ export default function DagView() {
   }
 
   return (
-    <section className="mx-auto mt-8 w-full max-w-4xl px-6">
-      <div className="mb-3 text-xs font-medium uppercase text-gray-500">
-        DAG cells
-      </div>
-      <div className="divide-y divide-gray-200 rounded border border-gray-200 bg-white">
-        {dagCells.map(({ id, cell }) => (
-          <article key={id} className="px-4 py-3">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <h2 className="truncate text-sm font-medium text-gray-900">
-                {id}
-              </h2>
-              <span className="shrink-0 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-                {cell.type}
-              </span>
-            </div>
-            <dl className="grid gap-2 text-xs text-gray-600 sm:grid-cols-3">
-              <div>
-                <dt className="font-medium text-gray-900">Produces</dt>
-                <dd className="mt-1 break-words">
-                  {formatProducedPorts(cell)}
-                </dd>
-              </div>
-              <div>
-                <dt className="font-medium text-gray-900">Consumes</dt>
-                <dd className="mt-1 break-words">
-                  {formatList(cell.dagMetadata?.consumes ?? [])}
-                </dd>
-              </div>
-              <div>
-                <dt className="font-medium text-gray-900">Source</dt>
-                <dd className="mt-1 break-words">{formatSource(cell)}</dd>
-              </div>
-            </dl>
-          </article>
-        ))}
+    <section className="h-[calc(100vh-9rem)] min-h-[520px] w-full px-4 py-4">
+      <div className="h-full overflow-hidden rounded border border-gray-200 bg-gray-50">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          minZoom={0.2}
+          maxZoom={1.5}
+        >
+          <Background gap={20} color="#e5e7eb" />
+          <MiniMap pannable zoomable nodeColor="#d1d5db" />
+          <Controls showInteractive={false} />
+        </ReactFlow>
       </div>
     </section>
   );
+}
+
+function DagFlowNode({ data, selected }: NodeProps<FlowDagNode>) {
+  return (
+    <>
+      <Handle type="target" position={Position.Top} isConnectable={false} />
+      <DagNode data={data} selected={selected} />
+      <Handle type="source" position={Position.Bottom} isConnectable={false} />
+    </>
+  );
+}
+
+function toFlowNodes(nodes: PositionedDagGraphNode[]): FlowDagNode[] {
+  return nodes.map((node) => ({
+    id: node.id,
+    type: "dagCell",
+    position: node.position,
+    data: node.data,
+    draggable: false,
+  }));
+}
+
+function toFlowEdges(
+  edges: Array<{ id: string; source: string; target: string; port: string }>,
+): Edge[] {
+  return edges.map((edge) => ({
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    label: edge.port,
+    type: "smoothstep",
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+    },
+    style: {
+      stroke: "#94a3b8",
+      strokeWidth: 1.5,
+    },
+    labelStyle: {
+      fill: "#475569",
+      fontSize: 11,
+      fontWeight: 600,
+    },
+    labelBgStyle: {
+      fill: "#f8fafc",
+      fillOpacity: 0.9,
+    },
+  }));
 }
