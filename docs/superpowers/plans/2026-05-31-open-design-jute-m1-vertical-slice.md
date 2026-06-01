@@ -425,10 +425,10 @@ Expected: PASS (all open-design tests plus the pre-existing skills tests).
 Then stamp the `SPUR-MANAGED` markers and render the skill into the per-adapter dirs:
 
 Run: `cargo run -p spur-cli -- skills init`
-Expected: command succeeds; `open-design` now appears under `.spur/skills/open-design/SKILL.md` and the agent adapter dirs (e.g. `.claude/skills/spurpower-open-design/SKILL.md`), each with a valid `SPUR-MANAGED v=1 skill=open-design sha256=<64-hex>` marker. Verify:
+Expected: command succeeds; because `open-design` is `role: brain`, the installer materializes it **only** under `.spur/skills/open-design/SKILL.md` with a valid `SPUR-MANAGED v=1 skill=open-design sha256=<64-hex>` marker. Worker adapter dirs (`.claude/skills/spurpower-*`, etc.) are intentionally skipped for brain-role skills (see the `run_skips_worker_adapters_for_brain_only_skill` test). Verify:
 
-Run: `git status --short .spur/skills .claude/skills | head`
-Expected: new `open-design` / `spurpower-open-design` skill files listed.
+Run: `git status --short .spur/skills | head`
+Expected: new `open-design` skill files listed under `.spur/skills/`.
 
 - [ ] **Step 5: Commit**
 

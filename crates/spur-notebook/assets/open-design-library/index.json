@@ -1,0 +1,2067 @@
+{
+  "version": 1,
+  "kind": "design-systems",
+  "count": 148,
+  "items": [
+    {
+      "id": "agentic",
+      "title": "Agentic",
+      "category": "Themed & Unique",
+      "summary": "Conversational AI-first interface with minimal controls, clear outcomes, and delegated task flows for agentic workflows.",
+      "swatches": [
+        "#ff5701",
+        "#f6f6f1",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "airbnb",
+      "title": "Airbnb",
+      "category": "E-Commerce & Retail",
+      "summary": "Airbnb's 2026 design feels like a travel magazine that happens to be an app — pristine white canvases give way to full-bleed photography, and the interface itself disappears so the listings can breathe. The signature Rausch coral-pink (`#ff",
+      "swatches": [
+        "#ff385c",
+        "#222222",
+        "#92174d",
+        "#460479",
+        "#e00b41",
+        "#428bff"
+      ]
+    },
+    {
+      "id": "airtable",
+      "title": "Airtable",
+      "category": "Design & Creative",
+      "summary": "Airtable's website is a clean, enterprise-friendly platform that communicates \"sophisticated simplicity\" through a white canvas with deep navy text (`#181d26`) and Airtable Blue (`#1b61c9`) as the primary interactive accent. The Haas font f",
+      "swatches": [
+        "#181d26",
+        "#1b61c9",
+        "#ffffff",
+        "#006400",
+        "#333333",
+        "#254fad"
+      ]
+    },
+    {
+      "id": "ant",
+      "title": "Ant",
+      "category": "Professional & Corporate",
+      "summary": "Structured, enterprise-focused design system emphasizing clarity, consistency, and efficiency for data-dense web applications.",
+      "swatches": [
+        "#1677ff",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "apple",
+      "title": "Apple",
+      "category": "Media & Consumer",
+      "summary": "Apple's web language is a precision editorial system that alternates between gallery-like calm and retail-density information blocks. The visual tone stays restrained: broad neutral canvases, quiet chrome, and product imagery given almost a",
+      "swatches": [
+        "#000000",
+        "#f5f5f7",
+        "#0071e3",
+        "#0066cc",
+        "#2997ff",
+        "#1d1d1f"
+      ]
+    },
+    {
+      "id": "application",
+      "title": "Application",
+      "category": "Professional & Corporate",
+      "summary": "App dashboard with purple-themed aesthetic, top-bar navigation, card-based layouts, and developer-first workflows.",
+      "swatches": [
+        "#9333ea",
+        "#a855f7",
+        "#10b981",
+        "#f59e0b",
+        "#ef4444",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "arc",
+      "title": "Arc Browser",
+      "category": "Productivity & SaaS",
+      "summary": "Arc Browser dissolves the boundary between the chrome and the page. Where Chrome and Safari treat the browser frame as a container, Arc treats it as scenery — the toolbar fades into the system wallpaper, the sidebar carries gradient warmth ",
+      "swatches": [
+        "#ff7e5f",
+        "#feb47b",
+        "#7f5af0",
+        "#e84393",
+        "#16f2b3",
+        "#0db4f7"
+      ]
+    },
+    {
+      "id": "artistic",
+      "title": "Artistic",
+      "category": "Creative & Artistic",
+      "summary": "High-contrast, expressive style with creative typography and bold color choices for visually striking interfaces.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "atelier-zero",
+      "title": "Atelier Zero",
+      "category": "Editorial · Studio",
+      "summary": "A small, high-craft studio's annual report rendered as a webpage. The canvas is warm handmade paper. Every surface earns its lines. Type does the heavy lifting; collage imagery does the storytelling. Coral provides the only spark of warmth;",
+      "swatches": [
+        "#efe7d2",
+        "#ece4cf",
+        "#ddd2b6",
+        "#f7f1de",
+        "#15140f",
+        "#2a2620"
+      ]
+    },
+    {
+      "id": "bento",
+      "title": "Bento",
+      "category": "Layout & Structure",
+      "summary": "Modular grid layout with card-like blocks, clear hierarchy, soft spacing, and subtle visual contrast for organized, scannable interfaces.",
+      "swatches": [
+        "#fad4c0",
+        "#80a1c1",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#fff5e6"
+      ]
+    },
+    {
+      "id": "binance",
+      "title": "Binance.US",
+      "category": "Fintech & Crypto",
+      "summary": "Binance.US radiates the polished urgency of a digital trading floor — a space where money moves and decisions happen in seconds. The design is a two-tone composition that alternates between stark white trading surfaces and deep near-black p",
+      "swatches": [
+        "#222126",
+        "#f0b90b",
+        "#ffd000",
+        "#f8d12f",
+        "#d0980b",
+        "#1eaedb"
+      ]
+    },
+    {
+      "id": "bmw",
+      "title": "BMW",
+      "category": "Automotive",
+      "summary": "BMW's website is automotive engineering made visual — a design system that communicates precision, performance, and German industrial confidence. The page alternates between deep dark hero sections (featuring full-bleed automotive photograp",
+      "swatches": [
+        "#1c69d4",
+        "#0653b6",
+        "#757575",
+        "#ffffff",
+        "#262626",
+        "#bbbbbb"
+      ]
+    },
+    {
+      "id": "bmw-m",
+      "title": "BMW M",
+      "category": "Automotive",
+      "summary": "The **M tricolor stripe** — `{colors.m-blue-light}` (#0066b1) → `{colors.m-blue-dark}` (#1c69d4) → `{colors.m-red}` (#e22718) — appears sparingly as the brand's signature accent, used on the M wordmark, motorsport chrome, vehicle-tech callo",
+      "swatches": [
+        "#000",
+        "#0066b1",
+        "#1c69d4",
+        "#e22718",
+        "#ffffff",
+        "#0653b6"
+      ]
+    },
+    {
+      "id": "bold",
+      "title": "Bold",
+      "category": "Bold & Expressive",
+      "summary": "Strong visual presence with heavyweight typography, high-contrast colors, and commanding layouts.",
+      "swatches": [
+        "#0077bc",
+        "#009866",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#111111"
+      ]
+    },
+    {
+      "id": "brutalism",
+      "title": "Brutalism",
+      "category": "Bold & Expressive",
+      "summary": "Raw, anti-design aesthetic inspired by concrete architecture with unadorned elements, jarring layouts, and functional minimalism.",
+      "swatches": [
+        "#dd614c",
+        "#daa144",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "bugatti",
+      "title": "Bugatti",
+      "category": "Automotive",
+      "summary": "Bugatti.com does not behave like a website — it behaves like a feature-length car film that a visitor happens to be standing inside. The canvas is pure `#000000`, the only color that appears at rest is white, and the entire page is carried ",
+      "swatches": [
+        "#000000",
+        "#ffffff",
+        "#999999",
+        "#000",
+        "#0070cc"
+      ]
+    },
+    {
+      "id": "cafe",
+      "title": "Cafe",
+      "category": "Creative & Artistic",
+      "summary": "Cozy cafe-inspired interface with warm tones, soft typography, and clean layouts for a relaxed browsing experience.",
+      "swatches": [
+        "#5d4432",
+        "#e9e3dd",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#f9f7f5"
+      ]
+    },
+    {
+      "id": "cal",
+      "title": "Cal.com",
+      "category": "Productivity & SaaS",
+      "summary": "Cal.com's website is a masterclass in monochromatic restraint — a grayscale world where boldness comes not from color but from the sheer confidence of black text on white space. Inspired by Uber's minimal aesthetic, the palette is deliberat",
+      "swatches": [
+        "#242424",
+        "#898989",
+        "#111111",
+        "#ffffff",
+        "#0099ff",
+        "#3b82f6"
+      ]
+    },
+    {
+      "id": "canva",
+      "title": "Canva",
+      "category": "Design & Creative",
+      "summary": "Canva is the friendly face of design tools — the brand makes a point of looking inviting where Adobe looks intimidating. The page is built on a clean white canvas (`#ffffff`) with a signature **purple-to-blue gradient** (`#7d2ae8` → `#00c4c",
+      "swatches": [
+        "#ffffff",
+        "#7d2ae8",
+        "#00c4cc",
+        "#ff5757",
+        "#f4f5f7",
+        "#e8eaed"
+      ]
+    },
+    {
+      "id": "cisco",
+      "title": "Cisco",
+      "category": "Backend & Data",
+      "summary": "Cisco's current public web presence is enterprise infrastructure rendered with cinematic restraint. The canvas is dark but not pure black: layered navy-charcoal surfaces create depth without resorting to glossy startup gradients. Bright Cis",
+      "swatches": [
+        "#049fd9",
+        "#64bbe3",
+        "#005073",
+        "#2b5592",
+        "#39393b",
+        "#58585b"
+      ]
+    },
+    {
+      "id": "claude",
+      "title": "Claude (Anthropic)",
+      "category": "AI & LLM",
+      "summary": "Claude's interface is a literary salon reimagined as a product page — warm, unhurried, and quietly intellectual. The entire experience is built on a parchment-toned canvas (`#f5f4ed`) that deliberately evokes the feeling of high-quality pap",
+      "swatches": [
+        "#f5f4ed",
+        "#c96442",
+        "#5e5d59",
+        "#87867f",
+        "#4d4c48",
+        "#f0eee6"
+      ]
+    },
+    {
+      "id": "clay",
+      "title": "Clay",
+      "category": "Design & Creative",
+      "summary": "Clay's website is a warm, playful celebration of color that treats B2B data enrichment like a craft rather than an enterprise chore. The design language is built on a foundation of warm cream backgrounds (`#faf9f7`) and oat-toned borders (`",
+      "swatches": [
+        "#faf9f7",
+        "#dad4c8",
+        "#eee9df",
+        "#000000",
+        "#ffffff",
+        "#84e7a5"
+      ]
+    },
+    {
+      "id": "claymorphism",
+      "title": "Claymorphism",
+      "category": "Morphism & Effects",
+      "summary": "Soft, rounded 3D-like shapes mimicking malleable clay with playful, puffy elements and colorful surfaces.",
+      "swatches": [
+        "#3b82f6",
+        "#ffffff",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#1c398e"
+      ]
+    },
+    {
+      "id": "clean",
+      "title": "Clean",
+      "category": "Modern & Minimal",
+      "summary": "Simplicity-focused design with ample whitespace, legible typography, and a limited color palette to reduce visual clutter.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "clickhouse",
+      "title": "ClickHouse",
+      "category": "Backend & Data",
+      "summary": "ClickHouse's interface is a high-performance cockpit rendered in acid yellow-green on obsidian black — a design that screams \"speed\" before you read a single word. The entire experience lives in darkness: pure black backgrounds (`#000000`) ",
+      "swatches": [
+        "#000000",
+        "#414141",
+        "#faff69",
+        "#166534",
+        "#f4f692",
+        "#14572f"
+      ]
+    },
+    {
+      "id": "cohere",
+      "title": "Cohere",
+      "category": "AI & LLM",
+      "summary": "Cohere's interface is a polished enterprise command deck — confident, clean, and designed to make AI feel like serious infrastructure rather than a consumer toy. The experience lives on a bright white canvas where content is organized into ",
+      "swatches": [
+        "#d9d9dd",
+        "#e5e7eb",
+        "#1863dc",
+        "#000000",
+        "#212121",
+        "#17171c"
+      ]
+    },
+    {
+      "id": "coinbase",
+      "title": "Coinbase",
+      "category": "Fintech & Crypto",
+      "summary": "Coinbase's website is a clean, trustworthy crypto platform that communicates financial reliability through a blue-and-white binary palette. The design uses Coinbase Blue (`#0052ff`) — a deep, saturated blue — as the singular brand accent ag",
+      "swatches": [
+        "#0052ff",
+        "#578bfa",
+        "#0a0b0d",
+        "#282b31",
+        "#eef0f3",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "colorful",
+      "title": "Colorful",
+      "category": "Bold & Expressive",
+      "summary": "Vibrant, high-contrast palettes and gradients for engaging, memorable, and modern user experiences.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "composio",
+      "title": "Composio",
+      "category": "Backend & Data",
+      "summary": "Composio's interface is a nocturnal command center — a dense, developer-focused darkness punctuated by electric cyan and deep cobalt signals. The entire experience is built on an almost-pure-black canvas (`#0f0f0f`) where content floats wit",
+      "swatches": [
+        "#0f0f0f",
+        "#0007cd",
+        "#00ffff",
+        "#0089ff",
+        "#0096ff",
+        "#000000"
+      ]
+    },
+    {
+      "id": "contemporary",
+      "title": "Contemporary",
+      "category": "Modern & Minimal",
+      "summary": "Current-era minimalist design with bento grids, dark mode support, and high-performance accessible layouts.",
+      "swatches": [
+        "#c800df",
+        "#e60076",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "corporate",
+      "title": "Corporate",
+      "category": "Professional & Corporate",
+      "summary": "Professional, brand-aligned design with structured grids, minimalist layouts, and consistent enterprise patterns.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "cosmic",
+      "title": "Cosmic",
+      "category": "Creative & Artistic",
+      "summary": "Futuristic sci-fi aesthetic with dark themes, vibrant neon accents, and immersive spatial elements.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "creative",
+      "title": "Creative",
+      "category": "Creative & Artistic",
+      "summary": "Playful, character-driven design with expressive typography and bold graphics for landing pages and creative projects.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "cursor",
+      "title": "Cursor",
+      "category": "Developer Tools",
+      "summary": "Cursor's website is a study in warm minimalism meets code-editor elegance. The entire experience is built on a warm off-white canvas (`#f2f1ed`) with dark warm-brown text (`#26251e`) -- not pure black, not neutral gray, but a deeply warm ne",
+      "swatches": [
+        "#f2f1ed",
+        "#26251e",
+        "#e6e5e0",
+        "#ebeae5",
+        "#cf2d56",
+        "#f54e00"
+      ]
+    },
+    {
+      "id": "dashboard",
+      "title": "Dashboard",
+      "category": "Professional & Corporate",
+      "summary": "Dark-themed cloud-platform aesthetic with modular grids, glass-like panels, and strong data hierarchy for productivity dashboards.",
+      "swatches": [
+        "#0c5cab",
+        "#0a4a8a",
+        "#10b981",
+        "#f59e0b",
+        "#ef4444",
+        "#09090b"
+      ]
+    },
+    {
+      "id": "default",
+      "title": "Neutral Modern",
+      "category": "Starter",
+      "summary": "",
+      "swatches": [
+        "#fafafa",
+        "#111111",
+        "#2f6feb",
+        "#6b6b6b",
+        "#e5e5e5",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "discord",
+      "title": "Discord",
+      "category": "Productivity & SaaS",
+      "summary": "Discord's product is engineered for evenings, raids, and group voice — so the entire surface is dark-first. The default canvas is the deep `Background Primary` (`#313338` light theme, `#1e1f22` dark theme), with chat columns layered on slig",
+      "swatches": [
+        "#313338",
+        "#1e1f22",
+        "#5865f2",
+        "#2b2d31",
+        "#4752c4",
+        "#7289da"
+      ]
+    },
+    {
+      "id": "dithered",
+      "title": "Dithered",
+      "category": "Retro & Nostalgic",
+      "summary": "Dot-pattern rendering technique that simulates shades with a limited palette for nostalgic, retro, high-contrast visuals.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "doodle",
+      "title": "Doodle",
+      "category": "Creative & Artistic",
+      "summary": "Hand-drawn, sketch-like style with doodles, handwritten fonts, and imperfect lines for a playful, informal feel.",
+      "swatches": [
+        "#49b6e5",
+        "#263d5b",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "dramatic",
+      "title": "Dramatic",
+      "category": "Bold & Expressive",
+      "summary": "High-contrast, theatrical design with bold layouts, immersive visuals, and unconventional compositions that command attention.",
+      "swatches": [
+        "#8b5cf6",
+        "#f43f5e",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#09090b"
+      ]
+    },
+    {
+      "id": "duolingo",
+      "title": "Duolingo",
+      "category": "Productivity & SaaS",
+      "summary": "Duolingo is gamification rendered as visual language. The interface is unapologetically bright, with **owl green** (`#58cc02`) as the brand primary and a chunky 4px bottom-shadow on every interactive element that reads like a 3D button wait",
+      "swatches": [
+        "#58cc02",
+        "#ffffff",
+        "#e5e5e5",
+        "#ff9600",
+        "#ce82ff",
+        "#58a700"
+      ]
+    },
+    {
+      "id": "editorial",
+      "title": "Editorial",
+      "category": "Creative & Artistic",
+      "summary": "Magazine-inspired editorial layout with refined serif typography, structured grids, and elegant reading experiences.",
+      "swatches": [
+        "#111111",
+        "#f1f1f1",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "elegant",
+      "title": "Elegant",
+      "category": "Professional & Corporate",
+      "summary": "Graceful, refined aesthetic with delicate typography, minimal palettes, and polished layouts that exude sophistication.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "elevenlabs",
+      "title": "ElevenLabs",
+      "category": "AI & LLM",
+      "summary": "ElevenLabs' website is a study in restrained elegance — a near-white canvas (`#ffffff`, `#f5f5f5`) where typography and subtle shadows do all the heavy lifting. The design feels like a premium audio product brochure: clean, spacious, and co",
+      "swatches": [
+        "#ffffff",
+        "#f5f5f5",
+        "#f5f2ef",
+        "#777169",
+        "#000000",
+        "#4e4e4e"
+      ]
+    },
+    {
+      "id": "energetic",
+      "title": "Energetic",
+      "category": "Bold & Expressive",
+      "summary": "Dynamic, vibrant style with thick borders, geometric shapes, high-contrast colors, and expressive typography conveying motion and vitality.",
+      "swatches": [
+        "#ea580b",
+        "#f59e0b",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffedd5"
+      ]
+    },
+    {
+      "id": "enterprise",
+      "title": "Enterprise",
+      "category": "Professional & Corporate",
+      "summary": "Clean, high-contrast enterprise design for data-driven workflows with intuitive drag-and-drop patterns and structured layouts.",
+      "swatches": [
+        "#072c2c",
+        "#ff5f03",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#edeade"
+      ]
+    },
+    {
+      "id": "expo",
+      "title": "Expo",
+      "category": "Developer Tools",
+      "summary": "Expo's interface is a luminous, confidence-radiating developer platform built on the premise that tools for building apps should feel as polished as the apps themselves. The entire experience lives on a bright, airy canvas — a cool-tinted o",
+      "swatches": [
+        "#f0f0f3",
+        "#000000",
+        "#60646c",
+        "#b0b4ba",
+        "#555860",
+        "#1c2024"
+      ]
+    },
+    {
+      "id": "expressive",
+      "title": "Expressive",
+      "category": "Bold & Expressive",
+      "summary": "Vibrant, personality-driven design with bold colors, playful graphics, and dynamic layouts that balance creativity with structure.",
+      "swatches": [
+        "#db2777",
+        "#2563eb",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "fantasy",
+      "title": "Fantasy",
+      "category": "Creative & Artistic",
+      "summary": "Game-inspired fantasy aesthetic with bold, premium visuals, rich color palettes, and immersive thematic elements.",
+      "swatches": [
+        "#0250cc",
+        "#fdc800",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "ferrari",
+      "title": "Ferrari",
+      "category": "Automotive",
+      "summary": "Ferrari's website is a digital editorial — a curated magazine where the Prancing Horse brand is presented with the gravitas of an art institution and the precision of Italian coachwork. The page opens onto an expanse of absolute black, brok",
+      "swatches": [
+        "#da291c",
+        "#303030",
+        "#8f8f8f",
+        "#d2d2d2",
+        "#fff200",
+        "#f6e500"
+      ]
+    },
+    {
+      "id": "figma",
+      "title": "Figma",
+      "category": "Design & Creative",
+      "summary": "Figma's interface is the design tool that designed itself — a masterclass in typographic sophistication where a custom variable font (figmaSans) modulates between razor-thin (weight 320) and bold (weight 700) with stops at unusual intermedi",
+      "swatches": [
+        "#000000",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "flat",
+      "title": "Flat",
+      "category": "Modern & Minimal",
+      "summary": "Two-dimensional minimalist style with vibrant colors, clean typography, and no 3D effects for fast, user-friendly interfaces.",
+      "swatches": [
+        "#f2673c",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "framer",
+      "title": "Framer",
+      "category": "Design & Creative",
+      "summary": "Framer's website is a cinematic, tool-obsessed dark canvas that radiates the confidence of a design tool built by designers who worship craft. The entire experience is drenched in pure black — not a warm charcoal or a cozy dark gray, but an",
+      "swatches": [
+        "#000000",
+        "#0099ff",
+        "#ffffff",
+        "#a6a6a6",
+        "#090909",
+        "#0000ee"
+      ]
+    },
+    {
+      "id": "friendly",
+      "title": "Friendly",
+      "category": "Creative & Artistic",
+      "summary": "Approachable, intuitive design with rounded elements, ample whitespace, and soft pastel color palettes.",
+      "swatches": [
+        "#f2d9dc",
+        "#d9f2d8",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "futuristic",
+      "title": "Futuristic",
+      "category": "Themed & Unique",
+      "summary": "Forward-looking design with tech-inspired typography, modern layouts, and a sleek, innovation-driven aesthetic.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "github",
+      "title": "GitHub",
+      "category": "Developer Tools",
+      "summary": "GitHub's surface is engineered, not decorated. Every pixel announces a stance: this is a tool for people who care about diffs, builds, and pull requests. The page background is a clean `#ffffff` (light) or `#0d1117` (dark), with content arr",
+      "swatches": [
+        "#ffffff",
+        "#0d1117",
+        "#0969da",
+        "#1a7f37",
+        "#d0d7de",
+        "#f6f8fa"
+      ]
+    },
+    {
+      "id": "glassmorphism",
+      "title": "Glassmorphism",
+      "category": "Morphism & Effects",
+      "summary": "Frosted glass effect with translucent layers, subtle blur, and luminous borders for depth and modern elegance.",
+      "swatches": [
+        "#1856ff",
+        "#3a344e",
+        "#07ca6b",
+        "#e89558",
+        "#ea2143",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "gradient",
+      "title": "Gradient",
+      "category": "Morphism & Effects",
+      "summary": "Smooth color transitions and gradient-rich surfaces for modern, playful interfaces with visual depth.",
+      "swatches": [
+        "#990ffa",
+        "#e60076",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "hashicorp",
+      "title": "HashiCorp",
+      "category": "Backend & Data",
+      "summary": "HashiCorp's website is enterprise infrastructure made tangible — a design system that must communicate the complexity of cloud infrastructure management while remaining approachable. The visual language splits between two modes: a clean whi",
+      "swatches": [
+        "#15181e",
+        "#0d0e12",
+        "#7b42bc",
+        "#ffcf25",
+        "#14c6cb",
+        "#1868f2"
+      ]
+    },
+    {
+      "id": "hud",
+      "title": "HUD Design System",
+      "category": "Themed & Unique",
+      "summary": "A **combat pilot's glass cockpit** — everything readable in a split second, in any light condition, under any G-load. The HUD projects critical flight data directly into the pilot's line of sight so they never have to look down. Translucenc",
+      "swatches": [
+        "#0a0a0a",
+        "#111316",
+        "#1e2328",
+        "#00ff41",
+        "#7fff00",
+        "#5a9a5a"
+      ]
+    },
+    {
+      "id": "huggingface",
+      "title": "Hugging Face",
+      "category": "AI & LLM",
+      "summary": "Hugging Face is the rare ML brand that refuses to look serious. The hub leans into a sunshine-yellow accent (`#ffd21e`), a cartoon hugging-face emoji as the logo, and a confident **IBM Plex Mono** voice that reads more like a community zine",
+      "swatches": [
+        "#ffd21e",
+        "#fafafa",
+        "#0d1117",
+        "#f3f4f6",
+        "#e5e7eb",
+        "#f59e0b"
+      ]
+    },
+    {
+      "id": "ibm",
+      "title": "IBM",
+      "category": "Media & Consumer",
+      "summary": "IBM's website is the digital embodiment of enterprise authority built on the Carbon Design System — a design language so methodically structured it reads like an engineering specification rendered as a webpage. The page operates on a stark ",
+      "swatches": [
+        "#ffffff",
+        "#161616",
+        "#0f62fe",
+        "#f4f4f4",
+        "#262626",
+        "#393939"
+      ]
+    },
+    {
+      "id": "intercom",
+      "title": "Intercom",
+      "category": "Productivity & SaaS",
+      "summary": "Intercom's website is a warm, confident customer service platform that communicates \"AI-first helpdesk\" through a clean, editorial design language. The page operates on a warm off-white canvas (`#faf9f6`) with off-black (`#111111`) text, cr",
+      "swatches": [
+        "#faf9f6",
+        "#111111",
+        "#ff5600",
+        "#dedbd6",
+        "#ffffff",
+        "#fe4c02"
+      ]
+    },
+    {
+      "id": "kami",
+      "title": "kami (紙 / 纸)",
+      "category": "Editorial & Print",
+      "summary": "kami compresses into one sentence: **warm parchment canvas, ink-blue accent, serif carries hierarchy, no cool grays, no hard shadows.** It is not a UI framework — it is a constraint system for the page, designed to keep deliverables stable,",
+      "swatches": [
+        "#f5f4ed",
+        "#1b365d",
+        "#ffffff",
+        "#e4ecf5",
+        "#2d5a8a",
+        "#faf9f5"
+      ]
+    },
+    {
+      "id": "kraken",
+      "title": "Kraken",
+      "category": "Fintech & Crypto",
+      "summary": "Kraken's website is a clean, trustworthy crypto exchange that uses purple as its commanding brand color. The design operates on white backgrounds with Kraken Purple (`#7132f5`, `#5741d8`, `#5b1ecf`) creating a distinctive, professional cryp",
+      "swatches": [
+        "#7132f5",
+        "#5741d8",
+        "#5b1ecf",
+        "#101114",
+        "#149e61",
+        "#686b82"
+      ]
+    },
+    {
+      "id": "lamborghini",
+      "title": "Lamborghini",
+      "category": "Automotive",
+      "summary": "Lamborghini's website is a cathedral of darkness — a digital stage where jet-black surfaces stretch infinitely and every element emerges from the void like a machine under a spotlight. The page is almost entirely black. Not dark gray, not n",
+      "swatches": [
+        "#000000",
+        "#ffc000",
+        "#ffffff",
+        "#917300",
+        "#ffce3e",
+        "#29abe2"
+      ]
+    },
+    {
+      "id": "levels",
+      "title": "Levels",
+      "category": "Layout & Structure",
+      "summary": "Conversion-focused design that removes friction and guides users toward action through clarity, trust, and speed.",
+      "swatches": [
+        "#27272a",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "linear-app",
+      "title": "Linear",
+      "category": "Productivity & SaaS",
+      "summary": "Linear's website is a masterclass in dark-mode-first product design — a near-black canvas (`#08090a`) where content emerges from darkness like starlight. The overall impression is one of extreme precision engineering: every element exists i",
+      "swatches": [
+        "#08090a",
+        "#f7f8f8",
+        "#5e6ad2",
+        "#7170ff",
+        "#0f1011",
+        "#191a1b"
+      ]
+    },
+    {
+      "id": "lingo",
+      "title": "Lingo",
+      "category": "Creative & Artistic",
+      "summary": "Playful, minimal design with bright colors, rounded shapes, tactile 3D borders, and friendly illustrations for approachable interfaces.",
+      "swatches": [
+        "#58cc02",
+        "#ce82ff",
+        "#ffc800",
+        "#ff4b4b",
+        "#ffffff",
+        "#3c3c3c"
+      ]
+    },
+    {
+      "id": "loom",
+      "title": "Loom Design System",
+      "category": "Themed & Unique",
+      "summary": "A friendly, fast video-first async communication tool. Loom's design feels like a well-made productivity app — approachable, clean, and professional without being corporate. Purple accent (#625DF5) signals creativity and video without being",
+      "swatches": [
+        "#625df5",
+        "#ffffff",
+        "#f7f7f8",
+        "#e4e4e7",
+        "#5048e5",
+        "#1f1f23"
+      ]
+    },
+    {
+      "id": "lovable",
+      "title": "Lovable",
+      "category": "Developer Tools",
+      "summary": "Lovable's website radiates warmth through restraint. The entire page sits on a creamy, parchment-toned background (`#f7f4ed`) that immediately separates it from the cold-white conventions of most developer tool sites. This isn't minimalism ",
+      "swatches": [
+        "#f7f4ed",
+        "#1c1c1c",
+        "#eceae4",
+        "#fcfbf8",
+        "#5f5f5d",
+        "#3b82f6"
+      ]
+    },
+    {
+      "id": "luxury",
+      "title": "Luxury",
+      "category": "Professional & Corporate",
+      "summary": "High-end dark aesthetic with bold headings, monochromatic palette, and premium feel for luxury brand experiences.",
+      "swatches": [
+        "#fafafa",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#000000",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "mastercard",
+      "title": "Mastercard",
+      "category": "Fintech & Crypto",
+      "summary": "Mastercard's experience reads like a warm, editorial magazine built from soft stone and signal orange. The canvas is a muted putty-cream (`#F3F0EE`) — not white, not gray, but a color that feels like the paper of a premium annual report. On",
+      "swatches": [
+        "#f3f0ee",
+        "#141413",
+        "#eb001b",
+        "#f79e1b",
+        "#cf4500",
+        "#f37338"
+      ]
+    },
+    {
+      "id": "material",
+      "title": "Material",
+      "category": "Professional & Corporate",
+      "summary": "Google's Material Design with layered surfaces, dynamic theming, built-in motion, and responsive cross-platform patterns.",
+      "swatches": [
+        "#6442d6",
+        "#c8b3fd",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "meta",
+      "title": "Meta (Store)",
+      "category": "E-Commerce & Retail",
+      "summary": "The Meta Store is a product-forward retail experience built to sell hardware — Quest VR headsets, Ray-Ban Meta smart glasses, and accessories. The design walks a tightrope between consumer electronics showroom and lifestyle editorial, deplo",
+      "swatches": [
+        "#0064e0",
+        "#0143b5",
+        "#004bb9",
+        "#47a5fa",
+        "#1877f2",
+        "#d6311f"
+      ]
+    },
+    {
+      "id": "minimal",
+      "title": "Minimal",
+      "category": "Modern & Minimal",
+      "summary": "Stripped-back design emphasizing whitespace, clean typography, and restrained color for maximum clarity and focus.",
+      "swatches": [
+        "#0c0c09",
+        "#312c85",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#f4f4f1"
+      ]
+    },
+    {
+      "id": "minimax",
+      "title": "MiniMax",
+      "category": "AI & LLM",
+      "summary": "MiniMax's website is a clean, product-showcase platform for a Chinese AI technology company that bridges consumer-friendly appeal with technical credibility. The design language is predominantly white-space-driven with a light, airy feel — ",
+      "swatches": [
+        "#ffffff",
+        "#1456f0",
+        "#3b82f6",
+        "#60a5fa",
+        "#ea5ec1",
+        "#222222"
+      ]
+    },
+    {
+      "id": "mintlify",
+      "title": "Mintlify",
+      "category": "Productivity & SaaS",
+      "summary": "Mintlify's website is a study in documentation-as-product design — a white, airy, information-rich surface that treats clarity as its highest aesthetic value. The page opens with a luminous white (`#ffffff`) background, near-black (`#0d0d0d",
+      "swatches": [
+        "#ffffff",
+        "#0d0d0d",
+        "#18e299",
+        "#d4fae8",
+        "#0fa76e",
+        "#c37d0d"
+      ]
+    },
+    {
+      "id": "miro",
+      "title": "Miro",
+      "category": "Design & Creative",
+      "summary": "Miro's website is a clean, collaborative-tool-forward platform that communicates \"visual thinking\" through generous whitespace, pastel accent colors, and a confident geometric font. The design uses a predominantly white canvas with near-bla",
+      "swatches": [
+        "#1c1c1e",
+        "#5b76fe",
+        "#00b473",
+        "#ffffff",
+        "#2a41b6",
+        "#ffc6c6"
+      ]
+    },
+    {
+      "id": "mission-control",
+      "title": "Mission Control Design System",
+      "category": "Developer Tools",
+      "summary": "A **deep space command center** — dark, information-dense, unambiguous. Every pixel earns its place. The aesthetic draws from NASA mission control rooms, SpaceX launch consoles, and ISRO's mission operations complex. Amber data on navy is t",
+      "swatches": [
+        "#0b1120",
+        "#111827",
+        "#1a2535",
+        "#1e3a5f",
+        "#ffb800",
+        "#00d4ff"
+      ]
+    },
+    {
+      "id": "mistral-ai",
+      "title": "Mistral AI",
+      "category": "AI & LLM",
+      "summary": "Mistral AI's interface is a sun-drenched landscape rendered in code — a warm, bold, unapologetically European design that trades the typical blue-screen AI aesthetic for golden amber, burnt orange, and the feeling of late-afternoon light in",
+      "swatches": [
+        "#fa520f",
+        "#ffd900",
+        "#ffa110",
+        "#fffaeb",
+        "#fb6424",
+        "#ff8105"
+      ]
+    },
+    {
+      "id": "modern",
+      "title": "Modern",
+      "category": "Modern & Minimal",
+      "summary": "Contemporary editorial style with serif typography, minimal palettes, and clean layouts for polished digital products.",
+      "swatches": [
+        "#553f83",
+        "#111111",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "mongodb",
+      "title": "MongoDB",
+      "category": "Backend & Data",
+      "summary": "MongoDB's website is a deep-forest-meets-terminal experience — a design system rooted in the darkest teal-black (`#001e2b`) that evokes both the density of a database and the depth of a forest canopy. Against this near-black canvas, a strik",
+      "swatches": [
+        "#001e2b",
+        "#00ed64",
+        "#b8c4c2",
+        "#00684a",
+        "#006cfa",
+        "#3860be"
+      ]
+    },
+    {
+      "id": "mono",
+      "title": "Mono",
+      "category": "Modern & Minimal",
+      "summary": "Monospace-driven, matrix-inspired design with high-contrast elements, compact density, and a hacker-chic aesthetic.",
+      "swatches": [
+        "#37f712",
+        "#00a6f4",
+        "#00a63d",
+        "#fe9900",
+        "#ff2157",
+        "#e7e5e4"
+      ]
+    },
+    {
+      "id": "neobrutalism",
+      "title": "Neobrutalism",
+      "category": "Bold & Expressive",
+      "summary": "Modern take on brutalism with bold borders, vivid accent colors, and raw, high-contrast layouts on warm surfaces.",
+      "swatches": [
+        "#fdc800",
+        "#432dd7",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#fbfbf9"
+      ]
+    },
+    {
+      "id": "neon",
+      "title": "Neon",
+      "category": "Morphism & Effects",
+      "summary": "Electric neon glow effects with high-contrast color pairings for bold, attention-grabbing interfaces.",
+      "swatches": [
+        "#bbf351",
+        "#00bcff",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "neumorphism",
+      "title": "Neumorphism",
+      "category": "Morphism & Effects",
+      "summary": "Soft, extruded UI elements with inner and outer shadows on monochromatic surfaces for a tactile, embedded look.",
+      "swatches": [
+        "#006666",
+        "#f1f2f5",
+        "#00a63d",
+        "#fe9900",
+        "#ff2157",
+        "#e7e5e4"
+      ]
+    },
+    {
+      "id": "nike",
+      "title": "Nike",
+      "category": "E-Commerce & Retail",
+      "summary": "Nike.com is a kinetic retail cathedral — a site that channels the explosive energy of sport into a digital shopping experience. The design operates on a principle of radical simplicity: strip everything back to black, white, and grey so tha",
+      "swatches": [
+        "#111111",
+        "#000000",
+        "#ffffff",
+        "#fafafa",
+        "#f5f5f5",
+        "#e5e5e5"
+      ]
+    },
+    {
+      "id": "notion",
+      "title": "Notion",
+      "category": "Productivity & SaaS",
+      "summary": "Notion's website embodies the philosophy of the tool itself: a blank canvas that gets out of your way. The design system is built on warm neutrals rather than cold grays, creating a distinctly approachable minimalism that feels like quality",
+      "swatches": [
+        "#ffffff",
+        "#f6f5f4",
+        "#31302e",
+        "#615d59",
+        "#a39e98",
+        "#0075de"
+      ]
+    },
+    {
+      "id": "nvidia",
+      "title": "NVIDIA",
+      "category": "Media & Consumer",
+      "summary": "NVIDIA's website is a high-contrast, technology-forward experience that communicates raw computational power through design restraint. The page is built on a stark black (`#000000`) and white (`#ffffff`) foundation, punctuated by NVIDIA's s",
+      "swatches": [
+        "#000000",
+        "#ffffff",
+        "#76b900",
+        "#bff230",
+        "#df6500",
+        "#ef9100"
+      ]
+    },
+    {
+      "id": "ollama",
+      "title": "Ollama",
+      "category": "AI & LLM",
+      "summary": "Ollama's interface is radical minimalism taken to its logical conclusion — a pure-white void where content floats without decoration, shadow, or color. The design philosophy mirrors the product itself: strip away everything unnecessary unti",
+      "swatches": [
+        "#000000",
+        "#ffffff",
+        "#262626",
+        "#090909",
+        "#fafafa",
+        "#e5e5e5"
+      ]
+    },
+    {
+      "id": "openai",
+      "title": "OpenAI",
+      "category": "AI & LLM",
+      "summary": "OpenAI's product surface reads like a research lab dressed for the public — clinical, restrained, deliberately quiet. The page background is a true white (`#ffffff`) layered against a near-black ink (`#0d0d0d`) with a subtle teal undertone,",
+      "swatches": [
+        "#ffffff",
+        "#0d0d0d",
+        "#e5e5e5",
+        "#1a1a1a",
+        "#fafafa",
+        "#f5f5f5"
+      ]
+    },
+    {
+      "id": "opencode-ai",
+      "title": "OpenCode",
+      "category": "AI & LLM",
+      "summary": "OpenCode's website embodies a terminal-native, monospace-first aesthetic that reflects its identity as an open source AI coding agent. The entire visual system is built on a stark dark-on-light contrast using a near-black background (`#201d",
+      "swatches": [
+        "#201d1d",
+        "#fdfcfc",
+        "#9a9898",
+        "#007aff",
+        "#ff3b30",
+        "#30d158"
+      ]
+    },
+    {
+      "id": "pacman",
+      "title": "Pacman",
+      "category": "Themed & Unique",
+      "summary": "Retro arcade-inspired design with pixel fonts, dotted borders, playful high-contrast colors, and 8-bit game aesthetics.",
+      "swatches": [
+        "#2a3fe5",
+        "#f4b9b0",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#000000"
+      ]
+    },
+    {
+      "id": "paper",
+      "title": "Paper",
+      "category": "Retro & Nostalgic",
+      "summary": "Paper-textured, print-inspired design with minimal colors, clean serif/sans typography, and tactile surface qualities.",
+      "swatches": [
+        "#111111",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "perspective",
+      "title": "Perspective",
+      "category": "Layout & Structure",
+      "summary": "Spatial depth design with isometric views, vanishing points, and layered elements that guide attention through 3D-like realism.",
+      "swatches": [
+        "#00bd7d",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff",
+        "#111827"
+      ]
+    },
+    {
+      "id": "pinterest",
+      "title": "Pinterest",
+      "category": "Media & Consumer",
+      "summary": "Pinterest's website is a warm, inspiration-driven canvas that treats visual discovery like a lifestyle magazine. The design operates on a soft, slightly warm white background with Pinterest Red (`#e60023`) as the singular, bold brand accent",
+      "swatches": [
+        "#e60023",
+        "#91918c",
+        "#62625b",
+        "#e5e5e0",
+        "#211922",
+        "#103c25"
+      ]
+    },
+    {
+      "id": "playstation",
+      "title": "PlayStation",
+      "category": "Media & Consumer",
+      "summary": "PlayStation.com carries itself like the marketing wing of a premium consumer-electronics brand that happens to sell entertainment. The page is organized as a **vertical channel of alternating surfaces**: a near-black masthead and hero, a se",
+      "swatches": [
+        "#1eaedb",
+        "#0070cc",
+        "#d53b00",
+        "#000000",
+        "#ffffff",
+        "#1883fd"
+      ]
+    },
+    {
+      "id": "posthog",
+      "title": "PostHog",
+      "category": "Backend & Data",
+      "summary": "PostHog's website feels like a startup's internal wiki that escaped into the wild — warm, irreverent, and deliberately anti-corporate. The background isn't the expected crisp white or dark void of developer tools; it's a warm, sage-tinted c",
+      "swatches": [
+        "#fdfdf8",
+        "#f54e00",
+        "#1e1f23",
+        "#bfc1b7",
+        "#eeefe9",
+        "#4d4f46"
+      ]
+    },
+    {
+      "id": "premium",
+      "title": "Premium",
+      "category": "Professional & Corporate",
+      "summary": "Apple-inspired premium aesthetic with precise spacing, modern typography, and a refined, polished visual language.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "professional",
+      "title": "Professional",
+      "category": "Professional & Corporate",
+      "summary": "Polished, business-ready design with modern typography, structured layouts, and a trustworthy visual identity.",
+      "swatches": [
+        "#fece14",
+        "#000000",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "publication",
+      "title": "Publication",
+      "category": "Creative & Artistic",
+      "summary": "Print-inspired visual language for books, magazines, and reports with editorial grids and expressive typography.",
+      "swatches": [
+        "#a855f7",
+        "#0a1829",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "raycast",
+      "title": "Raycast",
+      "category": "Developer Tools",
+      "summary": "Raycast's marketing site feels like the dark interior of a precision instrument — a Swiss watch case carved from obsidian. The background isn't just dark, it's an almost-black blue-tint (`#07080a`) that creates a sense of being inside a mac",
+      "swatches": [
+        "#07080a",
+        "#ff6363",
+        "#ffffff",
+        "#55b3ff",
+        "#5fc992",
+        "#ffbc33"
+      ]
+    },
+    {
+      "id": "refined",
+      "title": "Refined",
+      "category": "Modern & Minimal",
+      "summary": "Carefully curated, modern minimal style with elegant serif typography and understated, sophisticated palettes.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "renault",
+      "title": "Renault",
+      "category": "Automotive",
+      "summary": "Renault's website is a vibrant digital showroom that balances French automotive elegance with bold, forward-leaning energy — a departure from the monochromatic austerity of German or Italian luxury brands. The page opens with a full-screen ",
+      "swatches": [
+        "#efdf00",
+        "#1883fd",
+        "#000000",
+        "#ffffff",
+        "#f8eb4c",
+        "#d9d9d6"
+      ]
+    },
+    {
+      "id": "replicate",
+      "title": "Replicate",
+      "category": "AI & LLM",
+      "summary": "Replicate's interface is a developer playground crackling with creative energy — a bold, high-contrast design that feels more like a music festival poster than a typical API platform. The hero section explodes with a vibrant orange-red-mage",
+      "swatches": [
+        "#ea2804",
+        "#202020",
+        "#2b9a66",
+        "#000",
+        "#dd4425",
+        "#24292e"
+      ]
+    },
+    {
+      "id": "resend",
+      "title": "Resend",
+      "category": "Productivity & SaaS",
+      "summary": "Resend's website is a dark, cinematic canvas that treats email infrastructure like a luxury product. The entire page is draped in pure black (`#000000`) with text that glows in near-white (`#f0f0f0`), creating a theater-like experience wher",
+      "swatches": [
+        "#000000",
+        "#f0f0f0",
+        "#ffffff",
+        "#ff5900",
+        "#ff801f",
+        "#ffa057"
+      ]
+    },
+    {
+      "id": "retro",
+      "title": "Retro",
+      "category": "Retro & Nostalgic",
+      "summary": "Throwback design with vintage-inspired typography, high-contrast retro palettes, and nostalgic visual elements.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "revolut",
+      "title": "Revolut",
+      "category": "Fintech & Crypto",
+      "summary": "Revolut's website is fintech confidence distilled into pixels — a design system that communicates \"your money is in capable hands\" through massive typography, generous whitespace, and a disciplined neutral palette. The visual language is bu",
+      "swatches": [
+        "#e23b4a",
+        "#ec7e00",
+        "#00a87e",
+        "#494fdf",
+        "#e61e49",
+        "#191c1f"
+      ]
+    },
+    {
+      "id": "runwayml",
+      "title": "Runway",
+      "category": "AI & LLM",
+      "summary": "Runway's interface is a cinematic reel brought to life as a website — a dark, editorial, film-production-grade design where full-bleed photography and video ARE the primary UI elements. This is not a typical tech product page; it's a visual",
+      "swatches": [
+        "#767d88",
+        "#7d848e",
+        "#000000",
+        "#030303",
+        "#1a1a1a",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "sanity",
+      "title": "Sanity",
+      "category": "Backend & Data",
+      "summary": "Sanity's website is a developer-content platform rendered as a nocturnal command center -- dark, precise, and deeply structured. The entire experience sits on a near-black canvas (`#0b0b0b`) that reads less like a \"dark mode toggle\" and mor",
+      "swatches": [
+        "#0b0b0b",
+        "#212121",
+        "#353535",
+        "#797979",
+        "#b9b9b9",
+        "#ededed"
+      ]
+    },
+    {
+      "id": "sentry",
+      "title": "Sentry",
+      "category": "Backend & Data",
+      "summary": "Sentry's website is a dark-mode-first developer tool interface that speaks the language of code editors and terminal windows. The entire aesthetic is rooted in deep purple-black backgrounds (`#1f1633`, `#150f23`) that evoke the late-night d",
+      "swatches": [
+        "#1f1633",
+        "#150f23",
+        "#c2ef4e",
+        "#79628c",
+        "#362d59",
+        "#6a5fc1"
+      ]
+    },
+    {
+      "id": "shadcn",
+      "title": "Shadcn",
+      "category": "Modern & Minimal",
+      "summary": "Shadcn/ui-inspired design with minimal, clean components, monochrome palette, and utility-first patterns.",
+      "swatches": [
+        "#000000",
+        "#111111",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "shopify",
+      "title": "Shopify",
+      "category": "E-Commerce & Retail",
+      "summary": "Shopify.com is a dark-first digital theatre — a website that stages its commerce platform like a cinematic premiere. The entire experience unfolds against an abyss of near-black surfaces that carry the faintest whisper of deep forest green ",
+      "swatches": [
+        "#02090a",
+        "#061a1c",
+        "#102620",
+        "#36f4a4",
+        "#c1fbd4",
+        "#d4f9e0"
+      ]
+    },
+    {
+      "id": "simple",
+      "title": "Simple",
+      "category": "Modern & Minimal",
+      "summary": "Straightforward, no-frills design with clean typography, neutral colors, and intuitive layouts that stay out of the way.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "skeumorphism",
+      "title": "Skeumorphism",
+      "category": "Morphism & Effects",
+      "summary": "Real-world mimicry with textured surfaces, 3D effects, and familiar physical metaphors for intuitive digital interfaces.",
+      "swatches": [
+        "#fa3c00",
+        "#f08321",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "slack",
+      "title": "Slack",
+      "category": "Productivity & SaaS",
+      "summary": "Slack's identity is built around the idea that work should feel human and even a little fun. The canonical surface is **light** — white content areas with a deep aubergine (`#4A154B`) sidebar — the inverse of dark-first tools. This contrast",
+      "swatches": [
+        "#4a154b",
+        "#ffffff",
+        "#f8f8f8",
+        "#350d36",
+        "#611f69",
+        "#36c5f0"
+      ]
+    },
+    {
+      "id": "sleek",
+      "title": "Sleek",
+      "category": "Modern & Minimal",
+      "summary": "Modern minimalist aesthetic with clean lines, intentional color palette, subtle interactions, and consistent spacing.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "spacex",
+      "title": "SpaceX",
+      "category": "Media & Consumer",
+      "summary": "SpaceX's website is a full-screen cinematic experience that treats aerospace engineering like a film — every section is a scene, every photograph is a frame, and the interface disappears entirely behind the imagery. The design is pure black",
+      "swatches": [
+        "#000000",
+        "#f0f0fa"
+      ]
+    },
+    {
+      "id": "spacious",
+      "title": "Spacious",
+      "category": "Layout & Structure",
+      "summary": "Generous whitespace, consistent padding, and grid-based layouts for clean, readable, and breathing interfaces.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "spotify",
+      "title": "Spotify",
+      "category": "Media & Consumer",
+      "summary": "Spotify's web interface is a dark, immersive music player that wraps listeners in a near-black cocoon (`#121212`, `#181818`, `#1f1f1f`) where album art and content become the primary source of color. The design philosophy is \"content-first ",
+      "swatches": [
+        "#121212",
+        "#181818",
+        "#1f1f1f",
+        "#1ed760",
+        "#f3727f",
+        "#ffa42b"
+      ]
+    },
+    {
+      "id": "starbucks",
+      "title": "Starbucks",
+      "category": "E-Commerce & Retail",
+      "summary": "Starbucks' design system is a **warm, confident retail flagship** wearing the green of their storefront apron across every surface. The canvas alternates between a neutral-warm cream (`#f2f0eb`) and a ceramic off-white (`#edebe9`) — colors ",
+      "swatches": [
+        "#f2f0eb",
+        "#edebe9",
+        "#006241",
+        "#cba258",
+        "#00754a",
+        "#1e3932"
+      ]
+    },
+    {
+      "id": "storytelling",
+      "title": "Storytelling",
+      "category": "Creative & Artistic",
+      "summary": "Narrative-driven design using visuals, copy, and interaction to guide users through engaging, emotionally resonant journeys.",
+      "swatches": [
+        "#3b82f6",
+        "#8b5cf6",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "stripe",
+      "title": "Stripe",
+      "category": "Fintech & Crypto",
+      "summary": "Stripe's website is the gold standard of fintech design -- a system that manages to feel simultaneously technical and luxurious, precise and warm. The page opens on a clean white canvas (`#ffffff`) with deep navy headings (`#061b31`) and a ",
+      "swatches": [
+        "#ffffff",
+        "#061b31",
+        "#533afd",
+        "#ea2261",
+        "#f96bee",
+        "#1c1e54"
+      ]
+    },
+    {
+      "id": "supabase",
+      "title": "Supabase",
+      "category": "Backend & Data",
+      "summary": "Supabase's website is a dark-mode-native developer platform that channels the aesthetic of a premium code editor — deep black backgrounds (`#0f0f0f`, `#171717`) with emerald green accents (`#3ecf8e`, `#00c573`) that reference the brand's op",
+      "swatches": [
+        "#0f0f0f",
+        "#171717",
+        "#3ecf8e",
+        "#00c573",
+        "#898989",
+        "#fafafa"
+      ]
+    },
+    {
+      "id": "superhuman",
+      "title": "Superhuman",
+      "category": "Developer Tools",
+      "summary": "Superhuman's website feels like opening a luxury envelope — predominantly white, immaculately clean, with a single dramatic gesture of color that commands attention. The hero section is a cinematic purple gradient, a deep twilight wash of `",
+      "swatches": [
+        "#1b1938",
+        "#e9e5dd",
+        "#cbb7fb",
+        "#292827",
+        "#714cb6",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "tesla",
+      "title": "Tesla",
+      "category": "Automotive",
+      "summary": "Tesla's website is an exercise in radical subtraction — a digital showroom where the product is everything and the interface is almost nothing. The page opens with a full-viewport hero that fills the entire screen with cinematic car photogr",
+      "swatches": [
+        "#3e6ae1",
+        "#ffffff",
+        "#f4f4f4",
+        "#171a20",
+        "#393c41",
+        "#5c5e62"
+      ]
+    },
+    {
+      "id": "tetris",
+      "title": "Tetris",
+      "category": "Themed & Unique",
+      "summary": "Classic block-game inspired design with playful colors, bold display fonts, and compact, high-energy layouts.",
+      "swatches": [
+        "#1c202b",
+        "#7107e7",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#dfe7ff"
+      ]
+    },
+    {
+      "id": "theverge",
+      "title": "The Verge",
+      "category": "Media & Consumer",
+      "summary": "The Verge's 2024 redesign feels like somebody wired a Condé Nast magazine to a chiptune soundboard. The canvas is almost-black (`#131313`), the headlines are built from a brutally heavy display face (Manuka) that runs up to 107px, and the w",
+      "swatches": [
+        "#131313",
+        "#3cffd0",
+        "#5200ff",
+        "#ffffff",
+        "#2d2d2d",
+        "#309875"
+      ]
+    },
+    {
+      "id": "together-ai",
+      "title": "Together AI",
+      "category": "AI & LLM",
+      "summary": "Together AI's interface is a pastel-gradient dreamscape built for enterprise AI infrastructure — a design that somehow makes GPU clusters and model inference feel light, airy, and optimistic. The hero section blooms with soft pink-blue-lave",
+      "swatches": [
+        "#010120",
+        "#ef2cc1",
+        "#fc4c02",
+        "#bdbbff",
+        "#00000066",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "totality-festival",
+      "title": "Totality Festival",
+      "category": "Themed & Unique",
+      "summary": "\"Cosmic Premium\" — the visceral tension and awe of a solar eclipse. The aesthetic blends the stark mystery of deep space with the explosive brilliance of the solar corona. Surfaces appear as translucent obsidian slabs floating over nebula-l",
+      "swatches": [
+        "#121318",
+        "#38393f",
+        "#0d0e13",
+        "#1a1b21",
+        "#1e1f25",
+        "#292a2f"
+      ]
+    },
+    {
+      "id": "trading-terminal",
+      "title": "Trading Terminal Design System",
+      "category": "Themed & Unique",
+      "summary": "A professional-grade financial data terminal. Dense, information-rich layouts designed for traders who need to monitor multiple markets simultaneously. Dark surfaces reduce eye strain during long sessions. Cyan accent (#00D4AA) signals posi",
+      "swatches": [
+        "#00d4aa",
+        "#ff4757",
+        "#0d0d0d",
+        "#141414",
+        "#1a1a1a",
+        "#2a2a2a"
+      ]
+    },
+    {
+      "id": "uber",
+      "title": "Uber",
+      "category": "Media & Consumer",
+      "summary": "Uber's design language is a masterclass in confident minimalism -- a black-and-white universe where every pixel serves a purpose and nothing decorates without earning its place. The entire experience is built on a stark duality: jet black (",
+      "swatches": [
+        "#000000",
+        "#ffffff",
+        "#e2e2e2",
+        "#f3f3f3",
+        "#efefef",
+        "#4b4b4b"
+      ]
+    },
+    {
+      "id": "urdu",
+      "title": "Urdu Modern (Indus Script System)",
+      "category": "Editorial / Personal / Publication",
+      "summary": "---",
+      "swatches": [
+        "#0f595e",
+        "#f4f1ea",
+        "#c05621",
+        "#1a202c",
+        "#4a5568",
+        "#e2e8f0"
+      ]
+    },
+    {
+      "id": "vercel",
+      "title": "Vercel",
+      "category": "Developer Tools",
+      "summary": "Vercel's website is the visual thesis of developer infrastructure made invisible — a design system so restrained it borders on philosophical. The page is overwhelmingly white (`#ffffff`) with near-black (`#171717`) text, creating a gallery-",
+      "swatches": [
+        "#ffffff",
+        "#171717",
+        "#ff5b4f",
+        "#de1d8d",
+        "#0a72ef",
+        "#000000"
+      ]
+    },
+    {
+      "id": "vibrant",
+      "title": "Vibrant",
+      "category": "Bold & Expressive",
+      "summary": "Lively, colorful design with bold playful typography, warm accents, and dynamic visual energy.",
+      "swatches": [
+        "#7c61d4",
+        "#eaae87",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "vintage",
+      "title": "Vintage",
+      "category": "Retro & Nostalgic",
+      "summary": "1950s-1990s nostalgia with skeuomorphic touches, grainy textures, retro color palettes, and pixel-style typography.",
+      "swatches": [
+        "#008080",
+        "#c0c0c0",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#000000"
+      ]
+    },
+    {
+      "id": "vodafone",
+      "title": "Vodafone",
+      "category": "Media & Consumer",
+      "summary": "Vodafone's corporate web system carries the confident, broadcast-scale presence of a global telecom brand — built around a single, fiercely-owned brand red and a restrained, editorial layout that lets imagery and type carry the emotional we",
+      "swatches": [
+        "#e60000",
+        "#25282b",
+        "#ffffff",
+        "#3860be",
+        "#ac1811",
+        "#f2f2f2"
+      ]
+    },
+    {
+      "id": "voltagent",
+      "title": "VoltAgent",
+      "category": "AI & LLM",
+      "summary": "VoltAgent's interface is a deep-space command terminal for the AI age — a developer-facing darkness built on near-pure-black surfaces (`#050507`) where the only interruption is the electric pulse of emerald green energy. The entire experien",
+      "swatches": [
+        "#050507",
+        "#00d992",
+        "#3d3a39",
+        "#8b949e",
+        "#b8b3b0",
+        "#2fd6a1"
+      ]
+    },
+    {
+      "id": "warm-editorial",
+      "title": "Warm Editorial",
+      "category": "Starter",
+      "summary": "",
+      "swatches": [
+        "#faf7f2",
+        "#1c1a17",
+        "#c0512f",
+        "#2f5b4f",
+        "#8a817a",
+        "#ffffff"
+      ]
+    },
+    {
+      "id": "warp",
+      "title": "Warp",
+      "category": "Developer Tools",
+      "summary": "Warp's website feels like sitting at a campfire in a deep forest — warm, dark, and alive with quiet confidence. Unlike the cold, blue-tinted blacks favored by most developer tools, Warp wraps everything in a warm near-black that feels like ",
+      "swatches": [
+        "#faf9f6",
+        "#353534",
+        "#868584",
+        "#afaeac",
+        "#666469",
+        "#454545"
+      ]
+    },
+    {
+      "id": "webex",
+      "title": "Webex",
+      "category": "Productivity & SaaS",
+      "summary": "Webex is cleaner, friendlier, and more product-led than Cisco corporate while still living inside the same trust-oriented universe. The brand language combines bright white canvases with dark in-product surfaces, then anchors interaction ar",
+      "swatches": [
+        "#1170cf",
+        "#0353a8",
+        "#063a75",
+        "#64b4fa",
+        "#000000f2",
+        "#000000b3"
+      ]
+    },
+    {
+      "id": "webflow",
+      "title": "Webflow",
+      "category": "Design & Creative",
+      "summary": "Webflow's website is a visually rich, tool-forward platform that communicates \"design without code\" through clean white surfaces, the signature Webflow Blue (`#146ef5`), and a rich secondary color palette (purple, pink, green, orange, yello",
+      "swatches": [
+        "#146ef5",
+        "#080808",
+        "#7a3dff",
+        "#ed52cb",
+        "#00d722",
+        "#ff6b00"
+      ]
+    },
+    {
+      "id": "wired",
+      "title": "WIRED",
+      "category": "Media & Consumer",
+      "summary": "WIRED's homepage feels like a printed broadsheet that someone has plugged into a wall socket. The grid is dense, the rules are thin, the type is loud, and almost every surface is paper-white or pure black with no rounded corners and no deco",
+      "swatches": [
+        "#057dbc",
+        "#000000",
+        "#1a1a1a",
+        "#ffffff",
+        "#e2e8f0",
+        "#757575"
+      ]
+    },
+    {
+      "id": "wise",
+      "title": "Wise",
+      "category": "Fintech & Crypto",
+      "summary": "Wise's website is a bold, confident fintech platform that communicates \"money without borders\" through massive typography and a distinctive lime-green accent. The design operates on a warm off-white canvas with near-black text (`#0e0f0c`) a",
+      "swatches": [
+        "#0e0f0c",
+        "#9fe870",
+        "#163300",
+        "#e2f6d5",
+        "#cdffad",
+        "#054d28"
+      ]
+    },
+    {
+      "id": "x-ai",
+      "title": "xAI",
+      "category": "AI & LLM",
+      "summary": "xAI's website is a masterclass in dark-first, monospace-driven brutalist minimalism -- a design system that feels like it was built by engineers who understand that restraint is the ultimate form of sophistication. The entire experience is ",
+      "swatches": [
+        "#1f2228",
+        "#ffffff",
+        "#000000"
+      ]
+    },
+    {
+      "id": "xiaohongshu",
+      "title": "Xiaohongshu",
+      "category": "Media & Consumer",
+      "summary": "Xiaohongshu (小红书 / RED) is the visual opposite of a SaaS console. Open the app and you do not see \"Xiaohongshu\" — you see other people's breakfasts, hotel sofas, the lipstick they bought on the third try. That is by design. The entire UI tr",
+      "swatches": [
+        "#ffffff",
+        "#f5f5f5",
+        "#ff2442",
+        "#ff2e4d",
+        "#fdbc5f",
+        "#fafafa"
+      ]
+    },
+    {
+      "id": "zapier",
+      "title": "Zapier",
+      "category": "Productivity & SaaS",
+      "summary": "Zapier's website radiates warm, approachable professionalism. It rejects the cold monochrome minimalism of developer tools in favor of a cream-tinted canvas (`#fffefb`) that feels like unbleached paper -- the digital equivalent of a well-or",
+      "swatches": [
+        "#fffefb",
+        "#201515",
+        "#ff4f00",
+        "#c5c0b1",
+        "#939084",
+        "#eceae3"
+      ]
+    }
+  ]
+}
