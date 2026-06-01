@@ -4,6 +4,38 @@ When the user has no brand, offer these 5 directions, then bind the chosen one's
 OKLch palette + font stack to the artifact's CSS `:root`. Deterministic — never
 improvise colors. Keep the directions visually distinct.
 
+## Three dials (set before binding a direction)
+
+A direction picks the palette and type; the dials pick how the artifact uses them.
+Set all three before writing the artifact, then state them in the plan. They are how
+the "embody the specialist" choice becomes concrete and repeatable instead of taste-by-feel.
+
+- **`DESIGN_VARIANCE` (1-10)** — layout experimentation. 1 = symmetric, centered, predictable grid; 10 = asymmetric, masonry, large empty zones. Above 4, avoid the centered-hero default unless the brief is a manifesto / launch.
+- **`MOTION_INTENSITY` (1-10)** — animation depth. 1 = static, hover/active only; 10 = scroll-driven choreography. Any motion above 3 must honor `prefers-reduced-motion`. If you claim motion above 4, the artifact must actually move; if you cannot ship working motion in scope, drop the dial and ship clean and static.
+- **`VISUAL_DENSITY` (1-10)** — information per viewport. 1 = gallery-airy, huge gaps; 10 = cockpit, hairline-separated data, mono numerics for every figure.
+
+Every animation must be motivated (hierarchy, storytelling, feedback, or state change).
+"It looked cool" is not a reason. Motion you cannot justify in one sentence gets cut.
+
+### Dial defaults per direction (starting point, adjust to the brief)
+
+| Direction | VARIANCE | MOTION | DENSITY |
+|---|---|---|---|
+| Editorial Monocle | 6 | 3 | 3 |
+| Modern Minimal | 5 | 4 | 3 |
+| Warm Soft | 6 | 5 | 3 |
+| Tech Utility | 3 | 4 | 8 |
+| Brutalist Experimental | 9 | 4 | 4 |
+
+### Surface overrides (when the brief names a surface)
+
+| Surface | VARIANCE | MOTION | DENSITY |
+|---|---|---|---|
+| Slide deck | 4 | 3 | 3 |
+| Landing page | 7 | 6 | 4 |
+| Mobile prototype | 5 | 5 | 4 |
+| Dashboard | 3 | 3 | 8 |
+
 ## Editorial Monocle
 - **Label:** Editorial — Monocle / FT magazine
 - **Mood:** Print-magazine feel. Generous whitespace, large serif headlines, restrained palette of off-white paper + ink + a single warm accent. Confident, quietly intelligent.
