@@ -7,8 +7,10 @@ reveal already built.
 
 ## Set up the deck (notebook-level)
 Set `metadata.jute_deck` on the notebook: `{ theme: "minimal-light", aspect: "16:9",
-title: "<deck title>", author?: "<name>" }`. (More themes arrive in M2b; the 3
-built-ins are `minimal-light`, `minimal-dark`, `spur-brand`.)
+title: "<deck title>", author?: "<name>" }`. Built-in themes: `minimal-light`, `minimal-dark`,
+`spur-brand`, plus the 5 ported Open Design directions — `editorial-monocle`,
+`modern-minimal`, `warm-soft`, `tech-utility`, `brutalist` (OKLch palettes + font
+stacks from `references/directions.md`).
 
 ## One cell per slide
 - `notebook_insert_cell(kind="markdown", source="...")` for prose slides (the common case);
