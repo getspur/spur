@@ -70,6 +70,11 @@ radios beats 30 minutes of redirects. Lock the brief before building.
   native Jute deck instead: see `references/deck-mode.md` (one cell per slide +
   `jute_deck` metadata via `set_cell_metadata`). The bullets below are for non-deck,
   single-HTML artifacts.
+  - **Polished / branded decks** (magazine, launch, investor pitch, a named taste, or
+    "make it look designed") escalate to the **artifact track**: see
+    `references/deck-artifact.md` (Open Design's fixed-canvas `deck-skeleton.html` + one
+    of 51 vendored themes, rendered as a single `text/html` cell). Native deck mode stays
+    the default; escalate only on an explicit polish/brand signal.
 - `notebook_insert_cell(kind="code", source="# open-design artifact")` to create
   the cell.
 - `notebook_write_cell(id, source, expected_version)` where the cell, when
