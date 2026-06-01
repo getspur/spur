@@ -20,7 +20,7 @@ import {
   useState,
 } from "react";
 
-import type { DaemonControlResponse, DatasourceEntry } from "@/bindings";
+import type { DatasourceEntry } from "@/bindings";
 import {
   addApiDatasourceCommand,
   attachDatasourceCommand,
@@ -143,7 +143,7 @@ export default function DatasourceSidebar() {
         const response = await daemonControl(
           addApiDatasourceCommand({ name, source }),
         );
-        const entry = datasourceEntryFromResponseIncludingApiTables(response);
+        const entry = datasourceEntryFromDaemonControlResponse(response);
         setEntries((current) => upsertDatasourceEntry(current, entry));
         setApiModalOpen(false);
       } catch (caught) {
@@ -178,7 +178,7 @@ export default function DatasourceSidebar() {
       .then((response) => {
         if (disposed) return;
         const nextEntries =
-          datasourceEntriesFromResponseIncludingApiTables(response);
+          datasourceEntriesFromDaemonControlResponse(response);
         entriesRef.current = nextEntries;
         setEntries(nextEntries);
       })
@@ -192,7 +192,7 @@ export default function DatasourceSidebar() {
       void listen("datasources://changed", (event) => {
         try {
           const nextEntries =
-            datasourceEntriesFromEventPayloadIncludingApiTables(event.payload);
+            datasourceEntriesFromEventPayload(event.payload);
           entriesRef.current = nextEntries;
           setEntries(nextEntries);
         } catch (caught) {
@@ -533,116 +533,6 @@ function DatasourceColumnRow({
       <span className="truncate text-gray-700">{column.name}</span>
       <span className="truncate text-gray-400">{column.sqlType}</span>
     </div>
-  );
-}
-
-function datasourceEntryFromResponseIncludingApiTables(
-  response: DaemonControlResponse,
-): DatasourceEntry {
-  try {
-    return datasourceEntryFromDaemonControlResponse(response);
-  } catch (caught) {
-    if (
-      response.ok &&
-      response.result?.type === "datasource" &&
-      isDatasourceEntryIncludingApiTables(response.result.data)
-    ) {
-      return response.result.data;
-    }
-    throw caught;
-  }
-}
-
-function datasourceEntriesFromResponseIncludingApiTables(
-  response: DaemonControlResponse,
-): DatasourceEntry[] {
-  try {
-    return datasourceEntriesFromDaemonControlResponse(response);
-  } catch (caught) {
-    if (
-      response.ok &&
-      response.result?.type === "datasources" &&
-      datasourceEntriesFromUnknownIncludingApiTables(response.result.data)
-    ) {
-      return response.result.data;
-    }
-    throw caught;
-  }
-}
-
-function datasourceEntriesFromEventPayloadIncludingApiTables(
-  payload: unknown,
-): DatasourceEntry[] {
-  try {
-    return datasourceEntriesFromEventPayload(payload);
-  } catch (caught) {
-    if (datasourceEntriesFromUnknownIncludingApiTables(payload)) {
-      return payload;
-    }
-    throw caught;
-  }
-}
-
-function datasourceEntriesFromUnknownIncludingApiTables(
-  value: unknown,
-): value is DatasourceEntry[] {
-  return (
-    Array.isArray(value) && value.every(isDatasourceEntryIncludingApiTables)
-  );
-}
-
-function isDatasourceEntryIncludingApiTables(
-  value: unknown,
-): value is DatasourceEntry {
-  if (typeof value !== "object" || value === null) return false;
-
-  const candidate = value as Partial<DatasourceEntry>;
-  return (
-    typeof candidate.name === "string" &&
-    typeof candidate.path === "string" &&
-    isDatasourceKind(candidate.kind) &&
-    (candidate.group === null || typeof candidate.group === "string") &&
-    Array.isArray(candidate.columns) &&
-    candidate.columns.every(isDatasourceColumn) &&
-    (candidate.rowCount === null || typeof candidate.rowCount === "number") &&
-    Array.isArray(candidate.tables) &&
-    candidate.tables.every(isDatasourceTable)
-  );
-}
-
-function isDatasourceKind(value: unknown): value is DatasourceEntry["kind"] {
-  return (
-    value === "csv" ||
-    value === "parquet" ||
-    value === "json" ||
-    value === "duck_db" ||
-    value === "sqlite" ||
-    value === "api_tables"
-  );
-}
-
-function isDatasourceColumn(
-  value: unknown,
-): value is DatasourceEntry["columns"][number] {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as DatasourceEntry["columns"][number]).name === "string" &&
-    typeof (value as DatasourceEntry["columns"][number]).sqlType === "string"
-  );
-}
-
-function isDatasourceTable(
-  value: unknown,
-): value is DatasourceEntry["tables"][number] {
-  if (typeof value !== "object" || value === null) return false;
-
-  const candidate = value as Partial<DatasourceEntry["tables"][number]>;
-  return (
-    typeof candidate.name === "string" &&
-    Array.isArray(candidate.columns) &&
-    candidate.columns.every(isDatasourceColumn) &&
-    (candidate.rowCount === null || typeof candidate.rowCount === "number")
   );
 }
 
