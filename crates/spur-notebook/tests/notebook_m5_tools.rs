@@ -318,6 +318,7 @@ impl MockNotebook {
                                 last_edited_by: cell.last_edited_by.clone(),
                                 datasource_setup: None,
                                 dag: None,
+                                code_type: None,
                             }),
                             jute_deck: None,
                             other: Default::default(),

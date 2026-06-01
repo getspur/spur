@@ -237,6 +237,43 @@ pub struct SpurCellMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub dag: Option<CellDagMetadata>,
+
+    /// Language label used to route this code cell to a kernel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub code_type: Option<CodeType>,
+}
+
+/// Per-cell code language label persisted under `cell.metadata.spur.code_type`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum CodeType {
+    /// Python code routed to the `python3` kernelspec.
+    Python,
+    /// JavaScript code routed to the `deno` kernelspec.
+    Javascript,
+    /// Rust code routed to the `evcxr` kernelspec.
+    Rust,
+}
+
+/// Return the kernelspec name for a per-cell code type.
+pub fn kernelspec_for(code_type: CodeType) -> &'static str {
+    match code_type {
+        CodeType::Python => "python3",
+        CodeType::Javascript => "deno",
+        CodeType::Rust => "evcxr",
+    }
+}
+
+/// Return the per-cell code type for a kernelspec name.
+pub fn code_type_for_spec(spec_name: &str) -> Option<CodeType> {
+    match spec_name {
+        "python3" => Some(CodeType::Python),
+        "deno" => Some(CodeType::Javascript),
+        "evcxr" => Some(CodeType::Rust),
+        _ => None,
+    }
 }
 
 /// Reactive DAG metadata persisted under `cell.metadata.spur.dag`.
@@ -714,6 +751,64 @@ mod tests {
             serialized["cells"][0]["metadata"]["spur"]["dag"]["source"]["port"],
             "raw"
         );
+    }
+
+    #[test]
+    fn spur_code_type_survives_round_trip_and_omits_when_absent() {
+        let json = r#"
+            {
+                "metadata": {},
+                "nbformat_minor": 5,
+                "nbformat": 4,
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "metadata": {
+                            "spur": {
+                                "version": 7,
+                                "code_type": "javascript"
+                            }
+                        },
+                        "source": "await Promise.resolve(1)",
+                        "execution_count": null,
+                        "outputs": []
+                    },
+                    {
+                        "cell_type": "code",
+                        "id": "550e8400-e29b-41d4-a716-446655440001",
+                        "metadata": {
+                            "spur": {
+                                "version": 8
+                            }
+                        },
+                        "source": "x = 1",
+                        "execution_count": null,
+                        "outputs": []
+                    }
+                ]
+            }
+        "#;
+
+        let notebook: NotebookRoot = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_value(&notebook).unwrap();
+        assert_eq!(
+            serialized["cells"][0]["metadata"]["spur"]["code_type"],
+            "javascript"
+        );
+        assert!(serialized["cells"][1]["metadata"]["spur"]
+            .as_object()
+            .unwrap()
+            .get("code_type")
+            .is_none());
+
+        assert_eq!(kernelspec_for(CodeType::Python), "python3");
+        assert_eq!(kernelspec_for(CodeType::Javascript), "deno");
+        assert_eq!(kernelspec_for(CodeType::Rust), "evcxr");
+        assert_eq!(code_type_for_spec("python3"), Some(CodeType::Python));
+        assert_eq!(code_type_for_spec("deno"), Some(CodeType::Javascript));
+        assert_eq!(code_type_for_spec("evcxr"), Some(CodeType::Rust));
+        assert_eq!(code_type_for_spec("unknown"), None);
     }
 
     #[test]

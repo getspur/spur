@@ -389,6 +389,7 @@ impl NotebookStore {
                         last_edited_by: None,
                         datasource_setup: None,
                         dag: None,
+                        code_type: None,
                     }
                 });
                 spur.dag = Some(patch);
@@ -416,6 +417,7 @@ impl NotebookStore {
                         last_edited_by: None,
                         datasource_setup: None,
                         dag: None,
+                        code_type: None,
                     }
                 });
                 spur.datasource_setup = Some(true);
@@ -731,6 +733,7 @@ pub(crate) fn merge_authoritative_spur_metadata_for_save(
                 last_edited_by: authoritative_spur.last_edited_by.clone(),
                 datasource_setup: authoritative_spur.datasource_setup,
                 dag: None,
+                code_type: authoritative_spur.code_type,
             }
         });
 
@@ -739,6 +742,9 @@ pub(crate) fn merge_authoritative_spur_metadata_for_save(
         }
         if let Some(dag) = authoritative_spur.dag.clone() {
             target_spur.dag = Some(dag);
+        }
+        if let Some(code_type) = authoritative_spur.code_type {
+            target_spur.code_type = Some(code_type);
         }
         if target_spur.last_edited_by.is_none() {
             target_spur.last_edited_by = authoritative_spur.last_edited_by.clone();
@@ -836,11 +842,13 @@ fn set_cell_spur_metadata(cell: &mut Cell, version: u64, last_edited_by: Option<
         .as_ref()
         .and_then(|spur| spur.datasource_setup);
     let previous_dag = metadata.spur.as_ref().and_then(|spur| spur.dag.clone());
+    let previous_code_type = metadata.spur.as_ref().and_then(|spur| spur.code_type);
     metadata.spur = Some(crate::backend::notebook::SpurCellMetadata {
         version,
         last_edited_by: last_edited_by.or(previous_last_edited_by),
         datasource_setup: previous_datasource_setup,
         dag: previous_dag,
+        code_type: previous_code_type,
     });
 }
 
@@ -937,6 +945,7 @@ mod tests {
                     last_edited_by: None,
                     datasource_setup: None,
                     dag: None,
+                    code_type: None,
                 }),
                 jute_deck: None,
                 other: Map::new(),
