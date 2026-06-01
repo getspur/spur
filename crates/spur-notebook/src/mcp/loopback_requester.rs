@@ -109,6 +109,8 @@ struct InsertCellParams {
     source: String,
     #[serde(default, alias = "lastEditedBy")]
     last_edited_by: Option<String>,
+    #[serde(default, alias = "codeType")]
+    code_type: Option<jute::backend::notebook::CodeType>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +191,7 @@ fn command_from_bridge_method(
                 after_id: params.after_id,
                 source: params.source,
                 last_edited_by: params.last_edited_by,
+                code_type: params.code_type,
             })
         }
         "notebook.load" => {
@@ -256,8 +259,9 @@ fn bridge_cell_kind(kind: &str) -> Result<CellKind, BridgeError> {
     match kind {
         "code" => Ok(CellKind::Code),
         "markdown" => Ok(CellKind::Markdown),
+        "raw" => Ok(CellKind::Raw),
         _ => Err(invalid_params(
-            "notebook.insert_cell kind must be code or markdown",
+            "notebook.insert_cell kind must be code, markdown, or raw",
         )),
     }
 }

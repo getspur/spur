@@ -58,6 +58,18 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
 
     match provisioning_target_for_spec(&params.spec_name) {
         KernelspecProvisioningTarget::Deno => ensure_deno_kernelspec().await,
+        KernelspecProvisioningTarget::NotYetSupported => {
+            return Err(McpError::invalid_params(
+                format!(
+                    "notebook.start_kernel does not support kernelspec {} yet",
+                    params.spec_name
+                ),
+                Some(json!({
+                    "code": "kernelspec_not_supported",
+                    "spec_name": params.spec_name,
+                })),
+            ));
+        }
         KernelspecProvisioningTarget::Python3 => {
             let app = deps.app.as_ref().ok_or_else(|| {
                 McpError::internal_error("notebook.start_kernel requires a Tauri app handle", None)
@@ -93,12 +105,14 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KernelspecProvisioningTarget {
     Deno,
+    NotYetSupported,
     Python3,
 }
 
 fn provisioning_target_for_spec(spec_name: &str) -> KernelspecProvisioningTarget {
     match spec_name {
         "deno" => KernelspecProvisioningTarget::Deno,
+        "evcxr" => KernelspecProvisioningTarget::NotYetSupported,
         _ => KernelspecProvisioningTarget::Python3,
     }
 }
@@ -164,6 +178,30 @@ mod tests {
         assert_eq!(
             provisioning_target_for_spec("custom"),
             KernelspecProvisioningTarget::Python3
+        );
+    }
+
+    #[test]
+    fn evcxr_spec_reports_not_yet_supported_provisioning() {
+        assert_eq!(
+            provisioning_target_for_spec("evcxr"),
+            KernelspecProvisioningTarget::NotYetSupported
+        );
+    }
+
+    #[tokio::test]
+    async fn evcxr_start_kernel_returns_not_supported_signal() {
+        let error = call(
+            &deps_without_notebook(),
+            json!({ "spec_name": "evcxr", "slot_id": "notebook:/tmp/demo.ipynb#evcxr" }),
+        )
+        .await
+        .expect_err("evcxr is not supported yet");
+
+        assert!(error.message.contains("does not support kernelspec evcxr"));
+        assert_eq!(
+            error.data.and_then(|data| data.get("code").cloned()),
+            Some(json!("kernelspec_not_supported"))
         );
     }
 }

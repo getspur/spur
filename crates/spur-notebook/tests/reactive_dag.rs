@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use spur_notebook::{
     dag::{
-        engine::{CellRunOutcome, CellRunner, EngineError},
+        engine::{CellRunOutcome, CellRunner, EngineError, KernelEnsureRequest},
         CellRunReport, CellRunRequest, CellRunStatus, PortStore, ReactiveEngine,
         ReactiveEngineClient, SourcePush,
     },
@@ -150,6 +150,13 @@ impl CellRunner for StoreBackedRunner {
             }
         })
     }
+
+    fn ensure_kernel<'a>(
+        &'a self,
+        _request: KernelEnsureRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[derive(Default)]
@@ -228,6 +235,7 @@ fn code_cell(id: &str, source: &str, version: u64, dag: CellDagMetadata) -> Cell
                 last_edited_by: None,
                 datasource_setup: None,
                 dag: Some(dag),
+                code_type: None,
             }),
             jute_deck: None,
             other: Map::new(),

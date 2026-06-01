@@ -22,7 +22,7 @@ use crate::{
     backend::{
         commands::{self, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
-        notebook::{CellDagMetadata, NotebookRoot},
+        notebook::{CellDagMetadata, CodeType, NotebookRoot},
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
     ports::{notebook_port_root, wrap_js_cell, wrap_python_cell},
@@ -39,7 +39,6 @@ pub mod venv;
 type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
 type BeforeSaveHook = dyn Fn(&Path, &mut NotebookRoot) + Send + Sync;
-const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 
 /// Snapshot of a stable kernel slot for agent read-side tools.
 #[derive(Debug, Clone, Serialize)]
@@ -259,6 +258,9 @@ pub enum DaemonControlCommand {
         after_id: Option<String>,
         source: String,
         last_edited_by: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        code_type: Option<CodeType>,
     },
     /// Load a notebook from disk into the authoritative store.
     #[serde(rename = "load")]
@@ -728,6 +730,7 @@ async fn handle_daemon_control_inner(
             after_id,
             source,
             last_edited_by,
+            code_type,
         } => {
             if matches!(after_id.as_deref(), Some("")) {
                 return Err(DaemonControlResponse::failure(
@@ -741,6 +744,7 @@ async fn handle_daemon_control_inner(
                     after_id,
                     source,
                     last_edited_by,
+                    code_type,
                 })
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
@@ -811,6 +815,23 @@ async fn handle_daemon_control_inner(
                     .apply(NotebookOp::SetSpurDagMetadata {
                         id,
                         patch: dag,
+                        expected_version,
+                    })
+                    .map(DaemonControlResult::Delta)
+                    .map_err(store_error_response);
+            }
+            if let Some(code_type) = patch.get("spur").and_then(|spur| spur.get("code_type")) {
+                let code_type =
+                    serde_json::from_value::<CodeType>(code_type.clone()).map_err(|error| {
+                        DaemonControlResponse::failure(
+                            "invalid_params",
+                            format!("invalid spur code_type metadata patch: {error}"),
+                        )
+                    })?;
+                return notebook
+                    .apply(NotebookOp::SetSpurCodeTypeMetadata {
+                        id,
+                        code_type,
                         expected_version,
                     })
                     .map(DaemonControlResult::Delta)
@@ -1427,25 +1448,19 @@ pub async fn save_to_disk(
 
 /// Run a code cell in a Jupyter kernel.
 pub async fn run_cell_events(
+    notebook_path: &str,
     kernel_id: &str,
     code: &str,
     state: &State,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
     let conn = kernel_connection_for_slot(state, kernel_id)?;
     let spec_name = spec_name_for_slot(state, kernel_id)?;
-    let wrapped_code = wrap_cell_for_kernel(kernel_id, &spec_name, code);
+    let wrapped_code = wrap_cell_for_kernel(notebook_path, &spec_name, code);
     commands::run_cell(&conn, &wrapped_code).await
 }
 
-fn port_root_for_kernel_id(kernel_id: &str) -> PathBuf {
-    let path = kernel_id
-        .strip_prefix(NOTEBOOK_SLOT_PREFIX)
-        .unwrap_or(kernel_id);
-    notebook_port_root(path)
-}
-
-fn wrap_cell_for_kernel(kernel_id: &str, spec_name: &str, code: &str) -> String {
-    let root = port_root_for_kernel_id(kernel_id);
+fn wrap_cell_for_kernel(notebook_path: &str, spec_name: &str, code: &str) -> String {
+    let root = notebook_port_root(notebook_path);
     if spec_name == "deno" {
         wrap_js_cell(root, code)
     } else {
@@ -1462,12 +1477,13 @@ pub async fn interrupt_kernel_slot(kernel_id: &str, state: &State) -> Result<(),
 /// Run a code cell in a Jupyter kernel.
 #[tauri::command]
 pub async fn run_cell(
+    notebook_path: &str,
     kernel_id: &str,
     code: &str,
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
-    let rx = run_cell_events(kernel_id, code, &state).await?;
+    let rx = run_cell_events(notebook_path, kernel_id, code, &state).await?;
     while let Ok(event) = rx.recv().await {
         if on_event.send(event).is_err() {
             break;
@@ -1499,7 +1515,7 @@ mod tests {
 
     use super::*;
     use crate::backend::notebook::{
-        Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
+        Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource, MultilineString,
         NotebookMetadata, PortSpec, SpurCellMetadata,
     };
     use crate::notebook_store::DeltaKind;
@@ -1525,6 +1541,7 @@ mod tests {
                         last_edited_by: None,
                         datasource_setup: None,
                         dag: None,
+                        code_type: None,
                     }),
                     jute_deck: None,
                     other: Default::default(),
@@ -1562,7 +1579,7 @@ mod tests {
     #[test]
     fn run_cell_chokepoint_wraps_python_code_with_port_bootstrap() {
         let wrapped = wrap_cell_for_kernel(
-            "notebook:/tmp/demo-notebook.ipynb",
+            "/tmp/demo-notebook.ipynb",
             "python3",
             "spur.put('sales', [1, 2])",
         );
@@ -1575,7 +1592,7 @@ mod tests {
     #[test]
     fn run_cell_chokepoint_wraps_deno_code_with_port_bootstrap() {
         let wrapped = wrap_cell_for_kernel(
-            "notebook:/tmp/demo-notebook.ipynb",
+            "/tmp/demo-notebook.ipynb",
             "deno",
             "await spur.put('sales', [{ id: 1 }]);",
         );
@@ -1586,12 +1603,34 @@ mod tests {
     }
 
     #[test]
-    fn run_cell_chokepoint_wraps_raw_code_once() {
-        let wrapped = wrap_cell_for_kernel(
-            "notebook:/tmp/demo-notebook.ipynb",
-            "python3",
-            "spur.get('sales')",
+    fn run_cell_chokepoint_uses_same_port_root_for_same_notebook_across_specs() {
+        let notebook_path = "/tmp/demo-notebook.ipynb";
+        let python = wrap_cell_for_kernel(notebook_path, "python3", "spur.get('sales')");
+        let deno = wrap_cell_for_kernel(notebook_path, "deno", "await spur.get('sales');");
+        let expected_root_literal =
+            serde_json::to_string(&notebook_port_root(notebook_path).display().to_string())
+                .expect("port root literal serializes");
+        let forked_root_literal = serde_json::to_string(
+            &notebook_port_root(format!("{notebook_path}#deno"))
+                .display()
+                .to_string(),
+        )
+        .expect("forked port root literal serializes");
+
+        assert_ne!(
+            expected_root_literal.as_bytes(),
+            forked_root_literal.as_bytes()
         );
+        assert!(python.contains(&expected_root_literal));
+        assert!(deno.contains(&expected_root_literal));
+        assert!(!python.contains(&forked_root_literal));
+        assert!(!deno.contains(&forked_root_literal));
+    }
+
+    #[test]
+    fn run_cell_chokepoint_wraps_raw_code_once() {
+        let wrapped =
+            wrap_cell_for_kernel("/tmp/demo-notebook.ipynb", "python3", "spur.get('sales')");
 
         assert_eq!(wrapped.matches("class _Spur").count(), 1);
         assert_eq!(wrapped.matches("spur = _Spur").count(), 1);
@@ -1926,6 +1965,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_set_cell_metadata_spur_code_type_patch_sets_metadata() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_source("initial", 1));
+        let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "set_cell_metadata",
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "patch": {
+                "spur": {
+                    "code_type": "rust"
+                }
+            },
+            "expected_version": 1
+        }))
+        .unwrap();
+
+        let response = handle_daemon_control_request(request, &state).await;
+        let result = response.into_result().unwrap();
+        let DaemonControlResult::Delta(NotebookDelta {
+            kind: DeltaKind::CellWritten { cell },
+            version,
+            ..
+        }) = result
+        else {
+            panic!("expected cellWritten delta");
+        };
+        assert_eq!(cell.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(cell.code_type, Some(CodeType::Rust));
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        let spur = cell.metadata.spur.as_ref().expect("spur metadata present");
+        assert_eq!(spur.version, version);
+        assert_eq!(spur.code_type, Some(CodeType::Rust));
+    }
+
+    #[tokio::test]
     async fn save_coordinator_preserves_authoritative_spur_dag_when_frontend_export_is_stale() {
         let dir = std::env::temp_dir().join(format!("jute-save-dag-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2034,6 +2114,7 @@ mod tests {
                 after_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
                 source: "notes".to_string(),
                 last_edited_by: Some("brain".to_string()),
+                code_type: None,
             })
             .unwrap();
         let DeltaKind::CellInserted { cell, .. } = delta.kind else {
@@ -2150,6 +2231,7 @@ mod tests {
                 after_id: Some(cell_id.clone()),
                 source: "notes".to_string(),
                 last_edited_by: Some("brain".to_string()),
+                code_type: None,
             }),
         )
         .await

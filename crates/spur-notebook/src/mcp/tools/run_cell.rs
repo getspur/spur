@@ -20,6 +20,7 @@ const RUN_CELL_EVENT_NAME: &str = "notebook://run_cell_event";
 #[derive(Debug, Deserialize)]
 struct RunCellParams {
     cell_id: String,
+    notebook_path: String,
     #[serde(default)]
     kernel_id: Option<String>,
     code: String,
@@ -38,9 +39,10 @@ pub fn tool() -> Tool {
         ),
         rmcp_object(json!({
             "type": "object",
-            "required": ["cell_id", "code"],
+            "required": ["cell_id", "notebook_path", "code"],
             "properties": {
                 "cell_id": { "type": "string", "minLength": 1 },
+                "notebook_path": { "type": "string", "minLength": 1 },
                 "kernel_id": { "type": "string" },
                 "code": { "type": "string" },
                 "expected_version": { "type": "integer", "minimum": 1 }
@@ -53,13 +55,19 @@ pub fn tool() -> Tool {
 pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
     let params: RunCellParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
-            "notebook.run_cell requires { cell_id, kernel_id?, code }",
+            "notebook.run_cell requires { cell_id, notebook_path, kernel_id?, code }",
             Some(json!({ "error": error.to_string() })),
         )
     })?;
     if params.cell_id.is_empty() {
         return Err(McpError::invalid_params(
             "notebook.run_cell cell_id must not be empty",
+            None,
+        ));
+    }
+    if params.notebook_path.is_empty() {
+        return Err(McpError::invalid_params(
+            "notebook.run_cell notebook_path must not be empty",
             None,
         ));
     }
@@ -72,7 +80,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     ensure_code_cell(state, &params.cell_id)?;
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
 
-    let rx = run_cell_events(&kernel_id, &params.code, state)
+    let rx = run_cell_events(&params.notebook_path, &kernel_id, &params.code, state)
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -314,6 +322,7 @@ mod tests {
                         last_edited_by: None,
                         datasource_setup: None,
                         dag: None,
+                        code_type: None,
                     }),
                     jute_deck: None,
                     other: Map::new(),
@@ -350,6 +359,7 @@ mod tests {
                         last_edited_by: None,
                         datasource_setup: None,
                         dag: None,
+                        code_type: None,
                     }),
                     jute_deck: None,
                     other: Map::new(),
@@ -374,7 +384,12 @@ mod tests {
         let deps = deps_with_state(Arc::new(State::new()));
         let error = call(
             &deps,
-            json!({ "cell_id": "code-1", "kernel_id": "missing", "code": "1+1" }),
+            json!({
+                "cell_id": "code-1",
+                "notebook_path": "/tmp/test.ipynb",
+                "kernel_id": "missing",
+                "code": "1+1"
+            }),
         )
         .await
         .expect_err("missing slot reports error");
@@ -390,7 +405,12 @@ mod tests {
         let deps = deps_with_state(state);
         let error = call(
             &deps,
-            json!({ "cell_id": "code-1", "kernel_id": "", "code": "" }),
+            json!({
+                "cell_id": "code-1",
+                "notebook_path": "/tmp/test.ipynb",
+                "kernel_id": "",
+                "code": ""
+            }),
         )
         .await
         .expect_err("empty kernel_id needs a default notebook slot");
@@ -415,6 +435,7 @@ mod tests {
             &deps,
             json!({
                 "cell_id": "code-1",
+                "notebook_path": "/tmp/test.ipynb",
                 "kernel_id": "missing",
                 "code": "print('new')",
                 "expected_version": 99
@@ -442,6 +463,7 @@ mod tests {
             &deps,
             json!({
                 "cell_id": "markdown-1",
+                "notebook_path": "/tmp/test.ipynb",
                 "kernel_id": "missing",
                 "code": "print('new')"
             }),
@@ -465,6 +487,7 @@ mod tests {
         let deps = deps_with_state(Arc::clone(&state));
         let params = RunCellParams {
             cell_id: "code-1".to_string(),
+            notebook_path: "/tmp/test.ipynb".to_string(),
             kernel_id: Some("kernel-1".to_string()),
             code: "print('new')".to_string(),
             expected_version: None,

@@ -1,5 +1,6 @@
 export * from "./DaemonControlError";
 export * from "./DaemonCell";
+export * from "./CodeType";
 export * from "./Column";
 export * from "./Output";
 export * from "./ClearOutput";

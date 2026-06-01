@@ -10,6 +10,7 @@ import type {
   Cell,
   CellDagMetadata,
   CellMetadata,
+  CodeType,
   DaemonCell,
   JuteDeckCellMetadata,
   NotebookDelta,
@@ -56,6 +57,7 @@ export type NotebookCellState = {
   lastEditedBy?: string;
   datasourceSetup?: boolean;
   dagMetadata?: CellDagMetadata;
+  codeType?: CodeType;
   juteDeckMetadata?: JuteDeckCellMetadata;
   cellMetadataOther?: Record<string, unknown>;
   result?: CellResult;
@@ -645,6 +647,7 @@ function loadNotebookRootDraft(
         lastEditedBy: spur?.last_edited_by,
         datasourceSetup: spur?.datasource_setup,
         dagMetadata: spur?.dag,
+        codeType: spur?.code_type,
         juteDeckMetadata: jute_deck,
         cellMetadataOther:
           Object.keys(cellMetadataOther).length > 0
@@ -698,6 +701,7 @@ function applyDaemonCellSnapshotDraft(
       lastEditedBy: cell.lastEditedBy ?? undefined,
       datasourceSetup: cell.datasourceSetup ?? undefined,
       dagMetadata: cell.dagMetadata,
+      codeType: cell.codeType,
       juteDeckMetadata: cell.juteDeckMetadata,
       cellMetadataOther: cell.metadataOther,
     };
@@ -710,6 +714,7 @@ function applyDaemonCellSnapshotDraft(
   existing.lastEditedBy = cell.lastEditedBy ?? undefined;
   existing.datasourceSetup = cell.datasourceSetup ?? undefined;
   existing.dagMetadata = cell.dagMetadata;
+  existing.codeType = cell.codeType;
   existing.juteDeckMetadata = cell.juteDeckMetadata;
   existing.cellMetadataOther = cell.metadataOther;
 }
@@ -1016,6 +1021,7 @@ export class Notebook {
             cell.lastEditedBy,
             cell.datasourceSetup,
             cell.dagMetadata,
+            cell.codeType,
             cell.juteDeckMetadata,
             cell.cellMetadataOther,
           ),
@@ -1030,6 +1036,7 @@ export class Notebook {
             cell.lastEditedBy,
             cell.datasourceSetup,
             cell.dagMetadata,
+            cell.codeType,
             cell.juteDeckMetadata,
             cell.cellMetadataOther,
           ),
@@ -1094,6 +1101,7 @@ export class Notebook {
       version: INITIAL_CELL_VERSION,
       lastEditedBy,
       datasourceSetup: undefined,
+      codeType: undefined,
     });
     return cellId;
   }
@@ -1103,6 +1111,7 @@ export class Notebook {
     type: CellType,
     initialText: string,
     lastEditedBy?: string,
+    codeType?: CodeType,
   ): string {
     const cellId = uuidv4();
     this.refs.set(cellId, {});
@@ -1115,6 +1124,7 @@ export class Notebook {
         version: INITIAL_CELL_VERSION,
         lastEditedBy,
         datasourceSetup: undefined,
+        codeType,
       },
       afterId,
     );
@@ -1191,6 +1201,7 @@ export class Notebook {
     const datasourceSetup =
       patch.spur?.datasource_setup ?? cell.datasourceSetup;
     const dagMetadata = patch.spur?.dag ?? cell.dagMetadata;
+    const codeType = patch.spur?.code_type ?? cell.codeType;
 
     const nextVersion = cell.version + 1;
     this.applyLocalCellSnapshot(cellId, {
@@ -1198,6 +1209,7 @@ export class Notebook {
       juteDeckMetadata: merged,
       datasourceSetup,
       dagMetadata,
+      codeType,
       version: nextVersion,
       lastEditedBy: "brain",
     });
@@ -1305,6 +1317,10 @@ export class Notebook {
     );
 
     try {
+      const notebookPath = this.state.viewState.path;
+      if (!notebookPath) {
+        throw new Error("Notebook path is not available");
+      }
       const onEvent = new Channel<RunCellEvent>();
 
       onEvent.onmessage = (message: RunCellEvent) => {
@@ -1317,6 +1333,7 @@ export class Notebook {
       };
 
       await invoke("run_cell", {
+        notebookPath,
         kernelId: this.state.viewState.kernelId,
         code,
         onEvent,
@@ -1570,6 +1587,7 @@ function cellMetadata(
   lastEditedBy?: string,
   datasourceSetup?: boolean,
   dagMetadata?: CellDagMetadata,
+  codeType?: CodeType,
   juteDeckMetadata?: JuteDeckCellMetadata,
   other?: Record<string, unknown>,
 ): CellMetadata {
@@ -1580,6 +1598,7 @@ function cellMetadata(
       last_edited_by: lastEditedBy,
       datasource_setup: datasourceSetup,
       dag: dagMetadata,
+      code_type: codeType,
     },
   };
   if (juteDeckMetadata !== undefined) {

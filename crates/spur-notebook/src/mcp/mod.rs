@@ -179,6 +179,9 @@ impl ServerHandler for NotebookMcpServer {
             "notebook_run_cascade" => {
                 tools::notebook_run_cascade::call(&self.deps, arguments).await
             }
+            "notebook_set_cell_code_type" => {
+                tools::notebook_set_cell_code_type::call(&self.deps, arguments).await
+            }
             "notebook_set_dag_metadata" => {
                 tools::notebook_set_dag_metadata::call(&self.deps, arguments).await
             }
