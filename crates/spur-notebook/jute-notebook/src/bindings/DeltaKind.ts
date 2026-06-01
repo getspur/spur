@@ -2,7 +2,6 @@
 import type { DaemonCell } from "./DaemonCell";
 import type { NotebookRoot } from "./NotebookRoot";
 import type { RunCellEvent } from "./RunCellEvent";
-import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
  * Kind of store mutation represented by a [`NotebookDelta`].
@@ -43,13 +42,6 @@ export type DeltaKind =
        * Applied run event.
        */
       event: RunCellEvent;
-    }
-  | {
-      type: "dagStatusChanged";
-      /**
-       * Full DAG status snapshot for frontend reducers.
-       */
-      snapshot: JsonValue;
     }
   | {
       type: "loaded";

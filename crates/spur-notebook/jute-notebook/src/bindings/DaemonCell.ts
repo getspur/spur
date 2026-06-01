@@ -16,6 +16,7 @@ export type DaemonCell = {
   dagMetadata?: CellDagMetadata;
   codeType?: CodeType;
   juteDeckMetadata?: JuteDeckCellMetadata;
+  metadataOther?: Record<string, JsonValue>;
   source: string;
   execCount: number | null;
   status: string;
