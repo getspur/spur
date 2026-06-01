@@ -799,6 +799,31 @@ mod tests {
     }
 
     #[test]
+    fn open_design_deck_artifact_track() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("open-design", &fake).unwrap();
+        assert!(
+            body.contains("references/deck-artifact.md"),
+            "SKILL.md must route polished/branded decks to the artifact track"
+        );
+        let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/skills/open-design/references/deck-artifact.md");
+        let text = std::fs::read_to_string(&refs).expect("deck-artifact.md must exist");
+        for marker in [
+            "deck-skeleton.html",
+            "index.json",
+            "text/html",
+            "SLOT:",
+            "native",
+        ] {
+            assert!(
+                text.contains(marker),
+                "deck-artifact.md must document `{marker}`"
+            );
+        }
+    }
+
+    #[test]
     fn open_design_critique_has_deck_checks() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/skills/open-design/references");
@@ -811,6 +836,23 @@ mod tests {
             assert!(
                 critique.contains(marker),
                 "deck checks must cover `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn open_design_critique_has_artifact_deck_checks() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/skills/open-design/references");
+        let critique = std::fs::read_to_string(dir.join("critique.md")).unwrap();
+        assert!(
+            critique.contains("Artifact-deck checks"),
+            "critique.md must include artifact-deck checks"
+        );
+        for marker in ["scale-to-fit", "slot", "16:9", "verbatim framework"] {
+            assert!(
+                critique.contains(marker),
+                "artifact-deck checks must cover `{marker}`"
             );
         }
     }
