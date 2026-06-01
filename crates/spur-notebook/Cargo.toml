@@ -45,6 +45,7 @@ uuid.workspace = true
 spur-acp = { path = "../spur-acp" }
 tauri = { version = "2.0.4", features = ["test"] }
 tempfile = "3"
+wiremock = "0.6"
 
 [build-dependencies]
 # Required for `tauri::generate_context!()` to embed the frontend dist into the
