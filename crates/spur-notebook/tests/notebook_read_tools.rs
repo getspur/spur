@@ -6,8 +6,8 @@ use std::time::Duration;
 use jute::state::{notebook_slot_id, KernelSlot, State};
 use jute::{
     backend::notebook::{
-        Cell, CellMetadata, CodeCell, MultilineString, NotebookMetadata, NotebookRoot,
-        SpurCellMetadata,
+        Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, MultilineString, NotebookMetadata,
+        NotebookRoot, PortSpec, SpurCellMetadata,
     },
     commands::{install_kernel_in_slot, start_local_kernel},
 };
@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 #[cfg(feature = "datasource-introspect")]
 use spur_notebook::mcp::tools::list_datasources;
 use spur_notebook::{
-    dag::{notebook_port_root, PortStore},
+    dag::{notebook_port_root, notebook_run_context, CellRunReport, CellRunStatus, PortStore},
     mcp::{
         bridge::{
             AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester, TauriBridgeRequester,
@@ -336,6 +336,15 @@ struct TestDenoKernelSpec {
     _temp_dir: tempfile::TempDir,
 }
 
+struct TestPythonDenoKernelSpecs {
+    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+    _home: EnvVarGuard,
+    _runtime_dir: EnvVarGuard,
+    _deno_path: EnvVarGuard,
+    _jupyter_path: EnvVarGuard,
+    _temp_dir: tempfile::TempDir,
+}
+
 async fn command_succeeds(command: &str, args: &[&str]) -> bool {
     let Ok(Ok(status)) = timeout(
         Duration::from_secs(120),
@@ -483,12 +492,76 @@ async fn install_test_python3_kernelspec_with(extra_packages: &[&str]) -> Option
         .tempdir()
         .expect("temp dir");
     let jupyter_root = temp_dir.path().join("jupyter");
+    write_test_python3_kernelspec(&jupyter_root, temp_dir.path(), extra_packages).await?;
+    let jupyter_path = EnvVarGuard::set("JUPYTER_PATH", jupyter_root.as_os_str());
+
+    Some(TestKernelSpec {
+        _env_lock: env_lock,
+        _jupyter_path: jupyter_path,
+        _temp_dir: temp_dir,
+    })
+}
+
+async fn install_test_python3_and_deno_kernelspecs(
+    extra_python_packages: &[&str],
+) -> Option<TestPythonDenoKernelSpecs> {
+    let Some(deno) = deno_binary_for_test() else {
+        eprintln!("skipping polyglot cascade test: deno binary is not available");
+        return None;
+    };
+    let deno_string = deno.to_string_lossy().into_owned();
+    if !command_succeeds(&deno_string, &["--version"]).await {
+        eprintln!(
+            "skipping polyglot cascade test: deno binary did not run: {}",
+            deno.display()
+        );
+        return None;
+    }
+
+    let env_lock = TEST_KERNELSPEC_ENV.lock().await;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-polyglot-kernelspec-")
+        .tempdir()
+        .expect("temp dir");
+    let home = temp_dir.path().join("home");
+    let runtime_dir = temp_dir.path().join("runtime");
+    let jupyter_root = temp_dir.path().join("jupyter");
+    tokio::fs::create_dir_all(&home).await.expect("home dir");
+    tokio::fs::create_dir_all(&runtime_dir)
+        .await
+        .expect("runtime dir");
+
+    let home = EnvVarGuard::set("HOME", home.as_os_str());
+    let runtime_dir = EnvVarGuard::set("JUPYTER_RUNTIME_DIR", runtime_dir.as_os_str());
+    let deno_path = EnvVarGuard::set("DENO_PATH", deno.as_os_str());
+    jute::kernel_provision::ensure_deno_kernelspec()
+        .await
+        .expect("deno kernelspec provisions");
+
+    write_test_python3_kernelspec(&jupyter_root, temp_dir.path(), extra_python_packages).await?;
+    let jupyter_path = EnvVarGuard::set("JUPYTER_PATH", jupyter_root.as_os_str());
+
+    Some(TestPythonDenoKernelSpecs {
+        _env_lock: env_lock,
+        _home: home,
+        _runtime_dir: runtime_dir,
+        _deno_path: deno_path,
+        _jupyter_path: jupyter_path,
+        _temp_dir: temp_dir,
+    })
+}
+
+async fn write_test_python3_kernelspec(
+    jupyter_root: &Path,
+    scratch_dir: &Path,
+    extra_packages: &[&str],
+) -> Option<()> {
     let kernelspec_dir = jupyter_root.join("kernels").join("python3");
     tokio::fs::create_dir_all(&kernelspec_dir)
         .await
         .expect("kernelspec dir");
     let python = std::env::var("PYTHON_PATH").unwrap_or_else(|_| "python3".to_string());
-    let site_packages = temp_dir.path().join("site-packages");
+    let site_packages = scratch_dir.join("site-packages");
     let mut packages = vec!["ipykernel"];
     packages.extend_from_slice(extra_packages);
     let mut modules = vec!["ipykernel", "zmq"];
@@ -548,13 +621,8 @@ async fn install_test_python3_kernelspec_with(extra_packages: &[&str]) -> Option
     )
     .await
     .expect("kernelspec writes");
-    let jupyter_path = EnvVarGuard::set("JUPYTER_PATH", jupyter_root.as_os_str());
 
-    Some(TestKernelSpec {
-        _env_lock: env_lock,
-        _jupyter_path: jupyter_path,
-        _temp_dir: temp_dir,
-    })
+    Some(())
 }
 
 fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
@@ -592,6 +660,58 @@ fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
                 })
             })
             .collect(),
+    }
+}
+
+fn notebook_with_dag_cells(cells: Vec<Cell>) -> NotebookRoot {
+    NotebookRoot {
+        metadata: NotebookMetadata {
+            kernelspec: None,
+            language_info: None,
+            orig_nbformat: None,
+            title: None,
+            authors: None,
+            jute_deck: None,
+            other: Default::default(),
+        },
+        nbformat_minor: 5,
+        nbformat: 4,
+        cells,
+    }
+}
+
+fn dag_code_cell(id: &str, source: &str, code_type: CodeType, dag: CellDagMetadata) -> Cell {
+    Cell::Code(CodeCell {
+        id: Some(id.to_string()),
+        metadata: CellMetadata {
+            spur: Some(SpurCellMetadata {
+                version: 1,
+                last_edited_by: None,
+                datasource_setup: None,
+                dag: Some(dag),
+                code_type: Some(code_type),
+            }),
+            jute_deck: None,
+            other: Default::default(),
+        },
+        source: MultilineString::Single(source.to_string()),
+        execution_count: None,
+        outputs: Vec::new(),
+    })
+}
+
+fn dag(produces: &[&str], consumes: &[&str]) -> CellDagMetadata {
+    CellDagMetadata {
+        produces: produces
+            .iter()
+            .map(|port| PortSpec {
+                port: (*port).to_string(),
+                repr: "arrow".to_string(),
+                display: None,
+            })
+            .collect(),
+        consumes: consumes.iter().map(|port| (*port).to_string()).collect(),
+        source: None,
     }
 }
 
@@ -766,6 +886,119 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
     );
 
     let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
+}
+
+/// Python+Deno cascade contract; run with
+/// `scripts/spur-cargo test -p spur-notebook --test notebook_read_tools polyglot_run_cascade_reads_python_port_from_deno -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "requires working python3 and Deno kernels; run with --ignored"]
+async fn polyglot_run_cascade_reads_python_port_from_deno() {
+    let Some(_kernelspecs) = install_test_python3_and_deno_kernelspecs(&["pyarrow"]).await else {
+        return;
+    };
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-polyglot-cascade-")
+        .tempdir()
+        .expect("temp dir");
+    let notebook_path = temp_dir.path().join("polyglot-cascade.ipynb");
+    let notebook_path_string = notebook_path.to_string_lossy().into_owned();
+    let root = notebook_with_dag_cells(vec![
+        dag_code_cell(
+            "python-source",
+            concat!(
+                "import pyarrow as pa\n",
+                "_ = spur.put('py_table', pa.table({\n",
+                "    'value': [41, 42],\n",
+                "    'label': ['alpha', 'beta'],\n",
+                "}))\n",
+            ),
+            CodeType::Python,
+            dag(&["py_table"], &[]),
+        ),
+        dag_code_cell(
+            "deno-consumer",
+            concat!(
+                "const table = spur.get('py_table');\n",
+                "if (table.numRows !== 2) {\n",
+                "  throw new Error(`expected 2 rows, got ${table.numRows}`);\n",
+                "}\n",
+                "const fields = table.schema.fields.map((field) => field.name).join(',');\n",
+                "if (fields !== 'value,label') {\n",
+                "  throw new Error(`unexpected fields: ${fields}`);\n",
+                "}\n",
+                "console.log(`python-port-ok:${table.numRows}:${fields}`);\n",
+            ),
+            CodeType::Javascript,
+            dag(&[], &["py_table"]),
+        ),
+    ]);
+    let state = Arc::new(State::new());
+    state.get_notebook().load(notebook_path.clone(), root);
+    let mut context = notebook_run_context(
+        &notebook_path,
+        Arc::clone(&state),
+        Arc::new(TauriBridgeRequester::without_app(Arc::new(
+            AgentBridge::new(),
+        ))),
+        None,
+        None,
+    );
+
+    let report = context
+        .engine
+        .run_cell_and_cascade("python-source")
+        .await
+        .expect("polyglot cascade succeeds");
+
+    assert_eq!(
+        report.runs,
+        vec![
+            CellRunReport::new("python-source", CellRunStatus::Succeeded),
+            CellRunReport::new("deno-consumer", CellRunStatus::Succeeded),
+        ]
+    );
+
+    let slot_id = notebook_slot_id(&notebook_path_string);
+    let python_slot_id = format!("{slot_id}#python3");
+    let deno_slot_id = format!("{slot_id}#deno");
+    let python_info = structured(
+        kernel_info::call(
+            context.deps.as_ref(),
+            json!({ "kernel_id": python_slot_id }),
+        )
+        .await
+        .expect("python kernel_info succeeds"),
+    );
+    let deno_info = structured(
+        kernel_info::call(context.deps.as_ref(), json!({ "kernel_id": deno_slot_id }))
+            .await
+            .expect("deno kernel_info succeeds"),
+    );
+    assert_eq!(python_info["spec_name"], "python3");
+    assert_ne!(python_info["status"], "dead");
+    assert_eq!(deno_info["spec_name"], "deno");
+    assert_ne!(deno_info["status"], "dead");
+
+    let store = PortStore::open_read_only_at(notebook_port_root(&notebook_path))
+        .expect("port store opens read-only");
+    let read = store
+        .get("py_table")
+        .expect("rust reads python-written port");
+    let row_count = read
+        .batches
+        .iter()
+        .map(arrow_array::RecordBatch::num_rows)
+        .sum::<usize>();
+    assert_eq!(row_count, 2);
+    assert_eq!(read.schema.field(0).name(), "value");
+    assert_eq!(read.schema.field(1).name(), "label");
+
+    let _ = stop_kernel::call(
+        context.deps.as_ref(),
+        json!({ "kernel_id": python_slot_id }),
+    )
+    .await;
+    let _ = stop_kernel::call(context.deps.as_ref(), json!({ "kernel_id": deno_slot_id })).await;
 }
 
 #[tokio::test]
