@@ -1,0 +1,189 @@
+# Derived from Nango providers.yaml (Elastic License 2.0) — see THIRD_PARTY_NOTICES; full file may replace this snapshot.
+stripe:
+  display_name: Stripe
+  categories:
+    - payments
+  auth_mode: API_KEY
+  proxy:
+    base_url: "${connectionConfig.stripe_base_url}"
+    headers:
+      authorization: "Bearer ${apiKey}"
+github:
+  display_name: GitHub
+  categories:
+    - devtools
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://api.github.com"
+    headers:
+      authorization: "Bearer ${apiKey}"
+linear:
+  display_name: Linear
+  categories:
+    - project-management
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://api.linear.app"
+    headers:
+      authorization: "${apiKey}"
+twilio:
+  display_name: Twilio
+  categories:
+    - communications
+  auth_mode: BASIC
+  proxy:
+    base_url: "https://api.twilio.com/2010-04-01"
+airtable:
+  display_name: Airtable
+  categories:
+    - databases
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://api.airtable.com/v0"
+    headers:
+      authorization: "Bearer ${apiKey}"
+square:
+  display_name: Square
+  categories:
+    - payments
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://connect.squareup.com/v2"
+    headers:
+      authorization: "Bearer ${apiKey}"
+sendgrid:
+  display_name: SendGrid
+  categories:
+    - communications
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://api.sendgrid.com/v3"
+    headers:
+      authorization: "Bearer ${apiKey}"
+zendesk:
+  display_name: Zendesk
+  categories:
+    - support
+  auth_mode: BASIC
+  proxy:
+    base_url: "https://${connectionConfig.zendesk_subdomain}.zendesk.com/api/v2"
+mailchimp:
+  display_name: Mailchimp
+  categories:
+    - marketing
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://${connectionConfig.mailchimp_datacenter}.api.mailchimp.com/3.0"
+    headers:
+      authorization: "Bearer ${apiKey}"
+algolia:
+  display_name: Algolia
+  categories:
+    - search
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://${connectionConfig.algolia_app_id}-dsn.algolia.net/1"
+    headers:
+      x-algolia-api-key: "${apiKey}"
+openai:
+  display_name: OpenAI
+  categories:
+    - ai
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://api.openai.com/v1"
+    headers:
+      authorization: "Bearer ${apiKey}"
+datadog:
+  display_name: Datadog
+  categories:
+    - monitoring
+  auth_mode: API_KEY
+  proxy:
+    base_url: "https://api.datadoghq.com/api/v1"
+    headers:
+      dd-api-key: "${apiKey}"
+shopify:
+  display_name: Shopify
+  categories:
+    - ecommerce
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://${connectionConfig.shopify_shop}.myshopify.com/admin/api/2024-10"
+notion:
+  display_name: Notion
+  categories:
+    - productivity
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://api.notion.com/v1"
+slack:
+  display_name: Slack
+  categories:
+    - communications
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://slack.com/api"
+hubspot:
+  display_name: HubSpot
+  categories:
+    - crm
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://api.hubapi.com"
+salesforce:
+  display_name: Salesforce
+  categories:
+    - crm
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "${connectionConfig.salesforce_instance_url}/services/data/v60.0"
+intercom:
+  display_name: Intercom
+  categories:
+    - support
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://api.intercom.io"
+asana:
+  display_name: Asana
+  categories:
+    - project-management
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://app.asana.com/api/1.0"
+google-calendar:
+  display_name: Google Calendar
+  categories:
+    - productivity
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://www.googleapis.com/calendar/v3"
+gmail:
+  display_name: Gmail
+  categories:
+    - communications
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://gmail.googleapis.com/gmail/v1"
+jira:
+  display_name: Jira
+  categories:
+    - project-management
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "${connectionConfig.jira_site_url}/rest/api/3"
+trello:
+  display_name: Trello
+  categories:
+    - project-management
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://api.trello.com/1"
+plaid:
+  display_name: Plaid
+  categories:
+    - banking
+  auth_mode: TWO_STEP
+  proxy:
+    base_url: "https://production.plaid.com"
