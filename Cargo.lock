@@ -11556,6 +11556,7 @@ dependencies = [
  "ts-rs",
  "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
