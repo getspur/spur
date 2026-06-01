@@ -16,6 +16,7 @@ use jute::{
     },
     commands::kernel_slot_info_for_state,
     notebook_store::{DeltaKind, NotebookDelta, NotebookStore},
+    state::{slot_id_for, slot_id_for_spec},
 };
 use serde_json::{json, Value};
 use tokio::{
@@ -653,18 +654,6 @@ where
         }
         Ok(downstream)
     }
-}
-
-fn slot_id_for(notebook_path: &str, code_type: CodeType) -> String {
-    slot_id_for_spec(notebook_path, kernelspec_for(code_type))
-}
-
-fn slot_id_for_spec(notebook_path: &str, spec_name: &str) -> String {
-    format!(
-        "{}#{}",
-        jute::state::notebook_slot_id(notebook_path),
-        spec_name
-    )
 }
 
 fn resolve_code_type(root: &NotebookRoot, code_type: Option<CodeType>) -> CodeType {

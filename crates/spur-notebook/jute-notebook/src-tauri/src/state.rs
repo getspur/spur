@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     backend::local::LocalKernel,
-    backend::notebook::{NotebookMetadata, NotebookRoot},
+    backend::notebook::{kernelspec_for, CodeType, NotebookMetadata, NotebookRoot},
     commands::{DatasourceEntry, SaveCoordinator},
     notebook_store::{merge_authoritative_spur_metadata_for_save, NotebookStore},
 };
@@ -258,6 +258,16 @@ pub(crate) const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 /// Derive the stable in-memory kernel slot ID for a notebook path.
 pub fn notebook_slot_id(path: &str) -> String {
     format!("{NOTEBOOK_SLOT_PREFIX}{path}")
+}
+
+/// Derive the per-notebook kernel slot ID for a per-cell code type.
+pub fn slot_id_for(path: &str, code_type: CodeType) -> String {
+    slot_id_for_spec(path, kernelspec_for(code_type))
+}
+
+/// Derive the per-notebook kernel slot ID for a kernelspec name.
+pub fn slot_id_for_spec(path: &str, spec_name: &str) -> String {
+    format!("{}#{spec_name}", notebook_slot_id(path))
 }
 
 /// Derive the fallback kernel slot ID for windows without a notebook path.

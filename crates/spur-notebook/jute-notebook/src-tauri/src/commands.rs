@@ -22,11 +22,13 @@ use crate::{
     backend::{
         commands::{self, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
-        notebook::{CellDagMetadata, CodeType, NotebookRoot},
+        notebook::{
+            code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType, NotebookRoot,
+        },
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
     ports::{notebook_port_root, wrap_js_cell, wrap_python_cell},
-    state::{notebook_slot_id, window_slot_id, KernelSlot, State},
+    state::{notebook_slot_id, slot_id_for, window_slot_id, KernelSlot, State},
     Error,
 };
 
@@ -1449,14 +1451,175 @@ pub async fn save_to_disk(
 /// Run a code cell in a Jupyter kernel.
 pub async fn run_cell_events(
     notebook_path: &str,
-    kernel_id: &str,
+    kernel_id: Option<&str>,
+    cell_id: &str,
     code: &str,
     state: &State,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
-    let conn = kernel_connection_for_slot(state, kernel_id)?;
-    let spec_name = spec_name_for_slot(state, kernel_id)?;
-    let wrapped_code = wrap_cell_for_kernel(notebook_path, &spec_name, code);
-    commands::run_cell(&conn, &wrapped_code).await
+    let dispatch = resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, code, state)?;
+    ensure_kernel_slot_live(
+        state,
+        &dispatch.slot_id,
+        &dispatch.spec_name,
+        dispatch.code_type,
+    )
+    .await?;
+    let conn = kernel_connection_for_slot(state, &dispatch.slot_id)?;
+    let spec_name = spec_name_for_slot(state, &dispatch.slot_id)?;
+    enforce_dispatch_spec(&dispatch.slot_id, &spec_name, dispatch.code_type)?;
+    commands::run_cell(&conn, &dispatch.wrapped_code).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunCellDispatch {
+    slot_id: String,
+    spec_name: String,
+    code_type: CodeType,
+    wrapped_code: String,
+}
+
+fn resolve_run_cell_dispatch(
+    notebook_path: &str,
+    supplied_kernel_id: Option<&str>,
+    cell_id: &str,
+    code: &str,
+    state: &State,
+) -> Result<RunCellDispatch, Error> {
+    let (root, _version) = state.get_notebook().snapshot();
+    let code_type = resolve_cell_code_type(&root, cell_id)?;
+    let spec_name = kernelspec_for(code_type).to_string();
+    let slot_id = slot_id_for(notebook_path, code_type);
+
+    if supplied_kernel_id.is_some_and(|kernel_id| kernel_id != slot_id) {
+        info!(
+            cell_id,
+            ?supplied_kernel_id,
+            resolved_slot_id = %slot_id,
+            "classic run_cell resolved kernel slot from cell code_type"
+        );
+    }
+
+    Ok(RunCellDispatch {
+        slot_id,
+        spec_name: spec_name.clone(),
+        code_type,
+        wrapped_code: wrap_cell_for_kernel(notebook_path, &spec_name, code),
+    })
+}
+
+fn resolve_cell_code_type(root: &NotebookRoot, cell_id: &str) -> Result<CodeType, Error> {
+    let cell = root
+        .cells
+        .iter()
+        .find(|cell| notebook_cell_id(cell) == Some(cell_id))
+        .ok_or_else(|| Error::NotebookDaemon(format!("cell not found: {cell_id}")))?;
+    let Cell::Code(code_cell) = cell else {
+        return Err(Error::NotebookDaemon(format!(
+            "cell is not a code cell: {cell_id}"
+        )));
+    };
+
+    Ok(code_cell
+        .metadata
+        .spur
+        .as_ref()
+        .and_then(|spur| spur.code_type)
+        .or_else(|| {
+            root.metadata
+                .kernelspec
+                .as_ref()
+                .and_then(|kernelspec| code_type_for_spec(&kernelspec.name))
+        })
+        .unwrap_or(CodeType::Python))
+}
+
+fn notebook_cell_id(cell: &Cell) -> Option<&str> {
+    match cell {
+        Cell::Raw(cell) => cell.id.as_deref(),
+        Cell::Markdown(cell) => cell.id.as_deref(),
+        Cell::Code(cell) => cell.id.as_deref(),
+    }
+}
+
+enum KernelSlotStatus {
+    Missing,
+    Empty,
+    Live,
+}
+
+fn kernel_slot_status(
+    state: &State,
+    slot_id: &str,
+    spec_name: &str,
+    code_type: CodeType,
+) -> Result<KernelSlotStatus, Error> {
+    let Some(slot) = state.kernels.get(slot_id) else {
+        return Ok(KernelSlotStatus::Missing);
+    };
+
+    enforce_dispatch_spec(slot_id, slot.spec_name(), code_type)?;
+    if slot.spec_name() != spec_name {
+        return Err(Error::NotebookDaemon(format!(
+            "refusing to run cell in slot {slot_id}: slot spec {:?} does not match resolved spec {:?}",
+            slot.spec_name(),
+            spec_name
+        )));
+    }
+
+    if slot.kernel.is_some() {
+        Ok(KernelSlotStatus::Live)
+    } else {
+        Ok(KernelSlotStatus::Empty)
+    }
+}
+
+async fn ensure_kernel_slot_live(
+    state: &State,
+    slot_id: &str,
+    spec_name: &str,
+    code_type: CodeType,
+) -> Result<(), Error> {
+    if matches!(
+        kernel_slot_status(state, slot_id, spec_name, code_type)?,
+        KernelSlotStatus::Live
+    ) {
+        return Ok(());
+    }
+
+    let mut kernel = start_local_kernel(spec_name).await?;
+    let status = match kernel_slot_status(state, slot_id, spec_name, code_type) {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = kernel.kill().await;
+            return Err(error);
+        }
+    };
+
+    match status {
+        KernelSlotStatus::Live => {
+            kernel.kill().await?;
+            Ok(())
+        }
+        KernelSlotStatus::Missing | KernelSlotStatus::Empty => {
+            install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
+            Ok(())
+        }
+    }
+}
+
+fn enforce_dispatch_spec(
+    slot_id: &str,
+    actual_spec_name: &str,
+    code_type: CodeType,
+) -> Result<(), Error> {
+    let expected_spec_name = kernelspec_for(code_type);
+    if actual_spec_name == expected_spec_name {
+        return Ok(());
+    }
+
+    Err(Error::NotebookDaemon(format!(
+        "refusing to run cell in slot {slot_id}: slot spec {actual_spec_name:?} does not match code_type {code_type:?} kernelspec {expected_spec_name:?}"
+    )))
 }
 
 fn wrap_cell_for_kernel(notebook_path: &str, spec_name: &str, code: &str) -> String {
@@ -1478,12 +1641,13 @@ pub async fn interrupt_kernel_slot(kernel_id: &str, state: &State) -> Result<(),
 #[tauri::command]
 pub async fn run_cell(
     notebook_path: &str,
-    kernel_id: &str,
+    kernel_id: Option<String>,
+    cell_id: &str,
     code: &str,
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
-    let rx = run_cell_events(notebook_path, kernel_id, code, &state).await?;
+    let rx = run_cell_events(notebook_path, kernel_id.as_deref(), cell_id, code, &state).await?;
     while let Ok(event) = rx.recv().await {
         if on_event.send(event).is_err() {
             break;
@@ -1634,6 +1798,77 @@ mod tests {
 
         assert_eq!(wrapped.matches("class _Spur").count(), 1);
         assert_eq!(wrapped.matches("spur = _Spur").count(), 1);
+    }
+
+    #[test]
+    fn run_cell_events_dispatch_routes_javascript_cell_to_deno_slot() {
+        let notebook_path = "/tmp/polyglot.ipynb";
+        let supplied_python_slot = format!("{}#python3", notebook_slot_id(notebook_path));
+        let state = State::new();
+        let mut notebook = notebook_with_source("await spur.put('sales', [])", 1);
+        let Cell::Code(cell) = &mut notebook.cells[0] else {
+            panic!("expected code cell");
+        };
+        cell.metadata.spur.as_mut().unwrap().code_type = Some(CodeType::Javascript);
+        state.get_notebook().load(notebook_path, notebook);
+        state.kernels.insert(
+            supplied_python_slot.clone(),
+            KernelSlot::new("python3".to_string()),
+        );
+
+        let dispatch = resolve_run_cell_dispatch(
+            notebook_path,
+            Some(&supplied_python_slot),
+            "550e8400-e29b-41d4-a716-446655440000",
+            "await spur.put('sales', [])",
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dispatch.slot_id,
+            format!("{}#deno", notebook_slot_id(notebook_path))
+        );
+        assert_eq!(dispatch.spec_name, "deno");
+        assert_eq!(dispatch.code_type, CodeType::Javascript);
+        assert!(dispatch.wrapped_code.contains("globalThis.spur"));
+        assert!(!dispatch.wrapped_code.contains("spur = _Spur"));
+        assert!(dispatch
+            .wrapped_code
+            .ends_with("await spur.put('sales', [])"));
+    }
+
+    #[test]
+    fn run_cell_events_dispatch_routes_python_cell_to_python_slot() {
+        let notebook_path = "/tmp/polyglot.ipynb";
+        let supplied_python_slot = format!("{}#python3", notebook_slot_id(notebook_path));
+        let state = State::new();
+        let mut notebook = notebook_with_source("spur.put('sales', [1])", 1);
+        let Cell::Code(cell) = &mut notebook.cells[0] else {
+            panic!("expected code cell");
+        };
+        cell.metadata.spur.as_mut().unwrap().code_type = Some(CodeType::Python);
+        state.get_notebook().load(notebook_path, notebook);
+        state.kernels.insert(
+            supplied_python_slot.clone(),
+            KernelSlot::new("python3".to_string()),
+        );
+
+        let dispatch = resolve_run_cell_dispatch(
+            notebook_path,
+            Some(&supplied_python_slot),
+            "550e8400-e29b-41d4-a716-446655440000",
+            "spur.put('sales', [1])",
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(dispatch.slot_id, supplied_python_slot);
+        assert_eq!(dispatch.spec_name, "python3");
+        assert_eq!(dispatch.code_type, CodeType::Python);
+        assert!(dispatch.wrapped_code.contains("class _Spur"));
+        assert!(!dispatch.wrapped_code.contains("globalThis.spur"));
+        assert!(dispatch.wrapped_code.ends_with("spur.put('sales', [1])"));
     }
 
     #[test]
