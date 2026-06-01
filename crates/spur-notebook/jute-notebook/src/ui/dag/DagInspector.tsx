@@ -118,6 +118,9 @@ export default function DagInspector({
         <h2 className="mt-1 truncate text-base font-semibold text-gray-950">
           {node.label}
         </h2>
+        <div className="mt-1 truncate font-mono text-xs text-gray-500">
+          {node.id}
+        </div>
         <span className="mt-2 inline-flex rounded bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
           {status?.state ?? node.state}
         </span>

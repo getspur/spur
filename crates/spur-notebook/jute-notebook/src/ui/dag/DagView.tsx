@@ -12,6 +12,7 @@ import {
   ReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import clsx from "clsx";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
@@ -23,13 +24,71 @@ import DagNode from "./DagNode";
 import HiddenCellsChip from "./HiddenCellsChip";
 import { loadNotebookDagStatus, runNotebookCascade } from "./dagStatus";
 import { type PositionedDagGraphNode, layoutDagGraph } from "./layout";
-import { type DagGraph, type DagNodeData, buildDagGraph } from "./useDagGraph";
+import {
+  type DagGraph,
+  type DagNodeData,
+  type DagNodeState,
+  buildDagGraph,
+} from "./useDagGraph";
 
 type FlowDagNode = Node<DagNodeData, "dagCell">;
 
 const nodeTypes = {
   dagCell: DagFlowNode,
 } satisfies NodeTypes;
+
+// Status is the one colour language: a single accent (emerald = healthy) plus
+// amber for the actionable state. These map state -> summary swatch, short
+// label, and the bird's-eye minimap fill so the stale region stays visible at
+// every zoom.
+const STATE_ORDER: DagNodeState[] = [
+  "fresh",
+  "stale",
+  "running",
+  "failed",
+  "upstream-failed",
+  "never-run",
+];
+
+const SUMMARY_LABEL: Record<DagNodeState, string> = {
+  fresh: "fresh",
+  stale: "stale",
+  running: "running",
+  failed: "failed",
+  "upstream-failed": "blocked",
+  "never-run": "idle",
+};
+
+const SUMMARY_DOT: Record<DagNodeState, string> = {
+  fresh: "bg-emerald-500",
+  stale: "bg-amber-500",
+  running: "bg-blue-500",
+  failed: "bg-red-500",
+  "upstream-failed": "bg-red-300",
+  "never-run": "bg-gray-300",
+};
+
+const MINIMAP_COLOR: Record<DagNodeState, string> = {
+  fresh: "#10b981",
+  stale: "#f59e0b",
+  running: "#3b82f6",
+  failed: "#ef4444",
+  "upstream-failed": "#fca5a5",
+  "never-run": "#d1d5db",
+};
+
+function countStates(graph: DagGraph): Record<DagNodeState, number> {
+  const counts: Record<DagNodeState, number> = {
+    fresh: 0,
+    stale: 0,
+    running: 0,
+    failed: 0,
+    "upstream-failed": 0,
+    "never-run": 0,
+  };
+  for (const node of graph.nodes) counts[node.data.state] += 1;
+  return counts;
+}
 
 export default function DagView() {
   const notebook = useNotebook();
@@ -68,6 +127,8 @@ export default function DagView() {
   const staleRootIds = useMemo(() => staleRoots(graph), [graph]);
   const staleCount = staleNodeIds.length;
   const dagNodeCount = nodes.length;
+  const stateCounts = useMemo(() => countStates(graph), [graph]);
+  const hasStale = staleCount > 0 && !isRunningStale;
 
   useEffect(() => {
     if (dagNodeCount === 0) return;
@@ -126,19 +187,46 @@ export default function DagView() {
         <header className="flex shrink-0 items-center justify-between border-b border-gray-200 bg-white px-4 py-3">
           <div>
             <h1 className="text-sm font-semibold text-gray-950">Data Flow</h1>
-            <p className="text-xs text-gray-500">{nodes.length} DAG nodes</p>
+            <div className="mt-1 flex items-center gap-3 text-[11px] text-gray-500">
+              {STATE_ORDER.filter((state) => stateCounts[state] > 0).map(
+                (state) => (
+                  <span
+                    key={state}
+                    className="inline-flex items-center gap-1.5"
+                  >
+                    <span
+                      className={clsx(
+                        "h-1.5 w-1.5 rounded-[2px]",
+                        SUMMARY_DOT[state],
+                      )}
+                    />
+                    <span className="tabular-nums">
+                      <span className="font-medium text-gray-700">
+                        {stateCounts[state]}
+                      </span>{" "}
+                      {SUMMARY_LABEL[state]}
+                    </span>
+                  </span>
+                ),
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <HiddenCellsChip cellIds={cellIds} cells={cells} />
             <button
               type="button"
-              className="inline-flex items-center rounded border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-800 transition-colors hover:border-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              className={clsx(
+                "inline-flex items-center rounded px-3 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed",
+                hasStale
+                  ? "bg-emerald-600 text-white shadow-sm hover:bg-emerald-700"
+                  : "border border-gray-200 bg-white text-gray-400",
+              )}
               disabled={staleCount === 0 || isRunningStale}
               onClick={() => {
                 void runStale();
               }}
             >
-              {isRunningStale ? "Running stale" : `Run stale (${staleCount})`}
+              {isRunningStale ? "Running stale…" : `Run stale (${staleCount})`}
             </button>
           </div>
         </header>
@@ -155,7 +243,13 @@ export default function DagView() {
             className="min-w-0 flex-1"
           >
             <Background gap={20} color="#e5e7eb" />
-            <MiniMap pannable zoomable nodeColor="#d1d5db" />
+            <MiniMap
+              pannable
+              zoomable
+              nodeColor={(node) =>
+                MINIMAP_COLOR[(node.data as DagNodeData).state] ?? "#d1d5db"
+              }
+            />
             <Controls showInteractive={false} />
           </ReactFlow>
           <DagInspector

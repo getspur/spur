@@ -94,7 +94,7 @@ export function buildDagGraph(
         id,
         data: {
           id,
-          label: id,
+          label: deriveLabel(dagMetadata, id),
           cellType: cell.type,
           code: cell.source,
           codePreview: firstSourceLine(cell.source),
@@ -167,6 +167,16 @@ function isDagCell(
 
 function firstSourceLine(source: string): string {
   return source.split(/\r?\n/, 1)[0]?.trim() || "(empty)";
+}
+
+// A node's human identity is the port it produces, not its opaque cell id.
+// Fall back to the id for portless sinks so every node still has a title.
+function deriveLabel(
+  metadata: NotebookCellState["dagMetadata"],
+  id: string,
+): string {
+  const produced = metadata?.produces?.[0];
+  return produced ? (produced.display ?? produced.port) : id;
 }
 
 function formatSource(

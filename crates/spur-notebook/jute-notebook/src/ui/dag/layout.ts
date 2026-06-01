@@ -2,8 +2,8 @@ import * as dagre from "@dagrejs/dagre";
 
 import type { DagGraph, DagGraphNode } from "./useDagGraph";
 
-export const DAG_NODE_WIDTH = 280;
-export const DAG_NODE_HEIGHT = 176;
+export const DAG_NODE_WIDTH = 224;
+export const DAG_NODE_HEIGHT = 92;
 
 export type DagNodePosition = {
   x: number;
