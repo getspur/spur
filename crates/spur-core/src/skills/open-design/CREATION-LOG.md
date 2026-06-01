@@ -14,3 +14,10 @@
   design-system library via `references/design-systems.md`. Read-driven selection;
   runtime install path + MCP surface deferred to M4. Spec:
   `docs/superpowers/specs/2026-06-01-open-design-asset-library-design.ipynb`.
+
+- **2026-06-01** — M2a: native deck track. Added `references/deck-mode.md` (one cell per
+  slide + `jute_deck` via `set_cell_metadata`, 12 layouts, present mode), routed the Artifact
+  step to it for `kind: deck`, and added deck-specific critique checks. No jute-notebook
+  changes (deck mode already exists). Artifact-deck track + `html-ppt-*` themes = M2c;
+  `dispatchDeckCommand` reconciliation = open decision. Spec:
+  `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m2-design.ipynb`.
