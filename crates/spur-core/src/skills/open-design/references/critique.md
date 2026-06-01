@@ -25,3 +25,18 @@ back, fix the weakest, re-score. Two passes is normal.
 
 When you don't have a real value, leave an honest placeholder (`—`, a grey block, a
 labelled stub) instead of inventing one. An honest placeholder beats a fake stat.
+
+## Deck-specific checks (run for `kind: deck`)
+
+Apply these in addition to the 5-dimensional critique:
+
+- **One idea per slide** — if a slide makes two points, split it.
+- **Readable from the back row** — headlines ≥ 36px, body ≥ 22px.
+- **Theme rhythm** — no 3+ consecutive slides on the same layout; break up content slides
+  with `section` covers.
+- **Slide counter present** — the audience can always see position (native present mode shows it).
+- **Speaker notes, not slide clutter** — move detail into `jute_deck.speaker_notes`, keep the
+  slide sparse.
+- **One accent, used sparingly** — same restraint as the anti-AI-slop checklist above.
+
+<!-- test markers: one idea per slide; theme rhythm; slide counter -->

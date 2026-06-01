@@ -754,6 +754,49 @@ mod tests {
     }
 
     #[test]
+    fn open_design_deck_mode_native_flow() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("open-design", &fake).unwrap();
+        assert!(
+            body.contains("references/deck-mode.md"),
+            "Artifact step must route kind:deck to the native deck guide"
+        );
+        let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/skills/open-design/references/deck-mode.md");
+        let text = std::fs::read_to_string(&refs).expect("deck-mode.md must exist");
+        for marker in [
+            "jute_deck",
+            "set_cell_metadata",
+            "title",
+            "section",
+            "bullets",
+            "speaker_notes",
+        ] {
+            assert!(
+                text.contains(marker),
+                "deck-mode.md must document `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn open_design_critique_has_deck_checks() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/skills/open-design/references");
+        let critique = std::fs::read_to_string(dir.join("critique.md")).unwrap();
+        assert!(
+            critique.contains("Deck-specific checks"),
+            "critique.md must include deck-specific checks"
+        );
+        for marker in ["one idea per slide", "theme rhythm", "slide counter"] {
+            assert!(
+                critique.contains(marker),
+                "deck checks must cover `{marker}`"
+            );
+        }
+    }
+
+    #[test]
     fn open_design_references_design_system_library() {
         let fake = PathBuf::from("/nonexistent");
         let body = load_skill("open-design", &fake).unwrap();
