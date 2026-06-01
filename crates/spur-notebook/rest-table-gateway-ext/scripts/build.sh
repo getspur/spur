@@ -55,7 +55,7 @@ python3 scripts/append_extension_metadata.py \
   --extension-version "${EXTENSION_VERSION}"
 
 INSTALL_DIR="${SPUR_EXT_INSTALL_DIR:-${HOME}/.spur/extensions}"
-INSTALL_FILE="${INSTALL_DIR}/${EXTENSION_NAME}-${DUCKDB_PLATFORM}.duckdb_extension"
+INSTALL_FILE="${INSTALL_DIR}/${EXTENSION_NAME}.duckdb_extension"
 mkdir -p "${INSTALL_DIR}"
 cp "build/release/${EXTENSION_NAME}.duckdb_extension" "${INSTALL_FILE}"
 

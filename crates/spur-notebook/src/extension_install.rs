@@ -9,6 +9,10 @@ pub fn bundled_extension_filename() -> String {
     format!("spur_rest-{}.duckdb_extension", platform())
 }
 
+pub fn loaded_extension_filename() -> &'static str {
+    "spur_rest.duckdb_extension"
+}
+
 fn platform() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux_amd64",
@@ -37,13 +41,13 @@ fn install_bundled_extension_into(
     resource_root: &Path,
     install_dir: &Path,
 ) -> io::Result<Option<PathBuf>> {
-    let file = bundled_extension_filename();
-    let dest = install_dir.join(&file);
+    let bundled_file = bundled_extension_filename();
+    let dest = install_dir.join(loaded_extension_filename());
     if dest.exists() {
         return Ok(None);
     }
 
-    let src = resource_root.join("extensions").join(&file);
+    let src = resource_root.join("extensions").join(&bundled_file);
     if !src.exists() {
         return Ok(None);
     }
@@ -67,7 +71,7 @@ mod tests {
         let install_dir = tempfile::tempdir()?;
         let file = bundled_extension_filename();
         let src = resource_root.path().join("extensions").join(&file);
-        let dest = install_dir.path().join(&file);
+        let dest = install_dir.path().join(loaded_extension_filename());
 
         fs::create_dir_all(src.parent().expect("src has parent"))?;
         fs::write(&src, b"extension bytes")?;
@@ -85,7 +89,7 @@ mod tests {
         let install_dir = tempfile::tempdir()?;
         let file = bundled_extension_filename();
         let src = resource_root.path().join("extensions").join(&file);
-        let dest = install_dir.path().join(&file);
+        let dest = install_dir.path().join(loaded_extension_filename());
 
         fs::create_dir_all(src.parent().expect("src has parent"))?;
         fs::write(&src, b"extension bytes")?;

@@ -20,7 +20,15 @@ Packaged artifacts are named:
 | Linux | arm64 or aarch64 | `linux_arm64` |
 
 The local build output is `build/release/spur_rest.duckdb_extension`. The local
-install copy is `~/.spur/extensions/spur_rest-<platform>.duckdb_extension`.
+install copy is `~/.spur/extensions/spur_rest.duckdb_extension`.
+
+## Filename constraint
+
+DuckDB derives the C-API init symbol from the loaded file's stem, so the
+installed/LOADed file MUST be `spur_rest.duckdb_extension` to match entrypoint
+`spur_rest_init_c_api`. Bundled and staged artifacts keep the disambiguating
+`spur_rest-<platform>.duckdb_extension` name, then startup install and
+`scripts/build.sh` rename that source artifact to the bare load name.
 
 ## Runtime resolution
 
@@ -30,12 +38,12 @@ On startup, the app resolves the current platform and copies:
 
 into:
 
-`~/.spur/extensions/`
+`~/.spur/extensions/spur_rest.duckdb_extension`
 
 The copy is copy-if-absent. If `scripts/build.sh` already installed a local
-`~/.spur/extensions/spur_rest-<platform>.duckdb_extension`, startup leaves it in
-place. That makes `scripts/build.sh` the local-development override for testing
-a freshly built extension without clobbering it from app resources.
+`~/.spur/extensions/spur_rest.duckdb_extension`, startup leaves it in place. That
+makes `scripts/build.sh` the local-development override for testing a freshly
+built extension without clobbering it from app resources.
 
 The notebook kernel setup cell `LOAD`s from `~/.spur/extensions/`, not directly
 from the app bundle.

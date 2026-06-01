@@ -89,11 +89,22 @@ fn python_kernel_recipe_loads_spur_rest_for_bare_duckdb_sql() {
             extension_path.display()
         );
 
+        // DuckDB derives the C-API init symbol from the loaded file stem, so
+        // the installed/LOADed extension must use the bare spur_rest stem.
+        let bare_extension_dir = std::env::temp_dir().join(format!(
+            "spur-rest-pykernel-load-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&bare_extension_dir).expect("bare extension dir should be created");
+        let bare_extension_path = bare_extension_dir.join("spur_rest.duckdb_extension");
+        fs::copy(&extension_path, &bare_extension_path)
+            .expect("bare-named extension copy should be written");
+
         let script_path = std::env::temp_dir().join(format!(
             "spur-rest-python-kernel-recipe-{}.py",
             std::process::id()
         ));
-        let artifact_path = extension_path.to_string_lossy().replace('"', "\\\"");
+        let artifact_path = bare_extension_path.to_string_lossy().replace('"', "\\\"");
         let script = format!(
             r#"# MIRROR of api_tables_setup_bootstrap_preamble in crates/spur-notebook/src/mcp/mod.rs - keep in sync
 import duckdb
