@@ -98,6 +98,11 @@ fn load_extension_queries_polymarket_markets_from_mock_rest_api() {
 
         std::env::set_var("SPUR_POLYMARKET_GAMMA_BASE", server.uri());
         std::env::set_var("SPUR_POLYMARKET_CLOB_BASE", server.uri());
+        std::env::set_var("SPUR_CONN_linear_base_url", server.uri());
+        std::env::set_var(
+            "SPUR_REST_MANIFEST",
+            crate_dir().join("tests/fixtures/linear_graphql_manifest.toml"),
+        );
         std::env::set_var(
             "SPUR_EXT_INSTALL_DIR",
             std::env::temp_dir().join(format!(
@@ -117,6 +122,7 @@ fn load_extension_queries_polymarket_markets_from_mock_rest_api() {
         println!("{output}");
         assert!(output.contains("polymarket_markets rows:"));
         assert!(output.contains("polymarket_orderbook rows:"));
+        assert!(output.contains("linear_issues registered and bound"));
         assert!(output.contains("m1"));
         assert!(output.contains("782375.55"));
         assert!(output.contains("0.51"));
