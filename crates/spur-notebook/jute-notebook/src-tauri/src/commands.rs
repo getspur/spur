@@ -1525,6 +1525,7 @@ mod tests {
                         last_edited_by: None,
                         datasource_setup: None,
                         dag: None,
+                        code_type: None,
                     }),
                     jute_deck: None,
                     other: Default::default(),

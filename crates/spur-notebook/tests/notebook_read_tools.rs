@@ -581,6 +581,7 @@ fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
                             last_edited_by: None,
                             datasource_setup: None,
                             dag: None,
+                            code_type: None,
                         }),
                         jute_deck: None,
                         other: Default::default(),
