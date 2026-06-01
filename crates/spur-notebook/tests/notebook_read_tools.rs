@@ -635,6 +635,7 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
             &deps,
             json!({
                 "cell_id": "deno-put",
+                "notebook_path": notebook_path_string,
                 "kernel_id": slot_id,
                 "code": concat!(
                     "const {\n",
@@ -672,6 +673,7 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
             &deps,
             json!({
                 "cell_id": "deno-get",
+                "notebook_path": notebook_path_string,
                 "kernel_id": slot_id,
                 "code": concat!(
                     "const table = spur.get('t');\n",
@@ -823,6 +825,7 @@ async fn run_cell_collects_events_against_in_process_kernel_mock() {
             &deps,
             json!({
                 "cell_id": "code-run-1",
+                "notebook_path": "/tmp/notebook-read-tools-run.ipynb",
                 "kernel_id": slot_id,
                 "code": "print(2 + 2)",
             }),
@@ -897,6 +900,7 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
             &deps,
             json!({
                 "cell_id": "code-run-define",
+                "notebook_path": path.to_string_lossy(),
                 "code": "x = 42",
             }),
         )
@@ -910,6 +914,7 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
             &deps,
             json!({
                 "cell_id": "code-run-print",
+                "notebook_path": path.to_string_lossy(),
                 "code": "print(x)",
             }),
         )
@@ -1045,6 +1050,7 @@ async fn canonical_demo_attach_csv_runs_setup_and_renders_html_chart() {
             &deps,
             json!({
                 "cell_id": setup_cell_id,
+                "notebook_path": notebook_path.to_string_lossy(),
                 "kernel_id": slot_id,
                 "code": setup_source,
             }),
@@ -1063,6 +1069,7 @@ async fn canonical_demo_attach_csv_runs_setup_and_renders_html_chart() {
             &deps,
             json!({
                 "cell_id": "code-canonical-demo-chart",
+                "notebook_path": notebook_path.to_string_lossy(),
                 "kernel_id": slot_id,
                 "code": r#"
 from IPython.display import HTML, display

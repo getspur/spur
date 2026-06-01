@@ -387,6 +387,10 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].cell_id, "producer");
         assert_eq!(
+            requests[0].notebook_path,
+            notebook_path.to_string_lossy().as_ref()
+        );
+        assert_eq!(
             requests[0].kernel_id,
             Some(jute::state::notebook_slot_id(
                 notebook_path.to_string_lossy().as_ref()

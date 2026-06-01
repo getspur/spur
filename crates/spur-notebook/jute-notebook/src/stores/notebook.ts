@@ -1305,6 +1305,10 @@ export class Notebook {
     );
 
     try {
+      const notebookPath = this.state.viewState.path;
+      if (!notebookPath) {
+        throw new Error("Notebook path is not available");
+      }
       const onEvent = new Channel<RunCellEvent>();
 
       onEvent.onmessage = (message: RunCellEvent) => {
@@ -1317,6 +1321,7 @@ export class Notebook {
       };
 
       await invoke("run_cell", {
+        notebookPath,
         kernelId: this.state.viewState.kernelId,
         code,
         onEvent,
