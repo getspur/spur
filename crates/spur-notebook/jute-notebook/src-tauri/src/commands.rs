@@ -184,6 +184,61 @@ pub struct DatasourceEntry {
     pub tables: Vec<Table>,
 }
 
+/// Nango provider metadata summarized for API datasource onboarding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ProviderSummary {
+    /// Provider key from the vendored Nango providers snapshot.
+    pub name: String,
+    /// Human-readable provider name.
+    pub display_name: String,
+    /// Primary provider category.
+    pub category: String,
+    /// Import tier derived from the provider auth mode.
+    pub tier: String,
+    /// Nango auth mode string.
+    pub auth_mode: String,
+}
+
+/// Column metadata returned when previewing OpenAPI-generated API tables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct TablePreviewColumn {
+    /// Column name.
+    pub name: String,
+    /// Gateway column type.
+    pub ty: String,
+    /// JSONPath used to extract the column value.
+    pub json: String,
+}
+
+/// Table metadata returned when previewing OpenAPI-generated API tables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct TablePreview {
+    /// Generated table name.
+    pub name: String,
+    /// Request path for the table.
+    pub path: String,
+    /// JSONPath to the response array when detected.
+    #[ts(type = "string | null")]
+    pub response_path: Option<String>,
+    /// Generated columns.
+    pub columns: Vec<TablePreviewColumn>,
+}
+
+/// Preview payload for OpenAPI-generated API tables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct OpenApiTablePreview {
+    /// Tables detected from the OpenAPI document.
+    pub tables: Vec<TablePreview>,
+}
+
 /// A daemon control protocol request.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -234,6 +289,18 @@ pub enum DaemonControlCommand {
     },
     /// Add an API-backed table-function datasource to the current notebook.
     AddApiDatasource { name: String, source: String },
+    /// List Nango providers available to the API datasource import wizard.
+    ListNangoProviders {},
+    /// Preview table definitions generated from an OpenAPI document.
+    PreviewOpenApiTables { spec_text: String },
+    /// Compose and attach an API datasource from Nango/OpenAPI import inputs.
+    AddApiDatasourceFromImport {
+        name: String,
+        provider: Option<String>,
+        spec_text: Option<String>,
+        #[ts(type = "[string, string][]")]
+        credentials: Vec<(String, String)>,
+    },
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.
@@ -365,6 +432,10 @@ pub enum DaemonControlResult {
     Datasource(DatasourceEntry),
     /// Datasource catalog entries.
     Datasources(Vec<DatasourceEntry>),
+    /// Nango provider summaries.
+    NangoProviders(Vec<ProviderSummary>),
+    /// OpenAPI-generated table preview.
+    OpenApiTablePreview(OpenApiTablePreview),
 }
 
 /// Full notebook snapshot returned by daemon control.
