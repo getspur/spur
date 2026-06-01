@@ -80,14 +80,20 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     ensure_code_cell(state, &params.cell_id)?;
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
 
-    let rx = run_cell_events(&params.notebook_path, &kernel_id, &params.code, state)
-        .await
-        .map_err(|error| {
-            McpError::internal_error(
-                "notebook.run_cell failed to dispatch",
-                Some(json!({ "error": error.to_string() })),
-            )
-        })?;
+    let rx = run_cell_events(
+        &params.notebook_path,
+        Some(&kernel_id),
+        &params.cell_id,
+        &params.code,
+        state,
+    )
+    .await
+    .map_err(|error| {
+        McpError::internal_error(
+            "notebook.run_cell failed to dispatch",
+            Some(json!({ "error": error.to_string() })),
+        )
+    })?;
 
     let summary = drain_run_cell_events(deps, state, &params.cell_id, &kernel_id, rx).await;
 

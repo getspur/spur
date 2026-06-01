@@ -1336,6 +1336,7 @@ export class Notebook {
       await invoke("run_cell", {
         notebookPath,
         kernelId: this.state.viewState.kernelId,
+        cellId,
         code,
         onEvent,
       });
