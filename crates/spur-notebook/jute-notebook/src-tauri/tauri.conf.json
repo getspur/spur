@@ -16,6 +16,7 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/uv"],
+    "resources": ["extensions/*.duckdb_extension"],
     "fileAssociations": [
       {
         "ext": ["ipynb"],
