@@ -305,6 +305,12 @@ pub enum DaemonControlCommand {
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.
     ListDatasources {},
+    /// List globally saved API connection templates.
+    ListSavedConnections {},
+    /// Re-attach a saved connection template into the current notebook.
+    AttachSavedConnection { name: String },
+    /// Delete a saved connection template from the global store.
+    DeleteSavedConnection { name: String },
     /// List daemon recents.
     ListRecents {},
     /// Remove a path from daemon recents.
@@ -436,6 +442,12 @@ pub enum DaemonControlResult {
     NangoProviders(Vec<ProviderSummary>),
     /// OpenAPI-generated table preview.
     OpenApiTablePreview(OpenApiTablePreview),
+    /// Globally saved API connection templates.
+    SavedConnections(serde_json::Value),
+    /// Saved connection attach payload.
+    AttachedSavedConnection(serde_json::Value),
+    /// Saved connection delete payload.
+    SavedConnectionDeleted(serde_json::Value),
 }
 
 /// Full notebook snapshot returned by daemon control.
