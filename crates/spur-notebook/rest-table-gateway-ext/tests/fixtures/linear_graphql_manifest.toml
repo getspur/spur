@@ -1,0 +1,19 @@
+[source]
+name = "linear"
+base_url = "${connectionConfig.linear_base_url}/graphql"
+transport = "graphql"
+connection_config = ["linear_base_url"]
+
+[[table]]
+name = "issues"
+path = "/unused"
+response_path = "$.data.issues.nodes"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+number = { json = "$.number", type = "Int64" }
+title = { json = "$.title", type = "Utf8" }
+open = { json = "$.open", type = "Boolean" }
+
+[table.graphql]
+query = "query Issues { issues { nodes { id number title open } } }"
