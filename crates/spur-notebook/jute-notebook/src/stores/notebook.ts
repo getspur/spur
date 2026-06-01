@@ -1170,6 +1170,7 @@ export class Notebook {
         cell.lastEditedBy,
         cell.datasourceSetup,
         cell.dagMetadata,
+        cell.codeType,
         cell.juteDeckMetadata,
         cell.cellMetadataOther,
       ),
@@ -1179,7 +1180,7 @@ export class Notebook {
   mergeCellJuteDeckMetadata(
     cellId: string,
     patch: Partial<JuteDeckCellMetadata> & {
-      spur?: { datasource_setup?: boolean; dag?: CellDagMetadata };
+      spur?: { datasource_setup?: boolean; dag?: CellDagMetadata; code_type?: CodeType };
     },
   ): number {
     const cell = selectCell(this.state, cellId);
