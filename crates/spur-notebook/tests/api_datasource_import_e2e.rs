@@ -209,10 +209,14 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
     let _api_key_guard = EnvGuard::preserve("STRIPE_API_KEY");
     let _base_url_guard = EnvGuard::preserve("SPUR_CONN_stripe_base_url");
     let server = MockServer::start().await;
+    let name = format!("scores_{}", uuid::Uuid::new_v4().simple());
+    let api_key_value = "Bearer test-api-key";
+    let base_url_value = server.uri();
+    let _cleanup = connection_store::remove(&name).await;
 
     Mock::given(method("GET"))
         .and(path("/scores"))
-        .and(header("authorization", "Bearer test-api-key"))
+        .and(header("authorization", api_key_value))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 { "id": "a", "score": 1 },
@@ -233,12 +237,12 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
     let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
         "daemon": "notebook.v1",
         "command": "add_api_datasource_from_import",
-        "name": "scores",
+        "name": name.clone(),
         "provider": "stripe",
         "spec_text": OPENAPI_SCORES_SPEC,
         "credentials": [
-            ["STRIPE_API_KEY", "Bearer test-api-key"],
-            ["SPUR_CONN_stripe_base_url", server.uri()]
+            ["STRIPE_API_KEY", api_key_value],
+            ["SPUR_CONN_stripe_base_url", base_url_value]
         ]
     }))
     .expect("add_api_datasource_from_import command deserializes");
@@ -249,7 +253,7 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
 
     assert!(response.ok, "{:?}", response.error);
     let entry = datasource_entry_from_response(&response);
-    assert_eq!(entry.name, "scores");
+    assert_eq!(entry.name, name);
     assert_eq!(entry.path, "stripe");
     assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
     assert_eq!(entry.group.as_deref(), Some("API"));
@@ -270,6 +274,33 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
             row_count: None,
         }]
     );
+    let templates = connection_store::list()
+        .await
+        .expect("saved connections list after import");
+    let saved = templates
+        .iter()
+        .find(|template| template.name == entry.name)
+        .expect("import saved a reusable connection template");
+    assert_eq!(saved.provider.as_deref(), Some("stripe"));
+    assert_eq!(saved.group.as_deref(), Some("API"));
+    assert_eq!(saved.tables, entry.tables);
+    assert_eq!(
+        saved.credential_env_vars,
+        vec![
+            "STRIPE_API_KEY".to_string(),
+            "SPUR_CONN_stripe_base_url".to_string()
+        ]
+    );
+    let serialized = serde_json::to_string(saved).expect("saved template serializes");
+    assert!(serialized.contains("STRIPE_API_KEY"));
+    assert!(serialized.contains("SPUR_CONN_stripe_base_url"));
+    assert!(!serialized.contains(api_key_value));
+    assert!(!serialized.contains(&base_url_value));
+    assert!(!saved.manifest_toml.contains(api_key_value));
+    assert!(!saved.manifest_toml.contains(&base_url_value));
+    connection_store::remove(&entry.name)
+        .await
+        .expect("saved import template cleans up");
     assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
 
     let adapter = ManifestAdapter::new(manifest_for_stripe_scores_import());

@@ -1710,7 +1710,17 @@ impl NotebookDaemonControl {
     ) -> Result<DaemonControlSuccess, BridgeError> {
         use spur_rest_table_gateway::adapter::Adapter as _;
 
+        let provider_for_template = provider.clone();
         let (source, manifest) = build_api_import_manifest(&name, provider, spec_text)?;
+        let mut manifest_toml =
+            spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
+        manifest_toml.push_str(&spur_rest_table_gateway::adapter::openapi::tables_to_toml(
+            &manifest.tables,
+        ));
+        let credential_env_vars = credentials
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
         // ManifestAdapter resolves auth and connection_config from environment
         // at scan time. This session-scoped injection is process-global, and
         // secrets are intentionally not persisted to the notebook catalog.
@@ -1725,10 +1735,31 @@ impl NotebookDaemonControl {
             .catalog()
             .into_iter()
             .map(|table| api_datasource_table(&adapter_name, table))
-            .collect();
+            .collect::<Vec<_>>();
 
-        self.register_api_datasource_entry(name, source, tables)
-            .await
+        let result = self
+            .register_api_datasource_entry(name.clone(), source, tables.clone())
+            .await?;
+
+        let now = chrono::Utc::now();
+        let template = crate::connection_store::ConnectionTemplate {
+            name,
+            provider: provider_for_template,
+            group: Some(API_DATASOURCE_GROUP.to_string()),
+            manifest_toml,
+            tables,
+            credential_env_vars,
+            created_at: now,
+            updated_at: now,
+        };
+        match crate::connection_store::upsert(template).await {
+            Ok(()) => self.emit_connections_changed().await,
+            Err(error) => {
+                warn!(%error, "failed to save reusable API connection template after import");
+            }
+        }
+
+        Ok(result)
     }
 
     #[cfg(feature = "datasource-introspect")]
