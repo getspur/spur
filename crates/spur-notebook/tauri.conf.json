@@ -16,6 +16,10 @@
       "jute-notebook/src-tauri/icons/icon.ico"
     ],
     "externalBin": ["jute-notebook/src-tauri/binaries/uv"],
+    "resources": {
+      "assets/open-design-library": "open-design-library",
+      "assets/open-design-deck-library": "open-design-deck-library"
+    },
     "fileAssociations": [
       {
         "ext": ["ipynb"],
