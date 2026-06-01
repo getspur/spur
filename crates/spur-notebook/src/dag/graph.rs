@@ -154,21 +154,33 @@ impl NotebookDag {
     }
 
     pub fn topological_sort(&self) -> Result<Vec<String>, DagError> {
+        // Build the producer -> {consumer} adjacency first, collapsing parallel
+        // edges. `edges()` yields one edge per (port, consumer), so a producer
+        // that feeds several ports to the SAME consumer shows up multiple times
+        // even though it is a single scheduling dependency. Derive `indegree`
+        // from this deduped adjacency so the Kahn drain decrements exactly as
+        // many times as it incremented; counting indegree per raw edge while
+        // the adjacency is a set under-decrements multi-port pairs and reports
+        // a spurious cycle.
+        let mut outgoing: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for edge in self.edges() {
+            outgoing
+                .entry(edge.producer)
+                .or_default()
+                .insert(edge.consumer);
+        }
+
         let mut indegree = self
             .nodes
             .keys()
             .map(|cell_id| (cell_id.clone(), 0usize))
             .collect::<BTreeMap<_, _>>();
-        let mut outgoing: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-
-        for edge in self.edges() {
-            if let Some(count) = indegree.get_mut(&edge.consumer) {
-                *count += 1;
+        for consumers in outgoing.values() {
+            for consumer in consumers {
+                if let Some(count) = indegree.get_mut(consumer) {
+                    *count += 1;
+                }
             }
-            outgoing
-                .entry(edge.producer)
-                .or_default()
-                .insert(edge.consumer);
         }
 
         let mut ready = indegree
@@ -412,5 +424,62 @@ mod tests {
 
         assert_eq!(dag.stale_from_port("a0").unwrap(), ["a1"]);
         assert_eq!(dag.stale_from_port("b0").unwrap(), ["b1"]);
+    }
+
+    #[test]
+    fn parallel_edges_same_pair_do_not_false_cycle() {
+        // One producer feeding multiple ports to the SAME consumer is a single
+        // scheduling dependency, not a cycle. Regression for the indegree vs.
+        // adjacency multiplicity mismatch in `topological_sort`.
+        let dag = graph(vec![
+            ("producer", cell(["markets", "markets_agg"], [], None)),
+            ("artifact", cell([], ["markets", "markets_agg"], None)),
+        ]);
+
+        assert_eq!(dag.topological_sort().unwrap(), ["producer", "artifact"]);
+        assert_eq!(dag.stale_from_port("markets").unwrap(), ["artifact"]);
+    }
+
+    #[test]
+    fn distinct_producers_both_ordered_before_consumer() {
+        let dag = graph(vec![
+            ("p1", cell(["one"], [], None)),
+            ("p2", cell(["two"], [], None)),
+            ("sink", cell([], ["one", "two"], None)),
+        ]);
+
+        let order = dag.topological_sort().unwrap();
+        let pos = |id: &str| order.iter().position(|c| c == id).unwrap();
+        assert_eq!(order.len(), 3);
+        assert!(pos("p1") < pos("sink"));
+        assert!(pos("p2") < pos("sink"));
+    }
+
+    #[test]
+    fn self_dependency_is_cycle() {
+        // A cell that consumes a port it produces depends on itself.
+        let error = NotebookDag::from_metadata(BTreeMap::from([(
+            "loop".to_string(),
+            cell(["x"], ["x"], None),
+        )]))
+        .expect_err("self dependency is a cycle");
+
+        assert_eq!(
+            error,
+            DagError::Cycle {
+                ports: vec!["x".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn two_node_cycle_still_detected() {
+        let error = NotebookDag::from_metadata(BTreeMap::from([
+            ("a".to_string(), cell(["a_out"], ["b_out"], None)),
+            ("b".to_string(), cell(["b_out"], ["a_out"], None)),
+        ]))
+        .expect_err("two node cycle is rejected");
+
+        assert!(matches!(error, DagError::Cycle { .. }));
     }
 }
