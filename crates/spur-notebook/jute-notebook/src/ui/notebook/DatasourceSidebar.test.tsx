@@ -228,31 +228,7 @@ describe("DatasourceSidebar", () => {
     expect(screen.getByText("sku")).toBeInTheDocument();
   });
 
-  test("api_button_opens_modal_and_dispatches_add_api_datasource", async () => {
-    daemonControlMock
-      .mockResolvedValueOnce({
-        ok: true,
-        result: { type: "datasources", data: [] },
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        result: datasourceResult({
-          name: "prediction",
-          path: "api://polymarket",
-          kind: "api_tables",
-          group: null,
-          columns: [],
-          rowCount: null,
-          tables: [
-            {
-              name: "polymarket_markets",
-              columns: [{ name: "market_id", sqlType: "VARCHAR" }],
-              rowCount: null,
-            },
-          ],
-        }),
-      });
-
+  test("api_button_opens_rest_api_wizard", async () => {
     render(<DatasourceSidebar />);
 
     fireEvent.click(
@@ -260,22 +236,47 @@ describe("DatasourceSidebar", () => {
     );
 
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Name"), {
-      target: { value: "prediction" },
-    });
-    fireEvent.change(screen.getByLabelText("Source"), {
-      target: { value: "polymarket" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
-
-    await waitFor(() =>
-      expect(daemonControlMock).toHaveBeenCalledWith({
-        command: "add_api_datasource",
-        name: "prediction",
-        source: "polymarket",
+    expect(
+      screen.getByRole("heading", {
+        name: "How do you want to connect?",
       }),
-    );
-    expect(await screen.findByText("polymarket_markets")).toBeInTheDocument();
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Provider catalog/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /OpenAPI spec/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Manual/i })).toBeInTheDocument();
+    expect(
+      daemonControlMock.mock.calls.some(
+        ([command]) => command.command === "add_api_datasource",
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "prediction",
+            path: "api://stripe",
+            kind: "api_tables",
+            group: null,
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "stripe_charges",
+                columns: [{ name: "id", sqlType: "VARCHAR" }],
+                rowCount: null,
+              },
+            ],
+          }),
+        ],
+      });
+    });
+
+    expect(await screen.findByText("stripe_charges")).toBeInTheDocument();
   });
 
   test("mount_fetch_populates_list_without_datasources_changed_event", async () => {

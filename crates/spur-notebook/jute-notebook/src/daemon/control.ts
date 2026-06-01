@@ -5,6 +5,8 @@ import type {
   DaemonControlResponse,
   DaemonNotebookSnapshot,
   DatasourceEntry,
+  OpenApiTablePreview,
+  ProviderSummary,
   RecentNotebookEntry,
 } from "@/bindings";
 
@@ -21,12 +23,28 @@ export type AddApiDatasourceCommand = Extract<
   DaemonControlCommand,
   { command: "add_api_datasource" }
 >;
+export type ListNangoProvidersCommand = Extract<
+  DaemonControlCommand,
+  { command: "list_nango_providers" }
+>;
+export type PreviewOpenApiTablesCommand = Extract<
+  DaemonControlCommand,
+  { command: "preview_open_api_tables" }
+>;
+export type AddApiDatasourceFromImportCommand = Extract<
+  DaemonControlCommand,
+  { command: "add_api_datasource_from_import" }
+>;
 export type ListDatasourcesCommand = Extract<
   DaemonControlCommand,
   { command: "list_datasources" }
 >;
 export type AttachDatasourceInput = Omit<AttachDatasourceCommand, "command">;
 export type DetachDatasourceInput = Omit<DetachDatasourceCommand, "command">;
+export type AddApiDatasourceFromImportInput = Omit<
+  AddApiDatasourceFromImportCommand,
+  "command"
+>;
 type EnrichedRecentEntry = NonNullable<
   DaemonControlResponse["entries"]
 >[number] &
@@ -60,6 +78,33 @@ export function addApiDatasourceCommand(input: {
   };
 }
 
+export function listNangoProvidersCommand(): ListNangoProvidersCommand {
+  return {
+    command: "list_nango_providers",
+  };
+}
+
+export function previewOpenApiTablesCommand(
+  specText: string,
+): PreviewOpenApiTablesCommand {
+  return {
+    command: "preview_open_api_tables",
+    spec_text: specText,
+  };
+}
+
+export function addApiDatasourceFromImportCommand(
+  input: AddApiDatasourceFromImportInput,
+): AddApiDatasourceFromImportCommand {
+  return {
+    command: "add_api_datasource_from_import",
+    name: input.name,
+    provider: input.provider,
+    spec_text: input.spec_text,
+    credentials: input.credentials,
+  };
+}
+
 export function detachDatasourceCommand(
   input: DetachDatasourceInput,
 ): DetachDatasourceCommand {
@@ -73,6 +118,48 @@ export function listDatasourcesCommand(): ListDatasourcesCommand {
   return {
     command: "list_datasources",
   };
+}
+
+export function nangoProvidersFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): ProviderSummary[] {
+  if (
+    response.ok &&
+    response.result?.type === "nangoProviders" &&
+    providerSummariesFromUnknown(response.result.data)
+  ) {
+    return response.result.data;
+  }
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  throw new Error(
+    "daemon list_nango_providers response did not include providers",
+  );
+}
+
+export function openApiTablePreviewFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): OpenApiTablePreview {
+  if (
+    response.ok &&
+    response.result?.type === "openApiTablePreview" &&
+    isOpenApiTablePreview(response.result.data)
+  ) {
+    return response.result.data;
+  }
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  throw new Error(
+    "daemon preview_open_api_tables response did not include table preview",
+  );
+}
+
+export function importedApiDatasourceFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): DatasourceEntry {
+  return datasourceEntryFromDaemonControlResponse(response);
 }
 
 export function datasourceEntryFromDaemonControlResponse(
@@ -203,4 +290,50 @@ function datasourceEntriesFromUnknown(
   value: unknown,
 ): value is DatasourceEntry[] {
   return Array.isArray(value) && value.every(isDatasourceEntry);
+}
+
+function providerSummariesFromUnknown(
+  value: unknown,
+): value is ProviderSummary[] {
+  return Array.isArray(value) && value.every(isProviderSummary);
+}
+
+function isProviderSummary(value: unknown): value is ProviderSummary {
+  if (typeof value !== "object" || value === null) return false;
+
+  const candidate = value as Partial<ProviderSummary>;
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.displayName === "string" &&
+    typeof candidate.category === "string" &&
+    typeof candidate.tier === "string" &&
+    typeof candidate.authMode === "string"
+  );
+}
+
+function isOpenApiTablePreview(value: unknown): value is OpenApiTablePreview {
+  if (typeof value !== "object" || value === null) return false;
+
+  const candidate = value as Partial<OpenApiTablePreview>;
+  return (
+    Array.isArray(candidate.tables) &&
+    candidate.tables.every(
+      (table) =>
+        typeof table === "object" &&
+        table !== null &&
+        typeof table.name === "string" &&
+        typeof table.path === "string" &&
+        (table.responsePath === null ||
+          typeof table.responsePath === "string") &&
+        Array.isArray(table.columns) &&
+        table.columns.every(
+          (column) =>
+            typeof column === "object" &&
+            column !== null &&
+            typeof column.name === "string" &&
+            typeof column.ty === "string" &&
+            typeof column.json === "string",
+        ),
+    )
+  );
 }

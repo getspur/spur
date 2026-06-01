@@ -22,7 +22,6 @@ import {
 
 import type { DatasourceEntry } from "@/bindings";
 import {
-  addApiDatasourceCommand,
   attachDatasourceCommand,
   daemonControl,
   datasourceEntriesFromDaemonControlResponse,
@@ -32,7 +31,7 @@ import {
   listDatasourcesCommand,
 } from "@/daemon/control";
 
-import AddApiDatasourceModal from "./AddApiDatasourceModal";
+import AddRestApiWizard from "./AddRestApiWizard";
 
 type DroppedFile = File & {
   path?: string;
@@ -135,26 +134,6 @@ export default function DatasourceSidebar() {
     }
   }, [attachPath]);
 
-  const handleAddApiDatasource = useCallback(
-    async (name: string, source: string) => {
-      setError(null);
-
-      try {
-        const response = await daemonControl(
-          addApiDatasourceCommand({ name, source }),
-        );
-        const entry = datasourceEntryFromDaemonControlResponse(response);
-        setEntries((current) => upsertDatasourceEntry(current, entry));
-        setApiModalOpen(false);
-      } catch (caught) {
-        const message = errorMessage(caught);
-        setError(message);
-        throw caught instanceof Error ? caught : new Error(message);
-      }
-    },
-    [],
-  );
-
   const handleDrop = useCallback(
     (event: DragEvent<HTMLElement>) => {
       event.preventDefault();
@@ -191,8 +170,7 @@ export default function DatasourceSidebar() {
     try {
       void listen("datasources://changed", (event) => {
         try {
-          const nextEntries =
-            datasourceEntriesFromEventPayload(event.payload);
+          const nextEntries = datasourceEntriesFromEventPayload(event.payload);
           entriesRef.current = nextEntries;
           setEntries(nextEntries);
         } catch (caught) {
@@ -411,10 +389,9 @@ export default function DatasourceSidebar() {
           </div>
         </div>
       </aside>
-      <AddApiDatasourceModal
+      <AddRestApiWizard
         open={apiModalOpen}
-        onAdd={handleAddApiDatasource}
-        onCancel={() => setApiModalOpen(false)}
+        onClose={() => setApiModalOpen(false)}
       />
     </>
   );
