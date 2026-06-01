@@ -43,6 +43,7 @@ use self::{
 
 const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
 const NOTEBOOK_LOAD_READY_POLL: Duration = Duration::from_millis(25);
+const CONNECTIONS_CHANGED_EVENT: &str = "connections://changed";
 
 pub mod bridge;
 pub mod loopback_requester;
@@ -456,6 +457,7 @@ pub trait DaemonWindowOps: Send + Sync {
     fn hide(&self, label: &str);
     fn open_notebook_path(&self, path: &Path) -> Result<String, BridgeError>;
     fn emit_recents_changed(&self, event: &RecentsChangedEvent);
+    fn emit_connections_changed(&self, _payload: &Value) {}
     fn exit(&self);
 }
 
@@ -491,6 +493,12 @@ impl DaemonWindowOps for TauriDaemonWindowOps {
 
     fn emit_recents_changed(&self, event: &RecentsChangedEvent) {
         let _ = self.app.emit(self::tools::RECENTS_CHANGED_EVENT, event);
+    }
+
+    fn emit_connections_changed(&self, payload: &Value) {
+        if let Err(error) = self.app.emit(CONNECTIONS_CHANGED_EVENT, payload.clone()) {
+            warn!(%error, "failed to emit saved connections update");
+        }
     }
 
     fn exit(&self) {
@@ -1085,6 +1093,30 @@ fn api_datasource_table(
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn datasource_entry_success(
+    entry: jute::commands::DatasourceEntry,
+) -> Result<DaemonControlSuccess, BridgeError> {
+    let result = serde_json::to_value(jute::commands::DaemonControlResult::Datasource(entry))
+        .map_err(|error| BridgeError::Handler {
+            code: "datasource_entry_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+    Ok(DaemonControlSuccess::result(result))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn saved_connection_result(
+    result: jute::commands::DaemonControlResult,
+    code: &'static str,
+) -> Result<DaemonControlSuccess, BridgeError> {
+    let result = serde_json::to_value(result).map_err(|error| BridgeError::Handler {
+        code: code.to_string(),
+        message: error.to_string(),
+    })?;
+    Ok(DaemonControlSuccess::result(result))
+}
+
+#[cfg(feature = "datasource-introspect")]
 fn arrow_type_to_sql(data_type: &arrow_schema::DataType) -> &'static str {
     match data_type {
         arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8 => "VARCHAR",
@@ -1209,20 +1241,20 @@ impl NotebookDaemonControl {
             };
         }
 
-        let result: Result<DaemonControlSuccess, BridgeError> =
-            match request.command.clone() {
-                DaemonControlCommand::WriteCell { .. }
-                | DaemonControlCommand::ReadCell { .. }
-                | DaemonControlCommand::InsertCell { .. }
-                | DaemonControlCommand::LoadNotebook { .. }
-                | DaemonControlCommand::DeleteCell { .. }
-                | DaemonControlCommand::Snapshot {}
-                | DaemonControlCommand::SetCellMetadata { .. }
-                | DaemonControlCommand::ApplyEdit { .. }
-                | DaemonControlCommand::FlushNotebook {} => {
-                    return self.handle_notebook_store_control(id, request).await;
-                }
-                DaemonControlCommand::Open { path } => async {
+        let result: Result<DaemonControlSuccess, BridgeError> = match request.command.clone() {
+            DaemonControlCommand::WriteCell { .. }
+            | DaemonControlCommand::ReadCell { .. }
+            | DaemonControlCommand::InsertCell { .. }
+            | DaemonControlCommand::LoadNotebook { .. }
+            | DaemonControlCommand::DeleteCell { .. }
+            | DaemonControlCommand::Snapshot {}
+            | DaemonControlCommand::SetCellMetadata { .. }
+            | DaemonControlCommand::ApplyEdit { .. }
+            | DaemonControlCommand::FlushNotebook {} => {
+                return self.handle_notebook_store_control(id, request).await;
+            }
+            DaemonControlCommand::Open { path } => {
+                async {
                     self.save_current().await?;
                     let path = self
                         .open_path(resolve_notebook_path(PathBuf::from(path)))
@@ -1234,8 +1266,10 @@ impl NotebookDaemonControl {
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
-                .await,
-                DaemonControlCommand::New {} => async {
+                .await
+            }
+            DaemonControlCommand::New {} => {
+                async {
                     self.save_current().await?;
                     let path =
                         create_untitled_notebook()
@@ -1252,8 +1286,10 @@ impl NotebookDaemonControl {
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
-                .await,
-                DaemonControlCommand::NewAt { path } => async {
+                .await
+            }
+            DaemonControlCommand::NewAt { path } => {
+                async {
                     self.save_current().await?;
                     let path = resolve_notebook_path(PathBuf::from(path));
                     create_empty_notebook_at(&path).await.map_err(|error| {
@@ -1270,116 +1306,120 @@ impl NotebookDaemonControl {
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
-                .await,
-                DaemonControlCommand::Reopen {} => {
-                    self.reopen().await.map(DaemonControlSuccess::path)
-                }
-                DaemonControlCommand::Rename { from, to } => {
-                    async {
-                        self.save_current().await?;
-                        let path = self
-                            .rename_path(
-                                resolve_notebook_path(PathBuf::from(from)),
-                                resolve_notebook_path(PathBuf::from(to)),
-                            )
-                            .await?;
-                        Ok(DaemonControlSuccess::path(path))
-                    }
-                    .await
-                }
-                DaemonControlCommand::Close {} => {
-                    async {
-                        self.save_current().await?;
-                        self.close_current_window().await;
-                        self.bridge.set_notebook_open(false);
-                        {
-                            let mut state = self.state.lock().await;
-                            state.current_path = None;
-                            state.window_label = None;
-                            #[cfg(feature = "datasource-introspect")]
-                            {
-                                state.datasource_setup_cell = None;
-                            }
-                        }
-                        if let Err(error) = self.clear_last_notebook().await {
-                            warn!(%error, "failed to clear last notebook record");
-                        }
-                        self.emit_recents_changed().await?;
-                        Ok(DaemonControlSuccess::empty())
-                    }
-                    .await
-                }
-                DaemonControlCommand::AttachDatasource { name, path, group } => {
-                    self.attach_datasource(name, path, group).await
-                }
-                DaemonControlCommand::AddApiDatasource { name, source } => {
-                    self.add_api_datasource(name, source).await
-                }
-                DaemonControlCommand::ListNangoProviders {} => self.list_nango_providers().await,
-                DaemonControlCommand::PreviewOpenApiTables { spec_text } => {
-                    self.preview_open_api_tables(spec_text).await
-                }
-                DaemonControlCommand::AddApiDatasourceFromImport {
-                    name,
-                    provider,
-                    spec_text,
-                    credentials,
-                } => {
-                    self.add_api_datasource_from_import(name, provider, spec_text, credentials)
-                        .await
-                }
-                DaemonControlCommand::DetachDatasource { name } => {
-                    self.detach_datasource(name).await
-                }
-                DaemonControlCommand::ListDatasources {} => {
-                    async {
-                        let entries = self.jute_state.datasource_catalog.lock().list();
-                        let result = serde_json::to_value(
-                            jute::commands::DaemonControlResult::Datasources(entries),
+                .await
+            }
+            DaemonControlCommand::Reopen {} => self.reopen().await.map(DaemonControlSuccess::path),
+            DaemonControlCommand::Rename { from, to } => {
+                async {
+                    self.save_current().await?;
+                    let path = self
+                        .rename_path(
+                            resolve_notebook_path(PathBuf::from(from)),
+                            resolve_notebook_path(PathBuf::from(to)),
                         )
+                        .await?;
+                    Ok(DaemonControlSuccess::path(path))
+                }
+                .await
+            }
+            DaemonControlCommand::Close {} => {
+                async {
+                    self.save_current().await?;
+                    self.close_current_window().await;
+                    self.bridge.set_notebook_open(false);
+                    {
+                        let mut state = self.state.lock().await;
+                        state.current_path = None;
+                        state.window_label = None;
+                        #[cfg(feature = "datasource-introspect")]
+                        {
+                            state.datasource_setup_cell = None;
+                        }
+                    }
+                    if let Err(error) = self.clear_last_notebook().await {
+                        warn!(%error, "failed to clear last notebook record");
+                    }
+                    self.emit_recents_changed().await?;
+                    Ok(DaemonControlSuccess::empty())
+                }
+                .await
+            }
+            DaemonControlCommand::AttachDatasource { name, path, group } => {
+                self.attach_datasource(name, path, group).await
+            }
+            DaemonControlCommand::AddApiDatasource { name, source } => {
+                self.add_api_datasource(name, source).await
+            }
+            DaemonControlCommand::ListNangoProviders {} => self.list_nango_providers().await,
+            DaemonControlCommand::PreviewOpenApiTables { spec_text } => {
+                self.preview_open_api_tables(spec_text).await
+            }
+            DaemonControlCommand::AddApiDatasourceFromImport {
+                name,
+                provider,
+                spec_text,
+                credentials,
+            } => {
+                self.add_api_datasource_from_import(name, provider, spec_text, credentials)
+                    .await
+            }
+            DaemonControlCommand::DetachDatasource { name } => self.detach_datasource(name).await,
+            DaemonControlCommand::ListDatasources {} => {
+                async {
+                    let entries = self.jute_state.datasource_catalog.lock().list();
+                    let result = serde_json::to_value(
+                        jute::commands::DaemonControlResult::Datasources(entries),
+                    )
+                    .map_err(|error| BridgeError::Handler {
+                        code: "datasources_encode_failed".to_owned(),
+                        message: error.to_string(),
+                    })?;
+                    Ok(DaemonControlSuccess::result(result))
+                }
+                .await
+            }
+            DaemonControlCommand::ListSavedConnections {} => self.list_saved_connections().await,
+            DaemonControlCommand::AttachSavedConnection { name } => {
+                self.attach_saved_connection(name).await
+            }
+            DaemonControlCommand::DeleteSavedConnection { name } => {
+                self.delete_saved_connection(name).await
+            }
+            DaemonControlCommand::ListRecents {} => self
+                .list_recent_entries()
+                .await
+                .map(DaemonControlSuccess::entries)
+                .map_err(|error| BridgeError::Handler {
+                    code: "recents_failed".to_owned(),
+                    message: error.to_string(),
+                }),
+            DaemonControlCommand::RemoveFromRecents { path } => {
+                async {
+                    self.remove_recent_path(&resolve_notebook_path(PathBuf::from(path)))
+                        .await
                         .map_err(|error| BridgeError::Handler {
-                            code: "datasources_encode_failed".to_owned(),
+                            code: "recents_failed".to_owned(),
                             message: error.to_string(),
                         })?;
-                        Ok(DaemonControlSuccess::result(result))
-                    }
-                    .await
+                    self.emit_recents_changed().await?;
+                    Ok(DaemonControlSuccess::empty())
                 }
-                DaemonControlCommand::ListRecents {} => self
-                    .list_recent_entries()
-                    .await
-                    .map(DaemonControlSuccess::entries)
-                    .map_err(|error| BridgeError::Handler {
-                        code: "recents_failed".to_owned(),
-                        message: error.to_string(),
-                    }),
-                DaemonControlCommand::RemoveFromRecents { path } => {
-                    async {
-                        self.remove_recent_path(&resolve_notebook_path(PathBuf::from(path)))
-                            .await
-                            .map_err(|error| BridgeError::Handler {
-                                code: "recents_failed".to_owned(),
-                                message: error.to_string(),
-                            })?;
-                        self.emit_recents_changed().await?;
-                        Ok(DaemonControlSuccess::empty())
-                    }
-                    .await
+                .await
+            }
+            DaemonControlCommand::SetPinned { path, pinned } => {
+                async {
+                    self.set_recent_pinned(&resolve_notebook_path(PathBuf::from(path)), pinned)
+                        .await
+                        .map_err(|error| BridgeError::Handler {
+                            code: "recents_failed".to_owned(),
+                            message: error.to_string(),
+                        })?;
+                    self.emit_recents_changed().await?;
+                    Ok(DaemonControlSuccess::empty())
                 }
-                DaemonControlCommand::SetPinned { path, pinned } => {
-                    async {
-                        self.set_recent_pinned(&resolve_notebook_path(PathBuf::from(path)), pinned)
-                            .await
-                            .map_err(|error| BridgeError::Handler {
-                                code: "recents_failed".to_owned(),
-                                message: error.to_string(),
-                            })?;
-                        self.emit_recents_changed().await?;
-                        Ok(DaemonControlSuccess::empty())
-                    }
-                    .await
-                }
-            };
+                .await
+            }
+        };
 
         match result {
             Ok(success) => DaemonControlResponse {
@@ -1459,6 +1499,19 @@ impl NotebookDaemonControl {
         source: String,
         tables: Vec<jute::commands::Table>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
+        let entry = self
+            .register_api_datasource_entry_inner(name, source, tables)
+            .await?;
+        datasource_entry_success(entry)
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn register_api_datasource_entry_inner(
+        &self,
+        name: String,
+        source: String,
+        tables: Vec<jute::commands::Table>,
+    ) -> Result<jute::commands::DatasourceEntry, BridgeError> {
         if name.trim().is_empty() {
             return Err(BridgeError::Handler {
                 code: "invalid_api_datasource_name".to_string(),
@@ -1480,13 +1533,7 @@ impl NotebookDaemonControl {
         self.refresh_datasource_setup_cell().await?;
         self.persist_catalog_to_current_notebook().await?;
 
-        let result = serde_json::to_value(jute::commands::DaemonControlResult::Datasource(entry))
-            .map_err(|error| BridgeError::Handler {
-            code: "datasource_entry_encode_failed".to_string(),
-            message: error.to_string(),
-        })?;
-
-        Ok(DaemonControlSuccess::result(result))
+        Ok(entry)
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -1506,6 +1553,122 @@ impl NotebookDaemonControl {
         let tables = api_datasource_tables(&source)?;
         self.register_api_datasource_entry(name, source, tables)
             .await
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn list_saved_connections(&self) -> Result<DaemonControlSuccess, BridgeError> {
+        let templates =
+            crate::connection_store::list()
+                .await
+                .map_err(|error| BridgeError::Handler {
+                    code: "saved_connections_list_failed".to_string(),
+                    message: error.to_string(),
+                })?;
+        let payload = serde_json::to_value(templates).map_err(|error| BridgeError::Handler {
+            code: "saved_connections_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+        saved_connection_result(
+            jute::commands::DaemonControlResult::SavedConnections(payload),
+            "saved_connections_encode_failed",
+        )
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn attach_saved_connection(
+        &self,
+        name: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        use spur_rest_table_gateway::adapter::Adapter as _;
+
+        let template = crate::connection_store::list()
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "saved_connections_list_failed".to_string(),
+                message: error.to_string(),
+            })?
+            .into_iter()
+            .find(|template| template.name == name)
+            .ok_or_else(|| BridgeError::Handler {
+                code: "saved_connection_not_found".to_string(),
+                message: format!("no saved connection named {name}"),
+            })?;
+
+        let missing_env_vars = template
+            .credential_env_vars
+            .iter()
+            .filter(|env_var| std::env::var_os(env_var).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let manifest = spur_rest_table_gateway::adapter::manifest::Manifest::from_toml(
+            &template.manifest_toml,
+        )
+        .map_err(|error| BridgeError::Handler {
+            code: "saved_connection_manifest_parse_failed".to_string(),
+            message: error.to_string(),
+        })?;
+        let adapter =
+            spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
+        let adapter_name = adapter.name().to_string();
+        let tables = adapter
+            .catalog()
+            .into_iter()
+            .map(|table| api_datasource_table(&adapter_name, table))
+            .collect();
+
+        let entry = self
+            .register_api_datasource_entry_inner(template.name, adapter_name, tables)
+            .await?;
+        self.emit_connections_changed().await;
+
+        let payload = json!({
+            "entry": entry,
+            "missing_env_vars": missing_env_vars,
+        });
+        saved_connection_result(
+            jute::commands::DaemonControlResult::AttachedSavedConnection(payload),
+            "saved_connection_attach_encode_failed",
+        )
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn delete_saved_connection(
+        &self,
+        name: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        crate::connection_store::remove(&name)
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "saved_connection_delete_failed".to_string(),
+                message: error.to_string(),
+            })?;
+        self.emit_connections_changed().await;
+
+        saved_connection_result(
+            jute::commands::DaemonControlResult::SavedConnectionDeleted(json!({
+                "removed": name,
+            })),
+            "saved_connection_delete_encode_failed",
+        )
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn emit_connections_changed(&self) {
+        let payload = match crate::connection_store::list().await {
+            Ok(templates) => match serde_json::to_value(templates) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(%error, "failed to encode saved connections change event");
+                    return;
+                }
+            },
+            Err(error) => {
+                warn!(%error, "failed to load saved connections change event payload");
+                return;
+            }
+        };
+        self.windows.emit_connections_changed(&payload);
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -1794,6 +1957,36 @@ impl NotebookDaemonControl {
         _provider: Option<String>,
         _spec_text: Option<String>,
         _credentials: Vec<(String, String)>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn list_saved_connections(&self) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn attach_saved_connection(
+        &self,
+        _name: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn delete_saved_connection(
+        &self,
+        _name: String,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
