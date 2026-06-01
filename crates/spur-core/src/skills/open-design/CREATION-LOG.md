@@ -39,3 +39,12 @@
   `html-ppt-retro-quarterly-review` (video/template mode); those + `dispatchDeckCommand`
   reconciliation remain open. Spec:
   `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m2-design.ipynb`.
+
+- **2026-06-01** — M4: runtime access surface. Added a `crates/spur-notebook/src/open_design/` loader
+  (resolution order: `$SPUR_OPEN_DESIGN_LIBRARY` → `~/.spur/open-design/` overlay → Tauri `resource_dir()`
+  → repo `assets/`; read-in-place, no copy) and two MCP tools — `open_design_search` (deterministic
+  field-weighted ranking over both libraries) and `open_design_get` (path-independent package fetch;
+  `example_html` optional, present in 49/51 deck themes). Bundled both asset dirs as Tauri resources and
+  rewired the skill's Direction / artifact-deck steps to call the tools (`Read` kept as dev fallback).
+  `open_design_list` + MCP Resources deferred to M4+. Spec:
+  `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m4-runtime-access-design.ipynb`.
