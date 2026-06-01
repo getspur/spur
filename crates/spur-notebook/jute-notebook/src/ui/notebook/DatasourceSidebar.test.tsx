@@ -95,10 +95,12 @@ describe("DatasourceSidebar", () => {
     dragDropCallbacks.length = 0;
     eventCallbacks.clear();
     listenMock.mockReset();
-    listenMock.mockImplementation((eventName: string, callback: TauriEventCallback) => {
-      eventCallbacks.set(eventName, callback);
-      return Promise.resolve(unlistenEventMock);
-    });
+    listenMock.mockImplementation(
+      (eventName: string, callback: TauriEventCallback) => {
+        eventCallbacks.set(eventName, callback);
+        return Promise.resolve(unlistenEventMock);
+      },
+    );
     onDragDropEventMock.mockReset();
     onDragDropEventMock.mockImplementation(
       (callback: TauriDragDropCallback) => {
@@ -226,6 +228,56 @@ describe("DatasourceSidebar", () => {
     expect(screen.getByText("sku")).toBeInTheDocument();
   });
 
+  test("api_button_opens_modal_and_dispatches_add_api_datasource", async () => {
+    daemonControlMock
+      .mockResolvedValueOnce({
+        ok: true,
+        result: { type: "datasources", data: [] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        result: datasourceResult({
+          name: "prediction",
+          path: "api://polymarket",
+          kind: "api_tables",
+          group: null,
+          columns: [],
+          rowCount: null,
+          tables: [
+            {
+              name: "polymarket_markets",
+              columns: [{ name: "market_id", sqlType: "VARCHAR" }],
+              rowCount: null,
+            },
+          ],
+        }),
+      });
+
+    render(<DatasourceSidebar />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add API datasource" }),
+    );
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "prediction" },
+    });
+    fireEvent.change(screen.getByLabelText("Source"), {
+      target: { value: "polymarket" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource",
+        name: "prediction",
+        source: "polymarket",
+      }),
+    );
+    expect(await screen.findByText("polymarket_markets")).toBeInTheDocument();
+  });
+
   test("mount_fetch_populates_list_without_datasources_changed_event", async () => {
     daemonControlMock.mockResolvedValueOnce({
       ok: true,
@@ -325,5 +377,48 @@ describe("DatasourceSidebar", () => {
     expect(screen.getByText("12 rows")).toBeInTheDocument();
     expect(screen.getByText("customers")).toBeInTheDocument();
     expect(screen.getByText("customer_name")).toBeInTheDocument();
+  });
+
+  test("api_tables_entry_renders_table_functions", async () => {
+    render(<DatasourceSidebar />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "polymarket",
+            path: "api://polymarket",
+            kind: "api_tables",
+            group: null,
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "polymarket_markets",
+                columns: [
+                  { name: "market_id", sqlType: "VARCHAR" },
+                  { name: "question", sqlType: "VARCHAR" },
+                ],
+                rowCount: null,
+              },
+              {
+                name: "polymarket_trades",
+                columns: [{ name: "price", sqlType: "DOUBLE" }],
+                rowCount: null,
+              },
+            ],
+          }),
+        ],
+      });
+    });
+
+    expect(await screen.findAllByText("API")).toHaveLength(2);
+    expect(screen.getByText("polymarket_markets")).toBeInTheDocument();
+    expect(screen.getByText("market_id")).toBeInTheDocument();
+    expect(screen.getByText("polymarket_trades")).toBeInTheDocument();
+    expect(screen.getByText("price")).toBeInTheDocument();
   });
 });
