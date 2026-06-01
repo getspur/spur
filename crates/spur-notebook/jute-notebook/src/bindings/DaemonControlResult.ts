@@ -3,6 +3,8 @@ import type { DaemonCell } from "./DaemonCell";
 import type { DaemonNotebookSnapshot } from "./DaemonNotebookSnapshot";
 import type { DatasourceEntry } from "./DatasourceEntry";
 import type { NotebookDelta } from "./NotebookDelta";
+import type { OpenApiTablePreview } from "./OpenApiTablePreview";
+import type { ProviderSummary } from "./ProviderSummary";
 
 /**
  * Successful daemon control payloads.
@@ -13,4 +15,6 @@ export type DaemonControlResult =
   | { type: "cell"; data: DaemonCell }
   | { type: "snapshot"; data: DaemonNotebookSnapshot }
   | { type: "datasource"; data: DatasourceEntry }
-  | { type: "datasources"; data: Array<DatasourceEntry> };
+  | { type: "datasources"; data: Array<DatasourceEntry> }
+  | { type: "nangoProviders"; data: Array<ProviderSummary> }
+  | { type: "openApiTablePreview"; data: OpenApiTablePreview };

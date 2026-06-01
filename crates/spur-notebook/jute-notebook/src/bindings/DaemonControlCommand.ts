@@ -20,6 +20,15 @@ export type DaemonControlCommand =
       group: string | null;
     }
   | { command: "add_api_datasource"; name: string; source: string }
+  | { command: "list_nango_providers" }
+  | { command: "preview_open_api_tables"; spec_text: string }
+  | {
+      command: "add_api_datasource_from_import";
+      name: string;
+      provider: string | null;
+      spec_text: string | null;
+      credentials: [string, string][];
+    }
   | { command: "detach_datasource"; name: string }
   | { command: "list_datasources" }
   | { command: "list_recents" }
