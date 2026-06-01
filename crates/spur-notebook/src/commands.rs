@@ -21,6 +21,7 @@ pub async fn notebook_dag_status(
 pub async fn notebook_run_cascade(
     state: tauri::State<'_, Arc<jute::state::State>>,
     bridge: tauri::State<'_, Arc<AgentBridge>>,
+    app: tauri::AppHandle,
     cell_id: String,
 ) -> Result<Value, jute::Error> {
     let notebook = state.get_notebook();
@@ -33,7 +34,7 @@ pub async fn notebook_run_cascade(
         Arc::new(TauriBridgeRequester::without_app(Arc::clone(
             bridge.inner(),
         ))),
-        None,
+        Some(app),
         None,
     );
     let report = context
@@ -60,6 +61,7 @@ pub async fn notebook_run_cascade(
 pub async fn notebook_run_cell(
     state: tauri::State<'_, Arc<jute::state::State>>,
     bridge: tauri::State<'_, Arc<AgentBridge>>,
+    app: tauri::AppHandle,
     cell_id: String,
 ) -> Result<Value, jute::Error> {
     let notebook = state.get_notebook();
@@ -72,7 +74,7 @@ pub async fn notebook_run_cell(
         Arc::new(TauriBridgeRequester::without_app(Arc::clone(
             bridge.inner(),
         ))),
-        None,
+        Some(app),
         None,
     );
     let report = context.engine.run_cell(&cell_id).await.map_err(|error| {
@@ -207,7 +209,10 @@ mod tests {
 
     use crate::{
         dag::{
-            engine::{CellRunOutcome, CellRunRequest, CellRunStatus, CellRunner, EngineError},
+            engine::{
+                CellRunOutcome, CellRunRequest, CellRunStatus, CellRunner, EngineError,
+                KernelEnsureRequest,
+            },
             notebook_run_context_with_runner,
         },
         mcp::bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
@@ -258,6 +263,13 @@ mod tests {
                     status: CellRunStatus::Succeeded,
                 })
             })
+        }
+
+        fn ensure_kernel<'a>(
+            &'a self,
+            _request: KernelEnsureRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -392,8 +404,9 @@ mod tests {
         );
         assert_eq!(
             requests[0].kernel_id,
-            Some(jute::state::notebook_slot_id(
-                notebook_path.to_string_lossy().as_ref()
+            Some(format!(
+                "{}#python3",
+                jute::state::notebook_slot_id(notebook_path.to_string_lossy().as_ref())
             ))
         );
     }
