@@ -17,6 +17,10 @@ export type DetachDatasourceCommand = Extract<
   DaemonControlCommand,
   { command: "detach_datasource" }
 >;
+export type AddApiDatasourceCommand = Extract<
+  DaemonControlCommand,
+  { command: "add_api_datasource" }
+>;
 export type ListDatasourcesCommand = Extract<
   DaemonControlCommand,
   { command: "list_datasources" }
@@ -42,6 +46,17 @@ export function attachDatasourceCommand(
     name: input.name,
     path: input.path,
     group: input.group,
+  };
+}
+
+export function addApiDatasourceCommand(input: {
+  name: string;
+  source: string;
+}): AddApiDatasourceCommand {
+  return {
+    command: "add_api_datasource" as const,
+    name: input.name,
+    source: input.source,
   };
 }
 

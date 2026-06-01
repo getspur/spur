@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
+  addApiDatasourceCommand,
   daemonControl,
   datasourceEntryFromDaemonControlResponse,
   pathFromDaemonControlResponse,
@@ -110,6 +111,19 @@ describe("daemon control adapter", () => {
         } as never,
       }),
     ).toThrow("daemon attach_datasource response did not include datasource");
+  });
+
+  test("builds add_api_datasource commands", () => {
+    expect(
+      addApiDatasourceCommand({
+        name: "prediction",
+        source: "polymarket",
+      }),
+    ).toEqual({
+      command: "add_api_datasource",
+      name: "prediction",
+      source: "polymarket",
+    });
   });
 
   test("sends void commands through daemon_control and discards the response", async () => {
