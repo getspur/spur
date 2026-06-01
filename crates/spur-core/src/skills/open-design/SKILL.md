@@ -12,11 +12,12 @@ about a design; you **build the design as notebook cells**. The notebook IS the
 project: brief, plan, and rendered artifact in one document.
 
 <HARD-GATE>
-You operate the notebook ONLY through the `notebook_*` MCP tools
+You operate the notebook and vendored Open Design libraries ONLY through these MCP tools:
 (`notebook_insert_cell`, `notebook_write_cell`, `notebook_read_cell`,
-`notebook_get_notebook`, `notebook_set_cell_metadata`). Never ask the user to
-paste code or open files. The final artifact MUST be a cell whose output carries
-`text/html`, so Jute renders it in its sandboxed iframe.
+`notebook_get_notebook`, `notebook_set_cell_metadata`, `open_design_search`,
+`open_design_get`). Never ask the user to paste code or open files. The final
+artifact MUST be a cell whose output carries `text/html`, so Jute renders it in
+its sandboxed iframe.
 </HARD-GATE>
 
 ## The loop
@@ -41,8 +42,9 @@ radios beats 30 minutes of redirects. Lock the brief before building.
 
 - If the user has brand direction, use it.
 - If the user names a **brand** or strong visual reference, consult the design-system
-  library first — see `references/design-systems.md` (search `index.json`, then `Read`
-  the chosen `DESIGN.md` and bind its palette). Otherwise use the 5 directions below.
+  library first — see `references/design-systems.md` (call `open_design_search`,
+  then `open_design_get`, and bind the chosen palette). Otherwise use the 5
+  directions below.
 - If the user has no brand, `notebook_insert_cell(kind="markdown", source="...")`
   to offer the five directions from `references/directions.md`.
 - Apply the chosen palette and font stack deterministically. No freestyle colors.

@@ -24,6 +24,8 @@ pub mod notebook_run_cascade;
 pub mod notebook_run_cell;
 pub mod notebook_set_cell_code_type;
 pub mod notebook_set_dag_metadata;
+pub mod open_design_get;
+pub mod open_design_search;
 pub mod read_cell;
 pub mod restart_kernel;
 pub mod run_cell;
@@ -55,6 +57,8 @@ pub fn tools() -> Vec<Tool> {
         notebook_run_cascade::tool(),
         notebook_set_cell_code_type::tool(),
         notebook_set_dag_metadata::tool(),
+        open_design_search::tool(),
+        open_design_get::tool(),
         insert_cell::tool(),
         write_cell::tool(),
         set_cell_metadata::tool(),
@@ -280,6 +284,21 @@ mod tests {
             "notebook.reveal_in_finder",
             "notebook.discard_scratch",
         ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing tool: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_include_open_design_tools() {
+        let names = tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+
+        for expected in ["open_design_search", "open_design_get"] {
             assert!(
                 names.iter().any(|name| name == expected),
                 "missing tool: {expected}"

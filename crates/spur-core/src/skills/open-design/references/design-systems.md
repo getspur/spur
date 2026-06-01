@@ -9,11 +9,15 @@ with a compact `index.json` beside them.
 - `swatches` are up to 6 lowercase hex codes in document order; may be fewer than 6 (never more).
 
 ## Selecting a design system (Direction step)
-1. If the user names a brand or a strong visual reference, scan `index.json` `items`
-   by `id` / `title` / `category` / `summary` for the closest match.
-2. `Read` that system's `design-systems/<id>/DESIGN.md` for the full palette, type
-   stack, and posture, and bind it to the artifact's CSS `:root`.
-3. If no brand fits, fall back to the 5 directions in `references/directions.md`.
+1. If the user names a brand or a strong visual reference, call
+   `open_design_search({ query, kind: "design-systems" })` and choose the closest
+   match from the ranked `items`.
+2. Call `open_design_get({ kind: "design-systems", id })` for the selected item,
+   use its `design_md` for the full palette, type stack, and posture, and bind it
+   to the artifact's CSS `:root`.
+3. **DEV FALLBACK:** in an in-repo checkout where the tools are unavailable,
+   `Read assets/open-design-library/design-systems/<id>/DESIGN.md`.
+4. If no brand fits, fall back to the 5 directions in `references/directions.md`.
 
-> Runtime install location and any search tool / MCP Resource surface are finalized
-> in M4. For now, selection is `Read`-driven against the committed library + index.
+> Runtime selection is tool-driven so packaged installs do not depend on repo-relative
+> asset paths. The `Read assets/...` path is only for local development fallback.
