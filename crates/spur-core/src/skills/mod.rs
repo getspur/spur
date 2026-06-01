@@ -812,6 +812,8 @@ mod tests {
         for marker in [
             "deck-skeleton.html",
             "index.json",
+            "open_design_search",
+            "open_design_get",
             "text/html",
             "SLOT:",
             "native",
@@ -873,6 +875,12 @@ mod tests {
             text.contains("index.json") && text.contains("swatches"),
             "reference must document the index schema"
         );
+        for marker in ["open_design_search", "open_design_get"] {
+            assert!(
+                text.contains(marker),
+                "design-systems.md must document `{marker}`"
+            );
+        }
     }
 
     #[test]
