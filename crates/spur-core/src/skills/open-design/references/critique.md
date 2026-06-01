@@ -45,6 +45,30 @@ zero dashes of this kind in artifact output.
 including JavaScript string literals and HTML entities (`&mdash;`, `&#8212;`, `&ndash;`,
 `&#8211;`), for `—` / `–`. Any hit fails the artifact; fix it and re-read the cell.
 
+## Self-contained and script-degradation (mandatory)
+
+The artifact renders inside a sandboxed iframe, and active content (scripts) is **off by
+default** (`output.activeContent = false`). With scripts off the iframe runs zero
+JavaScript and shows only static HTML and CSS. The iframe also has no same-origin access
+and the host sets no CSP, so anything fetched at render time (CDN scripts, `esm.sh`
+imports, `cdn.tailwindcss.com`, a network-only web font) is unreliable.
+
+Two hard rules:
+
+1. **Self-contained.** All CSS and JS live inline in the one HTML document. No external
+   `<script src>`, no CDN stylesheet, no network-loaded module, no remote font as the only
+   source. If a build step produced the artifact (e.g. a Deno kernel bundling React /
+   Tailwind / Motion), the emitted HTML must already have everything inlined.
+2. **Meaningful with scripts off.** The static render must carry the design on its own.
+   Interactivity (motion, click-to-inspect, cascades) is progressive enhancement that only
+   lights up when active content is enabled. A blank or broken artifact with scripts off is
+   a fail. For an inherently interactive piece, ship a static baseline (server-rendered
+   markup or a representative still state) and tell the user that enabling active content
+   unlocks the live behavior.
+
+Check before finalizing: read the cell output, confirm there are no external resource URLs
+in the HTML, and confirm the markup alone (no JS) still reads as the intended design.
+
 ## Deck-specific checks (run for `kind: deck`)
 
 Apply these in addition to the 5-dimensional critique:
