@@ -52,6 +52,7 @@ pub struct SourcePush {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellRunRequest {
     pub cell_id: String,
+    pub notebook_path: String,
     pub kernel_id: Option<String>,
     pub code: String,
     pub expected_version: u64,
@@ -118,6 +119,7 @@ impl CellRunner for RunCellCommandRunner {
                 &self.deps,
                 json!({
                     "cell_id": request.cell_id,
+                    "notebook_path": request.notebook_path,
                     "kernel_id": request.kernel_id,
                     "code": request.code,
                     "expected_version": request.expected_version,
@@ -204,6 +206,7 @@ where
 {
     store: Arc<NotebookStore>,
     runner: R,
+    notebook_path: String,
     kernel_id: String,
     port_root: PathBuf,
     graph: Option<NotebookDag>,
@@ -219,11 +222,12 @@ where
         notebook_path: impl AsRef<Path>,
         port_root: PathBuf,
     ) -> Self {
-        let kernel_id =
-            jute::state::notebook_slot_id(notebook_path.as_ref().to_string_lossy().as_ref());
+        let notebook_path = notebook_path.as_ref().to_string_lossy().into_owned();
+        let kernel_id = jute::state::notebook_slot_id(&notebook_path);
         Self {
             store,
             runner,
+            notebook_path,
             kernel_id,
             port_root,
             graph: None,
@@ -470,6 +474,7 @@ where
             })?;
         Ok(CellRunRequest {
             cell_id: cell_id.to_owned(),
+            notebook_path: self.notebook_path.clone(),
             kernel_id: Some(self.kernel_id.clone()),
             code: cell.source,
             expected_version,
@@ -1145,7 +1150,7 @@ mod tests {
         let mut engine = ReactiveEngine::new(
             Arc::clone(&store),
             runner.clone(),
-            notebook_path,
+            &notebook_path,
             temp.path().join("ports"),
         );
 
@@ -1153,6 +1158,10 @@ mod tests {
 
         let requests = runner.requests();
         assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].notebook_path,
+            notebook_path.to_string_lossy().as_ref()
+        );
         assert_eq!(requests[0].kernel_id, Some(expected_slot));
     }
 

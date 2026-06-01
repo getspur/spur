@@ -39,7 +39,6 @@ pub mod venv;
 type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
 type BeforeSaveHook = dyn Fn(&Path, &mut NotebookRoot) + Send + Sync;
-const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 
 /// Snapshot of a stable kernel slot for agent read-side tools.
 #[derive(Debug, Clone, Serialize)]
@@ -1427,25 +1426,19 @@ pub async fn save_to_disk(
 
 /// Run a code cell in a Jupyter kernel.
 pub async fn run_cell_events(
+    notebook_path: &str,
     kernel_id: &str,
     code: &str,
     state: &State,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
     let conn = kernel_connection_for_slot(state, kernel_id)?;
     let spec_name = spec_name_for_slot(state, kernel_id)?;
-    let wrapped_code = wrap_cell_for_kernel(kernel_id, &spec_name, code);
+    let wrapped_code = wrap_cell_for_kernel(notebook_path, &spec_name, code);
     commands::run_cell(&conn, &wrapped_code).await
 }
 
-fn port_root_for_kernel_id(kernel_id: &str) -> PathBuf {
-    let path = kernel_id
-        .strip_prefix(NOTEBOOK_SLOT_PREFIX)
-        .unwrap_or(kernel_id);
-    notebook_port_root(path)
-}
-
-fn wrap_cell_for_kernel(kernel_id: &str, spec_name: &str, code: &str) -> String {
-    let root = port_root_for_kernel_id(kernel_id);
+fn wrap_cell_for_kernel(notebook_path: &str, spec_name: &str, code: &str) -> String {
+    let root = notebook_port_root(notebook_path);
     if spec_name == "deno" {
         wrap_js_cell(root, code)
     } else {
@@ -1462,12 +1455,13 @@ pub async fn interrupt_kernel_slot(kernel_id: &str, state: &State) -> Result<(),
 /// Run a code cell in a Jupyter kernel.
 #[tauri::command]
 pub async fn run_cell(
+    notebook_path: &str,
     kernel_id: &str,
     code: &str,
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
-    let rx = run_cell_events(kernel_id, code, &state).await?;
+    let rx = run_cell_events(notebook_path, kernel_id, code, &state).await?;
     while let Ok(event) = rx.recv().await {
         if on_event.send(event).is_err() {
             break;
@@ -1563,7 +1557,7 @@ mod tests {
     #[test]
     fn run_cell_chokepoint_wraps_python_code_with_port_bootstrap() {
         let wrapped = wrap_cell_for_kernel(
-            "notebook:/tmp/demo-notebook.ipynb",
+            "/tmp/demo-notebook.ipynb",
             "python3",
             "spur.put('sales', [1, 2])",
         );
@@ -1576,7 +1570,7 @@ mod tests {
     #[test]
     fn run_cell_chokepoint_wraps_deno_code_with_port_bootstrap() {
         let wrapped = wrap_cell_for_kernel(
-            "notebook:/tmp/demo-notebook.ipynb",
+            "/tmp/demo-notebook.ipynb",
             "deno",
             "await spur.put('sales', [{ id: 1 }]);",
         );
@@ -1587,12 +1581,34 @@ mod tests {
     }
 
     #[test]
-    fn run_cell_chokepoint_wraps_raw_code_once() {
-        let wrapped = wrap_cell_for_kernel(
-            "notebook:/tmp/demo-notebook.ipynb",
-            "python3",
-            "spur.get('sales')",
+    fn run_cell_chokepoint_uses_same_port_root_for_same_notebook_across_specs() {
+        let notebook_path = "/tmp/demo-notebook.ipynb";
+        let python = wrap_cell_for_kernel(notebook_path, "python3", "spur.get('sales')");
+        let deno = wrap_cell_for_kernel(notebook_path, "deno", "await spur.get('sales');");
+        let expected_root_literal =
+            serde_json::to_string(&notebook_port_root(notebook_path).display().to_string())
+                .expect("port root literal serializes");
+        let forked_root_literal = serde_json::to_string(
+            &notebook_port_root(format!("{notebook_path}#deno"))
+                .display()
+                .to_string(),
+        )
+        .expect("forked port root literal serializes");
+
+        assert_ne!(
+            expected_root_literal.as_bytes(),
+            forked_root_literal.as_bytes()
         );
+        assert!(python.contains(&expected_root_literal));
+        assert!(deno.contains(&expected_root_literal));
+        assert!(!python.contains(&forked_root_literal));
+        assert!(!deno.contains(&forked_root_literal));
+    }
+
+    #[test]
+    fn run_cell_chokepoint_wraps_raw_code_once() {
+        let wrapped =
+            wrap_cell_for_kernel("/tmp/demo-notebook.ipynb", "python3", "spur.get('sales')");
 
         assert_eq!(wrapped.matches("class _Spur").count(), 1);
         assert_eq!(wrapped.matches("spur = _Spur").count(), 1);
