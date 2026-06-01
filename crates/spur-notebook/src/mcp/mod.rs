@@ -706,6 +706,10 @@ const POLYMARKET_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const POLYMARKET_CLOB_BASE: &str = "https://clob.polymarket.com";
 
 #[cfg(feature = "datasource-introspect")]
+const NANGO_PROVIDERS_SNAPSHOT: &str =
+    include_str!("../../jute-notebook/src-tauri/src/nango_providers_snapshot.yaml");
+
+#[cfg(feature = "datasource-introspect")]
 const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
 
 #[cfg(feature = "datasource-introspect")]
@@ -867,6 +871,154 @@ fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String
         jute::commands::DatasourceKind::ApiTables => {
             unreachable!("API table sources are registered as table functions")
         }
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, BridgeError> {
+    let providers =
+        spur_rest_table_gateway::adapter::nango::parse_providers(NANGO_PROVIDERS_SNAPSHOT)
+            .map_err(|error| BridgeError::Handler {
+                code: "nango_provider_snapshot_failed".to_string(),
+                message: format!("failed to parse bundled Nango providers snapshot: {error}"),
+            })?;
+    let mut summaries = providers
+        .into_iter()
+        .map(|(name, provider)| {
+            let auth_mode = provider.auth_mode.clone().unwrap_or_default();
+            jute::commands::ProviderSummary {
+                display_name: provider
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| name.clone()),
+                category: provider
+                    .categories
+                    .as_ref()
+                    .and_then(|categories| categories.first())
+                    .cloned()
+                    .unwrap_or_default(),
+                tier: spur_rest_table_gateway::adapter::nango::tier(provider.auth_mode.as_deref())
+                    .to_string(),
+                auth_mode,
+                name,
+            }
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(summaries)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn preview_open_api_tables(
+    spec_text: &str,
+) -> Result<jute::commands::OpenApiTablePreview, BridgeError> {
+    let spec =
+        spur_rest_table_gateway::adapter::openapi::parse_spec(spec_text).map_err(|error| {
+            BridgeError::Handler {
+                code: "openapi_parse_failed".to_string(),
+                message: format!("failed to parse OpenAPI spec: {error}"),
+            }
+        })?;
+    let tables = spur_rest_table_gateway::adapter::openapi::spec_to_tables(&spec)
+        .into_iter()
+        .map(table_preview)
+        .collect();
+    Ok(jute::commands::OpenApiTablePreview { tables })
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn build_api_import_manifest(
+    name: &str,
+    provider: Option<String>,
+    spec_text: Option<String>,
+) -> Result<(String, spur_rest_table_gateway::adapter::manifest::Manifest), BridgeError> {
+    let source = provider
+        .as_deref()
+        .map(normalize_api_datasource_source)
+        .transpose()?
+        .unwrap_or_else(|| api_import_source_name(name));
+    let mut toml = if let Some(provider) = provider {
+        let providers =
+            spur_rest_table_gateway::adapter::nango::parse_providers(NANGO_PROVIDERS_SNAPSHOT)
+                .map_err(|error| BridgeError::Handler {
+                    code: "nango_provider_snapshot_failed".to_string(),
+                    message: format!("failed to parse bundled Nango providers snapshot: {error}"),
+                })?;
+        let provider = providers.get(&source).ok_or_else(|| BridgeError::Handler {
+            code: "unknown_nango_provider".to_string(),
+            message: format!("unknown Nango provider: {}", provider.trim()),
+        })?;
+        let manifest_stub =
+            spur_rest_table_gateway::adapter::nango::provider_to_manifest_stub(&source, provider);
+        spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest_stub)
+    } else {
+        let manifest_stub = spur_rest_table_gateway::adapter::manifest::Manifest {
+            source: spur_rest_table_gateway::adapter::manifest::SourceCfg {
+                name: source.clone(),
+                base_url: String::new(),
+                auth: spur_rest_table_gateway::adapter::manifest::AuthCfg::None,
+                pagination: None,
+                connection_config: Vec::new(),
+            },
+            tables: Vec::new(),
+        };
+        spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest_stub)
+    };
+
+    if let Some(spec_text) = spec_text {
+        let spec =
+            spur_rest_table_gateway::adapter::openapi::parse_spec(&spec_text).map_err(|error| {
+                BridgeError::Handler {
+                    code: "openapi_parse_failed".to_string(),
+                    message: format!("failed to parse OpenAPI spec: {error}"),
+                }
+            })?;
+        let tables = spur_rest_table_gateway::adapter::openapi::spec_to_tables(&spec);
+        toml.push_str(&spur_rest_table_gateway::adapter::openapi::tables_to_toml(
+            &tables,
+        ));
+    }
+
+    let manifest = spur_rest_table_gateway::adapter::manifest::Manifest::from_toml(&toml).map_err(
+        |error| BridgeError::Handler {
+            code: "api_import_manifest_failed".to_string(),
+            message: format!("failed to build API datasource manifest: {error}"),
+        },
+    )?;
+    Ok((source, manifest))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn api_import_source_name(name: &str) -> String {
+    let mut source = normalize_api_datasource_source(name).unwrap_or_else(|_| "api".to_string());
+    source = source
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    if source.is_empty() {
+        "api".to_string()
+    } else {
+        source
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn table_preview(
+    table: spur_rest_table_gateway::adapter::manifest::TableCfg,
+) -> jute::commands::TablePreview {
+    jute::commands::TablePreview {
+        name: table.name,
+        path: table.path,
+        response_path: table.response_path,
+        columns: table
+            .columns
+            .into_iter()
+            .map(|(name, column)| jute::commands::TablePreviewColumn {
+                name,
+                ty: column.ty,
+                json: column.json,
+            })
+            .collect(),
     }
 }
 
@@ -1163,6 +1315,19 @@ impl NotebookDaemonControl {
                 DaemonControlCommand::AddApiDatasource { name, source } => {
                     self.add_api_datasource(name, source).await
                 }
+                DaemonControlCommand::ListNangoProviders {} => self.list_nango_providers().await,
+                DaemonControlCommand::PreviewOpenApiTables { spec_text } => {
+                    self.preview_open_api_tables(spec_text).await
+                }
+                DaemonControlCommand::AddApiDatasourceFromImport {
+                    name,
+                    provider,
+                    spec_text,
+                    credentials,
+                } => {
+                    self.add_api_datasource_from_import(name, provider, spec_text, credentials)
+                        .await
+                }
                 DaemonControlCommand::DetachDatasource { name } => {
                     self.detach_datasource(name).await
                 }
@@ -1288,10 +1453,11 @@ impl NotebookDaemonControl {
     }
 
     #[cfg(feature = "datasource-introspect")]
-    async fn add_api_datasource(
+    async fn register_api_datasource_entry(
         &self,
         name: String,
         source: String,
+        tables: Vec<jute::commands::Table>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         if name.trim().is_empty() {
             return Err(BridgeError::Handler {
@@ -1300,15 +1466,14 @@ impl NotebookDaemonControl {
             });
         }
 
-        let source = normalize_api_datasource_source(&source)?;
         let entry = jute::commands::DatasourceEntry {
             name,
-            path: source.clone(),
+            path: source,
             kind: jute::commands::DatasourceKind::ApiTables,
             group: Some(API_DATASOURCE_GROUP.to_string()),
             columns: Vec::new(),
             row_count: None,
-            tables: api_datasource_tables(&source)?,
+            tables,
         };
 
         self.jute_state.attach_datasource(entry.clone());
@@ -1322,6 +1487,85 @@ impl NotebookDaemonControl {
         })?;
 
         Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn add_api_datasource(
+        &self,
+        name: String,
+        source: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        if name.trim().is_empty() {
+            return Err(BridgeError::Handler {
+                code: "invalid_api_datasource_name".to_string(),
+                message: "API datasource name must not be empty".to_string(),
+            });
+        }
+
+        let source = normalize_api_datasource_source(&source)?;
+        let tables = api_datasource_tables(&source)?;
+        self.register_api_datasource_entry(name, source, tables)
+            .await
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn list_nango_providers(&self) -> Result<DaemonControlSuccess, BridgeError> {
+        let providers = nango_provider_summaries()?;
+        let result = serde_json::to_value(jute::commands::DaemonControlResult::NangoProviders(
+            providers,
+        ))
+        .map_err(|error| BridgeError::Handler {
+            code: "nango_providers_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+        Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn preview_open_api_tables(
+        &self,
+        spec_text: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        let preview = preview_open_api_tables(&spec_text)?;
+        let result = serde_json::to_value(
+            jute::commands::DaemonControlResult::OpenApiTablePreview(preview),
+        )
+        .map_err(|error| BridgeError::Handler {
+            code: "openapi_preview_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+        Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn add_api_datasource_from_import(
+        &self,
+        name: String,
+        provider: Option<String>,
+        spec_text: Option<String>,
+        credentials: Vec<(String, String)>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        use spur_rest_table_gateway::adapter::Adapter as _;
+
+        let (source, manifest) = build_api_import_manifest(&name, provider, spec_text)?;
+        // ManifestAdapter resolves auth and connection_config from environment
+        // at scan time. This session-scoped injection is process-global, and
+        // secrets are intentionally not persisted to the notebook catalog.
+        for (key, value) in credentials {
+            std::env::set_var(key, value);
+        }
+
+        let adapter =
+            spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
+        let adapter_name = adapter.name().to_string();
+        let tables = adapter
+            .catalog()
+            .into_iter()
+            .map(|table| api_datasource_table(&adapter_name, table))
+            .collect();
+
+        self.register_api_datasource_entry(name, source, tables)
+            .await
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -1517,6 +1761,39 @@ impl NotebookDaemonControl {
         &self,
         _name: String,
         _source: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn list_nango_providers(&self) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn preview_open_api_tables(
+        &self,
+        _spec_text: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn add_api_datasource_from_import(
+        &self,
+        _name: String,
+        _provider: Option<String>,
+        _spec_text: Option<String>,
+        _credentials: Vec<(String, String)>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
@@ -2846,6 +3123,189 @@ mod tests {
         assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
     }
 
+    const OPENAPI_CHARGES_SPEC: &str = r#"
+openapi: 3.0.3
+info:
+  title: Charges
+  version: "1"
+paths:
+  /charges:
+    get:
+      operationId: charges
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        amount:
+                          type: integer
+                        paid:
+                          type: boolean
+"#;
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn manifest_import_registers_api_tables() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "add_api_datasource_from_import",
+            "name": "billing",
+            "provider": "stripe",
+            "spec_text": OPENAPI_CHARGES_SPEC,
+            "credentials": [
+                ["STRIPE_API_KEY", "sk_test_runtime"],
+                ["SPUR_CONN_stripe_base_url", "https://api.stripe.com/v1"]
+            ]
+        }))
+        .expect("add_api_datasource_from_import command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry = datasource_entry_from_response(&response);
+        assert_eq!(entry.name, "billing");
+        assert_eq!(entry.path, "stripe");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
+        assert_eq!(entry.group.as_deref(), Some("API"));
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert_eq!(
+            entry.tables,
+            vec![jute::commands::Table {
+                name: "stripe_charges".to_string(),
+                columns: vec![
+                    jute::commands::Column {
+                        name: "id".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "amount".to_string(),
+                        sql_type: "BIGINT".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "paid".to_string(),
+                        sql_type: "BOOLEAN".to_string(),
+                    },
+                ],
+                row_count: None,
+            }]
+        );
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn list_nango_providers_tiers() {
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::new(State::new()),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "list_nango_providers"
+        }))
+        .expect("list_nango_providers command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let providers = provider_summaries_from_response(&response);
+        assert_eq!(
+            providers
+                .iter()
+                .find(|provider| provider.name == "stripe")
+                .expect("stripe provider is listed")
+                .tier,
+            "A"
+        );
+        assert_eq!(
+            providers
+                .iter()
+                .find(|provider| provider.name == "shopify")
+                .expect("shopify provider is listed")
+                .tier,
+            "B"
+        );
+        assert!(providers
+            .windows(2)
+            .all(|pair| pair[0].name <= pair[1].name));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn preview_openapi_tables() {
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::new(State::new()),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "preview_open_api_tables",
+            "spec_text": OPENAPI_CHARGES_SPEC
+        }))
+        .expect("preview_open_api_tables command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let preview = open_api_preview_from_response(&response);
+        assert_eq!(preview.tables.len(), 1);
+        let table = &preview.tables[0];
+        assert_eq!(table.name, "charges");
+        assert_eq!(table.path, "/charges");
+        assert_eq!(table.response_path.as_deref(), Some("$.data"));
+        assert_eq!(
+            table.columns,
+            vec![
+                jute::commands::TablePreviewColumn {
+                    name: "id".to_string(),
+                    ty: "Utf8".to_string(),
+                    json: "$.id".to_string(),
+                },
+                jute::commands::TablePreviewColumn {
+                    name: "amount".to_string(),
+                    ty: "Int64".to_string(),
+                    json: "$.amount".to_string(),
+                },
+                jute::commands::TablePreviewColumn {
+                    name: "paid".to_string(),
+                    ty: "Boolean".to_string(),
+                    json: "$.paid".to_string(),
+                },
+            ]
+        );
+    }
+
     #[cfg(feature = "datasource-introspect")]
     #[test]
     fn portability_duckdb_setup_cell_sql_runs_on_vanilla_duckdb() -> anyhow::Result<()> {
@@ -3703,6 +4163,30 @@ mod tests {
             .expect("daemon control result decodes")
         {
             jute::commands::DaemonControlResult::Datasources(entries) => entries,
+            result => panic!("unexpected daemon control result: {result:?}"),
+        }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn provider_summaries_from_response(
+        response: &DaemonControlResponse,
+    ) -> Vec<jute::commands::ProviderSummary> {
+        match serde_json::from_value(response.result.clone().expect("providers control result"))
+            .expect("daemon control result decodes")
+        {
+            jute::commands::DaemonControlResult::NangoProviders(providers) => providers,
+            result => panic!("unexpected daemon control result: {result:?}"),
+        }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn open_api_preview_from_response(
+        response: &DaemonControlResponse,
+    ) -> jute::commands::OpenApiTablePreview {
+        match serde_json::from_value(response.result.clone().expect("preview control result"))
+            .expect("daemon control result decodes")
+        {
+            jute::commands::DaemonControlResult::OpenApiTablePreview(preview) => preview,
             result => panic!("unexpected daemon control result: {result:?}"),
         }
     }

@@ -9,7 +9,8 @@ use jute::{
     commands::{
         Column, DaemonCell, DaemonControlCommand, DaemonControlError, DaemonControlRequest,
         DaemonControlResponse, DaemonControlResult, DaemonNotebookSnapshot, DaemonRecentEntry,
-        DatasourceEntry, DatasourceKind, RecentNotebookEntry, RecentsChangedEvent, Table,
+        DatasourceEntry, DatasourceKind, OpenApiTablePreview, ProviderSummary, RecentNotebookEntry,
+        RecentsChangedEvent, Table, TablePreview, TablePreviewColumn,
     },
     notebook_store::{CellKind, DeltaKind, NotebookDelta},
 };
@@ -48,6 +49,10 @@ fn main() {
     Column::export_all_to(&export_path).unwrap();
     Table::export_all_to(&export_path).unwrap();
     DatasourceEntry::export_all_to(&export_path).unwrap();
+    ProviderSummary::export_all_to(&export_path).unwrap();
+    TablePreviewColumn::export_all_to(&export_path).unwrap();
+    TablePreview::export_all_to(&export_path).unwrap();
+    OpenApiTablePreview::export_all_to(&export_path).unwrap();
     DaemonControlCommand::export_all_to(&export_path).unwrap();
     DaemonControlRequest::export_all_to(&export_path).unwrap();
     DaemonControlError::export_all_to(&export_path).unwrap();
