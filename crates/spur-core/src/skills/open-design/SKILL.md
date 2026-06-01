@@ -40,6 +40,9 @@ radios beats 30 minutes of redirects. Lock the brief before building.
 ### 2. Direction
 
 - If the user has brand direction, use it.
+- If the user names a **brand** or strong visual reference, consult the design-system
+  library first — see `references/design-systems.md` (search `index.json`, then `Read`
+  the chosen `DESIGN.md` and bind its palette). Otherwise use the 5 directions below.
 - If the user has no brand, `notebook_insert_cell(kind="markdown", source="...")`
   to offer the five directions from `references/directions.md`.
 - Apply the chosen palette and font stack deterministically. No freestyle colors.
