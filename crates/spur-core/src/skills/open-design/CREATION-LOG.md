@@ -74,3 +74,12 @@
   active-content-default-off) and rewrote SKILL.md step 4 to pick a track and allow a Deno
   build step (the prior "single-entry HTML, no build step" M1 line is superseded; the
   rendered output is still one inlined self-contained cell).
+
+- **2026-06-01** — charts guidance. Added a "Charts and data viz" section to
+  `references/artifact-tracks.md`: default to **Observable Plot, server-rendered to inline
+  SVG** (Deno kernel + jsdom shim + `chart.outerHTML`), which is the chart-shaped version of
+  the Track B "render static at kernel time" rule (scripts-off baseline, zero external URLs,
+  single-digit KB). Verified empirically in a Deno notebook (static `<svg>`, external_urls=0).
+  Marked **Perspective** (and other WASM/worker engines requiring remote runtime) out of
+  scope for artifact cells (no static baseline, multi-MB WASM + worker, not self-containable);
+  they belong on a full app surface.

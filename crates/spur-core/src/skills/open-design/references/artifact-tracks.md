@@ -109,3 +109,33 @@ const doc = "<!doctype html><html><head><meta charset=utf-8><style>" + css +
 Dynamic, data-driven values (positions, status colors) stay inline `style`; structural
 styling is utility classes so Tailwind can tree-shake them. Custom motion (pulse, dashed
 edges) is a small appended `@keyframes` block, since Tailwind ships none by default.
+
+## Charts and data viz
+
+- **Default: Observable Plot, server-rendered to inline SVG.** Plot is code-first (compose
+  layered marks in one spec). In the Deno kernel, give it a DOM via a jsdom shim and read
+  `chart.outerHTML` to get a static `<svg>` string, then inline it. The chart renders with
+  scripts OFF and ships zero external URLs (jsdom and Plot are kernel-time only, never
+  shipped). This is the chart-shaped version of the Track B "render static at kernel time"
+  rule, and the output is tiny (single-digit KB of SVG).
+
+  ```ts
+  import * as Plot from "npm:@observablehq/plot";
+  import { JSDOM } from "npm:jsdom";
+  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+  globalThis.document = dom.window.document;
+  globalThis.window = dom.window;
+  const svg = Plot.plot({ marks: [/* areaY + lineY + dot + ruleY ... */] }).outerHTML;
+  // inline `svg` into the one self-contained text/html document
+  ```
+
+  Need interactivity (hover, brush, click)? Hydrate a Plot/Preact client island via the
+  Track B bundle path, and keep the SSR'd SVG as the scripts-off baseline.
+
+- **Out of scope: Perspective and other WASM/worker engines.** `@finos/perspective` is a
+  client-only analytics engine (WASM core + Web Worker + `<perspective-viewer>` web
+  component). It has no static baseline (blank with scripts off), needs multi-MB WASM plus a
+  worker at runtime, and cannot be made self-contained in one cell. It belongs on a full app
+  surface (Jute app / web app) where large-data, live pivot/filter interactivity is the
+  product, not in an artifact cell. Same verdict for any chart library that requires a
+  runtime CDN script or remote WASM.
