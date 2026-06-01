@@ -1,0 +1,16 @@
+Nango providers.yaml attribution
+================================
+
+This crate can import provider metadata derived from Nango:
+
+Upstream: https://github.com/NangoHQ/nango
+License: Elastic License 2.0
+
+Files named *.connection.toml produced by the nango-import helper are modified
+or derived works of Nango provider metadata under Elastic License 2.0. Preserve
+the generated notice comments and this THIRD_PARTY_NOTICES file when locally
+distributing those imported manifests.
+
+Bundling imported manifests is for local distribution and use only. It is not
+permission to offer a hosted or managed service based on Nango-derived provider
+metadata.
