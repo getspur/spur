@@ -66,6 +66,10 @@ radios beats 30 minutes of redirects. Lock the brief before building.
 
 ### 4. Artifact
 
+- **If the brief is a deck (`kind: deck`)**, do NOT emit a single HTML blob — build a
+  native Jute deck instead: see `references/deck-mode.md` (one cell per slide +
+  `jute_deck` metadata via `set_cell_metadata`). The bullets below are for non-deck,
+  single-HTML artifacts.
 - `notebook_insert_cell(kind="code", source="# open-design artifact")` to create
   the cell.
 - `notebook_write_cell(id, source, expected_version)` where the cell, when
