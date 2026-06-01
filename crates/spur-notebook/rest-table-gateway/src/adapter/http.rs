@@ -88,6 +88,19 @@ fn next_link_from_header(header: &str, rel: &str) -> Option<String> {
     None
 }
 
+pub(crate) fn apply_auth(
+    req: reqwest::RequestBuilder,
+    auth: &ResolvedAuth,
+) -> reqwest::RequestBuilder {
+    match auth {
+        ResolvedAuth::None => req,
+        ResolvedAuth::Bearer(t) => req.bearer_auth(t),
+        ResolvedAuth::Header { name, value } => req.header(name.as_str(), value.as_str()),
+        ResolvedAuth::Basic { user, pass } => req.basic_auth(user, Some(pass)),
+        ResolvedAuth::QueryParam { param, value } => req.query(&[(param.as_str(), value.as_str())]),
+    }
+}
+
 async fn get_page(
     f: &HttpFetch<'_>,
     extra: &[(String, String)],
@@ -102,21 +115,7 @@ async fn get_page(
         req = req.query(&f.query).query(extra);
     }
 
-    match f.auth {
-        ResolvedAuth::None => {}
-        ResolvedAuth::Bearer(t) => {
-            req = req.bearer_auth(t);
-        }
-        ResolvedAuth::Header { name, value } => {
-            req = req.header(name.as_str(), value.as_str());
-        }
-        ResolvedAuth::Basic { user, pass } => {
-            req = req.basic_auth(user, Some(pass));
-        }
-        ResolvedAuth::QueryParam { param, value } => {
-            req = req.query(&[(param.as_str(), value.as_str())]);
-        }
-    }
+    let req = apply_auth(req, f.auth);
 
     let resp = req
         .send()
