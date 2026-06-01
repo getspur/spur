@@ -337,9 +337,9 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
         eprintln!("==> python3 binaries/download.py skipped; uv sidecars already exist");
     }
 
-    stage_duckdb_extension(workspace_root)?;
+    let extension_resource = stage_duckdb_extension(workspace_root)?;
 
-    let mut tauri_build = tauri_build_command(workspace_root);
+    let mut tauri_build = tauri_build_command(workspace_root, &extension_resource);
     run_status(&mut tauri_build, "tauri build --bundles app")?;
 
     let built_app = workspace_root.join("target/release/bundle/macos/Jute.app");
@@ -375,7 +375,7 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
     Ok(installed_app)
 }
 
-fn stage_duckdb_extension(workspace_root: &Path) -> Result<(), String> {
+fn stage_duckdb_extension(workspace_root: &Path) -> Result<String, String> {
     let ext_dir = workspace_root.join("crates/spur-notebook/rest-table-gateway-ext");
     let mut build = duckdb_extension_build_command(&ext_dir);
     run_status(&mut build, "rest-table-gateway-ext/scripts/build.sh")?;
@@ -403,7 +403,7 @@ fn stage_duckdb_extension(workspace_root: &Path) -> Result<(), String> {
         )
     })?;
     eprintln!("staged DuckDB extension: {}", staged.display());
-    Ok(())
+    Ok(format!("extensions/spur_rest-{platform}.duckdb_extension"))
 }
 
 fn duckdb_extension_build_command(ext_dir: &Path) -> Command {
@@ -424,9 +424,14 @@ fn duckdb_extension_platform() -> Result<&'static str, String> {
     }
 }
 
-fn tauri_build_command(workspace_root: &Path) -> Command {
+fn tauri_build_command(workspace_root: &Path, extension_resource: &str) -> Command {
     let spur_notebook_dir = workspace_root.join("crates/spur-notebook");
     let jute_dir = spur_notebook_dir.join("jute-notebook");
+    // Inject the staged extension as a bundle resource here (exact path,
+    // guaranteed to exist post-stage) instead of declaring it statically in
+    // tauri.conf.json — a static glob breaks plain `cargo build` because the
+    // gitignored artifact is absent until xtask stages it right before bundling.
+    let resources_config = format!("{{\"bundle\":{{\"resources\":[\"{extension_resource}\"]}}}}");
     let mut cmd = Command::new(jute_dir.join(tauri_cli_bin()));
     cmd.args([
         "build",
@@ -434,6 +439,8 @@ fn tauri_build_command(workspace_root: &Path) -> Command {
         "app",
         "--features",
         "datasource-introspect",
+        "--config",
+        resources_config.as_str(),
     ])
     .current_dir(spur_notebook_dir)
     .env_remove("TAURI_CONFIG");
@@ -835,8 +842,9 @@ mod tests {
     #[test]
     fn tauri_build_command_runs_outer_spur_notebook_crate() {
         let root = PathBuf::from("/workspace");
+        let resource = "extensions/spur_rest-osx_arm64.duckdb_extension";
 
-        let command = tauri_build_command(&root);
+        let command = tauri_build_command(&root, resource);
 
         assert_eq!(
             command.get_program(),
@@ -851,7 +859,9 @@ mod tests {
                 "--bundles".to_string(),
                 "app".to_string(),
                 "--features".to_string(),
-                "datasource-introspect".to_string()
+                "datasource-introspect".to_string(),
+                "--config".to_string(),
+                format!("{{\"bundle\":{{\"resources\":[\"{resource}\"]}}}}"),
             ]
         );
         assert_eq!(
