@@ -10,7 +10,10 @@ use std::{
 };
 
 use jute::{
-    backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot},
+    backend::notebook::{
+        code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType, DagSource,
+        NotebookRoot,
+    },
     notebook_store::{DeltaKind, NotebookDelta, NotebookStore},
 };
 use serde_json::{json, Value};
@@ -207,7 +210,6 @@ where
     store: Arc<NotebookStore>,
     runner: R,
     notebook_path: String,
-    kernel_id: String,
     port_root: PathBuf,
     graph: Option<NotebookDag>,
 }
@@ -223,12 +225,10 @@ where
         port_root: PathBuf,
     ) -> Self {
         let notebook_path = notebook_path.as_ref().to_string_lossy().into_owned();
-        let kernel_id = jute::state::notebook_slot_id(&notebook_path);
         Self {
             store,
             runner,
             notebook_path,
-            kernel_id,
             port_root,
             graph: None,
         }
@@ -472,10 +472,19 @@ where
             .ok_or_else(|| EngineError::MissingCellVersion {
                 cell_id: cell_id.to_owned(),
             })?;
+        let code_type = cell
+            .code_type
+            .or_else(|| {
+                root.metadata
+                    .kernelspec
+                    .as_ref()
+                    .and_then(|kernelspec| code_type_for_spec(&kernelspec.name))
+            })
+            .unwrap_or(CodeType::Python);
         Ok(CellRunRequest {
             cell_id: cell_id.to_owned(),
             notebook_path: self.notebook_path.clone(),
-            kernel_id: Some(self.kernel_id.clone()),
+            kernel_id: Some(slot_id_for(&self.notebook_path, code_type)),
             code: cell.source,
             expected_version,
         })
@@ -494,6 +503,14 @@ where
         }
         Ok(downstream)
     }
+}
+
+fn slot_id_for(notebook_path: &str, code_type: CodeType) -> String {
+    format!(
+        "{}#{}",
+        jute::state::notebook_slot_id(notebook_path),
+        kernelspec_for(code_type)
+    )
 }
 
 impl CellRunStatus {
@@ -737,6 +754,7 @@ fn build_graph(root: &NotebookRoot) -> Result<NotebookDag, EngineError> {
 struct CellView {
     source: String,
     version: Option<u64>,
+    code_type: Option<CodeType>,
 }
 
 fn cell_view(root: &NotebookRoot, target: &str) -> Option<CellView> {
@@ -744,6 +762,7 @@ fn cell_view(root: &NotebookRoot, target: &str) -> Option<CellView> {
         (cell_id(cell).as_deref() == Some(target)).then(|| CellView {
             source: cell_source(cell),
             version: cell_version(cell),
+            code_type: cell_code_type(cell),
         })
     })
 }
@@ -769,6 +788,14 @@ fn cell_version(cell: &Cell) -> Option<u64> {
         Cell::Raw(cell) => cell.metadata.spur.as_ref().map(|spur| spur.version),
         Cell::Markdown(cell) => cell.metadata.spur.as_ref().map(|spur| spur.version),
         Cell::Code(cell) => cell.metadata.spur.as_ref().map(|spur| spur.version),
+    }
+}
+
+fn cell_code_type(cell: &Cell) -> Option<CodeType> {
+    match cell {
+        Cell::Raw(cell) => cell.metadata.spur.as_ref().and_then(|spur| spur.code_type),
+        Cell::Markdown(cell) => cell.metadata.spur.as_ref().and_then(|spur| spur.code_type),
+        Cell::Code(cell) => cell.metadata.spur.as_ref().and_then(|spur| spur.code_type),
     }
 }
 
@@ -829,8 +856,8 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use jute::{
         backend::notebook::{
-            Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
-            NotebookMetadata, NotebookRoot, PortSpec, SpurCellMetadata,
+            Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource, KernelSpec,
+            MultilineString, NotebookMetadata, NotebookRoot, PortSpec, SpurCellMetadata,
         },
         commands::SaveCoordinator,
         notebook_store::NotebookStore,
@@ -1140,6 +1167,7 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let notebook_path = temp.path().join("ui.ipynb");
         let expected_slot = jute::state::notebook_slot_id(notebook_path.to_string_lossy().as_ref());
+        let expected_slot = format!("{expected_slot}#python3");
         let store = store_with_notebook(notebook(vec![cell(
             "a",
             "a = 1",
@@ -1161,6 +1189,66 @@ mod tests {
         assert_eq!(
             requests[0].notebook_path,
             notebook_path.to_string_lossy().as_ref()
+        );
+        assert_eq!(requests[0].kernel_id, Some(expected_slot));
+    }
+
+    #[tokio::test]
+    async fn run_cell_request_uses_explicit_cell_code_type_slot_id() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let mut root = notebook(vec![cell("a", "a = 1", 1, dag(vec![], vec![], None))]);
+        if let Cell::Code(cell) = &mut root.cells[0] {
+            cell.metadata
+                .spur
+                .as_mut()
+                .expect("spur metadata")
+                .code_type = Some(CodeType::Javascript);
+        }
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            &notebook_path,
+            temp.path().join("ports"),
+        );
+
+        engine.run_cell("a").await.expect("run cell");
+
+        let requests = runner.requests();
+        let expected_slot = format!(
+            "{}#deno",
+            jute::state::notebook_slot_id(notebook_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(requests[0].kernel_id, Some(expected_slot));
+    }
+
+    #[tokio::test]
+    async fn run_cell_request_falls_back_to_notebook_kernelspec_slot_id() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let mut root = notebook(vec![cell("a", "a = 1", 1, dag(vec![], vec![], None))]);
+        root.metadata.kernelspec = Some(KernelSpec {
+            name: "deno".to_string(),
+            display_name: "Deno".to_string(),
+            other: Default::default(),
+        });
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            &notebook_path,
+            temp.path().join("ports"),
+        );
+
+        engine.run_cell("a").await.expect("run cell");
+
+        let requests = runner.requests();
+        let expected_slot = format!(
+            "{}#deno",
+            jute::state::notebook_slot_id(notebook_path.to_string_lossy().as_ref())
         );
         assert_eq!(requests[0].kernel_id, Some(expected_slot));
     }
