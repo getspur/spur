@@ -754,6 +754,24 @@ mod tests {
     }
 
     #[test]
+    fn open_design_references_design_system_library() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("open-design", &fake).unwrap();
+        assert!(
+            body.contains("references/design-systems.md"),
+            "Direction step must point at the design-system library reference"
+        );
+        // The reference doc itself ships beside the skill source.
+        let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/skills/open-design/references/design-systems.md");
+        let text = std::fs::read_to_string(&refs).expect("design-systems.md must exist");
+        assert!(
+            text.contains("index.json") && text.contains("swatches"),
+            "reference must document the index schema"
+        );
+    }
+
+    #[test]
     fn open_design_directions_reference_lists_all_five() {
         // The reference files live beside the bundled skill source.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
