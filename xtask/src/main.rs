@@ -337,6 +337,8 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
         eprintln!("==> python3 binaries/download.py skipped; uv sidecars already exist");
     }
 
+    stage_duckdb_extension(workspace_root)?;
+
     let mut tauri_build = tauri_build_command(workspace_root);
     run_status(&mut tauri_build, "tauri build --bundles app")?;
 
@@ -371,6 +373,55 @@ fn install_macos_jute_app(workspace_root: &Path) -> Result<PathBuf, String> {
 
     eprintln!("installed Jute.app: {}", installed_app.display());
     Ok(installed_app)
+}
+
+fn stage_duckdb_extension(workspace_root: &Path) -> Result<(), String> {
+    let ext_dir = workspace_root.join("crates/spur-notebook/rest-table-gateway-ext");
+    let mut build = duckdb_extension_build_command(&ext_dir);
+    run_status(&mut build, "rest-table-gateway-ext/scripts/build.sh")?;
+
+    let platform = duckdb_extension_platform()?;
+    let source = ext_dir.join("build/release/spur_rest.duckdb_extension");
+    if !source.is_file() {
+        return Err(format!(
+            "expected built DuckDB extension at {}",
+            source.display()
+        ));
+    }
+
+    let extensions_dir =
+        workspace_root.join("crates/spur-notebook/jute-notebook/src-tauri/extensions");
+    fs::create_dir_all(&extensions_dir)
+        .map_err(|err| format!("failed to create {}: {err}", extensions_dir.display()))?;
+
+    let staged = extensions_dir.join(format!("spur_rest-{platform}.duckdb_extension"));
+    fs::copy(&source, &staged).map_err(|err| {
+        format!(
+            "failed to copy {} to {}: {err}",
+            source.display(),
+            staged.display()
+        )
+    })?;
+    eprintln!("staged DuckDB extension: {}", staged.display());
+    Ok(())
+}
+
+fn duckdb_extension_build_command(ext_dir: &Path) -> Command {
+    let mut cmd = Command::new("bash");
+    cmd.arg("scripts/build.sh").current_dir(ext_dir);
+    cmd
+}
+
+fn duckdb_extension_platform() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("linux_amd64"),
+        ("linux", "aarch64") => Ok("linux_arm64"),
+        ("macos", "aarch64") => Ok("osx_arm64"),
+        ("macos", "x86_64") => Ok("osx_amd64"),
+        (os, arch) => Err(format!(
+            "unsupported DuckDB extension host platform: {os}/{arch}"
+        )),
+    }
 }
 
 fn tauri_build_command(workspace_root: &Path) -> Command {
@@ -812,6 +863,17 @@ mod tests {
             command_removes_env(&command, "RUSTC_WRAPPER"),
             cfg!(target_os = "macos")
         );
+    }
+
+    #[test]
+    fn duckdb_extension_build_command_runs_build_script_in_ext_dir() {
+        let ext_dir = PathBuf::from("/workspace/crates/spur-notebook/rest-table-gateway-ext");
+
+        let command = duckdb_extension_build_command(&ext_dir);
+
+        assert_eq!(command.get_program(), OsStr::new("bash"));
+        assert_eq!(command_args(&command), vec!["scripts/build.sh".to_string()]);
+        assert_eq!(command.get_current_dir(), Some(ext_dir.as_path()));
     }
 
     #[test]
