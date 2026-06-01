@@ -1,11 +1,7 @@
 ---
 name: brain-delegation-codex
-description: >
-  Brain role guidance for Codex. Injected when Codex acts as SPUR brain.
-  Handles context-window constraints and aggressive delegation.
+description: Brain role guidance for Codex. Injected when Codex acts as SPUR brain. Handles context-window constraints and aggressive delegation.
 role: brain
-agent: codex
-activation: always
 ---
 
 # Codex — Brain Role
