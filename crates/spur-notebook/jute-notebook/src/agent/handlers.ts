@@ -1,4 +1,4 @@
-import type { NotebookDelta } from "@/bindings";
+import type { CodeType, NotebookDelta } from "@/bindings";
 import { daemonControl } from "@/daemon/control";
 import { type CellType, type Notebook, selectCell } from "@/stores/notebook";
 
@@ -113,12 +113,19 @@ function insertCell(notebook: Notebook, params: unknown): AgentInsertCell {
   const afterId = readOptionalStringParam(params, "after_id");
   const lastEditedBy =
     readOptionalStringParam(params, "last_edited_by") ?? "brain";
+  const codeType = readOptionalCodeTypeParam(params);
   const state = notebook.state;
   if (afterId && !state.serverState.cells[afterId]) {
     throw new AgentHandlerError("cell_not_found", `Cell not found: ${afterId}`);
   }
 
-  const id = notebook.insertCellAfter(afterId, kind, source, lastEditedBy);
+  const id = notebook.insertCellAfter(
+    afterId,
+    kind,
+    source,
+    lastEditedBy,
+    codeType,
+  );
   return { id, version: selectCell(notebook.state, id)?.version ?? 0 };
 }
 
@@ -263,6 +270,21 @@ function readKind(params: unknown, method: string): CellType {
     return kind;
   }
   throw new AgentHandlerError("invalid_params", `${method} kind is invalid`);
+}
+
+function readOptionalCodeTypeParam(params: unknown): CodeType | undefined {
+  if (!params || typeof params !== "object" || !("code_type" in params)) {
+    return undefined;
+  }
+  const value = (params as Record<string, unknown>).code_type;
+  if (value === undefined || value === null) return undefined;
+  if (value === "python" || value === "javascript" || value === "rust") {
+    return value;
+  }
+  throw new AgentHandlerError(
+    "invalid_params",
+    "notebook.insert_cell code_type is invalid",
+  );
 }
 
 function cellStatus(status: AgentCellStatus | undefined): AgentCellStatus {

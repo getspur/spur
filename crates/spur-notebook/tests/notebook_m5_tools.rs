@@ -481,9 +481,12 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
     let deps = ServerDeps::from_bridge(notebook.clone());
 
     let c1 = structured(
-        insert_cell::call(&deps, json!({ "kind": "code", "source": "x = 2 + 2" }))
-            .await
-            .unwrap(),
+        insert_cell::call(
+            &deps,
+            json!({ "kind": "code", "source": "x = 2 + 2", "code_type": "python" }),
+        )
+        .await
+        .unwrap(),
     );
     assert_eq!(c1["version"], 1);
 
@@ -493,7 +496,8 @@ async fn m5_smoke_sequence_runs_against_in_process_kernel_mock() {
             json!({
                 "after_id": c1["id"],
                 "kind": "code",
-                "source": "print(x)"
+                "source": "print(x)",
+                "code_type": "python"
             }),
         )
         .await

@@ -22,7 +22,7 @@ use crate::{
     backend::{
         commands::{self, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
-        notebook::{CellDagMetadata, NotebookRoot},
+        notebook::{CellDagMetadata, CodeType, NotebookRoot},
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
     ports::{notebook_port_root, wrap_js_cell, wrap_python_cell},
@@ -258,6 +258,9 @@ pub enum DaemonControlCommand {
         after_id: Option<String>,
         source: String,
         last_edited_by: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        code_type: Option<CodeType>,
     },
     /// Load a notebook from disk into the authoritative store.
     #[serde(rename = "load")]
@@ -727,6 +730,7 @@ async fn handle_daemon_control_inner(
             after_id,
             source,
             last_edited_by,
+            code_type,
         } => {
             if matches!(after_id.as_deref(), Some("")) {
                 return Err(DaemonControlResponse::failure(
@@ -740,6 +744,7 @@ async fn handle_daemon_control_inner(
                     after_id,
                     source,
                     last_edited_by,
+                    code_type,
                 })
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
@@ -810,6 +815,23 @@ async fn handle_daemon_control_inner(
                     .apply(NotebookOp::SetSpurDagMetadata {
                         id,
                         patch: dag,
+                        expected_version,
+                    })
+                    .map(DaemonControlResult::Delta)
+                    .map_err(store_error_response);
+            }
+            if let Some(code_type) = patch.get("spur").and_then(|spur| spur.get("code_type")) {
+                let code_type =
+                    serde_json::from_value::<CodeType>(code_type.clone()).map_err(|error| {
+                        DaemonControlResponse::failure(
+                            "invalid_params",
+                            format!("invalid spur code_type metadata patch: {error}"),
+                        )
+                    })?;
+                return notebook
+                    .apply(NotebookOp::SetSpurCodeTypeMetadata {
+                        id,
+                        code_type,
                         expected_version,
                     })
                     .map(DaemonControlResult::Delta)
@@ -1493,7 +1515,7 @@ mod tests {
 
     use super::*;
     use crate::backend::notebook::{
-        Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
+        Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource, MultilineString,
         NotebookMetadata, PortSpec, SpurCellMetadata,
     };
     use crate::notebook_store::DeltaKind;
@@ -1943,6 +1965,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_set_cell_metadata_spur_code_type_patch_sets_metadata() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_source("initial", 1));
+        let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "set_cell_metadata",
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "patch": {
+                "spur": {
+                    "code_type": "rust"
+                }
+            },
+            "expected_version": 1
+        }))
+        .unwrap();
+
+        let response = handle_daemon_control_request(request, &state).await;
+        let result = response.into_result().unwrap();
+        let DaemonControlResult::Delta(NotebookDelta {
+            kind: DeltaKind::CellWritten { cell },
+            version,
+            ..
+        }) = result
+        else {
+            panic!("expected cellWritten delta");
+        };
+        assert_eq!(cell.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(cell.code_type, Some(CodeType::Rust));
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        let spur = cell.metadata.spur.as_ref().expect("spur metadata present");
+        assert_eq!(spur.version, version);
+        assert_eq!(spur.code_type, Some(CodeType::Rust));
+    }
+
+    #[tokio::test]
     async fn save_coordinator_preserves_authoritative_spur_dag_when_frontend_export_is_stale() {
         let dir = std::env::temp_dir().join(format!("jute-save-dag-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2051,6 +2114,7 @@ mod tests {
                 after_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
                 source: "notes".to_string(),
                 last_edited_by: Some("brain".to_string()),
+                code_type: None,
             })
             .unwrap();
         let DeltaKind::CellInserted { cell, .. } = delta.kind else {
@@ -2167,6 +2231,7 @@ mod tests {
                 after_id: Some(cell_id.clone()),
                 source: "notes".to_string(),
                 last_edited_by: Some("brain".to_string()),
+                code_type: None,
             }),
         )
         .await

@@ -22,6 +22,7 @@ pub mod notebook_dag_status;
 pub mod notebook_push_source;
 pub mod notebook_run_cascade;
 pub mod notebook_run_cell;
+pub mod notebook_set_cell_code_type;
 pub mod notebook_set_dag_metadata;
 pub mod read_cell;
 pub mod restart_kernel;
@@ -52,6 +53,7 @@ pub fn tools() -> Vec<Tool> {
         notebook_dag_status::tool(),
         notebook_run_cell::tool(),
         notebook_run_cascade::tool(),
+        notebook_set_cell_code_type::tool(),
         notebook_set_dag_metadata::tool(),
         insert_cell::tool(),
         write_cell::tool(),
@@ -243,6 +245,9 @@ mod tests {
             .iter()
             .any(|name| name == "notebook.set_cell_metadata"));
         assert!(names.iter().any(|name| name == "notebook_set_dag_metadata"));
+        assert!(names
+            .iter()
+            .any(|name| name == "notebook_set_cell_code_type"));
         assert!(names.iter().any(|name| name == "notebook_push_source"));
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
         assert!(names.iter().any(|name| name == "notebook_run_cell"));
@@ -267,6 +272,7 @@ mod tests {
             "notebook.venv_list_python_versions",
             "notebook.set_cell_metadata",
             "notebook_set_dag_metadata",
+            "notebook_set_cell_code_type",
             "notebook.list_recents",
             "notebook.set_pinned",
             "notebook.remove_from_recents",
