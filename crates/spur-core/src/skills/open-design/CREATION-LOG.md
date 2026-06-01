@@ -48,3 +48,15 @@
   rewired the skill's Direction / artifact-deck steps to call the tools (`Read` kept as dev fallback).
   `open_design_list` + MCP Resources deferred to M4+. Spec:
   `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m4-runtime-access-design.ipynb`.
+
+- **2026-06-01** — taste-skill cross-pollination. Folded two gates from the external
+  `taste-skill` v2 framework (`github.com/leonxlnx/taste-skill`) into the references so they
+  are permanent rather than per-session: (1) a **zero-tolerance em-dash ban** scoped to
+  artifact-visible text in `references/critique.md` (new checklist bullet + a hard subsection
+  with a mechanical `text/html` scan for `—` / `–` / `&mdash;` / `&ndash;`), which also
+  corrected the old guidance that suggested `—` as a placeholder glyph; and (2) the **three-dial
+  framework** (`DESIGN_VARIANCE` / `MOTION_INTENSITY` / `VISUAL_DENSITY`) in
+  `references/directions.md`, with per-direction defaults and surface overrides, making the
+  "embody the specialist" step deterministic. SKILL.md (SPUR-MANAGED) untouched; both edited
+  files are read by the existing loop steps. Edits applied to the authoritative crate source;
+  `.spur/.claude` copies regenerate on `skills init`.
