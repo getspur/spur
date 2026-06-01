@@ -4,10 +4,12 @@ use arrow_array::RecordBatch;
 use arrow_schema::{Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use reqwest::Client;
+use serde_json::{Map, Number, Value};
 
+use crate::adapter::graphql::{fetch_graphql_rows, GraphqlFetch};
 use crate::adapter::http::{fetch_rows, HttpFetch};
 use crate::adapter::json_to_batch::{arrow_type, rows_to_batch, ColumnExtract};
-use crate::adapter::manifest::{AuthCfg, Manifest, TableCfg};
+use crate::adapter::manifest::{AuthCfg, GraphqlTableCfg, Manifest, TableCfg, Transport};
 use crate::adapter::templating::{resolve_template, ConnectionContext};
 use crate::adapter::{
     Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest, TableDef, TableKind,
@@ -118,6 +120,63 @@ impl ManifestAdapter {
             })
             .collect()
     }
+
+    fn graphql_value(value: &ScalarValue) -> Result<Value> {
+        Ok(match value {
+            ScalarValue::Utf8(value) => Value::String(value.clone()),
+            ScalarValue::Int64(value) => Value::Number(Number::from(*value)),
+            ScalarValue::Float64(value) => {
+                Number::from_f64(*value).map(Value::Number).ok_or_else(|| {
+                    GatewayError::Manifest(format!(
+                        "non-finite Float64 cannot be used as a GraphQL variable: {value}"
+                    ))
+                })?
+            }
+            ScalarValue::Bool(value) => Value::Bool(*value),
+        })
+    }
+
+    fn graphql_variable_name<'a>(
+        table: &'a TableCfg,
+        graphql: &'a GraphqlTableCfg,
+        column: &str,
+    ) -> Option<&'a str> {
+        graphql
+            .arg_vars
+            .get(column)
+            .map(String::as_str)
+            .or_else(|| {
+                table
+                    .filters
+                    .get(column)
+                    .map(|filter| filter.param.as_str())
+            })
+    }
+
+    fn graphql_variables(
+        table: &TableCfg,
+        graphql: &GraphqlTableCfg,
+        predicates: &[Predicate],
+    ) -> Result<Map<String, Value>> {
+        let mut variables = graphql.variables.as_object().cloned().unwrap_or_default();
+
+        for predicate in predicates {
+            if predicate.op != PredicateOp::Eq {
+                continue;
+            }
+
+            if let Some(variable_name) =
+                Self::graphql_variable_name(table, graphql, &predicate.column)
+            {
+                variables.insert(
+                    variable_name.to_string(),
+                    Self::graphql_value(&predicate.value)?,
+                );
+            }
+        }
+
+        Ok(variables)
+    }
 }
 
 #[async_trait]
@@ -137,23 +196,47 @@ impl Adapter for ManifestAdapter {
     async fn scan(&self, req: ScanRequest) -> Result<Vec<RecordBatch>> {
         let table = self.table(&req.table)?;
         let columns = Self::column_extracts(table)?;
-        let query = Self::query_params(table, &req.predicates);
         let auth = self.resolve_auth();
         let connection_ctx = ConnectionContext::from_env(&self.manifest.source.connection_config);
         let base_url = resolve_template(&self.manifest.source.base_url, &connection_ctx)?;
 
-        // v1 ignores projection and leaves non-Eq or undeclared predicates as
-        // residual filters for DuckDB to apply after this scan returns rows.
-        let fetch = HttpFetch {
-            client: &self.client,
-            base_url: &base_url,
-            path: &table.path,
-            query,
-            pagination: self.manifest.source.pagination.as_ref(),
-            auth: &auth,
-            response_path: table.response_path.clone(),
+        let rows = match &self.manifest.source.transport {
+            Transport::Rest => {
+                let query = Self::query_params(table, &req.predicates);
+
+                // v1 ignores projection and leaves non-Eq or undeclared predicates as
+                // residual filters for DuckDB to apply after this scan returns rows.
+                let fetch = HttpFetch {
+                    client: &self.client,
+                    base_url: &base_url,
+                    path: &table.path,
+                    query,
+                    pagination: self.manifest.source.pagination.as_ref(),
+                    auth: &auth,
+                    response_path: table.response_path.clone(),
+                };
+                fetch_rows(&fetch).await?
+            }
+            Transport::Graphql => {
+                let graphql = table.graphql.as_ref().ok_or_else(|| {
+                    GatewayError::Manifest(format!(
+                        "table '{}' missing graphql config for graphql transport",
+                        table.name
+                    ))
+                })?;
+                let variables = Self::graphql_variables(table, graphql, &req.predicates)?;
+                let fetch = GraphqlFetch {
+                    client: &self.client,
+                    endpoint: &base_url,
+                    query: &graphql.query,
+                    variables,
+                    auth: &auth,
+                    pagination: self.manifest.source.pagination.as_ref(),
+                    response_path: table.response_path.clone(),
+                };
+                fetch_graphql_rows(&fetch).await?
+            }
         };
-        let rows = fetch_rows(&fetch).await?;
         let batch = rows_to_batch(&columns, &rows)?;
 
         Ok(vec![batch])

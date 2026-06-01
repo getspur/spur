@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::adapter::manifest::{AuthCfg, Manifest, PaginationCfg, SourceCfg};
+use crate::adapter::manifest::{AuthCfg, Manifest, PaginationCfg, SourceCfg, Transport};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderEntry {
@@ -45,6 +45,7 @@ pub fn provider_to_manifest_stub(name: &str, p: &ProviderEntry) -> Manifest {
         source: SourceCfg {
             name: name.to_string(),
             base_url: base_url.clone(),
+            transport: Transport::Rest,
             auth: auth_cfg(name, p, &upper),
             pagination: proxy
                 .and_then(|proxy| proxy.paginate.as_ref())

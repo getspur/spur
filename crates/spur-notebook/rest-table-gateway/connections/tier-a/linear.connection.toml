@@ -1,0 +1,31 @@
+[source]
+name = "linear"
+base_url = "https://api.linear.app/graphql"
+transport = "graphql"
+auth = { scheme = "header", name = "authorization", env = "LINEAR_API_KEY" }
+
+[source.pagination]
+style = "cursor"
+page_size = 50
+cursor_param = "after"
+cursor_path = "$.data.issues.pageInfo.endCursor"
+has_next_path = "$.data.issues.pageInfo.hasNextPage"
+
+[[table]]
+name = "issues"
+path = "/graphql"
+response_path = "$.data.issues.nodes"
+filters = { state = { param = "stateFilter" } }
+
+[table.graphql]
+query = "query Issues($first:Int!, $after:String, $stateFilter:String){ issues(first:$first, after:$after, filter:{state:{name:{eq:$stateFilter}}}){ nodes{ id identifier title priority state{name} assignee{name} createdAt } pageInfo{ hasNextPage endCursor } } }"
+arg_vars = { state = "stateFilter" }
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+identifier = { json = "$.identifier", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+priority = { json = "$.priority", type = "Int64" }
+state = { json = "$.state.name", type = "Utf8" }
+assignee = { json = "$.assignee.name", type = "Utf8" }
+created_at = { json = "$.createdAt", type = "Utf8" }
