@@ -77,15 +77,21 @@ radios beats 30 minutes of redirects. Lock the brief before building.
     `references/deck-artifact.md` (Open Design's fixed-canvas `deck-skeleton.html` + one
     of 51 vendored themes, rendered as a single `text/html` cell). Native deck mode stays
     the default; escalate only on an explicit polish/brand signal.
-- `notebook_insert_cell(kind="code", source="# open-design artifact")` to create
-  the cell.
-- `notebook_write_cell(id, source, expected_version)` where the cell, when
-  rendered, yields one `text/html` output: a single self-contained HTML document
-  with inline CSS and optional inline `<script>` for interactivity.
-- Do not split the artifact across files. M1 is single-entry HTML only: no
-  external assets and no build step.
-- Re-read with `notebook_read_cell(id)` to confirm the output mime is
-  `text/html`.
+- **Pick an artifact track** (non-deck) — see `references/artifact-tracks.md`:
+  - **Track B (default): componentized + SSR.** On the Deno kernel, author the artifact as
+    components, server-render a static baseline, and inline-bundle the client island
+    (esbuild) with CSS compiled in-kernel (e.g. Tailwind). Scales to interactive, stateful
+    artifacts and degrades correctly when scripts are off. Use this by default.
+  - **Track A: single-file HTML.** Hand-write one self-contained document with inline CSS and
+    an optional inline `<script>`. Use only for simple / mostly-static artifacts, and even
+    then pre-render the initial DOM into the markup — never build the whole UI in script
+    (it renders blank when active content is off).
+- `notebook_insert_cell(kind="code", source="# open-design artifact")` then
+  `notebook_write_cell(id, source, expected_version)`. When run, the cell MUST yield exactly
+  one `text/html` output: a single self-contained document with everything inlined. A Deno
+  build step (SSR + bundle) is allowed; the RENDERED output must still have no external
+  resource URLs (see the self-contained + scripts-off gate in `references/critique.md`).
+- Re-read with `notebook_read_cell(id)` to confirm the output mime is `text/html`.
 
 ### 5. Critique
 
@@ -98,4 +104,4 @@ Critique and anti-slop are non-negotiable.
 - Re-read with `notebook_read_cell(id)` after revision so the notebook remains
   the source of truth.
 
-See `references/directions.md` and `references/critique.md`.
+See `references/directions.md`, `references/artifact-tracks.md`, and `references/critique.md`.
