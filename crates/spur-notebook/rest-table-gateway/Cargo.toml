@@ -16,6 +16,7 @@ arrow-schema.workspace = true
 async-trait.workspace = true
 duckdb = { workspace = true, features = ["vtab"] }
 futures.workspace = true
+openapiv3 = "2"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json.workspace = true
