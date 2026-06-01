@@ -803,26 +803,8 @@ fn api_tables_setup_bootstrap_preamble() -> String {
 
 #[cfg(feature = "datasource-introspect")]
 fn spur_rest_extension_path() -> PathBuf {
-    let file_name = format!("spur_rest-{}.duckdb_extension", duckdb_extension_platform());
-    BaseDirs::new()
-        .map(|base_dirs| base_dirs.home_dir().join(".spur").join("extensions"))
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".spur").join("extensions"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".spur").join("extensions"))
-        .join(file_name)
-}
-
-#[cfg(feature = "datasource-introspect")]
-fn duckdb_extension_platform() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "linux_amd64",
-        ("linux", "aarch64") => "linux_arm64",
-        ("macos", "aarch64") => "osx_arm64",
-        ("macos", "x86_64") => "osx_amd64",
-        _ => "unknown",
-    }
+    crate::extension_install::extension_install_dir()
+        .join(crate::extension_install::bundled_extension_filename())
 }
 
 #[cfg(feature = "datasource-introspect")]

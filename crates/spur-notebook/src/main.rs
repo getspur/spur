@@ -17,7 +17,7 @@ use spur_core::notebook::notebook_binary_path;
 #[cfg(target_os = "macos")]
 use spur_notebook::mcp::NotebookDaemonControl;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -350,6 +350,29 @@ fn main() {
                 app.handle().clone(),
                 Arc::clone(&state_for_setup),
             );
+            match app.path().resource_dir() {
+                Ok(resource_root) => {
+                    match spur_notebook::extension_install::install_bundled_extension(
+                        &resource_root,
+                    ) {
+                        Ok(Some(dest)) => tracing::info!(
+                            dest = %dest.display(),
+                            "installed bundled spur_rest duckdb extension"
+                        ),
+                        Ok(None) => tracing::debug!(
+                            "spur_rest extension already present or not bundled; skipping install"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "failed to install bundled spur_rest duckdb extension"
+                        ),
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "could not resolve tauri resource dir for extension install"
+                ),
+            }
             #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {
