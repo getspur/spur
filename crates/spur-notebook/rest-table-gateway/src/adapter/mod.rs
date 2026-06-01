@@ -3,6 +3,7 @@ pub mod json_to_batch;
 pub mod manifest;
 pub mod manifest_adapter;
 pub mod nango;
+pub mod openapi;
 pub mod templating;
 
 use std::collections::HashMap;
