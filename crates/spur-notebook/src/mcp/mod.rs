@@ -804,7 +804,7 @@ fn api_tables_setup_bootstrap_preamble() -> String {
 #[cfg(feature = "datasource-introspect")]
 fn spur_rest_extension_path() -> PathBuf {
     crate::extension_install::extension_install_dir()
-        .join(crate::extension_install::bundled_extension_filename())
+        .join(crate::extension_install::loaded_extension_filename())
 }
 
 #[cfg(feature = "datasource-introspect")]
