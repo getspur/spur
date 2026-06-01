@@ -2,10 +2,15 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   addApiDatasourceCommand,
+  attachSavedConnectionCommand,
+  attachedSavedConnectionFromDaemonControlResponse,
   daemonControl,
   datasourceEntryFromDaemonControlResponse,
+  deleteSavedConnectionCommand,
+  listSavedConnectionsCommand,
   pathFromDaemonControlResponse,
   recentEntriesFromDaemonControlResponse,
+  savedConnectionsFromDaemonControlResponse,
 } from "./control";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -123,6 +128,96 @@ describe("daemon control adapter", () => {
       command: "add_api_datasource",
       name: "prediction",
       source: "polymarket",
+    });
+  });
+
+  test("builds saved connection commands", () => {
+    expect(listSavedConnectionsCommand()).toEqual({
+      command: "list_saved_connections",
+    });
+    expect(
+      attachSavedConnectionCommand({
+        name: "stripe_reporting",
+      }),
+    ).toEqual({
+      command: "attach_saved_connection",
+      name: "stripe_reporting",
+    });
+    expect(
+      deleteSavedConnectionCommand({
+        name: "stripe_reporting",
+      }),
+    ).toEqual({
+      command: "delete_saved_connection",
+      name: "stripe_reporting",
+    });
+  });
+
+  test("unwraps saved connection list results", () => {
+    expect(
+      savedConnectionsFromDaemonControlResponse({
+        ok: true,
+        result: {
+          type: "savedConnections",
+          data: [
+            {
+              name: "stripe_reporting",
+              provider: "stripe",
+              group: "API",
+              manifestToml: "name = 'stripe'",
+              tables: [],
+              credentialEnvVars: ["STRIPE_API_KEY"],
+              createdAt: "2026-06-01T12:00:00Z",
+              updatedAt: "2026-06-01T12:00:00Z",
+            },
+          ],
+        },
+      }),
+    ).toEqual([
+      {
+        name: "stripe_reporting",
+        provider: "stripe",
+        group: "API",
+        manifestToml: "name = 'stripe'",
+        tables: [],
+        credentialEnvVars: ["STRIPE_API_KEY"],
+        createdAt: "2026-06-01T12:00:00Z",
+        updatedAt: "2026-06-01T12:00:00Z",
+      },
+    ]);
+  });
+
+  test("unwraps attached saved connection results", () => {
+    expect(
+      attachedSavedConnectionFromDaemonControlResponse({
+        ok: true,
+        result: {
+          type: "attachedSavedConnection",
+          data: {
+            entry: {
+              name: "stripe_reporting",
+              path: "stripe",
+              kind: "api_tables",
+              group: "API",
+              columns: [],
+              rowCount: null,
+              tables: [],
+            },
+            missing_env_vars: ["STRIPE_API_KEY"],
+          },
+        },
+      }),
+    ).toEqual({
+      entry: {
+        name: "stripe_reporting",
+        path: "stripe",
+        kind: "api_tables",
+        group: "API",
+        columns: [],
+        rowCount: null,
+        tables: [],
+      },
+      missingEnvVars: ["STRIPE_API_KEY"],
     });
   });
 

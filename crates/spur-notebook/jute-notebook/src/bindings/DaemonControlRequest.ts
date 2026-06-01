@@ -36,6 +36,9 @@ export type DaemonControlRequest = {
     }
   | { command: "detach_datasource"; name: string }
   | { command: "list_datasources" }
+  | { command: "list_saved_connections" }
+  | { command: "attach_saved_connection"; name: string }
+  | { command: "delete_saved_connection"; name: string }
   | { command: "list_recents" }
   | { command: "remove_from_recents"; path: string }
   | { command: "set_pinned"; path: string; pinned: boolean }
