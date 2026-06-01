@@ -22,7 +22,7 @@ struct HttpPage {
     next_link: Option<String>,
 }
 
-fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
+pub(crate) fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
     let p = path.strip_prefix("$.").unwrap_or(path);
     let mut cur = row;
     for seg in p.split('.') {
@@ -35,7 +35,7 @@ fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
     }
 }
 
-fn rows_from_body(body: &Value, response_path: Option<&str>) -> Result<Vec<Value>> {
+pub(crate) fn rows_from_body(body: &Value, response_path: Option<&str>) -> Result<Vec<Value>> {
     let value = match response_path {
         Some(path) => json_path_get(body, path).ok_or_else(|| {
             GatewayError::Http(format!("expected JSON array at {path}, got null"))
@@ -51,7 +51,7 @@ fn rows_from_body(body: &Value, response_path: Option<&str>) -> Result<Vec<Value
     })
 }
 
-fn cursor_value(body: &Value, path: &str) -> Option<String> {
+pub(crate) fn cursor_value(body: &Value, path: &str) -> Option<String> {
     match json_path_get(body, path)? {
         Value::String(value) => Some(value.clone()),
         Value::Null => None,
@@ -271,6 +271,7 @@ mod tests {
             cursor_path: None,
             cursor_param: None,
             link_rel: None,
+            has_next_path: None,
         };
         let auth = ResolvedAuth::None;
         let fetch = HttpFetch {
@@ -379,6 +380,7 @@ mod tests {
             cursor_path: Some("$.next".to_string()),
             cursor_param: Some("cursor".to_string()),
             link_rel: None,
+            has_next_path: None,
         };
         let auth = ResolvedAuth::None;
         let fetch = HttpFetch {
@@ -430,6 +432,7 @@ mod tests {
             cursor_path: None,
             cursor_param: None,
             link_rel: None,
+            has_next_path: None,
         };
         let auth = ResolvedAuth::None;
         let fetch = HttpFetch {

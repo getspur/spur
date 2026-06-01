@@ -55,6 +55,8 @@ pub struct PaginationCfg {
     pub cursor_param: Option<String>,
     #[serde(default)]
     pub link_rel: Option<String>,
+    #[serde(default)]
+    pub has_next_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
