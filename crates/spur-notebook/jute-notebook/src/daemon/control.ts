@@ -167,7 +167,8 @@ function isDatasourceEntry(value: unknown): value is DatasourceEntry {
       candidate.kind === "parquet" ||
       candidate.kind === "json" ||
       candidate.kind === "duck_db" ||
-      candidate.kind === "sqlite") &&
+      candidate.kind === "sqlite" ||
+      candidate.kind === "api_tables") &&
     (candidate.group === null || typeof candidate.group === "string") &&
     Array.isArray(candidate.columns) &&
     candidate.columns.every(
