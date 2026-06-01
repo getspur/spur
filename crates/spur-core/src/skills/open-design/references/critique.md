@@ -19,12 +19,31 @@ back, fix the weakest, re-score. Two passes is normal.
 - ❌ Hand-drawn SVG humans / faces / scenery
 - ❌ Inter / Roboto / Arial as a *display* face (body is fine)
 - ❌ Invented metrics ("10× faster", "99.9% uptime") without a source
-- ❌ Filler copy — "Feature One / Feature Two", lorem ipsum
+- ❌ Filler copy: "Feature One / Feature Two", lorem ipsum
 - ❌ An icon next to every heading
 - ❌ A gradient on every background
+- ❌ Em-dash (`—`) or en-dash-as-separator (`–`) in ANY artifact-visible string (see the hard ban below)
 
-When you don't have a real value, leave an honest placeholder (`—`, a grey block, a
-labelled stub) instead of inventing one. An honest placeholder beats a fake stat.
+When you don't have a real value, leave an honest placeholder (a grey block, a labelled
+stub, or `TBD`) instead of inventing one. An honest placeholder beats a fake stat. Do
+not reach for a dash glyph as the placeholder; see the em-dash ban below.
+
+## Em-dash ban (zero tolerance, artifact-visible text)
+
+The em-dash (`—`) and the en-dash used as a separator (`–`) are the single most
+reliable AI tell. They are banned from every user-visible string the artifact renders:
+headlines, body copy, eyebrows, button labels, captions, quote attribution, alt text,
+AND error / status strings. There is no "use sparingly" allowance. The rule is binary:
+zero dashes of this kind in artifact output.
+
+- Restructure instead: a regular hyphen (`-`), a comma, a period, parentheses, or a colon.
+- Date and number ranges use a hyphen (`2018-2026`, `40-80k`), never an en-dash.
+- The only dash characters allowed in artifact text are the hyphen `-` (compounds, ranges, dividers) and the math minus.
+- This scopes to the rendered artifact, not this critique file's own prose.
+
+**Mechanical check before finalizing:** scan the cell's rendered `text/html` output,
+including JavaScript string literals and HTML entities (`&mdash;`, `&#8212;`, `&ndash;`,
+`&#8211;`), for `—` / `–`. Any hit fails the artifact; fix it and re-read the cell.
 
 ## Deck-specific checks (run for `kind: deck`)
 
