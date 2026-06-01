@@ -182,6 +182,8 @@ impl ServerHandler for NotebookMcpServer {
             "notebook_set_dag_metadata" => {
                 tools::notebook_set_dag_metadata::call(&self.deps, arguments).await
             }
+            "open_design_search" => tools::open_design_search::call(&self.deps, arguments).await,
+            "open_design_get" => tools::open_design_get::call(&self.deps, arguments).await,
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,
@@ -2758,7 +2760,7 @@ mod tests {
             "_SPUR_DUCKDB_CONNECTION = duckdb.connect(\n        database=\":memory:\",\n        config={\"allow_unsigned_extensions\": \"true\"},\n    )"
         ));
         assert!(source.contains("duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)"));
-        assert!(source.contains("spur_rest-"));
+        assert!(source.contains("spur_rest.duckdb_extension"));
         assert!(source.contains(".duckdb_extension"));
         assert!(source.contains("duckdb.sql(f\"LOAD '{_SPUR_DUCKDB_EXTENSION_SQL}'\")"));
         assert_eq!(source.matches("duckdb.sql(f\"LOAD").count(), 1);
