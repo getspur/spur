@@ -1,3 +1,4 @@
+use jute::backend::notebook::CodeType;
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -16,6 +17,7 @@ struct InsertCellParams {
     after_id: Option<String>,
     kind: String,
     source: String,
+    code_type: Option<CodeType>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -27,14 +29,15 @@ struct InsertCellResult {
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Insert a code or markdown cell after after_id, or at the end when omitted.",
+        "Insert a code, markdown, or raw cell after after_id, or at the end when omitted.",
         rmcp_object(json!({
             "type": "object",
             "required": ["kind", "source"],
             "properties": {
                 "after_id": { "type": "string", "minLength": 1 },
-                "kind": { "type": "string", "enum": ["code", "markdown"] },
-                "source": { "type": "string" }
+                "kind": { "type": "string", "enum": ["code", "markdown", "raw"] },
+                "source": { "type": "string" },
+                "code_type": { "type": "string", "enum": ["python", "javascript", "rust"] }
             },
             "additionalProperties": false
         })),
@@ -45,11 +48,12 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     let bridge = deps.bridge.as_ref();
     let params: InsertCellParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
-            "notebook.insert_cell requires { after_id?, kind, source }",
+            "notebook.insert_cell requires { after_id?, kind, source, code_type? }",
             Some(json!({ "error": error.to_string() })),
         )
     })?;
     validate_kind(&params.kind)?;
+    validate_code_type(&params.kind, params.code_type)?;
     if matches!(params.after_id.as_deref(), Some("")) {
         return Err(McpError::invalid_params(
             "notebook.insert_cell after_id must not be empty",
@@ -64,6 +68,9 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     });
     if let Some(after_id) = params.after_id {
         request["after_id"] = json!(after_id);
+    }
+    if let Some(code_type) = params.code_type {
+        request["code_type"] = json!(code_type);
     }
 
     let value = bridge
@@ -81,12 +88,28 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
 }
 
 fn validate_kind(kind: &str) -> Result<(), McpError> {
-    if matches!(kind, "code" | "markdown") {
+    if matches!(kind, "code" | "markdown" | "raw") {
         Ok(())
     } else {
         Err(McpError::invalid_params(
-            "notebook.insert_cell kind must be code or markdown",
+            "notebook.insert_cell kind must be code, markdown, or raw",
             None,
         ))
+    }
+}
+
+fn validate_code_type(kind: &str, code_type: Option<CodeType>) -> Result<(), McpError> {
+    match (kind, code_type) {
+        ("code", Some(_)) => Ok(()),
+        ("code", None) => Err(McpError::invalid_params(
+            "code_type required for code cells",
+            None,
+        )),
+        ("markdown" | "raw", None) => Ok(()),
+        ("markdown" | "raw", Some(_)) => Err(McpError::invalid_params(
+            "code_type must be absent for non-code cells",
+            None,
+        )),
+        _ => Ok(()),
     }
 }

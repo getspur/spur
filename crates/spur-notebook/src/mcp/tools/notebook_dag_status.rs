@@ -247,6 +247,7 @@ mod tests {
                         consumes: consumes.into_iter().map(str::to_string).collect(),
                         source,
                     }),
+                    code_type: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),
