@@ -21,3 +21,9 @@
   changes (deck mode already exists). Artifact-deck track + `html-ppt-*` themes = M2c;
   `dispatchDeckCommand` reconciliation = open decision. Spec:
   `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m2-design.ipynb`.
+
+- **2026-06-01** — M2b: theme port. Ported the 5 Open Design directions
+  (`editorial-monocle`, `modern-minimal`, `warm-soft`, `tech-utility`, `brutalist`)
+  into Jute's native deck `THEMES` as CSS-token themes (OKLch palettes + font stacks
+  injected by `SlideFrame`). Native decks now offer 8 themes; the 3 class-only built-ins
+  are unchanged. Spec: `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m2-design.ipynb`.

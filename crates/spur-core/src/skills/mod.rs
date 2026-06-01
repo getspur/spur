@@ -780,6 +780,25 @@ mod tests {
     }
 
     #[test]
+    fn open_design_deck_mode_lists_ported_themes() {
+        let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/skills/open-design/references/deck-mode.md");
+        let text = std::fs::read_to_string(&refs).expect("deck-mode.md must exist");
+        for id in [
+            "editorial-monocle",
+            "modern-minimal",
+            "warm-soft",
+            "tech-utility",
+            "brutalist",
+        ] {
+            assert!(
+                text.contains(id),
+                "deck-mode.md must list ported theme `{id}`"
+            );
+        }
+    }
+
+    #[test]
     fn open_design_critique_has_deck_checks() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/skills/open-design/references");
