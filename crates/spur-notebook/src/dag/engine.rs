@@ -14,16 +14,20 @@ use jute::{
         code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType, DagSource,
         NotebookRoot,
     },
+    commands::kernel_slot_info_for_state,
     notebook_store::{DeltaKind, NotebookDelta, NotebookStore},
 };
 use serde_json::{json, Value};
 use tokio::{
     sync::{mpsc, oneshot},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, warn};
 
-use crate::mcp::{tools::run_cell, ServerDeps};
+use crate::mcp::{
+    tools::{run_cell, start_kernel},
+    ServerDeps,
+};
 
 use super::{notebook_port_root, NotebookDag, PortStore, PortStoreError};
 
@@ -59,6 +63,12 @@ pub struct CellRunRequest {
     pub kernel_id: Option<String>,
     pub code: String,
     pub expected_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelEnsureRequest {
+    pub slot_id: String,
+    pub spec_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +108,11 @@ pub trait CellRunner: Clone + Send + Sync + 'static {
         &'a self,
         request: CellRunRequest,
     ) -> Pin<Box<dyn Future<Output = Result<CellRunOutcome, EngineError>> + Send + 'a>>;
+
+    fn ensure_kernel<'a>(
+        &'a self,
+        request: KernelEnsureRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>>;
 }
 
 #[derive(Clone)]
@@ -158,15 +173,53 @@ impl CellRunner for RunCellCommandRunner {
             })
         })
     }
+
+    fn ensure_kernel<'a>(
+        &'a self,
+        request: KernelEnsureRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(state) = self.deps.state.as_ref() {
+                if kernel_slot_info_for_state(&request.slot_id, state)
+                    .await
+                    .is_ok_and(|info| info.status != "dead" && info.spec_name == request.spec_name)
+                {
+                    return Ok(());
+                }
+            }
+
+            start_kernel::call(
+                &self.deps,
+                json!({
+                    "spec_name": request.spec_name,
+                    "slot_id": request.slot_id,
+                }),
+            )
+            .await
+            .map(|_result| ())
+            .map_err(|error| EngineError::KernelEnsure(format!("{error:?}")))
+        })
+    }
 }
 
 #[derive(Debug)]
 pub enum EngineError {
     Dag(crate::dag::DagError),
     Port(PortStoreError),
-    CellNotFound { cell_id: String },
-    MissingCellVersion { cell_id: String },
-    StaleCell { cell_id: String },
+    CellNotFound {
+        cell_id: String,
+    },
+    MissingCellVersion {
+        cell_id: String,
+    },
+    StaleCell {
+        cell_id: String,
+    },
+    UnsupportedKernelspec {
+        spec_name: String,
+        cell_ids: Vec<String>,
+    },
+    KernelEnsure(String),
     RunCell(String),
     DaemonUnavailable,
     SourceQueueClosed,
@@ -182,6 +235,15 @@ impl fmt::Display for EngineError {
                 write!(f, "cell has no spur version: {cell_id}")
             }
             Self::StaleCell { cell_id } => write!(f, "stale cell version: {cell_id}"),
+            Self::UnsupportedKernelspec {
+                spec_name,
+                cell_ids,
+            } => write!(
+                f,
+                "kernelspec {spec_name} is not supported yet for cells: {}",
+                cell_ids.join(", ")
+            ),
+            Self::KernelEnsure(error) => write!(f, "kernel ensure failed: {error}"),
             Self::RunCell(error) => write!(f, "run_cell failed: {error}"),
             Self::DaemonUnavailable => write!(f, "notebook daemon state is unavailable"),
             Self::SourceQueueClosed => write!(f, "reactive engine source queue is closed"),
@@ -212,6 +274,13 @@ where
     notebook_path: String,
     port_root: PathBuf,
     graph: Option<NotebookDag>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KernelRequirement {
+    spec_name: String,
+    slot_id: String,
+    cell_ids: Vec<String>,
 }
 
 impl<R> ReactiveEngine<R>
@@ -245,6 +314,7 @@ where
         push: SourcePush,
     ) -> Result<CascadeReport, EngineError> {
         self.rebuild_graph()?;
+        self.ensure_dag_kernels().await?;
 
         let mut ports = PortStore::open_at(&self.port_root)?;
         ports.put(&push.source.port, &push.ipc_bytes)?;
@@ -260,6 +330,7 @@ where
         cell_id: &str,
     ) -> Result<CascadeReport, EngineError> {
         self.rebuild_graph()?;
+        self.ensure_dag_kernels().await?;
 
         let port_versions = self.produced_port_versions(cell_id)?;
         let outcome = self.run_cell_with_status_events(cell_id).await?;
@@ -284,6 +355,7 @@ where
 
     pub async fn run_cell(&mut self, cell_id: &str) -> Result<CellRunReport, EngineError> {
         self.rebuild_graph()?;
+        self.ensure_cell_kernel(cell_id).await?;
 
         let port_versions = self.produced_port_versions(cell_id)?;
         let outcome = self.run_cell_with_status_events(cell_id).await?;
@@ -348,6 +420,92 @@ where
             .filter(|cell_id| seeds.contains(cell_id))
             .collect();
         self.cascade_from(ordered).await
+    }
+
+    async fn ensure_dag_kernels(&self) -> Result<(), EngineError> {
+        let requirements = self.dag_kernel_requirements();
+        self.ensure_kernel_requirements(requirements).await
+    }
+
+    async fn ensure_cell_kernel(&self, cell_id: &str) -> Result<(), EngineError> {
+        let requirement = self.cell_kernel_requirement(cell_id)?;
+        self.ensure_kernel_requirements(vec![requirement]).await
+    }
+
+    async fn ensure_kernel_requirements(
+        &self,
+        requirements: Vec<KernelRequirement>,
+    ) -> Result<(), EngineError> {
+        reject_unsupported_kernel_specs(&requirements)?;
+
+        let mut join_set = JoinSet::new();
+        for requirement in requirements {
+            let runner = self.runner.clone();
+            join_set.spawn(async move {
+                runner
+                    .ensure_kernel(KernelEnsureRequest {
+                        slot_id: requirement.slot_id,
+                        spec_name: requirement.spec_name,
+                    })
+                    .await
+            });
+        }
+
+        let mut first_error = None;
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(EngineError::KernelEnsure(format!(
+                            "kernel ensure task failed: {error}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn dag_kernel_requirements(&self) -> Vec<KernelRequirement> {
+        let (root, _) = self.store.snapshot();
+        let mut by_spec = BTreeMap::<String, BTreeSet<String>>::new();
+        for cell in &root.cells {
+            if cell_dag(cell).is_none() {
+                continue;
+            }
+            let Some(cell_id) = cell_id(cell) else {
+                continue;
+            };
+            let code_type = resolve_code_type(&root, cell_code_type(cell));
+            let spec_name = kernelspec_for(code_type).to_owned();
+            by_spec.entry(spec_name).or_default().insert(cell_id);
+        }
+        requirements_from_spec_map(&self.notebook_path, by_spec)
+    }
+
+    fn cell_kernel_requirement(&self, cell_id: &str) -> Result<KernelRequirement, EngineError> {
+        let (root, _) = self.store.snapshot();
+        let cell = cell_view(&root, cell_id).ok_or_else(|| EngineError::CellNotFound {
+            cell_id: cell_id.to_owned(),
+        })?;
+        let code_type = resolve_code_type(&root, cell.code_type);
+        let spec_name = kernelspec_for(code_type).to_owned();
+        Ok(KernelRequirement {
+            slot_id: slot_id_for_spec(&self.notebook_path, &spec_name),
+            spec_name,
+            cell_ids: vec![cell_id.to_owned()],
+        })
     }
 
     async fn run_cell_with_status_events(
@@ -472,15 +630,7 @@ where
             .ok_or_else(|| EngineError::MissingCellVersion {
                 cell_id: cell_id.to_owned(),
             })?;
-        let code_type = cell
-            .code_type
-            .or_else(|| {
-                root.metadata
-                    .kernelspec
-                    .as_ref()
-                    .and_then(|kernelspec| code_type_for_spec(&kernelspec.name))
-            })
-            .unwrap_or(CodeType::Python);
+        let code_type = resolve_code_type(&root, cell.code_type);
         Ok(CellRunRequest {
             cell_id: cell_id.to_owned(),
             notebook_path: self.notebook_path.clone(),
@@ -506,11 +656,57 @@ where
 }
 
 fn slot_id_for(notebook_path: &str, code_type: CodeType) -> String {
+    slot_id_for_spec(notebook_path, kernelspec_for(code_type))
+}
+
+fn slot_id_for_spec(notebook_path: &str, spec_name: &str) -> String {
     format!(
         "{}#{}",
         jute::state::notebook_slot_id(notebook_path),
-        kernelspec_for(code_type)
+        spec_name
     )
+}
+
+fn resolve_code_type(root: &NotebookRoot, code_type: Option<CodeType>) -> CodeType {
+    code_type
+        .or_else(|| {
+            root.metadata
+                .kernelspec
+                .as_ref()
+                .and_then(|kernelspec| code_type_for_spec(&kernelspec.name))
+        })
+        .unwrap_or(CodeType::Python)
+}
+
+fn requirements_from_spec_map(
+    notebook_path: &str,
+    by_spec: BTreeMap<String, BTreeSet<String>>,
+) -> Vec<KernelRequirement> {
+    by_spec
+        .into_iter()
+        .map(|(spec_name, cell_ids)| KernelRequirement {
+            slot_id: slot_id_for_spec(notebook_path, &spec_name),
+            spec_name,
+            cell_ids: cell_ids.into_iter().collect(),
+        })
+        .collect()
+}
+
+fn reject_unsupported_kernel_specs(requirements: &[KernelRequirement]) -> Result<(), EngineError> {
+    let cell_ids = requirements
+        .iter()
+        .filter(|requirement| requirement.spec_name == "evcxr")
+        .flat_map(|requirement| requirement.cell_ids.iter().cloned())
+        .collect::<Vec<_>>();
+
+    if cell_ids.is_empty() {
+        Ok(())
+    } else {
+        Err(EngineError::UnsupportedKernelspec {
+            spec_name: "evcxr".to_owned(),
+            cell_ids,
+        })
+    }
 }
 
 impl CellRunStatus {
@@ -873,6 +1069,10 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeRunner {
         requests: Arc<Mutex<Vec<CellRunRequest>>>,
+        ensures: Arc<Mutex<Vec<KernelEnsureRequest>>>,
+        active_ensures: Arc<Mutex<usize>>,
+        max_active_ensures: Arc<Mutex<usize>>,
+        events: Arc<Mutex<Vec<String>>>,
         outcomes: Arc<Mutex<BTreeMap<String, VecDeque<Result<CellRunOutcome, EngineError>>>>>,
     }
 
@@ -902,6 +1102,21 @@ mod tests {
         fn requests(&self) -> Vec<CellRunRequest> {
             self.requests.lock().expect("requests lock").clone()
         }
+
+        fn ensures(&self) -> Vec<KernelEnsureRequest> {
+            self.ensures.lock().expect("ensures lock").clone()
+        }
+
+        fn max_active_ensures(&self) -> usize {
+            *self
+                .max_active_ensures
+                .lock()
+                .expect("max active ensures lock")
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.events.lock().expect("events lock").clone()
+        }
     }
 
     impl CellRunner for FakeRunner {
@@ -915,6 +1130,10 @@ mod tests {
                     .lock()
                     .expect("requests lock")
                     .push(request.clone());
+                self.events
+                    .lock()
+                    .expect("events lock")
+                    .push(format!("run:{}", request.cell_id));
                 let outcome = self
                     .outcomes
                     .lock()
@@ -924,6 +1143,41 @@ mod tests {
                 outcome.unwrap_or(Ok(CellRunOutcome {
                     status: CellRunStatus::Succeeded,
                 }))
+            })
+        }
+
+        fn ensure_kernel<'a>(
+            &'a self,
+            request: KernelEnsureRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.ensures
+                    .lock()
+                    .expect("ensures lock")
+                    .push(request.clone());
+                self.events
+                    .lock()
+                    .expect("events lock")
+                    .push(format!("ensure-start:{}", request.spec_name));
+                {
+                    let mut active = self.active_ensures.lock().expect("active ensures lock");
+                    *active += 1;
+                    let mut max_active = self
+                        .max_active_ensures
+                        .lock()
+                        .expect("max active ensures lock");
+                    *max_active = (*max_active).max(*active);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                {
+                    let mut active = self.active_ensures.lock().expect("active ensures lock");
+                    *active -= 1;
+                }
+                self.events
+                    .lock()
+                    .expect("events lock")
+                    .push(format!("ensure-end:{}", request.spec_name));
+                Ok(())
             })
         }
     }
@@ -1071,6 +1325,130 @@ mod tests {
         assert_eq!(ports.get("a").expect("a bumped").version, 2);
         assert_eq!(ports.get("b").expect("b unchanged").version, 1);
         assert_eq!(ports.get("z").expect("z untouched").version, 1);
+    }
+
+    #[tokio::test]
+    async fn run_cell_and_cascade_preflights_distinct_kernels_before_dispatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let mut root = notebook(vec![
+            cell("a", "a = 1", 1, dag(vec![port("a")], vec![], None)),
+            cell("b", "b = a", 1, dag(vec![], vec!["a"], None)),
+            cell("c", "console.log(a)", 1, dag(vec![], vec!["a"], None)),
+        ]);
+        set_code_type(&mut root, "c", CodeType::Javascript);
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            &notebook_path,
+            temp.path().join("ports"),
+        );
+
+        engine.run_cell_and_cascade("a").await.expect("run cascade");
+
+        let expected_base = jute::state::notebook_slot_id(notebook_path.to_string_lossy().as_ref());
+        assert_eq!(
+            runner
+                .ensures()
+                .iter()
+                .map(|request| (request.spec_name.clone(), request.slot_id.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("deno".to_string(), format!("{expected_base}#deno")),
+                ("python3".to_string(), format!("{expected_base}#python3")),
+            ]
+        );
+        assert!(
+            runner.max_active_ensures() > 1,
+            "kernel ensures should run concurrently"
+        );
+        let events = runner.events();
+        let first_run = events
+            .iter()
+            .position(|event| event.starts_with("run:"))
+            .expect("run event");
+        assert!(events[..first_run]
+            .iter()
+            .any(|event| event == "ensure-end:deno"));
+        assert!(events[..first_run]
+            .iter()
+            .any(|event| event == "ensure-end:python3"));
+    }
+
+    #[tokio::test]
+    async fn run_cell_and_cascade_fails_fast_for_rust_cells_before_preflight_or_dispatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let mut root = notebook(vec![
+            cell("a", "a = 1", 1, dag(vec![port("a")], vec![], None)),
+            cell("rs", "let x = 1;", 1, dag(vec![], vec!["a"], None)),
+        ]);
+        set_code_type(&mut root, "rs", CodeType::Rust);
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            &notebook_path,
+            temp.path().join("ports"),
+        );
+
+        let error = engine
+            .run_cell_and_cascade("a")
+            .await
+            .expect_err("rust kernelspec is unsupported");
+
+        assert!(matches!(
+            error,
+            EngineError::UnsupportedKernelspec {
+                ref spec_name,
+                ref cell_ids
+            } if spec_name == "evcxr" && cell_ids == &vec!["rs".to_string()]
+        ));
+        assert!(runner.ensures().is_empty());
+        assert!(runner.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_cell_lazily_preflights_only_target_kernel_before_dispatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let mut root = notebook(vec![
+            cell("py", "py = 1", 1, dag(vec![], vec![], None)),
+            cell("js", "console.log(1)", 1, dag(vec![], vec![], None)),
+        ]);
+        set_code_type(&mut root, "js", CodeType::Javascript);
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            &notebook_path,
+            temp.path().join("ports"),
+        );
+
+        engine.run_cell("js").await.expect("run cell");
+
+        assert_eq!(
+            runner
+                .ensures()
+                .iter()
+                .map(|request| request.spec_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deno"]
+        );
+        let events = runner.events();
+        let ensure_end = events
+            .iter()
+            .position(|event| event == "ensure-end:deno")
+            .expect("ensure completed");
+        let run = events
+            .iter()
+            .position(|event| event == "run:js")
+            .expect("run event");
+        assert!(ensure_end < run);
     }
 
     #[tokio::test]
@@ -1254,7 +1632,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daemonless_command_runner_gets_explicit_kernel_id_before_dispatch() {
+    async fn daemonless_command_runner_lazily_ensures_explicit_kernel_id() {
         let temp = TempDir::new().expect("temp dir");
         let notebook_path = temp.path().join("ui.ipynb");
         let root = notebook(vec![cell("a", "a = 1", 1, dag(vec![], vec![], None))]);
@@ -1279,14 +1657,14 @@ mod tests {
         let error = engine
             .run_cell("a")
             .await
-            .expect_err("empty test slot cannot dispatch a run");
+            .expect_err("test runner cannot provision python without an app handle");
         let message = error.to_string();
 
         assert!(
             !message.contains("requires kernel_id when no notebook is open"),
             "{message}"
         );
-        assert!(message.contains("failed to dispatch"), "{message}");
+        assert!(message.contains("notebook.start_kernel requires a Tauri app handle"));
     }
 
     #[test]
@@ -1381,6 +1759,22 @@ mod tests {
             execution_count: None,
             outputs: Vec::new(),
         })
+    }
+
+    fn set_code_type(root: &mut NotebookRoot, id: &str, code_type: CodeType) {
+        for cell in &mut root.cells {
+            if let Cell::Code(cell) = cell {
+                if cell.id.as_deref() == Some(id) {
+                    cell.metadata
+                        .spur
+                        .as_mut()
+                        .expect("spur metadata")
+                        .code_type = Some(code_type);
+                    return;
+                }
+            }
+        }
+        panic!("missing cell {id}");
     }
 
     fn dag(

@@ -7,7 +7,10 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{dag::notebook_run_context, mcp::ServerDeps};
+use crate::{
+    dag::{engine::EngineError, notebook_run_context},
+    mcp::ServerDeps,
+};
 
 const METHOD: &str = "notebook_run_cascade";
 
@@ -75,12 +78,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         .engine
         .run_cell_and_cascade(&params.cell_id)
         .await
-        .map_err(|error| {
-            McpError::internal_error(
-                "notebook_run_cascade failed",
-                Some(json!({ "error": error.to_string() })),
-            )
-        })?;
+        .map_err(notebook_run_cascade_error)?;
 
     Ok(CallToolResult::structured(json!({
         "cell_id": params.cell_id,
@@ -91,4 +89,41 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             })
         }).collect::<Vec<_>>(),
     })))
+}
+
+fn notebook_run_cascade_error(error: EngineError) -> McpError {
+    match error {
+        EngineError::UnsupportedKernelspec {
+            spec_name,
+            cell_ids,
+        } => McpError::invalid_params(
+            "notebook_run_cascade unsupported kernelspec",
+            Some(json!({
+                "code": "kernelspec_not_supported",
+                "spec_name": spec_name,
+                "cell_ids": cell_ids,
+            })),
+        ),
+        error => McpError::internal_error(
+            "notebook_run_cascade failed",
+            Some(json!({ "error": error.to_string() })),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_kernelspec_error_names_cells() {
+        let error = notebook_run_cascade_error(EngineError::UnsupportedKernelspec {
+            spec_name: "evcxr".to_string(),
+            cell_ids: vec!["rs1".to_string(), "rs2".to_string()],
+        });
+        let data = error.data.expect("structured error data");
+
+        assert_eq!(data.get("code"), Some(&json!("kernelspec_not_supported")));
+        assert_eq!(data.get("cell_ids"), Some(&json!(["rs1", "rs2"])));
+    }
 }

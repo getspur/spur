@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use spur_notebook::{
     dag::{
-        engine::{CellRunOutcome, CellRunner, EngineError},
+        engine::{CellRunOutcome, CellRunner, EngineError, KernelEnsureRequest},
         CellRunReport, CellRunRequest, CellRunStatus, PortStore, ReactiveEngine,
         ReactiveEngineClient, SourcePush,
     },
@@ -149,6 +149,13 @@ impl CellRunner for StoreBackedRunner {
                 }
             }
         })
+    }
+
+    fn ensure_kernel<'a>(
+        &'a self,
+        _request: KernelEnsureRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
