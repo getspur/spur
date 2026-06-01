@@ -403,6 +403,29 @@ fn stage_duckdb_extension(workspace_root: &Path) -> Result<String, String> {
         )
     })?;
     eprintln!("staged DuckDB extension: {}", staged.display());
+
+    // The injected `extensions/<file>` bundle resource (see tauri_build_command)
+    // is validated by BOTH tauri build scripts in this workspace, each relative
+    // to its own tauri.conf.json dir: the `jute` dependency
+    // (jute-notebook/src-tauri, staged above) and the outer `spur-notebook`
+    // crate (crates/spur-notebook), which also produces the bundle and whose
+    // runtime (extension_install.rs) reads <resource_root>/extensions/<file>.
+    // A single relative path cannot satisfy both config dirs, so stage a second
+    // copy into the outer crate's extensions/ dir; the bundle then lays the
+    // resource out as resources/extensions/<file>, matching the runtime.
+    let outer_extensions_dir = workspace_root.join("crates/spur-notebook/extensions");
+    fs::create_dir_all(&outer_extensions_dir)
+        .map_err(|err| format!("failed to create {}: {err}", outer_extensions_dir.display()))?;
+    let outer_staged = outer_extensions_dir.join(format!("spur_rest-{platform}.duckdb_extension"));
+    fs::copy(&source, &outer_staged).map_err(|err| {
+        format!(
+            "failed to copy {} to {}: {err}",
+            source.display(),
+            outer_staged.display()
+        )
+    })?;
+    eprintln!("staged DuckDB extension: {}", outer_staged.display());
+
     Ok(format!("extensions/spur_rest-{platform}.duckdb_extension"))
 }
 
