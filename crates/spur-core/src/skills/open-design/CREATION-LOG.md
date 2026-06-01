@@ -27,3 +27,15 @@
   into Jute's native deck `THEMES` as CSS-token themes (OKLch palettes + font stacks
   injected by `SlideFrame`). Native decks now offer 8 themes; the 3 class-only built-ins
   are unchanged. Spec: `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m2-design.ipynb`.
+
+- **2026-06-01** — M2c: artifact-deck track + theme library. Brain-vendored 51
+  self-contained Open Design deck themes (`guizang-ppt`, `replit-deck`, 48 `html-ppt-*`)
+  + `deck-skeleton.html` (the 1920×1080 fixed-canvas framework, verbatim) into
+  `assets/open-design-deck-library/`, with a tolerant `build_index.py` + committed
+  `index.json` (`--check`-guarded). Wired the skill's artifact-deck escalation
+  (`references/deck-artifact.md` + SKILL.md step-4) and deck-artifact critique checks.
+  Native deck mode (M2a) stays the default; the artifact track is the polish/brand
+  escalation. Excludes `simple-deck`/`weekly-update` (need a design system) and
+  `html-ppt-retro-quarterly-review` (video/template mode); those + `dispatchDeckCommand`
+  reconciliation remain open. Spec:
+  `docs/superpowers/specs/2026-06-01-open-design-deck-mode-m2-design.ipynb`.
