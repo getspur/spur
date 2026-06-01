@@ -1,5 +1,4 @@
 import clsx from "clsx";
-import type { ReactNode } from "react";
 
 import type {
   DagConsumedPort,
@@ -14,22 +13,25 @@ type DagNodeProps = {
   selected?: boolean;
 };
 
-const STATE_BORDER_COLORS: Record<DagNodeState, string> = {
-  fresh: "border-emerald-500 bg-emerald-50/30",
-  stale: "border-amber-500 bg-amber-50/40",
-  running: "animate-pulse border-blue-500 bg-blue-50/40",
-  failed: "border-red-500 bg-red-50/40",
-  "upstream-failed": "border-red-400 border-dashed bg-red-50/20",
-  "never-run": "border-gray-300 bg-white",
+// Status is the ONLY colour language on a node. The 3px left rail + the header
+// dot carry run state; the card itself stays a neutral surface so a wall of
+// nodes reads as topology first, status second.
+const STATE_RAIL: Record<DagNodeState, string> = {
+  fresh: "bg-emerald-500",
+  stale: "bg-amber-500",
+  running: "bg-blue-500",
+  failed: "bg-red-500",
+  "upstream-failed": "bg-red-300",
+  "never-run": "bg-gray-300",
 };
 
-const STATE_BADGE_COLORS: Record<DagNodeState, string> = {
-  fresh: "bg-emerald-100 text-emerald-800",
-  stale: "bg-amber-100 text-amber-800",
-  running: "bg-blue-100 text-blue-800",
-  failed: "bg-red-100 text-red-800",
-  "upstream-failed": "bg-red-100 text-red-700",
-  "never-run": "bg-gray-100 text-gray-600",
+const STATE_DOT: Record<DagNodeState, string> = {
+  fresh: "bg-emerald-500",
+  stale: "bg-amber-500",
+  running: "bg-blue-500 animate-pulse",
+  failed: "bg-red-500",
+  "upstream-failed": "border-[1.5px] border-red-400 bg-white",
+  "never-run": "border-[1.5px] border-gray-300 bg-white",
 };
 
 export default function DagNode({
@@ -37,13 +39,14 @@ export default function DagNode({
   onSelect,
   selected = false,
 }: DagNodeProps) {
+  const hasConsumes = data.consumes.length > 0 || Boolean(data.source);
+
   return (
     <article
-      aria-label={`Select ${data.label}`}
+      aria-label={`Select ${data.id}`}
       className={clsx(
-        "h-44 w-[280px] overflow-hidden rounded border text-left shadow-sm transition-colors",
-        STATE_BORDER_COLORS[data.state],
-        selected && "ring-2 ring-gray-900/20",
+        "flex w-[224px] overflow-hidden rounded border border-gray-200 bg-white text-left shadow-sm transition-shadow hover:shadow-md",
+        selected && "ring-2 ring-gray-900/25",
       )}
       onClick={() => onSelect?.(data.id)}
       onKeyDown={(event) => {
@@ -55,108 +58,88 @@ export default function DagNode({
       role="button"
       tabIndex={0}
     >
-      <div className="border-b border-gray-100 px-3 py-2">
-        <div className="flex min-w-0 items-center justify-between gap-2">
-          <h2 className="truncate text-sm font-semibold text-gray-950">
-            {data.label}
-          </h2>
-          <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-normal text-gray-600">
-            {data.cellType}
-          </span>
-        </div>
-        <div className="mt-1 flex min-w-0 items-center justify-between gap-2">
-          <p className="truncate font-mono text-xs text-gray-500">
-            {data.codePreview}
-          </p>
+      <div className={clsx("w-[3px] shrink-0", STATE_RAIL[data.state])} />
+      <div className="min-w-0 flex-1 px-2.5 py-2">
+        <div className="flex min-w-0 items-center gap-2">
           <span
             className={clsx(
-              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-normal",
-              STATE_BADGE_COLORS[data.state],
+              "h-2 w-2 shrink-0 rounded-full",
+              STATE_DOT[data.state],
             )}
-          >
-            {data.state}
+          />
+          <h2 className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-gray-900">
+            {data.label}
+          </h2>
+          <span className="shrink-0 font-mono text-[10px] text-gray-400">
+            {data.id}
           </span>
         </div>
-      </div>
-      <div className="grid gap-2 px-3 py-2 text-xs">
-        <PortSection label="Consumes">
-          {data.consumes.length > 0 || data.source ? (
-            <>
-              {data.consumes.map((port) => (
-                <ConsumedPortChip key={port.port} port={port} />
-              ))}
-              {data.source ? <SourceChip source={data.source} /> : null}
-            </>
-          ) : (
-            <EmptyPorts />
-          )}
-        </PortSection>
-        <PortSection label="Produces">
-          {data.produces.length > 0 ? (
-            data.produces.map((port) => (
-              <ProducedPortChip key={port.port} port={port} />
-            ))
-          ) : (
-            <EmptyPorts />
-          )}
-        </PortSection>
+        <p className="mt-1 truncate font-mono text-[10.5px] text-gray-500">
+          {data.codePreview}
+        </p>
+        <div className="mt-2 flex items-center justify-between gap-2 font-mono text-[10px]">
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+            {hasConsumes ? (
+              <>
+                <span className="shrink-0 text-gray-400">↓</span>
+                {data.consumes.map((port) => (
+                  <ConsumedToken key={port.port} port={port} />
+                ))}
+                {data.source ? <SourceToken source={data.source} /> : null}
+              </>
+            ) : (
+              <span className="text-gray-300">no input</span>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {data.produces.length > 0 ? (
+              <>
+                {data.produces.map((port) => (
+                  <ProducedToken key={port.port} port={port} />
+                ))}
+                <span className="shrink-0 text-gray-400">↑</span>
+              </>
+            ) : (
+              <span className="text-gray-300">sink</span>
+            )}
+          </div>
+        </div>
       </div>
     </article>
   );
 }
 
-function PortSection({
-  children,
-  label,
-}: {
-  children: ReactNode;
-  label: string;
-}) {
+function ProducedToken({ port }: { port: DagProducedPort }) {
   return (
-    <section>
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-normal text-gray-500">
-        {label}
-      </div>
-      <div className="flex min-h-6 flex-wrap gap-1">{children}</div>
-    </section>
-  );
-}
-
-function ProducedPortChip({ port }: { port: DagProducedPort }) {
-  return (
-    <span className="max-w-full truncate rounded bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-800">
-      {port.display ?? port.port}
-      <span className="ml-1 text-emerald-600">v{port.version}</span>
+    <span className="inline-flex items-center gap-1 whitespace-nowrap">
+      <span className="text-gray-600">{port.display ?? port.port}</span>
+      <span className="text-gray-400">v{port.version}</span>
     </span>
   );
 }
 
-function ConsumedPortChip({ port }: { port: DagConsumedPort }) {
+function ConsumedToken({ port }: { port: DagConsumedPort }) {
+  const version = port.version === undefined ? "v?" : `v${port.version}`;
   return (
-    <span
-      className={clsx(
-        "max-w-full truncate rounded px-2 py-1 text-[11px] font-medium",
-        port.stale ? "bg-amber-100 text-amber-800" : "bg-sky-50 text-sky-800",
-      )}
-    >
-      {port.port}
+    <span className="inline-flex min-w-0 items-center gap-1 whitespace-nowrap">
+      {port.stale ? (
+        <span className="h-1 w-1 shrink-0 rounded-full bg-amber-500" />
+      ) : null}
       <span
-        className={clsx("ml-1", port.stale ? "text-amber-700" : "text-sky-600")}
+        className={clsx(
+          "truncate",
+          port.stale ? "text-amber-700" : "text-gray-600",
+        )}
       >
-        {port.version === undefined ? "v?" : `v${port.version}`}
+        {port.port}
+      </span>
+      <span className={port.stale ? "text-amber-500" : "text-gray-400"}>
+        {version}
       </span>
     </span>
   );
 }
 
-function SourceChip({ source }: { source: string }) {
-  return (
-    <span className="max-w-full truncate rounded bg-indigo-50 px-2 py-1 text-[11px] font-medium text-indigo-800">
-      {source}
-    </span>
-  );
-}
-
-function EmptyPorts() {
-  return <span className="text-[11px] text-gray-400">None</span>;
+function SourceToken({ source }: { source: string }) {
+  return <span className="truncate text-gray-500">{source}</span>;
 }
