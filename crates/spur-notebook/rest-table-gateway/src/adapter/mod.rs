@@ -2,6 +2,7 @@ pub mod http;
 pub mod json_to_batch;
 pub mod manifest;
 pub mod manifest_adapter;
+pub mod templating;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +43,8 @@ pub enum ResolvedAuth {
     None,
     Bearer(String),
     Header { name: String, value: String },
+    Basic { user: String, pass: String },
+    QueryParam { param: String, value: String },
 }
 
 impl Default for ResolvedAuth {

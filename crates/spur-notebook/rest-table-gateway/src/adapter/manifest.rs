@@ -16,6 +16,8 @@ pub struct SourceCfg {
     #[serde(default)]
     pub auth: AuthCfg,
     pub pagination: Option<PaginationCfg>,
+    #[serde(default)]
+    pub connection_config: Vec<String>,
 }
 
 /// Authentication config uses serde's internally tagged representation.
@@ -28,6 +30,8 @@ pub enum AuthCfg {
     None,
     Bearer { env: String },
     Header { name: String, env: String },
+    Basic { user_env: String, pass_env: String },
+    ApiKeyQuery { param: String, env: String },
 }
 
 impl Default for AuthCfg {
@@ -39,15 +43,26 @@ impl Default for AuthCfg {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaginationCfg {
     pub style: String,
-    pub limit_param: String,
-    pub offset_param: String,
+    #[serde(default)]
+    pub limit_param: Option<String>,
+    #[serde(default)]
+    pub offset_param: Option<String>,
+    #[serde(default)]
     pub page_size: u32,
+    #[serde(default)]
+    pub cursor_path: Option<String>,
+    #[serde(default)]
+    pub cursor_param: Option<String>,
+    #[serde(default)]
+    pub link_rel: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TableCfg {
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub response_path: Option<String>,
     pub columns: IndexMap<String, ColumnCfg>,
     #[serde(default)]
     pub filters: HashMap<String, FilterCfg>,
@@ -109,5 +124,47 @@ active = { param = "active" }
         );
         assert_eq!(manifest.tables[0].columns["volume"].ty, "Float64");
         assert_eq!(manifest.tables[0].filters["active"].param, "active");
+    }
+
+    #[test]
+    fn parses_extended_connection_fields() {
+        let manifest = Manifest::from_toml(
+            r#"
+[source]
+name = "nango"
+base_url = "https://${connectionConfig.host}"
+connection_config = ["host", "workspace"]
+auth = { scheme = "basic", user_env = "NANGO_USER", pass_env = "NANGO_PASS" }
+pagination = { style = "cursor", page_size = 500, cursor_path = "$.next_cursor", cursor_param = "cursor" }
+
+[[table]]
+name = "accounts"
+path = "/accounts"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+"#,
+        )
+        .expect("manifest should parse");
+
+        assert_eq!(manifest.source.connection_config, ["host", "workspace"]);
+        match manifest.source.auth {
+            AuthCfg::Basic { user_env, pass_env } => {
+                assert_eq!(user_env, "NANGO_USER");
+                assert_eq!(pass_env, "NANGO_PASS");
+            }
+            other => panic!("expected basic auth, got {other:?}"),
+        }
+
+        let pagination = manifest.source.pagination.expect("pagination");
+        assert_eq!(pagination.style, "cursor");
+        assert_eq!(pagination.limit_param, None);
+        assert_eq!(pagination.offset_param, None);
+        assert_eq!(pagination.page_size, 500);
+        assert_eq!(pagination.cursor_path.as_deref(), Some("$.next_cursor"));
+        assert_eq!(pagination.cursor_param.as_deref(), Some("cursor"));
+        assert_eq!(pagination.link_rel, None);
+        assert_eq!(manifest.tables[0].response_path.as_deref(), Some("$.data"));
     }
 }
