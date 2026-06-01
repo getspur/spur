@@ -60,3 +60,17 @@
   "embody the specialist" step deterministic. SKILL.md (SPUR-MANAGED) untouched; both edited
   files are read by the existing loop steps. Edits applied to the authoritative crate source;
   `.spur/.claude` copies regenerate on `skills init`.
+
+- **2026-06-01** — artifact tracks A/B + Direction B default. Validated a second artifact
+  track end-to-end in a live Deno-kernel notebook: components (Preact) + SSR baseline +
+  Tailwind compiled in-kernel + esbuild inline-bundled client island, emitted as one
+  self-contained `text/html` cell (zero external URLs). Bake-off vs the hand-written
+  single-file track showed the hand-written DAG view fails the new scripts-off gate (it
+  builds all DOM in script, so it renders blank with active content off), while the SSR
+  track passes by construction. Decision: **Track B (componentized + SSR) is the default**;
+  Track A (single-file HTML) is for simple / static artifacts and must pre-render its
+  initial DOM. Added `references/artifact-tracks.md` (decision rule, hard constraints,
+  Track B recipe skeleton, three gotchas: two-preact-instances, jsr-blocked http plugin,
+  active-content-default-off) and rewrote SKILL.md step 4 to pick a track and allow a Deno
+  build step (the prior "single-entry HTML, no build step" M1 line is superseded; the
+  rendered output is still one inlined self-contained cell).
