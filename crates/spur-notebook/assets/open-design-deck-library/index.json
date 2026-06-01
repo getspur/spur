@@ -1,0 +1,843 @@
+{
+  "version": 1,
+  "kind": "deck-themes",
+  "count": 51,
+  "items": [
+    {
+      "id": "guizang-ppt",
+      "title": "magazine-web-ppt",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": 9,
+      "summary": "生成\"电子杂志 × 电子墨水\"风格的横向翻页网页 PPT（单 HTML 文件），含 WebGL 流体背景、衬线标题 + 非衬线正文、章节幕封、数据大字报、图片网格等模板。当用户需要制作分享 / 演讲 / 发布会风格的网页 PPT，或提到\"杂志风 PPT\"、\"horizontal swipe deck\"、\"editorial magazine\"、\"e-ink presentation\"时使用。",
+      "source": "https://github.com/op7418/guizang-ppt-skill",
+      "swatches": [
+        "#0a0a0b",
+        "#f1efea",
+        "#e8e5de",
+        "#18181a",
+        "#aaa"
+      ]
+    },
+    {
+      "id": "html-ppt-course-module",
+      "title": "html-ppt-course-module",
+      "scenario": "education",
+      "mode": "deck",
+      "featured": 25,
+      "summary": "Online-course / workshop module deck — warm paper background + Playfair serif, persistent left sidebar of learning objectives, MCQ self-check page. Use for teaching modules, training materials, workshop slides.",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-dir-key-nav-minimal",
+      "title": "html-ppt-dir-key-nav-minimal",
+      "scenario": "personal",
+      "mode": "deck",
+      "featured": 34,
+      "summary": "8 页极简方向键 keynote — 每页一个独立单色背景（靛 / 奶 / 绛 / 翠 / 灰 / 紫 / 白 / 炭），各自配色，160px display 标题 + 4px 短粗 accent 线分隔、箭头 → 前缀的 Mono 列表、左下 ← → kbd 提示 + 右下页码、巨大呼吸留白。适合\"有话要说但没什么可看\"的 keynote、launch、公开演讲。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-graphify-dark-graph",
+      "title": "html-ppt-graphify-dark-graph",
+      "scenario": "engineering",
+      "mode": "deck",
+      "featured": 28,
+      "summary": "暗底知识图谱 deck — #06060c→#0e1020 深夜渐变 + 漂浮 blur orbs、封面 SVG 力导向图谱、彩虹渐变标题、JetBrains Mono 命令行高亮、glass-morphism 卡片。适合 dev-tool / CLI / 知识图谱 / 数据可视化的发布会，\"AI-native + 科幻 + 暖色\" 调子。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-hermes-cyber-terminal",
+      "title": "html-ppt-hermes-cyber-terminal",
+      "scenario": "engineering",
+      "mode": "deck",
+      "featured": 30,
+      "summary": "暗终端 honest-review deck — #0a0c10 黑底 + 56px 赛博网格 + CRT 暗角 + 扫描线、窗口红绿灯 chrome、`$ prompt` 命令行标题、薄荷绿 #7ed3a4 大字、JetBrains Mono、stroke-only 柱状图、blinking 光标、琥珀/绿/红三档 tag、暗色代码块。适合 CLI / agent / dev tool 测评（含 trace、diff、benchmark）。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-knowledge-arch-blueprint",
+      "title": "html-ppt-knowledge-arch-blueprint",
+      "scenario": "engineering",
+      "mode": "deck",
+      "featured": 29,
+      "summary": "奶油蓝图架构 deck — 奶油纸 #F0EAE0 底色 + 单一锈红 #B5392A 高亮、48px 蓝图网格 mask、2px 黑边硬卡片、pipeline 步骤盒（其中一个抬高）、右侧锈红 insight callout、Playfair 衬线大字、SVG 虚线反馈环。零渐变零软阴影，认真且印刷友好。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-obsidian-claude-gradient",
+      "title": "html-ppt-obsidian-claude-gradient",
+      "scenario": "engineering",
+      "mode": "deck",
+      "featured": 31,
+      "summary": "GitHub 暗紫渐变 deck — GitHub-dark #0d1117 + 紫蓝 radial 环境光 + 60px 网格 mask、居中布局、紫色 pill 标签、三色渐变标题（#a855f7→#60a5fa→#34d399）、GitHub 风代码 palette、紫色左边框高亮块。适合开发者工作流 / MCP / Agent / dev tool 教程，类似 GitHub Blog / Linear Changelog。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-pitch-deck",
+      "title": "html-ppt-pitch-deck",
+      "scenario": "finance",
+      "mode": "deck",
+      "featured": 20,
+      "summary": "Investor-ready 10-slide HTML pitch deck — white + blue→purple gradient hero, big numbers, traction bar chart, $4.5M-style ask page. Use when the user wants a fundraising deck, seed-round pitch, or VC meeting slides.",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-presenter-mode-reveal",
+      "title": "html-ppt-presenter-mode",
+      "scenario": "engineering",
+      "mode": "deck",
+      "featured": 26,
+      "summary": "演讲者模式专用 deck — tokyo-night 默认主题，5 套主题 T 键切换，每页带 150-300 字逐字稿示例（<aside class=\"notes\">），按 S 打开 popup（CURRENT / NEXT / SCRIPT / TIMER 四张磁吸卡片）。用于技术分享、公开演讲、课程讲解，怕忘词或要提词器的场景。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-product-launch",
+      "title": "html-ppt-product-launch",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": 21,
+      "summary": "Launch keynote deck — dark hero + light content, warm orange→peach accent, feature cards, pricing tiers, CTA. Use when announcing a product, launching a feature, or doing a keynote-style reveal.",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-taste-brutalist",
+      "title": "html-ppt-taste-brutalist",
+      "scenario": "",
+      "mode": "deck",
+      "featured": null,
+      "summary": "16:9 HTML deck in tactical-telemetry / CRT-terminal taste. Deactivated-CRT charcoal slides, white-phosphor monospace, hazard-red accent, scanline overlay, ASCII syntax, density over decoration. Distilled from Leonxlnx/taste-skill `brutalist",
+      "source": "",
+      "swatches": [
+        "#0b0b0b",
+        "#131312",
+        "#ececea",
+        "#9f9f9c",
+        "#6a6a67",
+        "#2a2a27"
+      ]
+    },
+    {
+      "id": "html-ppt-taste-editorial",
+      "title": "html-ppt-taste-editorial",
+      "scenario": "",
+      "mode": "deck",
+      "featured": null,
+      "summary": "16:9 HTML deck in editorial-minimalist taste. Warm cream slides, serif display + grotesque body, hairline rules, monospace meta, generous macro-whitespace, one accent. Distilled from Leonxlnx/taste-skill `minimalist-skill`.",
+      "source": "",
+      "swatches": [
+        "#fbfbfa",
+        "#f4f3f0",
+        "#1a1a19",
+        "#555452",
+        "#828079",
+        "#e5e3de"
+      ]
+    },
+    {
+      "id": "html-ppt-tech-sharing",
+      "title": "html-ppt-tech-sharing",
+      "scenario": "engineering",
+      "mode": "deck",
+      "featured": 22,
+      "summary": "Conference / internal tech-talk deck — GitHub-dark, JetBrains Mono, terminal code blocks, agenda + Q&A pages. Use for engineering presentations, internal sharing sessions, conference talks, and code-heavy walkthroughs.",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-testing-safety-alert",
+      "title": "html-ppt-testing-safety-alert",
+      "scenario": "engineering",
+      "mode": "deck",
+      "featured": 32,
+      "summary": "红琥珀警示 deck — 顶/底 45° 红黑 hazard 条纹、红色删除线否定标题、L1/L2/L3 绿/琥珀/红 tier 卡片、圆点状态 alert box、policy-yaml 代码块（红左边框 + bad 关键词高亮）、红绿 checklist、Q1 事故堆叠柱状图。适合安全 / 风险 / 事故复盘 / 红队 / 上线前 AI 评审 / policy-as-code。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-weekly-report",
+      "title": "html-ppt-weekly-report",
+      "scenario": "operations",
+      "mode": "deck",
+      "featured": 23,
+      "summary": "Team weekly / status-update deck — corporate clarity, 8-cell KPI grid, shipped list, 8-week bar chart, next-week table. Use for 周报, business reviews, team status updates, and exec dashboards.",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-xhs-pastel-card",
+      "title": "html-ppt-xhs-pastel-card",
+      "scenario": "personal",
+      "mode": "deck",
+      "featured": 33,
+      "summary": "柔和马卡龙慢生活 deck — 奶油 #fef8f1 底 + 三个柔光 blob、Playfair 斜体衬线 display 标题混 sans 正文、28px 圆角马卡龙卡片（桃 / 薄荷 / 天 / 紫 / 柠 / 玫）、Playfair 斜体 01-04 序号、SVG donut 图、chip+page 顶栏。适合生活方式 / 个人成长 / 慢生活 / 情绪类内容，\"杂志、手作、不太科技\"的感觉。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-xhs-post",
+      "title": "html-ppt-xhs-post",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": 24,
+      "summary": "小红书 / Instagram 风 9 页 3:4 竖版图文（810×1080）— 暖色 pastel、虚线 sticker 卡片、底部页码点点。用于发小红书图文、Instagram carousel、品牌种草内容。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-xhs-white-editorial",
+      "title": "html-ppt-xhs-white-editorial",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": 27,
+      "summary": "白底杂志风 deck — 纯白背景 + 顶部 10 色彩虹 bar、80-110px display 标题、紫→蓝→绿→橙→粉渐变文字、马卡龙软卡片组（粉/紫/蓝/绿/橙）、黑底白字 .focus pill、引用大块。同时适合发小红书图文 + 横版 PPT 双用。",
+      "source": "https://github.com/lewislulu/html-ppt-skill",
+      "swatches": [
+        "#ffffff",
+        "#f7f7f8",
+        "#f2f2f4",
+        "#111216",
+        "#55596a",
+        "#8a8f9e"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-8-bit-orbit",
+      "title": "html-ppt-zhangzara-8-bit-orbit",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/8-bit-orbit",
+      "swatches": [
+        "#f0a6ca",
+        "#5edcf4",
+        "#f4d03f",
+        "#0f1b3d",
+        "#0a0e27",
+        "#e2d5f2"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-biennale-yellow",
+      "title": "html-ppt-zhangzara-biennale-yellow",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/biennale-yellow",
+      "swatches": [
+        "#e9e5db",
+        "#1b2566",
+        "#f1ee2e",
+        "#e26b4a",
+        "#f0da7c"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-block-frame",
+      "title": "html-ppt-zhangzara-block-frame",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/block-frame",
+      "swatches": [
+        "#fe90e8",
+        "#c0f7fe",
+        "#99e885",
+        "#f7cb46",
+        "#ffdc8b",
+        "#000000"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-blue-professional",
+      "title": "html-ppt-zhangzara-blue-professional",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/blue-professional",
+      "swatches": [
+        "#fdfae7",
+        "#1e2bfa",
+        "#111111",
+        "#6b6b6b"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-bold-poster",
+      "title": "html-ppt-zhangzara-bold-poster",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/bold-poster",
+      "swatches": [
+        "#ffffff",
+        "#1c1410",
+        "#d8000f",
+        "#f5f2ef"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-broadside",
+      "title": "html-ppt-zhangzara-broadside",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/broadside",
+      "swatches": [
+        "#111111",
+        "#1a1a18",
+        "#f0ece5",
+        "#e85d26",
+        "#282826",
+        "#888880"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-capsule",
+      "title": "html-ppt-zhangzara-capsule",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/capsule",
+      "swatches": [
+        "#f5f5f0",
+        "#1a1a1a",
+        "#e85d4e",
+        "#c4d94e",
+        "#c5b5e0",
+        "#8bb4f7"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-cartesian",
+      "title": "html-ppt-zhangzara-cartesian",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/cartesian",
+      "swatches": [
+        "#ede8e0",
+        "#e2dbd1",
+        "#1a1a1a",
+        "#5a5a5a",
+        "#8a8178",
+        "#b8b0a4"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-cobalt-grid",
+      "title": "html-ppt-zhangzara-cobalt-grid",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/cobalt-grid",
+      "swatches": [
+        "#f0ebde",
+        "#1f2be0",
+        "#5560e5"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-coral",
+      "title": "html-ppt-zhangzara-coral",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/coral",
+      "swatches": [
+        "#e85d5d",
+        "#d44a4a",
+        "#f5f0e8",
+        "#e8e0d4",
+        "#1a1a1a",
+        "#6b6b6b"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-creative-mode",
+      "title": "html-ppt-zhangzara-creative-mode",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/creative-mode",
+      "swatches": [
+        "#efe9d9",
+        "#e4dcc4",
+        "#1f8a4c",
+        "#f06ca8",
+        "#e85a1f",
+        "#f5c518"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-daisy-days",
+      "title": "html-ppt-zhangzara-daisy-days",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/daisy-days",
+      "swatches": [
+        "#f5f0e6",
+        "#7ecdc0",
+        "#f7c8d4",
+        "#fde68a",
+        "#a8e6cf",
+        "#d4a5e8"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-editorial-tri-tone",
+      "title": "html-ppt-zhangzara-editorial-tri-tone",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/editorial-tri-tone",
+      "swatches": [
+        "#f2b6c6",
+        "#f2d86a",
+        "#7a1f35"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-grove",
+      "title": "html-ppt-zhangzara-grove",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/grove",
+      "swatches": [
+        "#192b1b",
+        "#1e3221",
+        "#d4cfbf",
+        "#c8524a",
+        "#e8e4d6"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-long-table",
+      "title": "html-ppt-zhangzara-long-table",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/long-table",
+      "swatches": [
+        "#faf1e2",
+        "#b53d2a",
+        "#8e2d1f"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-mat",
+      "title": "html-ppt-zhangzara-mat",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/mat",
+      "swatches": [
+        "#232e26",
+        "#2e3d30",
+        "#f0e8d2",
+        "#c07030",
+        "#ede6d0",
+        "#7a4e24"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-monochrome",
+      "title": "html-ppt-zhangzara-monochrome",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/monochrome",
+      "swatches": [
+        "#fafadf",
+        "#f2f2d2",
+        "#f5f0e4",
+        "#1a1a16",
+        "#5e5e54"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-neo-grid-bold",
+      "title": "html-ppt-zhangzara-neo-grid-bold",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/neo-grid-bold",
+      "swatches": [
+        "#ecece8",
+        "#0a0a0a",
+        "#f5f4ef",
+        "#e6ff3d",
+        "#8a8a85"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-peoples-platform",
+      "title": "html-ppt-zhangzara-peoples-platform",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/peoples-platform",
+      "swatches": [
+        "#2c2cdc",
+        "#f2a03a",
+        "#e83a2a",
+        "#f4e9d6",
+        "#0e0e14"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-pin-and-paper",
+      "title": "html-ppt-zhangzara-pin-and-paper",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/pin-and-paper",
+      "swatches": [
+        "#efe56a",
+        "#f8f1d6",
+        "#1f3a8a",
+        "#c2342b"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-pink-script",
+      "title": "html-ppt-zhangzara-pink-script",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/pink-script",
+      "swatches": [
+        "#060507",
+        "#f5edf1",
+        "#ed3d8c",
+        "#ff66a8",
+        "#b81d67"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-playful",
+      "title": "html-ppt-zhangzara-playful",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/playful",
+      "swatches": [
+        "#f0c8a0",
+        "#e8b88e",
+        "#1a1a1a",
+        "#f7dec6"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-raw-grid",
+      "title": "html-ppt-zhangzara-raw-grid",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/raw-grid",
+      "swatches": [
+        "#ffffff",
+        "#0a0a0a",
+        "#f2d4cf",
+        "#e5edd6",
+        "#f5f5f5"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-retro-windows",
+      "title": "html-ppt-zhangzara-retro-windows",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/retro-windows",
+      "swatches": [
+        "#c0c0c0",
+        "#d4d0c8",
+        "#000080",
+        "#1084d0",
+        "#ffffff",
+        "#000000"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-retro-zine",
+      "title": "html-ppt-zhangzara-retro-zine",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/retro-zine",
+      "swatches": [
+        "#c8b99a",
+        "#b8a98a",
+        "#008f4d",
+        "#00a85d",
+        "#1a1a1a",
+        "#f4efe6"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-sakura-chroma",
+      "title": "html-ppt-zhangzara-sakura-chroma",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/sakura-chroma",
+      "swatches": [
+        "#f1e6cb",
+        "#3a2516",
+        "#e5392a",
+        "#e54489",
+        "#f09131",
+        "#f0bc2a"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-scatterbrain",
+      "title": "html-ppt-zhangzara-scatterbrain",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/scatterbrain",
+      "swatches": [
+        "#ffe066",
+        "#a5d8ff",
+        "#ffc9c9",
+        "#b2f2bb",
+        "#ffcc80",
+        "#d0bfff"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-signal",
+      "title": "html-ppt-zhangzara-signal",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/signal",
+      "swatches": [
+        "#1c2644",
+        "#232f55",
+        "#e2dcd0",
+        "#c8a870",
+        "#f0ece3"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-soft-editorial",
+      "title": "html-ppt-zhangzara-soft-editorial",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/soft-editorial",
+      "swatches": [
+        "#f2eedf",
+        "#2a241b",
+        "#e1a4c2",
+        "#d6dd63",
+        "#e8c9b6",
+        "#b7c7a8"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-stencil-tablet",
+      "title": "html-ppt-zhangzara-stencil-tablet",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/stencil-tablet",
+      "swatches": [
+        "#e2dcc9",
+        "#0a0a0a",
+        "#f4efe0",
+        "#a06a3c",
+        "#c73b7a",
+        "#ee7a2e"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-studio",
+      "title": "html-ppt-zhangzara-studio",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/studio",
+      "swatches": [
+        "#1c1c1c",
+        "#242422",
+        "#f5d200"
+      ]
+    },
+    {
+      "id": "html-ppt-zhangzara-vellum",
+      "title": "html-ppt-zhangzara-vellum",
+      "scenario": "marketing",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "https://github.com/zarazhangrui/beautiful-html-templates/tree/main/templates/vellum",
+      "swatches": [
+        "#2a3870",
+        "#343f80",
+        "#e8d85c",
+        "#3a7878"
+      ]
+    },
+    {
+      "id": "replit-deck",
+      "title": "replit-deck",
+      "scenario": "product",
+      "mode": "deck",
+      "featured": null,
+      "summary": "|",
+      "source": "",
+      "swatches": [
+        "#fafafa",
+        "#ffffff",
+        "#19191c",
+        "#6e6e73",
+        "#e4e4e7",
+        "#5889fe"
+      ]
+    }
+  ]
+}

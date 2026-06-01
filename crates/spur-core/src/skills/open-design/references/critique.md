@@ -40,3 +40,20 @@ Apply these in addition to the 5-dimensional critique:
 - **One accent, used sparingly** — same restraint as the anti-AI-slop checklist above.
 
 <!-- test markers: one idea per slide; theme rhythm; slide counter -->
+
+## Artifact-deck checks (run for the artifact track)
+
+In addition to the deck-specific checks above, for a `deck-skeleton.html` artifact:
+
+- **Verbatim framework intact** — the framework `<style>`, chrome, and trailing `<script>`
+  are byte-for-byte from `deck-skeleton.html`; only the `SLOT:` markers were edited.
+- **Scale-to-fit unbroken** — every slide is a `<section class="slide">` inside the
+  1920×1080 `.deck-stage`; nothing overflows the fixed canvas at 16:9.
+- **Theme bound at `:root`** — the chosen theme's palette + fonts are set as `:root` tokens,
+  not hard-coded per slide; one accent, used sparingly (anti-AI-slop checklist still applies).
+- **slot discipline** — title, `:root` tokens, per-deck `<style>`, and slide bodies are the
+  only edits; counter + nav still render outside the scaled stage.
+- **No native-mode confusion** — if the user wants slide-by-slide editing, this is the wrong
+  track; switch to native deck mode.
+
+<!-- test markers: scale-to-fit; slot; 16:9; verbatim framework -->
