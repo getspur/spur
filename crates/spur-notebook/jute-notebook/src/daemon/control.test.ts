@@ -142,6 +142,17 @@ describe("daemon control adapter", () => {
     ).toEqual({
       command: "attach_saved_connection",
       name: "stripe_reporting",
+      credentials: [],
+    });
+    expect(
+      attachSavedConnectionCommand({
+        name: "stripe_reporting",
+        credentials: [["STRIPE_API_KEY", "sk_test_123"]],
+      }),
+    ).toEqual({
+      command: "attach_saved_connection",
+      name: "stripe_reporting",
+      credentials: [["STRIPE_API_KEY", "sk_test_123"]],
     });
     expect(
       deleteSavedConnectionCommand({

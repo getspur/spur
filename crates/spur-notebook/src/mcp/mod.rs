@@ -1379,8 +1379,8 @@ impl NotebookDaemonControl {
                 .await
             }
             DaemonControlCommand::ListSavedConnections {} => self.list_saved_connections().await,
-            DaemonControlCommand::AttachSavedConnection { name } => {
-                self.attach_saved_connection(name).await
+            DaemonControlCommand::AttachSavedConnection { name, credentials } => {
+                self.attach_saved_connection(name, credentials).await
             }
             DaemonControlCommand::DeleteSavedConnection { name } => {
                 self.delete_saved_connection(name).await
@@ -1578,6 +1578,7 @@ impl NotebookDaemonControl {
     async fn attach_saved_connection(
         &self,
         name: String,
+        credentials: Vec<(String, String)>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         use spur_rest_table_gateway::adapter::Adapter as _;
 
@@ -1593,6 +1594,12 @@ impl NotebookDaemonControl {
                 code: "saved_connection_not_found".to_string(),
                 message: format!("no saved connection named {name}"),
             })?;
+
+        for (key, value) in &credentials {
+            if !value.is_empty() {
+                std::env::set_var(key, value);
+            }
+        }
 
         let missing_env_vars = template
             .credential_env_vars
@@ -2007,6 +2014,7 @@ impl NotebookDaemonControl {
     async fn attach_saved_connection(
         &self,
         _name: String,
+        _credentials: Vec<(String, String)>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
