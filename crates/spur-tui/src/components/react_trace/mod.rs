@@ -1675,6 +1675,46 @@ mod virtual_row_tests {
     }
 
     #[test]
+    fn markdown_table_uses_vertical_records_when_too_narrow_for_grid() {
+        let mut trace = ReactTrace::new();
+        trace.append_message(
+            "| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n",
+            "claude",
+            "10:00".to_string(),
+        );
+        let _ = trace.force_flush_all(&StateLookup::empty());
+
+        let (rows, _starts, _byte_ranges) =
+            trace.build_virtual_rows(0, 17, &std::collections::HashMap::new(), None);
+        let rendered = rows
+            .iter()
+            .filter_map(|row| match row {
+                VirtualRow::Text(line) => Some(
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>(),
+                ),
+                VirtualRow::ImageRow { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("Key: Esc"),
+            "narrow fallback should render record labels:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Action: cancel"),
+            "narrow fallback should render record values:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("┌"),
+            "narrow fallback must not emit a grid wider than the viewport:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn stored_trace_image_expands_to_virtual_image_rows() {
         let mut trace = ReactTrace::new();
         let id = trace

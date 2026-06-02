@@ -180,6 +180,7 @@ impl ReactTrace {
                             render_agent_message_body(
                                 stream,
                                 &empty_state,
+                                None,
                                 |line| lines.push(line),
                                 |_id, _h| unreachable!("secondary path passes empty fence_state"),
                             );
@@ -510,6 +511,7 @@ use crate::components::mermaid::{fence_placeholder_line, FenceRender, MermaidId}
 fn render_agent_message_body(
     stream: &MarkdownStream,
     fence_state: &std::collections::HashMap<MermaidId, FenceRender>,
+    body_width: Option<u16>,
     mut emit_line: impl FnMut(ratatui::text::Line<'static>),
     mut emit_fence_image: impl FnMut(MermaidId, u16),
 ) {
@@ -535,7 +537,11 @@ fn render_agent_message_body(
         pending: &pending,
     };
 
-    let items = stream.preview_items(&state_lookup);
+    let items = if let Some(body_width) = body_width {
+        stream.preview_items_with_width(&state_lookup, body_width)
+    } else {
+        stream.preview_items(&state_lookup)
+    };
 
     for item in &items {
         match item {
@@ -796,6 +802,7 @@ impl ReactTrace {
                         render_agent_message_body(
                             stream,
                             states,
+                            Some(effective_width.saturating_sub(3)),
                             |line| staged.borrow_mut().push(BodyRow::Line(line)),
                             |id, h| staged.borrow_mut().push(BodyRow::Image { id, h }),
                         );
