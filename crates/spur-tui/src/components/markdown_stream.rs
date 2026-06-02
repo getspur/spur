@@ -325,11 +325,10 @@ struct RenderedTable {
 
 fn replace_markdown_tables_in_lines(
     lines: Vec<Line<'static>>,
-    table_parse_input: &str,
-    table_source_input: &str,
+    parse_input: &str,
     render_width: Option<u16>,
 ) -> Vec<Line<'static>> {
-    let tables = rendered_markdown_tables(table_parse_input, table_source_input, render_width);
+    let tables = rendered_markdown_tables(parse_input, render_width);
     if tables.is_empty() {
         return lines;
     }
@@ -357,25 +356,26 @@ fn replace_markdown_tables_in_lines(
     out
 }
 
-fn rendered_markdown_tables(
-    table_parse_input: &str,
-    table_source_input: &str,
-    render_width: Option<u16>,
-) -> Vec<RenderedTable> {
-    let tables = collect_markdown_tables(table_parse_input);
-    if tables.is_empty() {
-        return Vec::new();
-    }
-
-    let source_blocks = collect_table_source_blocks(table_source_input);
-    if source_blocks.len() != tables.len() {
-        return Vec::new();
-    }
-
-    source_blocks
+fn rendered_markdown_tables(parse_input: &str, render_width: Option<u16>) -> Vec<RenderedTable> {
+    // Source rows are sliced from each table's own byte range (reported by
+    // pulldown), so the rendered grid and the source lines it must match
+    // against always correspond 1:1. This deliberately replaces an earlier
+    // approach that scanned for table-ish line blocks with a separate lax
+    // heuristic and bailed on ALL tables when its count disagreed with
+    // pulldown — a divergence that flickers constantly while a later table's
+    // delimiter row streams in column-by-column (RCA: streaming grid↔raw).
+    collect_markdown_tables(parse_input)
         .into_iter()
-        .zip(tables)
-        .filter_map(|(source_rows, table)| {
+        .filter_map(|(table, range)| {
+            let source_rows: Vec<String> = parse_input
+                .get(range)?
+                .lines()
+                .filter(|line| is_table_row(line))
+                .map(normalize_table_source_row)
+                .collect();
+            if source_rows.is_empty() {
+                return None;
+            }
             let rendered_lines = render_markdown_table(&table, render_width);
             (!rendered_lines.is_empty()).then_some(RenderedTable {
                 source_rows,
@@ -385,20 +385,22 @@ fn rendered_markdown_tables(
         .collect()
 }
 
-fn collect_markdown_tables(input: &str) -> Vec<MarkdownTable> {
+fn collect_markdown_tables(input: &str) -> Vec<(MarkdownTable, std::ops::Range<usize>)> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
 
     let mut tables = Vec::new();
     let mut current_table: Option<MarkdownTable> = None;
+    let mut current_table_start: usize = 0;
     let mut current_row: Option<Vec<String>> = None;
     let mut current_cell = String::new();
     let mut in_header = false;
     let mut in_cell = false;
 
-    for (event, _) in Parser::new_ext(input, options).into_offset_iter() {
+    for (event, range) in Parser::new_ext(input, options).into_offset_iter() {
         match event {
             Event::Start(Tag::Table(alignments)) => {
+                current_table_start = range.start;
                 current_table = Some(MarkdownTable {
                     alignments,
                     header: Vec::new(),
@@ -408,7 +410,7 @@ fn collect_markdown_tables(input: &str) -> Vec<MarkdownTable> {
             Event::End(TagEnd::Table) => {
                 if let Some(table) = current_table.take() {
                     if !table.header.is_empty() {
-                        tables.push(table);
+                        tables.push((table, current_table_start..range.end));
                     }
                 }
             }
@@ -458,45 +460,6 @@ fn collect_markdown_tables(input: &str) -> Vec<MarkdownTable> {
     }
 
     tables
-}
-
-fn collect_table_source_blocks(input: &str) -> Vec<Vec<String>> {
-    let lines: Vec<&str> = input.lines().collect();
-    let mut blocks = Vec::new();
-    let mut in_code_fence = false;
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i];
-        let trimmed_start = line.trim_start();
-
-        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
-            in_code_fence = !in_code_fence;
-            i += 1;
-            continue;
-        }
-
-        if !in_code_fence && is_table_row(line) {
-            let start = i;
-            while i < lines.len() && is_table_row(lines[i]) {
-                i += 1;
-            }
-            let block = &lines[start..i];
-            if block.len() >= 2 && block.iter().any(|l| is_table_separator(l)) {
-                blocks.push(
-                    block
-                        .iter()
-                        .map(|line| normalize_table_source_row(line))
-                        .collect(),
-                );
-            }
-            continue;
-        }
-
-        i += 1;
-    }
-
-    blocks
 }
 
 fn render_markdown_table(table: &MarkdownTable, render_width: Option<u16>) -> Vec<Line<'static>> {
@@ -658,8 +621,25 @@ fn line_sequence_matches_table(
 ) -> bool {
     start + source_rows.len() <= lines.len()
         && source_rows.iter().enumerate().all(|(offset, source)| {
-            normalize_table_source_row(&line_plain_text(&lines[start + offset])) == *source
+            let rendered = line_plain_text(&lines[start + offset]);
+            // Cells can carry inline markdown — `**bold**`, `` `code` ``,
+            // links — which tui-markdown renders as styled spans with the
+            // markers stripped, so the rendered plain text never equals the raw
+            // source row (which keeps the markers). Match on the table-row shape
+            // instead: both are `|`-delimited rows with the same column count,
+            // which inline formatting cannot change. (Stripping markers from the
+            // source is NOT an option — literal underscores in identifiers like
+            // `collect_table_source_blocks` would be mangled into emphasis.)
+            is_table_row(&rendered) && pipe_count(&rendered) == pipe_count(source)
         })
+}
+
+/// Count of `|` bytes in a (trimmed) line. For a GFM table row this is the
+/// column count plus one, and it is invariant under inline-markdown rendering,
+/// so it anchors the rendered grid to its source rows without depending on
+/// cell text that the renderer rewrites.
+fn pipe_count(line: &str) -> usize {
+    line.trim().bytes().filter(|&b| b == b'|').count()
 }
 
 fn line_plain_text(line: &Line<'static>) -> String {
@@ -1056,7 +1036,6 @@ impl MarkdownStream {
         };
 
         let transformed = inject_hard_breaks_in_tables(&transformed);
-        let table_parse_input = transformed.clone();
 
         if transformed.is_empty() {
             return (
@@ -1080,12 +1059,8 @@ impl MarkdownStream {
                 out
             })
             .collect();
-        let parsed_lines = replace_markdown_tables_in_lines(
-            parsed_lines,
-            &table_parse_input,
-            &transformed,
-            render_width,
-        );
+        let parsed_lines =
+            replace_markdown_tables_in_lines(parsed_lines, &transformed, render_width);
 
         let mut items: Vec<StreamItem> = Vec::new();
         let mut current_text: Vec<ratatui::text::Line<'static>> = Vec::new();
