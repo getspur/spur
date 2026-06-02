@@ -50,5 +50,19 @@ fn main() -> duckdb::Result<()> {
         println!("linear_issues registered and bound");
     }
 
+    if let Ok(expected_function) = env::var("SPUR_REST_EXPECT_FUNCTION") {
+        let escaped_function = expected_function.replace('\'', "''");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT function_name FROM duckdb_functions() \
+             WHERE function_name = '{escaped_function}'"
+        ))?;
+        let n = stmt.query_map([], |_| Ok(()))?.count();
+        assert_eq!(
+            n, 1,
+            "{expected_function} table function should be registered at LOAD"
+        );
+        println!("{expected_function} registered");
+    }
+
     Ok(())
 }
