@@ -586,6 +586,76 @@ score = { json = "$.score", type = "Int64" }
 }
 
 #[tokio::test]
+async fn add_api_datasource_from_manifest_saves_auth_env_without_secret() {
+    let _custom_token_guard = EnvGuard::preserve("CUSTOM_TOKEN");
+    let server = MockServer::start().await;
+    let name = format!("manifest_custom_auth_{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = connection_store::remove(&name).await;
+
+    let manifest_toml = format!(
+        r#"
+[source]
+name = "custom"
+base_url = "{base_url}"
+auth = {{ scheme = "bearer", env = "CUSTOM_TOKEN" }}
+
+[[table]]
+name = "scores"
+path = "/scores"
+response_path = "$.data"
+
+[table.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+score = {{ json = "$.score", type = "Int64" }}
+"#,
+        base_url = server.uri()
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/scores"))
+        .and(header("authorization", "Bearer secret-value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "id": "m1", "score": 11 }]
+        })))
+        .mount(&server)
+        .await;
+
+    let (control, _jute_state, _windows) = test_control();
+    let response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "add_api_datasource_from_manifest",
+                "name": name.clone(),
+                "manifest_toml": manifest_toml,
+                "credentials": [["CUSTOM_TOKEN", "secret-value"]]
+            })),
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let templates = connection_store::list()
+        .await
+        .expect("saved connections list");
+    let saved = templates
+        .iter()
+        .find(|template| template.name == name)
+        .expect("saved connection exists");
+    assert!(saved
+        .credential_env_vars
+        .iter()
+        .any(|env_var| env_var == "CUSTOM_TOKEN"));
+    let serialized = serde_json::to_string(saved).expect("saved template serializes");
+    assert!(serialized.contains("CUSTOM_TOKEN"));
+    assert!(!serialized.contains("secret-value"));
+
+    connection_store::remove(&name)
+        .await
+        .expect("saved manifest template cleans up");
+}
+
+#[tokio::test]
 async fn saved_connection_list_attach_delete_roundtrip_reports_missing_env() {
     let missing_env_var = "SPUR_SAVED_CONNECTION_ATTACH_MISSING_E2E";
     let _missing_guard = EnvGuard::preserve(missing_env_var);
