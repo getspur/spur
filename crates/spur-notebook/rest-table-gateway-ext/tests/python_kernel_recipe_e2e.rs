@@ -38,6 +38,7 @@ fn python_kernel_recipe_loads_spur_rest_for_bare_duckdb_sql() {
 
     rt.block_on(async {
         let server = MockServer::start().await;
+        let items_server = MockServer::start().await;
 
         Mock::given(method("GET"))
             .and(path("/markets"))
@@ -72,8 +73,39 @@ fn python_kernel_recipe_loads_spur_rest_for_bare_duckdb_sql() {
             .mount(&server)
             .await;
 
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "item-1"
+                },
+                {
+                    "id": "item-2"
+                }
+            ])))
+            .mount(&items_server)
+            .await;
+
+        let manifest_dir = std::env::temp_dir().join(format!(
+            "spur-rest-pykernel-manifests-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&manifest_dir).expect("manifest dir should be created");
+        fs::write(
+            manifest_dir.join("custom.toml"),
+            format!(
+                "[source]\nname = \"custom\"\nbase_url = \"{}\"\n\
+                 [[table]]\nname = \"items\"\npath = \"/items\"\n\
+                 [table.columns]\nid = {{ json = \"$.id\", type = \"Utf8\" }}\n",
+                items_server.uri()
+            ),
+        )
+        .expect("saved manifest should be written");
+
         std::env::set_var("SPUR_POLYMARKET_GAMMA_BASE", server.uri());
         std::env::set_var("SPUR_POLYMARKET_CLOB_BASE", server.uri());
+        std::env::set_var("SPUR_REST_MANIFEST_DIR", &manifest_dir);
+        std::env::remove_var("SPUR_REST_MANIFEST");
         std::env::set_var(
             "SPUR_EXT_INSTALL_DIR",
             std::env::temp_dir().join(format!(
@@ -114,6 +146,7 @@ duckdb.set_default_connection(con)
 duckdb.sql("LOAD '" + _p.replace("'", "''") + "'")
 print("polymarket_markets rows:", duckdb.sql("SELECT id, volume FROM polymarket_markets() ORDER BY id").fetchall())
 print("polymarket_orderbook rows:", duckdb.sql("SELECT price, size FROM polymarket_orderbook(token_id := '0xabc', depth := 1) ORDER BY price DESC").fetchall())
+print("custom_items rows:", duckdb.sql("SELECT id FROM custom_items() ORDER BY id").fetchall())
 "#
         );
         fs::write(&script_path, script).expect("python recipe script should be written");
@@ -136,5 +169,7 @@ print("polymarket_orderbook rows:", duckdb.sql("SELECT price, size FROM polymark
         assert!(stdout.contains("m1"));
         assert!(stdout.contains("782375.55"));
         assert!(stdout.contains("0.51"));
+        assert!(stdout.contains("custom_items rows:"));
+        assert!(stdout.contains("item-1"));
     });
 }
