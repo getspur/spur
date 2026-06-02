@@ -27,7 +27,7 @@ use crate::{
         },
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
-    ports::{javascript_bootstrap, notebook_port_root, python_bootstrap},
+    ports::{go_bootstrap, javascript_bootstrap, notebook_port_root, python_bootstrap, rust_bootstrap},
     state::{
         notebook_path_from_slot_id, notebook_slot_id, slot_id_for, window_slot_id, KernelSlot,
         State,
@@ -1591,15 +1591,25 @@ pub async fn run_cell_events(
 }
 
 /// Inject the SPUR port helper into a fresh kernel session.
+/// Select the per-language SPUR port bootstrap injected once per kernel session.
+///
+/// The bootstrap source is static; the notebook port root is bound at runtime
+/// from the `SPUR_NOTEBOOK_PORT_ROOT` env the daemon sets on the kernel, so cells
+/// run verbatim instead of being wrapped per dispatch.
+fn bootstrap_source_for_spec(spec_name: &str) -> &'static str {
+    match spec_name {
+        "deno" => javascript_bootstrap(),
+        "evcxr" => rust_bootstrap(),
+        "gonb" => go_bootstrap(),
+        _ => python_bootstrap(),
+    }
+}
+
 pub async fn inject_port_bootstrap(
     conn: &crate::backend::KernelConnection,
     spec_name: &str,
 ) -> Result<(), Error> {
-    let src = if spec_name == "deno" {
-        javascript_bootstrap()
-    } else {
-        python_bootstrap()
-    };
+    let src = bootstrap_source_for_spec(spec_name);
     let rx = commands::run_cell(conn, src)
         .await
         .map_err(|error| Error::PortBootstrapFailed {
@@ -2027,6 +2037,18 @@ mod tests {
 
         assert_eq!(dispatch.wrapped_code, input);
         assert!(!dispatch.wrapped_code.contains("class _Spur"));
+    }
+
+    #[test]
+    fn bootstrap_source_for_spec_routes_by_spec() {
+        // Each spec maps to its language's session bootstrap; unknown specs fall
+        // back to Python. The bodies read the root from env, so no spec embeds a
+        // notebook path.
+        assert!(bootstrap_source_for_spec("python3").contains("class _Spur"));
+        assert!(bootstrap_source_for_spec("deno").contains("globalThis.spur"));
+        assert!(bootstrap_source_for_spec("evcxr").contains(":dep arrow = "));
+        assert!(bootstrap_source_for_spec("gonb").contains("!*go get "));
+        assert!(bootstrap_source_for_spec("custom").contains("class _Spur"));
     }
 
     #[test]

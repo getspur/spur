@@ -32,6 +32,16 @@ pub fn javascript_bootstrap() -> &'static str {
     include_str!("assets/ports_bootstrap.js")
 }
 
+/// Rust/evcxr bootstrap source that installs the `spur` helper for the kernel session.
+pub fn rust_bootstrap() -> &'static str {
+    include_str!("assets/ports_bootstrap.rs")
+}
+
+/// Go/gonb bootstrap source that installs the `spur` helper for the kernel session.
+pub fn go_bootstrap() -> &'static str {
+    include_str!("assets/ports_bootstrap.go")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +75,52 @@ mod tests {
         let javascript = javascript_bootstrap();
         assert!(javascript.contains("unsupported Arrow type for manifest schema"));
         assert!(!javascript.contains(r#"?? "Utf8""#));
+    }
+
+    #[test]
+    fn rust_bootstrap_pins_arrow_and_reads_root_from_env() {
+        let bootstrap = rust_bootstrap();
+        let arrow_dep = format!(
+            r#":dep arrow = "{}""#,
+            crate::kernel_provision::EVCXR_ARROW_CRATE_VERSION
+        );
+
+        assert!(bootstrap.contains(&arrow_dep));
+        assert!(bootstrap.contains(r#":dep serde_json = "1""#));
+        assert!(bootstrap.contains("struct _Spur"));
+        assert!(bootstrap.contains(PORT_MIME));
+        assert!(bootstrap.contains(r#""ports""#));
+        assert!(bootstrap.contains(r#""manifest.json""#));
+        assert!(bootstrap.contains(r#"const PORT_FILE_VERSION_SEPARATOR: &str = "@v";"#));
+        assert!(bootstrap.contains("FileWriter::try_new"));
+        assert!(bootstrap.contains("FileReader::try_new"));
+        // Root is bound once per kernel session from the env the daemon set,
+        // not formatted into the cell body.
+        assert!(bootstrap.contains(r#"std::env::var("SPUR_NOTEBOOK_PORT_ROOT")"#));
+    }
+
+    #[test]
+    fn go_bootstrap_pins_arrow_go_and_reads_root_from_env() {
+        let bootstrap = go_bootstrap();
+        let arrow_dep = format!("!*go get {}", crate::kernel_provision::GONB_ARROW_GO_MODULE);
+        let arrow_ipc_import = format!(
+            "import \"{}/arrow/ipc\"",
+            crate::kernel_provision::GONB_ARROW_GO_MODULE
+        );
+
+        assert!(bootstrap.contains(&arrow_dep));
+        assert!(bootstrap.contains(&arrow_ipc_import));
+        assert!(bootstrap.contains("func (s *spurPorts) Put"));
+        assert!(bootstrap.contains("func (s *spurPorts) Get"));
+        assert!(bootstrap.contains("var spur = newSpurPorts"));
+        assert!(bootstrap.contains(PORT_MIME));
+        assert!(bootstrap.contains(r#""ports""#));
+        assert!(bootstrap.contains(r#""manifest.json""#));
+        assert!(bootstrap.contains(r#"const portFileVersionSeparator = "@v""#));
+        assert!(bootstrap.contains("ipc.NewFileWriter"));
+        assert!(bootstrap.contains("ipc.NewFileReader"));
+        // Root is bound once per kernel session from the env the daemon set.
+        assert!(bootstrap.contains(r#"os.Getenv("SPUR_NOTEBOOK_PORT_ROOT")"#));
     }
 
     #[test]

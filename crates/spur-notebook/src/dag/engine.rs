@@ -35,6 +35,7 @@ use super::{notebook_port_root, NotebookDag, PortStore, PortStoreError};
 const DEFAULT_SOURCE_DEBOUNCE: Duration = Duration::from_millis(150);
 const DEFAULT_MAX_IN_FLIGHT: usize = 4;
 const STALE_RETRY_LIMIT: usize = 3;
+const SUPPORTED_KERNELSPECS: [&str; 4] = ["python3", "deno", "evcxr", "gonb"];
 
 #[derive(Debug, Clone)]
 pub struct ReactiveEngineConfig {
@@ -682,19 +683,16 @@ fn requirements_from_spec_map(
 }
 
 fn reject_unsupported_kernel_specs(requirements: &[KernelRequirement]) -> Result<(), EngineError> {
-    let cell_ids = requirements
+    if let Some(requirement) = requirements
         .iter()
-        .filter(|requirement| requirement.spec_name == "evcxr")
-        .flat_map(|requirement| requirement.cell_ids.iter().cloned())
-        .collect::<Vec<_>>();
-
-    if cell_ids.is_empty() {
-        Ok(())
-    } else {
+        .find(|requirement| !SUPPORTED_KERNELSPECS.contains(&requirement.spec_name.as_str()))
+    {
         Err(EngineError::UnsupportedKernelspec {
-            spec_name: "evcxr".to_owned(),
-            cell_ids,
+            spec_name: requirement.spec_name.clone(),
+            cell_ids: requirement.cell_ids.clone(),
         })
+    } else {
+        Ok(())
     }
 }
 
@@ -1367,7 +1365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_cell_and_cascade_fails_fast_for_rust_cells_before_preflight_or_dispatch() {
+    async fn run_cell_and_cascade_preflights_rust_cells_before_dispatch() {
         let temp = TempDir::new().expect("temp dir");
         let notebook_path = temp.path().join("ui.ipynb");
         let mut root = notebook(vec![
@@ -1384,20 +1382,100 @@ mod tests {
             temp.path().join("ports"),
         );
 
-        let error = engine
+        let report = engine
             .run_cell_and_cascade("a")
             .await
-            .expect_err("rust kernelspec is unsupported");
+            .expect("rust kernelspec is supported");
+
+        assert_eq!(
+            report.runs,
+            vec![
+                CellRunReport::new("a", CellRunStatus::Succeeded),
+                CellRunReport::new("rs", CellRunStatus::Succeeded),
+            ]
+        );
+        assert_eq!(
+            runner
+                .ensures()
+                .iter()
+                .map(|request| request.spec_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evcxr", "python3"]
+        );
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .map(|request| request.cell_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "rs"]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cell_and_cascade_preflights_go_cells_before_dispatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("ui.ipynb");
+        let mut root = notebook(vec![
+            cell("a", "a = 1", 1, dag(vec![port("a")], vec![], None)),
+            cell("go", "x := 1", 1, dag(vec![], vec!["a"], None)),
+        ]);
+        set_code_type(&mut root, "go", CodeType::Go);
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            &notebook_path,
+            temp.path().join("ports"),
+        );
+
+        let report = engine
+            .run_cell_and_cascade("a")
+            .await
+            .expect("go kernelspec is supported");
+
+        assert_eq!(
+            report.runs,
+            vec![
+                CellRunReport::new("a", CellRunStatus::Succeeded),
+                CellRunReport::new("go", CellRunStatus::Succeeded),
+            ]
+        );
+        assert_eq!(
+            runner
+                .ensures()
+                .iter()
+                .map(|request| request.spec_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gonb", "python3"]
+        );
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .map(|request| request.cell_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "go"]
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_kernel_specs_rejects_unknown_specs() {
+        let error = reject_unsupported_kernel_specs(&[KernelRequirement {
+            spec_name: "ruby".to_string(),
+            slot_id: "notebook#ruby".to_string(),
+            cell_ids: vec!["rb".to_string()],
+        }])
+        .expect_err("unknown kernelspec is unsupported");
 
         assert!(matches!(
             error,
             EngineError::UnsupportedKernelspec {
                 ref spec_name,
                 ref cell_ids
-            } if spec_name == "evcxr" && cell_ids == &vec!["rs".to_string()]
+            } if spec_name == "ruby" && cell_ids == &vec!["rb".to_string()]
         ));
-        assert!(runner.ensures().is_empty());
-        assert!(runner.requests().is_empty());
     }
 
     #[tokio::test]
