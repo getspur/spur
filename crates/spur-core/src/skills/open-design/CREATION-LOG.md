@@ -83,3 +83,14 @@
   Marked **Perspective** (and other WASM/worker engines requiring remote runtime) out of
   scope for artifact cells (no static baseline, multi-MB WASM + worker, not self-containable);
   they belong on a full app surface.
+
+- **2026-06-02** — Perspective re-evaluation (corrects the prior entry). Empirically tested
+  `@finos/perspective` 3.8.0 in the actual Jute iframe via Deno cells: basic render, 500k-row
+  pivot, live `table.update()` streaming, and d3fc charts all work in the sandbox (the earlier
+  "out of scope" was a wrong architectural dismissal). Revised the "Charts and data viz" section:
+  **Plot stays the default for static charts; Perspective is now the default *dashboard*
+  visualizer** for heavy / interactive / streaming data, built from a Deno cell. Documented the
+  accepted tradeoff (needs active content + ~2.5 MB CDN WASM, no scripts-off baseline) and two
+  hard-won gotchas isolated with Playwright: (1) d3fc chart plugins need `theme: "Pro Light"` in
+  `restore` or they throw `null.opacity`; (2) the themes.css `<link>` needs `crossorigin="anonymous"`
+  (else its `cssRules` are unreadable cross-origin, theme is null, same crash + `View not found`).
