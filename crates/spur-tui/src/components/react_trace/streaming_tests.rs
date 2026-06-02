@@ -2538,3 +2538,48 @@ fn compact_scroll_survives_entry_eviction() {
     ));
     assert!(resolved < trace.last_total_lines);
 }
+
+/// App-path proof: a streamed agent message containing a table with inline
+/// markdown (bold/code), angle-bracket "generics", em-dashes and long cells
+/// must NOT render as raw `|`-pipe markdown through the real
+/// build_virtual_rows path that the TUI uses. (At width 120 the long cells
+/// take the narrow-terminal records fallback — that is expected; the bug is
+/// raw markdown, which this guards against.)
+#[test]
+fn streamed_inline_table_does_not_render_raw_through_virtual_rows() {
+    let mut trace = ReactTrace::new_for_tests();
+    let msg = "Here's a summary:\n\n\
+        | Part | Fix |\n|---|---|\n\
+        | **A. PATH/tooling** (fixes #1) | ensure_gonb_kernelspec must `go install goimports` (+ gopls) **and** write env.PATH = <go-bin-dir>:<inherited PATH> — without this Go cells fail on every GUI launch. |\n\
+        | **B. arrow-go latency** (fixes #2) — *design choice* | (i) **Pre-warm** during provisioning; or (ii) raise the inject timeout + show progress. I lean **(i) + (ii)**. |\n\
+        | **C. diagnosability** (fixes #3) | Pipe kernel stderr instead of Stdio::null() — the plumbing Phase-2 needs. |\n\
+        \nThat's the plan.\n";
+    trace.append_message(msg, "claude", "10:00:00".to_string());
+    let _ = trace.force_flush_all(&StateLookup::empty());
+
+    let (rows, _, _) =
+        trace.build_virtual_rows_for_tests(0, 120, &std::collections::HashMap::new(), None);
+    let rendered: String = rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::components::react_trace::VirtualRow::Text(line) => Some(
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !rendered.contains("|---|---|") && !rendered.contains("| Part | Fix |"),
+        "table must not render as raw markdown through the TUI path:\n{rendered}"
+    );
+    // The content must survive (records labels appear).
+    assert!(
+        rendered.contains("Part:") || rendered.contains('┌'),
+        "table must render as records or a grid, carrying its content:\n{rendered}"
+    );
+}
