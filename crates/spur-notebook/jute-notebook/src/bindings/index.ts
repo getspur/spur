@@ -4,6 +4,7 @@ export * from "./CodeType";
 export * from "./Column";
 export * from "./Output";
 export * from "./ClearOutput";
+export * from "./ConnectionTemplate";
 export * from "./DaemonControlResponse";
 export * from "./OpenApiTablePreview";
 export * from "./OutputDisplayData";

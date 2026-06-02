@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  ConnectionTemplate,
   DaemonControlCommand,
   DaemonControlResponse,
   DaemonNotebookSnapshot,
@@ -39,12 +40,38 @@ export type ListDatasourcesCommand = Extract<
   DaemonControlCommand,
   { command: "list_datasources" }
 >;
+export type ListSavedConnectionsCommand = Extract<
+  DaemonControlCommand,
+  { command: "list_saved_connections" }
+>;
+export type AttachSavedConnectionCommand = Extract<
+  DaemonControlCommand,
+  { command: "attach_saved_connection" }
+>;
+export type DeleteSavedConnectionCommand = Extract<
+  DaemonControlCommand,
+  { command: "delete_saved_connection" }
+>;
 export type AttachDatasourceInput = Omit<AttachDatasourceCommand, "command">;
 export type DetachDatasourceInput = Omit<DetachDatasourceCommand, "command">;
 export type AddApiDatasourceFromImportInput = Omit<
   AddApiDatasourceFromImportCommand,
   "command"
 >;
+export type AttachSavedConnectionInput = Omit<
+  AttachSavedConnectionCommand,
+  "command" | "credentials"
+> & {
+  credentials?: [string, string][];
+};
+export type DeleteSavedConnectionInput = Omit<
+  DeleteSavedConnectionCommand,
+  "command"
+>;
+export type AttachedSavedConnection = {
+  entry: DatasourceEntry;
+  missingEnvVars: string[];
+};
 type EnrichedRecentEntry = NonNullable<
   DaemonControlResponse["entries"]
 >[number] &
@@ -117,6 +144,31 @@ export function detachDatasourceCommand(
 export function listDatasourcesCommand(): ListDatasourcesCommand {
   return {
     command: "list_datasources",
+  };
+}
+
+export function listSavedConnectionsCommand(): ListSavedConnectionsCommand {
+  return {
+    command: "list_saved_connections",
+  };
+}
+
+export function attachSavedConnectionCommand(
+  input: AttachSavedConnectionInput,
+): AttachSavedConnectionCommand {
+  return {
+    command: "attach_saved_connection",
+    name: input.name,
+    credentials: input.credentials ?? [],
+  };
+}
+
+export function deleteSavedConnectionCommand(
+  input: DeleteSavedConnectionInput,
+): DeleteSavedConnectionCommand {
+  return {
+    command: "delete_saved_connection",
+    name: input.name,
   };
 }
 
@@ -195,6 +247,45 @@ export function datasourceEntriesFromDaemonControlResponse(
   }
   throw new Error(
     "daemon list_datasources response did not include datasources",
+  );
+}
+
+export function savedConnectionsFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): ConnectionTemplate[] {
+  if (
+    response.ok &&
+    response.result?.type === "savedConnections" &&
+    connectionTemplatesFromUnknown(response.result.data)
+  ) {
+    return response.result.data;
+  }
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  throw new Error(
+    "daemon list_saved_connections response did not include saved connections",
+  );
+}
+
+export function attachedSavedConnectionFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): AttachedSavedConnection {
+  if (
+    response.ok &&
+    response.result?.type === "attachedSavedConnection" &&
+    isAttachedSavedConnectionPayload(response.result.data)
+  ) {
+    return {
+      entry: response.result.data.entry,
+      missingEnvVars: response.result.data.missing_env_vars,
+    };
+  }
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  throw new Error(
+    "daemon attach_saved_connection response did not include saved connection",
   );
 }
 
@@ -290,6 +381,46 @@ function datasourceEntriesFromUnknown(
   value: unknown,
 ): value is DatasourceEntry[] {
   return Array.isArray(value) && value.every(isDatasourceEntry);
+}
+
+function connectionTemplatesFromUnknown(
+  value: unknown,
+): value is ConnectionTemplate[] {
+  return Array.isArray(value) && value.every(isConnectionTemplate);
+}
+
+function isConnectionTemplate(value: unknown): value is ConnectionTemplate {
+  if (typeof value !== "object" || value === null) return false;
+
+  const candidate = value as Partial<ConnectionTemplate>;
+  return (
+    typeof candidate.name === "string" &&
+    (candidate.provider === null || typeof candidate.provider === "string") &&
+    (candidate.group === null || typeof candidate.group === "string") &&
+    typeof candidate.manifestToml === "string" &&
+    Array.isArray(candidate.tables) &&
+    Array.isArray(candidate.credentialEnvVars) &&
+    candidate.credentialEnvVars.every((envVar) => typeof envVar === "string") &&
+    typeof candidate.createdAt === "string" &&
+    typeof candidate.updatedAt === "string"
+  );
+}
+
+function isAttachedSavedConnectionPayload(value: unknown): value is {
+  entry: DatasourceEntry;
+  missing_env_vars: string[];
+} {
+  if (typeof value !== "object" || value === null) return false;
+
+  const candidate = value as {
+    entry?: unknown;
+    missing_env_vars?: unknown;
+  };
+  return (
+    isDatasourceEntry(candidate.entry) &&
+    Array.isArray(candidate.missing_env_vars) &&
+    candidate.missing_env_vars.every((envVar) => typeof envVar === "string")
+  );
 }
 
 function providerSummariesFromUnknown(
