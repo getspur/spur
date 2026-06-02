@@ -316,6 +316,14 @@ pub enum DaemonControlCommand {
     },
     /// Delete a saved connection template from the global store.
     DeleteSavedConnection { name: String },
+    /// Update a saved connection template in place (edit flow).
+    UpdateSavedConnection {
+        name: String,
+        spec_text: Option<String>,
+        #[serde(default)]
+        #[ts(type = "[string, string][]")]
+        credentials: Vec<(String, String)>,
+    },
     /// List daemon recents.
     ListRecents {},
     /// Remove a path from daemon recents.
@@ -2037,6 +2045,41 @@ mod tests {
                 "credentials": [["STRIPE_API_KEY", "sk_test_123"]]
             })
         );
+    }
+
+    #[test]
+    fn update_saved_connection_command_round_trips() {
+        let json = serde_json::json!({
+            "command": "update_saved_connection",
+            "name": "stripe_reporting",
+            "spec_text": null,
+            "credentials": [["STRIPE_API_KEY", "sk_live_x"]],
+        });
+        let cmd: DaemonControlCommand = serde_json::from_value(json.clone()).expect("deserializes");
+        assert_eq!(serde_json::to_value(&cmd).expect("serializes"), json);
+        match &cmd {
+            DaemonControlCommand::UpdateSavedConnection {
+                name,
+                spec_text,
+                credentials,
+            } => {
+                assert_eq!(name, "stripe_reporting");
+                assert!(spec_text.is_none());
+                assert_eq!(credentials.len(), 1);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        // credentials defaults to [] when omitted
+        let minimal: DaemonControlCommand = serde_json::from_value(serde_json::json!({
+            "command": "update_saved_connection",
+            "name": "x",
+            "spec_text": "openapi: 3.0.0",
+        }))
+        .expect("deserializes without credentials");
+        assert!(matches!(
+            minimal,
+            DaemonControlCommand::UpdateSavedConnection { ref credentials, .. } if credentials.is_empty()
+        ));
     }
 
     #[test]
