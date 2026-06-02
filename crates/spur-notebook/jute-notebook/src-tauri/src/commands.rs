@@ -305,6 +305,17 @@ pub enum DaemonControlCommand {
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.
     ListDatasources {},
+    /// List globally saved API connection templates.
+    ListSavedConnections {},
+    /// Re-attach a saved connection template into the current notebook.
+    AttachSavedConnection {
+        name: String,
+        #[serde(default)]
+        #[ts(type = "[string, string][]")]
+        credentials: Vec<(String, String)>,
+    },
+    /// Delete a saved connection template from the global store.
+    DeleteSavedConnection { name: String },
     /// List daemon recents.
     ListRecents {},
     /// Remove a path from daemon recents.
@@ -436,6 +447,12 @@ pub enum DaemonControlResult {
     NangoProviders(Vec<ProviderSummary>),
     /// OpenAPI-generated table preview.
     OpenApiTablePreview(OpenApiTablePreview),
+    /// Globally saved API connection templates.
+    SavedConnections(serde_json::Value),
+    /// Saved connection attach payload.
+    AttachedSavedConnection(serde_json::Value),
+    /// Saved connection delete payload.
+    SavedConnectionDeleted(serde_json::Value),
 }
 
 /// Full notebook snapshot returned by daemon control.
@@ -1987,6 +2004,39 @@ mod tests {
         };
         assert_eq!(entry.kind, DatasourceKind::Csv);
         assert_eq!(entry.columns[0].sql_type, "DOUBLE");
+    }
+
+    #[test]
+    fn attach_saved_connection_command_defaults_and_round_trips_credentials() {
+        let decoded: DaemonControlRequest = serde_json::from_value(serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "attach_saved_connection",
+            "name": "stripe_reporting"
+        }))
+        .expect("attach saved connection without credentials decodes");
+        match decoded.command {
+            DaemonControlCommand::AttachSavedConnection { name, credentials } => {
+                assert_eq!(name, "stripe_reporting");
+                assert!(credentials.is_empty());
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        let request = DaemonControlRequest::new(DaemonControlCommand::AttachSavedConnection {
+            name: "stripe_reporting".to_string(),
+            credentials: vec![("STRIPE_API_KEY".to_string(), "sk_test_123".to_string())],
+        });
+
+        let value = serde_json::to_value(&request).expect("attach saved connection serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "attach_saved_connection",
+                "name": "stripe_reporting",
+                "credentials": [["STRIPE_API_KEY", "sk_test_123"]]
+            })
+        );
     }
 
     #[test]

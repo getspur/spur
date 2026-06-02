@@ -95,6 +95,59 @@ function datasourceResponse() {
   };
 }
 
+function savedConnectionsResponse() {
+  return {
+    ok: true,
+    result: {
+      type: "savedConnections" as const,
+      data: [
+        {
+          name: "stripe_reporting",
+          provider: "stripe",
+          group: "Payments",
+          manifestToml: "name = 'stripe'",
+          tables: [
+            {
+              name: "stripe_charges",
+              columns: [],
+              rowCount: null,
+            },
+            {
+              name: "stripe_customers",
+              columns: [],
+              rowCount: null,
+            },
+          ],
+          credentialEnvVars: ["STRIPE_API_KEY", "STRIPE_ACCOUNT"],
+          createdAt: "2026-06-01T12:00:00Z",
+          updatedAt: "2026-06-01T12:00:00Z",
+        },
+      ],
+    },
+  };
+}
+
+function attachedSavedConnectionResponse(missingEnvVars: string[]) {
+  return {
+    ok: true,
+    result: {
+      type: "attachedSavedConnection" as const,
+      data: {
+        entry: {
+          name: "stripe_reporting",
+          path: "stripe",
+          kind: "api_tables" as const,
+          group: "Payments",
+          columns: [],
+          rowCount: null,
+          tables: [],
+        },
+        missing_env_vars: missingEnvVars,
+      },
+    },
+  };
+}
+
 function renderWizard(onClose = vi.fn()) {
   render(<AddRestApiWizard open onClose={onClose} />);
   return onClose;
@@ -114,18 +167,33 @@ describe("AddRestApiWizard", () => {
 
   beforeEach(() => {
     daemonControlMock.mockReset();
-    daemonControlMock.mockImplementation((command: { command: string }) => {
-      if (command.command === "list_nango_providers") {
-        return Promise.resolve(providersResponse());
-      }
-      if (command.command === "preview_open_api_tables") {
-        return Promise.resolve(tablePreviewResponse());
-      }
-      if (command.command === "add_api_datasource_from_import") {
-        return Promise.resolve(datasourceResponse());
-      }
-      return Promise.resolve({ ok: true, result: { type: "empty", data: {} } });
-    });
+    daemonControlMock.mockImplementation(
+      (command: { command: string; credentials?: [string, string][] }) => {
+        if (command.command === "list_nango_providers") {
+          return Promise.resolve(providersResponse());
+        }
+        if (command.command === "preview_open_api_tables") {
+          return Promise.resolve(tablePreviewResponse());
+        }
+        if (command.command === "add_api_datasource_from_import") {
+          return Promise.resolve(datasourceResponse());
+        }
+        if (command.command === "list_saved_connections") {
+          return Promise.resolve(savedConnectionsResponse());
+        }
+        if (command.command === "attach_saved_connection") {
+          return Promise.resolve(
+            attachedSavedConnectionResponse(
+              command.credentials?.length ? [] : ["STRIPE_API_KEY"],
+            ),
+          );
+        }
+        return Promise.resolve({
+          ok: true,
+          result: { type: "empty", data: {} },
+        });
+      },
+    );
   });
 
   test("source_selection_branches_between_catalog_openapi_and_manual", async () => {
@@ -225,6 +293,60 @@ describe("AddRestApiWizard", () => {
         provider: "stripe",
         spec_text: SPEC_TEXT,
         credentials: [["STRIPE_API_KEY", "sk_test_123"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("saved_connections_source_prompts_for_missing_tokens_then_retries_attach", async () => {
+    const onClose = renderWizard();
+
+    expect(
+      screen.getByRole("button", { name: /Saved connections/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("0 saved")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Saved connections/i }));
+
+    expect(await screen.findByText("1 saved")).toBeInTheDocument();
+    const useConnection = screen.getByRole("button", {
+      name: "Use connection",
+    });
+    expect(useConnection).toBeDisabled();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /stripe_reporting/i }),
+    );
+
+    expect(
+      screen.getByText("Payments · 2 table-functions"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 credentials")).toBeInTheDocument();
+    expect(useConnection).toBeEnabled();
+
+    fireEvent.click(useConnection);
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "attach_saved_connection",
+        name: "stripe_reporting",
+        credentials: [],
+      }),
+    );
+    expect(await screen.findByLabelText("STRIPE_API_KEY")).toBeInTheDocument();
+    expect(screen.queryByLabelText("STRIPE_ACCOUNT")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("STRIPE_API_KEY"), {
+      target: { value: "sk_test_saved" },
+    });
+    fireEvent.click(useConnection);
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "attach_saved_connection",
+        name: "stripe_reporting",
+        credentials: [["STRIPE_API_KEY", "sk_test_saved"]],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));

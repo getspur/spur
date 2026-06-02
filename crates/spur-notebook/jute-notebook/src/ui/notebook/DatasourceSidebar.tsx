@@ -3,6 +3,7 @@ import { type DragDropEvent, getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
+  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   DatabaseIcon,
@@ -20,15 +21,20 @@ import {
   useState,
 } from "react";
 
-import type { DatasourceEntry } from "@/bindings";
+import type { ConnectionTemplate, DatasourceEntry } from "@/bindings";
 import {
   attachDatasourceCommand,
+  attachSavedConnectionCommand,
+  attachedSavedConnectionFromDaemonControlResponse,
   daemonControl,
   datasourceEntriesFromDaemonControlResponse,
   datasourceEntriesFromEventPayload,
   datasourceEntryFromDaemonControlResponse,
+  deleteSavedConnectionCommand,
   detachDatasourceCommand,
   listDatasourcesCommand,
+  listSavedConnectionsCommand,
+  savedConnectionsFromDaemonControlResponse,
 } from "@/daemon/control";
 
 import AddRestApiWizard from "./AddRestApiWizard";
@@ -63,6 +69,15 @@ export default function DatasourceSidebar() {
   const [dragActive, setDragActive] = useState(false);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [savedConnections, setSavedConnections] = useState<
+    ConnectionTemplate[]
+  >([]);
+  const [expandedSavedConnection, setExpandedSavedConnection] = useState<
+    string | null
+  >(null);
+  const [savedConnectionNotice, setSavedConnectionNotice] = useState<
+    string | null
+  >(null);
   const [apiModalOpen, setApiModalOpen] = useState(false);
   const dropzoneRef = useRef<HTMLElement | null>(null);
   const entriesRef = useRef<DatasourceEntry[]>([]);
@@ -116,6 +131,48 @@ export default function DatasourceSidebar() {
 
     try {
       await daemonControl(detachDatasourceCommand({ name }));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
+
+  const handleAttachSavedConnection = useCallback(async (name: string) => {
+    setError(null);
+    setSavedConnectionNotice(null);
+
+    try {
+      const response = await daemonControl(
+        attachSavedConnectionCommand({ name }),
+      );
+      const { entry, missingEnvVars } =
+        attachedSavedConnectionFromDaemonControlResponse(response);
+      setEntries((current) => {
+        const nextEntries = upsertDatasourceEntry(current, entry);
+        entriesRef.current = nextEntries;
+        return nextEntries;
+      });
+      if (missingEnvVars.length > 0) {
+        setSavedConnectionNotice(
+          `Open the Add REST API wizard to supply ${missingEnvVars.join(", ")}.`,
+        );
+      }
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
+
+  const handleDeleteSavedConnection = useCallback(async (name: string) => {
+    setError(null);
+
+    try {
+      await daemonControl(deleteSavedConnectionCommand({ name }));
+      setSavedConnections((current) =>
+        current.filter((connection) => connection.name !== name),
+      );
+      setExpandedSavedConnection((current) =>
+        current === name ? null : current,
+      );
+      setSavedConnectionNotice(null);
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -176,6 +233,48 @@ export default function DatasourceSidebar() {
         } catch (caught) {
           setError(errorMessage(caught));
         }
+      })
+        .then((cleanup) => {
+          if (disposed) {
+            cleanup();
+          } else {
+            unlisten = cleanup;
+          }
+        })
+        .catch(() => undefined);
+    } catch {
+      return undefined;
+    }
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    const reloadSavedConnections = async () => {
+      try {
+        const response = await daemonControl(listSavedConnectionsCommand());
+        if (disposed) return;
+        setSavedConnections(
+          savedConnectionsFromDaemonControlResponse(response),
+        );
+      } catch (caught) {
+        if (!disposed) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+
+    void reloadSavedConnections();
+
+    try {
+      void listen("connections://changed", () => {
+        void reloadSavedConnections();
       })
         .then((cleanup) => {
           if (disposed) {
@@ -362,31 +461,49 @@ export default function DatasourceSidebar() {
           )}
 
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {groupedEntries.length === 0 ? (
-              <p className="px-1 py-2 text-sm text-gray-400">
-                No datasources attached.
-              </p>
-            ) : (
-              <div className="space-y-4">
-                {groupedEntries.map((datasourceGroup) => (
-                  <section key={datasourceGroup.key}>
-                    <h3 className="mb-2 truncate text-xs uppercase tracking-wide text-gray-400">
-                      {datasourceGroup.label}
-                    </h3>
-                    <div className="space-y-2">
-                      {datasourceGroup.entries.map((entry) => (
-                        <DatasourceListItem
-                          entry={entry}
-                          key={entry.name}
-                          onRemove={handleDetachDatasource}
-                        />
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            )}
+            <section>
+              <h3 className="mb-2 truncate text-xs uppercase tracking-wide text-gray-400">
+                In this notebook
+              </h3>
+              {groupedEntries.length === 0 ? (
+                <p className="px-1 py-2 text-sm text-gray-400">
+                  No datasources attached.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {groupedEntries.map((datasourceGroup) => (
+                    <section key={datasourceGroup.key}>
+                      <h4 className="mb-2 truncate text-xs uppercase tracking-wide text-gray-400">
+                        {datasourceGroup.label}
+                      </h4>
+                      <div className="space-y-2">
+                        {datasourceGroup.entries.map((entry) => (
+                          <DatasourceListItem
+                            entry={entry}
+                            key={entry.name}
+                            onRemove={handleDetachDatasource}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
+
+          <SavedConnectionsSection
+            connections={savedConnections}
+            expandedName={expandedSavedConnection}
+            notice={savedConnectionNotice}
+            onAttach={(name) => void handleAttachSavedConnection(name)}
+            onDelete={(name) => void handleDeleteSavedConnection(name)}
+            onToggle={(name) =>
+              setExpandedSavedConnection((current) =>
+                current === name ? null : name,
+              )
+            }
+          />
         </div>
       </aside>
       <AddRestApiWizard
@@ -394,6 +511,167 @@ export default function DatasourceSidebar() {
         onClose={() => setApiModalOpen(false)}
       />
     </>
+  );
+}
+
+function SavedConnectionsSection({
+  connections,
+  expandedName,
+  notice,
+  onAttach,
+  onDelete,
+  onToggle,
+}: {
+  connections: ConnectionTemplate[];
+  expandedName: string | null;
+  notice: string | null;
+  onAttach: (name: string) => void;
+  onDelete: (name: string) => void;
+  onToggle: (name: string) => void;
+}) {
+  return (
+    <section className="shrink-0 border-t border-gray-200 pt-3">
+      <h3 className="mb-2 truncate text-xs uppercase tracking-wide text-gray-400">
+        Saved connections
+      </h3>
+      {notice && (
+        <p className="mb-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+          {notice}
+        </p>
+      )}
+      {connections.length === 0 ? (
+        <p className="px-1 py-1 text-xs text-gray-400">No saved connections.</p>
+      ) : (
+        <div className="max-h-60 space-y-1 overflow-y-auto pr-1">
+          {connections.map((connection) => (
+            <SavedConnectionRow
+              connection={connection}
+              expanded={expandedName === connection.name}
+              key={connection.name}
+              onAttach={onAttach}
+              onDelete={onDelete}
+              onToggle={onToggle}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SavedConnectionRow({
+  connection,
+  expanded,
+  onAttach,
+  onDelete,
+  onToggle,
+}: {
+  connection: ConnectionTemplate;
+  expanded: boolean;
+  onAttach: (name: string) => void;
+  onDelete: (name: string) => void;
+  onToggle: (name: string) => void;
+}) {
+  const credentialCount = connection.credentialEnvVars.length;
+  const provider = connection.provider?.trim() || "custom";
+  const tableFunctionLabel = `${connection.tables.length} ${
+    connection.tables.length === 1 ? "table-function" : "table-functions"
+  }`;
+
+  return (
+    <article className="rounded border border-gray-200 bg-white">
+      <div className="flex items-center gap-1 p-1.5">
+        <button
+          aria-label={`${expanded ? "Collapse" : "Expand"} saved connection ${
+            connection.name
+          }`}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 hover:text-gray-950"
+          onClick={() => onToggle(connection.name)}
+          type="button"
+        >
+          {expanded ? (
+            <ChevronDownIcon className="shrink-0" size={14} strokeWidth={1.5} />
+          ) : (
+            <ChevronRightIcon
+              className="shrink-0"
+              size={14}
+              strokeWidth={1.5}
+            />
+          )}
+          <span
+            aria-label={
+              credentialCount > 0
+                ? "Credentials required"
+                : "No credentials required"
+            }
+            className={clsx(
+              "h-2 w-2 shrink-0 rounded-full",
+              credentialCount > 0 ? "bg-amber-400" : "bg-emerald-500",
+            )}
+            role="img"
+          />
+          <span className="truncate font-medium">{connection.name}</span>
+        </button>
+        <button
+          aria-label={`Attach saved connection ${connection.name}`}
+          className="shrink-0 rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950"
+          onClick={() => onAttach(connection.name)}
+          type="button"
+        >
+          Attach
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="space-y-2 border-t border-gray-100 px-3 py-2 text-xs text-gray-500">
+          <p className="truncate">
+            {provider} · {tableFunctionLabel}
+          </p>
+
+          <div className="flex flex-wrap gap-1">
+            {connection.credentialEnvVars.length === 0 ? (
+              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] uppercase text-emerald-700">
+                No credentials
+              </span>
+            ) : (
+              connection.credentialEnvVars.map((envVar) => (
+                <span
+                  className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] uppercase text-amber-700"
+                  key={envVar}
+                >
+                  {envVar}
+                </span>
+              ))
+            )}
+          </div>
+
+          {connection.tables.length > 0 && (
+            <ul className="space-y-1">
+              {connection.tables.map((table) => (
+                <li
+                  className="flex items-center justify-between gap-2"
+                  key={table.name}
+                >
+                  <span className="truncate text-gray-700">{table.name}</span>
+                  <span className="shrink-0 rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
+                    function
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <button
+            aria-label={`Delete saved connection ${connection.name}`}
+            className="text-xs font-medium text-red-600 transition-colors hover:text-red-700"
+            onClick={() => onDelete(connection.name)}
+            type="button"
+          >
+            Delete saved connection
+          </button>
+        </div>
+      )}
+    </article>
   );
 }
 

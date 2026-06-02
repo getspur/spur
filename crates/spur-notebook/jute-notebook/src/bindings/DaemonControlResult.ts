@@ -5,6 +5,7 @@ import type { DatasourceEntry } from "./DatasourceEntry";
 import type { NotebookDelta } from "./NotebookDelta";
 import type { OpenApiTablePreview } from "./OpenApiTablePreview";
 import type { ProviderSummary } from "./ProviderSummary";
+import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
  * Successful daemon control payloads.
@@ -17,4 +18,7 @@ export type DaemonControlResult =
   | { type: "datasource"; data: DatasourceEntry }
   | { type: "datasources"; data: Array<DatasourceEntry> }
   | { type: "nangoProviders"; data: Array<ProviderSummary> }
-  | { type: "openApiTablePreview"; data: OpenApiTablePreview };
+  | { type: "openApiTablePreview"; data: OpenApiTablePreview }
+  | { type: "savedConnections"; data: JsonValue }
+  | { type: "attachedSavedConnection"; data: JsonValue }
+  | { type: "savedConnectionDeleted"; data: JsonValue };
