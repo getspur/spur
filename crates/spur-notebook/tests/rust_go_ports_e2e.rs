@@ -539,6 +539,7 @@ async fn rust_go_ports_round_trip_through_python() {
         "rs-get-t",
         &rust_slot_id,
         concat!(
+            "{\n",
             "let batches = spur.get(\"t\").expect(\"rust reads python port\");\n",
             "assert_eq!(batches.len(), 1);\n",
             "let batch = &batches[0];\n",
@@ -552,6 +553,7 @@ async fn rust_go_ports_round_trip_through_python() {
             "assert_eq!(ids.value(1), 2);\n",
             "assert_eq!(labels.value(0), \"alpha\");\n",
             "assert_eq!(labels.value(1), \"beta\");\n",
+            "}\n",
         ),
     )
     .await;
@@ -584,9 +586,11 @@ async fn rust_go_ports_round_trip_through_python() {
         "rs-put-t",
         &rust_slot_id,
         concat!(
+            "{\n",
             "let mut batches = spur.get(\"t\").expect(\"rust reads python port before put\");\n",
             "let batch = batches.remove(0);\n",
             "spur.put(\"from_rust\", batch).expect(\"rust writes port\");\n",
+            "}\n",
         ),
     )
     .await;

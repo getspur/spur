@@ -1243,6 +1243,7 @@ var spur = newSpurPorts(
     portMime,
 )
 // --- end SPUR port helper bootstrap ---
+%%
 "#
     .replace("__SPUR_GONB_ARROW_GO_MODULE__", GONB_ARROW_GO_MODULE)
     .replace("__SPUR_ROOT__", &root_literal)
@@ -1334,7 +1335,12 @@ pub fn rust_bootstrap(notebook_root: impl AsRef<Path>) -> String {
     r#":dep arrow = "__SPUR_EVCXR_ARROW_CRATE_VERSION__"
 :dep serde_json = "1"
 
-let spur = {
+#[derive(Clone, Debug)]
+struct _Spur {
+    root: String,
+}
+
+let spur: _Spur = {
     use std::fs;
     use std::fs::File;
     use std::io::Write;
@@ -1365,11 +1371,6 @@ let spur = {
     const PORT_FORBIDDEN_BACKSLASH: &str = __SPUR_FORBIDDEN_BACKSLASH__;
     const PORT_FORBIDDEN_NUL: &str = __SPUR_FORBIDDEN_NUL__;
 
-    #[derive(Clone, Debug)]
-    struct _Spur {
-        root: String,
-    }
-
     impl _Spur {
         pub fn new(root: impl Into<String>) -> Self {
             Self { root: root.into() }
@@ -1385,7 +1386,7 @@ let spur = {
             fs::create_dir_all(&ports_dir)?;
 
             let mut manifest = self.load_manifest()?;
-            let schema = serde_json::to_value(batch.schema().as_ref())?;
+            let schema = Self::schema_json(batch.schema().as_ref(), port)?;
             let previous_version = Self::previous_version(&manifest, port);
             let version = previous_version + PORT_VERSION_INCREMENT;
             let arrow_path = ports_dir.join(Self::port_file_name(port, version));
@@ -1533,6 +1534,78 @@ let spur = {
             Ok(())
         }
 
+        fn schema_json(
+            schema: &arrow::datatypes::Schema,
+            port: &str,
+        ) -> Result<Value, Box<dyn std::error::Error>> {
+            let mut fields = Vec::new();
+            for field in schema.fields() {
+                let mut field_json = Map::new();
+                field_json.insert("name".to_string(), Value::String(field.name().clone()));
+                field_json.insert(
+                    "data_type".to_string(),
+                    Self::data_type_json(field.data_type(), port)?,
+                );
+                field_json.insert("nullable".to_string(), Value::Bool(field.is_nullable()));
+                field_json.insert("dict_id".to_string(), Value::Number(Number::from(0)));
+                field_json.insert("dict_is_ordered".to_string(), Value::Bool(false));
+                field_json.insert("metadata".to_string(), Self::metadata_json(field.metadata()));
+                fields.push(Value::Object(field_json));
+            }
+
+            let mut schema_json = Map::new();
+            schema_json.insert("fields".to_string(), Value::Array(fields));
+            schema_json.insert("metadata".to_string(), Self::metadata_json(schema.metadata()));
+            Ok(Value::Object(schema_json))
+        }
+
+        fn metadata_json(metadata: &std::collections::HashMap<String, String>) -> Value {
+            let mut output = Map::new();
+            for (key, value) in metadata {
+                output.insert(key.clone(), Value::String(value.clone()));
+            }
+            Value::Object(output)
+        }
+
+        fn data_type_json(
+            data_type: &arrow::datatypes::DataType,
+            port: &str,
+        ) -> Result<Value, Box<dyn std::error::Error>> {
+            use arrow::datatypes::DataType;
+
+            let value = match data_type {
+                DataType::Null => "Null",
+                DataType::Boolean => "Boolean",
+                DataType::Int8 => "Int8",
+                DataType::Int16 => "Int16",
+                DataType::Int32 => "Int32",
+                DataType::Int64 => "Int64",
+                DataType::UInt8 => "UInt8",
+                DataType::UInt16 => "UInt16",
+                DataType::UInt32 => "UInt32",
+                DataType::UInt64 => "UInt64",
+                DataType::Float16 => "Float16",
+                DataType::Float32 => "Float32",
+                DataType::Float64 => "Float64",
+                DataType::Utf8 => "Utf8",
+                DataType::LargeUtf8 => "LargeUtf8",
+                DataType::Binary => "Binary",
+                DataType::LargeBinary => "LargeBinary",
+                DataType::Date32 => "Date32",
+                DataType::Date64 => "Date64",
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "SPUR port {port:?}: unsupported Arrow type for manifest schema: {other}"
+                        ),
+                    )
+                    .into())
+                }
+            };
+            Ok(Value::String(value.to_string()))
+        }
+
         fn display_port(
             &self,
             port: &str,
@@ -1548,8 +1621,15 @@ let spur = {
             );
             payload.insert(PORT_MANIFEST_SCHEMA_KEY.to_string(), schema);
             let payload = Value::Object(payload);
-            evcxr_display(PORT_MIME, &serde_json::to_string(&payload)?);
-            evcxr_display("text/html", &self.preview_html(port, version, batch));
+            let payload_json = serde_json::to_string(&payload)?;
+            println!(
+                "EVCXR_BEGIN_CONTENT {}\n{}\nEVCXR_END_CONTENT",
+                PORT_MIME, payload_json
+            );
+            println!(
+                "EVCXR_BEGIN_CONTENT text/html\n{}\nEVCXR_END_CONTENT",
+                self.preview_html(port, version, batch)
+            );
             Ok(payload)
         }
 

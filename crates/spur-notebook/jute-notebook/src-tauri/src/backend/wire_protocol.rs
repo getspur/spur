@@ -237,12 +237,15 @@ pub enum Reply<T> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct ErrorReply {
     /// The error name, such as 'NameError'.
+    #[serde(default)]
     pub ename: String,
 
     /// The error message, such as 'NameError: name 'x' is not defined'.
+    #[serde(default)]
     pub evalue: String,
 
     /// The traceback frames of the error as a list of strings.
+    #[serde(default)]
     pub traceback: Vec<String>,
 }
 
@@ -736,5 +739,22 @@ mod tests {
         assert_eq!(reply.language_info.file_extension, "");
         assert_eq!(reply.language_info.version, "");
         assert_eq!(reply.language_info.mimetype, "");
+    }
+
+    #[test]
+    fn error_reply_deserializes_without_optional_error_fields() {
+        // Some kernels report execute_reply errors with only status. Missing
+        // optional diagnostic fields should not disconnect the client.
+        let reply: Reply<ExecuteReply> = serde_json::from_value(json!({
+            "status": "error"
+        }))
+        .expect("minimal error execute_reply should deserialize");
+
+        let Reply::Error(error) = reply else {
+            panic!("expected error reply");
+        };
+        assert_eq!(error.ename, "");
+        assert_eq!(error.evalue, "");
+        assert!(error.traceback.is_empty());
     }
 }
