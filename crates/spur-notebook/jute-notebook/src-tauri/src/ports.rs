@@ -4,8 +4,38 @@ use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
 
+use crate::kernel_provision::EVCXR_ARROW_CRATE_VERSION;
+
 /// MIME type used for SPUR port display payloads.
 pub const PORT_MIME: &str = "application/vnd.spur.port+json";
+
+/// Subdirectory under a notebook root that stores SPUR port Arrow files.
+pub const PORTS_DIR_NAME: &str = "ports";
+/// Separator used between a port name and its manifest version in Arrow files.
+pub const PORT_FILE_VERSION_SEPARATOR: &str = "@v";
+/// File extension used for SPUR port Arrow IPC files.
+pub const PORT_ARROW_FILE_EXTENSION: &str = "arrow";
+/// Manifest filename stored inside the SPUR ports directory.
+pub const PORT_MANIFEST_FILE_NAME: &str = "manifest.json";
+/// Top-level manifest object key containing per-port entries.
+pub const PORT_MANIFEST_PORTS_KEY: &str = "ports";
+/// Manifest entry key for the Arrow IPC file path.
+pub const PORT_MANIFEST_PATH_KEY: &str = "path";
+/// Manifest entry key for the current port version.
+pub const PORT_MANIFEST_VERSION_KEY: &str = "version";
+/// Manifest entry key for the serialized Arrow schema.
+pub const PORT_MANIFEST_SCHEMA_KEY: &str = "schema";
+/// Missing ports start at version 0 before the first write increments them.
+pub const PORT_INITIAL_VERSION: u64 = 0;
+/// Every successful put writes a fresh Arrow IPC file and bumps by one.
+pub const PORT_VERSION_INCREMENT: u64 = 1;
+
+const PORT_RESERVED_CURRENT_DIR: &str = ".";
+const PORT_RESERVED_PARENT_DIR: &str = "..";
+const PORT_FORBIDDEN_SLASH: &str = "/";
+const PORT_FORBIDDEN_BACKSLASH: &str = "\\";
+const PORT_FORBIDDEN_NUL: &str = "\0";
+const PORT_TEMP_FILE_SUFFIX: &str = ".tmp";
 
 /// Stable notebook id derived from the notebook path.
 pub fn notebook_id_for_path(path: impl AsRef<Path>) -> String {
@@ -20,6 +50,22 @@ pub fn notebook_port_root(path: impl AsRef<Path>) -> PathBuf {
     BaseDirs::new()
         .map(|dirs| dirs.home_dir().join(".spur/notebooks").join(&notebook_id))
         .unwrap_or_else(|| PathBuf::from(".spur/notebooks").join(notebook_id))
+}
+
+fn ports_dir_for_root(notebook_root: impl AsRef<Path>) -> PathBuf {
+    notebook_root.as_ref().join(PORTS_DIR_NAME)
+}
+
+fn manifest_path_for_root(notebook_root: impl AsRef<Path>) -> PathBuf {
+    ports_dir_for_root(notebook_root).join(PORT_MANIFEST_FILE_NAME)
+}
+
+fn manifest_temp_prefix() -> String {
+    format!("{PORT_MANIFEST_FILE_NAME}.")
+}
+
+fn string_literal(value: &str) -> String {
+    format!("{value:?}")
 }
 
 /// Python bootstrap source that installs the `spur` helper for one cell.
@@ -40,8 +86,8 @@ class _Spur:
 
     def __init__(self, notebook_root):
         self._root = _spur_pathlib.Path(notebook_root)
-        self._ports_dir = self._root / "ports"
-        self._manifest_path = self._ports_dir / "manifest.json"
+        self._ports_dir = self._root / {ports_dir_name}
+        self._manifest_path = self._ports_dir / {manifest_file_name}
         self._ports_dir.mkdir(parents=True, exist_ok=True)
 
     def put(self, port, value):
@@ -51,25 +97,25 @@ class _Spur:
 
         table = self._to_table(value, _spur_pa)
         manifest = self._load_manifest()
-        version = int(manifest.get("ports", {{}}).get(port, {{}}).get("version", 0)) + 1
-        arrow_path = self._ports_dir / f"{{port}}@v{{version}}.arrow"
+        version = int(manifest.get({manifest_ports_key}, {{}}).get(port, {{}}).get({manifest_version_key}, {initial_version})) + {version_increment}
+        arrow_path = self._ports_dir / f"{{port}}{version_separator}{{version}}.{arrow_extension}"
 
         with _spur_ipc.new_file(str(arrow_path), table.schema) as writer:
             writer.write_table(table)
 
         schema = self._schema_json(table.schema, port)
-        manifest.setdefault("ports", {{}})[port] = {{
-            "path": str(arrow_path),
-            "version": version,
-            "schema": schema,
+        manifest.setdefault({manifest_ports_key}, {{}})[port] = {{
+            {manifest_path_key}: str(arrow_path),
+            {manifest_version_key}: version,
+            {manifest_schema_key}: schema,
         }}
         self._store_manifest(manifest)
 
         bundle = {{
             self._MIME: {{
                 "port": port,
-                "version": version,
-                "schema": schema,
+                {manifest_version_key}: version,
+                {manifest_schema_key}: schema,
             }},
             "text/html": self._preview_html(port, version, table),
         }}
@@ -81,10 +127,10 @@ class _Spur:
         self._validate_port(port)
         import pyarrow.ipc as _spur_ipc
 
-        entry = self._load_manifest().get("ports", {{}}).get(port)
+        entry = self._load_manifest().get({manifest_ports_key}, {{}}).get(port)
         if entry is None:
             raise KeyError(f"SPUR port has not been written: {{port}}")
-        with _spur_ipc.open_file(entry["path"]) as reader:
+        with _spur_ipc.open_file(entry[{manifest_path_key}]) as reader:
             table = reader.read_all()
         try:
             return table.to_pandas()
@@ -119,13 +165,13 @@ class _Spur:
 
     def _load_manifest(self):
         if not self._manifest_path.exists():
-            return {{"ports": {{}}}}
+            return {{{manifest_ports_key}: {{}}}}
         return _spur_json.loads(self._manifest_path.read_text(encoding="utf-8"))
 
     def _store_manifest(self, manifest):
         fd, tmp_name = _spur_tempfile.mkstemp(
-            prefix="manifest.json.",
-            suffix=".tmp",
+            prefix={manifest_temp_prefix},
+            suffix={temp_file_suffix},
             dir=str(self._ports_dir),
         )
         try:
@@ -139,7 +185,7 @@ class _Spur:
     def _validate_port(self, port):
         if not isinstance(port, str) or port == "":
             raise ValueError("SPUR port name cannot be empty")
-        if port in (".", "..") or "/" in port or "\\" in port or "\0" in port:
+        if port in ({reserved_current_dir}, {reserved_parent_dir}) or {forbidden_slash} in port or {forbidden_backslash} in port or {forbidden_nul} in port:
             raise ValueError(f"SPUR port name is not valid for an on-disk port file: {{port}}")
 
     def _schema_json(self, schema, port):
@@ -272,18 +318,34 @@ spur = _Spur({root})
 # --- end SPUR port helper bootstrap ---
 "#,
         mime = PORT_MIME,
-        root = root_literal
+        root = root_literal,
+        ports_dir_name = string_literal(PORTS_DIR_NAME),
+        manifest_file_name = string_literal(PORT_MANIFEST_FILE_NAME),
+        manifest_ports_key = string_literal(PORT_MANIFEST_PORTS_KEY),
+        manifest_path_key = string_literal(PORT_MANIFEST_PATH_KEY),
+        manifest_version_key = string_literal(PORT_MANIFEST_VERSION_KEY),
+        manifest_schema_key = string_literal(PORT_MANIFEST_SCHEMA_KEY),
+        initial_version = PORT_INITIAL_VERSION,
+        version_increment = PORT_VERSION_INCREMENT,
+        version_separator = PORT_FILE_VERSION_SEPARATOR,
+        arrow_extension = PORT_ARROW_FILE_EXTENSION,
+        manifest_temp_prefix = string_literal(&manifest_temp_prefix()),
+        temp_file_suffix = string_literal(PORT_TEMP_FILE_SUFFIX),
+        reserved_current_dir = string_literal(PORT_RESERVED_CURRENT_DIR),
+        reserved_parent_dir = string_literal(PORT_RESERVED_PARENT_DIR),
+        forbidden_slash = string_literal(PORT_FORBIDDEN_SLASH),
+        forbidden_backslash = string_literal(PORT_FORBIDDEN_BACKSLASH),
+        forbidden_nul = string_literal(PORT_FORBIDDEN_NUL),
     )
 }
 
 /// JavaScript/Deno bootstrap source that installs the `globalThis.spur` helper for one cell.
 pub fn javascript_bootstrap(notebook_root: impl AsRef<Path>) -> String {
     let root = notebook_root.as_ref().display().to_string();
-    let ports_dir = notebook_root.as_ref().join("ports").display().to_string();
-    let manifest_path = notebook_root
-        .as_ref()
-        .join("ports")
-        .join("manifest.json")
+    let ports_dir = ports_dir_for_root(notebook_root.as_ref())
+        .display()
+        .to_string();
+    let manifest_path = manifest_path_for_root(notebook_root.as_ref())
         .display()
         .to_string();
     let root_literal = serde_json::to_string(&root).expect("path string serializes");
@@ -341,8 +403,8 @@ const _spurDenoRuntime = {
     makeTempFile(dir) {
       return Deno.makeTempFileSync({
         dir,
-        prefix: "manifest.json.",
-        suffix: ".tmp",
+        prefix: __SPUR_MANIFEST_TEMP_PREFIX__,
+        suffix: __SPUR_TEMP_FILE_SUFFIX__,
       });
     },
     remove(path) {
@@ -372,28 +434,28 @@ class _Spur {
 
   get(port) {
     this._validatePort(port);
-    const entry = this._loadManifest().ports?.[port];
+    const entry = this._loadManifest().__SPUR_MANIFEST_PORTS_KEY__?.[port];
     if (entry === undefined) {
       throw new Error(`SPUR port has not been written: ${port}`);
     }
-    return tableFromIPC(this._runtime.fs.readBytes(entry.path));
+    return tableFromIPC(this._runtime.fs.readBytes(entry.__SPUR_MANIFEST_PATH_KEY__));
   }
 
   put(port, value) {
     this._validatePort(port);
     const table = this._toTable(value);
     const manifest = this._loadManifest();
-    const version = Number(manifest.ports?.[port]?.version ?? 0) + 1;
-    const arrowPath = `${this._portsDir}/${port}@v${version}.arrow`;
+    const version = Number(manifest.__SPUR_MANIFEST_PORTS_KEY__?.[port]?.__SPUR_MANIFEST_VERSION_KEY__ ?? __SPUR_INITIAL_VERSION__) + __SPUR_VERSION_INCREMENT__;
+    const arrowPath = `${this._portsDir}/${port}__SPUR_VERSION_SEPARATOR__${version}.__SPUR_ARROW_EXTENSION__`;
 
     this._runtime.fs.writeBytes(arrowPath, tableToIPC(table, "file"));
 
     const schema = this._schemaJson(table.schema, port);
-    manifest.ports ??= {};
-    manifest.ports[port] = {
-      path: arrowPath,
-      version,
-      schema,
+    manifest.__SPUR_MANIFEST_PORTS_KEY__ ??= {};
+    manifest.__SPUR_MANIFEST_PORTS_KEY__[port] = {
+      __SPUR_MANIFEST_PATH_KEY__: arrowPath,
+      __SPUR_MANIFEST_VERSION_KEY__,
+      __SPUR_MANIFEST_SCHEMA_KEY__,
     };
     this._storeManifest(manifest);
 
@@ -439,7 +501,7 @@ class _Spur {
 
   _loadManifest() {
     if (!this._runtime.fs.exists(this._manifestPath)) {
-      return { ports: {} };
+      return { __SPUR_MANIFEST_PORTS_KEY__: {} };
     }
     return JSON.parse(this._runtime.fs.readText(this._manifestPath));
   }
@@ -461,11 +523,11 @@ class _Spur {
       throw new Error("SPUR port name cannot be empty");
     }
     if (
-      port === "." ||
-      port === ".." ||
-      port.includes("/") ||
-      port.includes("\\") ||
-      port.includes("\0")
+      port === __SPUR_RESERVED_CURRENT_DIR__ ||
+      port === __SPUR_RESERVED_PARENT_DIR__ ||
+      port.includes(__SPUR_FORBIDDEN_SLASH__) ||
+      port.includes(__SPUR_FORBIDDEN_BACKSLASH__) ||
+      port.includes(__SPUR_FORBIDDEN_NUL__)
     ) {
       throw new Error(`SPUR port name is not valid for an on-disk port file: ${port}`);
     }
@@ -739,6 +801,385 @@ globalThis.spur = new _Spur({
     .replace("__SPUR_PORTS_DIR__", &ports_literal)
     .replace("__SPUR_MANIFEST_PATH__", &manifest_literal)
     .replace("__SPUR_PORT_MIME__", &mime_literal)
+    .replace(
+        "__SPUR_MANIFEST_TEMP_PREFIX__",
+        &string_literal(&manifest_temp_prefix()),
+    )
+    .replace("__SPUR_TEMP_FILE_SUFFIX__", &string_literal(PORT_TEMP_FILE_SUFFIX))
+    .replace("__SPUR_MANIFEST_PORTS_KEY__", PORT_MANIFEST_PORTS_KEY)
+    .replace("__SPUR_MANIFEST_PATH_KEY__", PORT_MANIFEST_PATH_KEY)
+    .replace("__SPUR_MANIFEST_VERSION_KEY__", PORT_MANIFEST_VERSION_KEY)
+    .replace("__SPUR_MANIFEST_SCHEMA_KEY__", PORT_MANIFEST_SCHEMA_KEY)
+    .replace("__SPUR_INITIAL_VERSION__", &PORT_INITIAL_VERSION.to_string())
+    .replace(
+        "__SPUR_VERSION_INCREMENT__",
+        &PORT_VERSION_INCREMENT.to_string(),
+    )
+    .replace("__SPUR_VERSION_SEPARATOR__", PORT_FILE_VERSION_SEPARATOR)
+    .replace("__SPUR_ARROW_EXTENSION__", PORT_ARROW_FILE_EXTENSION)
+    .replace(
+        "__SPUR_RESERVED_CURRENT_DIR__",
+        &string_literal(PORT_RESERVED_CURRENT_DIR),
+    )
+    .replace(
+        "__SPUR_RESERVED_PARENT_DIR__",
+        &string_literal(PORT_RESERVED_PARENT_DIR),
+    )
+    .replace("__SPUR_FORBIDDEN_SLASH__", &string_literal(PORT_FORBIDDEN_SLASH))
+    .replace(
+        "__SPUR_FORBIDDEN_BACKSLASH__",
+        &string_literal(PORT_FORBIDDEN_BACKSLASH),
+    )
+    .replace("__SPUR_FORBIDDEN_NUL__", &string_literal(PORT_FORBIDDEN_NUL))
+}
+
+/// Rust/evcxr bootstrap source that installs the `spur` helper for one cell.
+pub fn rust_bootstrap(notebook_root: impl AsRef<Path>) -> String {
+    let root = notebook_root.as_ref().display().to_string();
+    let root_literal = string_literal(&root);
+
+    r#":dep arrow = "__SPUR_EVCXR_ARROW_CRATE_VERSION__"
+:dep serde_json = "1"
+
+let spur = {
+    use std::fs;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use arrow::ipc::reader::FileReader;
+    use arrow::ipc::writer::FileWriter;
+    use arrow::record_batch::RecordBatch;
+    use serde_json::{Map, Number, Value};
+
+    const PORT_MIME: &str = __SPUR_PORT_MIME__;
+    const PORTS_DIR_NAME: &str = __SPUR_PORTS_DIR_NAME__;
+    const PORT_FILE_VERSION_SEPARATOR: &str = __SPUR_VERSION_SEPARATOR__;
+    const PORT_ARROW_FILE_EXTENSION: &str = __SPUR_ARROW_EXTENSION__;
+    const PORT_MANIFEST_FILE_NAME: &str = __SPUR_MANIFEST_FILE_NAME__;
+    const PORT_MANIFEST_TEMP_PREFIX: &str = __SPUR_MANIFEST_TEMP_PREFIX__;
+    const PORT_TEMP_FILE_SUFFIX: &str = __SPUR_TEMP_FILE_SUFFIX__;
+    const PORT_MANIFEST_PORTS_KEY: &str = __SPUR_MANIFEST_PORTS_KEY__;
+    const PORT_MANIFEST_PATH_KEY: &str = __SPUR_MANIFEST_PATH_KEY__;
+    const PORT_MANIFEST_VERSION_KEY: &str = __SPUR_MANIFEST_VERSION_KEY__;
+    const PORT_MANIFEST_SCHEMA_KEY: &str = __SPUR_MANIFEST_SCHEMA_KEY__;
+    const PORT_INITIAL_VERSION: u64 = __SPUR_INITIAL_VERSION__;
+    const PORT_VERSION_INCREMENT: u64 = __SPUR_VERSION_INCREMENT__;
+    const PORT_RESERVED_CURRENT_DIR: &str = __SPUR_RESERVED_CURRENT_DIR__;
+    const PORT_RESERVED_PARENT_DIR: &str = __SPUR_RESERVED_PARENT_DIR__;
+    const PORT_FORBIDDEN_SLASH: &str = __SPUR_FORBIDDEN_SLASH__;
+    const PORT_FORBIDDEN_BACKSLASH: &str = __SPUR_FORBIDDEN_BACKSLASH__;
+    const PORT_FORBIDDEN_NUL: &str = __SPUR_FORBIDDEN_NUL__;
+
+    #[derive(Clone, Debug)]
+    struct _Spur {
+        root: String,
+    }
+
+    impl _Spur {
+        pub fn new(root: impl Into<String>) -> Self {
+            Self { root: root.into() }
+        }
+
+        pub fn put(
+            &self,
+            port: &str,
+            batch: RecordBatch,
+        ) -> Result<Value, Box<dyn std::error::Error>> {
+            self.validate_port(port)?;
+            let ports_dir = self.ports_dir();
+            fs::create_dir_all(&ports_dir)?;
+
+            let mut manifest = self.load_manifest()?;
+            let schema = serde_json::to_value(batch.schema().as_ref())?;
+            let previous_version = Self::previous_version(&manifest, port);
+            let version = previous_version + PORT_VERSION_INCREMENT;
+            let arrow_path = ports_dir.join(Self::port_file_name(port, version));
+
+            let file = File::create(&arrow_path)?;
+            let mut writer = FileWriter::try_new(file, batch.schema().as_ref())?;
+            writer.write(&batch)?;
+            writer.finish()?;
+
+            Self::set_manifest_entry(
+                &mut manifest,
+                port,
+                arrow_path.to_string_lossy().into_owned(),
+                version,
+                schema.clone(),
+            )?;
+            self.store_manifest(&manifest)?;
+            self.display_port(port, version, schema, &batch)
+        }
+
+        pub fn get(
+            &self,
+            port: &str,
+        ) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error>> {
+            self.validate_port(port)?;
+            let manifest = self.load_manifest()?;
+            let entry = manifest
+                .get(PORT_MANIFEST_PORTS_KEY)
+                .and_then(|ports| ports.get(port))
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("SPUR port has not been written: {port}"),
+                    )
+                })?;
+            let path = entry
+                .get(PORT_MANIFEST_PATH_KEY)
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("SPUR port manifest entry is missing a path: {port}"),
+                    )
+                })?;
+
+            let file = File::open(path)?;
+            let reader = FileReader::try_new(file, None)?;
+            let mut batches = Vec::new();
+            for batch in reader {
+                batches.push(batch?);
+            }
+            Ok(batches)
+        }
+
+        fn ports_dir(&self) -> PathBuf {
+            Path::new(self.root.as_str()).join(PORTS_DIR_NAME)
+        }
+
+        fn manifest_path(&self) -> PathBuf {
+            self.ports_dir().join(PORT_MANIFEST_FILE_NAME)
+        }
+
+        fn load_manifest(&self) -> Result<Value, Box<dyn std::error::Error>> {
+            let manifest_path = self.manifest_path();
+            if !manifest_path.exists() {
+                return Ok(Self::empty_manifest());
+            }
+            let text = fs::read_to_string(manifest_path)?;
+            Ok(serde_json::from_str(&text)?)
+        }
+
+        fn store_manifest(&self, manifest: &Value) -> Result<(), Box<dyn std::error::Error>> {
+            let tmp_path = self.temp_manifest_path()?;
+            let mut tmp = File::create(&tmp_path)?;
+            serde_json::to_writer_pretty(&mut tmp, manifest)?;
+            writeln!(&mut tmp)?;
+            drop(tmp);
+            fs::rename(&tmp_path, self.manifest_path())?;
+            Ok(())
+        }
+
+        fn temp_manifest_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+            let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            Ok(self.ports_dir().join(format!(
+                "{PORT_MANIFEST_TEMP_PREFIX}{nanos}{PORT_TEMP_FILE_SUFFIX}"
+            )))
+        }
+
+        fn previous_version(manifest: &Value, port: &str) -> u64 {
+            manifest
+                .get(PORT_MANIFEST_PORTS_KEY)
+                .and_then(|ports| ports.get(port))
+                .and_then(|entry| entry.get(PORT_MANIFEST_VERSION_KEY))
+                .and_then(Value::as_u64)
+                .unwrap_or(PORT_INITIAL_VERSION)
+        }
+
+        fn port_file_name(port: &str, version: u64) -> String {
+            format!(
+                "{}{}{}.{}",
+                port, PORT_FILE_VERSION_SEPARATOR, version, PORT_ARROW_FILE_EXTENSION
+            )
+        }
+
+        fn empty_manifest() -> Value {
+            let mut manifest = Map::new();
+            manifest.insert(
+                PORT_MANIFEST_PORTS_KEY.to_string(),
+                Value::Object(Map::new()),
+            );
+            Value::Object(manifest)
+        }
+
+        fn set_manifest_entry(
+            manifest: &mut Value,
+            port: &str,
+            path: String,
+            version: u64,
+            schema: Value,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let manifest_object = manifest.as_object_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "SPUR port manifest must be a JSON object",
+                )
+            })?;
+            let ports_value = manifest_object
+                .entry(PORT_MANIFEST_PORTS_KEY.to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let ports = ports_value.as_object_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "SPUR port manifest ports must be a JSON object",
+                )
+            })?;
+
+            let mut entry = Map::new();
+            entry.insert(PORT_MANIFEST_PATH_KEY.to_string(), Value::String(path));
+            entry.insert(
+                PORT_MANIFEST_VERSION_KEY.to_string(),
+                Value::Number(Number::from(version)),
+            );
+            entry.insert(PORT_MANIFEST_SCHEMA_KEY.to_string(), schema);
+            ports.insert(port.to_string(), Value::Object(entry));
+            Ok(())
+        }
+
+        fn display_port(
+            &self,
+            port: &str,
+            version: u64,
+            schema: Value,
+            batch: &RecordBatch,
+        ) -> Result<Value, Box<dyn std::error::Error>> {
+            let mut payload = Map::new();
+            payload.insert("port".to_string(), Value::String(port.to_string()));
+            payload.insert(
+                PORT_MANIFEST_VERSION_KEY.to_string(),
+                Value::Number(Number::from(version)),
+            );
+            payload.insert(PORT_MANIFEST_SCHEMA_KEY.to_string(), schema);
+            let payload = Value::Object(payload);
+            evcxr_display(PORT_MIME, &serde_json::to_string(&payload)?);
+            evcxr_display("text/html", &self.preview_html(port, version, batch));
+            Ok(payload)
+        }
+
+        fn preview_html(&self, port: &str, version: u64, batch: &RecordBatch) -> String {
+            let title = format!(
+                "<strong>SPUR port</strong> <code>{}</code> <span>v{}</span>",
+                Self::escape_html(port),
+                version
+            );
+            format!(
+                "<div>{title}<p>{} rows x {} columns</p></div>",
+                batch.num_rows(),
+                batch.num_columns()
+            )
+        }
+
+        fn escape_html(value: &str) -> String {
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&#39;")
+        }
+
+        fn validate_port(&self, port: &str) -> Result<(), Box<dyn std::error::Error>> {
+            if port.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "SPUR port name cannot be empty",
+                )
+                .into());
+            }
+            if port == PORT_RESERVED_CURRENT_DIR
+                || port == PORT_RESERVED_PARENT_DIR
+                || port.contains(PORT_FORBIDDEN_SLASH)
+                || port.contains(PORT_FORBIDDEN_BACKSLASH)
+                || port.contains(PORT_FORBIDDEN_NUL)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("SPUR port name is not valid for an on-disk port file: {port}"),
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    _Spur::new(__SPUR_ROOT__)
+};
+"#
+    .replace(
+        "__SPUR_EVCXR_ARROW_CRATE_VERSION__",
+        EVCXR_ARROW_CRATE_VERSION,
+    )
+    .replace("__SPUR_ROOT__", &root_literal)
+    .replace("__SPUR_PORT_MIME__", &string_literal(PORT_MIME))
+    .replace("__SPUR_PORTS_DIR_NAME__", &string_literal(PORTS_DIR_NAME))
+    .replace(
+        "__SPUR_VERSION_SEPARATOR__",
+        &string_literal(PORT_FILE_VERSION_SEPARATOR),
+    )
+    .replace(
+        "__SPUR_ARROW_EXTENSION__",
+        &string_literal(PORT_ARROW_FILE_EXTENSION),
+    )
+    .replace(
+        "__SPUR_MANIFEST_FILE_NAME__",
+        &string_literal(PORT_MANIFEST_FILE_NAME),
+    )
+    .replace(
+        "__SPUR_MANIFEST_TEMP_PREFIX__",
+        &string_literal(&manifest_temp_prefix()),
+    )
+    .replace(
+        "__SPUR_TEMP_FILE_SUFFIX__",
+        &string_literal(PORT_TEMP_FILE_SUFFIX),
+    )
+    .replace(
+        "__SPUR_MANIFEST_PORTS_KEY__",
+        &string_literal(PORT_MANIFEST_PORTS_KEY),
+    )
+    .replace(
+        "__SPUR_MANIFEST_PATH_KEY__",
+        &string_literal(PORT_MANIFEST_PATH_KEY),
+    )
+    .replace(
+        "__SPUR_MANIFEST_VERSION_KEY__",
+        &string_literal(PORT_MANIFEST_VERSION_KEY),
+    )
+    .replace(
+        "__SPUR_MANIFEST_SCHEMA_KEY__",
+        &string_literal(PORT_MANIFEST_SCHEMA_KEY),
+    )
+    .replace(
+        "__SPUR_INITIAL_VERSION__",
+        &PORT_INITIAL_VERSION.to_string(),
+    )
+    .replace(
+        "__SPUR_VERSION_INCREMENT__",
+        &PORT_VERSION_INCREMENT.to_string(),
+    )
+    .replace(
+        "__SPUR_RESERVED_CURRENT_DIR__",
+        &string_literal(PORT_RESERVED_CURRENT_DIR),
+    )
+    .replace(
+        "__SPUR_RESERVED_PARENT_DIR__",
+        &string_literal(PORT_RESERVED_PARENT_DIR),
+    )
+    .replace(
+        "__SPUR_FORBIDDEN_SLASH__",
+        &string_literal(PORT_FORBIDDEN_SLASH),
+    )
+    .replace(
+        "__SPUR_FORBIDDEN_BACKSLASH__",
+        &string_literal(PORT_FORBIDDEN_BACKSLASH),
+    )
+    .replace(
+        "__SPUR_FORBIDDEN_NUL__",
+        &string_literal(PORT_FORBIDDEN_NUL),
+    )
 }
 
 /// Prepend the Python SPUR port bootstrap to user code.
@@ -752,6 +1193,14 @@ pub fn wrap_python_cell(notebook_root: impl AsRef<Path>, code: &str) -> String {
 /// Prepend the JavaScript/Deno SPUR port bootstrap to user code.
 pub fn wrap_js_cell(notebook_root: impl AsRef<Path>, code: &str) -> String {
     let mut wrapped = javascript_bootstrap(notebook_root);
+    wrapped.push('\n');
+    wrapped.push_str(code);
+    wrapped
+}
+
+/// Prepend the Rust/evcxr SPUR port bootstrap to user code.
+pub fn wrap_rust_cell(notebook_root: impl AsRef<Path>, code: &str) -> String {
+    let mut wrapped = rust_bootstrap(notebook_root);
     wrapped.push('\n');
     wrapped.push_str(code);
     wrapped
@@ -789,6 +1238,30 @@ mod tests {
         assert!(wrapped.contains(&ports_literal));
         assert!(root.display().to_string().contains("/nb-"));
         assert!(wrapped.ends_with("await spur.put('sales', [{ id: 1 }]);"));
+    }
+
+    #[test]
+    fn rust_bootstrap_pulls_arrow_and_uses_shared_port_paths() {
+        let bootstrap = rust_bootstrap("/tmp/demo-root");
+        let wrapped = wrap_rust_cell("/tmp/demo-root", "spur.put(\"sales\", batch)?;");
+        let arrow_dep = format!(
+            r#":dep arrow = "{}""#,
+            crate::kernel_provision::EVCXR_ARROW_CRATE_VERSION
+        );
+
+        assert!(bootstrap.contains(&arrow_dep));
+        assert!(bootstrap.contains(r#":dep serde_json = "1""#));
+        assert!(bootstrap.contains(PORT_MIME));
+        assert!(bootstrap.contains(r#""ports""#));
+        assert!(bootstrap.contains(r#""manifest.json""#));
+        assert!(bootstrap.contains(r#"const PORT_FILE_VERSION_SEPARATOR: &str = "@v";"#));
+        assert!(bootstrap.contains(r#"const PORT_ARROW_FILE_EXTENSION: &str = "arrow";"#));
+        assert!(bootstrap.contains("FileWriter::try_new"));
+        assert!(bootstrap.contains("FileReader::try_new"));
+        assert!(bootstrap.contains("const PORT_VERSION_INCREMENT: u64 = 1;"));
+        assert!(bootstrap.contains("previous_version + PORT_VERSION_INCREMENT"));
+        assert!(wrapped.contains(&arrow_dep));
+        assert!(wrapped.ends_with("spur.put(\"sales\", batch)?;"));
     }
 
     #[test]
