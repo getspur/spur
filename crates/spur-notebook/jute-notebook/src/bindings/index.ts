@@ -32,6 +32,7 @@ export * from "./JuteDeckLayout";
 export * from "./LanguageInfo";
 export * from "./ExecuteResult";
 export * from "./DaemonControlCommand";
+export * from "./CompilePhase";
 export * from "./PortSpec";
 export * from "./Author";
 export * from "./DisplayData";
