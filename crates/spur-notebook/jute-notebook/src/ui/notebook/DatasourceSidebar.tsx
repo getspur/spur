@@ -37,7 +37,9 @@ import {
   savedConnectionsFromDaemonControlResponse,
 } from "@/daemon/control";
 
-import AddRestApiWizard from "./AddRestApiWizard";
+import AddRestApiWizard, {
+  type AddRestApiWizardPrefill,
+} from "./AddRestApiWizard";
 
 type DroppedFile = File & {
   path?: string;
@@ -62,6 +64,43 @@ const DATASOURCE_EXTENSIONS = [
   "sqlite",
 ];
 
+function restWizardPrefillFromPayload(
+  payload: unknown,
+): AddRestApiWizardPrefill | null {
+  if (!payload || typeof payload !== "object") return null;
+
+  const record = payload as Record<string, unknown>;
+  if (typeof record.name !== "string" || record.name.trim().length === 0) {
+    return null;
+  }
+
+  const missingEnvVars = Array.isArray(record.missingEnvVars)
+    ? record.missingEnvVars
+    : Array.isArray(record.missing_env_vars)
+      ? record.missing_env_vars
+      : [];
+  const specText =
+    typeof record.specText === "string"
+      ? record.specText
+      : typeof record.spec_text === "string"
+        ? record.spec_text
+        : undefined;
+  const provider =
+    typeof record.provider === "string" && record.provider.trim().length > 0
+      ? record.provider
+      : undefined;
+
+  return {
+    name: record.name,
+    provider,
+    specText,
+    missingEnvVars: missingEnvVars.filter(
+      (envVar): envVar is string => typeof envVar === "string",
+    ),
+    step: "connect",
+  };
+}
+
 export default function DatasourceSidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [entries, setEntries] = useState<DatasourceEntry[]>([]);
@@ -79,6 +118,8 @@ export default function DatasourceSidebar() {
     string | null
   >(null);
   const [apiModalOpen, setApiModalOpen] = useState(false);
+  const [restWizardPrefill, setRestWizardPrefill] =
+    useState<AddRestApiWizardPrefill | null>(null);
   const [editingConnection, setEditingConnection] =
     useState<ConnectionTemplate | null>(null);
   const dropzoneRef = useRef<HTMLElement | null>(null);
@@ -300,6 +341,37 @@ export default function DatasourceSidebar() {
     let disposed = false;
     let unlisten: (() => void) | null = null;
 
+    try {
+      void listen("notebook://open_rest_wizard", (event) => {
+        const nextPrefill = restWizardPrefillFromPayload(event.payload);
+        if (!nextPrefill) return;
+
+        setEditingConnection(null);
+        setRestWizardPrefill(nextPrefill);
+        setApiModalOpen(true);
+      })
+        .then((cleanup) => {
+          if (disposed) {
+            cleanup();
+          } else {
+            unlisten = cleanup;
+          }
+        })
+        .catch(() => undefined);
+    } catch {
+      return undefined;
+    }
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
     const handleDragDropEvent = (event: TauriEvent<DragDropEvent>) => {
       const payload = event.payload;
 
@@ -417,7 +489,10 @@ export default function DatasourceSidebar() {
             <button
               aria-label="Add API datasource"
               className="inline-flex h-8 shrink-0 items-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs font-medium text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950"
-              onClick={() => setApiModalOpen(true)}
+              onClick={() => {
+                setRestWizardPrefill(null);
+                setApiModalOpen(true);
+              }}
               title="Add API datasource"
               type="button"
             >
@@ -500,7 +575,10 @@ export default function DatasourceSidebar() {
             notice={savedConnectionNotice}
             onAttach={(name) => void handleAttachSavedConnection(name)}
             onDelete={(name) => void handleDeleteSavedConnection(name)}
-            onEdit={(connection) => setEditingConnection(connection)}
+            onEdit={(connection) => {
+              setRestWizardPrefill(null);
+              setEditingConnection(connection);
+            }}
             onToggle={(name) =>
               setExpandedSavedConnection((current) =>
                 current === name ? null : name,
@@ -512,9 +590,11 @@ export default function DatasourceSidebar() {
       <AddRestApiWizard
         editConnection={editingConnection}
         open={apiModalOpen || editingConnection !== null}
+        prefill={restWizardPrefill}
         onClose={() => {
           setApiModalOpen(false);
           setEditingConnection(null);
+          setRestWizardPrefill(null);
         }}
       />
     </>
