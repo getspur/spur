@@ -32,6 +32,7 @@ vi.mock("./CellInput", () => ({
 function createNotebookStore(
   startedAt: number,
   compileCurrent: string | null = null,
+  compilePhase: "compiling" | "running" = "compiling",
 ) {
   return createStore<any>()(() => ({
     serverState: {
@@ -49,7 +50,7 @@ function createNotebookStore(
             timings: { startedAt },
             executionCount: undefined,
             compile: {
-              phase: "compiling",
+              phase: compilePhase,
               current: compileCurrent,
               startedAt,
             },
@@ -89,16 +90,27 @@ describe("NotebookCells", () => {
     mocks.notebook = undefined;
   });
 
-  test("renders compiling chip with elapsed seconds from compile start", () => {
+  test("renders compile progress in the execution gutter and output rail", () => {
     const { unmount } = render(<NotebookCells />);
 
-    expect(screen.getByText("Compiling… ⏱ 5s")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Cell execution Compiling 5s" }),
+    ).toHaveTextContent("5s");
+    expect(
+      screen.getByRole("status", { name: "Compiling 5s" }),
+    ).toHaveTextContent("Compiling");
+    expect(screen.queryByText(/Compiling.*⏱/)).not.toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(1000);
     });
 
-    expect(screen.getByText("Compiling… ⏱ 6s")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Cell execution Compiling 6s" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Compiling 6s" }),
+    ).toBeInTheDocument();
 
     unmount();
 
@@ -113,6 +125,11 @@ describe("NotebookCells", () => {
 
     render(<NotebookCells />);
 
-    expect(screen.getByText("Compiling smawk… ⏱ 5s")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Cell execution Compiling 5s" }),
+    ).toHaveTextContent("5s");
+    expect(
+      screen.getByRole("status", { name: "Compiling smawk 5s" }),
+    ).toHaveTextContent("Compiling smawk");
   });
 });

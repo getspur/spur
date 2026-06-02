@@ -11,6 +11,7 @@ import type {
   CellDagMetadata,
   CellMetadata,
   CodeType,
+  CompilePhase,
   DaemonCell,
   JuteDeckCellMetadata,
   NotebookDelta,
@@ -183,7 +184,7 @@ export type CellResult = {
   };
   executionCount?: number;
   compile?: {
-    phase: "compiling" | "running";
+    phase: CompilePhase;
     current: string | null;
     startedAt: number;
   };
@@ -429,7 +430,7 @@ export type RunCellEventApplicationState = {
   executionCount: CellResult["executionCount"];
   willClearOutput: boolean;
   compile?: {
-    phase: "compiling" | "running";
+    phase: CompilePhase;
     current: string | null;
     startedAt: number;
   };
@@ -833,6 +834,18 @@ function updateRunCellResultDraft(
   });
 }
 
+function dismissesCompileProgress(message: RunCellEvent): boolean {
+  return (
+    message.event === "stdout" ||
+    message.event === "stderr" ||
+    message.event === "execute_result" ||
+    message.event === "display_data" ||
+    message.event === "error" ||
+    message.event === "disconnect" ||
+    message.event === "finished"
+  );
+}
+
 export function applyRunCellEvent(
   state: WritableDraft<NotebookServerState>,
   cellId: string,
@@ -847,7 +860,12 @@ export function applyRunCellEvent(
     nextRunState.willClearOutput = false;
   }
 
+  if (dismissesCompileProgress(message)) {
+    delete nextRunState.compile;
+  }
+
   if (message.event === "stdout" || message.event === "stderr") {
+    updateRunCellResultDraft(state, cellId, nextRunState);
     appendOutputDraft(state, cellId, {
       output_type: "stream",
       name: message.event,
@@ -874,6 +892,7 @@ export function applyRunCellEvent(
     });
   } else if (message.event === "display_data") {
     const displayId = message.data.transient?.display_id || options.displayId;
+    updateRunCellResultDraft(state, cellId, nextRunState);
     appendOutputDraft(
       state,
       cellId,
@@ -899,15 +918,11 @@ export function applyRunCellEvent(
       clearOutputDraft(state, cellId);
     }
   } else if (message.event === "compile_progress") {
-    if (message.data.phase === "running") {
-      delete nextRunState.compile;
-    } else {
-      nextRunState.compile = {
-        phase: message.data.phase,
-        current: message.data.current,
-        startedAt: nextRunState.compile?.startedAt ?? Date.now(),
-      };
-    }
+    nextRunState.compile = {
+      phase: message.data.phase,
+      current: message.data.current,
+      startedAt: nextRunState.compile?.startedAt ?? Date.now(),
+    };
     updateRunCellResultDraft(state, cellId, nextRunState);
   } else if (message.event === "started") {
     nextRunState.status = "running";
@@ -925,21 +940,25 @@ export function applyRunCellEvent(
       };
     }
     updateRunCellResultDraft(state, cellId, nextRunState);
-  } else if (message.event === "disconnect" && options.handleDisconnect) {
-    nextRunState.status = "error";
-    if (options.finishedAt !== undefined) {
-      nextRunState.timings = {
-        ...nextRunState.timings,
-        finishedAt: options.finishedAt,
-      };
+  } else if (message.event === "disconnect") {
+    if (options.handleDisconnect) {
+      nextRunState.status = "error";
+      if (options.finishedAt !== undefined) {
+        nextRunState.timings = {
+          ...nextRunState.timings,
+          finishedAt: options.finishedAt,
+        };
+      }
+      updateRunCellResultDraft(state, cellId, nextRunState);
+      appendOutputDraft(state, cellId, {
+        output_type: "error",
+        ename: "InternalError",
+        evalue: message.data,
+        traceback: [],
+      });
+    } else {
+      updateRunCellResultDraft(state, cellId, nextRunState);
     }
-    updateRunCellResultDraft(state, cellId, nextRunState);
-    appendOutputDraft(state, cellId, {
-      output_type: "error",
-      ename: "InternalError",
-      evalue: message.data,
-      traceback: [],
-    });
   }
 
   return nextRunState;
@@ -1209,7 +1228,11 @@ export class Notebook {
   mergeCellJuteDeckMetadata(
     cellId: string,
     patch: Partial<JuteDeckCellMetadata> & {
-      spur?: { datasource_setup?: boolean; dag?: CellDagMetadata; code_type?: CodeType };
+      spur?: {
+        datasource_setup?: boolean;
+        dag?: CellDagMetadata;
+        code_type?: CodeType;
+      };
     },
   ): number {
     const cell = selectCell(this.state, cellId);

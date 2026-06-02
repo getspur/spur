@@ -131,7 +131,7 @@ describe("applyRunCellEvent", () => {
     });
   });
 
-  test("tracks compile progress until the run finishes", () => {
+  test("tracks compile progress until output or finish dismisses it", () => {
     const cellId = "cell-1";
     const state: NotebookStoreState = {
       serverState: {
@@ -215,6 +215,19 @@ describe("applyRunCellEvent", () => {
       data: { phase: "running", current: null },
     });
 
+    expect(runState.compile).toEqual({
+      phase: "running",
+      current: null,
+      startedAt: 500,
+    });
+    expect(state.serverState.cells[cellId].result?.compile).toEqual({
+      phase: "running",
+      current: null,
+      startedAt: 500,
+    });
+
+    apply({ event: "stdout", data: "hello\n" });
+
     expect(runState.compile).toBeUndefined();
     expect(state.serverState.cells[cellId].result?.compile).toBeUndefined();
 
@@ -234,6 +247,13 @@ describe("applyRunCellEvent", () => {
       current: "target-c",
       startedAt: 1000,
     });
+    expect(state.serverState.cells[cellId].result?.outputs).toEqual([
+      {
+        output_type: "stream",
+        name: "stdout",
+        text: "hello\n",
+      },
+    ]);
 
     apply({ event: "finished", data: { status: "ok", exec_count: null } });
 

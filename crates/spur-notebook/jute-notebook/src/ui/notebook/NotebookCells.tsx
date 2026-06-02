@@ -1,3 +1,4 @@
+import clsx from "clsx";
 import {
   BotIcon,
   CheckIcon,
@@ -15,6 +16,10 @@ import { useNotebook } from "@/stores/notebook";
 
 import CellInputFallback from "./CellInputFallback";
 import OutputView from "./OutputView";
+import {
+  compilePhasePresentation,
+  formatCompileElapsed,
+} from "./compileProgress";
 
 const CellInput = lazy(() => import("./CellInput"));
 
@@ -53,22 +58,6 @@ function CellInputAside({ cellId }: { cellId: string }) {
       ? sourceDraft.lastEditedBy
       : state.serverState.cells[cellId].lastEditedBy;
   });
-  const compile = output?.compile;
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (compile?.phase !== "compiling") {
-      return;
-    }
-
-    setNow(Date.now());
-    const intervalId = window.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-
-    return () => window.clearInterval(intervalId);
-  }, [compile?.phase, compile?.startedAt]);
-
   const formatExecutionDuration = (durationMs: number) => {
     const seconds = durationMs / 1000;
     if (seconds < 1) {
@@ -77,15 +66,6 @@ function CellInputAside({ cellId }: { cellId: string }) {
       return `${seconds.toFixed(2)} s`;
     }
   };
-  const compileElapsedSeconds =
-    compile?.phase === "compiling"
-      ? Math.max(0, Math.floor((now - compile.startedAt) / 1000))
-      : undefined;
-  const compileCurrent =
-    compile?.phase === "compiling" ? compile.current?.trim() : undefined;
-  const compileLabel = compileCurrent
-    ? `Compiling ${compileCurrent}…`
-    : "Compiling…";
 
   return (
     <Aside>
@@ -106,13 +86,7 @@ function CellInputAside({ cellId }: { cellId: string }) {
           }}
         />
       </div>
-      {compileElapsedSeconds !== undefined ? (
-        <div className="mt-0.5 flex items-center">
-          <span className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700">
-            {compileLabel} ⏱ {compileElapsedSeconds}s
-          </span>
-        </div>
-      ) : output?.timings?.finishedAt ? (
+      {output?.timings?.finishedAt ? (
         <div className="mt-0.5 flex items-center">
           {output.status === "success" ? (
             <CheckIcon size={16} className="mr-1 text-green-500" />
@@ -127,6 +101,79 @@ function CellInputAside({ cellId }: { cellId: string }) {
         </div>
       ) : null}
     </Aside>
+  );
+}
+
+function useCompileNow(active: boolean, startedAt: number | undefined) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active || startedAt === undefined) {
+      return;
+    }
+
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [active, startedAt]);
+
+  return now;
+}
+
+function CellExecutionMarker({ cellId }: { cellId: string }) {
+  const notebook = useNotebook();
+  const cell = useStore(
+    notebook.store,
+    (state) => state.serverState.cells[cellId],
+  );
+  const compile = cell.result?.compile;
+  const now = useCompileNow(Boolean(compile), compile?.startedAt);
+  const markerClassName =
+    "absolute left-0 top-4 z-10 flex w-[57px] justify-center font-mono text-[10.5px] leading-5";
+
+  if (cell.type !== "code") {
+    return null;
+  }
+
+  if (compile) {
+    const presentation = compilePhasePresentation(compile.phase);
+    const elapsed = formatCompileElapsed(compile.startedAt, now);
+
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        aria-label={`Cell execution ${presentation.label} ${elapsed}`}
+        className={clsx(markerClassName, presentation.gutterBadgeClassName)}
+      >
+        <span className="inline-flex items-center gap-1 rounded px-1 py-0.5">
+          <span
+            aria-hidden="true"
+            className={clsx(
+              "h-1.5 w-1.5 rounded-full motion-safe:animate-pulse",
+              presentation.dotClassName,
+            )}
+          />
+          <span>{elapsed}</span>
+        </span>
+      </div>
+    );
+  }
+
+  const executionCount =
+    cell.result?.status === "running"
+      ? "*"
+      : cell.result?.executionCount !== undefined
+        ? String(cell.result.executionCount)
+        : " ";
+
+  return (
+    <div aria-hidden="true" className={clsx(markerClassName, "text-gray-400")}>
+      [{executionCount}]
+    </div>
   );
 }
 
@@ -153,9 +200,10 @@ export default function NotebookCells() {
   return (
     <div className="relative py-8">
       {cellIds.map((id) => (
-        <div key={id}>
+        <div key={id} className="relative">
           <hr className="border-gray-200" />
 
+          <CellExecutionMarker cellId={id} />
           <CellInputAside cellId={id} />
           <Suspense fallback={<CellInputFallback cellId={id} />}>
             <CellInput cellId={id} />
