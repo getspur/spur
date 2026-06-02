@@ -31,6 +31,9 @@ __pycache__/
 **/.spur/session_metadata.json.tmp
 .spur/bot/
 .spur/keys/
+# Ephemeral build/install scratch (cargo target dirs from ext harnesses, etc.)
+.spur/tmp/
+**/.spur/tmp/
 /.beads/
 /resource/superpowers/
 .superpowers/brainstorm/
