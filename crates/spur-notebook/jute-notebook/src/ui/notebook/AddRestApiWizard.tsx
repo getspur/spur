@@ -31,6 +31,7 @@ import {
   openApiTablePreviewFromDaemonControlResponse,
   previewOpenApiTablesCommand,
   savedConnectionsFromDaemonControlResponse,
+  updateSavedConnectionCommand,
 } from "@/daemon/control";
 
 type SourceMode = "catalog" | "saved" | "openapi" | "manual";
@@ -43,6 +44,7 @@ type CredentialField = {
 };
 
 export type AddRestApiWizardProps = {
+  editConnection?: ConnectionTemplate | null;
   onClose: () => void;
   open: boolean;
 };
@@ -69,9 +71,11 @@ const KNOWN_BASE_URLS: Record<string, string> = {
 };
 
 export default function AddRestApiWizard({
+  editConnection = null,
   onClose,
   open,
 }: AddRestApiWizardProps) {
+  const editMode = editConnection !== null;
   const [stepIndex, setStepIndex] = useState(0);
   const [sourceMode, setSourceMode] = useState<SourceMode | null>(null);
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
@@ -107,6 +111,27 @@ export default function AddRestApiWizard({
 
   useEffect(() => {
     if (!open) return;
+
+    if (editConnection) {
+      setStepIndex(1);
+      setSourceMode("saved");
+      setProviderSearch("");
+      setProviderCategory("All");
+      setSelectedProvider(null);
+      setSelectedSavedConnection(editConnection);
+      setDatasourceName(editConnection.name);
+      setCredentials({});
+      setSavedConnectionCredentials({});
+      setMissingSavedCredentialKeys([]);
+      setSpecText("");
+      setTablePreview(tablePreviewFromTemplate(editConnection));
+      setConnectionOnly(editConnection.tables.length === 0);
+      setPendingPreview(false);
+      setPendingAdd(false);
+      setError(null);
+      return;
+    }
+
     setStepIndex(0);
     setSourceMode(null);
     setProviderSearch("");
@@ -123,7 +148,7 @@ export default function AddRestApiWizard({
     setPendingPreview(false);
     setPendingAdd(false);
     setError(null);
-  }, [open]);
+  }, [editConnection, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -258,8 +283,13 @@ export default function AddRestApiWizard({
   }, [providerCategory, providerSearch, providers]);
 
   const credentialFields = useMemo(
-    () => credentialFieldsForProvider(selectedProvider),
-    [selectedProvider],
+    () =>
+      editConnection
+        ? editConnection.credentialEnvVars.map(
+            (key): CredentialField => ({ key, label: key, type: "password" }),
+          )
+        : credentialFieldsForProvider(selectedProvider),
+    [editConnection, selectedProvider],
   );
   const canContinue = canContinueFromStep({
     connectionOnly,
@@ -273,6 +303,7 @@ export default function AddRestApiWizard({
     sourceMode,
     stepIndex,
     tablePreview,
+    editMode,
   });
 
   if (!open) return null;
@@ -286,7 +317,9 @@ export default function AddRestApiWizard({
   };
 
   const goBack = () => {
-    setStepIndex((currentStep) => Math.max(0, currentStep - 1));
+    setStepIndex((currentStep) =>
+      Math.max(editMode ? 1 : 0, currentStep - 1),
+    );
     setError(null);
   };
 
@@ -336,6 +369,37 @@ export default function AddRestApiWizard({
         }),
       );
       importedApiDatasourceFromDaemonControlResponse(response);
+      onClose();
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setPendingAdd(false);
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editConnection) return;
+
+    const trimmedSpec = specText.trim();
+    const credentialPairs = credentialFields
+      .map((field): [string, string] => [
+        field.key,
+        credentials[field.key]?.trim() ?? "",
+      ])
+      .filter(([, value]) => value.length > 0);
+
+    setPendingAdd(true);
+    setError(null);
+
+    try {
+      const response = await daemonControl(
+        updateSavedConnectionCommand({
+          name: editConnection.name,
+          spec_text: trimmedSpec.length === 0 ? null : trimmedSpec,
+          credentials: credentialPairs,
+        }),
+      );
+      attachedSavedConnectionFromDaemonControlResponse(response);
       onClose();
     } catch (caught) {
       setError(errorMessage(caught));
@@ -397,10 +461,12 @@ export default function AddRestApiWizard({
   };
 
   const primaryActionLabel =
-    step === "source" && sourceMode === "saved"
-      ? "Use connection"
-      : step === "review"
-        ? "Add datasource"
+    step === "review"
+      ? editMode
+        ? "Save changes"
+        : "Add datasource"
+      : step === "source" && sourceMode === "saved"
+        ? "Use connection"
         : "Continue";
 
   return (
@@ -445,7 +511,9 @@ export default function AddRestApiWizard({
                         : "text-gray-400",
                       complete && "text-gray-700 hover:bg-white",
                     )}
-                    disabled={!complete && !active}
+                    disabled={
+                      (editMode && index === 0) || (!complete && !active)
+                    }
                     onClick={() => setStepIndex(index)}
                     type="button"
                   >
@@ -515,6 +583,8 @@ export default function AddRestApiWizard({
               <ConnectStep
                 credentials={credentials}
                 datasourceName={datasourceName}
+                fields={credentialFields}
+                nameReadOnly={editMode}
                 onCredentialChange={(key, value) =>
                   setCredentials((current) => ({
                     ...current,
@@ -537,7 +607,14 @@ export default function AddRestApiWizard({
                 onPreviewTables={() => void handlePreviewTables()}
                 onSpecTextChange={(value) => {
                   setSpecText(value);
-                  setTablePreview(null);
+                  setTablePreview(
+                    editConnection && value.trim().length === 0
+                      ? tablePreviewFromTemplate(editConnection)
+                      : null,
+                  );
+                  if (editConnection && value.trim().length === 0) {
+                    setConnectionOnly(editConnection.tables.length === 0);
+                  }
                 }}
                 pendingPreview={pendingPreview}
                 selectedProvider={selectedProvider}
@@ -564,6 +641,7 @@ export default function AddRestApiWizard({
               className={clsx(
                 "rounded border border-transparent px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:text-gray-950",
                 stepIndex === 0 && "invisible",
+                editMode && stepIndex <= 1 && "invisible",
               )}
               onClick={goBack}
               type="button"
@@ -574,10 +652,11 @@ export default function AddRestApiWizard({
               className="inline-flex items-center gap-2 rounded border border-indigo-600 bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:border-gray-300 disabled:bg-gray-300"
               disabled={!canContinue || pendingAdd}
               onClick={() => {
-                if (step === "source" && sourceMode === "saved") {
+                if (step === "source" && sourceMode === "saved" && !editMode) {
                   void handleAttachSavedConnection();
                 } else if (step === "review") {
-                  void handleAddDatasource();
+                  if (editMode) void handleSaveEdit();
+                  else void handleAddDatasource();
                 } else {
                   goNext();
                 }
@@ -996,6 +1075,8 @@ function CredentialFieldInputs({
 function ConnectStep({
   credentials,
   datasourceName,
+  fields,
+  nameReadOnly,
   onCredentialChange,
   onDatasourceNameChange,
   selectedProvider,
@@ -1003,6 +1084,8 @@ function ConnectStep({
 }: {
   credentials: Record<string, string>;
   datasourceName: string;
+  fields: CredentialField[];
+  nameReadOnly: boolean;
   onCredentialChange: (key: string, value: string) => void;
   onDatasourceNameChange: (value: string) => void;
   selectedProvider: ProviderSummary | null;
@@ -1015,7 +1098,6 @@ function ConnectStep({
     ? baseUrlForProvider(selectedProvider)
     : "https://api.example.com";
   const tier = normalizedTier(selectedProvider?.tier);
-  const fields = credentialFieldsForProvider(selectedProvider);
   const heading = selectedProvider
     ? `Connect to ${selectedProvider.displayName}`
     : "Connect a custom REST API";
@@ -1072,7 +1154,8 @@ function ConnectStep({
           </span>
           <input
             aria-label="Datasource name"
-            className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+            className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600 disabled:bg-gray-50 disabled:text-gray-500"
+            disabled={nameReadOnly}
             onChange={(event) =>
               onDatasourceNameChange(event.currentTarget.value)
             }
@@ -1406,6 +1489,7 @@ function canContinueFromStep({
   sourceMode,
   stepIndex,
   tablePreview,
+  editMode,
 }: {
   connectionOnly: boolean;
   credentialFields: CredentialField[];
@@ -1418,6 +1502,7 @@ function canContinueFromStep({
   sourceMode: SourceMode | null;
   stepIndex: number;
   tablePreview: OpenApiTablePreview | null;
+  editMode: boolean;
 }) {
   if (stepIndex === 0) {
     if (sourceMode === "saved") {
@@ -1437,6 +1522,7 @@ function canContinueFromStep({
   if (stepIndex === 1) {
     const hasName = datasourceName.trim().length > 0;
     const credentialsSatisfied =
+      editMode ||
       credentialFields.length === 0 ||
       credentialFields.every(
         (field) => (credentials[field.key]?.trim() ?? "").length > 0,
@@ -1514,6 +1600,24 @@ function normalizedTier(tier: string | undefined) {
   const normalized = (tier ?? "C").trim().toUpperCase();
   if (normalized === "A" || normalized === "B") return normalized;
   return "C";
+}
+
+function tablePreviewFromTemplate(
+  connection: ConnectionTemplate,
+): OpenApiTablePreview | null {
+  if (connection.tables.length === 0) return null;
+  return {
+    tables: connection.tables.map((table) => ({
+      name: table.name,
+      path: "",
+      responsePath: null,
+      columns: table.columns.map((column) => ({
+        name: column.name,
+        ty: column.sqlType,
+        json: "",
+      })),
+    })),
+  };
 }
 
 function errorMessage(caught: unknown) {
