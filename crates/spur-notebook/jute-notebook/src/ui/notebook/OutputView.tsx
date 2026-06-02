@@ -7,6 +7,11 @@ import { CellResult } from "@/stores/notebook";
 import { useOutputActiveContentEnabled } from "@/stores/settings";
 
 import MarkdownRenderer from "./MarkdownRenderer";
+import {
+  compilePhasePresentation,
+  compileProgressMessage,
+  formatCompileElapsed,
+} from "./compileProgress";
 import { htmlOutputSandbox } from "./rendering";
 
 type Props = {
@@ -14,11 +19,18 @@ type Props = {
   chromeless?: boolean;
 };
 
+type CompileProgressState = NonNullable<CellResult["compile"]>;
+
 export default function OutputView({ value, chromeless = false }: Props) {
+  const compile = value?.compile;
+  const outputs = value?.outputs ?? [];
+  const showCompileRail = Boolean(compile && outputs.length === 0);
+  const now = useCompileNow(showCompileRail, compile?.startedAt);
+
   if (!value) {
     return null;
   }
-  const outputs = value.outputs ?? [];
+
   return (
     <div
       className={clsx(
@@ -26,6 +38,9 @@ export default function OutputView({ value, chromeless = false }: Props) {
         !chromeless && "px-8 pb-6 pt-4",
       )}
     >
+      {showCompileRail && compile ? (
+        <CompileProgressRail compile={compile} now={now} />
+      ) : null}
       {outputs.map((output, index) => (
         <div key={index}>
           {output.output_type === "stream" ? (
@@ -42,6 +57,83 @@ export default function OutputView({ value, chromeless = false }: Props) {
           ) : null}
         </div>
       ))}
+    </div>
+  );
+}
+
+function useCompileNow(active: boolean, startedAt: number | undefined) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active || startedAt === undefined) {
+      return;
+    }
+
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [active, startedAt]);
+
+  return now;
+}
+
+function CompileProgressRail({
+  compile,
+  now,
+}: {
+  compile: CompileProgressState;
+  now: number;
+}) {
+  const presentation = compilePhasePresentation(compile.phase);
+  const elapsed = formatCompileElapsed(compile.startedAt, now);
+  const message = compileProgressMessage(compile.phase, compile.current);
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label={`${message} ${elapsed}`}
+      className={clsx(
+        "mb-3 grid grid-cols-[auto_minmax(96px,1fr)_minmax(0,1.6fr)_auto] items-center gap-2 rounded border px-3 py-2",
+        presentation.railClassName,
+      )}
+    >
+      <span
+        className={clsx(
+          "whitespace-nowrap rounded border px-1.5 py-0.5 text-[11px] font-medium",
+          presentation.chipClassName,
+        )}
+      >
+        {presentation.label}
+      </span>
+      <span
+        aria-hidden="true"
+        className={clsx(
+          "relative h-1.5 overflow-hidden rounded",
+          presentation.trackClassName,
+        )}
+      >
+        <span
+          className={clsx(
+            "jute-compile-progress-sweep absolute inset-y-0 left-0 w-1/2 rounded",
+            presentation.sweepClassName,
+          )}
+        />
+      </span>
+      <span className={clsx("truncate text-xs", presentation.textClassName)}>
+        {message}
+      </span>
+      <span
+        className={clsx(
+          "whitespace-nowrap font-mono text-[11px]",
+          presentation.textClassName,
+        )}
+      >
+        {elapsed}
+      </span>
     </div>
   );
 }

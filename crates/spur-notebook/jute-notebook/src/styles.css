@@ -13,6 +13,27 @@
   animation: dag-stale-edge-dash 900ms linear infinite;
 }
 
+@keyframes jute-compile-progress-sweep {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(240%);
+  }
+}
+
+.jute-compile-progress-sweep {
+  animation: jute-compile-progress-sweep 1200ms ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jute-compile-progress-sweep {
+    animation: none;
+    opacity: 0.45;
+    transform: none;
+  }
+}
+
 @layer base {
   body {
     /* Mimic native apps, which do not have selectable text by default. */

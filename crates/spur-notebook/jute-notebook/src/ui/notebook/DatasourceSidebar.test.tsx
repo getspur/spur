@@ -492,6 +492,7 @@ describe("DatasourceSidebar", () => {
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "attach_saved_connection",
         name: "stripe_reporting",
+        credentials: [],
       }),
     );
     expect(
