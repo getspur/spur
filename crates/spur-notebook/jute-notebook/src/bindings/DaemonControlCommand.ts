@@ -38,6 +38,12 @@ export type DaemonControlCommand =
       credentials: [string, string][];
     }
   | { command: "delete_saved_connection"; name: string }
+  | {
+      command: "update_saved_connection";
+      name: string;
+      spec_text: string | null;
+      credentials: [string, string][];
+    }
   | { command: "list_recents" }
   | { command: "remove_from_recents"; path: string }
   | { command: "set_pinned"; path: string; pinned: boolean }
