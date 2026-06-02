@@ -81,6 +81,11 @@ function CellInputAside({ cellId }: { cellId: string }) {
     compile?.phase === "compiling"
       ? Math.max(0, Math.floor((now - compile.startedAt) / 1000))
       : undefined;
+  const compileCurrent =
+    compile?.phase === "compiling" ? compile.current?.trim() : undefined;
+  const compileLabel = compileCurrent
+    ? `Compiling ${compileCurrent}…`
+    : "Compiling…";
 
   return (
     <Aside>
@@ -104,7 +109,7 @@ function CellInputAside({ cellId }: { cellId: string }) {
       {compileElapsedSeconds !== undefined ? (
         <div className="mt-0.5 flex items-center">
           <span className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700">
-            Compiling… ⏱ {compileElapsedSeconds}s
+            {compileLabel} ⏱ {compileElapsedSeconds}s
           </span>
         </div>
       ) : output?.timings?.finishedAt ? (
