@@ -13,7 +13,11 @@ Source lives in each crate’s `src/`. Integration tests are primarily in `crate
 
 ## Build, Test, and Development Commands
 
-**Use `scripts/spur-cargo` instead of `cargo` for builds.** The wrapper runs a fast pre-build hook that keeps sccache's `SCCACHE_BASEDIRS` in sync with the current set of git worktrees, enabling cross-worktree compile-cache reuse. It is a no-op when nothing changed and refuses to restart sccache while rustc is running. Plain `cargo` still works but skips the sync — agents should default to `spur-cargo` to keep cache hits high. See `docs/rca/2026-04-27-sccache-worktree-cache-miss.md`.
+**Always build and test through `scripts/spur-cargo`, never plain `cargo`.** For any compile-heavy work — `build`, `check`, `test` (including end-to-end suites), `clippy`, `doc`, `clean` — `spur-cargo` is the required entry point. Agents frequently default to bare `cargo` out of habit; do not. Bare `cargo` compiles into the local `target/`, which under the agent sandbox routinely fails (EPERM writing build artifacts on provenance-tagged files, and limited local disk that can't fit heavy C/C++ deps like `duckdb`). `spur-cargo` sidesteps both.
+
+**Priority: remote build/test first; the script already handles fallback.** When `<main_repo>/.spur/remote-cargo.enabled` exists (or `SPUR_REMOTE=1`), `spur-cargo` dispatches the compile-heavy subcommands to the GCP build VM with its GCS-backed sccache — faster, and immune to local-target permission/disk problems. It falls back to local cargo **only** when the VM itself is unreachable (build.sh exit `200`); genuine build/test failures (cargo exit `1`/`100`/`101`) propagate unchanged, so a red remote test is a real failure — don't re-run it locally to "get it to pass." Per-invocation overrides: `SPUR_REMOTE=1` forces remote (e.g. CI), `SPUR_REMOTE=0` forces local (e.g. `fmt`, `run`, interactive debugging).
+
+In local mode (fallback, or when remote is disabled) the wrapper also keeps sccache's `SCCACHE_BASEDIRS` in sync with the current set of git worktrees for cross-worktree cache reuse — a no-op when nothing changed, and it refuses to restart sccache while rustc is running. See `docs/rca/2026-04-27-sccache-worktree-cache-miss.md` and `scripts/gcp-build/` for the remote pipeline.
 
 - `scripts/spur-cargo build --workspace`: build all crates (with sccache sync)
 - `scripts/spur-cargo test --workspace`: run the full test suite
