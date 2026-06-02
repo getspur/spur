@@ -380,22 +380,31 @@ pub struct KernelInfoReply {
 }
 
 /// Detailed information about the programming language of the kernel.
+///
+/// Per the Jupyter messaging spec only `name` is guaranteed in a
+/// `kernel_info_reply`; the remaining fields are optional and are omitted by
+/// some kernels (e.g. evcxr does not send `nbconvert_exporter`). They default
+/// to an empty string so non-Python/Deno kernels still deserialize.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct LanguageInfo {
     /// Name of the programming language.
     pub name: String,
 
     /// Version number of the language.
+    #[serde(default)]
     pub version: String,
 
     /// MIME type for script files in this language.
+    #[serde(default)]
     pub mimetype: String,
 
     /// File extension for script files in this language.
+    #[serde(default)]
     pub file_extension: String,
 
     /// Nbconvert exporter, if notebooks should be exported differently than the
     /// general script.
+    #[serde(default)]
     pub nbconvert_exporter: String,
 }
 
@@ -707,5 +716,25 @@ mod tests {
 
         assert_eq!(js_channel.recv().await.unwrap(), message);
         assert_eq!(mcp_progress.recv().await.unwrap(), message);
+    }
+
+    #[test]
+    fn kernel_info_reply_deserializes_without_optional_language_info_fields() {
+        // evcxr's kernel_info_reply omits nbconvert_exporter (and others). Only
+        // `name` is guaranteed by the Jupyter spec; the rest must default.
+        let reply: KernelInfoReply = serde_json::from_value(json!({
+            "protocol_version": "5.3",
+            "implementation": "evcxr",
+            "implementation_version": "0.21.0",
+            "banner": "Evcxr",
+            "language_info": { "name": "Rust" }
+        }))
+        .expect("evcxr-style kernel_info_reply should deserialize");
+
+        assert_eq!(reply.language_info.name, "Rust");
+        assert_eq!(reply.language_info.nbconvert_exporter, "");
+        assert_eq!(reply.language_info.file_extension, "");
+        assert_eq!(reply.language_info.version, "");
+        assert_eq!(reply.language_info.mimetype, "");
     }
 }
