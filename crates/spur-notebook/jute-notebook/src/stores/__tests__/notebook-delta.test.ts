@@ -97,6 +97,55 @@ describe("Notebook kernel startup", () => {
     });
     expect(notebook.store.getState().viewState.kernelSpecName).toBe("python3");
   });
+
+  test.each([
+    ["evcxr", "evcxr"],
+    ["gonb", "gonb"],
+    ["ruby", "python3"],
+  ])(
+    "normalizes kernelspec metadata name %s to %s",
+    async (metadataName, expectedSpecName) => {
+      const cellId = `${metadataName}-cell`;
+
+      invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+        if (command === "start_kernel") {
+          expect(args).toEqual({ specName: expectedSpecName });
+          return `kernel-${expectedSpecName}`;
+        }
+        if (command === "kernel_slot_info") {
+          expect(args).toEqual({ kernelId: `kernel-${expectedSpecName}` });
+          return {
+            kernel_id: `kernel-${expectedSpecName}`,
+            spec_name: expectedSpecName,
+            generation: 1,
+            status: "idle",
+            cpu_pct: 0,
+            mem_mb: 0,
+          };
+        }
+        throw new Error(`unexpected invoke: ${command}`);
+      });
+
+      const notebook = new Notebook();
+      notebook.loadNotebook({
+        ...notebookRoot(cellId, "answer = 42"),
+        metadata: {
+          kernelspec: {
+            name: metadataName,
+            display_name: metadataName,
+          },
+        },
+      });
+      await notebook.kernelStartPromise;
+
+      expect(invokeMock).toHaveBeenCalledWith("start_kernel", {
+        specName: expectedSpecName,
+      });
+      expect(notebook.store.getState().viewState.kernelSpecName).toBe(
+        expectedSpecName,
+      );
+    },
+  );
 });
 
 describe("reconcileNotebookDelta", () => {
