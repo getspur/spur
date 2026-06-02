@@ -27,7 +27,9 @@ use crate::{
         },
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
-    ports::{go_bootstrap, javascript_bootstrap, notebook_port_root, python_bootstrap, rust_bootstrap},
+    ports::{
+        go_bootstrap, javascript_bootstrap, notebook_port_root, python_bootstrap, rust_bootstrap,
+    },
     state::{
         notebook_path_from_slot_id, notebook_slot_id, slot_id_for, window_slot_id, KernelSlot,
         State,
