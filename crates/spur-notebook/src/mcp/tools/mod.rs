@@ -9,6 +9,7 @@ use tauri::Emitter;
 use super::{DaemonControlResponse, ServerDeps};
 
 pub mod add_api_datasource;
+pub mod api_connection;
 pub mod daemon_files;
 pub mod daemon_lifecycle;
 pub mod daemon_recents;
@@ -51,6 +52,11 @@ pub fn tools() -> Vec<Tool> {
         kernel_info::tool(),
         add_api_datasource::tool(),
         list_datasources::tool(),
+        api_connection::list_api_providers_tool(),
+        api_connection::preview_api_tables_tool(),
+        api_connection::add_api_connection_tool(),
+        api_connection::list_api_connections_tool(),
+        api_connection::api_connection_status_tool(),
         notebook_push_source::tool(),
         notebook_dag_status::tool(),
         notebook_run_cell::tool(),
@@ -299,6 +305,27 @@ mod tests {
             .collect::<Vec<_>>();
 
         for expected in ["open_design_search", "open_design_get"] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing tool: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_include_api_connection_tools() {
+        let names = tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "notebook_list_api_providers",
+            "notebook_preview_api_tables",
+            "notebook_add_api_connection",
+            "notebook_list_api_connections",
+            "notebook_api_connection_status",
+        ] {
             assert!(
                 names.iter().any(|name| name == expected),
                 "missing tool: {expected}"

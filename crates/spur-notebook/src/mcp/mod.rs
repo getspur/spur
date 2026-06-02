@@ -225,6 +225,21 @@ impl ServerHandler for NotebookMcpServer {
             "notebook.discard_scratch" => {
                 tools::daemon_files::call_discard_scratch(&self.deps, arguments).await
             }
+            "notebook_list_api_providers" => {
+                tools::api_connection::call_list_api_providers(&self.deps, arguments).await
+            }
+            "notebook_preview_api_tables" => {
+                tools::api_connection::call_preview_api_tables(&self.deps, arguments).await
+            }
+            "notebook_add_api_connection" => {
+                tools::api_connection::call_add_api_connection(&self.deps, arguments).await
+            }
+            "notebook_list_api_connections" => {
+                tools::api_connection::call_list_api_connections(&self.deps, arguments).await
+            }
+            "notebook_api_connection_status" => {
+                tools::api_connection::call_api_connection_status(&self.deps, arguments).await
+            }
             name => Err(McpError::invalid_params(
                 format!("unknown notebook tool: {name}"),
                 Some(json!({ "tool": name })),
@@ -5266,6 +5281,40 @@ paths:
         assert!(
             message.contains("Tauri app handle"),
             "unexpected error: {message}"
+        );
+
+        client.cancel().await.expect("client closes");
+    }
+
+    #[tokio::test]
+    async fn api_connection_tool_dispatch_reaches_daemon_requirement() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-api-connection-mcp-")
+            .tempdir()
+            .expect("temp dir");
+        let socket_path = temp_dir.path().join("notebook.sock");
+        let _server = start_server(&socket_path).await.expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+
+        let error = client
+            .call_tool(CallToolRequestParams::new("notebook_list_api_providers"))
+            .await
+            .expect_err("tool routes but cannot run without daemon control");
+        let message = error.to_string();
+        assert!(
+            message.contains("daemon control plane"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("unknown notebook tool"),
+            "tool fell through dispatch: {message}"
         );
 
         client.cancel().await.expect("client closes");
