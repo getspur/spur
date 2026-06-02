@@ -1,4 +1,6 @@
 pub mod ai;
+mod cell_runner;
+pub use cell_runner::NotebookCellRunner;
 pub mod engine;
 pub mod graph;
 pub mod inject;
