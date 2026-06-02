@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use jute::backend::commands::{self as kernel_commands, RunCellEvent};
+#[cfg(feature = "datasource-introspect")]
+use jute::notebook_store::{CellKind, DeltaKind, NotebookOp};
 use jute::state::{notebook_slot_id, KernelSlot, State};
 use jute::{
     backend::notebook::{
@@ -101,11 +103,217 @@ impl BridgeRequester for MockBridge {
             self.calls.lock().await.push((method.to_string(), params));
             let mut responses = self.responses.lock().await;
             if responses.is_empty() {
-                Ok(json!({}))
+                Err(BridgeError::Handler {
+                    code: "missing_mock_response".to_string(),
+                    message: format!("no mock bridge response queued for {method}"),
+                })
             } else {
                 responses.remove(0)
             }
         })
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+struct StoreBackedBridge {
+    state: Arc<State>,
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+#[cfg(feature = "datasource-introspect")]
+impl StoreBackedBridge {
+    fn new(state: Arc<State>) -> Self {
+        Self {
+            state,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+impl BridgeRequester for StoreBackedBridge {
+    fn listener_registered(&self) -> bool {
+        true
+    }
+
+    fn window_alive(&self) -> bool {
+        true
+    }
+
+    fn notebook_open(&self) -> bool {
+        true
+    }
+
+    fn request<'a>(
+        &'a self,
+        method: &'static str,
+        params: Value,
+        _timeout: Duration,
+    ) -> BridgeRequestFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .await
+                .push((method.to_string(), params.clone()));
+            match method {
+                "notebook.snapshot" => Ok(snapshot_bridge_value(&self.state)),
+                "notebook.insert_cell" => {
+                    let kind = match required_str(method, &params, "kind")?.as_str() {
+                        "code" => CellKind::Code,
+                        "markdown" => CellKind::Markdown,
+                        "raw" => CellKind::Raw,
+                        kind => {
+                            return Err(mock_bridge_error(format!(
+                                "unsupported notebook.insert_cell kind {kind:?}"
+                            )));
+                        }
+                    };
+                    let source = required_str(method, &params, "source")?;
+                    let after_id = params
+                        .get("after_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let last_edited_by = params
+                        .get("last_edited_by")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let delta = self
+                        .state
+                        .get_notebook()
+                        .apply(NotebookOp::InsertCell {
+                            kind,
+                            after_id,
+                            source,
+                            last_edited_by,
+                            code_type: None,
+                        })
+                        .map_err(|error| mock_bridge_error(error.to_string()))?;
+                    let DeltaKind::CellInserted { cell, .. } = delta.kind else {
+                        return Err(mock_bridge_error(
+                            "notebook.insert_cell did not produce an insert delta",
+                        ));
+                    };
+                    Ok(json!({ "id": cell.id, "version": delta.version }))
+                }
+                "notebook.write_cell" => {
+                    let id = required_str(method, &params, "id")?;
+                    let source = required_str(method, &params, "source")?;
+                    let expected_version = required_u64(method, &params, "expected_version")?;
+                    let last_edited_by = params
+                        .get("last_edited_by")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let delta = self
+                        .state
+                        .get_notebook()
+                        .apply(NotebookOp::WriteCell {
+                            id,
+                            source,
+                            expected_version: Some(expected_version),
+                            last_edited_by,
+                        })
+                        .map_err(|error| mock_bridge_error(error.to_string()))?;
+                    Ok(json!({ "version": delta.version }))
+                }
+                "notebook.set_cell_metadata" => {
+                    let id = required_str(method, &params, "id")?;
+                    let expected_version = required_u64(method, &params, "expected_version")?;
+                    let datasource_setup = params
+                        .get("patch")
+                        .and_then(|patch| patch.get("spur"))
+                        .and_then(|spur| spur.get("datasource_setup"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    if !datasource_setup {
+                        return Err(mock_bridge_error(
+                            "StoreBackedBridge only supports datasource setup metadata",
+                        ));
+                    }
+                    let delta = self
+                        .state
+                        .get_notebook()
+                        .apply(NotebookOp::MarkDatasourceSetupCell {
+                            id,
+                            expected_version,
+                        })
+                        .map_err(|error| mock_bridge_error(error.to_string()))?;
+                    Ok(json!({ "ok": true, "version": delta.version }))
+                }
+                method => Err(mock_bridge_error(format!(
+                    "StoreBackedBridge does not support {method}"
+                ))),
+            }
+        })
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn required_str(
+    method: &'static str,
+    params: &Value,
+    key: &'static str,
+) -> Result<String, BridgeError> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| mock_bridge_error(format!("{method} missing string field {key}")))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn required_u64(
+    method: &'static str,
+    params: &Value,
+    key: &'static str,
+) -> Result<u64, BridgeError> {
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| mock_bridge_error(format!("{method} missing integer field {key}")))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn mock_bridge_error(message: impl Into<String>) -> BridgeError {
+    BridgeError::Handler {
+        code: "mock_bridge_error".to_string(),
+        message: message.into(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn snapshot_bridge_value(state: &State) -> Value {
+    let (root, _) = state.get_notebook().snapshot();
+    Value::Array(root.cells.iter().map(snapshot_cell_bridge_value).collect())
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn snapshot_cell_bridge_value(cell: &Cell) -> Value {
+    let (id, metadata, source, kind, exec_count) = match cell {
+        Cell::Raw(cell) => (&cell.id, &cell.metadata, &cell.source, "raw", None),
+        Cell::Markdown(cell) => (&cell.id, &cell.metadata, &cell.source, "markdown", None),
+        Cell::Code(cell) => (
+            &cell.id,
+            &cell.metadata,
+            &cell.source,
+            "code",
+            cell.execution_count,
+        ),
+    };
+    json!({
+        "id": id.clone().unwrap_or_default(),
+        "kind": kind,
+        "version": metadata.spur.as_ref().map(|spur| spur.version).unwrap_or_default(),
+        "exec_count": exec_count,
+        "status": "idle",
+        "source": multiline_source(source),
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn multiline_source(source: &MultilineString) -> String {
+    match source {
+        MultilineString::Single(source) => source.clone(),
+        MultilineString::Multi(lines) => lines.join(""),
     }
 }
 
@@ -1154,34 +1362,7 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
             "metadata": {},
             "nbformat_minor": 5,
             "nbformat": 4,
-            "cells": [
-                {
-                    "cell_type": "code",
-                    "id": "code-run-define",
-                    "metadata": {
-                        "spur": {
-                            "version": 1,
-                            "code_type": "python"
-                        }
-                    },
-                    "source": "",
-                    "execution_count": null,
-                    "outputs": []
-                },
-                {
-                    "cell_type": "code",
-                    "id": "code-run-print",
-                    "metadata": {
-                        "spur": {
-                            "version": 1,
-                            "code_type": "python"
-                        }
-                    },
-                    "source": "",
-                    "execution_count": null,
-                    "outputs": []
-                }
-            ]
+            "cells": []
         }))
         .expect("notebook serializes"),
     )
@@ -1204,6 +1385,10 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
         }))
         .await;
     assert!(open.ok, "{:?}", open.error);
+    state.get_notebook().load(
+        path.clone(),
+        notebook_with_code_cells(&["code-run-define", "code-run-print"]),
+    );
 
     let slot_id = notebook_slot_id(path.to_string_lossy().as_ref());
     let kernel = start_local_kernel("python3", None)
@@ -1388,29 +1573,23 @@ async fn canonical_demo_attach_csv_runs_setup_and_renders_html_chart() {
     .await
     .expect("csv fixture writes");
     let notebook_path = temp_dir.path().join("analysis.ipynb");
-    let empty_notebook = json!({
-        "metadata": {},
-        "nbformat_minor": 5,
-        "nbformat": 4,
-        "cells": []
-    });
+    let notebook_root = notebook_with_code_cells(&["code-canonical-demo-chart"]);
+    let notebook_json = serde_json::to_value(&notebook_root).expect("notebook serializes");
     tokio::fs::write(
         &notebook_path,
-        serde_json::to_vec_pretty(&empty_notebook).expect("empty notebook serializes"),
+        serde_json::to_vec_pretty(&notebook_json).expect("notebook fixture serializes"),
     )
     .await
     .expect("notebook fixture writes");
 
     let state = Arc::new(State::new());
-    let notebook_root: jute::backend::notebook::NotebookRoot =
-        serde_json::from_value(empty_notebook).expect("empty notebook parses");
     state
         .get_notebook()
         .load(notebook_path.clone(), notebook_root);
 
     let control = NotebookDaemonControl::new_with_parts_for_test(
         Arc::new(AgentBridge::new()),
-        Arc::new(MockBridge::default()),
+        Arc::new(StoreBackedBridge::new(state.clone())),
         state.clone(),
         Arc::new(RecordingWindowOps::default()),
         None,

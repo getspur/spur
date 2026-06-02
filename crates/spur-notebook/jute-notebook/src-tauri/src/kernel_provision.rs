@@ -28,14 +28,13 @@ pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     ensure_python3_kernelspec_in_dir(&spur_jupyter, &runner).await
 }
 
-/// Return whether the bundled `python3` kernelspec is already installed and usable.
+/// Return whether a `python3` kernelspec is already discoverable.
 pub async fn python3_kernelspec_is_valid() -> bool {
     let _guard = PYTHON3_KERNELSPEC_LOCK.lock().await;
-    let Some(spur_jupyter) = environment::spur_jupyter_dir() else {
-        return false;
-    };
-
-    python3_kernelspec_is_valid_in_dir(&spur_jupyter).await
+    environment::list_kernels(None)
+        .await
+        .into_iter()
+        .any(|(path, _spec)| path.file_name().and_then(|name| name.to_str()) == Some("python3"))
 }
 
 /// Ensure the bundled `deno` kernelspec is installed for this app.
@@ -225,6 +224,7 @@ where
     }
 }
 
+#[cfg(test)]
 async fn python3_kernelspec_is_valid_in_dir(spur_jupyter: &std::path::Path) -> bool {
     kernelspec_is_valid(&python3_kernelspec_path(spur_jupyter)).await
 }
@@ -495,6 +495,29 @@ mod tests {
 
     use super::*;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     struct PanicRunner;
 
     impl ProvisionRunner for PanicRunner {
@@ -656,6 +679,45 @@ mod tests {
         .unwrap();
 
         assert!(python3_kernelspec_is_valid_in_dir(&root).await);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn python3_kernelspec_validity_probe_honors_jupyter_path() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-path-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let jupyter_root = root.join("jupyter");
+        let kernelspec = jupyter_root
+            .join("kernels")
+            .join("python3")
+            .join("kernel.json");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::create_dir_all(kernelspec.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &kernelspec,
+            serde_json::json!({
+                "argv": [
+                    "/usr/bin/python3",
+                    "-m",
+                    "ipykernel_launcher",
+                    "-f",
+                    "{connection_file}"
+                ],
+                "display_name": "Python 3",
+                "language": "python"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _jupyter_path = EnvVarGuard::set("JUPYTER_PATH", jupyter_root.as_os_str());
+
+        assert!(python3_kernelspec_is_valid().await);
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
