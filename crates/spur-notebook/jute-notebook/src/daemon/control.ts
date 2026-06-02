@@ -60,8 +60,10 @@ export type AddApiDatasourceFromImportInput = Omit<
 >;
 export type AttachSavedConnectionInput = Omit<
   AttachSavedConnectionCommand,
-  "command"
->;
+  "command" | "credentials"
+> & {
+  credentials?: [string, string][];
+};
 export type DeleteSavedConnectionInput = Omit<
   DeleteSavedConnectionCommand,
   "command"
@@ -157,6 +159,7 @@ export function attachSavedConnectionCommand(
   return {
     command: "attach_saved_connection",
     name: input.name,
+    credentials: input.credentials ?? [],
   };
 }
 
