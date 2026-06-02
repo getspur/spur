@@ -37,10 +37,15 @@ type NotebookStoreActions = {
 
 const INITIAL_CELL_VERSION = 1;
 const AUTOSAVE_DEBOUNCE_MS = 5000;
-type SupportedKernelSpecName = "deno" | "python3";
+type SupportedKernelSpecName = "deno" | "python3" | "evcxr" | "gonb";
 
 function supportedKernelSpecName(name?: string): SupportedKernelSpecName {
-  return name === "deno" || name === "python3" ? name : "python3";
+  return name === "deno" ||
+    name === "python3" ||
+    name === "evcxr" ||
+    name === "gonb"
+    ? name
+    : "python3";
 }
 
 function kernelSpecNameFromMetadata(
