@@ -270,6 +270,14 @@ pub fn slot_id_for_spec(path: &str, spec_name: &str) -> String {
     format!("{}#{spec_name}", notebook_slot_id(path))
 }
 
+/// Recover the notebook path from a notebook-derived kernel slot ID.
+pub fn notebook_path_from_slot_id<'a>(slot_id: &'a str, spec_name: &str) -> Option<&'a str> {
+    let path = slot_id.strip_prefix(NOTEBOOK_SLOT_PREFIX)?;
+    let spec_suffix = format!("#{spec_name}");
+    let path = path.strip_suffix(spec_suffix.as_str()).unwrap_or(path);
+    (!path.is_empty()).then_some(path)
+}
+
 /// Derive the fallback kernel slot ID for windows without a notebook path.
 pub(crate) fn window_slot_id(label: &str) -> String {
     format!("window:{label}")
@@ -488,6 +496,27 @@ mod tests {
 
         assert_eq!(restarted_slot.record_start("python3".to_string()), 1);
         assert_eq!(restarted_slot.generation(), 1);
+    }
+
+    #[test]
+    fn notebook_path_from_slot_id_strips_prefix_and_spec_suffix() {
+        let path = "/tmp/notebooks/polyglot.ipynb";
+
+        assert_eq!(
+            notebook_path_from_slot_id(&slot_id_for_spec(path, "python3"), "python3"),
+            Some(path)
+        );
+    }
+
+    #[test]
+    fn notebook_path_from_slot_id_accepts_unsuffixed_notebook_slot() {
+        let path = "/tmp/notebooks/ui#draft.ipynb";
+
+        assert_eq!(
+            notebook_path_from_slot_id(&notebook_slot_id(path), "python3"),
+            Some(path)
+        );
+        assert_eq!(notebook_path_from_slot_id("mcp:kernel", "python3"), None);
     }
 
     #[test]

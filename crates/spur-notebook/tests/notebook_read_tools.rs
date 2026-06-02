@@ -1009,7 +1009,7 @@ async fn start_kernel_then_stop_kernel_cycles_slot() {
     };
     let state = Arc::new(State::new());
     let slot_id = "mcp:notebook-read-tools-stop".to_string();
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     let (generation, previous) =
@@ -1047,7 +1047,7 @@ async fn run_cell_collects_events_against_in_process_kernel_mock() {
     };
     let state = Arc::new(State::new());
     let slot_id = "mcp:notebook-read-tools-run".to_string();
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
@@ -1122,7 +1122,7 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
     assert!(open.ok, "{:?}", open.error);
 
     let slot_id = notebook_slot_id(path.to_string_lossy().as_ref());
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
@@ -1273,7 +1273,7 @@ async fn canonical_demo_attach_csv_runs_setup_and_renders_html_chart() {
     assert!(setup_source.contains("sales"));
 
     let slot_id = "mcp:notebook-read-tools-canonical-demo".to_string();
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
