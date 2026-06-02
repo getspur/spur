@@ -401,4 +401,3 @@ var spur = newSpurPorts(
     portMime,
 )
 // --- end SPUR port helper bootstrap ---
-%%

@@ -558,6 +558,9 @@ async fn rust_go_ports_round_trip_through_python() {
         "go-get-t",
         &go_slot_id,
         concat!(
+            // gonb wraps statements after `%%` into func main(); declarations
+            // (the injected spur helper) persist from the session bootstrap.
+            "%%\n",
             "records, err := spur.Get(\"t\")\n",
             "if err != nil { panic(err) }\n",
             "if len(records) != 1 { panic(fmt.Sprintf(\"expected 1 record, got %d\", len(records))) }\n",
@@ -595,6 +598,7 @@ async fn rust_go_ports_round_trip_through_python() {
         "go-put-t",
         &go_slot_id,
         concat!(
+            "%%\n",
             "records, err := spur.Get(\"t\")\n",
             "if err != nil { panic(err) }\n",
             "if len(records) == 0 { panic(\"expected records from t\") }\n",

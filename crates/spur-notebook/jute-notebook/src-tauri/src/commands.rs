@@ -1590,7 +1590,6 @@ pub async fn run_cell_events(
     commands::run_cell(&conn, &dispatch.wrapped_code).await
 }
 
-/// Inject the SPUR port helper into a fresh kernel session.
 /// Select the per-language SPUR port bootstrap injected once per kernel session.
 ///
 /// The bootstrap source is static; the notebook port root is bound at runtime
@@ -1605,6 +1604,7 @@ fn bootstrap_source_for_spec(spec_name: &str) -> &'static str {
     }
 }
 
+/// Inject the SPUR port helper into a fresh kernel session.
 pub async fn inject_port_bootstrap(
     conn: &crate::backend::KernelConnection,
     spec_name: &str,
