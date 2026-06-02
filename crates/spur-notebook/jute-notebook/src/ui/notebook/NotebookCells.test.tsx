@@ -29,7 +29,10 @@ vi.mock("./CellInput", () => ({
   ),
 }));
 
-function createNotebookStore(startedAt: number) {
+function createNotebookStore(
+  startedAt: number,
+  compileCurrent: string | null = null,
+) {
   return createStore<any>()(() => ({
     serverState: {
       lastAppliedVersion: 0,
@@ -47,7 +50,7 @@ function createNotebookStore(startedAt: number) {
             executionCount: undefined,
             compile: {
               phase: "compiling",
-              current: null,
+              current: compileCurrent,
               startedAt,
             },
             outputs: [],
@@ -87,7 +90,7 @@ describe("NotebookCells", () => {
   });
 
   test("renders compiling chip with elapsed seconds from compile start", () => {
-    render(<NotebookCells />);
+    const { unmount } = render(<NotebookCells />);
 
     expect(screen.getByText("Compiling… ⏱ 5s")).toBeInTheDocument();
 
@@ -96,5 +99,20 @@ describe("NotebookCells", () => {
     });
 
     expect(screen.getByText("Compiling… ⏱ 6s")).toBeInTheDocument();
+
+    unmount();
+
+    vi.setSystemTime(new Date("2026-06-02T00:00:05.400Z"));
+    const startedAt = new Date("2026-06-02T00:00:00.000Z").getTime();
+    mocks.notebook = {
+      store: createNotebookStore(startedAt, "smawk"),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    expect(screen.getByText("Compiling smawk… ⏱ 5s")).toBeInTheDocument();
   });
 });

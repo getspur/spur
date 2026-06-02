@@ -6,6 +6,9 @@ target/
 # Tauri
 /src-tauri/gen/
 
+# ts-rs default export dir (canonical bindings live in src/bindings/)
+/src-tauri/bindings/
+
 # Sidecar binaries
 /src-tauri/binaries/uv-*
 /src-tauri/binaries/*

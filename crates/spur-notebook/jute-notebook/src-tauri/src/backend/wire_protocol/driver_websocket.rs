@@ -123,6 +123,10 @@ pub async fn create_websocket_connection(
     let (shell_tx, shell_rx) = async_channel::bounded(8);
     let (control_tx, control_rx) = async_channel::bounded(8);
     let (iopub_tx, _) = broadcast::channel(1024);
+    // WebSocket connections don't own a kernel process, so there is no stderr to
+    // mirror. Hold an unfed sender so `subscribe_process_stderr()` yields an
+    // empty stream rather than erroring.
+    let (process_stderr_tx, _) = broadcast::channel::<String>(16);
     let reply_tx_map = Arc::new(DashMap::new());
     let signal = CancellationToken::new();
 
@@ -130,6 +134,7 @@ pub async fn create_websocket_connection(
         shell_tx,
         control_tx,
         iopub_tx: iopub_tx.clone(),
+        process_stderr_tx,
         reply_tx_map: reply_tx_map.clone(),
         signal: signal.clone(),
         _drop_guard: Arc::new(signal.clone().drop_guard()),

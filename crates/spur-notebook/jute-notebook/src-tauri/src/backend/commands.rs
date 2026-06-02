@@ -135,6 +135,23 @@ impl CompilePhaseTracker {
         self.emit_once(CompilePhase::Running)
     }
 
+    /// Observe a single cargo compile unit (one `Compiling <crate>` line).
+    ///
+    /// Emits a `Compiling` progress update carrying the crate name while the
+    /// cell is still compiling. Returns `None` once execution output has begun
+    /// (running phase) or for the [`CompileProgressMode::None`] mode. This does
+    /// not touch the [`Self::on_busy`] once-guard, so coarse and per-crate
+    /// progress remain independent.
+    pub fn on_compile_unit(&mut self, krate: String) -> Option<CompileProgress> {
+        if self.mode == CompileProgressMode::None || self.running_emitted {
+            return None;
+        }
+        Some(CompileProgress {
+            phase: CompilePhase::Compiling,
+            current: Some(krate),
+        })
+    }
+
     fn emit_once(&mut self, phase: CompilePhase) -> Option<CompileProgress> {
         if self.mode == CompileProgressMode::None {
             return None;
@@ -154,6 +171,24 @@ impl CompilePhaseTracker {
             current: None,
         })
     }
+}
+
+/// Parse a cargo `   Compiling <crate> v<ver>` progress line.
+///
+/// Returns the crate name when `line` (after any leading whitespace) is a cargo
+/// "Compiling" status line, and `None` for any other output. This is a pure
+/// function so it can be unit-tested without a kernel.
+pub fn parse_cargo_progress(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("Compiling ")?;
+    let mut parts = rest.split_whitespace();
+    let krate = parts.next()?;
+    // Cargo follows the crate name with a `v<version>` token; require it so we
+    // don't match unrelated lines that merely start with "Compiling ".
+    let version = parts.next()?;
+    if !version.starts_with('v') {
+        return None;
+    }
+    Some(krate.to_string())
 }
 
 async fn send_compile_progress(
@@ -182,6 +217,14 @@ pub async fn run_cell_with_mode(
     mode: CompileProgressMode,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
     let mut iopub_rx = conn.subscribe_iopub();
+    // evcxr writes `Compiling <crate>` progress to its child stderr rather than
+    // over the wire protocol. Subscribe only for Cargo-backed cells; gonb's Go
+    // build emits nothing on success, so there is nothing to forward there.
+    let mut process_stderr_rx = if mode == CompileProgressMode::Cargo {
+        Some(conn.subscribe_process_stderr())
+    } else {
+        None
+    };
     let request = KernelMessage::new(
         KernelMessageType::ExecuteRequest,
         ExecuteRequest {
@@ -206,7 +249,37 @@ pub async fn run_cell_with_mode(
         let mut status = KernelStatus::Busy;
 
         while status != KernelStatus::Idle {
-            let msg = iopub_rx.recv().await.map_err(|_| Error::KernelDisconnect)?;
+            let msg = tokio::select! {
+                // Forward cargo crate updates as they arrive on the child's
+                // stderr. A broadcast `Lagged`/`Closed` must never error the
+                // run, so we skip on either and stop polling once closed.
+                line = async {
+                    match process_stderr_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if process_stderr_rx.is_some() => {
+                    match line {
+                        Ok(line) => {
+                            if let Some(krate) = parse_cargo_progress(&line) {
+                                send_compile_progress(
+                                    &tx,
+                                    compile_tracker.on_compile_unit(krate),
+                                )
+                                .await;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            process_stderr_rx = None;
+                        }
+                    }
+                    continue;
+                }
+                msg = iopub_rx.recv() => {
+                    msg.map_err(|_| Error::KernelDisconnect)?
+                }
+            };
             if msg
                 .parent_header
                 .as_ref()
@@ -325,5 +398,58 @@ mod tests {
 
         let mut tracker = CompilePhaseTracker::new(CompileProgressMode::None);
         assert!(tracker.on_output().is_none());
+    }
+
+    #[test]
+    fn parse_cargo_progress_extracts_crate_name() {
+        assert_eq!(
+            parse_cargo_progress("   Compiling smawk v0.3.2"),
+            Some("smawk".to_string())
+        );
+        assert_eq!(
+            parse_cargo_progress("   Compiling textwrap v0.16.2"),
+            Some("textwrap".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_cargo_progress_ignores_non_compiling_lines() {
+        assert_eq!(parse_cargo_progress("hello from a cell"), None);
+        assert_eq!(parse_cargo_progress(""), None);
+        assert_eq!(parse_cargo_progress("Compiling"), None);
+        assert_eq!(parse_cargo_progress("   Finished dev [unoptimized]"), None);
+    }
+
+    #[test]
+    fn on_compile_unit_emits_crate_while_compiling() {
+        let mut tracker = CompilePhaseTracker::new(CompileProgressMode::Cargo);
+        _ = tracker.on_busy();
+
+        let progress = tracker
+            .on_compile_unit("smawk".to_string())
+            .expect("cargo mode emits crate updates while compiling");
+        assert_eq!(progress.phase, CompilePhase::Compiling);
+        assert_eq!(progress.current, Some("smawk".to_string()));
+
+        // Crate updates keep flowing and do not consume the on_busy once-guard.
+        let next = tracker
+            .on_compile_unit("textwrap".to_string())
+            .expect("cargo mode keeps emitting crate updates");
+        assert_eq!(next.current, Some("textwrap".to_string()));
+    }
+
+    #[test]
+    fn on_compile_unit_stops_after_output_begins() {
+        let mut tracker = CompilePhaseTracker::new(CompileProgressMode::Cargo);
+        _ = tracker.on_busy();
+        _ = tracker.on_output();
+
+        assert!(tracker.on_compile_unit("smawk".to_string()).is_none());
+    }
+
+    #[test]
+    fn on_compile_unit_suppressed_for_none_mode() {
+        let mut tracker = CompilePhaseTracker::new(CompileProgressMode::None);
+        assert!(tracker.on_compile_unit("smawk".to_string()).is_none());
     }
 }
