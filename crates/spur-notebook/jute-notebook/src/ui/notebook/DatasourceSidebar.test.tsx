@@ -9,7 +9,12 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import type { DatasourceEntry } from "@/bindings";
+import type {
+  ConnectionTemplate,
+  DaemonControlCommand,
+  DaemonControlResponse,
+  DatasourceEntry,
+} from "@/bindings";
 
 import DatasourceSidebar from "./DatasourceSidebar";
 
@@ -81,6 +86,93 @@ function datasourceResult(overrides: Partial<DatasourceEntry> = {}) {
   };
 }
 
+function savedConnectionTemplate(
+  overrides: Partial<ConnectionTemplate> = {},
+): ConnectionTemplate {
+  return {
+    name: "stripe_reporting",
+    provider: "stripe",
+    group: "API",
+    manifestToml: "name = 'stripe'",
+    tables: [
+      {
+        name: "stripe_charges",
+        columns: [{ name: "id", sqlType: "VARCHAR" }],
+        rowCount: null,
+      },
+      {
+        name: "stripe_customers",
+        columns: [{ name: "customer_id", sqlType: "VARCHAR" }],
+        rowCount: null,
+      },
+    ],
+    credentialEnvVars: ["STRIPE_API_KEY"],
+    createdAt: "2026-06-01T12:00:00Z",
+    updatedAt: "2026-06-01T12:00:00Z",
+    ...overrides,
+  };
+}
+
+function defaultDaemonResponse(
+  command: DaemonControlCommand,
+): DaemonControlResponse {
+  if (command.command === "list_datasources") {
+    return { ok: true, result: { type: "datasources", data: [] } };
+  }
+
+  if (command.command === "list_saved_connections") {
+    return { ok: true, result: { type: "savedConnections", data: [] } };
+  }
+
+  if (command.command === "attach_datasource") {
+    const overrides: Partial<DatasourceEntry> = {
+      name: command.name,
+      path: command.path,
+      kind: command.path.endsWith(".parquet") ? "parquet" : "csv",
+      group: command.group,
+    };
+    if (command.name === "inventory") {
+      overrides.columns = [{ name: "sku", sqlType: "VARCHAR" }];
+      overrides.rowCount = null;
+    }
+
+    return {
+      ok: true,
+      result: datasourceResult(overrides),
+    };
+  }
+
+  if (command.command === "attach_saved_connection") {
+    return {
+      ok: true,
+      result: {
+        type: "attachedSavedConnection",
+        data: {
+          entry: datasourceEntry({
+            name: command.name,
+            path: `api://${command.name}`,
+            kind: "api_tables",
+            group: "API",
+            columns: [],
+            rowCount: null,
+            tables: savedConnectionTemplate().tables,
+          }),
+          missing_env_vars: [],
+        },
+      },
+    };
+  }
+
+  if (
+    command.command === "detach_datasource" ||
+    command.command === "delete_saved_connection"
+  ) {
+    return { ok: true, result: { type: "empty", data: {} } };
+  }
+
+  return { ok: true, result: { type: "empty", data: {} } };
+}
+
 describe("DatasourceSidebar", () => {
   afterEach(() => {
     cleanup();
@@ -88,10 +180,9 @@ describe("DatasourceSidebar", () => {
 
   beforeEach(() => {
     daemonControlMock.mockReset();
-    daemonControlMock.mockResolvedValue({
-      ok: true,
-      result: { type: "datasources", data: [] },
-    });
+    daemonControlMock.mockImplementation((command: DaemonControlCommand) =>
+      Promise.resolve(defaultDaemonResponse(command)),
+    );
     dragDropCallbacks.length = 0;
     eventCallbacks.clear();
     listenMock.mockReset();
@@ -114,26 +205,6 @@ describe("DatasourceSidebar", () => {
   });
 
   test("sidebar_attach_emits_command", async () => {
-    daemonControlMock
-      .mockResolvedValueOnce({
-        ok: true,
-        result: { type: "datasources", data: [] },
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        result: datasourceResult(),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        result: datasourceResult({
-          name: "inventory",
-          path: "/tmp/inventory.parquet",
-          kind: "parquet",
-          group: "quarterly",
-          columns: [{ name: "sku", sqlType: "VARCHAR" }],
-          rowCount: null,
-        }),
-      });
     openMock.mockResolvedValueOnce("/tmp/inventory.parquet");
 
     render(<DatasourceSidebar />);
@@ -280,22 +351,28 @@ describe("DatasourceSidebar", () => {
   });
 
   test("mount_fetch_populates_list_without_datasources_changed_event", async () => {
-    daemonControlMock.mockResolvedValueOnce({
-      ok: true,
-      result: {
-        type: "datasources",
-        data: [
-          datasourceEntry({
-            name: "restored",
-            path: "/tmp/restored.duckdb",
-            kind: "duck_db",
-            group: "SPUR",
-            columns: [],
-            rowCount: null,
-            tables: [],
-          }),
-        ],
-      },
+    daemonControlMock.mockImplementation((command: DaemonControlCommand) => {
+      if (command.command === "list_datasources") {
+        return Promise.resolve({
+          ok: true,
+          result: {
+            type: "datasources",
+            data: [
+              datasourceEntry({
+                name: "restored",
+                path: "/tmp/restored.duckdb",
+                kind: "duck_db",
+                group: "SPUR",
+                columns: [],
+                rowCount: null,
+                tables: [],
+              }),
+            ],
+          },
+        });
+      }
+
+      return Promise.resolve(defaultDaemonResponse(command));
     });
 
     render(<DatasourceSidebar />);
@@ -310,16 +387,6 @@ describe("DatasourceSidebar", () => {
   });
 
   test("remove_button_dispatches_detach_datasource", async () => {
-    daemonControlMock
-      .mockResolvedValueOnce({
-        ok: true,
-        result: { type: "datasources", data: [] },
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        result: { type: "empty", data: null },
-      });
-
     render(<DatasourceSidebar />);
 
     await waitFor(() =>
@@ -337,6 +404,112 @@ describe("DatasourceSidebar", () => {
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "detach_datasource",
         name: "sales",
+      }),
+    );
+  });
+
+  test("saved_connections_render_below_attached_and_support_expand_attach_delete", async () => {
+    const savedConnection = savedConnectionTemplate();
+    daemonControlMock.mockImplementation((command: DaemonControlCommand) => {
+      if (command.command === "list_datasources") {
+        return Promise.resolve({
+          ok: true,
+          result: {
+            type: "datasources",
+            data: [
+              datasourceEntry({
+                name: "attached_sales",
+                path: "/tmp/attached_sales.csv",
+                group: "In notebook",
+              }),
+            ],
+          },
+        });
+      }
+
+      if (command.command === "list_saved_connections") {
+        return Promise.resolve({
+          ok: true,
+          result: { type: "savedConnections", data: [savedConnection] },
+        });
+      }
+
+      if (command.command === "attach_saved_connection") {
+        return Promise.resolve({
+          ok: true,
+          result: {
+            type: "attachedSavedConnection",
+            data: {
+              entry: datasourceEntry({
+                name: command.name,
+                path: `api://${command.name}`,
+                kind: "api_tables",
+                group: "API",
+                columns: [],
+                rowCount: null,
+                tables: savedConnection.tables,
+              }),
+              missing_env_vars: ["STRIPE_API_KEY"],
+            },
+          },
+        });
+      }
+
+      return Promise.resolve(defaultDaemonResponse(command));
+    });
+
+    render(<DatasourceSidebar />);
+
+    const attachedHeading = await screen.findByText("In this notebook");
+    const savedHeading = await screen.findByText("Saved connections");
+    expect(
+      attachedHeading.compareDocumentPosition(savedHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    expect(screen.getByText("attached_sales")).toBeInTheDocument();
+    expect(screen.getByText("stripe_reporting")).toBeInTheDocument();
+    expect(screen.queryByText("stripe_charges")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand saved connection stripe_reporting",
+      }),
+    );
+
+    expect(screen.getByText("stripe · 2 table-functions")).toBeInTheDocument();
+    expect(screen.getByText("STRIPE_API_KEY")).toBeInTheDocument();
+    expect(screen.getByText("stripe_charges")).toBeInTheDocument();
+    expect(screen.getByText("stripe_customers")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Attach saved connection stripe_reporting",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "attach_saved_connection",
+        name: "stripe_reporting",
+      }),
+    );
+    expect(
+      await screen.findByText(
+        "Open the Add REST API wizard to supply STRIPE_API_KEY.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Delete saved connection stripe_reporting",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "delete_saved_connection",
+        name: "stripe_reporting",
       }),
     );
   });
