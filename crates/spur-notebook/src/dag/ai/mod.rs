@@ -1,5 +1,7 @@
 //! AI-node backend seam for the reactive DAG engine (Tier 1).
 
+pub mod acp_backend;
+
 use tokio_util::sync::CancellationToken;
 
 /// One consumed upstream port, already rendered to text for prompt context.

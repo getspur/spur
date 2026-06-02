@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+agent-client-protocol = { workspace = true }
 arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
 arrow-ipc = { workspace = true }
@@ -22,11 +23,13 @@ chrono.workspace = true
 directories.workspace = true
 duckdb = { workspace = true, optional = true, features = ["bundled"] }
 fs4 = "0.13"
+futures = { workspace = true }
 jute = { path = "jute-notebook/src-tauri" }
 memmap2 = { workspace = true }
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+spur-acp.workspace = true
 spur-core.workspace = true
 spur-rest-table-gateway = { path = "rest-table-gateway", default-features = false, optional = true }
 tauri = { version = "2.0.4", features = ["devtools", "macos-private-api"] }
@@ -44,7 +47,6 @@ url = "2.5.0"
 uuid.workspace = true
 
 [dev-dependencies]
-spur-acp = { path = "../spur-acp" }
 tauri = { version = "2.0.4", features = ["test"] }
 tempfile = "3"
 wiremock = "0.6"
