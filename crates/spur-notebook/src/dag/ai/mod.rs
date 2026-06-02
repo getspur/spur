@@ -1,6 +1,9 @@
 //! AI-node backend seam for the reactive DAG engine (Tier 1).
 
 pub mod acp_backend;
+pub mod context;
+
+pub use context::render_port_context;
 
 use tokio_util::sync::CancellationToken;
 
