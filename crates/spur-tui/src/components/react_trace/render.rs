@@ -833,7 +833,11 @@ impl ReactTrace {
                 .unwrap_or(false);
             if !hit {
                 let spinner_frame = spinner::frame(spinner::BRAILLE, self.tick_counter as u32);
-                let lines = self.build_display_lines(spinner_frame, lineage);
+                let lines = self.build_display_lines(
+                    spinner_frame,
+                    lineage,
+                    Some(effective_width.saturating_sub(3)),
+                );
                 let built: Vec<Line<'static>> = lines
                     .into_iter()
                     .flat_map(|l| wrap_line_to_width(&l, effective_width))
@@ -854,7 +858,11 @@ impl ReactTrace {
         #[cfg(feature = "markdown")]
         let wrapped_owned: Vec<Line<'static>> = {
             let spinner_frame = spinner::frame(spinner::BRAILLE, self.tick_counter as u32);
-            let lines = self.build_display_lines(spinner_frame, lineage);
+            let lines = self.build_display_lines(
+                spinner_frame,
+                lineage,
+                Some(effective_width.saturating_sub(3)),
+            );
             lines
                 .into_iter()
                 .flat_map(|l| wrap_line_to_width(&l, effective_width))

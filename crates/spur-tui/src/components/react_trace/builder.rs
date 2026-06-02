@@ -40,11 +40,19 @@ impl ReactTrace {
     /// Build the flat sequence of display lines produced by the trace,
     /// before wrapping. Shared between `render` and `build_virtual_rows`.
     ///
+    /// `body_width` is the available body width (terminal columns) used to
+    /// size markdown tables so they pick the narrow-terminal records fallback
+    /// instead of emitting a full-width grid that the caller's
+    /// `wrap_line_to_width` would later split mid-border. Pass
+    /// `Some(width.saturating_sub(3))` to account for the 3-space body indent;
+    /// `None` disables width-aware table sizing (test helpers only).
+    ///
     /// All returned lines have `'static` content.
     pub(super) fn build_display_lines(
         &self,
         spinner_frame: &str,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+        body_width: Option<u16>,
     ) -> Vec<Line<'static>> {
         let theme = &self.theme;
         let tok = |name: &str| resolve_token(theme, name, ColorDepth::Truecolor);
@@ -180,7 +188,7 @@ impl ReactTrace {
                             render_agent_message_body(
                                 stream,
                                 &empty_state,
-                                None,
+                                body_width,
                                 |line| lines.push(line),
                                 |_id, _h| unreachable!("secondary path passes empty fence_state"),
                             );
