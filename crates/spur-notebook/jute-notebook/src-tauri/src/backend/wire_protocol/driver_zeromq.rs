@@ -70,6 +70,7 @@ pub async fn create_zeromq_connection(
     stdin_port: u16,
     heartbeat_port: u16,
     signing_key: &str,
+    process_stderr_tx: broadcast::Sender<String>,
 ) -> Result<KernelConnection, Error> {
     let (shell_tx, shell_rx) = async_channel::bounded(8);
     let (control_tx, control_rx) = async_channel::bounded(8);
@@ -81,6 +82,7 @@ pub async fn create_zeromq_connection(
         shell_tx,
         control_tx,
         iopub_tx: iopub_tx.clone(),
+        process_stderr_tx,
         reply_tx_map: reply_tx_map.clone(),
         signal: signal.clone(),
         _drop_guard: Arc::new(signal.clone().drop_guard()),
