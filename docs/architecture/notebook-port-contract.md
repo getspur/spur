@@ -104,28 +104,47 @@ IPC file bytes with `tableToIPC(table, "file")` and renames the temp manifest
 
 ## Implementations
 
-There are three hand-written implementations:
+This on-disk contract is implemented by three hand-written bodies:
 
-- Rust `PortStore`: `crates/spur-notebook/src/dag/ports.rs:101-242`
-- `python_bootstrap`: `crates/spur-notebook/src/dag/inject.rs:20-271`
-- `javascript_bootstrap`: `crates/spur-notebook/src/dag/inject.rs:273-733`
+- Rust `PortStore`, including `impl PortStore::put` and
+  `impl PortStore::persist_manifest`.
+- Python helper body `crates/spur-notebook/jute-notebook/src-tauri/src/assets/ports_bootstrap.py`,
+  exposed by `python_bootstrap`.
+- JavaScript/Deno helper body `crates/spur-notebook/jute-notebook/src-tauri/src/assets/ports_bootstrap.js`,
+  exposed by `javascript_bootstrap`.
+
+The helper bodies do not receive a wrapped per-cell root literal. Rust computes
+the root with `notebook_port_root` and supplies it to kernels as
+`SPUR_NOTEBOOK_PORT_ROOT` via `apply_notebook_port_root_env`; the Python and
+JavaScript helpers read that environment variable when they install `spur`.
+
+The helper is injected once for each fresh kernel session by
+`inject_port_bootstrap`, using a silent Jupyter `execute_request`, before user
+cells run. `drain_port_bootstrap_events` treats injection failures as kernel
+startup/restart failures. User cell source is not per-cell wrapped for ports.
 
 Finding 1: this replication is intentional because kernels run in separate
-runtimes. There is no static edge that binds the three implementations together.
-The contract is enforced only by tests:
+runtimes. There is no static edge that binds the implementations together. The
+contract is enforced by tests named for the behaviors they protect, including
+`generated_schema_shape_matches_arrow_schema_serde`,
+`generated_helpers_fail_loud_instead_of_utf8_fallback`,
+`python_helper_round_trips_arrow_and_emits_display_mirror`, and
+`start_local_kernel_spawned_env_includes_notebook_port_root_and_preserves_parent_env`.
 
-- Rust serde oracle and manifest-shape tests:
-  `crates/spur-notebook/src/dag/ports.rs:419-508`
-- Deno cross-language round-trip test:
-  `crates/spur-notebook/tests/notebook_read_tools.rs:601-766`
+The design reference for the session-injected helper contract is
+`docs/superpowers/specs/2026-06-02-notebook-port-integration-design.ipynb`.
 
 ## Change Checklist
 
 When changing this contract:
 
 1. Update Rust `PortStore`.
-2. Update `python_bootstrap`.
-3. Update `javascript_bootstrap`.
-4. Update the Rust serde oracle / manifest-shape tests.
-5. Update the Deno cross-language round-trip tests.
-6. Update this document.
+2. Update `ports_bootstrap.py` and keep `python_bootstrap` as the loader.
+3. Update `ports_bootstrap.js` and keep `javascript_bootstrap` as the loader.
+4. Verify `SPUR_NOTEBOOK_PORT_ROOT` is still supplied by
+   `apply_notebook_port_root_env` and consumed by both helpers.
+5. Verify `inject_port_bootstrap` still installs the helper once per kernel
+   session via a silent `execute_request`.
+6. Update the Rust serde oracle / manifest-shape tests.
+7. Update the Python/JavaScript helper round-trip tests.
+8. Update the spec notebook and this document.
