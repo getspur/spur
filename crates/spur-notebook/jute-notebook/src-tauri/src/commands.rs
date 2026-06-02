@@ -27,9 +27,7 @@ use crate::{
         },
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
-    ports::{
-        javascript_bootstrap, notebook_port_root, python_bootstrap, wrap_js_cell, wrap_python_cell,
-    },
+    ports::{javascript_bootstrap, notebook_port_root, python_bootstrap},
     state::{
         notebook_path_from_slot_id, notebook_slot_id, slot_id_for, window_slot_id, KernelSlot,
         State,
@@ -1698,7 +1696,7 @@ fn resolve_run_cell_dispatch(
         slot_id,
         spec_name: spec_name.clone(),
         code_type,
-        wrapped_code: wrap_cell_for_kernel(notebook_path, &spec_name, code),
+        wrapped_code: code.to_string(),
     })
 }
 
@@ -1821,15 +1819,6 @@ fn enforce_dispatch_spec(
     Err(Error::NotebookDaemon(format!(
         "refusing to run cell in slot {slot_id}: slot spec {actual_spec_name:?} does not match code_type {code_type:?} kernelspec {expected_spec_name:?}"
     )))
-}
-
-fn wrap_cell_for_kernel(notebook_path: &str, spec_name: &str, code: &str) -> String {
-    let root = notebook_port_root(notebook_path);
-    if spec_name == "deno" {
-        wrap_js_cell(root, code)
-    } else {
-        wrap_python_cell(root, code)
-    }
 }
 
 /// Interrupt a Jupyter kernel slot.
@@ -2019,63 +2008,25 @@ mod tests {
     }
 
     #[test]
-    fn run_cell_chokepoint_wraps_python_code_with_port_bootstrap() {
-        let wrapped = wrap_cell_for_kernel(
-            "/tmp/demo-notebook.ipynb",
-            "python3",
-            "spur.put('sales', [1, 2])",
-        );
-
-        assert!(wrapped.contains("class _Spur"));
-        assert!(wrapped.contains("spur = _Spur"));
-        assert!(wrapped.ends_with("spur.put('sales', [1, 2])"));
-    }
-
-    #[test]
-    fn run_cell_chokepoint_wraps_deno_code_with_port_bootstrap() {
-        let wrapped = wrap_cell_for_kernel(
-            "/tmp/demo-notebook.ipynb",
-            "deno",
-            "await spur.put('sales', [{ id: 1 }]);",
-        );
-
-        assert!(wrapped.contains("globalThis.spur"));
-        assert!(wrapped.contains("npm:apache-arrow@21.1.0"));
-        assert!(wrapped.ends_with("await spur.put('sales', [{ id: 1 }]);"));
-    }
-
-    #[test]
-    fn run_cell_chokepoint_uses_same_port_root_for_same_notebook_across_specs() {
+    fn run_cell_chokepoint_passes_user_code_verbatim() {
         let notebook_path = "/tmp/demo-notebook.ipynb";
-        let python = wrap_cell_for_kernel(notebook_path, "python3", "spur.get('sales')");
-        let deno = wrap_cell_for_kernel(notebook_path, "deno", "await spur.get('sales');");
-        let expected_root_literal =
-            serde_json::to_string(&notebook_port_root(notebook_path).display().to_string())
-                .expect("port root literal serializes");
-        let forked_root_literal = serde_json::to_string(
-            &notebook_port_root(format!("{notebook_path}#deno"))
-                .display()
-                .to_string(),
+        let state = State::new();
+        let input = "spur.put('sales', [1, 2])";
+        state
+            .get_notebook()
+            .load(notebook_path, notebook_with_source(input, 1));
+
+        let dispatch = resolve_run_cell_dispatch(
+            notebook_path,
+            None,
+            "550e8400-e29b-41d4-a716-446655440000",
+            input,
+            &state,
         )
-        .expect("forked port root literal serializes");
+        .unwrap();
 
-        assert_ne!(
-            expected_root_literal.as_bytes(),
-            forked_root_literal.as_bytes()
-        );
-        assert!(python.contains(&expected_root_literal));
-        assert!(deno.contains(&expected_root_literal));
-        assert!(!python.contains(&forked_root_literal));
-        assert!(!deno.contains(&forked_root_literal));
-    }
-
-    #[test]
-    fn run_cell_chokepoint_wraps_raw_code_once() {
-        let wrapped =
-            wrap_cell_for_kernel("/tmp/demo-notebook.ipynb", "python3", "spur.get('sales')");
-
-        assert_eq!(wrapped.matches("class _Spur").count(), 1);
-        assert_eq!(wrapped.matches("spur = _Spur").count(), 1);
+        assert_eq!(dispatch.wrapped_code, input);
+        assert!(!dispatch.wrapped_code.contains("class _Spur"));
     }
 
     #[test]
@@ -2109,11 +2060,9 @@ mod tests {
         );
         assert_eq!(dispatch.spec_name, "deno");
         assert_eq!(dispatch.code_type, CodeType::Javascript);
-        assert!(dispatch.wrapped_code.contains("globalThis.spur"));
+        assert_eq!(dispatch.wrapped_code, "await spur.put('sales', [])");
+        assert!(!dispatch.wrapped_code.contains("globalThis.spur"));
         assert!(!dispatch.wrapped_code.contains("spur = _Spur"));
-        assert!(dispatch
-            .wrapped_code
-            .ends_with("await spur.put('sales', [])"));
     }
 
     #[test]
@@ -2144,9 +2093,9 @@ mod tests {
         assert_eq!(dispatch.slot_id, supplied_python_slot);
         assert_eq!(dispatch.spec_name, "python3");
         assert_eq!(dispatch.code_type, CodeType::Python);
-        assert!(dispatch.wrapped_code.contains("class _Spur"));
+        assert_eq!(dispatch.wrapped_code, "spur.put('sales', [1])");
+        assert!(!dispatch.wrapped_code.contains("class _Spur"));
         assert!(!dispatch.wrapped_code.contains("globalThis.spur"));
-        assert!(dispatch.wrapped_code.ends_with("spur.put('sales', [1])"));
     }
 
     #[test]

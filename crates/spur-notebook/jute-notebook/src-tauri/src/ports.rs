@@ -32,59 +32,11 @@ pub fn javascript_bootstrap() -> &'static str {
     include_str!("assets/ports_bootstrap.js")
 }
 
-/// Prepend the Python SPUR port bootstrap to user code.
-pub fn wrap_python_cell(_notebook_root: impl AsRef<Path>, code: &str) -> String {
-    let mut wrapped = python_bootstrap().to_string();
-    wrapped.push('\n');
-    wrapped.push_str(code);
-    wrapped
-}
-
-/// Prepend the JavaScript/Deno SPUR port bootstrap to user code.
-pub fn wrap_js_cell(_notebook_root: impl AsRef<Path>, code: &str) -> String {
-    let mut wrapped = javascript_bootstrap().to_string();
-    wrapped.push('\n');
-    wrapped.push_str(code);
-    wrapped
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::process::{Command, Stdio};
-
-    #[test]
-    fn wrap_python_cell_installs_spur_helper_and_keeps_user_code() {
-        let wrapped = wrap_python_cell("/tmp/demo-root", "spur.put('sales', [1, 2])");
-
-        assert!(wrapped.contains("class _Spur"));
-        assert!(wrapped.contains(r#"if "spur" not in globals()"#));
-        assert!(wrapped.contains(r#"_spur_os.environ["SPUR_NOTEBOOK_PORT_ROOT"]"#));
-        assert!(wrapped.contains(PORT_MIME));
-        assert!(!wrapped.contains("/tmp/demo-root"));
-        assert!(wrapped.ends_with("spur.put('sales', [1, 2])"));
-    }
-
-    #[test]
-    fn wrap_js_cell_installs_spur_helper_and_keeps_user_code() {
-        let notebook_path = "/tmp/demo-notebook.ipynb";
-        let root = notebook_port_root(notebook_path);
-        let wrapped = wrap_js_cell(&root, "await spur.put('sales', [{ id: 1 }]);");
-        let root_literal = serde_json::to_string(&root.display().to_string()).unwrap();
-        let ports_literal =
-            serde_json::to_string(&root.join("ports").display().to_string()).unwrap();
-
-        assert!(wrapped.contains("globalThis.spur"));
-        assert!(wrapped.contains("globalThis.spur ??="));
-        assert!(wrapped.contains(r#"Deno.env.get("SPUR_NOTEBOOK_PORT_ROOT")"#));
-        assert!(wrapped.contains("npm:apache-arrow@21.1.0"));
-        assert!(wrapped.contains(PORT_MIME));
-        assert!(!wrapped.contains(&root_literal));
-        assert!(!wrapped.contains(&ports_literal));
-        assert!(root.display().to_string().contains("/nb-"));
-        assert!(wrapped.ends_with("await spur.put('sales', [{ id: 1 }]);"));
-    }
 
     #[test]
     fn generated_schema_shape_matches_arrow_schema_serde() {
