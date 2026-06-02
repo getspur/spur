@@ -1,5 +1,7 @@
 use jute::commands::{inject_port_bootstrap, install_kernel_in_slot, start_local_kernel};
-use jute::kernel_provision::{ensure_deno_kernelspec, ensure_python3_kernelspec};
+use jute::kernel_provision::{
+    ensure_deno_kernelspec, ensure_python3_kernelspec, python3_kernelspec_is_valid,
+};
 use jute::state::notebook_path_from_slot_id;
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
@@ -74,10 +76,17 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             ));
         }
         KernelspecProvisioningTarget::Python3 => {
-            let app = deps.app.as_ref().ok_or_else(|| {
-                McpError::internal_error("notebook.start_kernel requires a Tauri app handle", None)
-            })?;
-            ensure_python3_kernelspec(app).await
+            if python3_kernelspec_is_valid().await {
+                Ok(())
+            } else {
+                let app = deps.app.as_ref().ok_or_else(|| {
+                    McpError::internal_error(
+                        "notebook.start_kernel requires a Tauri app handle",
+                        None,
+                    )
+                })?;
+                ensure_python3_kernelspec(app).await
+            }
         }
     }
     .map_err(|error| {

@@ -28,6 +28,16 @@ pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     ensure_python3_kernelspec_in_dir(&spur_jupyter, &runner).await
 }
 
+/// Return whether the bundled `python3` kernelspec is already installed and usable.
+pub async fn python3_kernelspec_is_valid() -> bool {
+    let _guard = PYTHON3_KERNELSPEC_LOCK.lock().await;
+    let Some(spur_jupyter) = environment::spur_jupyter_dir() else {
+        return false;
+    };
+
+    python3_kernelspec_is_valid_in_dir(&spur_jupyter).await
+}
+
 /// Ensure the bundled `deno` kernelspec is installed for this app.
 pub async fn ensure_deno_kernelspec() -> Result<(), Error> {
     let _guard = DENO_KERNELSPEC_LOCK.lock().await;
@@ -136,10 +146,7 @@ async fn ensure_python3_kernelspec_in_dir<R>(
 where
     R: ProvisionRunner,
 {
-    let kernelspec = spur_jupyter
-        .join("kernels")
-        .join("python3")
-        .join("kernel.json");
+    let kernelspec = python3_kernelspec_path(spur_jupyter);
     if kernelspec_is_valid(&kernelspec).await {
         return Ok(());
     }
@@ -216,6 +223,17 @@ where
             ),
         })
     }
+}
+
+async fn python3_kernelspec_is_valid_in_dir(spur_jupyter: &std::path::Path) -> bool {
+    kernelspec_is_valid(&python3_kernelspec_path(spur_jupyter)).await
+}
+
+fn python3_kernelspec_path(spur_jupyter: &std::path::Path) -> PathBuf {
+    spur_jupyter
+        .join("kernels")
+        .join("python3")
+        .join("kernel.json")
 }
 
 async fn relocate_kernelspec(
@@ -600,6 +618,44 @@ mod tests {
         ensure_python3_kernelspec_in_dir(&root, &PanicRunner)
             .await
             .unwrap();
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn python3_kernelspec_validity_probe_reads_bundled_path() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let kernelspec = python3_kernelspec_path(&root);
+        let python = venv_python_path(&root.join("venv"));
+
+        assert!(!python3_kernelspec_is_valid_in_dir(&root).await);
+
+        tokio::fs::create_dir_all(python.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&python, b"").await.unwrap();
+        tokio::fs::create_dir_all(kernelspec.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &kernelspec,
+            serde_json::json!({
+                "argv": [
+                    python.to_string_lossy(),
+                    "-m",
+                    "ipykernel_launcher",
+                    "-f",
+                    "{connection_file}"
+                ],
+                "display_name": "Python 3 (SPUR)",
+                "language": "python"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(python3_kernelspec_is_valid_in_dir(&root).await);
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

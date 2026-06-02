@@ -99,7 +99,12 @@ impl BridgeRequester for MockBridge {
     ) -> BridgeRequestFuture<'a> {
         Box::pin(async move {
             self.calls.lock().await.push((method.to_string(), params));
-            self.responses.lock().await.remove(0)
+            let mut responses = self.responses.lock().await;
+            if responses.is_empty() {
+                Ok(json!({}))
+            } else {
+                responses.remove(0)
+            }
         })
     }
 }
@@ -670,6 +675,10 @@ async fn write_test_python3_kernelspec(
 }
 
 fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
+    notebook_with_typed_code_cells(ids, None)
+}
+
+fn notebook_with_typed_code_cells(ids: &[&str], code_type: Option<CodeType>) -> NotebookRoot {
     NotebookRoot {
         metadata: NotebookMetadata {
             kernelspec: None,
@@ -693,7 +702,7 @@ fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
                             last_edited_by: None,
                             datasource_setup: None,
                             dag: None,
-                            code_type: None,
+                            code_type: code_type.clone(),
                         }),
                         jute_deck: None,
                         other: Default::default(),
@@ -777,7 +786,7 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
     let state = Arc::new(State::new());
     state.get_notebook().load(
         notebook_path.clone(),
-        notebook_with_code_cells(&["deno-put", "deno-get"]),
+        notebook_with_typed_code_cells(&["deno-put", "deno-get"], Some(CodeType::Javascript)),
     );
     let deps = deps_with_state(state);
 
@@ -1090,6 +1099,10 @@ async fn run_cell_collects_events_against_in_process_kernel_mock() {
         return;
     };
     let state = Arc::new(State::new());
+    state.get_notebook().load(
+        PathBuf::from("/tmp/notebook-read-tools-run.ipynb"),
+        notebook_with_code_cells(&["code-run-1"]),
+    );
     let slot_id = "mcp:notebook-read-tools-run".to_string();
     let kernel = start_local_kernel("python3", None)
         .await
@@ -1141,7 +1154,34 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
             "metadata": {},
             "nbformat_minor": 5,
             "nbformat": 4,
-            "cells": []
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "id": "code-run-define",
+                    "metadata": {
+                        "spur": {
+                            "version": 1,
+                            "code_type": "python"
+                        }
+                    },
+                    "source": "",
+                    "execution_count": null,
+                    "outputs": []
+                },
+                {
+                    "cell_type": "code",
+                    "id": "code-run-print",
+                    "metadata": {
+                        "spur": {
+                            "version": 1,
+                            "code_type": "python"
+                        }
+                    },
+                    "source": "",
+                    "execution_count": null,
+                    "outputs": []
+                }
+            ]
         }))
         .expect("notebook serializes"),
     )
