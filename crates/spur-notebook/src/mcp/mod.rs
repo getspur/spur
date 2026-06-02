@@ -964,6 +964,7 @@ fn build_api_import_manifest(
             source: spur_rest_table_gateway::adapter::manifest::SourceCfg {
                 name: source.clone(),
                 base_url: String::new(),
+                transport: spur_rest_table_gateway::adapter::manifest::Transport::Rest,
                 auth: spur_rest_table_gateway::adapter::manifest::AuthCfg::None,
                 pagination: None,
                 connection_config: Vec::new(),
