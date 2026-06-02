@@ -55,6 +55,7 @@ async fn main() {
         while let Ok(event) = rx.recv().await {
             match event {
                 RunCellEvent::Started => {}
+                RunCellEvent::CompileProgress { .. } => {}
                 RunCellEvent::Stdout(text) => print!("{}", text),
                 RunCellEvent::Stderr(text) => eprint!("{}", text),
                 RunCellEvent::ExecuteResult(msg) => {

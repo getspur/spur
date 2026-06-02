@@ -955,6 +955,7 @@ fn apply_event_to_code_cell(cell: &mut CodeCell, event: &RunCellEvent) {
         RunCellEvent::Finished { exec_count, .. } => {
             cell.execution_count = *exec_count;
         }
+        RunCellEvent::CompileProgress { .. } => {}
     }
 }
 

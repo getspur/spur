@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     backend::{
-        commands::{self, RunCellEvent},
+        commands::{self, CompileProgressMode, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
         notebook::{
             code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType, NotebookRoot,
@@ -1597,7 +1597,20 @@ pub async fn run_cell_events(
     let conn = kernel_connection_for_slot(state, &dispatch.slot_id)?;
     let spec_name = spec_name_for_slot(state, &dispatch.slot_id)?;
     enforce_dispatch_spec(&dispatch.slot_id, &spec_name, dispatch.code_type)?;
-    commands::run_cell(&conn, &dispatch.wrapped_code).await
+    commands::run_cell_with_mode(
+        &conn,
+        &dispatch.wrapped_code,
+        compile_progress_mode_for_spec(&spec_name),
+    )
+    .await
+}
+
+fn compile_progress_mode_for_spec(spec_name: &str) -> CompileProgressMode {
+    match spec_name {
+        "evcxr" => CompileProgressMode::Cargo,
+        "gonb" => CompileProgressMode::GoBuild,
+        _ => CompileProgressMode::None,
+    }
 }
 
 /// Select the per-language SPUR port bootstrap injected once per kernel session.
@@ -1649,6 +1662,7 @@ async fn drain_port_bootstrap_events(
             }
             RunCellEvent::Disconnect(message) => disconnect = Some(message),
             RunCellEvent::Started
+            | RunCellEvent::CompileProgress { .. }
             | RunCellEvent::Stdout(_)
             | RunCellEvent::Stderr(_)
             | RunCellEvent::ExecuteResult(_)
@@ -2059,6 +2073,22 @@ mod tests {
         assert!(bootstrap_source_for_spec("evcxr").contains(":dep arrow = "));
         assert!(bootstrap_source_for_spec("gonb").contains("!*go get "));
         assert!(bootstrap_source_for_spec("custom").contains("class _Spur"));
+    }
+
+    #[test]
+    fn compile_progress_mode_for_spec_routes_compiled_kernels() {
+        assert_eq!(
+            compile_progress_mode_for_spec("evcxr"),
+            crate::backend::commands::CompileProgressMode::Cargo
+        );
+        assert_eq!(
+            compile_progress_mode_for_spec("gonb"),
+            crate::backend::commands::CompileProgressMode::GoBuild
+        );
+        assert_eq!(
+            compile_progress_mode_for_spec("python3"),
+            crate::backend::commands::CompileProgressMode::None
+        );
     }
 
     #[test]
