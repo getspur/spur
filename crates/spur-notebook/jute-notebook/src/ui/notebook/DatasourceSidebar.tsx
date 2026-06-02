@@ -79,6 +79,8 @@ export default function DatasourceSidebar() {
     string | null
   >(null);
   const [apiModalOpen, setApiModalOpen] = useState(false);
+  const [editingConnection, setEditingConnection] =
+    useState<ConnectionTemplate | null>(null);
   const dropzoneRef = useRef<HTMLElement | null>(null);
   const entriesRef = useRef<DatasourceEntry[]>([]);
 
@@ -498,6 +500,7 @@ export default function DatasourceSidebar() {
             notice={savedConnectionNotice}
             onAttach={(name) => void handleAttachSavedConnection(name)}
             onDelete={(name) => void handleDeleteSavedConnection(name)}
+            onEdit={(connection) => setEditingConnection(connection)}
             onToggle={(name) =>
               setExpandedSavedConnection((current) =>
                 current === name ? null : name,
@@ -507,8 +510,12 @@ export default function DatasourceSidebar() {
         </div>
       </aside>
       <AddRestApiWizard
-        open={apiModalOpen}
-        onClose={() => setApiModalOpen(false)}
+        editConnection={editingConnection}
+        open={apiModalOpen || editingConnection !== null}
+        onClose={() => {
+          setApiModalOpen(false);
+          setEditingConnection(null);
+        }}
       />
     </>
   );
@@ -520,6 +527,7 @@ function SavedConnectionsSection({
   notice,
   onAttach,
   onDelete,
+  onEdit,
   onToggle,
 }: {
   connections: ConnectionTemplate[];
@@ -527,6 +535,7 @@ function SavedConnectionsSection({
   notice: string | null;
   onAttach: (name: string) => void;
   onDelete: (name: string) => void;
+  onEdit: (connection: ConnectionTemplate) => void;
   onToggle: (name: string) => void;
 }) {
   return (
@@ -550,6 +559,7 @@ function SavedConnectionsSection({
               key={connection.name}
               onAttach={onAttach}
               onDelete={onDelete}
+              onEdit={onEdit}
               onToggle={onToggle}
             />
           ))}
@@ -564,12 +574,14 @@ function SavedConnectionRow({
   expanded,
   onAttach,
   onDelete,
+  onEdit,
   onToggle,
 }: {
   connection: ConnectionTemplate;
   expanded: boolean;
   onAttach: (name: string) => void;
   onDelete: (name: string) => void;
+  onEdit: (connection: ConnectionTemplate) => void;
   onToggle: (name: string) => void;
 }) {
   const credentialCount = connection.credentialEnvVars.length;
@@ -661,14 +673,24 @@ function SavedConnectionRow({
             </ul>
           )}
 
-          <button
-            aria-label={`Delete saved connection ${connection.name}`}
-            className="text-xs font-medium text-red-600 transition-colors hover:text-red-700"
-            onClick={() => onDelete(connection.name)}
-            type="button"
-          >
-            Delete saved connection
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              aria-label={`Edit saved connection ${connection.name}`}
+              className="text-xs font-medium text-gray-600 transition-colors hover:text-gray-950"
+              onClick={() => onEdit(connection)}
+              type="button"
+            >
+              Edit
+            </button>
+            <button
+              aria-label={`Delete saved connection ${connection.name}`}
+              className="text-xs font-medium text-red-600 transition-colors hover:text-red-700"
+              onClick={() => onDelete(connection.name)}
+              type="button"
+            >
+              Delete saved connection
+            </button>
+          </div>
         </div>
       )}
     </article>
