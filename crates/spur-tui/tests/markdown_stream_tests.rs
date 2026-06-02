@@ -2,6 +2,31 @@
 
 use spur_tui::components::markdown_stream::{MarkdownStream, StateLookup};
 
+fn item_debug(stream: &MarkdownStream) -> String {
+    format!("{:#?}", stream.items())
+}
+
+fn assert_incremental_chunks_match_full_rebuild(name: &str, chunks: &[&str]) {
+    let full = chunks.concat();
+
+    let mut incremental = MarkdownStream::new();
+    for chunk in chunks {
+        incremental.append(chunk);
+        incremental.flush_now(&StateLookup::empty());
+    }
+    incremental.flush_final(&StateLookup::empty());
+
+    let mut one_shot = MarkdownStream::new();
+    one_shot.append(&full);
+    one_shot.flush_final(&StateLookup::empty());
+
+    assert_eq!(
+        item_debug(&incremental),
+        item_debug(&one_shot),
+        "{name}: incremental flushes must match one full rebuild item-for-item"
+    );
+}
+
 #[test]
 fn append_chunks_then_flush_equals_full_parse() {
     let full = "# Heading\n\nSome **bold** and *italic* text.\n\n- a\n- b\n";
@@ -19,6 +44,203 @@ fn append_chunks_then_flush_equals_full_parse() {
         incremental.cached_lines_debug(),
         one_shot.cached_lines_debug(),
         "incremental parse must equal full parse after flush"
+    );
+}
+
+#[test]
+fn incremental_flushes_match_full_rebuild_for_markdown_block_shapes() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "bullet list then trailing paragraph",
+            &[
+                "Intro paragraph.\n\n- bullet a\n- bullet b\n\n",
+                "trailing paragraph\n\n",
+            ],
+        ),
+        (
+            "ordered list then trailing paragraph",
+            &["1. first\n2. second\n\n", "after ordered list\n\n"],
+        ),
+        (
+            "blank-line-separated blocks",
+            &[
+                "Alpha paragraph.\n\n",
+                "Beta paragraph with **strong** text.\n\n",
+                "Gamma paragraph.\n\n",
+            ],
+        ),
+        (
+            "atx and setext headings",
+            &[
+                "# ATX heading\n\n",
+                "Body paragraph.\n\nSetext heading\n---\n\n",
+                "Trailing paragraph.\n\n",
+            ],
+        ),
+        (
+            "nested blockquote and nested list",
+            &[
+                "> quote line\n> - nested bullet\n\n",
+                "1. ordered parent\n   - nested child\n\n",
+                "tail\n\n",
+            ],
+        ),
+    ];
+
+    for (name, chunks) in cases {
+        assert_incremental_chunks_match_full_rebuild(name, chunks);
+    }
+}
+
+#[test]
+fn incremental_flush_build_work_tracks_delta_and_matches_full_rebuild() {
+    let chunks: Vec<String> = (0..48)
+        .map(|i| {
+            format!("Chunk {i}\n\nStreaming markdown paragraph {i} with **bold** and `code`.\n\n")
+        })
+        .collect();
+    let full = chunks.concat();
+    let largest_chunk = chunks.iter().map(|chunk| chunk.len()).max().unwrap() as u64;
+
+    let mut incremental = MarkdownStream::new();
+    let mut previous_work = 0;
+    let mut largest_flush_work = 0;
+    for chunk in &chunks {
+        incremental.append(chunk);
+        incremental.flush_now(&StateLookup::empty());
+
+        let current_work = incremental.build_work_bytes_for_tests();
+        largest_flush_work = largest_flush_work.max(current_work - previous_work);
+        previous_work = current_work;
+    }
+    incremental.flush_final(&StateLookup::empty());
+
+    let mut one_shot = MarkdownStream::new();
+    one_shot.append(&full);
+    one_shot.flush_final(&StateLookup::empty());
+
+    assert_eq!(item_debug(&incremental), item_debug(&one_shot));
+    assert!(
+        largest_flush_work <= largest_chunk * 3,
+        "per-flush build work should be bounded by delta size: largest_flush_work={largest_flush_work} largest_chunk={largest_chunk}"
+    );
+    assert!(
+        incremental.build_work_bytes_for_tests() <= full.len() as u64 * 2,
+        "total build work should stay linear in input length: work={} len={}",
+        incremental.build_work_bytes_for_tests(),
+        full.len()
+    );
+}
+
+#[test]
+fn complete_fenced_code_flushes_match_full_rebuild_with_linear_work() {
+    let chunks: Vec<String> = (0..16)
+        .map(|i| {
+            let body = (0..24)
+                .map(|line| format!("    let value_{i}_{line} = {line};\n"))
+                .collect::<String>();
+            format!("```rust\nfn block_{i}() {{\n{body}}}\n```\n\nParagraph after block {i}.\n\n")
+        })
+        .collect();
+    let full = chunks.concat();
+    let largest_chunk = chunks.iter().map(|chunk| chunk.len()).max().unwrap() as u64;
+
+    let mut incremental = MarkdownStream::new();
+    let mut previous_work = 0;
+    let mut largest_flush_work = 0;
+    for chunk in &chunks {
+        incremental.append(chunk);
+        incremental.flush_now(&StateLookup::empty());
+
+        let current_work = incremental.build_work_bytes_for_tests();
+        largest_flush_work = largest_flush_work.max(current_work - previous_work);
+        previous_work = current_work;
+    }
+    incremental.flush_final(&StateLookup::empty());
+
+    let mut one_shot = MarkdownStream::new();
+    one_shot.append(&full);
+    one_shot.flush_final(&StateLookup::empty());
+
+    assert_eq!(item_debug(&incremental), item_debug(&one_shot));
+    assert!(
+        largest_flush_work <= largest_chunk * 3,
+        "per-flush fenced-code build work should be bounded by delta size: largest_flush_work={largest_flush_work} largest_chunk={largest_chunk}"
+    );
+    assert!(
+        incremental.build_work_bytes_for_tests() <= full.len() as u64 * 3,
+        "total fenced-code build work should stay linear in input length: work={} len={}",
+        incremental.build_work_bytes_for_tests(),
+        full.len()
+    );
+}
+
+#[test]
+fn table_seam_falls_back_to_full_rebuild_and_matches_full_parse() {
+    let first = "| A | B |\n|---|---|\n\n";
+    let second = "| 1 | 2 |\n\nAfter table.\n\n";
+    let full = format!("{first}{second}");
+
+    let mut incremental = MarkdownStream::new();
+    incremental.append(first);
+    incremental.flush_now(&StateLookup::empty());
+    let work_before = incremental.build_work_bytes_for_tests();
+    incremental.append(second);
+    incremental.flush_now(&StateLookup::empty());
+
+    let second_flush_work = incremental.build_work_bytes_for_tests() - work_before;
+    assert!(
+        second_flush_work >= incremental.flushed_byte_len_for_tests() as u64,
+        "table seam should fall back to full prefix rebuild: second_flush_work={second_flush_work} second_len={}",
+        second.len()
+    );
+
+    let mut one_shot = MarkdownStream::new();
+    one_shot.append(&full);
+    one_shot.flush_now(&StateLookup::empty());
+    assert_eq!(item_debug(&incremental), item_debug(&one_shot));
+}
+
+#[test]
+fn mermaid_state_change_rebuilds_committed_prefix() {
+    use std::collections::HashSet;
+
+    let mut stream = MarkdownStream::new();
+    stream.append("```mermaid\nflowchart LR\nA-->B\n```\n\nAfter.\n");
+    let fences = stream.flush_now(&StateLookup::empty());
+    assert_eq!(fences.len(), 1);
+    let id = fences[0].id;
+
+    let before_work = stream.build_work_bytes_for_tests();
+    let mut errors = HashSet::new();
+    errors.insert(id);
+    let pending = HashSet::new();
+    let states = StateLookup {
+        errors: &errors,
+        pending: &pending,
+    };
+
+    stream.mark_dirty_now();
+    stream.flush_now(&states);
+
+    let rebuild_work = stream.build_work_bytes_for_tests() - before_work;
+    assert!(
+        rebuild_work >= stream.flushed_byte_len_for_tests() as u64,
+        "state-only invalidation must rebuild the committed prefix: rebuild_work={rebuild_work} flushed={}",
+        stream.flushed_byte_len_for_tests()
+    );
+
+    let placeholder = stream
+        .fence_placeholder_for(id)
+        .expect("placeholder should be refreshed for committed fence");
+    let rendered: String = placeholder
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        rendered.contains("error"),
+        "placeholder should reflect error state: {rendered}"
     );
 }
 
