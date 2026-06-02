@@ -255,6 +255,9 @@ async fn drain_run_cell_events(
                 status = s.clone();
             }
             RunCellEvent::Started => {}
+            // Ephemeral compile-progress signal (Phase-1/2 compile ticker):
+            // surfaced via the per-event progress report above, not a cell output.
+            RunCellEvent::CompileProgress { .. } => {}
             RunCellEvent::Disconnect(message) => {
                 status = format!("disconnect: {message}");
             }
