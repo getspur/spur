@@ -27,7 +27,9 @@ use crate::{
         },
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
-    ports::{notebook_port_root, wrap_js_cell, wrap_python_cell},
+    ports::{
+        javascript_bootstrap, notebook_port_root, python_bootstrap, wrap_js_cell, wrap_python_cell,
+    },
     state::{
         notebook_path_from_slot_id, notebook_slot_id, slot_id_for, window_slot_id, KernelSlot,
         State,
@@ -1486,7 +1488,11 @@ pub async fn start_kernel(
     }
 
     crate::kernel_provision::ensure_python3_kernelspec(&app).await?;
-    let kernel = start_local_kernel(spec_name, port_root.as_deref()).await?;
+    let mut kernel = start_local_kernel(spec_name, port_root.as_deref()).await?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(error);
+    }
     let (generation, _previous_kernel) =
         install_kernel_in_slot(&state, &slot_id, spec_name.to_string(), kernel);
     info!(slot_id = %slot_id, generation, "started jute kernel slot");
@@ -1514,7 +1520,11 @@ pub async fn restart_kernel(
         return Err(error);
     }
 
-    let kernel = start_local_kernel(&next_spec_name, port_root.as_deref()).await?;
+    let mut kernel = start_local_kernel(&next_spec_name, port_root.as_deref()).await?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), &next_spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(error);
+    }
     let (generation, _previous_kernel) =
         install_kernel_in_slot(&state, slot_id, next_spec_name, kernel);
     info!(slot_id = %slot_id, generation, "restarted jute kernel slot");
@@ -1580,6 +1590,79 @@ pub async fn run_cell_events(
     let spec_name = spec_name_for_slot(state, &dispatch.slot_id)?;
     enforce_dispatch_spec(&dispatch.slot_id, &spec_name, dispatch.code_type)?;
     commands::run_cell(&conn, &dispatch.wrapped_code).await
+}
+
+/// Inject the SPUR port helper into a fresh kernel session.
+pub async fn inject_port_bootstrap(
+    conn: &crate::backend::KernelConnection,
+    spec_name: &str,
+) -> Result<(), Error> {
+    let src = if spec_name == "deno" {
+        javascript_bootstrap()
+    } else {
+        python_bootstrap()
+    };
+    let rx = commands::run_cell(conn, src)
+        .await
+        .map_err(|error| Error::PortBootstrapFailed {
+            stage: "dispatch",
+            cause: error.to_string(),
+        })?;
+    drain_port_bootstrap_events(rx).await
+}
+
+async fn drain_port_bootstrap_events(
+    rx: async_channel::Receiver<RunCellEvent>,
+) -> Result<(), Error> {
+    let mut status = None;
+    let mut execute_error = None;
+    let mut disconnect = None;
+
+    while let Ok(event) = rx.recv().await {
+        match event {
+            RunCellEvent::Finished {
+                status: finished_status,
+                ..
+            } => status = Some(finished_status),
+            RunCellEvent::Error(error) => {
+                if execute_error.is_none() {
+                    execute_error = Some(format!("{}: {}", error.ename, error.evalue));
+                }
+            }
+            RunCellEvent::Disconnect(message) => disconnect = Some(message),
+            RunCellEvent::Started
+            | RunCellEvent::Stdout(_)
+            | RunCellEvent::Stderr(_)
+            | RunCellEvent::ExecuteResult(_)
+            | RunCellEvent::DisplayData(_)
+            | RunCellEvent::UpdateDisplayData(_)
+            | RunCellEvent::ClearOutput(_) => {}
+        }
+    }
+
+    if let Some(cause) = execute_error {
+        return Err(Error::PortBootstrapFailed {
+            stage: "execute-error",
+            cause,
+        });
+    }
+    if let Some(cause) = disconnect {
+        return Err(Error::PortBootstrapFailed {
+            stage: "disconnect",
+            cause,
+        });
+    }
+    match status.as_deref() {
+        Some("ok") => Ok(()),
+        Some(status) => Err(Error::PortBootstrapFailed {
+            stage: "execute-reply",
+            cause: format!("kernel returned status {status}"),
+        }),
+        None => Err(Error::PortBootstrapFailed {
+            stage: "event-stream",
+            cause: "kernel closed without Finished event".to_string(),
+        }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1715,6 +1798,10 @@ async fn ensure_kernel_slot_live(
             Ok(())
         }
         KernelSlotStatus::Missing | KernelSlotStatus::Empty => {
+            if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
+                let _ = kernel.kill().await;
+                return Err(error);
+            }
             install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
             Ok(())
         }

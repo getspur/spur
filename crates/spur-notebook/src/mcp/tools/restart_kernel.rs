@@ -1,5 +1,6 @@
 use jute::commands::{
-    install_kernel_in_slot, spec_name_for_slot, start_local_kernel, take_kernel_from_slot,
+    inject_port_bootstrap, install_kernel_in_slot, spec_name_for_slot, start_local_kernel,
+    take_kernel_from_slot,
 };
 use jute::state::notebook_path_from_slot_id;
 use rmcp::{
@@ -81,7 +82,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     })?;
 
     let port_root = notebook_path_from_slot_id(&params.slot_id, &spec_name).map(notebook_port_root);
-    let kernel = start_local_kernel(&spec_name, port_root.as_deref())
+    let mut kernel = start_local_kernel(&spec_name, port_root.as_deref())
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -89,6 +90,13 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
                 Some(json!({ "error": error.to_string() })),
             )
         })?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), &spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(McpError::internal_error(
+            "notebook.restart_kernel failed to inject port bootstrap",
+            Some(json!({ "error": error.to_string() })),
+        ));
+    }
     let (generation, _previous) = install_kernel_in_slot(state, &params.slot_id, spec_name, kernel);
 
     Ok(CallToolResult::structured(json!({

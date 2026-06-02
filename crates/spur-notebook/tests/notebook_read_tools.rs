@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use jute::backend::commands::{self as kernel_commands, RunCellEvent};
 use jute::state::{notebook_slot_id, KernelSlot, State};
 use jute::{
     backend::notebook::{
         Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, MultilineString, NotebookMetadata,
         NotebookRoot, PortSpec, SpurCellMetadata,
     },
-    commands::{install_kernel_in_slot, start_local_kernel},
+    commands::{inject_port_bootstrap, install_kernel_in_slot, start_local_kernel},
 };
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
@@ -142,6 +143,49 @@ fn combined_stream_text(outputs: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+async fn run_raw_kernel_cell(
+    kernel: &jute::backend::local::LocalKernel,
+    code: &str,
+) -> (String, String) {
+    let rx = kernel_commands::run_cell(kernel.conn(), code)
+        .await
+        .expect("raw backend cell dispatch succeeds");
+    let mut stdout = String::new();
+    let mut diagnostics = Vec::new();
+    let mut status = None;
+    while let Ok(event) = rx.recv().await {
+        match event {
+            RunCellEvent::Stdout(text) => stdout.push_str(&text),
+            RunCellEvent::Stderr(text) => diagnostics.push(text),
+            RunCellEvent::Error(error) => diagnostics.push(format!("{error:?}")),
+            RunCellEvent::Disconnect(message) => diagnostics.push(message),
+            RunCellEvent::Finished {
+                status: finished_status,
+                ..
+            } => status = Some(finished_status),
+            RunCellEvent::Started
+            | RunCellEvent::ExecuteResult(_)
+            | RunCellEvent::DisplayData(_)
+            | RunCellEvent::UpdateDisplayData(_)
+            | RunCellEvent::ClearOutput(_) => {}
+        }
+    }
+
+    let status = status.unwrap_or_else(|| "missing-finished".to_string());
+    assert_eq!(
+        status, "ok",
+        "raw cell failed with stdout={stdout:?}, diagnostics={diagnostics:?}"
+    );
+    (status, stdout)
+}
+
+fn stdout_value<'a>(stdout: &'a str, prefix: &str) -> &'a str {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("expected stdout line with prefix {prefix:?}, got {stdout:?}"))
 }
 
 #[tokio::test]
@@ -1163,6 +1207,120 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
     );
 
     let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a working python3 kernel; run with --ignored"]
+async fn python_port_bootstrap_is_available_for_raw_cells_once_per_kernel_session() {
+    let Some(_kernelspec) = install_test_python3_kernelspec().await else {
+        return;
+    };
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-port-bootstrap-")
+        .tempdir()
+        .expect("temp dir");
+    let notebook_path = temp_dir.path().join("bootstrap.ipynb");
+    let notebook_path_string = notebook_path.to_string_lossy().into_owned();
+    let slot_id = notebook_slot_id(&notebook_path_string);
+    let port_root = notebook_port_root(&notebook_path);
+    let state = Arc::new(State::new());
+
+    let kernel = start_local_kernel("python3", Some(&port_root))
+        .await
+        .expect("python3 kernel starts");
+    inject_port_bootstrap(kernel.conn(), "python3")
+        .await
+        .expect("port bootstrap injects");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
+    let mut kernel =
+        jute::commands::take_kernel_from_slot(&state, &slot_id).expect("kernel installed");
+
+    let (_, first_stdout) = run_raw_kernel_cell(
+        &kernel,
+        concat!(
+            "print(f\"spur-defined:{'spur' in globals()}\")\n",
+            "print(f\"spur-class:{spur.__class__.__name__}\")\n",
+            "print(f\"spur-root:{spur._root}\")\n",
+            "print(f\"spur-id:{id(spur)}\")\n",
+        ),
+    )
+    .await;
+    let (_, second_stdout) = run_raw_kernel_cell(
+        &kernel,
+        concat!(
+            "print(f\"spur-defined:{'spur' in globals()}\")\n",
+            "print(f\"spur-class:{spur.__class__.__name__}\")\n",
+            "print(f\"spur-root:{spur._root}\")\n",
+            "print(f\"spur-id:{id(spur)}\")\n",
+        ),
+    )
+    .await;
+
+    assert_eq!(stdout_value(&first_stdout, "spur-defined:"), "True");
+    assert_eq!(stdout_value(&second_stdout, "spur-defined:"), "True");
+    assert_eq!(stdout_value(&first_stdout, "spur-class:"), "_Spur");
+    assert_eq!(stdout_value(&second_stdout, "spur-class:"), "_Spur");
+    assert_eq!(
+        stdout_value(&first_stdout, "spur-root:"),
+        port_root.to_string_lossy()
+    );
+    assert_eq!(
+        stdout_value(&second_stdout, "spur-root:"),
+        port_root.to_string_lossy()
+    );
+    assert_eq!(
+        stdout_value(&first_stdout, "spur-id:"),
+        stdout_value(&second_stdout, "spur-id:"),
+        "bootstrap should construct one helper for the kernel session"
+    );
+
+    let _ = kernel.kill().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a working python3 kernel; run with --ignored"]
+async fn python_port_bootstrap_is_available_again_after_fresh_restart_kernel() {
+    let Some(_kernelspec) = install_test_python3_kernelspec().await else {
+        return;
+    };
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-port-bootstrap-restart-")
+        .tempdir()
+        .expect("temp dir");
+    let notebook_path = temp_dir.path().join("bootstrap-restart.ipynb");
+    let notebook_path_string = notebook_path.to_string_lossy().into_owned();
+    let slot_id = notebook_slot_id(&notebook_path_string);
+    let port_root = notebook_port_root(&notebook_path);
+    let state = Arc::new(State::new());
+
+    let kernel = start_local_kernel("python3", Some(&port_root))
+        .await
+        .expect("python3 kernel starts");
+    inject_port_bootstrap(kernel.conn(), "python3")
+        .await
+        .expect("initial port bootstrap injects");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
+    let mut kernel =
+        jute::commands::take_kernel_from_slot(&state, &slot_id).expect("kernel installed");
+    let (_, first_stdout) =
+        run_raw_kernel_cell(&kernel, "print(f\"spur-defined:{'spur' in globals()}\")").await;
+    assert_eq!(stdout_value(&first_stdout, "spur-defined:"), "True");
+    kernel.kill().await.expect("first kernel stops");
+
+    let restarted = start_local_kernel("python3", Some(&port_root))
+        .await
+        .expect("python3 kernel restarts");
+    inject_port_bootstrap(restarted.conn(), "python3")
+        .await
+        .expect("restart port bootstrap injects");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), restarted);
+    let mut restarted = jute::commands::take_kernel_from_slot(&state, &slot_id)
+        .expect("restarted kernel installed");
+    let (_, restart_stdout) =
+        run_raw_kernel_cell(&restarted, "print(f\"spur-defined:{'spur' in globals()}\")").await;
+    assert_eq!(stdout_value(&restart_stdout, "spur-defined:"), "True");
+
+    let _ = restarted.kill().await;
 }
 
 #[cfg(feature = "datasource-introspect")]
