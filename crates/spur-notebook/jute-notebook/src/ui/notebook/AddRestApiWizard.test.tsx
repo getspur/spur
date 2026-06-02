@@ -239,6 +239,62 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText(/Drop-in/i)).toBeInTheDocument();
   });
 
+  test("prefill_opens_connect_step_with_blank_missing_credentials_and_saves_import", async () => {
+    const onClose = vi.fn();
+
+    render(
+      <AddRestApiWizard
+        open
+        onClose={onClose}
+        prefill={{
+          name: "stripe_reporting",
+          provider: "stripe",
+          specText: SPEC_TEXT,
+          missingEnvVars: ["STRIPE_API_KEY"],
+          step: "connect",
+        }}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to Stripe" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Datasource name")).toHaveValue(
+      "stripe_reporting",
+    );
+    expect(
+      screen.queryByText("How do you want to connect?"),
+    ).not.toBeInTheDocument();
+
+    const apiKeyInput = screen.getByLabelText("STRIPE_API_KEY");
+    expect(apiKeyInput).toHaveAttribute("type", "password");
+    expect(apiKeyInput).toHaveValue("");
+
+    fireEvent.change(apiKeyInput, { target: { value: "sk_test_prefill" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      await screen.findByLabelText("OpenAPI spec text or URL"),
+    ).toHaveValue(SPEC_TEXT);
+    fireEvent.click(screen.getByRole("button", { name: "Preview tables" }));
+
+    expect(await screen.findByText("stripe_charges")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource_from_import",
+        name: "stripe_reporting",
+        provider: "stripe",
+        spec_text: SPEC_TEXT,
+        credentials: [["STRIPE_API_KEY", "sk_test_prefill"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
   test("preview_openapi_tables_result_renders_tables_and_flattened_columns", async () => {
     renderWizard();
 

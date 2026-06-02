@@ -14,9 +14,10 @@ crate-type = ["cdylib", "rlib"]
 arrow-array = "58"
 arrow-schema = "58"
 duckdb = { version = "=1.10502.0", features = ["loadable-extension", "vtab"] }
+directories = "5"
+serde_json = "1"
 spur-rest-table-gateway = { path = "../rest-table-gateway", default-features = false }
 
 [dev-dependencies]
-serde_json = "1"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
