@@ -89,6 +89,15 @@ pub enum Error {
         cause: String,
     },
 
+    /// Could not inject the SPUR port bootstrap into a fresh kernel.
+    #[error("could not inject SPUR port bootstrap during {stage}: {cause}")]
+    PortBootstrapFailed {
+        /// Bootstrap stage that failed.
+        stage: &'static str,
+        /// Underlying error text for the failed stage.
+        cause: String,
+    },
+
     /// Disconnected while communicating with a kernel.
     #[error("disconnected from the kernel")]
     KernelDisconnect,

@@ -255,6 +255,8 @@ pub enum CodeType {
     Javascript,
     /// Rust code routed to the `evcxr` kernelspec.
     Rust,
+    /// Go code routed to the `gonb` kernelspec.
+    Go,
 }
 
 /// Return the kernelspec name for a per-cell code type.
@@ -263,6 +265,7 @@ pub fn kernelspec_for(code_type: CodeType) -> &'static str {
         CodeType::Python => "python3",
         CodeType::Javascript => "deno",
         CodeType::Rust => "evcxr",
+        CodeType::Go => "gonb",
     }
 }
 
@@ -272,6 +275,7 @@ pub fn code_type_for_spec(spec_name: &str) -> Option<CodeType> {
         "python3" => Some(CodeType::Python),
         "deno" => Some(CodeType::Javascript),
         "evcxr" => Some(CodeType::Rust),
+        "gonb" => Some(CodeType::Go),
         _ => None,
     }
 }
@@ -809,6 +813,15 @@ mod tests {
         assert_eq!(code_type_for_spec("deno"), Some(CodeType::Javascript));
         assert_eq!(code_type_for_spec("evcxr"), Some(CodeType::Rust));
         assert_eq!(code_type_for_spec("unknown"), None);
+    }
+
+    #[test]
+    fn go_round_trips_through_kernelspec_maps() {
+        let spec_name = kernelspec_for(CodeType::Go);
+
+        assert_eq!(spec_name, "gonb");
+        assert_eq!(code_type_for_spec(spec_name), Some(CodeType::Go));
+        assert_eq!(serde_json::to_value(CodeType::Go).unwrap(), "go");
     }
 
     #[test]

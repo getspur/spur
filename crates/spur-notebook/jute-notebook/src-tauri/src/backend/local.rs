@@ -161,6 +161,14 @@ fn kernel_command(argv: &[String], env: &BTreeMap<String, String>) -> tokio::pro
 }
 
 #[cfg(test)]
+pub(crate) fn kernel_command_for_test(
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+) -> tokio::process::Command {
+    kernel_command(argv, env)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsString;

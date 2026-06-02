@@ -1,13 +1,19 @@
-use jute::commands::{install_kernel_in_slot, start_local_kernel};
-use jute::kernel_provision::{ensure_deno_kernelspec, ensure_python3_kernelspec};
+use jute::commands::{inject_port_bootstrap, install_kernel_in_slot, start_local_kernel};
+use jute::kernel_provision::{
+    ensure_deno_kernelspec, ensure_evcxr_kernelspec, ensure_gonb_kernelspec,
+    ensure_python3_kernelspec, python3_kernelspec_is_valid,
+};
+use jute::state::notebook_path_from_slot_id;
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::dag::notebook_port_root;
 use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.start_kernel";
@@ -58,23 +64,20 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
 
     match provisioning_target_for_spec(&params.spec_name) {
         KernelspecProvisioningTarget::Deno => ensure_deno_kernelspec().await,
-        KernelspecProvisioningTarget::NotYetSupported => {
-            return Err(McpError::invalid_params(
-                format!(
-                    "notebook.start_kernel does not support kernelspec {} yet",
-                    params.spec_name
-                ),
-                Some(json!({
-                    "code": "kernelspec_not_supported",
-                    "spec_name": params.spec_name,
-                })),
-            ));
-        }
+        KernelspecProvisioningTarget::Evcxr => ensure_evcxr_kernelspec().await,
+        KernelspecProvisioningTarget::Gonb => ensure_gonb_kernelspec().await,
         KernelspecProvisioningTarget::Python3 => {
-            let app = deps.app.as_ref().ok_or_else(|| {
-                McpError::internal_error("notebook.start_kernel requires a Tauri app handle", None)
-            })?;
-            ensure_python3_kernelspec(app).await
+            if python3_kernelspec_is_valid().await {
+                Ok(())
+            } else {
+                let app = deps.app.as_ref().ok_or_else(|| {
+                    McpError::internal_error(
+                        "notebook.start_kernel requires a Tauri app handle",
+                        None,
+                    )
+                })?;
+                ensure_python3_kernelspec(app).await
+            }
         }
     }
     .map_err(|error| {
@@ -84,7 +87,8 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         )
     })?;
 
-    let kernel = start_local_kernel(&params.spec_name)
+    let port_root = resolve_port_root(deps, params.slot_id.as_deref(), &params.spec_name).await;
+    let mut kernel = start_local_kernel(&params.spec_name, port_root.as_deref())
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -92,6 +96,13 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
                 Some(json!({ "error": error.to_string() })),
             )
         })?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), &params.spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(McpError::internal_error(
+            "notebook.start_kernel failed to inject port bootstrap",
+            Some(json!({ "error": error.to_string() })),
+        ));
+    }
 
     let slot_id = resolve_slot_id(deps, params.slot_id).await;
     let (generation, _previous) = install_kernel_in_slot(state, &slot_id, params.spec_name, kernel);
@@ -105,14 +116,16 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KernelspecProvisioningTarget {
     Deno,
-    NotYetSupported,
+    Evcxr,
+    Gonb,
     Python3,
 }
 
 fn provisioning_target_for_spec(spec_name: &str) -> KernelspecProvisioningTarget {
     match spec_name {
         "deno" => KernelspecProvisioningTarget::Deno,
-        "evcxr" => KernelspecProvisioningTarget::NotYetSupported,
+        "evcxr" => KernelspecProvisioningTarget::Evcxr,
+        "gonb" => KernelspecProvisioningTarget::Gonb,
         _ => KernelspecProvisioningTarget::Python3,
     }
 }
@@ -125,6 +138,19 @@ async fn resolve_slot_id(deps: &ServerDeps, explicit_slot_id: Option<String>) ->
     super::current_notebook_slot_id(deps)
         .await
         .unwrap_or_else(|| format!("mcp:{}", Uuid::new_v4()))
+}
+
+async fn resolve_port_root(
+    deps: &ServerDeps,
+    explicit_slot_id: Option<&str>,
+    spec_name: &str,
+) -> Option<PathBuf> {
+    if let Some(slot_id) = explicit_slot_id {
+        return notebook_path_from_slot_id(slot_id, spec_name).map(notebook_port_root);
+    }
+
+    let daemon = deps.daemon.as_ref()?;
+    daemon.current_path().await.map(notebook_port_root)
 }
 
 #[cfg(test)]
@@ -182,26 +208,14 @@ mod tests {
     }
 
     #[test]
-    fn evcxr_spec_reports_not_yet_supported_provisioning() {
+    fn evcxr_and_gonb_map_to_their_provisioning_targets() {
         assert_eq!(
             provisioning_target_for_spec("evcxr"),
-            KernelspecProvisioningTarget::NotYetSupported
+            KernelspecProvisioningTarget::Evcxr
         );
-    }
-
-    #[tokio::test]
-    async fn evcxr_start_kernel_returns_not_supported_signal() {
-        let error = call(
-            &deps_without_notebook(),
-            json!({ "spec_name": "evcxr", "slot_id": "notebook:/tmp/demo.ipynb#evcxr" }),
-        )
-        .await
-        .expect_err("evcxr is not supported yet");
-
-        assert!(error.message.contains("does not support kernelspec evcxr"));
         assert_eq!(
-            error.data.and_then(|data| data.get("code").cloned()),
-            Some(json!("kernelspec_not_supported"))
+            provisioning_target_for_spec("gonb"),
+            KernelspecProvisioningTarget::Gonb
         );
     }
 }
