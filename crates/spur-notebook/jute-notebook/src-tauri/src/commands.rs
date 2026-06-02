@@ -1649,6 +1649,7 @@ async fn drain_port_bootstrap_events(
             }
             RunCellEvent::Disconnect(message) => disconnect = Some(message),
             RunCellEvent::Started
+            | RunCellEvent::CompileProgress { .. }
             | RunCellEvent::Stdout(_)
             | RunCellEvent::Stderr(_)
             | RunCellEvent::ExecuteResult(_)
