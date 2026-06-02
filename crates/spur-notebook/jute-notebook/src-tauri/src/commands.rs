@@ -27,8 +27,11 @@ use crate::{
         },
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
-    ports::{notebook_port_root, wrap_js_cell, wrap_python_cell},
-    state::{notebook_slot_id, slot_id_for, window_slot_id, KernelSlot, State},
+    ports::{go_bootstrap, javascript_bootstrap, notebook_port_root, python_bootstrap, rust_bootstrap},
+    state::{
+        notebook_path_from_slot_id, notebook_slot_id, slot_id_for, window_slot_id, KernelSlot,
+        State,
+    },
     Error,
 };
 
@@ -41,6 +44,7 @@ pub mod venv;
 type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
 type BeforeSaveHook = dyn Fn(&Path, &mut NotebookRoot) + Send + Sync;
+const SPUR_NOTEBOOK_PORT_ROOT_ENV: &str = "SPUR_NOTEBOOK_PORT_ROOT";
 
 /// Snapshot of a stable kernel slot for agent read-side tools.
 #[derive(Debug, Clone, Serialize)]
@@ -1101,8 +1105,23 @@ fn is_root_or_prefix_only(path: &Path) -> bool {
     saw_anchor
 }
 
+fn apply_notebook_port_root_env(
+    kernel_spec: &mut environment::KernelSpec,
+    port_root: Option<&Path>,
+) {
+    if let Some(root) = port_root {
+        kernel_spec.env.insert(
+            SPUR_NOTEBOOK_PORT_ROOT_ENV.to_string(),
+            root.display().to_string(),
+        );
+    }
+}
+
 /// Start a local Jupyter kernel by spec name.
-pub async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
+pub async fn start_local_kernel(
+    spec_name: &str,
+    port_root: Option<&std::path::Path>,
+) -> Result<LocalKernel, Error> {
     // Temporary hack to just start a kernel locally with ZeroMQ.
     let kernels = environment::list_kernels(None).await;
     let mut kernel_spec = match kernels
@@ -1128,6 +1147,7 @@ pub async fn start_local_kernel(spec_name: &str) -> Result<LocalKernel, Error> {
         }
     }
 
+    apply_notebook_port_root_env(&mut kernel_spec, port_root);
     let kernel = LocalKernel::start(&kernel_spec).await?;
 
     let info = commands::kernel_info(kernel.conn()).await?;
@@ -1464,6 +1484,8 @@ pub async fn start_kernel(
     // let client = JupyterClient::new("", "")?;
 
     let slot_id = slot_id_for_window(&window);
+    let notebook_path = load_current_notebook_path_normalized().await?;
+    let port_root = notebook_path.as_deref().map(notebook_port_root);
     if let Some(mut kernel) = take_kernel_if_present(&state, &slot_id) {
         if let Err(error) = kernel.kill().await {
             restore_kernel_to_slot(&state, &slot_id, kernel);
@@ -1472,7 +1494,11 @@ pub async fn start_kernel(
     }
 
     crate::kernel_provision::ensure_python3_kernelspec(&app).await?;
-    let kernel = start_local_kernel(spec_name).await?;
+    let mut kernel = start_local_kernel(spec_name, port_root.as_deref()).await?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(error);
+    }
     let (generation, _previous_kernel) =
         install_kernel_in_slot(&state, &slot_id, spec_name.to_string(), kernel);
     info!(slot_id = %slot_id, generation, "started jute kernel slot");
@@ -1492,6 +1518,7 @@ pub async fn restart_kernel(
         Some(spec_name) => spec_name,
         None => spec_name_for_slot(&state, slot_id)?,
     };
+    let port_root = notebook_path_from_slot_id(slot_id, &next_spec_name).map(notebook_port_root);
 
     let mut kernel = take_kernel_from_slot(&state, slot_id)?;
     if let Err(error) = kernel.kill().await {
@@ -1499,7 +1526,11 @@ pub async fn restart_kernel(
         return Err(error);
     }
 
-    let kernel = start_local_kernel(&next_spec_name).await?;
+    let mut kernel = start_local_kernel(&next_spec_name, port_root.as_deref()).await?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), &next_spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(error);
+    }
     let (generation, _previous_kernel) =
         install_kernel_in_slot(&state, slot_id, next_spec_name, kernel);
     info!(slot_id = %slot_id, generation, "restarted jute kernel slot");
@@ -1555,6 +1586,7 @@ pub async fn run_cell_events(
     let dispatch = resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, code, state)?;
     ensure_kernel_slot_live(
         state,
+        notebook_path,
         &dispatch.slot_id,
         &dispatch.spec_name,
         dispatch.code_type,
@@ -1564,6 +1596,89 @@ pub async fn run_cell_events(
     let spec_name = spec_name_for_slot(state, &dispatch.slot_id)?;
     enforce_dispatch_spec(&dispatch.slot_id, &spec_name, dispatch.code_type)?;
     commands::run_cell(&conn, &dispatch.wrapped_code).await
+}
+
+/// Select the per-language SPUR port bootstrap injected once per kernel session.
+///
+/// The bootstrap source is static; the notebook port root is bound at runtime
+/// from the `SPUR_NOTEBOOK_PORT_ROOT` env the daemon sets on the kernel, so cells
+/// run verbatim instead of being wrapped per dispatch.
+fn bootstrap_source_for_spec(spec_name: &str) -> &'static str {
+    match spec_name {
+        "deno" => javascript_bootstrap(),
+        "evcxr" => rust_bootstrap(),
+        "gonb" => go_bootstrap(),
+        _ => python_bootstrap(),
+    }
+}
+
+/// Inject the SPUR port helper into a fresh kernel session.
+pub async fn inject_port_bootstrap(
+    conn: &crate::backend::KernelConnection,
+    spec_name: &str,
+) -> Result<(), Error> {
+    let src = bootstrap_source_for_spec(spec_name);
+    let rx = commands::run_cell(conn, src)
+        .await
+        .map_err(|error| Error::PortBootstrapFailed {
+            stage: "dispatch",
+            cause: error.to_string(),
+        })?;
+    drain_port_bootstrap_events(rx).await
+}
+
+async fn drain_port_bootstrap_events(
+    rx: async_channel::Receiver<RunCellEvent>,
+) -> Result<(), Error> {
+    let mut status = None;
+    let mut execute_error = None;
+    let mut disconnect = None;
+
+    while let Ok(event) = rx.recv().await {
+        match event {
+            RunCellEvent::Finished {
+                status: finished_status,
+                ..
+            } => status = Some(finished_status),
+            RunCellEvent::Error(error) => {
+                if execute_error.is_none() {
+                    execute_error = Some(format!("{}: {}", error.ename, error.evalue));
+                }
+            }
+            RunCellEvent::Disconnect(message) => disconnect = Some(message),
+            RunCellEvent::Started
+            | RunCellEvent::Stdout(_)
+            | RunCellEvent::Stderr(_)
+            | RunCellEvent::ExecuteResult(_)
+            | RunCellEvent::DisplayData(_)
+            | RunCellEvent::UpdateDisplayData(_)
+            | RunCellEvent::ClearOutput(_) => {}
+        }
+    }
+
+    if let Some(cause) = execute_error {
+        return Err(Error::PortBootstrapFailed {
+            stage: "execute-error",
+            cause,
+        });
+    }
+    if let Some(cause) = disconnect {
+        return Err(Error::PortBootstrapFailed {
+            stage: "disconnect",
+            cause,
+        });
+    }
+    match status.as_deref() {
+        Some("ok") => Ok(()),
+        Some(status) => Err(Error::PortBootstrapFailed {
+            stage: "execute-reply",
+            cause: format!("kernel returned status {status}"),
+        }),
+        None => Err(Error::PortBootstrapFailed {
+            stage: "event-stream",
+            cause: "kernel closed without Finished event".to_string(),
+        }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1599,7 +1714,7 @@ fn resolve_run_cell_dispatch(
         slot_id,
         spec_name: spec_name.clone(),
         code_type,
-        wrapped_code: wrap_cell_for_kernel(notebook_path, &spec_name, code),
+        wrapped_code: code.to_string(),
     })
 }
 
@@ -1671,6 +1786,7 @@ fn kernel_slot_status(
 
 async fn ensure_kernel_slot_live(
     state: &State,
+    notebook_path: &str,
     slot_id: &str,
     spec_name: &str,
     code_type: CodeType,
@@ -1682,7 +1798,8 @@ async fn ensure_kernel_slot_live(
         return Ok(());
     }
 
-    let mut kernel = start_local_kernel(spec_name).await?;
+    let port_root = notebook_port_root(notebook_path);
+    let mut kernel = start_local_kernel(spec_name, Some(&port_root)).await?;
     let status = match kernel_slot_status(state, slot_id, spec_name, code_type) {
         Ok(status) => status,
         Err(error) => {
@@ -1697,6 +1814,10 @@ async fn ensure_kernel_slot_live(
             Ok(())
         }
         KernelSlotStatus::Missing | KernelSlotStatus::Empty => {
+            if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
+                let _ = kernel.kill().await;
+                return Err(error);
+            }
             install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
             Ok(())
         }
@@ -1716,15 +1837,6 @@ fn enforce_dispatch_spec(
     Err(Error::NotebookDaemon(format!(
         "refusing to run cell in slot {slot_id}: slot spec {actual_spec_name:?} does not match code_type {code_type:?} kernelspec {expected_spec_name:?}"
     )))
-}
-
-fn wrap_cell_for_kernel(notebook_path: &str, spec_name: &str, code: &str) -> String {
-    let root = notebook_port_root(notebook_path);
-    if spec_name == "deno" {
-        wrap_js_cell(root, code)
-    } else {
-        wrap_python_cell(root, code)
-    }
 }
 
 /// Interrupt a Jupyter kernel slot.
@@ -1764,6 +1876,8 @@ pub async fn interrupt_kernel(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
+        ffi::OsString,
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -1831,69 +1945,118 @@ mod tests {
         }
     }
 
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: String, value: &str) -> Self {
+            let previous = env::var_os(&key);
+            env::set_var(&key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                env::set_var(&self.key, previous);
+            } else {
+                env::remove_var(&self.key);
+            }
+        }
+    }
+
     #[test]
     fn daemon_control_command_symbol_is_exported() {
         let _command = daemon_control;
     }
 
-    #[test]
-    fn run_cell_chokepoint_wraps_python_code_with_port_bootstrap() {
-        let wrapped = wrap_cell_for_kernel(
-            "/tmp/demo-notebook.ipynb",
-            "python3",
-            "spur.put('sales', [1, 2])",
-        );
+    #[tokio::test]
+    async fn start_local_kernel_spawned_env_includes_notebook_port_root_and_preserves_parent_env() {
+        let notebook_path = Path::new("/tmp/spur-port-root-env.ipynb");
+        let port_root = notebook_port_root(notebook_path);
+        let expected_root = port_root.display().to_string();
+        let unique = Uuid::new_v4().to_string().replace('-', "_");
+        let parent_key = format!("SPUR_NOTEBOOK_PARENT_ENV_{unique}");
+        let spec_key = format!("SPUR_NOTEBOOK_SPEC_ENV_{unique}");
+        let output_file = tempfile::NamedTempFile::new().expect("output temp file");
+        let output_path = output_file.path().to_owned();
+        let _parent_guard = EnvVarGuard::set(parent_key.clone(), "parent");
 
-        assert!(wrapped.contains("class _Spur"));
-        assert!(wrapped.contains("spur = _Spur"));
-        assert!(wrapped.ends_with("spur.put('sales', [1, 2])"));
+        let script = format!(
+            "printf '%s|%s|%s' \"$SPUR_NOTEBOOK_PORT_ROOT\" \"${{{spec_key}}}\" \"${{{parent_key}}}\" > \"$1\""
+        );
+        let mut kernel_spec = environment::KernelSpec {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                script,
+                "kernel-env-test".to_string(),
+                output_path.to_string_lossy().into_owned(),
+            ],
+            display_name: "env test".to_string(),
+            language: "sh".to_string(),
+            interrupt_mode: Default::default(),
+            env: BTreeMap::from([(spec_key.clone(), "spec".to_string())]),
+        };
+        apply_notebook_port_root_env(&mut kernel_spec, Some(&port_root));
+
+        let status =
+            crate::backend::local::kernel_command_for_test(&kernel_spec.argv, &kernel_spec.env)
+                .spawn()
+                .expect("spawn fake kernel env probe")
+                .wait()
+                .await
+                .expect("wait for fake kernel env probe");
+        assert!(status.success());
+        let output = tokio::fs::read_to_string(&output_path)
+            .await
+            .expect("read env output");
+
+        assert_eq!(
+            kernel_spec
+                .env
+                .get("SPUR_NOTEBOOK_PORT_ROOT")
+                .map(String::as_str),
+            Some(expected_root.as_str())
+        );
+        assert_eq!(output, format!("{expected_root}|spec|parent"));
     }
 
     #[test]
-    fn run_cell_chokepoint_wraps_deno_code_with_port_bootstrap() {
-        let wrapped = wrap_cell_for_kernel(
-            "/tmp/demo-notebook.ipynb",
-            "deno",
-            "await spur.put('sales', [{ id: 1 }]);",
-        );
-
-        assert!(wrapped.contains("globalThis.spur"));
-        assert!(wrapped.contains("npm:apache-arrow@21.1.0"));
-        assert!(wrapped.ends_with("await spur.put('sales', [{ id: 1 }]);"));
-    }
-
-    #[test]
-    fn run_cell_chokepoint_uses_same_port_root_for_same_notebook_across_specs() {
+    fn run_cell_chokepoint_passes_user_code_verbatim() {
         let notebook_path = "/tmp/demo-notebook.ipynb";
-        let python = wrap_cell_for_kernel(notebook_path, "python3", "spur.get('sales')");
-        let deno = wrap_cell_for_kernel(notebook_path, "deno", "await spur.get('sales');");
-        let expected_root_literal =
-            serde_json::to_string(&notebook_port_root(notebook_path).display().to_string())
-                .expect("port root literal serializes");
-        let forked_root_literal = serde_json::to_string(
-            &notebook_port_root(format!("{notebook_path}#deno"))
-                .display()
-                .to_string(),
-        )
-        .expect("forked port root literal serializes");
+        let state = State::new();
+        let input = "spur.put('sales', [1, 2])";
+        state
+            .get_notebook()
+            .load(notebook_path, notebook_with_source(input, 1));
 
-        assert_ne!(
-            expected_root_literal.as_bytes(),
-            forked_root_literal.as_bytes()
-        );
-        assert!(python.contains(&expected_root_literal));
-        assert!(deno.contains(&expected_root_literal));
-        assert!(!python.contains(&forked_root_literal));
-        assert!(!deno.contains(&forked_root_literal));
+        let dispatch = resolve_run_cell_dispatch(
+            notebook_path,
+            None,
+            "550e8400-e29b-41d4-a716-446655440000",
+            input,
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(dispatch.wrapped_code, input);
+        assert!(!dispatch.wrapped_code.contains("class _Spur"));
     }
 
     #[test]
-    fn run_cell_chokepoint_wraps_raw_code_once() {
-        let wrapped =
-            wrap_cell_for_kernel("/tmp/demo-notebook.ipynb", "python3", "spur.get('sales')");
-
-        assert_eq!(wrapped.matches("class _Spur").count(), 1);
-        assert_eq!(wrapped.matches("spur = _Spur").count(), 1);
+    fn bootstrap_source_for_spec_routes_by_spec() {
+        // Each spec maps to its language's session bootstrap; unknown specs fall
+        // back to Python. The bodies read the root from env, so no spec embeds a
+        // notebook path.
+        assert!(bootstrap_source_for_spec("python3").contains("class _Spur"));
+        assert!(bootstrap_source_for_spec("deno").contains("globalThis.spur"));
+        assert!(bootstrap_source_for_spec("evcxr").contains(":dep arrow = "));
+        assert!(bootstrap_source_for_spec("gonb").contains("!*go get "));
+        assert!(bootstrap_source_for_spec("custom").contains("class _Spur"));
     }
 
     #[test]
@@ -1927,11 +2090,9 @@ mod tests {
         );
         assert_eq!(dispatch.spec_name, "deno");
         assert_eq!(dispatch.code_type, CodeType::Javascript);
-        assert!(dispatch.wrapped_code.contains("globalThis.spur"));
+        assert_eq!(dispatch.wrapped_code, "await spur.put('sales', [])");
+        assert!(!dispatch.wrapped_code.contains("globalThis.spur"));
         assert!(!dispatch.wrapped_code.contains("spur = _Spur"));
-        assert!(dispatch
-            .wrapped_code
-            .ends_with("await spur.put('sales', [])"));
     }
 
     #[test]
@@ -1962,9 +2123,9 @@ mod tests {
         assert_eq!(dispatch.slot_id, supplied_python_slot);
         assert_eq!(dispatch.spec_name, "python3");
         assert_eq!(dispatch.code_type, CodeType::Python);
-        assert!(dispatch.wrapped_code.contains("class _Spur"));
+        assert_eq!(dispatch.wrapped_code, "spur.put('sales', [1])");
+        assert!(!dispatch.wrapped_code.contains("class _Spur"));
         assert!(!dispatch.wrapped_code.contains("globalThis.spur"));
-        assert!(dispatch.wrapped_code.ends_with("spur.put('sales', [1])"));
     }
 
     #[test]

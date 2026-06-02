@@ -11,9 +11,15 @@ use crate::{
 
 static PYTHON3_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
 static DENO_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
+static EVCXR_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
+static GONB_KERNELSPEC_LOCK: Mutex<()> = Mutex::const_new(());
 
 // DuckDB 1.5.x is compatible with the stable v1.2.0 C-API extension envelope.
 const MANAGED_KERNEL_DUCKDB_VERSION: &str = "1.5.3";
+/// Arrow crate major version used by managed Rust kernel bootstrap code.
+pub const EVCXR_ARROW_CRATE_VERSION: &str = "55";
+/// Arrow Go module path used by managed Go kernel bootstrap code.
+pub const GONB_ARROW_GO_MODULE: &str = "github.com/apache/arrow-go/v18";
 
 /// Ensure the bundled `python3` kernelspec is installed for this app.
 pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
@@ -28,6 +34,15 @@ pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     ensure_python3_kernelspec_in_dir(&spur_jupyter, &runner).await
 }
 
+/// Return whether a `python3` kernelspec is already discoverable.
+pub async fn python3_kernelspec_is_valid() -> bool {
+    let _guard = PYTHON3_KERNELSPEC_LOCK.lock().await;
+    environment::list_kernels(None)
+        .await
+        .into_iter()
+        .any(|(path, _spec)| path.file_name().and_then(|name| name.to_str()) == Some("python3"))
+}
+
 /// Ensure the bundled `deno` kernelspec is installed for this app.
 pub async fn ensure_deno_kernelspec() -> Result<(), Error> {
     let _guard = DENO_KERNELSPEC_LOCK.lock().await;
@@ -38,6 +53,30 @@ pub async fn ensure_deno_kernelspec() -> Result<(), Error> {
         })?;
 
     ensure_deno_kernelspec_in_dir(&spur_jupyter).await
+}
+
+/// Ensure the `evcxr` kernelspec is installed for this app.
+pub async fn ensure_evcxr_kernelspec() -> Result<(), Error> {
+    let _guard = EVCXR_KERNELSPEC_LOCK.lock().await;
+    let spur_jupyter =
+        environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {
+            stage: "home_dir",
+            cause: "could not determine home directory".to_string(),
+        })?;
+
+    ensure_evcxr_kernelspec_installed(&spur_jupyter).await
+}
+
+/// Ensure the `gonb` kernelspec is installed for this app.
+pub async fn ensure_gonb_kernelspec() -> Result<(), Error> {
+    let _guard = GONB_KERNELSPEC_LOCK.lock().await;
+    let spur_jupyter =
+        environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {
+            stage: "home_dir",
+            cause: "could not determine home directory".to_string(),
+        })?;
+
+    ensure_gonb_kernelspec_installed(&spur_jupyter).await
 }
 
 trait ProvisionRunner: Sync {
@@ -72,6 +111,61 @@ impl ProvisionRunner for AppProvisionRunner {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(run_python_process(python, args))
     }
+}
+
+async fn ensure_evcxr_kernelspec_installed(spur_jupyter: &std::path::Path) -> Result<(), Error> {
+    let kernelspec = spur_jupyter
+        .join("kernels")
+        .join("evcxr")
+        .join("kernel.json");
+    if kernelspec_is_valid(&kernelspec).await {
+        return Ok(());
+    }
+
+    let cargo = cargo_binary_path()?;
+    run_process(
+        cargo,
+        vec![
+            "install".to_string(),
+            "--locked".to_string(),
+            "evcxr_jupyter".to_string(),
+        ],
+    )
+    .await
+    .map_err(|cause| Error::KernelProvisionFailed {
+        stage: "evcxr_install",
+        cause,
+    })?;
+
+    let evcxr = evcxr_jupyter_binary_path()?;
+    ensure_evcxr_kernelspec_in_dir(spur_jupyter, &evcxr).await
+}
+
+async fn ensure_gonb_kernelspec_installed(spur_jupyter: &std::path::Path) -> Result<(), Error> {
+    let kernelspec = spur_jupyter
+        .join("kernels")
+        .join("gonb")
+        .join("kernel.json");
+    if kernelspec_is_valid(&kernelspec).await {
+        return Ok(());
+    }
+
+    let go = go_binary_path()?;
+    run_process(
+        go,
+        vec![
+            "install".to_string(),
+            "github.com/janpfeifer/gonb@latest".to_string(),
+        ],
+    )
+    .await
+    .map_err(|cause| Error::KernelProvisionFailed {
+        stage: "gonb_install",
+        cause,
+    })?;
+
+    let gonb = gonb_binary_path()?;
+    ensure_gonb_kernelspec_in_dir(spur_jupyter, &gonb).await
 }
 
 async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result<(), Error> {
@@ -129,6 +223,116 @@ async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result
     }
 }
 
+async fn ensure_evcxr_kernelspec_in_dir(
+    spur_jupyter: &std::path::Path,
+    evcxr_jupyter: &std::path::Path,
+) -> Result<(), Error> {
+    let kernelspec = spur_jupyter
+        .join("kernels")
+        .join("evcxr")
+        .join("kernel.json");
+    if kernelspec_is_valid(&kernelspec).await {
+        return Ok(());
+    }
+
+    let Some(parent) = kernelspec.parent() else {
+        return Err(Error::KernelProvisionFailed {
+            stage: "prepare_evcxr_kernelspec_dir",
+            cause: format!("{} has no parent directory", kernelspec.display()),
+        });
+    };
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| Error::KernelProvisionFailed {
+            stage: "prepare_evcxr_kernelspec_dir",
+            cause: error.to_string(),
+        })?;
+
+    let payload = serde_json::json!({
+        "argv": [
+            path_to_string(evcxr_jupyter, "evcxr_kernelspec_write")?,
+            "--control_file",
+            "{connection_file}"
+        ],
+        "display_name": "Rust (evcxr)",
+        "language": "rust"
+    });
+
+    tokio::fs::write(&kernelspec, payload.to_string())
+        .await
+        .map_err(|error| Error::KernelProvisionFailed {
+            stage: "evcxr_kernelspec_write",
+            cause: error.to_string(),
+        })?;
+
+    if kernelspec_is_valid(&kernelspec).await {
+        Ok(())
+    } else {
+        Err(Error::KernelProvisionFailed {
+            stage: "kernelspec_validate",
+            cause: format!(
+                "{} was not created with a valid evcxr argv",
+                kernelspec.display()
+            ),
+        })
+    }
+}
+
+async fn ensure_gonb_kernelspec_in_dir(
+    spur_jupyter: &std::path::Path,
+    gonb: &std::path::Path,
+) -> Result<(), Error> {
+    let kernelspec = spur_jupyter
+        .join("kernels")
+        .join("gonb")
+        .join("kernel.json");
+    if kernelspec_is_valid(&kernelspec).await {
+        return Ok(());
+    }
+
+    let Some(parent) = kernelspec.parent() else {
+        return Err(Error::KernelProvisionFailed {
+            stage: "prepare_gonb_kernelspec_dir",
+            cause: format!("{} has no parent directory", kernelspec.display()),
+        });
+    };
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| Error::KernelProvisionFailed {
+            stage: "prepare_gonb_kernelspec_dir",
+            cause: error.to_string(),
+        })?;
+
+    let payload = serde_json::json!({
+        "argv": [
+            path_to_string(gonb, "gonb_kernelspec_write")?,
+            "--kernel",
+            "{connection_file}"
+        ],
+        "display_name": "Go (gonb)",
+        "language": "go"
+    });
+
+    tokio::fs::write(&kernelspec, payload.to_string())
+        .await
+        .map_err(|error| Error::KernelProvisionFailed {
+            stage: "gonb_kernelspec_write",
+            cause: error.to_string(),
+        })?;
+
+    if kernelspec_is_valid(&kernelspec).await {
+        Ok(())
+    } else {
+        Err(Error::KernelProvisionFailed {
+            stage: "kernelspec_validate",
+            cause: format!(
+                "{} was not created with a valid gonb argv",
+                kernelspec.display()
+            ),
+        })
+    }
+}
+
 async fn ensure_python3_kernelspec_in_dir<R>(
     spur_jupyter: &std::path::Path,
     runner: &R,
@@ -136,10 +340,7 @@ async fn ensure_python3_kernelspec_in_dir<R>(
 where
     R: ProvisionRunner,
 {
-    let kernelspec = spur_jupyter
-        .join("kernels")
-        .join("python3")
-        .join("kernel.json");
+    let kernelspec = python3_kernelspec_path(spur_jupyter);
     if kernelspec_is_valid(&kernelspec).await {
         return Ok(());
     }
@@ -216,6 +417,18 @@ where
             ),
         })
     }
+}
+
+#[cfg(test)]
+async fn python3_kernelspec_is_valid_in_dir(spur_jupyter: &std::path::Path) -> bool {
+    kernelspec_is_valid(&python3_kernelspec_path(spur_jupyter)).await
+}
+
+fn python3_kernelspec_path(spur_jupyter: &std::path::Path) -> PathBuf {
+    spur_jupyter
+        .join("kernels")
+        .join("python3")
+        .join("kernel.json")
 }
 
 async fn relocate_kernelspec(
@@ -344,27 +557,119 @@ fn venv_python_path(venv: &std::path::Path) -> PathBuf {
 }
 
 fn deno_binary_path() -> Result<PathBuf, Error> {
-    if let Some(path) = env::var_os("DENO_PATH") {
-        return existing_absolute_binary(PathBuf::from(path), "deno_path");
+    resolve_binary_from_env_or_path(
+        "deno",
+        "DENO_PATH",
+        "deno_path",
+        "install Deno from https://deno.com/ or set DENO_PATH to the deno binary",
+    )
+}
+
+fn cargo_binary_path() -> Result<PathBuf, Error> {
+    resolve_binary_from_env_or_path(
+        "cargo",
+        "CARGO_PATH",
+        "cargo_path",
+        "install Rust via rustup (https://rustup.rs/) or set CARGO_PATH to the cargo binary",
+    )
+}
+
+fn go_binary_path() -> Result<PathBuf, Error> {
+    resolve_binary_from_env_or_path(
+        "go",
+        "GO_PATH",
+        "go_path",
+        "install Go from https://go.dev/ or set GO_PATH to the go binary",
+    )
+}
+
+fn resolve_binary_from_env_or_path(
+    binary: &str,
+    env_var: &str,
+    stage: &'static str,
+    missing_hint: &str,
+) -> Result<PathBuf, Error> {
+    if let Some(path) = env::var_os(env_var) {
+        return existing_absolute_binary(PathBuf::from(path), stage).map_err(|error| {
+            let Error::KernelProvisionFailed { cause, .. } = error else {
+                return error;
+            };
+            Error::KernelProvisionFailed {
+                stage,
+                cause: format!("{env_var} is set but unusable: {cause}; {missing_hint}"),
+            }
+        });
     }
 
-    find_binary_on_path("deno").ok_or_else(|| Error::KernelProvisionFailed {
-        stage: "deno_path",
-        cause: "could not resolve deno from PATH; set DENO_PATH to the deno binary".to_string(),
+    find_binary_on_path(binary, stage).ok_or_else(|| Error::KernelProvisionFailed {
+        stage,
+        cause: format!("could not resolve {binary} from PATH; {missing_hint}"),
     })
 }
 
-fn find_binary_on_path(binary: &str) -> Option<PathBuf> {
+fn find_binary_on_path(binary: &str, stage: &'static str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     for dir in env::split_paths(&paths) {
         for name in binary_path_names(binary) {
             let candidate = dir.join(name);
-            if let Ok(candidate) = existing_absolute_binary(candidate, "deno_path") {
+            if let Ok(candidate) = existing_absolute_binary(candidate, stage) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+fn evcxr_jupyter_binary_path() -> Result<PathBuf, Error> {
+    let binary = if cfg!(windows) {
+        "evcxr_jupyter.exe"
+    } else {
+        "evcxr_jupyter"
+    };
+    let mut candidates = Vec::new();
+    if let Some(cargo_home) = env::var_os("CARGO_HOME") {
+        candidates.push(PathBuf::from(cargo_home).join("bin").join(binary));
+    }
+    if let Some(home) = environment::default_home_dir() {
+        candidates.push(home.join(".cargo").join("bin").join(binary));
+    }
+
+    find_binary_in_candidates_or_path(candidates, "evcxr_jupyter", "evcxr_path")
+}
+
+fn gonb_binary_path() -> Result<PathBuf, Error> {
+    let binary = if cfg!(windows) { "gonb.exe" } else { "gonb" };
+    let mut candidates = Vec::new();
+    if let Some(gobin) = env::var_os("GOBIN") {
+        candidates.push(PathBuf::from(gobin).join(binary));
+    }
+    if let Some(gopath) = env::var_os("GOPATH") {
+        for path in env::split_paths(&gopath) {
+            candidates.push(path.join("bin").join(binary));
+        }
+    }
+    if let Some(home) = environment::default_home_dir() {
+        candidates.push(home.join("go").join("bin").join(binary));
+    }
+
+    find_binary_in_candidates_or_path(candidates, "gonb", "gonb_path")
+}
+
+fn find_binary_in_candidates_or_path(
+    candidates: Vec<PathBuf>,
+    binary: &str,
+    stage: &'static str,
+) -> Result<PathBuf, Error> {
+    for candidate in candidates {
+        if let Ok(candidate) = existing_absolute_binary(candidate, stage) {
+            return Ok(candidate);
+        }
+    }
+
+    find_binary_on_path(binary, stage).ok_or_else(|| Error::KernelProvisionFailed {
+        stage,
+        cause: format!("could not locate {binary} after installation"),
+    })
 }
 
 fn binary_path_names(binary: &str) -> Vec<String> {
@@ -446,6 +751,24 @@ async fn run_python_process(python: PathBuf, args: Vec<String>) -> Result<(), St
     }
 }
 
+async fn run_process(binary: PathBuf, args: Vec<String>) -> Result<(), String> {
+    let output = tokio::process::Command::new(&binary)
+        .args(args)
+        .output()
+        .await
+        .map_err(|error| format!("{}: {error}", binary.display()))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format_command_failure(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ))
+    }
+}
+
 fn format_command_failure(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
     let stdout = String::from_utf8_lossy(stdout);
     let stderr = String::from_utf8_lossy(stderr);
@@ -476,6 +799,29 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     struct PanicRunner;
 
@@ -605,6 +951,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn python3_kernelspec_validity_probe_reads_bundled_path() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let kernelspec = python3_kernelspec_path(&root);
+        let python = venv_python_path(&root.join("venv"));
+
+        assert!(!python3_kernelspec_is_valid_in_dir(&root).await);
+
+        tokio::fs::create_dir_all(python.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&python, b"").await.unwrap();
+        tokio::fs::create_dir_all(kernelspec.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &kernelspec,
+            serde_json::json!({
+                "argv": [
+                    python.to_string_lossy(),
+                    "-m",
+                    "ipykernel_launcher",
+                    "-f",
+                    "{connection_file}"
+                ],
+                "display_name": "Python 3 (SPUR)",
+                "language": "python"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(python3_kernelspec_is_valid_in_dir(&root).await);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn python3_kernelspec_validity_probe_honors_jupyter_path() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-path-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let jupyter_root = root.join("jupyter");
+        let kernelspec = jupyter_root
+            .join("kernels")
+            .join("python3")
+            .join("kernel.json");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::create_dir_all(kernelspec.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &kernelspec,
+            serde_json::json!({
+                "argv": [
+                    "/usr/bin/python3",
+                    "-m",
+                    "ipykernel_launcher",
+                    "-f",
+                    "{connection_file}"
+                ],
+                "display_name": "Python 3",
+                "language": "python"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _jupyter_path = EnvVarGuard::set("JUPYTER_PATH", jupyter_root.as_os_str());
+
+        assert!(python3_kernelspec_is_valid().await);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn provisioning_installs_pinned_duckdb_package() {
         let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
         let runner = RecordingRunner::default();
@@ -667,6 +1090,113 @@ mod tests {
             Some(value) => std::env::set_var("DENO_PATH", value),
             None => std::env::remove_var("DENO_PATH"),
         }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_evcxr_kernelspec_writes_template_from_injected_binary() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let evcxr = root.join("bin").join(if cfg!(windows) {
+            "evcxr_jupyter.exe"
+        } else {
+            "evcxr_jupyter"
+        });
+        tokio::fs::create_dir_all(evcxr.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&evcxr, b"").await.unwrap();
+
+        ensure_evcxr_kernelspec_in_dir(&root, &evcxr).await.unwrap();
+
+        let kernelspec = root.join("kernels").join("evcxr").join("kernel.json");
+        let contents = tokio::fs::read(&kernelspec).await.unwrap();
+        let spec = serde_json::from_slice::<serde_json::Value>(&contents).unwrap();
+        assert_eq!(
+            spec,
+            serde_json::json!({
+                "argv": [
+                    evcxr.to_string_lossy(),
+                    "--control_file",
+                    "{connection_file}"
+                ],
+                "display_name": "Rust (evcxr)",
+                "language": "rust"
+            })
+        );
+        assert!(kernelspec_is_valid(&kernelspec).await);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_gonb_kernelspec_writes_template_from_injected_binary() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let gonb = root
+            .join("bin")
+            .join(if cfg!(windows) { "gonb.exe" } else { "gonb" });
+        tokio::fs::create_dir_all(gonb.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&gonb, b"").await.unwrap();
+
+        ensure_gonb_kernelspec_in_dir(&root, &gonb).await.unwrap();
+
+        let kernelspec = root.join("kernels").join("gonb").join("kernel.json");
+        let contents = tokio::fs::read(&kernelspec).await.unwrap();
+        let spec = serde_json::from_slice::<serde_json::Value>(&contents).unwrap();
+        assert_eq!(
+            spec,
+            serde_json::json!({
+                "argv": [
+                    gonb.to_string_lossy(),
+                    "--kernel",
+                    "{connection_file}"
+                ],
+                "display_name": "Go (gonb)",
+                "language": "go"
+            })
+        );
+        assert!(kernelspec_is_valid(&kernelspec).await);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn valid_evcxr_kernelspec_skips_injected_binary_validation() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let kernelspec = root.join("kernels").join("evcxr").join("kernel.json");
+        let evcxr = root.join("bin").join(if cfg!(windows) {
+            "evcxr_jupyter.exe"
+        } else {
+            "evcxr_jupyter"
+        });
+        tokio::fs::create_dir_all(evcxr.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&evcxr, b"").await.unwrap();
+        tokio::fs::create_dir_all(kernelspec.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &kernelspec,
+            serde_json::json!({
+                "argv": [
+                    evcxr.to_string_lossy(),
+                    "--control_file",
+                    "{connection_file}"
+                ],
+                "display_name": "Rust (evcxr)",
+                "language": "rust"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        ensure_evcxr_kernelspec_in_dir(&root, &root.join("missing-evcxr"))
+            .await
+            .unwrap();
+
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

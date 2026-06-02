@@ -3,13 +3,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use jute::backend::commands::{self as kernel_commands, RunCellEvent};
+#[cfg(feature = "datasource-introspect")]
+use jute::notebook_store::{CellKind, DeltaKind, NotebookOp};
 use jute::state::{notebook_slot_id, KernelSlot, State};
 use jute::{
     backend::notebook::{
         Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, MultilineString, NotebookMetadata,
         NotebookRoot, PortSpec, SpurCellMetadata,
     },
-    commands::{install_kernel_in_slot, start_local_kernel},
+    commands::{inject_port_bootstrap, install_kernel_in_slot, start_local_kernel},
 };
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
@@ -98,8 +101,219 @@ impl BridgeRequester for MockBridge {
     ) -> BridgeRequestFuture<'a> {
         Box::pin(async move {
             self.calls.lock().await.push((method.to_string(), params));
-            self.responses.lock().await.remove(0)
+            let mut responses = self.responses.lock().await;
+            if responses.is_empty() {
+                Err(BridgeError::Handler {
+                    code: "missing_mock_response".to_string(),
+                    message: format!("no mock bridge response queued for {method}"),
+                })
+            } else {
+                responses.remove(0)
+            }
         })
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+struct StoreBackedBridge {
+    state: Arc<State>,
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+#[cfg(feature = "datasource-introspect")]
+impl StoreBackedBridge {
+    fn new(state: Arc<State>) -> Self {
+        Self {
+            state,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+impl BridgeRequester for StoreBackedBridge {
+    fn listener_registered(&self) -> bool {
+        true
+    }
+
+    fn window_alive(&self) -> bool {
+        true
+    }
+
+    fn notebook_open(&self) -> bool {
+        true
+    }
+
+    fn request<'a>(
+        &'a self,
+        method: &'static str,
+        params: Value,
+        _timeout: Duration,
+    ) -> BridgeRequestFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .await
+                .push((method.to_string(), params.clone()));
+            match method {
+                "notebook.snapshot" => Ok(snapshot_bridge_value(&self.state)),
+                "notebook.insert_cell" => {
+                    let kind = match required_str(method, &params, "kind")?.as_str() {
+                        "code" => CellKind::Code,
+                        "markdown" => CellKind::Markdown,
+                        "raw" => CellKind::Raw,
+                        kind => {
+                            return Err(mock_bridge_error(format!(
+                                "unsupported notebook.insert_cell kind {kind:?}"
+                            )));
+                        }
+                    };
+                    let source = required_str(method, &params, "source")?;
+                    let after_id = params
+                        .get("after_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let last_edited_by = params
+                        .get("last_edited_by")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let delta = self
+                        .state
+                        .get_notebook()
+                        .apply(NotebookOp::InsertCell {
+                            kind,
+                            after_id,
+                            source,
+                            last_edited_by,
+                            code_type: None,
+                        })
+                        .map_err(|error| mock_bridge_error(error.to_string()))?;
+                    let DeltaKind::CellInserted { cell, .. } = delta.kind else {
+                        return Err(mock_bridge_error(
+                            "notebook.insert_cell did not produce an insert delta",
+                        ));
+                    };
+                    Ok(json!({ "id": cell.id, "version": delta.version }))
+                }
+                "notebook.write_cell" => {
+                    let id = required_str(method, &params, "id")?;
+                    let source = required_str(method, &params, "source")?;
+                    let expected_version = required_u64(method, &params, "expected_version")?;
+                    let last_edited_by = params
+                        .get("last_edited_by")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let delta = self
+                        .state
+                        .get_notebook()
+                        .apply(NotebookOp::WriteCell {
+                            id,
+                            source,
+                            expected_version: Some(expected_version),
+                            last_edited_by,
+                        })
+                        .map_err(|error| mock_bridge_error(error.to_string()))?;
+                    Ok(json!({ "version": delta.version }))
+                }
+                "notebook.set_cell_metadata" => {
+                    let id = required_str(method, &params, "id")?;
+                    let expected_version = required_u64(method, &params, "expected_version")?;
+                    let datasource_setup = params
+                        .get("patch")
+                        .and_then(|patch| patch.get("spur"))
+                        .and_then(|spur| spur.get("datasource_setup"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    if !datasource_setup {
+                        return Err(mock_bridge_error(
+                            "StoreBackedBridge only supports datasource setup metadata",
+                        ));
+                    }
+                    let delta = self
+                        .state
+                        .get_notebook()
+                        .apply(NotebookOp::MarkDatasourceSetupCell {
+                            id,
+                            expected_version,
+                        })
+                        .map_err(|error| mock_bridge_error(error.to_string()))?;
+                    Ok(json!({ "ok": true, "version": delta.version }))
+                }
+                method => Err(mock_bridge_error(format!(
+                    "StoreBackedBridge does not support {method}"
+                ))),
+            }
+        })
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn required_str(
+    method: &'static str,
+    params: &Value,
+    key: &'static str,
+) -> Result<String, BridgeError> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| mock_bridge_error(format!("{method} missing string field {key}")))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn required_u64(
+    method: &'static str,
+    params: &Value,
+    key: &'static str,
+) -> Result<u64, BridgeError> {
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| mock_bridge_error(format!("{method} missing integer field {key}")))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn mock_bridge_error(message: impl Into<String>) -> BridgeError {
+    BridgeError::Handler {
+        code: "mock_bridge_error".to_string(),
+        message: message.into(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn snapshot_bridge_value(state: &State) -> Value {
+    let (root, _) = state.get_notebook().snapshot();
+    Value::Array(root.cells.iter().map(snapshot_cell_bridge_value).collect())
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn snapshot_cell_bridge_value(cell: &Cell) -> Value {
+    let (id, metadata, source, kind, exec_count) = match cell {
+        Cell::Raw(cell) => (&cell.id, &cell.metadata, &cell.source, "raw", None),
+        Cell::Markdown(cell) => (&cell.id, &cell.metadata, &cell.source, "markdown", None),
+        Cell::Code(cell) => (
+            &cell.id,
+            &cell.metadata,
+            &cell.source,
+            "code",
+            cell.execution_count,
+        ),
+    };
+    json!({
+        "id": id.clone().unwrap_or_default(),
+        "kind": kind,
+        "version": metadata.spur.as_ref().map(|spur| spur.version).unwrap_or_default(),
+        "exec_count": exec_count,
+        "status": "idle",
+        "source": multiline_source(source),
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn multiline_source(source: &MultilineString) -> String {
+    match source {
+        MultilineString::Single(source) => source.clone(),
+        MultilineString::Multi(lines) => lines.join(""),
     }
 }
 
@@ -142,6 +356,49 @@ fn combined_stream_text(outputs: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+async fn run_raw_kernel_cell(
+    kernel: &jute::backend::local::LocalKernel,
+    code: &str,
+) -> (String, String) {
+    let rx = kernel_commands::run_cell(kernel.conn(), code)
+        .await
+        .expect("raw backend cell dispatch succeeds");
+    let mut stdout = String::new();
+    let mut diagnostics = Vec::new();
+    let mut status = None;
+    while let Ok(event) = rx.recv().await {
+        match event {
+            RunCellEvent::Stdout(text) => stdout.push_str(&text),
+            RunCellEvent::Stderr(text) => diagnostics.push(text),
+            RunCellEvent::Error(error) => diagnostics.push(format!("{error:?}")),
+            RunCellEvent::Disconnect(message) => diagnostics.push(message),
+            RunCellEvent::Finished {
+                status: finished_status,
+                ..
+            } => status = Some(finished_status),
+            RunCellEvent::Started
+            | RunCellEvent::ExecuteResult(_)
+            | RunCellEvent::DisplayData(_)
+            | RunCellEvent::UpdateDisplayData(_)
+            | RunCellEvent::ClearOutput(_) => {}
+        }
+    }
+
+    let status = status.unwrap_or_else(|| "missing-finished".to_string());
+    assert_eq!(
+        status, "ok",
+        "raw cell failed with stdout={stdout:?}, diagnostics={diagnostics:?}"
+    );
+    (status, stdout)
+}
+
+fn stdout_value<'a>(stdout: &'a str, prefix: &str) -> &'a str {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("expected stdout line with prefix {prefix:?}, got {stdout:?}"))
 }
 
 #[tokio::test]
@@ -626,6 +883,10 @@ async fn write_test_python3_kernelspec(
 }
 
 fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
+    notebook_with_typed_code_cells(ids, None)
+}
+
+fn notebook_with_typed_code_cells(ids: &[&str], code_type: Option<CodeType>) -> NotebookRoot {
     NotebookRoot {
         metadata: NotebookMetadata {
             kernelspec: None,
@@ -649,7 +910,7 @@ fn notebook_with_code_cells(ids: &[&str]) -> NotebookRoot {
                             last_edited_by: None,
                             datasource_setup: None,
                             dag: None,
-                            code_type: None,
+                            code_type: code_type.clone(),
                         }),
                         jute_deck: None,
                         other: Default::default(),
@@ -733,7 +994,7 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
     let state = Arc::new(State::new());
     state.get_notebook().load(
         notebook_path.clone(),
-        notebook_with_code_cells(&["deno-put", "deno-get"]),
+        notebook_with_typed_code_cells(&["deno-put", "deno-get"], Some(CodeType::Javascript)),
     );
     let deps = deps_with_state(state);
 
@@ -1009,7 +1270,7 @@ async fn start_kernel_then_stop_kernel_cycles_slot() {
     };
     let state = Arc::new(State::new());
     let slot_id = "mcp:notebook-read-tools-stop".to_string();
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     let (generation, previous) =
@@ -1046,8 +1307,12 @@ async fn run_cell_collects_events_against_in_process_kernel_mock() {
         return;
     };
     let state = Arc::new(State::new());
+    state.get_notebook().load(
+        PathBuf::from("/tmp/notebook-read-tools-run.ipynb"),
+        notebook_with_code_cells(&["code-run-1"]),
+    );
     let slot_id = "mcp:notebook-read-tools-run".to_string();
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
@@ -1120,9 +1385,13 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
         }))
         .await;
     assert!(open.ok, "{:?}", open.error);
+    state.get_notebook().load(
+        path.clone(),
+        notebook_with_code_cells(&["code-run-define", "code-run-print"]),
+    );
 
     let slot_id = notebook_slot_id(path.to_string_lossy().as_ref());
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
@@ -1165,6 +1434,120 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
     let _ = stop_kernel::call(&deps, json!({ "kernel_id": slot_id })).await;
 }
 
+#[tokio::test]
+#[ignore = "requires a working python3 kernel; run with --ignored"]
+async fn python_port_bootstrap_is_available_for_raw_cells_once_per_kernel_session() {
+    let Some(_kernelspec) = install_test_python3_kernelspec().await else {
+        return;
+    };
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-port-bootstrap-")
+        .tempdir()
+        .expect("temp dir");
+    let notebook_path = temp_dir.path().join("bootstrap.ipynb");
+    let notebook_path_string = notebook_path.to_string_lossy().into_owned();
+    let slot_id = notebook_slot_id(&notebook_path_string);
+    let port_root = notebook_port_root(&notebook_path);
+    let state = Arc::new(State::new());
+
+    let kernel = start_local_kernel("python3", Some(&port_root))
+        .await
+        .expect("python3 kernel starts");
+    inject_port_bootstrap(kernel.conn(), "python3")
+        .await
+        .expect("port bootstrap injects");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
+    let mut kernel =
+        jute::commands::take_kernel_from_slot(&state, &slot_id).expect("kernel installed");
+
+    let (_, first_stdout) = run_raw_kernel_cell(
+        &kernel,
+        concat!(
+            "print(f\"spur-defined:{'spur' in globals()}\")\n",
+            "print(f\"spur-class:{spur.__class__.__name__}\")\n",
+            "print(f\"spur-root:{spur._root}\")\n",
+            "print(f\"spur-id:{id(spur)}\")\n",
+        ),
+    )
+    .await;
+    let (_, second_stdout) = run_raw_kernel_cell(
+        &kernel,
+        concat!(
+            "print(f\"spur-defined:{'spur' in globals()}\")\n",
+            "print(f\"spur-class:{spur.__class__.__name__}\")\n",
+            "print(f\"spur-root:{spur._root}\")\n",
+            "print(f\"spur-id:{id(spur)}\")\n",
+        ),
+    )
+    .await;
+
+    assert_eq!(stdout_value(&first_stdout, "spur-defined:"), "True");
+    assert_eq!(stdout_value(&second_stdout, "spur-defined:"), "True");
+    assert_eq!(stdout_value(&first_stdout, "spur-class:"), "_Spur");
+    assert_eq!(stdout_value(&second_stdout, "spur-class:"), "_Spur");
+    assert_eq!(
+        stdout_value(&first_stdout, "spur-root:"),
+        port_root.to_string_lossy()
+    );
+    assert_eq!(
+        stdout_value(&second_stdout, "spur-root:"),
+        port_root.to_string_lossy()
+    );
+    assert_eq!(
+        stdout_value(&first_stdout, "spur-id:"),
+        stdout_value(&second_stdout, "spur-id:"),
+        "bootstrap should construct one helper for the kernel session"
+    );
+
+    let _ = kernel.kill().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a working python3 kernel; run with --ignored"]
+async fn python_port_bootstrap_is_available_again_after_fresh_restart_kernel() {
+    let Some(_kernelspec) = install_test_python3_kernelspec().await else {
+        return;
+    };
+    let temp_dir = tempfile::Builder::new()
+        .prefix("spur-notebook-it-port-bootstrap-restart-")
+        .tempdir()
+        .expect("temp dir");
+    let notebook_path = temp_dir.path().join("bootstrap-restart.ipynb");
+    let notebook_path_string = notebook_path.to_string_lossy().into_owned();
+    let slot_id = notebook_slot_id(&notebook_path_string);
+    let port_root = notebook_port_root(&notebook_path);
+    let state = Arc::new(State::new());
+
+    let kernel = start_local_kernel("python3", Some(&port_root))
+        .await
+        .expect("python3 kernel starts");
+    inject_port_bootstrap(kernel.conn(), "python3")
+        .await
+        .expect("initial port bootstrap injects");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
+    let mut kernel =
+        jute::commands::take_kernel_from_slot(&state, &slot_id).expect("kernel installed");
+    let (_, first_stdout) =
+        run_raw_kernel_cell(&kernel, "print(f\"spur-defined:{'spur' in globals()}\")").await;
+    assert_eq!(stdout_value(&first_stdout, "spur-defined:"), "True");
+    kernel.kill().await.expect("first kernel stops");
+
+    let restarted = start_local_kernel("python3", Some(&port_root))
+        .await
+        .expect("python3 kernel restarts");
+    inject_port_bootstrap(restarted.conn(), "python3")
+        .await
+        .expect("restart port bootstrap injects");
+    install_kernel_in_slot(&state, &slot_id, "python3".to_string(), restarted);
+    let mut restarted = jute::commands::take_kernel_from_slot(&state, &slot_id)
+        .expect("restarted kernel installed");
+    let (_, restart_stdout) =
+        run_raw_kernel_cell(&restarted, "print(f\"spur-defined:{'spur' in globals()}\")").await;
+    assert_eq!(stdout_value(&restart_stdout, "spur-defined:"), "True");
+
+    let _ = restarted.kill().await;
+}
+
 #[cfg(feature = "datasource-introspect")]
 #[tokio::test]
 #[ignore = "requires a working python3 kernel with duckdb; run with --ignored"]
@@ -1190,29 +1573,23 @@ async fn canonical_demo_attach_csv_runs_setup_and_renders_html_chart() {
     .await
     .expect("csv fixture writes");
     let notebook_path = temp_dir.path().join("analysis.ipynb");
-    let empty_notebook = json!({
-        "metadata": {},
-        "nbformat_minor": 5,
-        "nbformat": 4,
-        "cells": []
-    });
+    let notebook_root = notebook_with_code_cells(&["code-canonical-demo-chart"]);
+    let notebook_json = serde_json::to_value(&notebook_root).expect("notebook serializes");
     tokio::fs::write(
         &notebook_path,
-        serde_json::to_vec_pretty(&empty_notebook).expect("empty notebook serializes"),
+        serde_json::to_vec_pretty(&notebook_json).expect("notebook fixture serializes"),
     )
     .await
     .expect("notebook fixture writes");
 
     let state = Arc::new(State::new());
-    let notebook_root: jute::backend::notebook::NotebookRoot =
-        serde_json::from_value(empty_notebook).expect("empty notebook parses");
     state
         .get_notebook()
         .load(notebook_path.clone(), notebook_root);
 
     let control = NotebookDaemonControl::new_with_parts_for_test(
         Arc::new(AgentBridge::new()),
-        Arc::new(MockBridge::default()),
+        Arc::new(StoreBackedBridge::new(state.clone())),
         state.clone(),
         Arc::new(RecordingWindowOps::default()),
         None,
@@ -1273,7 +1650,7 @@ async fn canonical_demo_attach_csv_runs_setup_and_renders_html_chart() {
     assert!(setup_source.contains("sales"));
 
     let slot_id = "mcp:notebook-read-tools-canonical-demo".to_string();
-    let kernel = start_local_kernel("python3")
+    let kernel = start_local_kernel("python3", None)
         .await
         .expect("python3 kernel starts");
     install_kernel_in_slot(&state, &slot_id, "python3".to_string(), kernel);
