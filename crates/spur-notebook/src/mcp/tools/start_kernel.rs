@@ -1,13 +1,16 @@
 use jute::commands::{install_kernel_in_slot, start_local_kernel};
 use jute::kernel_provision::{ensure_deno_kernelspec, ensure_python3_kernelspec};
+use jute::state::notebook_path_from_slot_id;
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::dag::notebook_port_root;
 use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.start_kernel";
@@ -84,7 +87,8 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         )
     })?;
 
-    let kernel = start_local_kernel(&params.spec_name)
+    let port_root = resolve_port_root(deps, params.slot_id.as_deref(), &params.spec_name).await;
+    let kernel = start_local_kernel(&params.spec_name, port_root.as_deref())
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -125,6 +129,19 @@ async fn resolve_slot_id(deps: &ServerDeps, explicit_slot_id: Option<String>) ->
     super::current_notebook_slot_id(deps)
         .await
         .unwrap_or_else(|| format!("mcp:{}", Uuid::new_v4()))
+}
+
+async fn resolve_port_root(
+    deps: &ServerDeps,
+    explicit_slot_id: Option<&str>,
+    spec_name: &str,
+) -> Option<PathBuf> {
+    if let Some(slot_id) = explicit_slot_id {
+        return notebook_path_from_slot_id(slot_id, spec_name).map(notebook_port_root);
+    }
+
+    let daemon = deps.daemon.as_ref()?;
+    daemon.current_path().await.map(notebook_port_root)
 }
 
 #[cfg(test)]
