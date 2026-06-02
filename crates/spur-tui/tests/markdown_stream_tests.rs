@@ -951,3 +951,65 @@ fn table_with_inline_formatting_in_cells_renders_as_grid() {
         "formatted cell content must appear inside the grid:\n{rendered}"
     );
 }
+
+// ── Regression: real-world summary table with angle-bracket "generics"
+// (<go-bin-dir>), em-dashes, italics, and long mixed-inline cells, fed in
+// streaming chunks. Must not fall back to raw markdown. (Long cells take the
+// narrow-terminal records fallback at width 120 — that is expected; the bug
+// guarded here is raw `|`-pipe output.)
+#[test]
+fn streamed_long_inline_table_does_not_render_raw() {
+    use spur_tui::components::markdown_stream::StreamItem;
+
+    fn text_of(s: &MarkdownStream, width: u16) -> String {
+        s.preview_items_with_width(&StateLookup::empty(), width)
+            .iter()
+            .filter_map(|i| match i {
+                StreamItem::Text(ls) => Some(
+                    ls.iter()
+                        .map(|l| {
+                            l.spans
+                                .iter()
+                                .map(|sp| sp.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let input = r##"| Part | Fix |
+|---|---|
+| **A. PATH/tooling** (fixes #1) | ensure_gonb_kernelspec must `go install goimports` (+ gopls) **and** write the gonb kernelspec with env.PATH = <go-bin-dir>:<inherited PATH> (or have kernel_command prepend the Go bin dir for gonb). Without this, Go cells fail on every machine where the app's PATH lacks ~/go/bin — i.e. any GUI launch. |
+| **B. arrow-go latency** (fixes #2) — *design choice* | (i) **Pre-warm** arrow-go during provisioning (pay 145 s once at install, as a visible step); or (ii) raise the compiled-kernel inject timeout + show progress (ties into the compile-progress feature); or (iii) drop/slim the eager arrow import. I lean **(i) + (ii)**. |
+| **C. diagnosability** (fixes #3) | Pipe kernel stderr (at least capture-on-failure) instead of Stdio::null() — also the exact plumbing Phase-2 compile-progress needs. |
+"##;
+    // Embed the table in surrounding prose, the way a streamed agent message
+    // delivers it, and feed it in small chunks with a flush between each —
+    // mirroring the live TUI rather than a single append.
+    let framed = format!(
+        "Here's a summary of the current uncommitted changes:\n\n{input}\nThat's the plan.\n"
+    );
+    let mut s = MarkdownStream::new();
+    let chars: Vec<char> = framed.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = (i + 13).min(chars.len());
+        let chunk: String = chars[i..end].iter().collect();
+        s.append(&chunk);
+        s.flush_now(&StateLookup::empty());
+        i = end;
+    }
+    s.flush_final(&StateLookup::empty());
+    let rendered = text_of(&s, 120);
+    eprintln!("=== RENDERED ===\n{rendered}\n=== END ===");
+
+    assert!(
+        !rendered.contains("|---|---|") && !rendered.contains("| Part | Fix |"),
+        "streamed table must not render as raw markdown:\n{rendered}"
+    );
+}
