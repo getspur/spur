@@ -9,7 +9,9 @@ use std::{collections::BTreeMap, process::Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -87,9 +89,28 @@ impl LocalKernel {
             .iter()
             .map(|s| s.replace("{connection_file}", &connection_filename))
             .collect();
-        let child = kernel_command(&argv, &spec.env)
+        // Capture the kernel's stderr (fd 2) rather than discarding it: some
+        // kernels (notably evcxr) emit compile progress like
+        // `Compiling <crate> v<ver>` directly on stderr instead of over IOPub.
+        let mut child = kernel_command(&argv, &spec.env)
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(Error::Subprocess)?;
+
+        let (process_stderr_tx, _) = broadcast::channel::<String>(256);
+
+        if let Some(stderr) = child.stderr.take() {
+            let tx = process_stderr_tx.clone();
+            // Detached reader: ends when stderr closes (process exit). It never
+            // blocks shutdown — `kill_on_drop` reaps the child, closing stderr.
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // Ignore SendError: no subscribers yet just drops the line.
+                    let _ = tx.send(line);
+                }
+            });
+        }
 
         let conn = create_zeromq_connection(
             shell_port,
@@ -98,6 +119,7 @@ impl LocalKernel {
             stdin_port,
             heartbeat_port,
             &signing_key,
+            process_stderr_tx,
         )
         .await?;
 

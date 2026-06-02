@@ -570,6 +570,7 @@ pub struct KernelConnection {
     shell_tx: async_channel::Sender<KernelMessage>,
     control_tx: async_channel::Sender<KernelMessage>,
     iopub_tx: broadcast::Sender<KernelMessage>,
+    process_stderr_tx: broadcast::Sender<String>,
     reply_tx_map: Arc<DashMap<String, oneshot::Sender<KernelMessage>>>,
     signal: CancellationToken,
     _drop_guard: Arc<DropGuard>,
@@ -631,6 +632,17 @@ impl KernelConnection {
         self.iopub_tx.subscribe()
     }
 
+    /// Subscribe to lines written to the kernel process's stderr (fd 2).
+    ///
+    /// Unlike IOPub `Stream` messages, some kernels (notably evcxr) emit
+    /// progress such as `Compiling <crate> v<ver>` directly on the child
+    /// process's stderr rather than over the wire protocol. Local kernels feed
+    /// those lines into this broadcast; connections without an owned process
+    /// (e.g. WebSocket) yield an empty stream.
+    pub fn subscribe_process_stderr(&self) -> broadcast::Receiver<String> {
+        self.process_stderr_tx.subscribe()
+    }
+
     /// Close the connection to the kernel, shutting down all channels.
     pub fn close(&self) {
         self.shell_tx.close();
@@ -675,6 +687,7 @@ mod tests {
 
     struct InProcessKernelHarness {
         iopub_tx: broadcast::Sender<KernelMessage>,
+        process_stderr_tx: broadcast::Sender<String>,
     }
 
     impl InProcessKernelHarness {
@@ -684,6 +697,13 @@ mod tests {
         ) -> Result<usize, broadcast::error::SendError<KernelMessage>> {
             self.iopub_tx.send(message)
         }
+
+        fn publish_process_stderr(
+            &self,
+            line: String,
+        ) -> Result<usize, broadcast::error::SendError<String>> {
+            self.process_stderr_tx.send(line)
+        }
     }
 
     impl KernelConnection {
@@ -691,16 +711,24 @@ mod tests {
             let (shell_tx, _shell_rx) = async_channel::bounded(8);
             let (control_tx, _control_rx) = async_channel::bounded(8);
             let (iopub_tx, _) = broadcast::channel(64);
+            let (process_stderr_tx, _) = broadcast::channel(64);
             let signal = CancellationToken::new();
             let conn = Self {
                 shell_tx,
                 control_tx,
                 iopub_tx: iopub_tx.clone(),
+                process_stderr_tx: process_stderr_tx.clone(),
                 reply_tx_map: Arc::new(DashMap::new()),
                 signal: signal.clone(),
                 _drop_guard: Arc::new(signal.drop_guard()),
             };
-            (conn, InProcessKernelHarness { iopub_tx })
+            (
+                conn,
+                InProcessKernelHarness {
+                    iopub_tx,
+                    process_stderr_tx,
+                },
+            )
         }
     }
 
@@ -719,6 +747,19 @@ mod tests {
 
         assert_eq!(js_channel.recv().await.unwrap(), message);
         assert_eq!(mcp_progress.recv().await.unwrap(), message);
+    }
+
+    #[tokio::test]
+    async fn process_stderr_subscribers_each_receive_every_line() {
+        let (conn, harness) = KernelConnection::in_process_for_test();
+        let mut compile_progress = conn.subscribe_process_stderr();
+        let mut other = conn.subscribe_process_stderr();
+        let line = "   Compiling serde v1.0.0".to_string();
+
+        harness.publish_process_stderr(line.clone()).unwrap();
+
+        assert_eq!(compile_progress.recv().await.unwrap(), line);
+        assert_eq!(other.recv().await.unwrap(), line);
     }
 
     #[test]
