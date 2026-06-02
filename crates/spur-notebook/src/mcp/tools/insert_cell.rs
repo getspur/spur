@@ -29,15 +29,33 @@ struct InsertCellResult {
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Insert a code, markdown, or raw cell after after_id, or at the end when omitted.",
+        "Insert a new code, markdown, or raw cell after after_id (or append at the end of the \
+         notebook when after_id is omitted). For a code cell, code_type is REQUIRED and selects \
+         the kernel language; for markdown/raw cells code_type MUST be omitted. Returns the new \
+         cell's id and version.",
         rmcp_object(json!({
             "type": "object",
             "required": ["kind", "source"],
             "properties": {
-                "after_id": { "type": "string", "minLength": 1 },
-                "kind": { "type": "string", "enum": ["code", "markdown", "raw"] },
-                "source": { "type": "string" },
-                "code_type": { "type": "string", "enum": ["python", "javascript", "rust"] }
+                "after_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Insert the new cell immediately after this existing cell id; omit to append at the end of the notebook."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["code", "markdown", "raw"],
+                    "description": "Cell type. 'code' is executable and REQUIRES code_type; 'markdown' and 'raw' are non-executable and MUST omit code_type."
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Initial cell content. For a code cell, write source valid for the chosen code_type."
+                },
+                "code_type": {
+                    "type": "string",
+                    "enum": ["python", "javascript", "rust"],
+                    "description": "Kernel language for a code cell: 'python', 'javascript' (runs on the Deno/TypeScript kernel), or 'rust'. REQUIRED when kind is 'code'; MUST be omitted for markdown/raw cells. Change it later with set_cell_code_type."
+                }
             },
             "additionalProperties": false
         })),
