@@ -45,5 +45,10 @@ fn main() -> duckdb::Result<()> {
     assert!((orderbook_rows[0].0.expect("price should be non-null") - 0.51).abs() < 0.000_01);
     assert!((orderbook_rows[0].1.expect("size should be non-null") - 120.0).abs() < 0.000_01);
 
+    if env::var_os("SPUR_REST_MANIFEST").is_some() {
+        let _stmt = conn.prepare("SELECT id, number, title, open FROM linear_issues()")?;
+        println!("linear_issues registered and bound");
+    }
+
     Ok(())
 }

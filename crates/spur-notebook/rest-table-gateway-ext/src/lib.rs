@@ -1,6 +1,7 @@
 use std::{
     env,
     error::Error,
+    fs,
     sync::{Arc, Mutex},
 };
 
@@ -13,7 +14,10 @@ use duckdb::{
     Connection, Result,
 };
 use spur_rest_table_gateway::{
-    adapter::{Adapter, ResolvedAuth, ScalarValue, ScanRequest, TableKind},
+    adapter::{
+        manifest::Manifest, manifest_adapter::ManifestAdapter, Adapter, ResolvedAuth, ScalarValue,
+        ScanRequest, TableKind,
+    },
     adapters::polymarket::PolymarketAdapter,
     vtab::{
         bridge::IoBridge,
@@ -34,7 +38,15 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
 
     let adapter: Arc<dyn Adapter> = Arc::new(PolymarketAdapter::new(&gamma_base, &clob_base)?);
     let bridge = Arc::new(IoBridge::new());
-    register_adapter(&con, adapter, bridge)?;
+    register_adapter(&con, adapter, Arc::clone(&bridge))?;
+
+    if let Ok(manifest_path) = env::var("SPUR_REST_MANIFEST") {
+        let manifest_toml = fs::read_to_string(manifest_path)?;
+        let manifest = Manifest::from_toml(&manifest_toml)?;
+        let manifest_adapter: Arc<dyn Adapter> = Arc::new(ManifestAdapter::new(manifest));
+        register_adapter(&con, manifest_adapter, bridge)?;
+    }
+
     Ok(())
 }
 

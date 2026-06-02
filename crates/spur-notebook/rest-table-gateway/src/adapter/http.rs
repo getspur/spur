@@ -22,7 +22,7 @@ struct HttpPage {
     next_link: Option<String>,
 }
 
-fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
+pub(crate) fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
     let p = path.strip_prefix("$.").unwrap_or(path);
     let mut cur = row;
     for seg in p.split('.') {
@@ -35,7 +35,7 @@ fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
     }
 }
 
-fn rows_from_body(body: &Value, response_path: Option<&str>) -> Result<Vec<Value>> {
+pub(crate) fn rows_from_body(body: &Value, response_path: Option<&str>) -> Result<Vec<Value>> {
     let value = match response_path {
         Some(path) => json_path_get(body, path).ok_or_else(|| {
             GatewayError::Http(format!("expected JSON array at {path}, got null"))
@@ -51,7 +51,7 @@ fn rows_from_body(body: &Value, response_path: Option<&str>) -> Result<Vec<Value
     })
 }
 
-fn cursor_value(body: &Value, path: &str) -> Option<String> {
+pub(crate) fn cursor_value(body: &Value, path: &str) -> Option<String> {
     match json_path_get(body, path)? {
         Value::String(value) => Some(value.clone()),
         Value::Null => None,
@@ -88,6 +88,19 @@ fn next_link_from_header(header: &str, rel: &str) -> Option<String> {
     None
 }
 
+pub(crate) fn apply_auth(
+    req: reqwest::RequestBuilder,
+    auth: &ResolvedAuth,
+) -> reqwest::RequestBuilder {
+    match auth {
+        ResolvedAuth::None => req,
+        ResolvedAuth::Bearer(t) => req.bearer_auth(t),
+        ResolvedAuth::Header { name, value } => req.header(name.as_str(), value.as_str()),
+        ResolvedAuth::Basic { user, pass } => req.basic_auth(user, Some(pass)),
+        ResolvedAuth::QueryParam { param, value } => req.query(&[(param.as_str(), value.as_str())]),
+    }
+}
+
 async fn get_page(
     f: &HttpFetch<'_>,
     extra: &[(String, String)],
@@ -102,21 +115,7 @@ async fn get_page(
         req = req.query(&f.query).query(extra);
     }
 
-    match f.auth {
-        ResolvedAuth::None => {}
-        ResolvedAuth::Bearer(t) => {
-            req = req.bearer_auth(t);
-        }
-        ResolvedAuth::Header { name, value } => {
-            req = req.header(name.as_str(), value.as_str());
-        }
-        ResolvedAuth::Basic { user, pass } => {
-            req = req.basic_auth(user, Some(pass));
-        }
-        ResolvedAuth::QueryParam { param, value } => {
-            req = req.query(&[(param.as_str(), value.as_str())]);
-        }
-    }
+    let req = apply_auth(req, f.auth);
 
     let resp = req
         .send()
@@ -272,6 +271,7 @@ mod tests {
             cursor_path: None,
             cursor_param: None,
             link_rel: None,
+            has_next_path: None,
         };
         let auth = ResolvedAuth::None;
         let fetch = HttpFetch {
@@ -380,6 +380,7 @@ mod tests {
             cursor_path: Some("$.next".to_string()),
             cursor_param: Some("cursor".to_string()),
             link_rel: None,
+            has_next_path: None,
         };
         let auth = ResolvedAuth::None;
         let fetch = HttpFetch {
@@ -431,6 +432,7 @@ mod tests {
             cursor_path: None,
             cursor_param: None,
             link_rel: None,
+            has_next_path: None,
         };
         let auth = ResolvedAuth::None;
         let fetch = HttpFetch {
