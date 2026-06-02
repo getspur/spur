@@ -832,3 +832,122 @@ fn preview_items_matches_post_final_flush() {
         "preview_items must produce same StreamItem count as post-flush_final"
     );
 }
+
+// ── Regression: a complete table must not revert to raw while a LATER ──
+// table's delimiter row is still streaming in column-by-column. Previously
+// the two table collectors (strict pulldown vs. lax line heuristic) diverged
+// on the partial separator, and rendered_markdown_tables bailed on ALL tables.
+#[test]
+fn complete_table_stays_grid_while_later_table_separator_is_partial() {
+    use spur_tui::components::markdown_stream::StreamItem;
+
+    fn text_of(s: &MarkdownStream, width: u16) -> String {
+        s.preview_items_with_width(&StateLookup::empty(), width)
+            .iter()
+            .filter_map(|i| match i {
+                StreamItem::Text(ls) => Some(
+                    ls.iter()
+                        .map(|l| {
+                            l.spans
+                                .iter()
+                                .map(|sp| sp.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // Table 1 complete; prose; table 2 header + a PARTIAL delimiter (2 of 3
+    // columns) — the exact mid-stream state that used to bail.
+    let input = "| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n\n\
+                 More tables:\n\n\
+                 | A | B | C |\n|---|---|";
+    let mut s = MarkdownStream::new();
+    s.append(input);
+    let rendered = text_of(&s, 100);
+
+    assert!(
+        rendered.contains('┌') && rendered.contains("│ Key"),
+        "first complete table must stay a grid while a later separator streams:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("| Key | Action |"),
+        "first table header must not revert to raw markdown:\n{rendered}"
+    );
+
+    // And once table 2's separator completes (3 columns) plus a data row,
+    // BOTH render as grids.
+    let mut s2 = MarkdownStream::new();
+    s2.append(
+        "| Key | Action |\n|---|---|\n| Esc | cancel |\n| Enter | submit |\n\n\
+         More tables:\n\n\
+         | A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |\n",
+    );
+    let full = text_of(&s2, 100);
+    let grid_tops = full.matches('┌').count();
+    assert_eq!(
+        grid_tops, 2,
+        "both tables must render as grids once complete:\n{full}"
+    );
+}
+
+// ── Regression: a table whose cells contain INLINE markdown (bold, inline
+// code) must still render as a grid. tui-markdown renders `**bold**` and
+// `` `code` `` as styled spans with the markers stripped, so the rendered
+// plain text never equals the raw source row (which keeps the markers). The
+// exact-match locator then failed and the whole table fell back to raw — the
+// failure visible whenever a summary table had formatted cells.
+#[test]
+fn table_with_inline_formatting_in_cells_renders_as_grid() {
+    use spur_tui::components::markdown_stream::StreamItem;
+
+    fn text_of(s: &MarkdownStream, width: u16) -> String {
+        s.preview_items_with_width(&StateLookup::empty(), width)
+            .iter()
+            .filter_map(|i| match i {
+                StreamItem::Text(ls) => Some(
+                    ls.iter()
+                        .map(|l| {
+                            l.spans
+                                .iter()
+                                .map(|sp| sp.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // Cells carry bold, inline code (with literal underscores that must NOT be
+    // treated as emphasis), and angle-bracket generics — exactly the content
+    // that streams in a change-summary table.
+    let input = "| # | Change |\n|---|---|\n\
+                 | 1 | **Core fix.** Rewrote `collect_table_source_blocks` |\n\
+                 | 2 | `collect_markdown_tables` returns `Range<usize>` |\n";
+    let mut s = MarkdownStream::new();
+    s.append(input);
+    let rendered = text_of(&s, 120);
+
+    assert!(
+        rendered.contains('┌'),
+        "table with inline-formatted cells must render as a grid, not raw:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("| # | Change |"),
+        "header must not revert to raw markdown:\n{rendered}"
+    );
+    // The stripped cell text must survive into the grid.
+    assert!(
+        rendered.contains("Core fix.") && rendered.contains("collect_table_source_blocks"),
+        "formatted cell content must appear inside the grid:\n{rendered}"
+    );
+}

@@ -944,7 +944,7 @@ impl ReactTrace {
             crate::components::spinner::BRAILLE,
             self.tick_counter as u32,
         );
-        let lines = self.build_display_lines(spinner_frame, None);
+        let lines = self.build_display_lines(spinner_frame, None, Some(width.saturating_sub(3)));
         let wrapped: Vec<ratatui::text::Line<'static>> = lines
             .into_iter()
             .flat_map(|l| crate::components::line_wrap::wrap_line_to_width(&l, width))
@@ -1412,7 +1412,7 @@ impl ReactTrace {
         spinner_frame: &str,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) -> Vec<ratatui::text::Line<'static>> {
-        self.build_display_lines(spinner_frame, lineage)
+        self.build_display_lines(spinner_frame, lineage, None)
     }
 }
 
