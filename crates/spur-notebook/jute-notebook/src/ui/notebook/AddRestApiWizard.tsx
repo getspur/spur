@@ -2,6 +2,7 @@ import clsx from "clsx";
 import {
   AlertCircleIcon,
   CheckIcon,
+  DatabaseIcon,
   FileTextIcon,
   Loader2Icon,
   PencilIcon,
@@ -13,21 +14,26 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type {
+  ConnectionTemplate,
   OpenApiTablePreview,
   ProviderSummary,
   TablePreview,
 } from "@/bindings";
 import {
   addApiDatasourceFromImportCommand,
+  attachSavedConnectionCommand,
+  attachedSavedConnectionFromDaemonControlResponse,
   daemonControl,
   importedApiDatasourceFromDaemonControlResponse,
   listNangoProvidersCommand,
+  listSavedConnectionsCommand,
   nangoProvidersFromDaemonControlResponse,
   openApiTablePreviewFromDaemonControlResponse,
   previewOpenApiTablesCommand,
+  savedConnectionsFromDaemonControlResponse,
 } from "@/daemon/control";
 
-type SourceMode = "catalog" | "openapi" | "manual";
+type SourceMode = "catalog" | "saved" | "openapi" | "manual";
 type WizardStep = "source" | "connect" | "tables" | "review";
 type ProviderLoadState = "idle" | "loading" | "loaded";
 type CredentialField = {
@@ -71,12 +77,25 @@ export default function AddRestApiWizard({
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [providerLoadState, setProviderLoadState] =
     useState<ProviderLoadState>("idle");
+  const [savedConnections, setSavedConnections] = useState<
+    ConnectionTemplate[]
+  >([]);
+  const [savedConnectionLoadState, setSavedConnectionLoadState] =
+    useState<ProviderLoadState>("idle");
   const [providerSearch, setProviderSearch] = useState("");
   const [providerCategory, setProviderCategory] = useState("All");
   const [selectedProvider, setSelectedProvider] =
     useState<ProviderSummary | null>(null);
+  const [selectedSavedConnection, setSelectedSavedConnection] =
+    useState<ConnectionTemplate | null>(null);
   const [datasourceName, setDatasourceName] = useState("");
   const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [savedConnectionCredentials, setSavedConnectionCredentials] = useState<
+    Record<string, string>
+  >({});
+  const [missingSavedCredentialKeys, setMissingSavedCredentialKeys] = useState<
+    string[]
+  >([]);
   const [specText, setSpecText] = useState("");
   const [tablePreview, setTablePreview] = useState<OpenApiTablePreview | null>(
     null,
@@ -93,8 +112,11 @@ export default function AddRestApiWizard({
     setProviderSearch("");
     setProviderCategory("All");
     setSelectedProvider(null);
+    setSelectedSavedConnection(null);
     setDatasourceName("");
     setCredentials({});
+    setSavedConnectionCredentials({});
+    setMissingSavedCredentialKeys([]);
     setSpecText("");
     setTablePreview(null);
     setConnectionOnly(false);
@@ -132,17 +154,47 @@ export default function AddRestApiWizard({
     }
   }, [providerLoadState]);
 
+  const loadSavedConnections = useCallback(async () => {
+    if (
+      savedConnectionLoadState === "loading" ||
+      savedConnectionLoadState === "loaded"
+    ) {
+      return;
+    }
+
+    setSavedConnectionLoadState("loading");
+    setError(null);
+
+    try {
+      const response = await daemonControl(listSavedConnectionsCommand());
+      setSavedConnections(savedConnectionsFromDaemonControlResponse(response));
+      setSavedConnectionLoadState("loaded");
+    } catch (caught) {
+      setSavedConnectionLoadState("idle");
+      setError(errorMessage(caught));
+    }
+  }, [savedConnectionLoadState]);
+
   const selectSourceMode = useCallback(
     (mode: SourceMode) => {
       setSourceMode(mode);
       setError(null);
       setTablePreview(null);
       setConnectionOnly(false);
+      setMissingSavedCredentialKeys([]);
+      setSavedConnectionCredentials({});
 
       if (mode === "catalog") {
+        setSelectedSavedConnection(null);
         void loadProviders();
+      } else if (mode === "saved") {
+        setSelectedProvider(null);
+        setCredentials({});
+        setDatasourceName("");
+        void loadSavedConnections();
       } else {
         setSelectedProvider(null);
+        setSelectedSavedConnection(null);
         setCredentials({});
         setDatasourceName((currentName) =>
           !currentName || currentName === selectedProvider?.name
@@ -151,17 +203,29 @@ export default function AddRestApiWizard({
         );
       }
     },
-    [loadProviders, selectedProvider?.name],
+    [loadProviders, loadSavedConnections, selectedProvider?.name],
   );
 
   const selectProvider = useCallback((provider: ProviderSummary) => {
     setSelectedProvider(provider);
+    setSelectedSavedConnection(null);
     setDatasourceName((currentName) =>
       !currentName || currentName === "rest_api" ? provider.name : currentName,
     );
     setCredentials({});
     setError(null);
   }, []);
+
+  const selectSavedConnection = useCallback(
+    (connection: ConnectionTemplate) => {
+      setSelectedSavedConnection(connection);
+      setSelectedProvider(null);
+      setMissingSavedCredentialKeys([]);
+      setSavedConnectionCredentials({});
+      setError(null);
+    },
+    [],
+  );
 
   const providerCategories = useMemo(() => {
     return [
@@ -202,7 +266,10 @@ export default function AddRestApiWizard({
     credentialFields,
     credentials,
     datasourceName,
+    missingSavedCredentialKeys,
+    savedConnectionCredentials,
     selectedProvider,
+    selectedSavedConnection,
     sourceMode,
     stepIndex,
     tablePreview,
@@ -276,6 +343,65 @@ export default function AddRestApiWizard({
       setPendingAdd(false);
     }
   };
+
+  const handleAttachSavedConnection = async () => {
+    if (!selectedSavedConnection) return;
+
+    const credentialPairs = missingSavedCredentialKeys.map(
+      (key): [string, string] => [
+        key,
+        savedConnectionCredentials[key]?.trim() ?? "",
+      ],
+    );
+
+    if (credentialPairs.some(([, value]) => value.length === 0)) {
+      setError("Fill the missing credentials before using this connection.");
+      return;
+    }
+
+    setPendingAdd(true);
+    setError(null);
+
+    try {
+      const response = await daemonControl(
+        attachSavedConnectionCommand(
+          credentialPairs.length > 0
+            ? {
+                credentials: credentialPairs,
+                name: selectedSavedConnection.name,
+              }
+            : { name: selectedSavedConnection.name },
+        ),
+      );
+      const attached =
+        attachedSavedConnectionFromDaemonControlResponse(response);
+
+      if (attached.missingEnvVars.length > 0) {
+        setMissingSavedCredentialKeys(attached.missingEnvVars);
+        setSavedConnectionCredentials((currentCredentials) => {
+          const nextCredentials: Record<string, string> = {};
+          for (const key of attached.missingEnvVars) {
+            nextCredentials[key] = currentCredentials[key] ?? "";
+          }
+          return nextCredentials;
+        });
+        return;
+      }
+
+      onClose();
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setPendingAdd(false);
+    }
+  };
+
+  const primaryActionLabel =
+    step === "source" && sourceMode === "saved"
+      ? "Use connection"
+      : step === "review"
+        ? "Add datasource"
+        : "Continue";
 
   return (
     <div
@@ -364,12 +490,24 @@ export default function AddRestApiWizard({
                 onCategoryChange={setProviderCategory}
                 onProviderSearch={setProviderSearch}
                 onSelectProvider={selectProvider}
+                onSelectSavedConnection={selectSavedConnection}
                 onSelectSourceMode={selectSourceMode}
+                onSavedCredentialChange={(key, value) =>
+                  setSavedConnectionCredentials((current) => ({
+                    ...current,
+                    [key]: value,
+                  }))
+                }
                 providerCategories={providerCategories}
                 providerCategory={providerCategory}
                 providerLoadState={providerLoadState}
                 providerSearch={providerSearch}
+                savedConnectionCredentials={savedConnectionCredentials}
+                savedConnectionLoadState={savedConnectionLoadState}
+                savedConnections={savedConnections}
                 selectedProvider={selectedProvider}
+                selectedSavedConnection={selectedSavedConnection}
+                missingSavedCredentialKeys={missingSavedCredentialKeys}
                 sourceMode={sourceMode}
               />
             )}
@@ -436,7 +574,9 @@ export default function AddRestApiWizard({
               className="inline-flex items-center gap-2 rounded border border-indigo-600 bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:border-gray-300 disabled:bg-gray-300"
               disabled={!canContinue || pendingAdd}
               onClick={() => {
-                if (step === "review") {
+                if (step === "source" && sourceMode === "saved") {
+                  void handleAttachSavedConnection();
+                } else if (step === "review") {
                   void handleAddDatasource();
                 } else {
                   goNext();
@@ -445,7 +585,7 @@ export default function AddRestApiWizard({
               type="button"
             >
               {pendingAdd && <Loader2Icon className="animate-spin" size={14} />}
-              {step === "review" ? "Add datasource" : "Continue"}
+              {primaryActionLabel}
             </button>
           </footer>
         </div>
@@ -460,12 +600,19 @@ function SourceStep({
   onCategoryChange,
   onProviderSearch,
   onSelectProvider,
+  onSelectSavedConnection,
   onSelectSourceMode,
+  onSavedCredentialChange,
   providerCategories,
   providerCategory,
   providerLoadState,
   providerSearch,
+  savedConnectionCredentials,
+  savedConnectionLoadState,
+  savedConnections,
   selectedProvider,
+  selectedSavedConnection,
+  missingSavedCredentialKeys,
   sourceMode,
 }: {
   error: string | null;
@@ -473,12 +620,19 @@ function SourceStep({
   onCategoryChange: (category: string) => void;
   onProviderSearch: (value: string) => void;
   onSelectProvider: (provider: ProviderSummary) => void;
+  onSelectSavedConnection: (connection: ConnectionTemplate) => void;
   onSelectSourceMode: (mode: SourceMode) => void;
+  onSavedCredentialChange: (key: string, value: string) => void;
   providerCategories: string[];
   providerCategory: string;
   providerLoadState: ProviderLoadState;
   providerSearch: string;
+  savedConnectionCredentials: Record<string, string>;
+  savedConnectionLoadState: ProviderLoadState;
+  savedConnections: ConnectionTemplate[];
   selectedProvider: ProviderSummary | null;
+  selectedSavedConnection: ConnectionTemplate | null;
+  missingSavedCredentialKeys: string[];
   sourceMode: SourceMode | null;
 }) {
   return (
@@ -487,8 +641,8 @@ function SourceStep({
         How do you want to connect?
       </h3>
       <p className="mt-1 text-sm text-gray-500">
-        Pick a provider catalog entry, start from an OpenAPI spec, or create a
-        connection shell manually.
+        Pick a saved connection, provider catalog entry, OpenAPI spec, or manual
+        shell.
       </p>
 
       <div className="mt-4 space-y-2">
@@ -499,6 +653,14 @@ function SourceStep({
           label="Provider catalog"
           meta="Nango"
           onClick={() => onSelectSourceMode("catalog")}
+        />
+        <SourceOption
+          active={sourceMode === "saved"}
+          detail="Attach a reusable API connection template to this notebook."
+          icon={<DatabaseIcon size={18} strokeWidth={1.5} />}
+          label="Saved connections"
+          meta={`${savedConnections.length} saved`}
+          onClick={() => onSelectSourceMode("saved")}
         />
         <SourceOption
           active={sourceMode === "openapi"}
@@ -580,6 +742,42 @@ function SourceStep({
             Tier A is drop-in. Tier B requires a token you bring from the
             provider. Tier C is available for manual review.
           </p>
+        </section>
+      )}
+
+      {sourceMode === "saved" && (
+        <section className="mt-4 border-t border-gray-200 pt-4">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {savedConnectionLoadState === "loading" && (
+              <div className="flex items-center gap-2 rounded border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-500">
+                <Loader2Icon className="animate-spin" size={14} />
+                Loading saved connections
+              </div>
+            )}
+            {savedConnectionLoadState === "loaded" &&
+              savedConnections.map((connection) => (
+                <SavedConnectionTile
+                  connection={connection}
+                  key={connection.name}
+                  onSelect={onSelectSavedConnection}
+                  selected={selectedSavedConnection?.name === connection.name}
+                />
+              ))}
+            {savedConnectionLoadState === "loaded" &&
+              savedConnections.length === 0 && (
+                <div className="rounded border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-500">
+                  No saved connections yet.
+                </div>
+              )}
+          </div>
+
+          {missingSavedCredentialKeys.length > 0 && (
+            <SavedCredentialPrompt
+              credentials={savedConnectionCredentials}
+              credentialKeys={missingSavedCredentialKeys}
+              onCredentialChange={onSavedCredentialChange}
+            />
+          )}
         </section>
       )}
 
@@ -676,6 +874,125 @@ function ProviderTile({
   );
 }
 
+function SavedConnectionTile({
+  connection,
+  onSelect,
+  selected,
+}: {
+  connection: ConnectionTemplate;
+  onSelect: (connection: ConnectionTemplate) => void;
+  selected: boolean;
+}) {
+  const provider = connection.provider ?? "custom";
+  const category = connection.group ?? provider;
+  const tableCount = connection.tables.length;
+  const credentialCount = connection.credentialEnvVars.length;
+
+  return (
+    <button
+      aria-pressed={selected}
+      className={clsx(
+        "min-w-0 rounded-lg border bg-white p-3 text-left transition-colors",
+        selected
+          ? "border-indigo-600 bg-indigo-50 ring-1 ring-indigo-600"
+          : "border-gray-200 hover:border-indigo-300",
+      )}
+      onClick={() => onSelect(connection)}
+      type="button"
+    >
+      <span className="flex items-center gap-2">
+        <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded bg-gray-900 text-[11px] font-semibold text-white">
+          {provider.charAt(0).toUpperCase()}
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-sm font-medium text-gray-950">
+            {connection.name}
+          </span>
+          <span className="mt-0.5 block truncate text-[11px] text-gray-400">
+            {category} · {tableCount} table-function
+            {tableCount === 1 ? "" : "s"}
+          </span>
+        </span>
+      </span>
+      <span className="mt-3 inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-medium text-indigo-700">
+        {credentialCount === 0
+          ? "No credentials"
+          : `${credentialCount} credential${credentialCount === 1 ? "" : "s"}`}
+      </span>
+    </button>
+  );
+}
+
+function SavedCredentialPrompt({
+  credentials,
+  credentialKeys,
+  onCredentialChange,
+}: {
+  credentials: Record<string, string>;
+  credentialKeys: string[];
+  onCredentialChange: (key: string, value: string) => void;
+}) {
+  const fields = credentialKeys.map(
+    (key): CredentialField => ({ key, label: key, type: "password" }),
+  );
+
+  return (
+    <section className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3">
+      <div className="flex items-start gap-2 text-sm text-amber-800">
+        <AlertCircleIcon className="mt-0.5 shrink-0" size={14} />
+        <div>
+          <h4 className="font-medium">Missing credentials</h4>
+          <p className="mt-0.5">
+            Add the required session values before attaching this connection.
+          </p>
+        </div>
+      </div>
+      <div className="mt-3 space-y-3">
+        <CredentialFieldInputs
+          credentials={credentials}
+          fields={fields}
+          onCredentialChange={onCredentialChange}
+        />
+      </div>
+    </section>
+  );
+}
+
+function CredentialFieldInputs({
+  credentials,
+  fields,
+  onCredentialChange,
+}: {
+  credentials: Record<string, string>;
+  fields: CredentialField[];
+  onCredentialChange: (key: string, value: string) => void;
+}) {
+  return (
+    <>
+      {fields.map((field) => (
+        <label className="block" key={field.key}>
+          <span className="text-xs font-medium text-gray-600">
+            {field.label}
+          </span>
+          <input
+            aria-label={field.key}
+            className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+            onChange={(event) =>
+              onCredentialChange(field.key, event.currentTarget.value)
+            }
+            placeholder={field.key}
+            type={field.type}
+            value={credentials[field.key] ?? ""}
+          />
+          <span className="mt-1 block font-mono text-[11px] text-gray-400">
+            env {field.key}
+          </span>
+        </label>
+      ))}
+    </>
+  );
+}
+
 function ConnectStep({
   credentials,
   datasourceName,
@@ -765,26 +1082,11 @@ function ConnectStep({
         </label>
 
         {fields.length > 0 ? (
-          fields.map((field) => (
-            <label className="block" key={field.key}>
-              <span className="text-xs font-medium text-gray-600">
-                {field.label}
-              </span>
-              <input
-                aria-label={field.key}
-                className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
-                onChange={(event) =>
-                  onCredentialChange(field.key, event.currentTarget.value)
-                }
-                placeholder={field.key}
-                type={field.type}
-                value={credentials[field.key] ?? ""}
-              />
-              <span className="mt-1 block font-mono text-[11px] text-gray-400">
-                env {field.key}
-              </span>
-            </label>
-          ))
+          <CredentialFieldInputs
+            credentials={credentials}
+            fields={fields}
+            onCredentialChange={onCredentialChange}
+          />
         ) : (
           <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500">
             Add credentials later if this API requires them.
@@ -1097,7 +1399,10 @@ function canContinueFromStep({
   credentialFields,
   credentials,
   datasourceName,
+  missingSavedCredentialKeys,
+  savedConnectionCredentials,
   selectedProvider,
+  selectedSavedConnection,
   sourceMode,
   stepIndex,
   tablePreview,
@@ -1106,12 +1411,24 @@ function canContinueFromStep({
   credentialFields: CredentialField[];
   credentials: Record<string, string>;
   datasourceName: string;
+  missingSavedCredentialKeys: string[];
+  savedConnectionCredentials: Record<string, string>;
   selectedProvider: ProviderSummary | null;
+  selectedSavedConnection: ConnectionTemplate | null;
   sourceMode: SourceMode | null;
   stepIndex: number;
   tablePreview: OpenApiTablePreview | null;
 }) {
   if (stepIndex === 0) {
+    if (sourceMode === "saved") {
+      return (
+        Boolean(selectedSavedConnection) &&
+        missingSavedCredentialKeys.every(
+          (key) => (savedConnectionCredentials[key]?.trim() ?? "").length > 0,
+        )
+      );
+    }
+
     return Boolean(
       sourceMode && (sourceMode !== "catalog" || selectedProvider),
     );
