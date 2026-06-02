@@ -8,7 +8,7 @@ import {
   XIcon,
   XSquareIcon,
 } from "lucide-react";
-import { ReactNode, Suspense, lazy } from "react";
+import { ReactNode, Suspense, lazy, useEffect, useState } from "react";
 import { useStore } from "zustand";
 
 import { useNotebook } from "@/stores/notebook";
@@ -53,6 +53,21 @@ function CellInputAside({ cellId }: { cellId: string }) {
       ? sourceDraft.lastEditedBy
       : state.serverState.cells[cellId].lastEditedBy;
   });
+  const compile = output?.compile;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (compile?.phase !== "compiling") {
+      return;
+    }
+
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [compile?.phase, compile?.startedAt]);
 
   const formatExecutionDuration = (durationMs: number) => {
     const seconds = durationMs / 1000;
@@ -62,8 +77,11 @@ function CellInputAside({ cellId }: { cellId: string }) {
       return `${seconds.toFixed(2)} s`;
     }
   };
+  const compileElapsedSeconds =
+    compile?.phase === "compiling"
+      ? Math.max(0, Math.floor((now - compile.startedAt) / 1000))
+      : undefined;
 
-  // TODO: Real-time clock indicator here.
   return (
     <Aside>
       <div className="mt-1 flex gap-0.5">
@@ -83,7 +101,13 @@ function CellInputAside({ cellId }: { cellId: string }) {
           }}
         />
       </div>
-      {output?.timings?.finishedAt && (
+      {compileElapsedSeconds !== undefined ? (
+        <div className="mt-0.5 flex items-center">
+          <span className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700">
+            Compiling… ⏱ {compileElapsedSeconds}s
+          </span>
+        </div>
+      ) : output?.timings?.finishedAt ? (
         <div className="mt-0.5 flex items-center">
           {output.status === "success" ? (
             <CheckIcon size={16} className="mr-1 text-green-500" />
@@ -96,7 +120,7 @@ function CellInputAside({ cellId }: { cellId: string }) {
             )}
           </p>
         </div>
-      )}
+      ) : null}
     </Aside>
   );
 }

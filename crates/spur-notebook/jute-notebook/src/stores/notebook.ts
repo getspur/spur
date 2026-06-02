@@ -182,6 +182,11 @@ export type CellResult = {
     finishedAt?: number;
   };
   executionCount?: number;
+  compile?: {
+    phase: "compiling" | "running";
+    current: string | null;
+    startedAt: number;
+  };
   outputs?: Output[];
   displays?: Record<string, number>;
 };
@@ -423,6 +428,11 @@ export type RunCellEventApplicationState = {
   timings: NonNullable<CellResult["timings"]>;
   executionCount: CellResult["executionCount"];
   willClearOutput: boolean;
+  compile?: {
+    phase: "compiling" | "running";
+    current: string | null;
+    startedAt: number;
+  };
 };
 
 type DirectRunCellState = RunCellEventApplicationState;
@@ -819,6 +829,7 @@ function updateRunCellResultDraft(
     status: runState.status,
     timings: runState.timings,
     executionCount: runState.executionCount,
+    compile: runState.compile,
   });
 }
 
@@ -887,13 +898,26 @@ export function applyRunCellEvent(
     } else {
       clearOutputDraft(state, cellId);
     }
+  } else if (message.event === "compile_progress") {
+    if (message.data.phase === "running") {
+      delete nextRunState.compile;
+    } else {
+      nextRunState.compile = {
+        phase: message.data.phase,
+        current: message.data.current,
+        startedAt: nextRunState.compile?.startedAt ?? Date.now(),
+      };
+    }
+    updateRunCellResultDraft(state, cellId, nextRunState);
   } else if (message.event === "started") {
     nextRunState.status = "running";
+    delete nextRunState.compile;
     updateRunCellResultDraft(state, cellId, nextRunState);
   } else if (message.event === "finished") {
     nextRunState.status = message.data.status === "ok" ? "success" : "error";
     nextRunState.executionCount =
       message.data.exec_count ?? nextRunState.executionCount;
+    delete nextRunState.compile;
     if (options.finishedAt !== undefined) {
       nextRunState.timings = {
         ...nextRunState.timings,
