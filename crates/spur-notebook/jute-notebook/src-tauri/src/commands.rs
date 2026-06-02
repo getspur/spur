@@ -307,6 +307,13 @@ pub enum DaemonControlCommand {
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
     },
+    /// Attach and save an API datasource from a table manifest.
+    AddApiDatasourceFromManifest {
+        name: String,
+        manifest_toml: String,
+        #[ts(type = "[string, string][]")]
+        credentials: Vec<(String, String)>,
+    },
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.

@@ -428,6 +428,164 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
 }
 
 #[tokio::test]
+async fn add_api_datasource_from_manifest_registers_and_scans() {
+    let api_token_env_var = "SPUR_MANIFEST_API_TOKEN_E2E";
+    let base_url_env_var = "SPUR_CONN_manifest_base_url_e2e";
+    let _api_token_guard = EnvGuard::preserve(api_token_env_var);
+    let _base_url_guard = EnvGuard::preserve(base_url_env_var);
+    let server = MockServer::start().await;
+    let name = format!("manifest_scores_{}", uuid::Uuid::new_v4().simple());
+    let api_token_value = "manifest-secret";
+    let authorization_value = format!("Bearer {api_token_value}");
+    let base_url_value = server.uri();
+    let _cleanup = connection_store::remove(&name).await;
+
+    let manifest_toml = r#"
+[source]
+name = "manifest"
+base_url = "${connectionConfig.manifest_base_url_e2e}"
+connection_config = ["manifest_base_url_e2e"]
+auth = { scheme = "bearer", env = "SPUR_MANIFEST_API_TOKEN_E2E" }
+
+[[table]]
+name = "scores"
+path = "/scores"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+score = { json = "$.score", type = "Int64" }
+"#
+    .to_string();
+
+    Mock::given(method("GET"))
+        .and(path("/scores"))
+        .and(header("authorization", authorization_value.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "m1", "score": 11 },
+                { "id": "m2", "score": 22 }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let (control, jute_state, windows) = test_control();
+    let response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "add_api_datasource_from_manifest",
+                "name": name.clone(),
+                "manifest_toml": manifest_toml,
+                "credentials": [
+                    [api_token_env_var, api_token_value],
+                    [base_url_env_var, base_url_value]
+                ]
+            })),
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let entry = datasource_entry_from_response(&response);
+    assert_eq!(entry.name, name);
+    assert_eq!(entry.path, "manifest");
+    assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
+    assert_eq!(entry.group.as_deref(), Some("API"));
+    assert_eq!(
+        entry.tables,
+        vec![jute::commands::Table {
+            name: "manifest_scores".to_string(),
+            columns: vec![
+                jute::commands::Column {
+                    name: "id".to_string(),
+                    sql_type: "VARCHAR".to_string(),
+                },
+                jute::commands::Column {
+                    name: "score".to_string(),
+                    sql_type: "BIGINT".to_string(),
+                },
+            ],
+            row_count: None,
+        }]
+    );
+
+    let saved = saved_template(&name).await;
+    assert_eq!(saved.provider, None);
+    assert_eq!(saved.group.as_deref(), Some("API"));
+    assert_eq!(saved.tables, entry.tables);
+    assert_eq!(
+        saved.credential_env_vars,
+        vec![api_token_env_var.to_string(), base_url_env_var.to_string()]
+    );
+    let serialized = serde_json::to_string(&saved).expect("saved template serializes");
+    assert!(serialized.contains(api_token_env_var));
+    assert!(serialized.contains(base_url_env_var));
+    assert!(!serialized.contains(api_token_value));
+    assert!(!serialized.contains(&base_url_value));
+    assert!(!saved.manifest_toml.contains(api_token_value));
+    assert!(!saved.manifest_toml.contains(&base_url_value));
+    assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    assert_eq!(windows.connections_changed_count(), 1);
+
+    let manifest = Manifest::from_toml(&saved.manifest_toml).expect("saved manifest parses");
+    let adapter = ManifestAdapter::new(manifest);
+    let batches = adapter
+        .scan(scan_request("scores"))
+        .await
+        .expect("manifest command scans wiremock rows");
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 2);
+
+    let ids = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("id column is Utf8");
+    let scores = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("score column is Int64");
+    assert_eq!(ids.value(0), "m1");
+    assert_eq!(ids.value(1), "m2");
+    assert_eq!(scores.value(0), 11);
+    assert_eq!(scores.value(1), 22);
+
+    let adapter: Arc<dyn Adapter> = Arc::new(adapter);
+    let conn = Connection::open_in_memory().expect("duckdb opens in memory");
+    let bridge = Arc::new(IoBridge::new());
+    assert_eq!(
+        register_tables(&conn, adapter, bridge).expect("table function registers"),
+        1
+    );
+
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut stmt = conn
+            .prepare("SELECT id, score FROM manifest_scores() ORDER BY id")
+            .expect("query prepares");
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .expect("query maps rows");
+
+        rows.collect::<duckdb::Result<Vec<_>>>()
+            .expect("rows collect")
+    })
+    .await
+    .expect("blocking duckdb query joins");
+
+    assert_eq!(rows, vec![("m1".to_string(), 11), ("m2".to_string(), 22)]);
+
+    connection_store::remove(&name)
+        .await
+        .expect("saved manifest template cleans up");
+}
+
+#[tokio::test]
 async fn saved_connection_list_attach_delete_roundtrip_reports_missing_env() {
     let missing_env_var = "SPUR_SAVED_CONNECTION_ATTACH_MISSING_E2E";
     let _missing_guard = EnvGuard::preserve(missing_env_var);

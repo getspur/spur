@@ -1364,6 +1364,14 @@ impl NotebookDaemonControl {
                 self.add_api_datasource_from_import(name, provider, spec_text, credentials)
                     .await
             }
+            DaemonControlCommand::AddApiDatasourceFromManifest {
+                name,
+                manifest_toml,
+                credentials,
+            } => {
+                self.add_api_datasource_from_manifest(name, manifest_toml, credentials)
+                    .await
+            }
             DaemonControlCommand::DetachDatasource { name } => self.detach_datasource(name).await,
             DaemonControlCommand::ListDatasources {} => {
                 async {
@@ -1824,15 +1832,43 @@ impl NotebookDaemonControl {
         spec_text: Option<String>,
         credentials: Vec<(String, String)>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
-        use spur_rest_table_gateway::adapter::Adapter as _;
-
         let provider_for_template = provider.clone();
-        let (source, manifest) = build_api_import_manifest(&name, provider, spec_text)?;
+        let (_source, manifest) = build_api_import_manifest(&name, provider, spec_text)?;
         let mut manifest_toml =
             spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
         manifest_toml.push_str(&spur_rest_table_gateway::adapter::openapi::tables_to_toml(
             &manifest.tables,
         ));
+        self.persist_and_register_manifest_api_datasource(
+            name,
+            provider_for_template,
+            manifest_toml,
+            credentials,
+        )
+        .await
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn add_api_datasource_from_manifest(
+        &self,
+        name: String,
+        manifest_toml: String,
+        credentials: Vec<(String, String)>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        self.persist_and_register_manifest_api_datasource(name, None, manifest_toml, credentials)
+            .await
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn persist_and_register_manifest_api_datasource(
+        &self,
+        name: String,
+        provider: Option<String>,
+        manifest_toml: String,
+        credentials: Vec<(String, String)>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        use spur_rest_table_gateway::adapter::Adapter as _;
+
         let credential_env_vars = credentials
             .iter()
             .map(|(key, _)| key.clone())
@@ -1844,6 +1880,12 @@ impl NotebookDaemonControl {
             std::env::set_var(key, value);
         }
 
+        let manifest =
+            spur_rest_table_gateway::adapter::manifest::Manifest::from_toml(&manifest_toml)
+                .map_err(|error| BridgeError::Handler {
+                    code: "api_manifest_parse_failed".to_string(),
+                    message: format!("failed to parse API datasource manifest: {error}"),
+                })?;
         let adapter =
             spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
         let adapter_name = adapter.name().to_string();
@@ -1854,13 +1896,13 @@ impl NotebookDaemonControl {
             .collect::<Vec<_>>();
 
         let result = self
-            .register_api_datasource_entry(name.clone(), source, tables.clone())
+            .register_api_datasource_entry(name.clone(), adapter_name, tables.clone())
             .await?;
 
         let now = chrono::Utc::now();
         let template = crate::connection_store::ConnectionTemplate {
             name,
-            provider: provider_for_template,
+            provider,
             group: Some(API_DATASOURCE_GROUP.to_string()),
             manifest_toml,
             tables,
@@ -2103,6 +2145,19 @@ impl NotebookDaemonControl {
         _name: String,
         _provider: Option<String>,
         _spec_text: Option<String>,
+        _credentials: Vec<(String, String)>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn add_api_datasource_from_manifest(
+        &self,
+        _name: String,
+        _manifest_toml: String,
         _credentials: Vec<(String, String)>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
