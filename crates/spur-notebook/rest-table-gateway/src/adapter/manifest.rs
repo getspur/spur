@@ -9,10 +9,20 @@ pub struct Manifest {
     pub tables: Vec<TableCfg>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    #[default]
+    Rest,
+    Graphql,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SourceCfg {
     pub name: String,
     pub base_url: String,
+    #[serde(default)]
+    pub transport: Transport,
     #[serde(default)]
     pub auth: AuthCfg,
     pub pagination: Option<PaginationCfg>,
@@ -55,6 +65,8 @@ pub struct PaginationCfg {
     pub cursor_param: Option<String>,
     #[serde(default)]
     pub link_rel: Option<String>,
+    #[serde(default)]
+    pub has_next_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +78,8 @@ pub struct TableCfg {
     pub columns: IndexMap<String, ColumnCfg>,
     #[serde(default)]
     pub filters: HashMap<String, FilterCfg>,
+    #[serde(default)]
+    pub graphql: Option<GraphqlTableCfg>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,6 +92,15 @@ pub struct ColumnCfg {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FilterCfg {
     pub param: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphqlTableCfg {
+    pub query: String,
+    #[serde(default)]
+    pub variables: serde_json::Value,
+    #[serde(default)]
+    pub arg_vars: std::collections::HashMap<String, String>,
 }
 
 impl Manifest {

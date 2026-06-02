@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::adapter::manifest::{AuthCfg, Manifest, PaginationCfg, SourceCfg};
+use crate::adapter::manifest::{AuthCfg, Manifest, PaginationCfg, SourceCfg, Transport};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderEntry {
@@ -45,6 +45,7 @@ pub fn provider_to_manifest_stub(name: &str, p: &ProviderEntry) -> Manifest {
         source: SourceCfg {
             name: name.to_string(),
             base_url: base_url.clone(),
+            transport: Transport::Rest,
             auth: auth_cfg(name, p, &upper),
             pagination: proxy
                 .and_then(|proxy| proxy.paginate.as_ref())
@@ -140,6 +141,7 @@ fn pagination_cfg(p: &Paginate) -> Option<PaginationCfg> {
             cursor_path: p.cursor_path_in_response.clone(),
             cursor_param: p.cursor_name_in_request.clone(),
             link_rel: None,
+            has_next_path: None,
         }),
         "offset" => Some(PaginationCfg {
             style: "offset".to_string(),
@@ -152,6 +154,7 @@ fn pagination_cfg(p: &Paginate) -> Option<PaginationCfg> {
             cursor_path: None,
             cursor_param: None,
             link_rel: None,
+            has_next_path: None,
         }),
         "link" => Some(PaginationCfg {
             style: "link".to_string(),
@@ -161,6 +164,7 @@ fn pagination_cfg(p: &Paginate) -> Option<PaginationCfg> {
             cursor_path: None,
             cursor_param: None,
             link_rel: p.response_path.clone(),
+            has_next_path: None,
         }),
         _ => None,
     }

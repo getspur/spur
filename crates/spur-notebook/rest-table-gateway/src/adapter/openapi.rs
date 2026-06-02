@@ -760,6 +760,7 @@ pub fn spec_to_tables(spec: &OpenAPI) -> Vec<TableCfg> {
             response_path,
             columns,
             filters: query_filters(spec, operation),
+            graphql: None,
         });
     }
 

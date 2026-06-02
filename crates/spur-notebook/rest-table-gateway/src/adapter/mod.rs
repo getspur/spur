@@ -1,3 +1,4 @@
+pub mod graphql;
 pub mod http;
 pub mod json_to_batch;
 pub mod manifest;
