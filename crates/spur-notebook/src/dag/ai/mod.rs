@@ -2,8 +2,11 @@
 
 pub mod acp_backend;
 pub mod context;
+pub mod null_backend;
 
+pub use acp_backend::AcpAgentBackend;
 pub use context::render_port_context;
+pub use null_backend::NullAiBackend;
 
 use tokio_util::sync::CancellationToken;
 
