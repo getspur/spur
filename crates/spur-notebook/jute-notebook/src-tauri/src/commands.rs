@@ -27,7 +27,7 @@ use crate::{
         },
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
-    ports::{notebook_port_root, wrap_js_cell, wrap_python_cell},
+    ports::{notebook_port_root, wrap_go_cell, wrap_js_cell, wrap_python_cell, wrap_rust_cell},
     state::{notebook_slot_id, slot_id_for, window_slot_id, KernelSlot, State},
     Error,
 };
@@ -1712,10 +1712,11 @@ fn enforce_dispatch_spec(
 
 fn wrap_cell_for_kernel(notebook_path: &str, spec_name: &str, code: &str) -> String {
     let root = notebook_port_root(notebook_path);
-    if spec_name == "deno" {
-        wrap_js_cell(root, code)
-    } else {
-        wrap_python_cell(root, code)
+    match spec_name {
+        "deno" => wrap_js_cell(root, code),
+        "evcxr" => wrap_rust_cell(root, code),
+        "gonb" => wrap_go_cell(root, code),
+        _ => wrap_python_cell(root, code),
     }
 }
 
@@ -1886,6 +1887,25 @@ mod tests {
 
         assert_eq!(wrapped.matches("class _Spur").count(), 1);
         assert_eq!(wrapped.matches("spur = _Spur").count(), 1);
+    }
+
+    #[test]
+    fn wrap_cell_for_kernel_routes_by_spec() {
+        let notebook_path = "/tmp/demo-notebook.ipynb";
+
+        let python = wrap_cell_for_kernel(notebook_path, "python3", "spur.get('sales')");
+        let deno = wrap_cell_for_kernel(notebook_path, "deno", "await spur.get('sales');");
+        let rust = wrap_cell_for_kernel(notebook_path, "evcxr", "spur.put(\"sales\", batch)?;");
+        let go = wrap_cell_for_kernel(notebook_path, "gonb", "spur.Put(\"sales\", batch)");
+
+        assert!(python.contains("class _Spur"));
+        assert!(python.ends_with("spur.get('sales')"));
+        assert!(deno.contains("globalThis.spur"));
+        assert!(deno.ends_with("await spur.get('sales');"));
+        assert!(rust.contains(":dep arrow = "));
+        assert!(rust.ends_with("spur.put(\"sales\", batch)?;"));
+        assert!(go.contains("!*go get "));
+        assert!(go.ends_with("spur.Put(\"sales\", batch)"));
     }
 
     #[test]
