@@ -2,11 +2,13 @@ use std::{
     env,
     error::Error,
     fs,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, SchemaRef};
+use directories::BaseDirs;
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
     duckdb_entrypoint_c_api,
@@ -44,10 +46,117 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
         let manifest_toml = fs::read_to_string(manifest_path)?;
         let manifest = Manifest::from_toml(&manifest_toml)?;
         let manifest_adapter: Arc<dyn Adapter> = Arc::new(ManifestAdapter::new(manifest));
-        register_adapter(&con, manifest_adapter, bridge)?;
+        register_adapter(&con, manifest_adapter, Arc::clone(&bridge))?;
     }
 
+    register_saved_connections(&con, &bridge);
+
     Ok(())
+}
+
+fn register_saved_connections(con: &Connection, bridge: &Arc<IoBridge>) {
+    for manifest_toml in saved_manifest_tomls() {
+        match Manifest::from_toml(&manifest_toml) {
+            Ok(manifest) => {
+                let manifest_adapter: Arc<dyn Adapter> = Arc::new(ManifestAdapter::new(manifest));
+                if let Err(error) = register_adapter(con, manifest_adapter, Arc::clone(bridge)) {
+                    eprintln!("spur_rest: saved manifest skipped: {error}");
+                }
+            }
+            Err(error) => eprintln!("spur_rest: malformed saved manifest skipped: {error}"),
+        }
+    }
+}
+
+fn saved_manifest_tomls() -> Vec<String> {
+    if let Some(dir) = env::var_os("SPUR_REST_MANIFEST_DIR") {
+        return saved_manifest_tomls_from_dir(Path::new(&dir));
+    }
+
+    let Some(base_dirs) = BaseDirs::new() else {
+        eprintln!("spur_rest: saved connections skipped: could not resolve home directory");
+        return Vec::new();
+    };
+    let path = base_dirs.home_dir().join(".spur").join("connections.json");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            eprintln!(
+                "spur_rest: saved connections skipped: failed to read {}: {error}",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("spur_rest: saved connections skipped: malformed JSON: {error}");
+            return Vec::new();
+        }
+    };
+
+    value
+        .get("templates")
+        .and_then(|templates| templates.as_array())
+        .map(|templates| {
+            templates
+                .iter()
+                .filter_map(|template| {
+                    template
+                        .get("manifest_toml")
+                        .or_else(|| template.get("manifestToml"))
+                        .and_then(|manifest_toml| manifest_toml.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn saved_manifest_tomls_from_dir(dir: &Path) -> Vec<String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!(
+                "spur_rest: saved manifests skipped: failed to read {}: {error}",
+                dir.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut manifest_paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) == Some("toml") {
+                    manifest_paths.push(path);
+                }
+            }
+            Err(error) => eprintln!(
+                "spur_rest: saved manifest entry skipped in {}: {error}",
+                dir.display()
+            ),
+        }
+    }
+    manifest_paths.sort();
+
+    manifest_paths
+        .into_iter()
+        .filter_map(|path| match fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(error) => {
+                eprintln!(
+                    "spur_rest: saved manifest skipped: failed to read {}: {error}",
+                    path.display()
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 fn register_adapter(

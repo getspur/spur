@@ -43,10 +43,19 @@ type CredentialField = {
   type: "password" | "text";
 };
 
+export type AddRestApiWizardPrefill = {
+  name: string;
+  provider?: string | null;
+  specText?: string | null;
+  missingEnvVars: string[];
+  step: "connect";
+};
+
 export type AddRestApiWizardProps = {
   editConnection?: ConnectionTemplate | null;
   onClose: () => void;
   open: boolean;
+  prefill?: AddRestApiWizardPrefill | null;
 };
 
 const STEPS: { key: WizardStep; label: string; detail: string }[] = [
@@ -74,6 +83,7 @@ export default function AddRestApiWizard({
   editConnection = null,
   onClose,
   open,
+  prefill = null,
 }: AddRestApiWizardProps) {
   const editMode = editConnection !== null;
   const [stepIndex, setStepIndex] = useState(0);
@@ -100,6 +110,9 @@ export default function AddRestApiWizard({
   const [missingSavedCredentialKeys, setMissingSavedCredentialKeys] = useState<
     string[]
   >([]);
+  const [prefillCredentialKeys, setPrefillCredentialKeys] = useState<string[]>(
+    [],
+  );
   const [specText, setSpecText] = useState("");
   const [tablePreview, setTablePreview] = useState<OpenApiTablePreview | null>(
     null,
@@ -123,9 +136,33 @@ export default function AddRestApiWizard({
       setCredentials({});
       setSavedConnectionCredentials({});
       setMissingSavedCredentialKeys([]);
+      setPrefillCredentialKeys([]);
       setSpecText("");
       setTablePreview(tablePreviewFromTemplate(editConnection));
       setConnectionOnly(editConnection.tables.length === 0);
+      setPendingPreview(false);
+      setPendingAdd(false);
+      setError(null);
+      return;
+    }
+
+    if (prefill) {
+      setStepIndex(1);
+      setSourceMode(prefill.provider ? "catalog" : "openapi");
+      setProviderSearch("");
+      setProviderCategory("All");
+      setSelectedProvider(
+        prefill.provider ? providerSummaryFromPrefill(prefill.provider) : null,
+      );
+      setSelectedSavedConnection(null);
+      setDatasourceName(prefill.name);
+      setCredentials({});
+      setSavedConnectionCredentials({});
+      setMissingSavedCredentialKeys([]);
+      setPrefillCredentialKeys(prefill.missingEnvVars);
+      setSpecText(prefill.specText ?? "");
+      setTablePreview(null);
+      setConnectionOnly(false);
       setPendingPreview(false);
       setPendingAdd(false);
       setError(null);
@@ -142,13 +179,14 @@ export default function AddRestApiWizard({
     setCredentials({});
     setSavedConnectionCredentials({});
     setMissingSavedCredentialKeys([]);
+    setPrefillCredentialKeys([]);
     setSpecText("");
     setTablePreview(null);
     setConnectionOnly(false);
     setPendingPreview(false);
     setPendingAdd(false);
     setError(null);
-  }, [editConnection, open]);
+  }, [editConnection, open, prefill]);
 
   useEffect(() => {
     if (!open) return;
@@ -208,6 +246,7 @@ export default function AddRestApiWizard({
       setConnectionOnly(false);
       setMissingSavedCredentialKeys([]);
       setSavedConnectionCredentials({});
+      setPrefillCredentialKeys([]);
 
       if (mode === "catalog") {
         setSelectedSavedConnection(null);
@@ -238,6 +277,7 @@ export default function AddRestApiWizard({
       !currentName || currentName === "rest_api" ? provider.name : currentName,
     );
     setCredentials({});
+    setPrefillCredentialKeys([]);
     setError(null);
   }, []);
 
@@ -247,6 +287,7 @@ export default function AddRestApiWizard({
       setSelectedProvider(null);
       setMissingSavedCredentialKeys([]);
       setSavedConnectionCredentials({});
+      setPrefillCredentialKeys([]);
       setError(null);
     },
     [],
@@ -288,8 +329,16 @@ export default function AddRestApiWizard({
         ? editConnection.credentialEnvVars.map(
             (key): CredentialField => ({ key, label: key, type: "password" }),
           )
-        : credentialFieldsForProvider(selectedProvider),
-    [editConnection, selectedProvider],
+        : prefillCredentialKeys.length > 0
+          ? prefillCredentialKeys.map(
+              (key): CredentialField => ({
+                key,
+                label: key,
+                type: "password",
+              }),
+            )
+          : credentialFieldsForProvider(selectedProvider),
+    [editConnection, prefillCredentialKeys, selectedProvider],
   );
   const canContinue = canContinueFromStep({
     connectionOnly,
@@ -317,9 +366,7 @@ export default function AddRestApiWizard({
   };
 
   const goBack = () => {
-    setStepIndex((currentStep) =>
-      Math.max(editMode ? 1 : 0, currentStep - 1),
-    );
+    setStepIndex((currentStep) => Math.max(editMode ? 1 : 0, currentStep - 1));
     setError(null);
   };
 
@@ -1565,6 +1612,28 @@ function credentialFieldsForProvider(
   return [
     { key: `${prefix}_API_KEY`, label: `${prefix}_API_KEY`, type: "password" },
   ];
+}
+
+function providerSummaryFromPrefill(providerName: string): ProviderSummary {
+  const name = providerName.trim();
+
+  return {
+    name,
+    displayName: displayNameFromProvider(name),
+    category: "Imported",
+    tier: "B",
+    authMode: "API_KEY",
+  };
+}
+
+function displayNameFromProvider(providerName: string) {
+  const displayName = providerName
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
+  return displayName || providerName;
 }
 
 function authSchemeLabel(authMode: string) {

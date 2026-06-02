@@ -34,6 +34,12 @@ export type DaemonControlRequest = {
       spec_text: string | null;
       credentials: [string, string][];
     }
+  | {
+      command: "add_api_datasource_from_manifest";
+      name: string;
+      manifest_toml: string;
+      credentials: [string, string][];
+    }
   | { command: "detach_datasource"; name: string }
   | { command: "list_datasources" }
   | { command: "list_saved_connections" }
