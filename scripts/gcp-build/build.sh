@@ -128,8 +128,50 @@ case "$VM_STATUS" in
         ;;
 esac
 
+# ---- choose SSH transport: direct (default) -> IAP -> local ----------------
+# Direct SSH connects to the VM's external IP and skips the IAP tunnel, which
+# roughly doubles upload throughput when the uplink has headroom (measured
+# ~1 MB/s over IAP vs ~2.5 MB/s direct from Vietnam->asia-southeast1). It does
+# depend on the firewall keeping tcp:22 reachable; IAP does not. We probe the
+# preferred transport with a cheap `true` (bounded by ConnectTimeout so a
+# filtered :22 fails fast) and fall back in order:
+#   direct -> IAP -> exit INFRA_UNAVAILABLE (caller spur-cargo builds locally)
+#
+# Both modes run through `gcloud compute ssh`, so OS Login, key management, and
+# host-key validation are identical — only the transport path differs (omit vs
+# pass --tunnel-through-iap). Set SPUR_DIRECT_SSH=0 to force IAP-only.
+SPUR_DIRECT_SSH="${SPUR_DIRECT_SSH:-1}"
+
+probe_transport() {
+    # $1: transport flag ("" for direct, "--tunnel-through-iap" for IAP).
+    gcloud compute ssh "$VM_NAME" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        $1 --quiet --command='true' \
+        -- -o ConnectTimeout=10 >/dev/null 2>&1
+}
+
+if [[ "$SPUR_DIRECT_SSH" != "0" ]] && probe_transport ""; then
+    IAP_FLAG=""; TRANSPORT_MODE="direct (external IP)"
+elif probe_transport "--tunnel-through-iap"; then
+    IAP_FLAG="--tunnel-through-iap"; TRANSPORT_MODE="IAP tunnel"
+else
+    log "No SSH transport reachable (direct + IAP both failed) — falling back to local build."
+    exit $INFRA_UNAVAILABLE
+fi
+log "SSH transport: $TRANSPORT_MODE"
+
+# Every remote command goes through here so it uses the chosen transport.
+# $IAP_FLAG is intentionally unquoted: empty -> no arg (direct), else one flag.
+remote_ssh() {
+    gcloud compute ssh "$VM_NAME" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        $IAP_FLAG --quiet "$@"
+}
+
 TRANSPORT="$SCRIPT_DIR/_gcloud-ssh.sh"
 export GCP_PROJECT GCP_ZONE
+# _gcloud-ssh.sh (the rsync transport) reads this to match the chosen mode.
+export SPUR_SSH_IAP_FLAG="$IAP_FLAG"
 
 # ---- enumerate tracked files for this worktree -----------------------------
 log "Enumerating git-tracked files..."
@@ -153,9 +195,7 @@ log "  $COUNT files"
 # "os error 2" creating a temp dir under target/release/deps. When the link is
 # already correct — the steady state for repeated builds — we touch nothing and
 # the window never opens.
-gcloud compute ssh "$VM_NAME" \
-    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-    --tunnel-through-iap --quiet \
+remote_ssh \
     --command="mkdir -p ~/$REMOTE_DIR $REMOTE_TARGET /mnt/cargo/cargo-home /mnt/cargo/rustup && link=\"\$HOME/$REMOTE_DIR/target\" && if [ \"\$(readlink \"\$link\" 2>/dev/null)\" != \"$REMOTE_TARGET\" ]; then rm -rf \"\$link\"; ln -s \"$REMOTE_TARGET\" \"\$link\"; fi" >/dev/null
 
 REMOTE_XFER_LIST="/tmp/spur-sync-xfer.${WORKTREE_KEY//\//_}"
@@ -183,9 +223,7 @@ rsync -az --delete -0 --files-from="$FILE_LIST" --out-format='%n' \
 if [[ -s "$XFER_LIST" ]]; then
     log "Re-stamping $(wc -l <"$XFER_LIST" | tr -d ' ') synced path(s) to VM clock..."
     rsync -az -e "$TRANSPORT" "$XFER_LIST" "$VM_NAME:$REMOTE_XFER_LIST"
-    gcloud compute ssh "$VM_NAME" \
-        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-        --tunnel-through-iap --quiet \
+    remote_ssh \
         --command="cd \"\$HOME/$REMOTE_DIR\" && while IFS= read -r f; do [ -n \"\$f\" ] && touch -c -- \"\$f\"; done < \"$REMOTE_XFER_LIST\""
 fi
 
@@ -203,9 +241,7 @@ REMOTE_MANIFEST_CUR="/tmp/spur-sync-manifest.${WORKTREE_KEY//\//_}"
 STORED_MANIFEST="/mnt/cargo/sync-manifests/$WORKTREE_KEY.manifest"
 log "Reconciling remote workspace (pruning locally-deleted files)..."
 rsync -az -e "$TRANSPORT" "$FILE_LIST" "$VM_NAME:$REMOTE_MANIFEST_CUR"
-gcloud compute ssh "$VM_NAME" \
-    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-    --tunnel-through-iap --quiet \
+remote_ssh \
     --command="bash \"\$HOME/$REMOTE_DIR/scripts/gcp-build/_prune-remote.sh\" \"$REMOTE_DIR\" \"$REMOTE_MANIFEST_CUR\" \"$STORED_MANIFEST\""
 
 # ---- run notebook frontend (vitest) tests on the VM ------------------------
@@ -216,9 +252,7 @@ gcloud compute ssh "$VM_NAME" \
 # (node_modules persists on the VM across syncs, so repeat TDD runs are fast).
 if [[ $FRONTEND_TEST -eq 1 ]]; then
     log "Running notebook frontend tests on VM: $NOTEBOOK_FRONTEND_DIR ($NOTEBOOK_FRONTEND_TEST_CMD)"
-    gcloud compute ssh "$VM_NAME" \
-        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-        --tunnel-through-iap --quiet \
+    remote_ssh \
         --command="bash -lc '
             set -e
             cd ~/$REMOTE_DIR/$NOTEBOOK_FRONTEND_DIR
@@ -260,9 +294,7 @@ if is_notebook_production_build "$CARGO_ARGS"; then
     NOTEBOOK_PRODUCTION_BUILD=1
     log "Notebook production build detected; will run frontend build on VM first."
 fi
-gcloud compute ssh "$VM_NAME" \
-    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-    --tunnel-through-iap --quiet \
+remote_ssh \
     --command="bash -lc '
         set -e
         cd ~/$REMOTE_DIR

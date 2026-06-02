@@ -19,10 +19,18 @@ host="$1"; shift
 # Strip an optional `user@` prefix — gcloud handles username via OS Login.
 host="${host##*@}"
 
+# Transport mode is selected by build.sh and handed down via SPUR_SSH_IAP_FLAG:
+#   ""                     -> direct SSH to the VM's external IP (skip IAP)
+#   "--tunnel-through-iap" -> route through the IAP tunnel
+# Use `-` (not `:-`) so an explicitly-empty value means "direct"; only an
+# UNSET var (standalone invocation) defaults to the safe IAP path.
+IAP_FLAG="${SPUR_SSH_IAP_FLAG---tunnel-through-iap}"
+
+# $IAP_FLAG is intentionally unquoted: empty -> no arg (direct), else one flag.
 exec gcloud compute ssh \
     --project="$GCP_PROJECT" \
     --zone="$GCP_ZONE" \
-    --tunnel-through-iap \
+    $IAP_FLAG \
     --quiet \
     "$host" \
     -- "$@"
