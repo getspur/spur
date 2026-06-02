@@ -1386,6 +1386,14 @@ impl NotebookDaemonControl {
             DaemonControlCommand::DeleteSavedConnection { name } => {
                 self.delete_saved_connection(name).await
             }
+            DaemonControlCommand::UpdateSavedConnection {
+                name,
+                spec_text,
+                credentials,
+            } => {
+                self.update_saved_connection(name, spec_text, credentials)
+                    .await
+            }
             DaemonControlCommand::ListRecents {} => self
                 .list_recent_entries()
                 .await
@@ -1637,6 +1645,106 @@ impl NotebookDaemonControl {
         saved_connection_result(
             jute::commands::DaemonControlResult::AttachedSavedConnection(payload),
             "saved_connection_attach_encode_failed",
+        )
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn update_saved_connection(
+        &self,
+        name: String,
+        spec_text: Option<String>,
+        credentials: Vec<(String, String)>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        use spur_rest_table_gateway::adapter::Adapter as _;
+
+        let existing = crate::connection_store::list()
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "saved_connections_list_failed".to_string(),
+                message: error.to_string(),
+            })?
+            .into_iter()
+            .find(|template| template.name == name)
+            .ok_or_else(|| BridgeError::Handler {
+                code: "saved_connection_not_found".to_string(),
+                message: format!("no saved connection named {name}"),
+            })?;
+
+        let supplied_env_vars = credentials
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for (key, value) in &credentials {
+            if !value.is_empty() {
+                std::env::set_var(key, value);
+            }
+        }
+
+        let manifest_toml = match spec_text {
+            Some(spec_text) if !spec_text.trim().is_empty() => {
+                let (_source, manifest) =
+                    build_api_import_manifest(&name, existing.provider.clone(), Some(spec_text))?;
+                let mut toml = spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
+                toml.push_str(&spur_rest_table_gateway::adapter::openapi::tables_to_toml(
+                    &manifest.tables,
+                ));
+                toml
+            }
+            _ => existing.manifest_toml.clone(),
+        };
+
+        let manifest =
+            spur_rest_table_gateway::adapter::manifest::Manifest::from_toml(&manifest_toml)
+                .map_err(|error| BridgeError::Handler {
+                    code: "saved_connection_manifest_parse_failed".to_string(),
+                    message: error.to_string(),
+                })?;
+        let adapter =
+            spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
+        let adapter_name = adapter.name().to_string();
+        let tables = adapter
+            .catalog()
+            .into_iter()
+            .map(|table| api_datasource_table(&adapter_name, table))
+            .collect::<Vec<_>>();
+
+        let credential_env_vars = if supplied_env_vars.is_empty() {
+            existing.credential_env_vars.clone()
+        } else {
+            supplied_env_vars
+        };
+        let missing_env_vars = credential_env_vars
+            .iter()
+            .filter(|env_var| std::env::var_os(env_var).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let entry = self
+            .register_api_datasource_entry_inner(name.clone(), adapter_name, tables.clone())
+            .await?;
+
+        let template = crate::connection_store::ConnectionTemplate {
+            name,
+            provider: existing.provider,
+            group: existing.group,
+            manifest_toml,
+            tables,
+            credential_env_vars,
+            created_at: existing.created_at,
+            updated_at: chrono::Utc::now(),
+        };
+        if let Err(error) = crate::connection_store::upsert(template).await {
+            warn!(%error, "failed to persist updated API connection template");
+        }
+        self.emit_connections_changed().await;
+
+        let payload = json!({
+            "entry": entry,
+            "missing_env_vars": missing_env_vars,
+        });
+        saved_connection_result(
+            jute::commands::DaemonControlResult::AttachedSavedConnection(payload),
+            "saved_connection_update_encode_failed",
         )
     }
 
@@ -2027,6 +2135,19 @@ impl NotebookDaemonControl {
     async fn delete_saved_connection(
         &self,
         _name: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn update_saved_connection(
+        &self,
+        _name: String,
+        _spec_text: Option<String>,
+        _credentials: Vec<(String, String)>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),

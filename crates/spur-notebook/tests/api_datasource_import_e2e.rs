@@ -57,6 +57,36 @@ paths:
                           type: integer
 "#;
 
+const OPENAPI_CHARGES_SPEC: &str = r#"
+openapi: 3.0.3
+info:
+  title: Charges
+  version: "1"
+paths:
+  /charges:
+    get:
+      operationId: charges
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        amount:
+                          type: integer
+                        status:
+                          type: string
+"#;
+
 struct EnvGuard {
     key: &'static str,
     previous: Option<String>,
@@ -202,6 +232,49 @@ score = {{ json = "$.score", type = "Int64" }}
 
 fn daemon_request(value: Value) -> jute::commands::DaemonControlRequest {
     serde_json::from_value(value).expect("daemon control request deserializes")
+}
+
+fn test_control() -> (NotebookDaemonControl, Arc<State>, Arc<RecordingWindowOps>) {
+    let jute_state = Arc::new(State::new());
+    let windows = Arc::new(RecordingWindowOps::default());
+    let control = NotebookDaemonControl::new_with_parts_for_test(
+        Arc::new(AgentBridge::new()),
+        Arc::new(ClosedNotebookBridge),
+        Arc::clone(&jute_state),
+        windows.clone(),
+        None,
+    );
+    (control, jute_state, windows)
+}
+
+async fn import_scores_connection(
+    control: &NotebookDaemonControl,
+    name: &str,
+    credential_env_var: &str,
+) {
+    let import_response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "add_api_datasource_from_import",
+                "name": name,
+                "provider": "stripe",
+                "spec_text": OPENAPI_SCORES_SPEC,
+                "credentials": [[credential_env_var, "test-secret"]],
+            })),
+        })
+        .await;
+    assert!(import_response.ok, "{:?}", import_response.error);
+}
+
+async fn saved_template(name: &str) -> ConnectionTemplate {
+    connection_store::list()
+        .await
+        .expect("saved connections list")
+        .into_iter()
+        .find(|template| template.name == name)
+        .expect("saved connection exists")
 }
 
 #[tokio::test]
@@ -444,4 +517,161 @@ async fn saved_connection_list_attach_delete_roundtrip_reports_missing_env() {
         .await
         .expect("saved connections list after delete");
     assert!(!templates.iter().any(|template| template.name == name));
+}
+
+#[tokio::test]
+async fn update_saved_connection_preserves_manifest_and_tables_without_spec() {
+    let name = format!("saved_update_preserve_{}", uuid::Uuid::new_v4().simple());
+    let credential_env_var = format!("SPUR_UPDATE_PRESERVE_{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = connection_store::remove(&name).await;
+    std::env::remove_var(&credential_env_var);
+
+    let (control, _jute_state, windows) = test_control();
+    import_scores_connection(&control, &name, &credential_env_var).await;
+    assert_eq!(windows.connections_changed_count(), 1);
+
+    let original = saved_template(&name).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
+
+    let update_response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "update_saved_connection",
+                "name": name,
+                "spec_text": null,
+                "credentials": [],
+            })),
+        })
+        .await;
+    assert!(update_response.ok, "{:?}", update_response.error);
+    let update_result = update_response.result.expect("update result");
+    assert_eq!(update_result["type"], "attachedSavedConnection");
+    assert_eq!(update_result["data"]["entry"]["name"], name);
+    assert_eq!(update_result["data"]["entry"]["path"], "stripe");
+    assert_eq!(
+        update_result["data"]["entry"]["tables"][0]["name"],
+        "stripe_scores"
+    );
+    assert_eq!(update_result["data"]["missing_env_vars"], json!([]));
+
+    let updated = saved_template(&name).await;
+    assert_eq!(updated.manifest_toml, original.manifest_toml);
+    assert_eq!(updated.tables, original.tables);
+    assert_eq!(updated.credential_env_vars, original.credential_env_vars);
+    assert_eq!(updated.created_at, original.created_at);
+    assert!(updated.updated_at > original.updated_at);
+    assert_eq!(windows.connections_changed_count(), 2);
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let blank_update_response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "update_saved_connection",
+                "name": name,
+                "spec_text": " \n\t ",
+                "credentials": [],
+            })),
+        })
+        .await;
+    assert!(
+        blank_update_response.ok,
+        "{:?}",
+        blank_update_response.error
+    );
+
+    let blank_updated = saved_template(&name).await;
+    assert_eq!(blank_updated.manifest_toml, original.manifest_toml);
+    assert_eq!(blank_updated.tables, original.tables);
+    assert_eq!(blank_updated.created_at, original.created_at);
+    assert!(blank_updated.updated_at > updated.updated_at);
+    assert_eq!(windows.connections_changed_count(), 3);
+
+    connection_store::remove(&name)
+        .await
+        .expect("saved connection cleans up");
+    std::env::remove_var(&credential_env_var);
+}
+
+#[tokio::test]
+async fn update_saved_connection_regenerates_manifest_and_tables_with_spec() {
+    let name = format!("saved_update_regen_{}", uuid::Uuid::new_v4().simple());
+    let original_env_var = format!("SPUR_UPDATE_REGEN_{}", uuid::Uuid::new_v4().simple());
+    let updated_env_var = format!("SPUR_UPDATE_REGEN_NEW_{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = connection_store::remove(&name).await;
+    std::env::remove_var(&original_env_var);
+    std::env::remove_var(&updated_env_var);
+
+    let (control, _jute_state, windows) = test_control();
+    import_scores_connection(&control, &name, &original_env_var).await;
+    assert_eq!(windows.connections_changed_count(), 1);
+
+    let original = saved_template(&name).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
+
+    let update_response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "update_saved_connection",
+                "name": name,
+                "spec_text": OPENAPI_CHARGES_SPEC,
+                "credentials": [[updated_env_var, "new-secret"]],
+            })),
+        })
+        .await;
+    assert!(update_response.ok, "{:?}", update_response.error);
+    let update_result = update_response.result.expect("update result");
+    assert_eq!(update_result["type"], "attachedSavedConnection");
+    assert_eq!(update_result["data"]["entry"]["name"], name);
+    assert_eq!(update_result["data"]["entry"]["path"], "stripe");
+    assert_eq!(
+        update_result["data"]["entry"]["tables"][0]["name"],
+        "stripe_charges"
+    );
+    assert_eq!(update_result["data"]["missing_env_vars"], json!([]));
+
+    let updated = saved_template(&name).await;
+    assert_ne!(updated.manifest_toml, original.manifest_toml);
+    assert_ne!(updated.tables, original.tables);
+    assert_eq!(updated.tables[0].name, "stripe_charges");
+    assert_eq!(updated.credential_env_vars, vec![updated_env_var.clone()]);
+    assert_eq!(updated.created_at, original.created_at);
+    assert!(updated.updated_at > original.updated_at);
+    assert_eq!(windows.connections_changed_count(), 2);
+
+    connection_store::remove(&name)
+        .await
+        .expect("saved connection cleans up");
+    std::env::remove_var(&original_env_var);
+    std::env::remove_var(&updated_env_var);
+}
+
+#[tokio::test]
+async fn update_saved_connection_reports_not_found_for_unknown_name() {
+    let missing_name = format!("missing_update_{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = connection_store::remove(&missing_name).await;
+    let (control, _jute_state, windows) = test_control();
+
+    let update_response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "update_saved_connection",
+                "name": missing_name,
+                "spec_text": null,
+                "credentials": [],
+            })),
+        })
+        .await;
+
+    assert!(!update_response.ok);
+    let error = update_response.error.expect("update error");
+    assert_eq!(error.code, "saved_connection_not_found");
+    assert_eq!(windows.connections_changed_count(), 0);
 }
