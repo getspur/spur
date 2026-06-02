@@ -7,7 +7,9 @@
 
 use std::time::{Duration, Instant};
 
-use ratatui::text::Line;
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::mermaid::MermaidId;
 
@@ -81,6 +83,143 @@ fn is_table_separator(line: &str) -> bool {
         let c = cell.trim();
         !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')
     })
+}
+
+fn starts_unordered_list_marker(trimmed: &str) -> bool {
+    let mut chars = trimmed.chars();
+    matches!(chars.next(), Some('-' | '+' | '*'))
+        && chars.next().map(char::is_whitespace).unwrap_or(true)
+}
+
+fn starts_ordered_list_marker(trimmed: &str) -> bool {
+    let mut digit_count = 0usize;
+    let mut chars = trimmed.chars().peekable();
+    while matches!(chars.peek(), Some(ch) if ch.is_ascii_digit()) {
+        digit_count += 1;
+        chars.next();
+        if digit_count > 9 {
+            return false;
+        }
+    }
+
+    digit_count > 0
+        && matches!(chars.next(), Some('.' | ')'))
+        && chars.next().map(char::is_whitespace).unwrap_or(true)
+}
+
+fn is_thematic_break_line(trimmed: &str) -> bool {
+    let mut marker: Option<char> = None;
+    let mut count = 0usize;
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if !matches!(ch, '-' | '*' | '_') {
+            return false;
+        }
+        match marker {
+            Some(existing) if existing != ch => return false,
+            Some(_) => {}
+            None => marker = Some(ch),
+        }
+        count += 1;
+    }
+    count >= 3
+}
+
+fn is_setext_underline_line(trimmed: &str) -> bool {
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '=' || ch == '-')
+}
+
+fn is_reference_definition_line(trimmed: &str) -> bool {
+    trimmed.starts_with('[') && trimmed.contains("]:")
+}
+
+fn is_context_sensitive_markdown_block_marker_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let fully_trimmed = trimmed.trim_end();
+    starts_unordered_list_marker(trimmed)
+        || starts_ordered_list_marker(trimmed)
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('>')
+        || is_table_row(line)
+        || is_table_separator(line)
+        || is_setext_underline_line(fully_trimmed)
+        || is_thematic_break_line(fully_trimmed)
+        || is_reference_definition_line(trimmed)
+        || line.starts_with("    ")
+        || line.starts_with('\t')
+}
+
+fn fence_line_content(line: &str) -> Option<&str> {
+    let mut spaces = 0usize;
+    for (idx, ch) in line.char_indices() {
+        match ch {
+            ' ' if spaces < 3 => spaces += 1,
+            ' ' => return None,
+            '\t' => return None,
+            _ => return Some(&line[idx..]),
+        }
+    }
+    Some("")
+}
+
+fn parse_fence_opener(line: &str) -> Option<(u8, usize)> {
+    let rest = fence_line_content(line)?;
+    let marker = *rest.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+
+    let marker_len = rest.bytes().take_while(|byte| *byte == marker).count();
+    if marker_len < 3 {
+        return None;
+    }
+
+    if marker == b'`' && rest[marker_len..].contains('`') {
+        return None;
+    }
+
+    Some((marker, marker_len))
+}
+
+fn is_fence_closer(line: &str, marker: u8, opener_len: usize) -> bool {
+    let Some(rest) = fence_line_content(line) else {
+        return false;
+    };
+    let marker_len = rest.bytes().take_while(|byte| *byte == marker).count();
+    marker_len >= opener_len && rest[marker_len..].trim().is_empty()
+}
+
+fn is_context_insensitive_incremental_delta(delta: &str) -> bool {
+    let mut open_fence: Option<(u8, usize)> = None;
+
+    for line in delta.lines() {
+        if let Some((marker, opener_len)) = open_fence {
+            if is_fence_closer(line, marker, opener_len) {
+                open_fence = None;
+            }
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if is_context_sensitive_markdown_block_marker_line(line) {
+            return false;
+        }
+
+        if let Some(fence) = parse_fence_opener(line) {
+            open_fence = Some(fence);
+        }
+    }
+
+    open_fence.is_none()
 }
 
 /// Force GFM-table-like blocks to render with each row on its own line by
@@ -171,6 +310,395 @@ fn inject_hard_breaks_in_tables(input: &str) -> String {
     out
 }
 
+#[derive(Debug, Clone)]
+struct MarkdownTable {
+    alignments: Vec<Alignment>,
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedTable {
+    source_rows: Vec<String>,
+    rendered_lines: Vec<Line<'static>>,
+}
+
+fn replace_markdown_tables_in_lines(
+    lines: Vec<Line<'static>>,
+    table_parse_input: &str,
+    table_source_input: &str,
+    render_width: Option<u16>,
+) -> Vec<Line<'static>> {
+    let tables = rendered_markdown_tables(table_parse_input, table_source_input, render_width);
+    if tables.is_empty() {
+        return lines;
+    }
+
+    let mut out = Vec::with_capacity(lines.len());
+    let mut line_idx = 0;
+    let mut table_idx = 0;
+
+    while line_idx < lines.len() {
+        let Some(table) = tables.get(table_idx) else {
+            out.extend(lines[line_idx..].iter().cloned());
+            break;
+        };
+
+        if line_sequence_matches_table(&lines, line_idx, &table.source_rows) {
+            out.extend(table.rendered_lines.iter().cloned());
+            line_idx += table.source_rows.len();
+            table_idx += 1;
+        } else {
+            out.push(lines[line_idx].clone());
+            line_idx += 1;
+        }
+    }
+
+    out
+}
+
+fn rendered_markdown_tables(
+    table_parse_input: &str,
+    table_source_input: &str,
+    render_width: Option<u16>,
+) -> Vec<RenderedTable> {
+    let tables = collect_markdown_tables(table_parse_input);
+    if tables.is_empty() {
+        return Vec::new();
+    }
+
+    let source_blocks = collect_table_source_blocks(table_source_input);
+    if source_blocks.len() != tables.len() {
+        return Vec::new();
+    }
+
+    source_blocks
+        .into_iter()
+        .zip(tables)
+        .filter_map(|(source_rows, table)| {
+            let rendered_lines = render_markdown_table(&table, render_width);
+            (!rendered_lines.is_empty()).then_some(RenderedTable {
+                source_rows,
+                rendered_lines,
+            })
+        })
+        .collect()
+}
+
+fn collect_markdown_tables(input: &str) -> Vec<MarkdownTable> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+
+    let mut tables = Vec::new();
+    let mut current_table: Option<MarkdownTable> = None;
+    let mut current_row: Option<Vec<String>> = None;
+    let mut current_cell = String::new();
+    let mut in_header = false;
+    let mut in_cell = false;
+
+    for (event, _) in Parser::new_ext(input, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Table(alignments)) => {
+                current_table = Some(MarkdownTable {
+                    alignments,
+                    header: Vec::new(),
+                    rows: Vec::new(),
+                });
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(table) = current_table.take() {
+                    if !table.header.is_empty() {
+                        tables.push(table);
+                    }
+                }
+            }
+            Event::Start(Tag::TableHead) => {
+                in_header = true;
+                current_row = Some(Vec::new());
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let (Some(table), Some(row)) = (current_table.as_mut(), current_row.take()) {
+                    table.header = row;
+                }
+                in_header = false;
+            }
+            Event::Start(Tag::TableRow) => {
+                current_row = Some(Vec::new());
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let (Some(table), Some(row)) = (current_table.as_mut(), current_row.take()) {
+                    if in_header {
+                        table.header = row;
+                    } else {
+                        table.rows.push(row);
+                    }
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                in_cell = true;
+                current_cell.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(row) = current_row.as_mut() {
+                    row.push(normalize_table_cell(&current_cell));
+                }
+                current_cell.clear();
+                in_cell = false;
+            }
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text)
+                if in_cell =>
+            {
+                current_cell.push_str(&text);
+            }
+            Event::SoftBreak | Event::HardBreak if in_cell => {
+                current_cell.push(' ');
+            }
+            _ => {}
+        }
+    }
+
+    tables
+}
+
+fn collect_table_source_blocks(input: &str) -> Vec<Vec<String>> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut blocks = Vec::new();
+    let mut in_code_fence = false;
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed_start = line.trim_start();
+
+        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+            i += 1;
+            continue;
+        }
+
+        if !in_code_fence && is_table_row(line) {
+            let start = i;
+            while i < lines.len() && is_table_row(lines[i]) {
+                i += 1;
+            }
+            let block = &lines[start..i];
+            if block.len() >= 2 && block.iter().any(|l| is_table_separator(l)) {
+                blocks.push(
+                    block
+                        .iter()
+                        .map(|line| normalize_table_source_row(line))
+                        .collect(),
+                );
+            }
+            continue;
+        }
+
+        i += 1;
+    }
+
+    blocks
+}
+
+fn render_markdown_table(table: &MarkdownTable, render_width: Option<u16>) -> Vec<Line<'static>> {
+    let col_count = table
+        .header
+        .len()
+        .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+    if col_count == 0 {
+        return Vec::new();
+    }
+
+    let header = normalized_row(&table.header, col_count);
+    let rows: Vec<Vec<String>> = table
+        .rows
+        .iter()
+        .map(|row| normalized_row(row, col_count))
+        .collect();
+    let widths = table_column_widths(&header, &rows, col_count);
+    let grid_width = table_grid_width(&widths);
+
+    if let Some(max_width) = render_width.map(usize::from).filter(|width| *width > 0) {
+        if grid_width > max_width {
+            return render_table_records(&header, &rows, max_width);
+        }
+    }
+
+    render_table_grid(&header, &rows, &widths, &table.alignments)
+}
+
+fn render_table_grid(
+    header: &[String],
+    rows: &[Vec<String>],
+    widths: &[usize],
+    alignments: &[Alignment],
+) -> Vec<Line<'static>> {
+    let mut out = Vec::with_capacity(rows.len() + 4);
+    out.push(table_line(top_border(widths)));
+    out.push(table_line(format_table_row(header, widths, alignments)));
+    out.push(table_line(header_border(widths)));
+    for row in rows {
+        out.push(table_line(format_table_row(row, widths, alignments)));
+    }
+    out.push(table_line(bottom_border(widths)));
+    out
+}
+
+fn render_table_records(
+    header: &[String],
+    rows: &[Vec<String>],
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for (row_idx, row) in rows.iter().enumerate() {
+        if row_idx > 0 {
+            out.push(Line::from(""));
+        }
+        for (col_idx, value) in row.iter().enumerate() {
+            let label = header
+                .get(col_idx)
+                .filter(|label| !label.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("Column {}", col_idx + 1));
+            out.push(table_line(truncate_to_width(
+                &format!("{label}: {value}"),
+                max_width,
+            )));
+        }
+    }
+    out
+}
+
+fn normalized_row(row: &[String], col_count: usize) -> Vec<String> {
+    (0..col_count)
+        .map(|idx| row.get(idx).cloned().unwrap_or_default())
+        .collect()
+}
+
+fn table_column_widths(header: &[String], rows: &[Vec<String>], col_count: usize) -> Vec<usize> {
+    let mut widths = vec![0; col_count];
+    for (idx, cell) in header.iter().enumerate() {
+        widths[idx] = widths[idx].max(display_width(cell));
+    }
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            widths[idx] = widths[idx].max(display_width(cell));
+        }
+    }
+    widths
+}
+
+fn table_grid_width(widths: &[usize]) -> usize {
+    widths.iter().sum::<usize>() + widths.len() * 3 + 1
+}
+
+fn format_table_row(cells: &[String], widths: &[usize], alignments: &[Alignment]) -> String {
+    let mut out = String::new();
+    out.push('│');
+    for (idx, cell) in cells.iter().enumerate() {
+        out.push(' ');
+        out.push_str(&pad_cell(
+            cell,
+            widths[idx],
+            alignments.get(idx).copied().unwrap_or(Alignment::None),
+        ));
+        out.push(' ');
+        out.push('│');
+    }
+    out
+}
+
+fn top_border(widths: &[usize]) -> String {
+    border_line('┌', '┬', '┐', widths)
+}
+
+fn header_border(widths: &[usize]) -> String {
+    border_line('├', '┼', '┤', widths)
+}
+
+fn bottom_border(widths: &[usize]) -> String {
+    border_line('└', '┴', '┘', widths)
+}
+
+fn border_line(left: char, separator: char, right: char, widths: &[usize]) -> String {
+    let mut out = String::new();
+    out.push(left);
+    for (idx, width) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(width + 2));
+        out.push(if idx + 1 == widths.len() {
+            right
+        } else {
+            separator
+        });
+    }
+    out
+}
+
+fn pad_cell(cell: &str, width: usize, alignment: Alignment) -> String {
+    let cell_width = display_width(cell);
+    let padding = width.saturating_sub(cell_width);
+    match alignment {
+        Alignment::Right => format!("{}{}", " ".repeat(padding), cell),
+        Alignment::Center => {
+            let left = padding / 2;
+            let right = padding - left;
+            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(right))
+        }
+        Alignment::None | Alignment::Left => format!("{}{}", cell, " ".repeat(padding)),
+    }
+}
+
+fn table_line(content: String) -> Line<'static> {
+    Line::from(Span::raw(content))
+}
+
+fn line_sequence_matches_table(
+    lines: &[Line<'static>],
+    start: usize,
+    source_rows: &[String],
+) -> bool {
+    start + source_rows.len() <= lines.len()
+        && source_rows.iter().enumerate().all(|(offset, source)| {
+            normalize_table_source_row(&line_plain_text(&lines[start + offset])) == *source
+        })
+}
+
+fn line_plain_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+fn normalize_table_cell(cell: &str) -> String {
+    cell.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_table_source_row(line: &str) -> String {
+    line.trim().trim_end_matches("  ").trim_end().to_string()
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
+fn truncate_to_width(value: &str, max_width: usize) -> String {
+    if display_width(value) <= max_width {
+        return value.to_string();
+    }
+
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
 /// Accumulated-text markdown renderer.
 #[derive(Debug, Clone)]
 pub struct MarkdownStream {
@@ -201,6 +729,8 @@ pub struct MarkdownStream {
 
     /// Production-unused; instrumented for test verification only.
     rebuild_count: std::cell::Cell<u64>,
+    /// Production-unused; tracks bytes sent through the markdown build stage.
+    build_work_bytes: std::cell::Cell<u64>,
 }
 
 impl Default for MarkdownStream {
@@ -216,6 +746,7 @@ impl Default for MarkdownStream {
             flushed_byte_len: 0,
             finalized: false,
             rebuild_count: std::cell::Cell::new(0),
+            build_work_bytes: std::cell::Cell::new(0),
         }
     }
 }
@@ -244,6 +775,11 @@ impl MarkdownStream {
     /// Used by busy-loop regression tests.
     pub fn rebuild_count_for_tests(&self) -> u64 {
         self.rebuild_count.get()
+    }
+
+    /// Test-only hook: total bytes handed to the markdown build stage.
+    pub fn build_work_bytes_for_tests(&self) -> u64 {
+        self.build_work_bytes.get()
     }
 
     pub fn is_finalized(&self) -> bool {
@@ -306,7 +842,7 @@ impl MarkdownStream {
     /// Force a flush immediately.
     pub fn flush_now(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
         self.dirty_since = None;
-        self.rebuild(states, /* permit_eof_closure */ false)
+        self.rebuild_with_width(states, /* permit_eof_closure */ false, None)
     }
 
     /// TurnComplete flush. Permits cursor advance past events at EOF
@@ -314,8 +850,16 @@ impl MarkdownStream {
     /// Sets `finalized = true`; subsequent `append` is a contract
     /// violation (debug_assert'd, self-heals in release).
     pub fn flush_final(&mut self, states: &StateLookup<'_>) -> Vec<FenceRef> {
+        self.flush_final_with_width(states, None)
+    }
+
+    fn flush_final_with_width(
+        &mut self,
+        states: &StateLookup<'_>,
+        render_width: Option<u16>,
+    ) -> Vec<FenceRef> {
         self.dirty_since = None;
-        let out = self.rebuild(states, /* permit_eof_closure */ true);
+        let out = self.rebuild_with_width(states, /* permit_eof_closure */ true, render_width);
         self.finalized = true;
         out
     }
@@ -328,14 +872,47 @@ impl MarkdownStream {
     /// Pure with respect to self. Cost is one pulldown parse pass per call;
     /// the parent VirtualRow cache amortizes across renders.
     pub fn preview_items(&self, states: &StateLookup<'_>) -> Vec<StreamItem> {
+        self.preview_items_with_optional_width(states, None)
+    }
+
+    /// Width-aware preview for render paths that already know the available
+    /// body width. This keeps cached stream state width-independent while
+    /// allowing markdown tables to choose a narrow-terminal fallback.
+    pub fn preview_items_with_width(
+        &self,
+        states: &StateLookup<'_>,
+        render_width: u16,
+    ) -> Vec<StreamItem> {
+        self.preview_items_with_optional_width(states, Some(render_width))
+    }
+
+    fn preview_items_with_optional_width(
+        &self,
+        states: &StateLookup<'_>,
+        render_width: Option<u16>,
+    ) -> Vec<StreamItem> {
         if self.raw_text.is_empty() {
             return Vec::new();
         }
+
+        // Fast path: when no new content has been committed since the last
+        // flush, the cached items are already current and we can skip the
+        // clone + full reflow. Only safe for the width-independent path: a
+        // width-aware caller may need a narrow-terminal table fallback that
+        // the cached (width-None) items do not reflect.
+        if render_width.is_none() {
+            let (preview_flushed, _) =
+                scan_authoritative(&self.raw_text, self.mermaid_enabled, true);
+            if preview_flushed == self.flushed_byte_len {
+                return self.cached_items.clone();
+            }
+        }
+
         let mut clone = self.clone();
         // flush_final allows EOF closure (permit_eof_closure=true), so the
         // entire raw_text is committed and trailing tail bytes get the same
         // paragraph context they would after TurnComplete.
-        let _ = clone.flush_final(states);
+        let _ = clone.flush_final_with_width(states, render_width);
         clone.cached_items
     }
 
@@ -430,6 +1007,7 @@ impl MarkdownStream {
         prefix: &str,
         discovered_fences: Vec<(std::ops::Range<usize>, String)>,
         states: &StateLookup<'_>,
+        render_width: Option<u16>,
     ) -> (
         Vec<StreamItem>,
         std::collections::HashMap<MermaidId, Line<'static>>,
@@ -478,6 +1056,7 @@ impl MarkdownStream {
         };
 
         let transformed = inject_hard_breaks_in_tables(&transformed);
+        let table_parse_input = transformed.clone();
 
         if transformed.is_empty() {
             return (
@@ -501,6 +1080,12 @@ impl MarkdownStream {
                 out
             })
             .collect();
+        let parsed_lines = replace_markdown_tables_in_lines(
+            parsed_lines,
+            &table_parse_input,
+            &transformed,
+            render_width,
+        );
 
         let mut items: Vec<StreamItem> = Vec::new();
         let mut current_text: Vec<ratatui::text::Line<'static>> = Vec::new();
@@ -553,20 +1138,182 @@ impl MarkdownStream {
     /// known_fences happen before flushed_byte_len is assigned. If any
     /// stage panics, flushed_byte_len retains its prior value; the next
     /// successful rebuild restores consistency (C1).
-    fn rebuild(&mut self, states: &StateLookup<'_>, permit_eof_closure: bool) -> Vec<FenceRef> {
+    fn rebuild_with_width(
+        &mut self,
+        states: &StateLookup<'_>,
+        permit_eof_closure: bool,
+        render_width: Option<u16>,
+    ) -> Vec<FenceRef> {
         self.rebuild_count.set(self.rebuild_count.get() + 1);
 
         // Stage 0: pulldown scan.
         let (new_flushed, discovered_fences) =
             scan_authoritative(&self.raw_text, self.mermaid_enabled, permit_eof_closure);
 
+        let old_flushed = self.flushed_byte_len;
+        let committed_fence_state_stale = self.known_fences.iter().any(|f| {
+            use super::mermaid::FenceRender;
+
+            let render = if states.is_err(f.id) {
+                FenceRender::Error
+            } else if states.is_pending(f.id) {
+                FenceRender::Pending
+            } else {
+                FenceRender::Ready(1)
+            };
+            let expected = super::mermaid::fence_placeholder_line(f.id, render);
+            self.fence_placeholders
+                .get(&f.id)
+                .map(|line| format!("{line:?}") != format!("{expected:?}"))
+                .unwrap_or(true)
+        });
+
+        let can_try_incremental = new_flushed > old_flushed
+            && old_flushed > 0
+            && !committed_fence_state_stale
+            && self.raw_text.is_char_boundary(old_flushed)
+            && self.raw_text.is_char_boundary(new_flushed);
+
+        if can_try_incremental {
+            let delta = &self.raw_text[old_flushed..new_flushed];
+            let before_line = self.raw_text[..old_flushed]
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty());
+            let after_line = delta.lines().find(|line| !line.trim().is_empty());
+            let table_seam = matches!(
+                (before_line, after_line),
+                (Some(before), Some(after))
+                    if (is_table_row(before) || is_table_separator(before))
+                        && (is_table_row(after) || is_table_separator(after))
+            );
+            let delta_has_reference_definition = delta.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with('[') && trimmed.contains("]:")
+            });
+            let setext_seam = matches!(
+                after_line,
+                Some(line)
+                    if before_line.is_some()
+                        && {
+                            let trimmed = line.trim();
+                            !trimmed.is_empty()
+                                && trimmed
+                                    .chars()
+                                    .all(|ch| ch == '=' || ch == '-')
+                        }
+            );
+            let context_sensitive_seam = before_line
+                .map(is_context_sensitive_markdown_block_marker_line)
+                .unwrap_or(false)
+                || after_line
+                    .map(is_context_sensitive_markdown_block_marker_line)
+                    .unwrap_or(false);
+            let delta_context_insensitive = is_context_insensitive_incremental_delta(delta);
+
+            if !table_seam
+                && !delta_has_reference_definition
+                && !setext_seam
+                && !context_sensitive_seam
+                && delta_context_insensitive
+            {
+                let mut delta_discovered = Vec::new();
+                let mut fence_crosses_seam = false;
+                for (range, code) in &discovered_fences {
+                    if range.end <= old_flushed {
+                        continue;
+                    }
+                    if range.start < old_flushed {
+                        fence_crosses_seam = true;
+                        break;
+                    }
+                    delta_discovered.push((
+                        (range.start - old_flushed)..(range.end - old_flushed),
+                        code.clone(),
+                    ));
+                }
+
+                if !fence_crosses_seam {
+                    let delta_owned = delta.to_owned();
+                    self.build_work_bytes
+                        .set(self.build_work_bytes.get() + delta_owned.len() as u64);
+
+                    let mut delta_builder = Self {
+                        raw_text: String::new(),
+                        dirty_since: None,
+                        cached_items: Vec::new(),
+                        fence_placeholders: std::collections::HashMap::new(),
+                        known_fences: Vec::new(),
+                        next_fence_id: self.next_fence_id,
+                        mermaid_enabled: self.mermaid_enabled,
+                        flushed_byte_len: 0,
+                        finalized: self.finalized,
+                        rebuild_count: std::cell::Cell::new(0),
+                        build_work_bytes: std::cell::Cell::new(0),
+                    };
+                    let (delta_items, delta_placeholders, delta_new_fences, delta_refreshed) =
+                        delta_builder.build_items_for(
+                            &delta_owned,
+                            delta_discovered,
+                            states,
+                            render_width,
+                        );
+
+                    let new_fences: Vec<FenceRef> = delta_new_fences
+                        .into_iter()
+                        .map(|mut fence| {
+                            fence.byte_range = (fence.byte_range.start + old_flushed)
+                                ..(fence.byte_range.end + old_flushed);
+                            fence
+                        })
+                        .collect();
+                    let refreshed: Vec<FenceRef> = delta_refreshed
+                        .into_iter()
+                        .map(|mut fence| {
+                            fence.byte_range = (fence.byte_range.start + old_flushed)
+                                ..(fence.byte_range.end + old_flushed);
+                            fence
+                        })
+                        .collect();
+
+                    if let (Some(StreamItem::Text(cached_lines)), Some(StreamItem::Text(lines))) =
+                        (self.cached_items.last_mut(), delta_items.first())
+                    {
+                        cached_lines.reserve(lines.len());
+                    }
+                    self.cached_items.reserve(delta_items.len());
+                    self.fence_placeholders.reserve(delta_placeholders.len());
+                    self.known_fences.reserve(refreshed.len());
+
+                    let mut delta_iter = delta_items.into_iter();
+                    if let Some(first) = delta_iter.next() {
+                        match (self.cached_items.last_mut(), first) {
+                            (Some(StreamItem::Text(cached_lines)), StreamItem::Text(mut lines)) => {
+                                cached_lines.append(&mut lines);
+                            }
+                            (_, item) => self.cached_items.push(item),
+                        }
+                    }
+                    self.cached_items.extend(delta_iter);
+                    self.fence_placeholders.extend(delta_placeholders);
+                    self.known_fences.extend(refreshed);
+                    self.next_fence_id = delta_builder.next_fence_id;
+                    self.flushed_byte_len = new_flushed;
+
+                    return new_fences;
+                }
+            }
+        }
+
         // Stage 1: build items for the committed prefix.
         // `.to_owned()` decouples the borrow on self.raw_text so we can
         // then mutate self inside build_items_for without overlapping
         // borrows.
         let prefix_owned = self.raw_text[..new_flushed].to_owned();
+        self.build_work_bytes
+            .set(self.build_work_bytes.get() + prefix_owned.len() as u64);
         let (items, placeholders, new_fences, refreshed) =
-            self.build_items_for(&prefix_owned, discovered_fences, states);
+            self.build_items_for(&prefix_owned, discovered_fences, states, render_width);
 
         // Stage 2: commit. flushed_byte_len assigned LAST (panic discipline).
         self.cached_items = items;
@@ -858,6 +1605,58 @@ mod stream_item_tests {
     }
 
     #[test]
+    fn basic_gfm_table_renders_as_aligned_grid() {
+        let mut s = MarkdownStream::new();
+        s.append("| Key | Action |\n|---|---|\n| Esc | cancel |\n");
+        let _ = s.flush_final(&StateLookup::empty());
+
+        let rendered = s.cached_lines_debug().join("\n");
+        let expected = [
+            "┌─────┬────────┐",
+            "│ Key │ Action │",
+            "├─────┼────────┤",
+            "│ Esc │ cancel │",
+            "└─────┴────────┘",
+        ]
+        .join("\n");
+
+        assert!(
+            rendered.contains(&expected),
+            "expected aligned grid:\n{expected}\n\ngot:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("|---|---|"),
+            "delimiter row must not render raw:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn gfm_table_pads_uneven_column_widths() {
+        let mut s = MarkdownStream::new();
+        s.append(
+            "| Name | Description |\n\
+             |---|---|\n\
+             | a | short |\n\
+             | longer-name | much longer value |\n",
+        );
+        let _ = s.flush_final(&StateLookup::empty());
+
+        let rendered = s.cached_lines_debug().join("\n");
+        assert!(
+            rendered.contains("│ Name        │ Description       │"),
+            "header cells should be padded to column widths:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("│ a           │ short             │"),
+            "short row cells should be padded:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("│ longer-name │ much longer value │"),
+            "long row should preserve the widest content:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn non_table_pipe_lines_are_not_transformed() {
         // Lines with `|` but without a separator row must NOT be treated as
         // tables. This avoids false positives on shell pipelines, regex
@@ -957,10 +1756,9 @@ mod stream_item_tests {
         assert!(!joined.contains("```"), "got:\n{joined}");
         for needle in [
             "keybindings:",
-            "| Key | Action |",
-            "|---|---|",
-            "| Esc | cancel |",
-            "| Enter | submit |",
+            "│ Key   │ Action │",
+            "│ Esc   │ cancel │",
+            "│ Enter │ submit │",
             "That's it.",
         ] {
             assert!(
@@ -968,6 +1766,10 @@ mod stream_item_tests {
                 "expected {needle:?} on its own line; got:\n{joined}"
             );
         }
+        assert!(
+            !joined.contains("|---|---|"),
+            "delimiter row must not render raw:\n{joined}"
+        );
 
         let merged = joined
             .lines()
