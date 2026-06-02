@@ -52,6 +52,10 @@ export type DeleteSavedConnectionCommand = Extract<
   DaemonControlCommand,
   { command: "delete_saved_connection" }
 >;
+export type UpdateSavedConnectionCommand = Extract<
+  DaemonControlCommand,
+  { command: "update_saved_connection" }
+>;
 export type AttachDatasourceInput = Omit<AttachDatasourceCommand, "command">;
 export type DetachDatasourceInput = Omit<DetachDatasourceCommand, "command">;
 export type AddApiDatasourceFromImportInput = Omit<
@@ -68,6 +72,12 @@ export type DeleteSavedConnectionInput = Omit<
   DeleteSavedConnectionCommand,
   "command"
 >;
+export type UpdateSavedConnectionInput = Omit<
+  UpdateSavedConnectionCommand,
+  "command" | "credentials"
+> & {
+  credentials?: [string, string][];
+};
 export type AttachedSavedConnection = {
   entry: DatasourceEntry;
   missingEnvVars: string[];
@@ -169,6 +179,17 @@ export function deleteSavedConnectionCommand(
   return {
     command: "delete_saved_connection",
     name: input.name,
+  };
+}
+
+export function updateSavedConnectionCommand(
+  input: UpdateSavedConnectionInput,
+): UpdateSavedConnectionCommand {
+  return {
+    command: "update_saved_connection",
+    name: input.name,
+    spec_text: input.spec_text,
+    credentials: input.credentials ?? [],
   };
 }
 

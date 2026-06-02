@@ -11,6 +11,7 @@ import {
   pathFromDaemonControlResponse,
   recentEntriesFromDaemonControlResponse,
   savedConnectionsFromDaemonControlResponse,
+  updateSavedConnectionCommand,
 } from "./control";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -161,6 +162,35 @@ describe("daemon control adapter", () => {
     ).toEqual({
       command: "delete_saved_connection",
       name: "stripe_reporting",
+    });
+  });
+
+  test("builds update_saved_connection with credentials", () => {
+    expect(
+      updateSavedConnectionCommand({
+        name: "scores",
+        spec_text: null,
+        credentials: [["SCORES_API_KEY", "x"]],
+      }),
+    ).toEqual({
+      command: "update_saved_connection",
+      name: "scores",
+      spec_text: null,
+      credentials: [["SCORES_API_KEY", "x"]],
+    });
+  });
+
+  test("defaults update_saved_connection credentials to []", () => {
+    expect(
+      updateSavedConnectionCommand({
+        name: "scores",
+        spec_text: "openapi: 3.0.0",
+      }),
+    ).toEqual({
+      command: "update_saved_connection",
+      name: "scores",
+      spec_text: "openapi: 3.0.0",
+      credentials: [],
     });
   });
 
