@@ -326,7 +326,8 @@ if [[ $PNPM -eq 1 ]]; then
                 rm -rf \"\$link\"
                 rm -rf \"\$pnpm_node_modules\"
                 mkdir -p \"\$pnpm_node_modules\"
-                pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" --modules-dir \"\$pnpm_node_modules\" install \"\${install_flags[@]}\"
+                ensure_node_modules_link
+                pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" install \"\${install_flags[@]}\"
                 if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 0 ]]; then
                     rm -f pnpm-lock.yaml
                 fi
@@ -336,8 +337,8 @@ if [[ $PNPM -eq 1 ]]; then
                 echo \"[build] node_modules current; skipping install\"
             fi
             ensure_node_modules_link
-            echo \"[build] pnpm --dir $NOTEBOOK_FRONTEND_DIR --store-dir \$pnpm_store --modules-dir \$pnpm_node_modules$PNPM_ARGS_ESCAPED\"
-            pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" --modules-dir \"\$pnpm_node_modules\"$PNPM_ARGS_ESCAPED
+            echo \"[build] pnpm --dir $NOTEBOOK_FRONTEND_DIR$PNPM_ARGS_ESCAPED\"
+            pnpm --dir \"\$frontend_dir\"$PNPM_ARGS_ESCAPED
         '"
     log "pnpm done."
     exit 0
