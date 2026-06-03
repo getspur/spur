@@ -40,9 +40,10 @@ pub struct SourceCfg {
 ///
 /// In TOML, write `auth = { scheme = "none" }` or omit `auth` to use the
 /// default `none` scheme; the shorthand `auth = "none"` is not supported.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(tag = "scheme", rename_all = "snake_case")]
 pub enum AuthCfg {
+    #[default]
     None,
     Bearer {
         env: String,
@@ -67,12 +68,6 @@ pub enum AuthCfg {
         #[serde(default)]
         scope: Option<String>,
     },
-}
-
-impl Default for AuthCfg {
-    fn default() -> Self {
-        AuthCfg::None
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

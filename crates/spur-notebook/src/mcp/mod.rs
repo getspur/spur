@@ -1072,11 +1072,10 @@ fn api_datasource_tables(source: &str) -> Result<Vec<jute::commands::Table>, Bri
     };
     let adapter_name = adapter.name().to_string();
 
-    Ok(adapter
-        .catalog()
-        .into_iter()
-        .map(|table| api_datasource_table(&adapter_name, table))
-        .collect())
+    Ok(datasource_tables_from_catalog(
+        &adapter_name,
+        adapter.catalog(),
+    ))
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -1109,6 +1108,20 @@ fn api_datasource_table(
             .collect(),
         row_count: None,
     }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_tables_from_catalog(
+    adapter_name: &str,
+    catalog: Vec<spur_rest_table_gateway::adapter::TableDef>,
+) -> Vec<jute::commands::Table> {
+    use spur_rest_table_gateway::adapter::TableKind;
+
+    catalog
+        .into_iter()
+        .filter(|table| !matches!(table.kind, TableKind::Action { .. }))
+        .map(|table| api_datasource_table(adapter_name, table))
+        .collect()
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -1653,11 +1666,7 @@ impl NotebookDaemonControl {
         let adapter =
             spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
         let adapter_name = adapter.name().to_string();
-        let tables = adapter
-            .catalog()
-            .into_iter()
-            .map(|table| api_datasource_table(&adapter_name, table))
-            .collect();
+        let tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog());
 
         let entry = self
             .register_api_datasource_entry_inner(template.name, adapter_name, tables)
@@ -1728,11 +1737,7 @@ impl NotebookDaemonControl {
         let adapter =
             spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
         let adapter_name = adapter.name().to_string();
-        let tables = adapter
-            .catalog()
-            .into_iter()
-            .map(|table| api_datasource_table(&adapter_name, table))
-            .collect::<Vec<_>>();
+        let tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog());
 
         let credential_env_vars = if supplied_env_vars.is_empty() {
             existing.credential_env_vars.clone()
@@ -1907,11 +1912,7 @@ impl NotebookDaemonControl {
         let adapter =
             spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
         let adapter_name = adapter.name().to_string();
-        let tables = adapter
-            .catalog()
-            .into_iter()
-            .map(|table| api_datasource_table(&adapter_name, table))
-            .collect::<Vec<_>>();
+        let tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog());
 
         let result = self
             .register_api_datasource_entry(name.clone(), adapter_name, tables.clone())
@@ -3080,6 +3081,40 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn action_defs_are_excluded_from_datasource_tables() {
+        use arrow_schema::{DataType, Field, Schema};
+        use spur_rest_table_gateway::adapter::{TableDef, TableKind};
+        use std::sync::Arc;
+
+        let read = TableDef {
+            name: "markets".into(),
+            schema: Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)])),
+            kind: TableKind::Table,
+        };
+        let action = TableDef {
+            name: "create".into(),
+            schema: Arc::new(Schema::new(vec![Field::new(
+                "order_id",
+                DataType::Utf8,
+                true,
+            )])),
+            kind: TableKind::Action {
+                method: "POST".into(),
+                path: "/orders".into(),
+                arg_specs: vec![],
+                dry_run_arg: None,
+                idempotency_header: None,
+            },
+        };
+
+        let tables = datasource_tables_from_catalog("svc", vec![read, action]);
+
+        assert!(tables.iter().any(|table| table.name == "svc_markets"));
+        assert!(!tables.iter().any(|table| table.name == "svc_create"));
     }
 
     #[test]
