@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use arrow_schema::SchemaRef;
+use arrow_schema::{DataType, SchemaRef};
 use async_trait::async_trait;
 
 use crate::error::Result;
@@ -83,10 +83,48 @@ pub struct ScanRequest {
     pub auth: ResolvedAuth,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgLocation {
+    Path,
+    Body,
+    Query,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArgSpec {
+    pub name: String,
+    pub location: ArgLocation,
+    pub ty: DataType,
+    pub required: bool,
+    pub json_key: String,
+    pub query_param: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActionRequest {
+    pub name: String,
+    pub method: String,
+    pub path: String,
+    pub query: Vec<(String, String)>,
+    pub body: Option<serde_json::Value>,
+    pub auth: ResolvedAuth,
+    pub idempotency_key: Option<String>,
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableKind {
     Table,
-    TableFunction { arg_names: Vec<String> },
+    TableFunction {
+        arg_names: Vec<String>,
+    },
+    Action {
+        method: String,
+        path: String,
+        arg_specs: Vec<ArgSpec>,
+        dry_run_arg: Option<String>,
+        idempotency_header: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +139,11 @@ pub trait Adapter: Send + Sync {
     fn name(&self) -> &str;
     fn catalog(&self) -> Vec<TableDef>;
     async fn scan(&self, req: ScanRequest) -> Result<Vec<RecordBatch>>;
+    async fn act(&self, _req: ActionRequest) -> Result<Vec<RecordBatch>> {
+        Err(crate::error::GatewayError::Adapter(
+            "this adapter does not support actions".to_string(),
+        ))
+    }
 }
 
 #[derive(Default)]
