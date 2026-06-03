@@ -96,6 +96,8 @@ pub async fn access_token(client: &reqwest::Client, grant: &RefreshGrant<'_>) ->
 }
 
 /// Drop a cached token (e.g. after a 401 from the resource API).
+// Reserved for the 401-invalidate-and-retry path (Approach B follow-up); not yet wired.
+#[allow(dead_code)]
 pub fn invalidate(grant: &RefreshGrant<'_>) {
     cache().lock().unwrap().remove(&cache_key(grant));
 }
