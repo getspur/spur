@@ -8,6 +8,7 @@ function cell(
   source: string,
   dagMetadata: NonNullable<NotebookCellState["dagMetadata"]>,
   version: number,
+  overrides: Partial<NotebookCellState> = {},
 ): NotebookCellState {
   return {
     type: "code",
@@ -15,6 +16,7 @@ function cell(
     source,
     version,
     dagMetadata,
+    ...overrides,
   };
 }
 
@@ -168,6 +170,99 @@ describe("buildDagGraph", () => {
     expect(graph.edges[0]).toMatchObject({ port: "root", stale: true });
     expect(graph.nodes.find((node) => node.id === "consumer")?.data.state).toBe(
       "stale",
+    );
+  });
+
+  test("marks regular dag cells as code nodes", () => {
+    const graph = buildDagGraph(["root"], {
+      root: cell(
+        "root = load()",
+        {
+          produces: [{ port: "root", repr: "dataframe" }],
+          consumes: [],
+        },
+        3,
+      ),
+    });
+
+    expect(graph.nodes[0]?.data.kind).toBe("code");
+    expect(graph.nodes[0]?.data.aiLive).toBe(false);
+  });
+
+  test("marks spur kernelspec dag cells as ai nodes", () => {
+    const graph = buildDagGraph(["summary"], {
+      summary: cell(
+        "Summarise the root dataframe",
+        {
+          produces: [{ port: "summary", repr: "text/plain" }],
+          consumes: ["root"],
+        },
+        4,
+        {
+          cellMetadataOther: {
+            kernelspec: { name: "spur" },
+          },
+        },
+      ),
+    });
+
+    expect(graph.nodes[0]?.data.kind).toBe("ai");
+    expect(graph.nodes[0]?.data.aiLive).toBe(false);
+  });
+
+  test("derives ai live from snake or camel case dag metadata", () => {
+    const graph = buildDagGraph(["snake", "camel", "manual"], {
+      snake: cell(
+        "Live summary",
+        {
+          produces: [{ port: "snake", repr: "text/plain" }],
+          consumes: [],
+          ai_live: true,
+        } as NonNullable<NotebookCellState["dagMetadata"]>,
+        1,
+        {
+          cellMetadataOther: {
+            kernelspec: { name: "spur" },
+          },
+        },
+      ),
+      camel: cell(
+        "Live summary",
+        {
+          produces: [{ port: "camel", repr: "text/plain" }],
+          consumes: [],
+          aiLive: true,
+        } as NonNullable<NotebookCellState["dagMetadata"]>,
+        1,
+        {
+          cellMetadataOther: {
+            kernelspec: { name: "spur" },
+          },
+        },
+      ),
+      manual: cell(
+        "Manual summary",
+        {
+          produces: [{ port: "manual", repr: "text/plain" }],
+          consumes: [],
+        },
+        1,
+        {
+          cellMetadataOther: {
+            kernelspec: { name: "spur" },
+          },
+        },
+      ),
+    });
+
+    expect(graph.nodes.find((node) => node.id === "snake")?.data.aiLive).toBe(
+      true,
+    );
+    expect(graph.nodes.find((node) => node.id === "camel")?.data.aiLive).toBe(
+      true,
+    );
+    expect(graph.nodes.find((node) => node.id === "manual")?.data.aiLive).toBe(
+      false,
     );
   });
 });

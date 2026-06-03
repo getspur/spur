@@ -106,6 +106,9 @@ export default function DagInspector({
     );
   }
 
+  const isAi = node.kind === "ai";
+  const aiLive = Boolean(node.aiLive);
+
   return (
     <aside
       aria-label="DAG inspector"
@@ -121,10 +124,53 @@ export default function DagInspector({
         <div className="mt-1 truncate font-mono text-xs text-gray-500">
           {node.id}
         </div>
-        <span className="mt-2 inline-flex rounded bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
-          {status?.state ?? node.state}
-        </span>
+        <div className="mt-2 flex items-center gap-2">
+          <span className="inline-flex rounded bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
+            {status?.state ?? node.state}
+          </span>
+          {isAi ? (
+            <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-2 py-1 font-mono text-xs font-semibold text-violet-700">
+              ✦ AI
+            </span>
+          ) : null}
+        </div>
       </header>
+
+      {isAi ? (
+        <section>
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-normal text-gray-500">
+            Mode
+          </div>
+          <div
+            aria-disabled="true"
+            className="inline-flex rounded border border-gray-200 bg-gray-50 p-0.5 opacity-60"
+            title="Live auto-run requires backend wiring (bd-1bpb)"
+          >
+            <button
+              type="button"
+              aria-pressed={!aiLive}
+              className={clsx(
+                "rounded px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed",
+                !aiLive ? "bg-white text-gray-900 shadow-sm" : "text-gray-500",
+              )}
+              disabled
+            >
+              manual
+            </button>
+            <button
+              type="button"
+              aria-pressed={aiLive}
+              className={clsx(
+                "rounded px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed",
+                aiLive ? "bg-gray-900 text-white shadow-sm" : "text-gray-500",
+              )}
+              disabled
+            >
+              live
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <PortList title="Consumes">
         {node.consumes.length > 0 ? (
@@ -172,7 +218,7 @@ export default function DagInspector({
       <section className="min-h-0">
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="text-[11px] font-semibold uppercase tracking-normal text-gray-500">
-            Code
+            {isAi ? "Prompt" : "Code"}
           </div>
           <div className="flex items-center gap-2">
             {isEdited && (
