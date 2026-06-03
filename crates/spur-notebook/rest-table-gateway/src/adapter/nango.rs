@@ -59,8 +59,10 @@ pub fn provider_to_manifest_stub(name: &str, p: &ProviderEntry) -> Manifest {
                 .and_then(|proxy| proxy.paginate.as_ref())
                 .and_then(pagination_cfg),
             connection_config: connection_config_names(&base_url),
+            allow_writes: false,
         },
         tables: Vec::new(),
+        actions: Vec::new(),
     }
 }
 

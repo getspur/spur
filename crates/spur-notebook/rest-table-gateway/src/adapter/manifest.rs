@@ -7,6 +7,8 @@ pub struct Manifest {
     pub source: SourceCfg,
     #[serde(default, rename = "table")]
     pub tables: Vec<TableCfg>,
+    #[serde(default, rename = "action")]
+    pub actions: Vec<ActionCfg>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -28,6 +30,8 @@ pub struct SourceCfg {
     pub pagination: Option<PaginationCfg>,
     #[serde(default)]
     pub connection_config: Vec<String>,
+    #[serde(default)]
+    pub allow_writes: bool,
 }
 
 /// Authentication config uses serde's internally tagged representation.
@@ -99,6 +103,44 @@ pub struct TableCfg {
     pub filters: HashMap<String, FilterCfg>,
     #[serde(default)]
     pub graphql: Option<GraphqlTableCfg>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArgLocation {
+    Path,
+    Body,
+    Query,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArgCfg {
+    #[serde(rename = "in")]
+    pub in_: ArgLocation,
+    #[serde(rename = "type")]
+    pub ty: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub json: Option<String>,
+    #[serde(default)]
+    pub param: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionCfg {
+    pub name: String,
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub response_path: Option<String>,
+    #[serde(default)]
+    pub idempotency_header: Option<String>,
+    #[serde(default)]
+    pub dry_run_arg: Option<String>,
+    pub args: IndexMap<String, ArgCfg>,
+    #[serde(default)]
+    pub columns: Option<IndexMap<String, ColumnCfg>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -208,5 +250,73 @@ id = { json = "$.id", type = "Utf8" }
         assert_eq!(pagination.cursor_param.as_deref(), Some("cursor"));
         assert_eq!(pagination.link_rel, None);
         assert_eq!(manifest.tables[0].response_path.as_deref(), Some("$.data"));
+    }
+
+    #[test]
+    fn parses_action_manifest() {
+        let manifest = Manifest::from_toml(
+            r#"
+[source]
+name = "polymarket"
+base_url = "https://clob.polymarket.com"
+allow_writes = true
+
+[[action]]
+name = "place_order"
+method = "POST"
+path = "/orders/{token_id}"
+response_path = "$.order"
+idempotency_header = "Idempotency-Key"
+dry_run_arg = "dry_run"
+
+[action.args]
+token_id = { in = "path",  type = "Utf8",    required = true }
+price    = { in = "body",  type = "Float64", required = true, json = "price" }
+verbose  = { in = "query", type = "Boolean", required = false, param = "verbose" }
+
+[action.columns]
+order_id = { json = "$.id", type = "Utf8" }
+"#,
+        )
+        .expect("action manifest should parse");
+
+        assert!(manifest.source.allow_writes);
+        assert_eq!(manifest.actions.len(), 1);
+        let action = &manifest.actions[0];
+        assert_eq!(action.name, "place_order");
+        assert_eq!(action.method, "POST");
+        assert_eq!(action.path, "/orders/{token_id}");
+        assert_eq!(
+            action.idempotency_header.as_deref(),
+            Some("Idempotency-Key")
+        );
+        assert_eq!(action.dry_run_arg.as_deref(), Some("dry_run"));
+        assert_eq!(action.args["token_id"].in_, ArgLocation::Path);
+        assert_eq!(action.args["price"].in_, ArgLocation::Body);
+        assert_eq!(action.args["price"].json.as_deref(), Some("price"));
+        assert_eq!(action.args["verbose"].in_, ArgLocation::Query);
+        assert!(!action.args["verbose"].required);
+        assert!(action.columns.as_ref().unwrap().contains_key("order_id"));
+    }
+
+    #[test]
+    fn allow_writes_defaults_false() {
+        let manifest = Manifest::from_toml(
+            r#"
+[source]
+name = "polymarket"
+base_url = "https://clob.polymarket.com"
+
+[[table]]
+name = "markets"
+path = "/markets"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+"#,
+        )
+        .expect("manifest should parse");
+        assert!(!manifest.source.allow_writes);
+        assert!(manifest.actions.is_empty());
     }
 }
