@@ -3,14 +3,21 @@ use std::thread;
 
 use arrow_array::RecordBatch;
 
-use crate::adapter::{Adapter, ScanRequest};
+use crate::adapter::{ActionRequest, Adapter, ScanRequest};
 use crate::error::{GatewayError, Result};
 
-type Job = (
-    Arc<dyn Adapter>,
-    ScanRequest,
-    mpsc::Sender<Result<Vec<RecordBatch>>>,
-);
+enum Job {
+    Scan(
+        Arc<dyn Adapter>,
+        ScanRequest,
+        mpsc::Sender<Result<Vec<RecordBatch>>>,
+    ),
+    Act(
+        Arc<dyn Adapter>,
+        ActionRequest,
+        mpsc::Sender<Result<Vec<RecordBatch>>>,
+    ),
+}
 
 pub struct IoBridge {
     tx: mpsc::Sender<Job>,
@@ -26,9 +33,17 @@ impl IoBridge {
                     .enable_all()
                     .build()
                     .expect("io runtime");
-                while let Ok((adapter, req, reply)) = rx.recv() {
-                    let res = rt.block_on(adapter.scan(req));
-                    let _ = reply.send(res);
+                while let Ok(job) = rx.recv() {
+                    match job {
+                        Job::Scan(adapter, req, reply) => {
+                            let res = rt.block_on(adapter.scan(req));
+                            let _ = reply.send(res);
+                        }
+                        Job::Act(adapter, req, reply) => {
+                            let res = rt.block_on(adapter.act(req));
+                            let _ = reply.send(res);
+                        }
+                    }
                 }
             })
             .expect("spawn io thread");
@@ -38,7 +53,20 @@ impl IoBridge {
     pub fn call(&self, adapter: Arc<dyn Adapter>, req: ScanRequest) -> Result<Vec<RecordBatch>> {
         let (rtx, rrx) = mpsc::channel();
         self.tx
-            .send((adapter, req, rtx))
+            .send(Job::Scan(adapter, req, rtx))
+            .map_err(|e| GatewayError::Adapter(format!("io bridge send: {e}")))?;
+        rrx.recv()
+            .map_err(|e| GatewayError::Adapter(format!("io bridge recv: {e}")))?
+    }
+
+    pub fn call_act(
+        &self,
+        adapter: Arc<dyn Adapter>,
+        req: ActionRequest,
+    ) -> Result<Vec<RecordBatch>> {
+        let (rtx, rrx) = mpsc::channel();
+        self.tx
+            .send(Job::Act(adapter, req, rtx))
             .map_err(|e| GatewayError::Adapter(format!("io bridge send: {e}")))?;
         rrx.recv()
             .map_err(|e| GatewayError::Adapter(format!("io bridge recv: {e}")))?
@@ -60,7 +88,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::IoBridge;
-    use crate::adapter::{Adapter, ScanRequest, TableDef};
+    use crate::adapter::{ActionRequest, Adapter, ScanRequest, TableDef};
     use crate::error::Result;
 
     struct TestAdapter;
@@ -108,5 +136,52 @@ mod tests {
         let batches = result.unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn bridge_dispatches_act() {
+        struct ActAdapter;
+
+        #[async_trait]
+        impl Adapter for ActAdapter {
+            fn name(&self) -> &str {
+                "act"
+            }
+
+            fn catalog(&self) -> Vec<TableDef> {
+                vec![]
+            }
+
+            async fn scan(&self, _req: ScanRequest) -> Result<Vec<RecordBatch>> {
+                Ok(vec![])
+            }
+
+            async fn act(&self, _req: ActionRequest) -> Result<Vec<RecordBatch>> {
+                let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+                let col = Arc::new(Int64Array::from(vec![7]));
+                Ok(vec![RecordBatch::try_new(schema, vec![col]).unwrap()])
+            }
+        }
+
+        let bridge = IoBridge::new();
+        let adapter: Arc<dyn Adapter> = Arc::new(ActAdapter);
+        let req = ActionRequest {
+            name: "x".into(),
+            method: "POST".into(),
+            path: "/x".into(),
+            query: vec![],
+            body: None,
+            auth: Default::default(),
+            idempotency_key: None,
+            dry_run: false,
+        };
+
+        let outer = tokio::runtime::Runtime::new().unwrap();
+        let result = outer.block_on(async {
+            tokio::task::spawn_blocking(move || bridge.call_act(adapter, req))
+                .await
+                .unwrap()
+        });
+        assert_eq!(result.unwrap()[0].num_rows(), 1);
     }
 }
