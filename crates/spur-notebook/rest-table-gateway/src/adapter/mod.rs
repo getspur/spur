@@ -16,6 +16,23 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 
+/// User-Agent sent on every outbound request. Many real-world provider APIs
+/// (GitHub, CoinGecko, anything behind a WAF/Cloudflare) reject requests with
+/// no User-Agent header with `403 Forbidden`, so a bare `reqwest::Client::new()`
+/// — which sets none — cannot talk to them. Always build the client through
+/// [`default_http_client`] so every adapter carries this identifier.
+pub const DEFAULT_USER_AGENT: &str = concat!("spur-rest-table-gateway/", env!("CARGO_PKG_VERSION"));
+
+/// reqwest client preconfigured with [`DEFAULT_USER_AGENT`]. Falls back to a
+/// default client if the builder fails (mirrors `Client::new()`'s own panic
+/// path, but without the missing User-Agent).
+pub fn default_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(DEFAULT_USER_AGENT)
+        .build()
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
     Utf8(String),

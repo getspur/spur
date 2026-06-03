@@ -27,7 +27,7 @@ impl PolymarketAdapter {
         Ok(Self {
             inner: ManifestAdapter::new(manifest),
             clob_base: clob_base.trim_end_matches('/').to_string(),
-            client: Client::new(),
+            client: crate::adapter::default_http_client(),
         })
     }
 
