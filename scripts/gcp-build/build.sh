@@ -399,6 +399,14 @@ remote_ssh \
         set -e
         cd ~/$REMOTE_DIR
         source /etc/profile.d/spur-build.sh 2>/dev/null || true
+        # Big-disk TMPDIR. Nested builds that use std::env::temp_dir() — e.g. the
+        # rest-table-gateway-ext load/action harnesses, which point
+        # CARGO_TARGET_DIR at a ~6G DuckDB build under a temp dir — would
+        # otherwise land on the small ~49G root disk that holds /tmp and exhaust
+        # it. /mnt/cargo is the ~295G build disk. TMPDIR is not a CARGO_* var, so
+        # this does NOT affect sccache cross-worktree hashing.
+        mkdir -p /mnt/cargo/tmp
+        export TMPDIR=/mnt/cargo/tmp
         # Do NOT set CARGO_TARGET_DIR — sccache hashes CARGO_* env vars, which
         # would defeat cross-worktree sharing. We symlinked target/ to
         # /mnt/cargo/targets/\$WORKTREE_KEY at sync time instead. Likewise
