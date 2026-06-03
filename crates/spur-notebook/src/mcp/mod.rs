@@ -983,8 +983,11 @@ fn build_api_import_manifest(
                 auth: spur_rest_table_gateway::adapter::manifest::AuthCfg::None,
                 pagination: None,
                 connection_config: Vec::new(),
+                allow_writes: false,
+                headers: Default::default(),
             },
             tables: Vec::new(),
+            actions: Vec::new(),
         };
         spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest_stub)
     };
