@@ -30,8 +30,6 @@ pub struct ManifestAdapter {
 /// pairs ready to attach to a request. `authorization` is reserved (it would
 /// shadow the resolved auth header, which `reqwest` appends rather than
 /// replaces).
-// wired in T2
-#[allow(dead_code)]
 fn resolve_headers(
     headers: &IndexMap<String, String>,
     ctx: &ConnectionContext,
@@ -378,6 +376,7 @@ impl Adapter for ManifestAdapter {
                     pagination: self.manifest.source.pagination.as_ref(),
                     auth: &auth,
                     response_path: table.response_path.clone(),
+                    headers: resolve_headers(&self.manifest.source.headers, &connection_ctx)?,
                 };
                 fetch_rows(&fetch).await?
             }
@@ -454,6 +453,7 @@ impl Adapter for ManifestAdapter {
             body,
             auth: &auth,
             idempotency_key,
+            headers: resolve_headers(&self.manifest.source.headers, &connection_ctx)?,
         };
 
         let (status, body) = send_request(&http_action).await?;
@@ -499,6 +499,97 @@ mod tests {
             resolve_headers(&bad, &ctx),
             Err(GatewayError::Manifest(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn read_table_sends_static_header() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/items"))
+            .and(wiremock::matchers::header("x-api-version", "v17"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{ "id": "a" }])),
+            )
+            .mount(&server)
+            .await;
+
+        let toml = format!(
+            r#"
+[source]
+name = "svc"
+base_url = "{base}"
+[source.headers]
+x-api-version = "v17"
+[[table]]
+name = "items"
+path = "/items"
+[table.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+"#,
+            base = server.uri()
+        );
+        let adapter = ManifestAdapter::new(Manifest::from_toml(&toml).unwrap());
+        let batches = adapter
+            .scan(ScanRequest {
+                table: "items".to_string(),
+                predicates: vec![],
+                projection: None,
+                tvf_args: vec![],
+                auth: ResolvedAuth::None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    }
+
+    #[tokio::test]
+    async fn action_sends_bearer_and_static_header_together() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/orders"))
+            .and(wiremock::matchers::header("authorization", "Bearer tok-1"))
+            .and(wiremock::matchers::header("developer-token", "dev-123"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "order": { "id": "o1" } })),
+            )
+            .mount(&server)
+            .await;
+
+        let toml = format!(
+            r#"
+[source]
+name = "svc"
+base_url = "{base}"
+allow_writes = true
+[source.headers]
+developer-token = "dev-123"
+[[action]]
+name = "create"
+method = "POST"
+path = "/orders"
+response_path = "$.order"
+[action.args]
+price = {{ in = "body", type = "Float64", required = true }}
+[action.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+"#,
+            base = server.uri()
+        );
+        let adapter = ManifestAdapter::new(Manifest::from_toml(&toml).unwrap());
+        let req = ActionRequest {
+            name: "create".to_string(),
+            method: "POST".to_string(),
+            path: "/orders".to_string(),
+            query: vec![],
+            body: Some(serde_json::json!({ "price": 0.5 })),
+            auth: ResolvedAuth::Bearer("tok-1".to_string()),
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let batches = adapter.act(req).await.unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 
     #[test]

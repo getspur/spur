@@ -14,6 +14,7 @@ pub struct HttpFetch<'a> {
     pub pagination: Option<&'a PaginationCfg>,
     pub auth: &'a ResolvedAuth,
     pub response_path: Option<String>,
+    pub headers: Vec<(String, String)>,
 }
 
 struct HttpPage {
@@ -31,6 +32,7 @@ pub struct HttpAction<'a> {
     pub auth: &'a ResolvedAuth,
     /// (header name, value) - attached verbatim when present.
     pub idempotency_key: Option<(String, String)>,
+    pub headers: Vec<(String, String)>,
 }
 
 /// Issues exactly one request. No retry, no pagination.
@@ -43,7 +45,10 @@ pub async fn send_request(a: &HttpAction<'_>) -> Result<(u16, serde_json::Value)
     if let Some((name, value)) = &a.idempotency_key {
         req = req.header(name.as_str(), value.as_str());
     }
-    let req = apply_auth(req, a.auth);
+    let mut req = apply_auth(req, a.auth);
+    for (name, value) in &a.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
 
     let resp = req
         .send()
@@ -163,7 +168,10 @@ async fn get_page(
         req = req.query(&f.query).query(extra);
     }
 
-    let req = apply_auth(req, f.auth);
+    let mut req = apply_auth(req, f.auth);
+    for (name, value) in &f.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
 
     let resp = req
         .send()
@@ -330,6 +338,7 @@ mod tests {
             pagination: Some(&pagination),
             auth: &auth,
             response_path: None,
+            headers: Vec::new(),
         };
 
         let rows = fetch_rows(&fetch).await.unwrap();
@@ -358,6 +367,7 @@ mod tests {
             pagination: None,
             auth: &auth,
             response_path: None,
+            headers: Vec::new(),
         };
 
         let rows = fetch_rows(&fetch).await.unwrap();
@@ -387,6 +397,7 @@ mod tests {
             pagination: None,
             auth: &auth,
             response_path: Some("$.data".to_string()),
+            headers: Vec::new(),
         };
 
         let rows = fetch_rows(&fetch).await.unwrap();
@@ -439,6 +450,7 @@ mod tests {
             pagination: Some(&pagination),
             auth: &auth,
             response_path: Some("$.items".to_string()),
+            headers: Vec::new(),
         };
 
         let rows = fetch_rows(&fetch).await.unwrap();
@@ -491,6 +503,7 @@ mod tests {
             pagination: Some(&pagination),
             auth: &auth,
             response_path: None,
+            headers: Vec::new(),
         };
 
         let rows = fetch_rows(&fetch).await.unwrap();
@@ -518,6 +531,7 @@ mod tests {
             body: Some(json!({ "price": 0.5 })),
             auth: &auth,
             idempotency_key: Some(("Idempotency-Key".to_string(), "key-1".to_string())),
+            headers: Vec::new(),
         };
 
         let (status, body) = send_request(&action).await.unwrap();
@@ -544,6 +558,7 @@ mod tests {
             body: None,
             auth: &auth,
             idempotency_key: None,
+            headers: Vec::new(),
         };
 
         let (status, body) = send_request(&action).await.unwrap();
@@ -570,6 +585,7 @@ mod tests {
             body: Some(json!({ "price": 1.0 })),
             auth: &auth,
             idempotency_key: None,
+            headers: Vec::new(),
         };
 
         let err = send_request(&action).await.unwrap_err();
