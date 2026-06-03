@@ -1,10 +1,11 @@
 import "@testing-library/jest-dom/vitest";
 import {
+  type RenderResult,
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
-  type RenderResult,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type StoreApi, createStore } from "zustand/vanilla";
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
         addCell: ReturnType<typeof vi.fn>;
         clearResult: ReturnType<typeof vi.fn>;
         setCellType: ReturnType<typeof vi.fn>;
+        setCellCodeType: ReturnType<typeof vi.fn>;
       }
     | undefined,
 }));
@@ -129,6 +131,7 @@ describe("NotebookCells", () => {
       addCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
     };
   });
 
@@ -169,6 +172,7 @@ describe("NotebookCells", () => {
       addCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
     };
 
     render(<NotebookCells />);
@@ -190,6 +194,7 @@ describe("NotebookCells", () => {
       addCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
     };
 
     const { container } = render(<NotebookCells />);
@@ -209,6 +214,7 @@ describe("NotebookCells", () => {
       addCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
     };
 
     render(<NotebookCells />);
@@ -223,6 +229,7 @@ describe("NotebookCells", () => {
       addCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
     };
 
     const { container } = render(<NotebookCells />);
@@ -239,6 +246,7 @@ describe("NotebookCells", () => {
       addCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
     };
 
     const { container } = render(<NotebookCells />);
@@ -247,5 +255,33 @@ describe("NotebookCells", () => {
     expect(screen.getByText("[*]")).toHaveStyle({ color: "#CE422B" });
     expectCellAccent(container, "#CE422B");
     expect(screen.queryByText(/✦\[/)).not.toBeInTheDocument();
+  });
+
+  test("opens language menu from chip and routes selections", () => {
+    const setCellCodeType = vi.fn();
+    const setCellType = vi.fn();
+    mocks.notebook = {
+      store: createNotebookStoreForCell({}),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType,
+      setCellCodeType,
+    };
+
+    render(<NotebookCells />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Change cell language: Python" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rust" }));
+    expect(setCellCodeType).toHaveBeenCalledWith("cell-1", "rust");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Change cell language: Python" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Markdown" }));
+    expect(setCellType).toHaveBeenCalledWith("cell-1", "markdown");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });

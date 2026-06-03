@@ -9,12 +9,13 @@ import {
   XIcon,
   XSquareIcon,
 } from "lucide-react";
-import { ReactNode, Suspense, lazy, useEffect, useState } from "react";
+import { ReactNode, Suspense, lazy, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 
 import { useNotebook } from "@/stores/notebook";
 
 import CellInputFallback from "./CellInputFallback";
+import CellLanguageMenu from "./CellLanguageMenu";
 import OutputView from "./OutputView";
 import { cellLanguageId, cellLanguageToken } from "./cellLanguage";
 import {
@@ -33,7 +34,9 @@ function isAiCell(cell: CellLanguageCell): boolean {
   return cellLanguageId(cell) === "spur";
 }
 
-function cellAiLive(cell: CellLanguageCell & { dagMetadata?: unknown }): boolean {
+function cellAiLive(
+  cell: CellLanguageCell & { dagMetadata?: unknown },
+): boolean {
   if (!isAiCell(cell)) return false;
   const dag = cell.dagMetadata as
     | { ai_live?: boolean; aiLive?: boolean }
@@ -204,28 +207,53 @@ function CellExecutionMarker({ cellId }: { cellId: string }) {
 function CellLanguageHeader({ cellId }: { cellId: string }) {
   const notebook = useNotebook();
   const cell = useStore(notebook.store, (s) => s.serverState.cells[cellId]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const chipButtonRef = useRef<HTMLButtonElement>(null);
   if (!cell || cell.type !== "code") return null;
   const token = cellLanguageToken(cell);
-  const isAi = cellLanguageId(cell) === "spur";
+  const languageId = cellLanguageId(cell);
+  const isAi = languageId === "spur";
   const live = isAi && cellAiLive(cell);
   return (
     <div className="flex items-center gap-2 pl-[57px] pr-[18px] pt-3">
-      <span
-        className="inline-flex items-center gap-1.5 rounded border px-1.5 py-px font-mono text-[10px] font-semibold"
-        style={{
-          color: token.chipText,
-          background: token.chipBg,
-          borderColor: token.chipBorder,
-        }}
-      >
-        <span
-          className="inline-flex h-[18px] w-[18px] items-center justify-center rounded text-[9px]"
-          style={{ background: token.glyphBg }}
+      <div className="relative inline-flex">
+        <button
+          ref={chipButtonRef}
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          aria-label={`Change cell language: ${token.label}`}
+          className="inline-flex items-center gap-1.5 rounded border px-1.5 py-px font-mono text-[10px] font-semibold transition-shadow hover:shadow-sm"
+          onClick={() => setMenuOpen((open) => !open)}
+          style={{
+            color: token.chipText,
+            background: token.chipBg,
+            borderColor: token.chipBorder,
+          }}
+          type="button"
         >
-          {token.glyph}
-        </span>
-        {token.label}
-      </span>
+          <span
+            className="inline-flex h-[18px] w-[18px] items-center justify-center rounded text-[9px]"
+            style={{ background: token.glyphBg }}
+          >
+            {token.glyph}
+          </span>
+          {token.label}
+        </button>
+        {menuOpen && (
+          <CellLanguageMenu
+            anchorRef={chipButtonRef}
+            currentLanguageId={languageId}
+            currentType={cell.type}
+            onClose={() => setMenuOpen(false)}
+            onSelectCodeType={(codeType) => {
+              notebook.setCellCodeType(cellId, codeType);
+            }}
+            onSelectType={(type) => {
+              notebook.setCellType(cellId, type);
+            }}
+          />
+        )}
+      </div>
       {isAi && (
         <span
           className={clsx(
