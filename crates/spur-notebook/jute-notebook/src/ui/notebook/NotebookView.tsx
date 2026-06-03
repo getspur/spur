@@ -31,8 +31,8 @@ export default function NotebookView() {
   }
 
   return (
-    <div className="grid h-full grid-cols-[minmax(0,1fr),auto] overflow-hidden">
-      <div className="min-w-0 overflow-y-auto py-16">
+    <div className="grid h-full grid-rows-1 grid-cols-[minmax(0,1fr),auto] overflow-hidden">
+      <div className="min-h-0 min-w-0 overflow-y-auto py-16">
         <NotebookLocation directory={directory} filename={filename} />
 
         {/* TODO: Handle these errors gracefully. */}
