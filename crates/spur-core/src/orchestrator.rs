@@ -363,8 +363,10 @@ impl Drop for Orchestrator {
         for handle in self.background_tasks.drain(..) {
             handle.abort();
         }
-        let path = crate::notebook::control_socket_path(&self.notebook_socket_nonce);
-        let _ = std::fs::remove_file(path);
+        // The notebook socket is a shared, per-workspace rendezvous that may
+        // still serve sibling processes and the detached Jute daemon. If a
+        // daemon dies, connect_or_spawn_daemon treats ConnectionRefused as a
+        // spawn path and prepare_socket_path unlinks the stale file on rebind.
     }
 }
 
@@ -439,6 +441,7 @@ impl Orchestrator {
             event_seq,
             funnel,
             review_sink,
+            notebook_socket_nonce: crate::notebook::stable_notebook_nonce(&repo_root),
             repo_root,
             pm_service: None,
             outcome_store,
@@ -450,7 +453,6 @@ impl Orchestrator {
             feature_gate,
             peer_mailbox: None,
             worker_mcp_servers: Arc::new(DashMap::new()),
-            notebook_socket_nonce: uuid::Uuid::new_v4().simple().to_string(),
             notebook_sockets: Arc::new(RwLock::new(HashMap::new())),
             fault_injection_hooks: FaultInjectionHooks::default(),
             peer_mailbox_reconciler_abort: None,

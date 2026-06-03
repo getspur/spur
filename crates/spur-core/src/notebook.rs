@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::{McpServer, McpServerHttp, McpServerStdio};
 
@@ -11,6 +11,28 @@ pub fn control_socket_path(socket_nonce: &str) -> PathBuf {
         .join("notebooks")
         .join("sessions")
         .join(format!("{socket_nonce}.sock"))
+}
+
+/// Derive a stable, per-workspace notebook daemon socket nonce.
+///
+/// All `spur` processes launched against the same `repo_root` resolve to the
+/// same socket path, so a second process *attaches* to the first's notebook
+/// daemon (one Jute window) instead of spawning a rival window that would
+/// fork the open `.ipynb`. Distinct workspaces stay isolated. The value is
+/// opaque; only stability and per-workspace uniqueness matter.
+pub fn stable_notebook_nonce(repo_root: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(24);
+    for byte in digest.iter().take(12) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("ws-{hex}")
 }
 
 pub fn notebook_binary_path() -> PathBuf {

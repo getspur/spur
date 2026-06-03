@@ -54,6 +54,29 @@ fn control_socket_path_distinguishes_socket_nonces() {
 }
 
 #[test]
+fn stable_notebook_nonce_is_deterministic_for_same_repo() {
+    let repo = tempfile::TempDir::new().unwrap();
+
+    let first = spur_core::notebook::stable_notebook_nonce(repo.path());
+    let second = spur_core::notebook::stable_notebook_nonce(repo.path());
+
+    assert_eq!(first, second);
+    assert!(!first.is_empty());
+    assert!(first.starts_with("ws-"));
+}
+
+#[test]
+fn stable_notebook_nonce_differs_across_repos() {
+    let first_repo = tempfile::TempDir::new().unwrap();
+    let second_repo = tempfile::TempDir::new().unwrap();
+
+    let first = spur_core::notebook::stable_notebook_nonce(first_repo.path());
+    let second = spur_core::notebook::stable_notebook_nonce(second_repo.path());
+
+    assert_ne!(first, second);
+}
+
+#[test]
 fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
     let servers =
         spur_core::notebook::brain_mcp_servers("http://127.0.0.1:3939/mcp", "fixture-nonce");
