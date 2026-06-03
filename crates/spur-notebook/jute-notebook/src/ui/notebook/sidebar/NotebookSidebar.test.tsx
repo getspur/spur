@@ -10,7 +10,7 @@ vi.mock("./panels", () => {
   return {
     SIDEBAR_PANELS: [
       {
-        id: "datasources",
+        id: DEFAULT_SIDEBAR_PANEL_ID,
         title: "Datasources",
         ariaLabel: "Datasources",
         icon: Icon,
