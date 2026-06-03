@@ -1201,15 +1201,33 @@ export class Notebook {
     });
   }
 
-  setCellCodeType(cellId: string, codeType: CodeType) {
+  async setCellCodeType(cellId: string, codeType: CodeType) {
     const cell = selectCell(this.state, cellId);
     if (!cell || (cell.type === "code" && cell.codeType === codeType)) return;
+    const expectedVersion = cell.version;
     this.applyLocalCellSnapshot(cellId, {
       ...cell,
       type: "code",
       codeType,
-      version: cell.version + 1,
+      version: expectedVersion + 1,
     });
+
+    const response = await daemonControl({
+      command: "set_cell_metadata",
+      id: cellId,
+      patch: { spur: { code_type: codeType } },
+      expected_version: expectedVersion,
+    });
+    if (!response.ok) {
+      throw new Error(
+        response.error?.message ?? "Failed to update cell code type metadata",
+      );
+    }
+    if (response.result?.type !== "delta") {
+      throw new Error("daemon set_cell_metadata did not return a delta");
+    }
+
+    await reconcileNotebookDelta(this, response.result.data as NotebookDelta);
   }
 
   setSelectedCell(cellId: string) {
