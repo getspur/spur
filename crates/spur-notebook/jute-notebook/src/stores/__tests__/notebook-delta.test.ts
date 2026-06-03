@@ -532,6 +532,61 @@ describe("reconcileNotebookDelta", () => {
     ).toEqual(dag);
     expect(notebook.export().cells[0]?.metadata.spur?.dag).toEqual(dag);
   });
+
+  test("setCellCodeType converts to code and updates code_type locally", async () => {
+    const cellId = "markdown-cell";
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook({
+      metadata: {},
+      nbformat_minor: 5,
+      nbformat: 4,
+      cells: [
+        {
+          cell_type: "markdown",
+          id: cellId,
+          metadata: {
+            spur: {
+              version: 2,
+              last_edited_by: "brain",
+              code_type: "rust",
+            },
+          },
+          source: "print('hello')",
+        },
+      ],
+    });
+    await notebook.kernelStartPromise;
+
+    notebook.setCellCodeType(cellId, "rust");
+
+    const cell = selectCell(notebook.store.getState(), cellId);
+    expect(cell).toMatchObject({
+      type: "code",
+      codeType: "rust",
+      version: 3,
+      lastEditedBy: "brain",
+    });
+    expect(notebook.export().cells[0]).toMatchObject({
+      cell_type: "code",
+      metadata: { spur: { code_type: "rust", version: 3 } },
+    });
+  });
 });
 
 function notebookRoot(cellId: string, source: string): NotebookRoot {

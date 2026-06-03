@@ -1201,6 +1201,17 @@ export class Notebook {
     });
   }
 
+  setCellCodeType(cellId: string, codeType: CodeType) {
+    const cell = selectCell(this.state, cellId);
+    if (!cell || (cell.type === "code" && cell.codeType === codeType)) return;
+    this.applyLocalCellSnapshot(cellId, {
+      ...cell,
+      type: "code",
+      codeType,
+      version: cell.version + 1,
+    });
+  }
+
   setSelectedCell(cellId: string) {
     this.state.viewStateActions.setSelectedCell(cellId);
   }
