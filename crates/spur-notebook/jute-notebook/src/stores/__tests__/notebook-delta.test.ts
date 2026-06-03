@@ -533,10 +533,10 @@ describe("reconcileNotebookDelta", () => {
     expect(notebook.export().cells[0]?.metadata.spur?.dag).toEqual(dag);
   });
 
-  test("setCellCodeType converts to code and updates code_type locally", async () => {
+  test("setCellCodeType converts to code and persists code_type metadata", async () => {
     const cellId = "markdown-cell";
 
-    invokeMock.mockImplementation(async (command: string) => {
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
       if (command === "start_kernel") return "kernel-1";
       if (command === "kernel_slot_info") {
         return {
@@ -546,6 +546,39 @@ describe("reconcileNotebookDelta", () => {
           status: "idle",
           cpu_pct: 0,
           mem_mb: 0,
+        };
+      }
+      if (command === "daemon_control") {
+        expect(args).toEqual({
+          cmd: {
+            command: "set_cell_metadata",
+            id: cellId,
+            patch: { spur: { code_type: "rust" } },
+            expected_version: 2,
+          },
+        });
+        return {
+          ok: true,
+          result: {
+            type: "delta",
+            data: {
+              version: 3,
+              kind: {
+                type: "cellWritten",
+                cell: {
+                  id: cellId,
+                  kind: "code",
+                  version: 3,
+                  lastEditedBy: "brain",
+                  source: "print('hello')",
+                  execCount: null,
+                  status: "idle",
+                  outputs: [],
+                  codeType: "rust",
+                },
+              },
+            },
+          },
         };
       }
       throw new Error(`unexpected invoke: ${command}`);
@@ -573,7 +606,16 @@ describe("reconcileNotebookDelta", () => {
     });
     await notebook.kernelStartPromise;
 
-    notebook.setCellCodeType(cellId, "rust");
+    await notebook.setCellCodeType(cellId, "rust");
+
+    expect(invokeMock).toHaveBeenCalledWith("daemon_control", {
+      cmd: {
+        command: "set_cell_metadata",
+        id: cellId,
+        patch: { spur: { code_type: "rust" } },
+        expected_version: 2,
+      },
+    });
 
     const cell = selectCell(notebook.store.getState(), cellId);
     expect(cell).toMatchObject({
