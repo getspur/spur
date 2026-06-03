@@ -40,6 +40,7 @@ export default function DagNode({
   selected = false,
 }: DagNodeProps) {
   const hasConsumes = data.consumes.length > 0 || Boolean(data.source);
+  const isAi = data.kind === "ai";
 
   return (
     <article
@@ -74,9 +75,32 @@ export default function DagNode({
             {data.id}
           </span>
         </div>
-        <p className="mt-1 truncate font-mono text-[10.5px] text-gray-500">
-          {data.codePreview}
-        </p>
+        {isAi ? (
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[9.5px] font-semibold text-violet-700">
+              ✦ AI
+            </span>
+            <span
+              className={clsx(
+                "rounded border px-1.5 py-px font-mono text-[9px]",
+                data.aiLive
+                  ? "border-violet-600 bg-violet-600 text-white"
+                  : "border-gray-300 bg-white text-gray-500",
+              )}
+            >
+              {data.aiLive ? "● LIVE" : "manual"}
+            </span>
+          </div>
+        ) : null}
+        {isAi ? (
+          <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-gray-700">
+            “{data.codePreview}
+          </p>
+        ) : (
+          <p className="mt-1 truncate font-mono text-[10.5px] text-gray-500">
+            {data.codePreview}
+          </p>
+        )}
         <div className="mt-2 flex items-center justify-between gap-2 font-mono text-[10px]">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
             {hasConsumes ? (
@@ -94,6 +118,11 @@ export default function DagNode({
           <div className="flex shrink-0 items-center gap-1.5">
             {data.produces.length > 0 ? (
               <>
+                {isAi ? (
+                  <span className="rounded-sm border border-gray-300 px-0.5 font-mono text-[8px] text-gray-500">
+                    T
+                  </span>
+                ) : null}
                 {data.produces.map((port) => (
                   <ProducedToken key={port.port} port={port} />
                 ))}

@@ -3,6 +3,7 @@ import type { NodeStatus, NotebookCellState } from "@/stores/notebook";
 import { type DagPortManifest, staleConsumedPorts } from "./dagStatus";
 
 export type DagNodeState = NodeStatus["state"];
+export type DagNodeKind = "code" | "ai";
 
 export type DagProducedPort = {
   port: string;
@@ -20,6 +21,8 @@ export type DagConsumedPort = {
 
 export type DagNodeData = {
   id: string;
+  kind: DagNodeKind;
+  aiLive?: boolean;
   label: string;
   cellType: NotebookCellState["type"];
   code: string;
@@ -94,6 +97,8 @@ export function buildDagGraph(
         id,
         data: {
           id,
+          kind: deriveNodeKind(cell),
+          aiLive: deriveAiLive(dagMetadata),
           label: deriveLabel(dagMetadata, id),
           cellType: cell.type,
           code: cell.source,
@@ -151,6 +156,33 @@ function deriveNodeState(
     return "stale";
   }
   return status.state;
+}
+
+function deriveNodeKind(cell: NotebookCellState): DagNodeKind {
+  const kernelspec = cell.cellMetadataOther?.kernelspec;
+  if (isRecord(kernelspec) && kernelspec.name === "spur") {
+    return "ai";
+  }
+  return "code";
+}
+
+function deriveAiLive(metadata: NotebookCellState["dagMetadata"]): boolean {
+  if (!metadata) return false;
+  const metadataWithAi = metadata as NotebookCellState["dagMetadata"] & {
+    ai_live?: unknown;
+    aiLive?: unknown;
+  };
+  if (typeof metadataWithAi.ai_live === "boolean") {
+    return metadataWithAi.ai_live;
+  }
+  if (typeof metadataWithAi.aiLive === "boolean") {
+    return metadataWithAi.aiLive;
+  }
+  return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function isDagCell(

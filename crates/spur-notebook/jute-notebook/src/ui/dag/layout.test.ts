@@ -11,6 +11,7 @@ function graph(): DagGraph {
         data: {
           id: "root",
           label: "root",
+          kind: "code",
           cellType: "code",
           code: "root = load()",
           codePreview: "root = load()",
@@ -24,6 +25,7 @@ function graph(): DagGraph {
         data: {
           id: "left",
           label: "left",
+          kind: "code",
           cellType: "code",
           code: "left = root",
           codePreview: "left = root",
@@ -37,6 +39,7 @@ function graph(): DagGraph {
         data: {
           id: "right",
           label: "right",
+          kind: "code",
           cellType: "code",
           code: "right = root",
           codePreview: "right = root",
@@ -50,6 +53,7 @@ function graph(): DagGraph {
         data: {
           id: "join",
           label: "join",
+          kind: "code",
           cellType: "code",
           code: "join = left + right",
           codePreview: "join = left + right",
