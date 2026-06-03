@@ -22,6 +22,54 @@ struct HttpPage {
     next_link: Option<String>,
 }
 
+pub struct HttpAction<'a> {
+    pub client: &'a Client,
+    pub method: reqwest::Method,
+    pub url: String,
+    pub query: Vec<(String, String)>,
+    pub body: Option<serde_json::Value>,
+    pub auth: &'a ResolvedAuth,
+    /// (header name, value) - attached verbatim when present.
+    pub idempotency_key: Option<(String, String)>,
+}
+
+/// Issues exactly one request. No retry, no pagination.
+/// Returns (status, parsed body). 204 / empty body -> Value::Null.
+pub async fn send_request(a: &HttpAction<'_>) -> Result<(u16, serde_json::Value)> {
+    let mut req = a.client.request(a.method.clone(), &a.url).query(&a.query);
+    if let Some(body) = &a.body {
+        req = req.json(body);
+    }
+    if let Some((name, value)) = &a.idempotency_key {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let req = apply_auth(req, a.auth);
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| GatewayError::Http(e.to_string()))?;
+    let status = resp.status();
+
+    if !status.is_success() {
+        let snippet = resp.text().await.unwrap_or_default();
+        let snippet: String = snippet.chars().take(500).collect();
+        return Err(GatewayError::Http(format!("status {status}: {snippet}")));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| GatewayError::Http(e.to_string()))?;
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).map_err(|e| GatewayError::Http(e.to_string()))?
+    };
+
+    Ok((status.as_u16(), body))
+}
+
 pub(crate) fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
     let p = path.strip_prefix("$.").unwrap_or(path);
     let mut cur = row;
@@ -238,7 +286,7 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{fetch_rows, HttpFetch};
+    use super::{fetch_rows, send_request, HttpAction, HttpFetch};
     use crate::adapter::manifest::PaginationCfg;
     use crate::adapter::ResolvedAuth;
 
@@ -448,5 +496,83 @@ mod tests {
         let rows = fetch_rows(&fetch).await.unwrap();
 
         assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn post_sends_body_and_returns_parsed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/orders/abc"))
+            .and(header("idempotency-key", "key-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "o1" })))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let auth = ResolvedAuth::None;
+        let action = HttpAction {
+            client: &client,
+            method: reqwest::Method::POST,
+            url: format!("{}/orders/abc", server.uri()),
+            query: vec![("verbose".to_string(), "true".to_string())],
+            body: Some(json!({ "price": 0.5 })),
+            auth: &auth,
+            idempotency_key: Some(("Idempotency-Key".to_string(), "key-1".to_string())),
+        };
+
+        let (status, body) = send_request(&action).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["id"], "o1");
+    }
+
+    #[tokio::test]
+    async fn delete_204_returns_null_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/orders/abc"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let auth = ResolvedAuth::None;
+        let action = HttpAction {
+            client: &client,
+            method: reqwest::Method::DELETE,
+            url: format!("{}/orders/abc", server.uri()),
+            query: vec![],
+            body: None,
+            auth: &auth,
+            idempotency_key: None,
+        };
+
+        let (status, body) = send_request(&action).await.unwrap();
+        assert_eq!(status, 204);
+        assert!(body.is_null());
+    }
+
+    #[tokio::test]
+    async fn non_2xx_is_error_with_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/orders/abc"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({ "error": "bad" })))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let auth = ResolvedAuth::None;
+        let action = HttpAction {
+            client: &client,
+            method: reqwest::Method::PATCH,
+            url: format!("{}/orders/abc", server.uri()),
+            query: vec![],
+            body: Some(json!({ "price": 1.0 })),
+            auth: &auth,
+            idempotency_key: None,
+        };
+
+        let err = send_request(&action).await.unwrap_err();
+        assert!(format!("{err}").contains("422"));
     }
 }
