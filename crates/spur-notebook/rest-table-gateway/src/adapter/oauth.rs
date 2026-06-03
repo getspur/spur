@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::error::{GatewayError, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// Refresh proactively this long before the token's stated expiry.
 const REFRESH_SKEW: Duration = Duration::from_secs(60);
@@ -160,6 +163,113 @@ pub async fn exchange_code(
     })
 }
 
+/// The authorization `code` + `state` captured from the OAuth redirect.
+#[allow(dead_code)]
+pub struct Callback {
+    pub code: String,
+    pub state: String,
+}
+
+/// Bind an ephemeral loopback listener for the OAuth redirect. Returns the
+/// `redirect_uri` to hand the provider plus the bound listener to await on.
+#[allow(dead_code)]
+pub async fn bind_loopback() -> Result<(String, TcpListener)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| GatewayError::Auth(format!("loopback bind failed: {e}")))?;
+    let addr: SocketAddr = listener
+        .local_addr()
+        .map_err(|e| GatewayError::Auth(format!("loopback local_addr failed: {e}")))?;
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", addr.port());
+    Ok((redirect_uri, listener))
+}
+
+/// Await exactly one redirect request, parse `code`/`state` from the query string,
+/// reply with a minimal close-tab page, and return the captured values. The listener
+/// is consumed (dropped) after one request.
+#[allow(dead_code)]
+pub async fn await_callback(listener: TcpListener) -> Result<Callback> {
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .map_err(|e| GatewayError::Auth(format!("loopback accept failed: {e}")))?;
+
+    let mut buf = vec![0u8; 4096];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .map_err(|e| GatewayError::Auth(format!("loopback read failed: {e}")))?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Request line: "GET /callback?code=...&state=... HTTP/1.1"
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| GatewayError::Auth("loopback: malformed request line".to_string()))?;
+    let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+    let mut code = None;
+    let mut state = None;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            match k {
+                "code" => code = Some(percent_decode(v)),
+                "state" => state = Some(percent_decode(v)),
+                _ => {}
+            }
+        }
+    }
+
+    let body = "<html><body>You can close this tab and return to SPUR.</body></html>";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.flush().await;
+
+    match (code, state) {
+        (Some(code), Some(state)) => Ok(Callback { code, state }),
+        _ => Err(GatewayError::Auth(
+            "loopback callback missing code or state".to_string(),
+        )),
+    }
+}
+
+/// Minimal `application/x-www-form-urlencoded` percent-decoding for query values.
+#[allow(dead_code)]
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Drop a cached token (e.g. after a 401 from the resource API).
 // Reserved for the 401-invalidate-and-retry path (Approach B follow-up); not yet wired.
 #[allow(dead_code)]
@@ -172,6 +282,34 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn loopback_captures_code_and_state() {
+        let (redirect_uri, listener) = bind_loopback().await.expect("bind loopback");
+        assert!(redirect_uri.starts_with("http://127.0.0.1:"));
+        assert!(redirect_uri.ends_with("/callback"));
+
+        let handle = tokio::spawn(async move { await_callback(listener).await });
+
+        let client = reqwest::Client::new();
+        let _ = client
+            .get(format!("{redirect_uri}?code=abc%2F123&state=xyz789"))
+            .send()
+            .await
+            .expect("redirect request should reach the listener");
+
+        let cb = handle.await.expect("join").expect("callback parsed");
+        assert_eq!(cb.code, "abc/123");
+        assert_eq!(cb.state, "xyz789");
+    }
+
+    #[test]
+    fn percent_decode_handles_escapes_and_plus() {
+        assert_eq!(percent_decode("abc%2F123"), "abc/123");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("%41%42"), "AB");
+    }
 
     #[tokio::test]
     async fn exchange_code_returns_access_and_refresh() {
