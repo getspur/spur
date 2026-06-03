@@ -628,7 +628,7 @@ fn substitute_path_arg(path: &mut String, name: &str, value: &str) -> Result<(),
 
 /// Error if any `{...}` placeholder remains unsubstituted in the path.
 fn ensure_no_unfilled_placeholders(path: &str) -> Result<(), Box<dyn Error>> {
-    if path.contains('{') && path.contains('}') {
+    if path.contains('{') || path.contains('}') {
         return Err(format!("action path has unfilled placeholder(s): {path}").into());
     }
     Ok(())
@@ -795,6 +795,8 @@ mod tests {
     #[test]
     fn ensure_no_unfilled_placeholders_errs_on_leftover() {
         assert!(ensure_no_unfilled_placeholders("/orders/{id}").is_err());
+        assert!(ensure_no_unfilled_placeholders("/orders/{id").is_err());
+        assert!(ensure_no_unfilled_placeholders("/orders/id}").is_err());
         assert!(ensure_no_unfilled_placeholders("/orders/ok-123").is_ok());
     }
 
