@@ -427,6 +427,12 @@ impl Adapter for ManifestAdapter {
     }
 
     async fn act(&self, req: ActionRequest) -> Result<Vec<RecordBatch>> {
+        if !self.manifest.source.allow_writes {
+            return Err(GatewayError::Adapter(
+                "writes are not enabled for this connection (set allow_writes = true)".to_string(),
+            ));
+        }
+
         let ActionRequest {
             name,
             method,
@@ -1201,5 +1207,40 @@ id = { json = "$.id", type = "Utf8" }
             .expect("scan should succeed");
 
         assert_eq!(batches[0].num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn act_rejects_when_writes_disabled() {
+        let manifest = Manifest::from_toml(
+            r#"
+[source]
+name = "svc"
+base_url = "https://example.invalid"
+allow_writes = false
+
+[[action]]
+name = "create"
+method = "POST"
+path = "/orders"
+
+[action.args]
+"#,
+        )
+        .expect("manifest parses");
+        let adapter = ManifestAdapter::new(manifest);
+        let req = ActionRequest {
+            name: "create".to_string(),
+            method: "POST".to_string(),
+            path: "/orders".to_string(),
+            query: vec![],
+            body: None,
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let err = adapter
+            .act(req)
+            .await
+            .expect_err("writes disabled must error");
+        assert!(err.to_string().contains("writes"), "got: {err}");
     }
 }
