@@ -278,7 +278,12 @@ function readOptionalCodeTypeParam(params: unknown): CodeType | undefined {
   }
   const value = (params as Record<string, unknown>).code_type;
   if (value === undefined || value === null) return undefined;
-  if (value === "python" || value === "javascript" || value === "rust") {
+  if (
+    value === "python" ||
+    value === "javascript" ||
+    value === "rust" ||
+    value === "go"
+  ) {
     return value;
   }
   throw new AgentHandlerError(
