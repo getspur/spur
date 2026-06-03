@@ -10,9 +10,12 @@ import {
   historyKeymap,
   indentWithTab,
 } from "@codemirror/commands";
+import { javascript } from "@codemirror/lang-javascript";
 import { markdown } from "@codemirror/lang-markdown";
 import { python } from "@codemirror/lang-python";
+import { rust } from "@codemirror/lang-rust";
 import {
+  StreamLanguage,
   bracketMatching,
   defaultHighlightStyle,
   foldKeymap,
@@ -20,6 +23,7 @@ import {
   indentUnit,
   syntaxHighlighting,
 } from "@codemirror/language";
+import { go } from "@codemirror/legacy-modes/mode/go";
 import { lintKeymap } from "@codemirror/lint";
 import { Compartment, EditorState, Extension, Prec } from "@codemirror/state";
 import {
@@ -35,6 +39,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 
+import type { CodeType } from "@/bindings/CodeType";
 import { CellType, useNotebook } from "@/stores/notebook";
 
 import CellInputFallback from "./CellInputFallback";
@@ -80,13 +85,23 @@ const editorTheme = EditorView.theme({
 const language = new Compartment();
 const lineNumbersDynamic = new Compartment();
 
-function extensionForLanguage(type: CellType): Extension {
-  if (type === "code") {
-    return python();
-  } else if (type === "markdown") {
+function extensionForLanguage(type: CellType, codeType?: CodeType): Extension {
+  if (type === "markdown") {
     return [markdown(), EditorView.lineWrapping];
-  } else {
+  } else if (type !== "code") {
     throw new Error(`Unsupported cell type: ${type}`);
+  }
+
+  switch (codeType) {
+    case "javascript":
+      return javascript();
+    case "rust":
+      return rust();
+    case "go":
+      return StreamLanguage.define(go);
+    case "python":
+    default:
+      return python();
   }
 }
 
@@ -102,6 +117,10 @@ export default function CellInput({ cellId }: Props) {
   const type = useStore(
     notebook.store,
     (state) => state.serverState.cells[cellId].type,
+  );
+  const codeType = useStore(
+    notebook.store,
+    (state) => state.serverState.cells[cellId].codeType,
   );
   const initialText = useStore(
     notebook.store,
@@ -165,7 +184,7 @@ export default function CellInput({ cellId }: Props) {
             ? lineNumbers({ formatNumber: (x) => String(x + 0) })
             : lineNumbers({ formatNumber: () => "" }),
         ),
-        language.of(type === "code" ? python() : markdown()),
+        language.of(extensionForLanguage(type, codeType)),
         indentUnit.of("    "),
         EditorState.tabSize.of(4),
         editorTheme,
@@ -205,11 +224,11 @@ export default function CellInput({ cellId }: Props) {
               ? lineNumbers({ formatNumber: (x) => String(x + 0) })
               : lineNumbers({ formatNumber: () => "" }),
           ),
-          language.reconfigure(extensionForLanguage(type)),
+          language.reconfigure(extensionForLanguage(type, codeType)),
         ],
       });
     }
-  }, [view, type]);
+  }, [view, type, codeType]);
 
   const isRenderingMarkdown = type === "markdown" && !editingMarkdown;
 
