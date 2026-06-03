@@ -14,7 +14,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=config.env
+# shellcheck disable=SC1091
+# shellcheck source=scripts/gcp-build/config.env
 source "$SCRIPT_DIR/config.env"
 
 log() { echo "[build] $*" >&2; }
@@ -31,21 +32,37 @@ INFRA_UNAVAILABLE=200
 #                     this installs node_modules (when stale) then runs the
 #                     `test` npm script. Override the script via
 #                     SPUR_FRONTEND_TEST_CMD (default: `npm test` -> vitest run).
+#   --pnpm            skip cargo; run pnpm in the notebook frontend on the VM
+#                     with a shared pnpm store and per-worktree node_modules on
+#                     /mnt/cargo so installs can hard-link from the store.
 AUTO_SPIN=0
 FRONTEND_TEST=0
+PNPM=0
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --auto-spin)     AUTO_SPIN=1; shift ;;
         --frontend-test) FRONTEND_TEST=1; shift ;;
+        --pnpm)          PNPM=1; shift ;;
         --)              shift; break ;;
         *)               break ;;
     esac
 done
 CARGO_ARGS="${CARGO_ARGS:-${*:-build --release --workspace}}"
+PNPM_ARGS=("$@")
+if [[ $PNPM -eq 1 && "${PNPM_ARGS[0]:-}" == "--" ]]; then
+    PNPM_ARGS=("${PNPM_ARGS[@]:1}")
+fi
+PNPM_ARGS_ESCAPED=""
+if [[ ${#PNPM_ARGS[@]} -gt 0 ]]; then
+    PNPM_ARGS_ESCAPED="$(printf ' %q' "${PNPM_ARGS[@]}")"
+fi
 NOTEBOOK_FRONTEND_DIR="crates/spur-notebook/jute-notebook"
 NOTEBOOK_FRONTEND_INSTALL_CMD="npm ci"
 NOTEBOOK_FRONTEND_BUILD_CMD="npm run build"
 NOTEBOOK_FRONTEND_TEST_CMD="${SPUR_FRONTEND_TEST_CMD:-npm test}"
+NOTEBOOK_FRONTEND_PNPM_STORE="/mnt/cargo/pnpm-store"
+PNPM_VERSION="${SPUR_PNPM_VERSION:-10.28.2}"
+PNPM_VERSION_ESCAPED="$(printf '%q' "$PNPM_VERSION")"
 
 is_notebook_production_build() {
     local args="$1"
@@ -68,9 +85,13 @@ else
     WORKTREE_KEY="main"
 fi
 REMOTE_DIR="spur/$WORKTREE_KEY"                       # e.g. spur/worktrees/UUID
-REMOTE_ABS="\$HOME/$REMOTE_DIR"                       # expanded on the VM
 REMOTE_TARGET="/mnt/cargo/targets/$WORKTREE_KEY"
+REMOTE_PNPM_NODE_MODULES="/mnt/cargo/pnpm-nm/$WORKTREE_KEY"
 JOBS="${SPUR_BUILD_JOBS:-8}"
+NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=0
+if [[ -f "$GIT_TOPLEVEL/$NOTEBOOK_FRONTEND_DIR/pnpm-lock.yaml" ]]; then
+    NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=1
+fi
 
 log "Worktree: $WORKTREE_KEY  (local=$GIT_TOPLEVEL)"
 log "Remote:   ~/$REMOTE_DIR   target=$REMOTE_TARGET   -j$JOBS"
@@ -144,10 +165,17 @@ SPUR_DIRECT_SSH="${SPUR_DIRECT_SSH:-1}"
 
 probe_transport() {
     # $1: transport flag ("" for direct, "--tunnel-through-iap" for IAP).
-    gcloud compute ssh "$VM_NAME" \
-        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-        $1 --quiet --command='true' \
-        -- -o ConnectTimeout=10 >/dev/null 2>&1
+    if [[ -n "$1" ]]; then
+        gcloud compute ssh "$VM_NAME" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+            "$1" --quiet --command='true' \
+            -- -o ConnectTimeout=10 >/dev/null 2>&1
+    else
+        gcloud compute ssh "$VM_NAME" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+            --quiet --command='true' \
+            -- -o ConnectTimeout=10 >/dev/null 2>&1
+    fi
 }
 
 if [[ "$SPUR_DIRECT_SSH" != "0" ]] && probe_transport ""; then
@@ -243,6 +271,77 @@ log "Reconciling remote workspace (pruning locally-deleted files)..."
 rsync -az -e "$TRANSPORT" "$FILE_LIST" "$VM_NAME:$REMOTE_MANIFEST_CUR"
 remote_ssh \
     --command="bash \"\$HOME/$REMOTE_DIR/scripts/gcp-build/_prune-remote.sh\" \"$REMOTE_DIR\" \"$REMOTE_MANIFEST_CUR\" \"$STORED_MANIFEST\""
+
+# ---- run pnpm in the notebook frontend on the VM --------------------------
+# pnpm hard-links node_modules entries from its content-addressable store.
+# Hard-links only work within one filesystem, so both the shared store and this
+# worktree's node_modules live under /mnt/cargo. The in-source node_modules
+# path is only a symlink, mirroring the target/ symlink used for cargo.
+if [[ $PNPM -eq 1 ]]; then
+    log "Running pnpm on VM: $NOTEBOOK_FRONTEND_DIR (pnpm$PNPM_ARGS_ESCAPED)"
+    remote_ssh \
+        --command="bash -lc '
+            set -e
+            cd ~/$REMOTE_DIR
+            source /etc/profile.d/spur-build.sh 2>/dev/null || true
+            frontend_dir=\"\$HOME/$REMOTE_DIR/$NOTEBOOK_FRONTEND_DIR\"
+            pnpm_store=\"$NOTEBOOK_FRONTEND_PNPM_STORE\"
+            pnpm_node_modules=\"$REMOTE_PNPM_NODE_MODULES\"
+            mkdir -p \"\$pnpm_store\" \"\$pnpm_node_modules\"
+            link=\"\$frontend_dir/node_modules\"
+            cd \"\$frontend_dir\"
+            store_dev=\$(stat -Lc %d \"\$pnpm_store\")
+            nm_dev=\$(stat -Lc %d \"\$pnpm_node_modules\")
+            if [ \"\$store_dev\" != \"\$nm_dev\" ]; then
+                echo \"[build] pnpm store and node_modules are on different filesystems\" >&2
+                exit 1
+            fi
+            pnpm_version=$PNPM_VERSION_ESCAPED
+            ensure_node_modules_link() {
+                if [ \"\$(readlink \"\$link\" 2>/dev/null)\" != \"\$pnpm_node_modules\" ]; then
+                    rm -rf \"\$link\"
+                    ln -s \"\$pnpm_node_modules\" \"\$link\"
+                fi
+            }
+            corepack prepare pnpm@\"\$pnpm_version\" --activate
+            lockfile=\"\"
+            install_flags=(--prefer-offline)
+            version_marker=\"\$pnpm_node_modules/.spur-pnpm-version\"
+            if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 0 ]]; then
+                rm -f pnpm-lock.yaml
+            fi
+            if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 1 && -f pnpm-lock.yaml ]]; then
+                lockfile=\"pnpm-lock.yaml\"
+                install_flags+=(--frozen-lockfile)
+            elif [ -f package-lock.json ]; then
+                lockfile=\"package-lock.json\"
+            fi
+            lock_hash=\"\"
+            if [ -n \"\$lockfile\" ]; then
+                lock_hash=\$(sha256sum \"\$lockfile\" | awk \"{ print \\\$1 }\")
+            fi
+            expected_marker=\"\$pnpm_version \$lockfile \$lock_hash\"
+            if [ ! -d \"\$pnpm_node_modules/.pnpm\" ] || [ ! -f \"\$version_marker\" ] || [ \"\$(cat \"\$version_marker\")\" != \"\$expected_marker\" ]; then
+                echo \"[build] Installing frontend deps: pnpm install \${install_flags[*]}\"
+                rm -rf \"\$link\"
+                rm -rf \"\$pnpm_node_modules\"
+                mkdir -p \"\$pnpm_node_modules\"
+                pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" --modules-dir \"\$pnpm_node_modules\" install \"\${install_flags[@]}\"
+                if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 0 ]]; then
+                    rm -f pnpm-lock.yaml
+                fi
+                printf \"%s\n\" \"\$expected_marker\" >\"\$version_marker\"
+                touch \"\$pnpm_node_modules\"
+            else
+                echo \"[build] node_modules current; skipping install\"
+            fi
+            ensure_node_modules_link
+            echo \"[build] pnpm --dir $NOTEBOOK_FRONTEND_DIR --store-dir \$pnpm_store --modules-dir \$pnpm_node_modules$PNPM_ARGS_ESCAPED\"
+            pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" --modules-dir \"\$pnpm_node_modules\"$PNPM_ARGS_ESCAPED
+        '"
+    log "pnpm done."
+    exit 0
+fi
 
 # ---- run notebook frontend (vitest) tests on the VM ------------------------
 # vitest is not a system tool — it lives in the worktree's node_modules, which
