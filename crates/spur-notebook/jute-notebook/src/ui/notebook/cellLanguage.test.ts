@@ -13,4 +13,8 @@ describe("cellLanguage", () => {
     expect(cellLanguageId({})).toBe("python");
     expect(cellLanguageToken({ codeType: "go" }).glyph).toBe("Go");
   });
+  test("falls back to python for unknown codeType", () => {
+    expect(cellLanguageId({ codeType: "ruby" as any })).toBe("python");
+    expect(cellLanguageToken({ codeType: "ruby" as any }).label).toBe("Python");
+  });
 });
