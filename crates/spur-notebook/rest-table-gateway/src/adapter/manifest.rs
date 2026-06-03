@@ -38,10 +38,29 @@ pub struct SourceCfg {
 #[serde(tag = "scheme", rename_all = "snake_case")]
 pub enum AuthCfg {
     None,
-    Bearer { env: String },
-    Header { name: String, env: String },
-    Basic { user_env: String, pass_env: String },
-    ApiKeyQuery { param: String, env: String },
+    Bearer {
+        env: String,
+    },
+    Header {
+        name: String,
+        env: String,
+    },
+    Basic {
+        user_env: String,
+        pass_env: String,
+    },
+    ApiKeyQuery {
+        param: String,
+        env: String,
+    },
+    Oauth2Refresh {
+        token_url: String,
+        client_id_env: String,
+        client_secret_env: String,
+        refresh_token_env: String,
+        #[serde(default)]
+        scope: Option<String>,
+    },
 }
 
 impl Default for AuthCfg {

@@ -37,8 +37,8 @@ impl ManifestAdapter {
             .ok_or_else(|| GatewayError::UnknownTable(name.to_string()))
     }
 
-    fn resolve_auth(&self) -> ResolvedAuth {
-        match &self.manifest.source.auth {
+    async fn resolve_auth(&self) -> Result<ResolvedAuth> {
+        Ok(match &self.manifest.source.auth {
             AuthCfg::None => ResolvedAuth::None,
             AuthCfg::Bearer { env } => std::env::var(env)
                 .map(ResolvedAuth::Bearer)
@@ -61,7 +61,34 @@ impl ManifestAdapter {
                     value,
                 })
                 .unwrap_or(ResolvedAuth::None),
-        }
+            AuthCfg::Oauth2Refresh {
+                token_url,
+                client_id_env,
+                client_secret_env,
+                refresh_token_env,
+                scope,
+            } => {
+                let ctx = ConnectionContext::from_env(&self.manifest.source.connection_config);
+                let token_url = resolve_template(token_url, &ctx)?;
+                let read = |name: &str| {
+                    std::env::var(name).map_err(|_| {
+                        GatewayError::Auth(format!("missing credential env var {name}"))
+                    })
+                };
+                let client_id = read(client_id_env)?;
+                let client_secret = read(client_secret_env)?;
+                let refresh_token = read(refresh_token_env)?;
+                let grant = crate::adapter::oauth::RefreshGrant {
+                    token_url: &token_url,
+                    client_id: &client_id,
+                    client_secret: &client_secret,
+                    refresh_token: &refresh_token,
+                    scope: scope.as_deref(),
+                };
+                let token = crate::adapter::oauth::access_token(&self.client, &grant).await?;
+                ResolvedAuth::Bearer(token)
+            }
+        })
     }
 
     fn schema_for_table(table: &TableCfg) -> Result<SchemaRef> {
@@ -196,7 +223,7 @@ impl Adapter for ManifestAdapter {
     async fn scan(&self, req: ScanRequest) -> Result<Vec<RecordBatch>> {
         let table = self.table(&req.table)?;
         let columns = Self::column_extracts(table)?;
-        let auth = self.resolve_auth();
+        let auth = self.resolve_auth().await?;
         let connection_ctx = ConnectionContext::from_env(&self.manifest.source.connection_config);
         let base_url = resolve_template(&self.manifest.source.base_url, &connection_ctx)?;
 
@@ -251,6 +278,93 @@ mod tests {
     use super::ManifestAdapter;
     use crate::adapter::manifest::Manifest;
     use crate::adapter::{Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest};
+
+    #[test]
+    fn oauth2_refresh_toml_roundtrips() {
+        let manifest = Manifest::from_toml(
+            r#"
+[source]
+name = "notion"
+base_url = "https://api.notion.com/v1"
+auth = { scheme = "oauth2_refresh", token_url = "https://api.notion.com/v1/oauth/token", client_id_env = "NOTION_CLIENT_ID", client_secret_env = "NOTION_CLIENT_SECRET", refresh_token_env = "NOTION_REFRESH_TOKEN" }
+
+[[table]]
+name = "pages"
+path = "/pages"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+"#,
+        )
+        .expect("manifest should parse");
+        match manifest.source.auth {
+            crate::adapter::manifest::AuthCfg::Oauth2Refresh {
+                token_url,
+                refresh_token_env,
+                ..
+            } => {
+                assert_eq!(token_url, "https://api.notion.com/v1/oauth/token");
+                assert_eq!(refresh_token_env, "NOTION_REFRESH_TOKEN");
+            }
+            other => panic!("expected oauth2_refresh, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth2_refresh_scan_sends_minted_bearer() {
+        let token_srv = MockServer::start().await;
+        let api_srv = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "minted-xyz", "expires_in": 3600
+            })))
+            .mount(&token_srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/things"))
+            .and(header("authorization", "Bearer minted-xyz"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{ "id": "t1" }])),
+            )
+            .mount(&api_srv)
+            .await;
+
+        std::env::set_var("OAUTHSCAN_CLIENT_ID", "cid");
+        std::env::set_var("OAUTHSCAN_CLIENT_SECRET", "csec");
+        std::env::set_var("OAUTHSCAN_REFRESH_TOKEN", "oauth2_refresh_scan_rt");
+
+        let toml = format!(
+            r#"
+[source]
+name = "oauthscan"
+base_url = "{api}"
+auth = {{ scheme = "oauth2_refresh", token_url = "{token}/oauth/token", client_id_env = "OAUTHSCAN_CLIENT_ID", client_secret_env = "OAUTHSCAN_CLIENT_SECRET", refresh_token_env = "OAUTHSCAN_REFRESH_TOKEN" }}
+
+[[table]]
+name = "things"
+path = "/things"
+
+[table.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+"#,
+            api = api_srv.uri(),
+            token = token_srv.uri()
+        );
+        let adapter = ManifestAdapter::new(Manifest::from_toml(&toml).expect("parse"));
+        let batches = adapter
+            .scan(ScanRequest {
+                table: "things".to_string(),
+                predicates: vec![],
+                projection: None,
+                tvf_args: vec![],
+                auth: ResolvedAuth::None,
+            })
+            .await
+            .expect("scan should succeed");
+        assert_eq!(batches[0].num_rows(), 1);
+    }
 
     #[tokio::test]
     async fn scans_with_pushdown() {
