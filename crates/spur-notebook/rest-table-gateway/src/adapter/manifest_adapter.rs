@@ -1,18 +1,23 @@
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
-use arrow_schema::{Field, Schema, SchemaRef};
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use reqwest::Client;
 use serde_json::{Map, Number, Value};
 
 use crate::adapter::graphql::{fetch_graphql_rows, GraphqlFetch};
-use crate::adapter::http::{fetch_rows, HttpFetch};
-use crate::adapter::json_to_batch::{arrow_type, rows_to_batch, ColumnExtract};
-use crate::adapter::manifest::{AuthCfg, GraphqlTableCfg, Manifest, TableCfg, Transport};
+use crate::adapter::http::{fetch_rows, send_request, HttpAction, HttpFetch};
+use crate::adapter::json_to_batch::{arrow_type, json_path_get, rows_to_batch, ColumnExtract};
+use crate::adapter::manifest::{
+    ActionCfg, ArgLocation as ManifestArgLocation, AuthCfg, ColumnCfg, GraphqlTableCfg, Manifest,
+    TableCfg, Transport,
+};
 use crate::adapter::templating::{resolve_template, ConnectionContext};
 use crate::adapter::{
-    Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest, TableDef, TableKind,
+    ActionRequest, Adapter, ArgLocation, ArgSpec, Predicate, PredicateOp, ResolvedAuth,
+    ScalarValue, ScanRequest, TableDef, TableKind,
 };
 use crate::error::{GatewayError, Result};
 
@@ -91,14 +96,17 @@ impl ManifestAdapter {
         })
     }
 
-    fn schema_for_table(table: &TableCfg) -> Result<SchemaRef> {
-        let fields = table
-            .columns
+    fn schema_from_columns(columns: &IndexMap<String, ColumnCfg>) -> Result<SchemaRef> {
+        let fields = columns
             .iter()
             .map(|(name, column)| Ok(Field::new(name.clone(), arrow_type(&column.ty)?, true)))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Arc::new(Schema::new(fields)))
+    }
+
+    fn schema_for_table(table: &TableCfg) -> Result<SchemaRef> {
+        Self::schema_from_columns(&table.columns)
     }
 
     fn table_def(table: &TableCfg) -> Result<TableDef> {
@@ -109,9 +117,63 @@ impl ManifestAdapter {
         })
     }
 
-    fn column_extracts(table: &TableCfg) -> Result<Vec<ColumnExtract>> {
-        table
-            .columns
+    fn generic_action_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("http_status", DataType::Int64, false),
+            Field::new("body", DataType::Utf8, true),
+        ]))
+    }
+
+    fn action_response_schema(action: &ActionCfg) -> Result<SchemaRef> {
+        match &action.columns {
+            Some(columns) => Self::schema_from_columns(columns),
+            None => Ok(Self::generic_action_schema()),
+        }
+    }
+
+    fn arg_location(location: ManifestArgLocation) -> ArgLocation {
+        match location {
+            ManifestArgLocation::Path => ArgLocation::Path,
+            ManifestArgLocation::Body => ArgLocation::Body,
+            ManifestArgLocation::Query => ArgLocation::Query,
+        }
+    }
+
+    fn action_arg_specs(action: &ActionCfg) -> Result<Vec<ArgSpec>> {
+        action
+            .args
+            .iter()
+            .map(|(name, cfg)| {
+                Ok(ArgSpec {
+                    name: name.clone(),
+                    location: Self::arg_location(cfg.in_),
+                    ty: arrow_type(&cfg.ty)?,
+                    required: cfg.required,
+                    json_key: cfg.json.clone().unwrap_or_else(|| name.clone()),
+                    query_param: cfg.param.clone().unwrap_or_else(|| name.clone()),
+                })
+            })
+            .collect()
+    }
+
+    fn action_def(action: &ActionCfg) -> Result<TableDef> {
+        Ok(TableDef {
+            name: action.name.clone(),
+            schema: Self::action_response_schema(action)?,
+            kind: TableKind::Action {
+                method: action.method.clone(),
+                path: action.path.clone(),
+                arg_specs: Self::action_arg_specs(action)?,
+                dry_run_arg: action.dry_run_arg.clone(),
+                idempotency_header: action.idempotency_header.clone(),
+            },
+        })
+    }
+
+    fn column_extracts_from_columns(
+        columns: &IndexMap<String, ColumnCfg>,
+    ) -> Result<Vec<ColumnExtract>> {
+        columns
             .iter()
             .map(|(name, column)| {
                 Ok(ColumnExtract {
@@ -121,6 +183,47 @@ impl ManifestAdapter {
                 })
             })
             .collect()
+    }
+
+    fn column_extracts(table: &TableCfg) -> Result<Vec<ColumnExtract>> {
+        Self::column_extracts_from_columns(&table.columns)
+    }
+
+    fn action_column_extracts(action: &ActionCfg) -> Result<Vec<ColumnExtract>> {
+        match &action.columns {
+            Some(columns) => Self::column_extracts_from_columns(columns),
+            None => Ok(vec![]),
+        }
+    }
+
+    fn action_rows(body: &Value, response_path: Option<&str>) -> Result<Vec<Value>> {
+        let value = match response_path {
+            Some(path) => json_path_get(body, path).ok_or_else(|| {
+                GatewayError::Http(format!("expected JSON value at {path}, got null"))
+            })?,
+            None => body,
+        };
+
+        Ok(match value {
+            Value::Array(rows) => rows.clone(),
+            Value::Null => vec![],
+            value => vec![value.clone()],
+        })
+    }
+
+    fn render_generic_row(status: u16, body: Value) -> Result<Vec<RecordBatch>> {
+        let body_value = if body.is_null() {
+            None
+        } else {
+            Some(body.to_string())
+        };
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![i64::from(status)])) as ArrayRef,
+            Arc::new(StringArray::from(vec![body_value])) as ArrayRef,
+        ];
+        let batch = RecordBatch::try_new(Self::generic_action_schema(), arrays)
+            .map_err(|e| GatewayError::Schema(e.to_string()))?;
+        Ok(vec![batch])
     }
 
     fn query_value(value: &ScalarValue) -> String {
@@ -213,11 +316,23 @@ impl Adapter for ManifestAdapter {
     }
 
     fn catalog(&self) -> Vec<TableDef> {
-        self.manifest
+        let mut defs: Vec<TableDef> = self
+            .manifest
             .tables
             .iter()
             .filter_map(|table| Self::table_def(table).ok())
-            .collect()
+            .collect();
+
+        if self.manifest.source.allow_writes {
+            defs.extend(
+                self.manifest
+                    .actions
+                    .iter()
+                    .filter_map(|action| Self::action_def(action).ok()),
+            );
+        }
+
+        defs
     }
 
     async fn scan(&self, req: ScanRequest) -> Result<Vec<RecordBatch>> {
@@ -268,6 +383,68 @@ impl Adapter for ManifestAdapter {
 
         Ok(vec![batch])
     }
+
+    async fn act(&self, req: ActionRequest) -> Result<Vec<RecordBatch>> {
+        let ActionRequest {
+            name,
+            method,
+            path,
+            query,
+            body,
+            auth,
+            idempotency_key,
+            dry_run,
+        } = req;
+
+        let action = self
+            .manifest
+            .actions
+            .iter()
+            .find(|action| action.name == name)
+            .ok_or_else(|| GatewayError::Adapter(format!("unknown action {name}")))?;
+        let connection_ctx = ConnectionContext::from_env(&self.manifest.source.connection_config);
+        let base_url = resolve_template(&self.manifest.source.base_url, &connection_ctx)?;
+        let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+
+        if dry_run {
+            return Self::render_generic_row(
+                0,
+                serde_json::json!({
+                    "dry_run": true,
+                    "method": method,
+                    "url": url,
+                    "query": query,
+                    "body": body,
+                }),
+            );
+        }
+
+        let idempotency_key = match (&action.idempotency_header, idempotency_key) {
+            (Some(header), Some(value)) => Some((header.clone(), value)),
+            _ => None,
+        };
+        let http_action = HttpAction {
+            client: &self.client,
+            method: reqwest::Method::from_bytes(method.as_bytes())
+                .map_err(|e| GatewayError::Http(e.to_string()))?,
+            url,
+            query,
+            body,
+            auth: &auth,
+            idempotency_key,
+        };
+
+        let (status, body) = send_request(&http_action).await?;
+
+        match &action.columns {
+            Some(_) => {
+                let columns = Self::action_column_extracts(action)?;
+                let rows = Self::action_rows(&body, action.response_path.as_deref())?;
+                Ok(vec![rows_to_batch(&columns, &rows)?])
+            }
+            None => Self::render_generic_row(status, body),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -277,7 +454,10 @@ mod tests {
 
     use super::ManifestAdapter;
     use crate::adapter::manifest::Manifest;
-    use crate::adapter::{Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest};
+    use crate::adapter::{
+        ActionRequest, Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest,
+        TableKind,
+    };
 
     #[test]
     fn oauth2_refresh_toml_roundtrips() {
@@ -437,6 +617,81 @@ active = {{ param = "active" }}
         let fields = batches[0].schema().fields().clone();
         let field_names: Vec<_> = fields.iter().map(|field| field.name().as_str()).collect();
         assert_eq!(field_names, ["id", "question", "active", "volume"]);
+    }
+
+    #[tokio::test]
+    async fn action_post_renders_typed_columns() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/orders/tok1"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "order": { "id": "o9" } })),
+            )
+            .mount(&server)
+            .await;
+
+        let toml = format!(
+            r#"
+[source]
+name = "pm"
+base_url = "{base}"
+allow_writes = true
+
+[[action]]
+name = "place_order"
+method = "POST"
+path = "/orders/{{token_id}}"
+response_path = "$.order"
+
+[action.args]
+token_id = {{ in = "path", type = "Utf8", required = true }}
+price    = {{ in = "body", type = "Float64", required = true }}
+
+[action.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+"#,
+            base = server.uri()
+        );
+        let manifest = Manifest::from_toml(&toml).unwrap();
+        let adapter = ManifestAdapter::new(manifest);
+
+        assert!(adapter
+            .catalog()
+            .iter()
+            .any(|t| t.name == "place_order" && matches!(t.kind, TableKind::Action { .. })));
+
+        let req = ActionRequest {
+            name: "place_order".to_string(),
+            method: "POST".to_string(),
+            path: "/orders/tok1".to_string(),
+            query: vec![],
+            body: Some(serde_json::json!({ "price": 0.5 })),
+            auth: ResolvedAuth::None,
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let batches = adapter.act(req).await.unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    }
+
+    #[tokio::test]
+    async fn action_hidden_when_writes_disabled() {
+        let toml = r#"
+[source]
+name = "pm"
+base_url = "https://example.com"
+
+[[action]]
+name = "place_order"
+method = "POST"
+path = "/orders"
+
+[action.args]
+price = { in = "body", type = "Float64", required = true }
+"#;
+        let adapter = ManifestAdapter::new(Manifest::from_toml(toml).unwrap());
+        assert!(!adapter.catalog().iter().any(|t| t.name == "place_order"));
     }
 
     #[tokio::test]
