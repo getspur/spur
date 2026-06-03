@@ -36,6 +36,10 @@ export type AddApiDatasourceFromImportCommand = Extract<
   DaemonControlCommand,
   { command: "add_api_datasource_from_import" }
 >;
+export type AddApiDatasourceFromManifestCommand = Extract<
+  DaemonControlCommand,
+  { command: "add_api_datasource_from_manifest" }
+>;
 export type ListDatasourcesCommand = Extract<
   DaemonControlCommand,
   { command: "list_datasources" }
@@ -60,6 +64,10 @@ export type AttachDatasourceInput = Omit<AttachDatasourceCommand, "command">;
 export type DetachDatasourceInput = Omit<DetachDatasourceCommand, "command">;
 export type AddApiDatasourceFromImportInput = Omit<
   AddApiDatasourceFromImportCommand,
+  "command"
+>;
+export type AddApiDatasourceFromManifestInput = Omit<
+  AddApiDatasourceFromManifestCommand,
   "command"
 >;
 export type AttachSavedConnectionInput = Omit<
@@ -138,6 +146,17 @@ export function addApiDatasourceFromImportCommand(
     name: input.name,
     provider: input.provider,
     spec_text: input.spec_text,
+    credentials: input.credentials,
+  };
+}
+
+export function addApiDatasourceFromManifestCommand(
+  input: AddApiDatasourceFromManifestInput,
+): AddApiDatasourceFromManifestCommand {
+  return {
+    command: "add_api_datasource_from_manifest",
+    name: input.name,
+    manifest_toml: input.manifest_toml,
     credentials: input.credentials,
   };
 }

@@ -16,7 +16,9 @@ import type {
   DatasourceEntry,
 } from "@/bindings";
 
-import DatasourceSidebar from "./DatasourceSidebar";
+import DatasourceSidebar, {
+  restWizardPrefillFromPayload,
+} from "./DatasourceSidebar";
 
 const daemonControlMock = vi.hoisted(() => vi.fn());
 const dragDropCallbacks = vi.hoisted(() => [] as TauriDragDropCallback[]);
@@ -202,6 +204,41 @@ describe("DatasourceSidebar", () => {
     openMock.mockReset();
     unlistenEventMock.mockReset();
     unlistenMock.mockReset();
+  });
+
+  test("rest_wizard_prefill_from_payload_preserves_manifest_metadata", () => {
+    const manifestToml = `name = "stripe_reporting"`;
+
+    expect(
+      restWizardPrefillFromPayload({
+        name: "stripe_reporting",
+        provider: "stripe",
+        manifest_toml: manifestToml,
+        connection_only: false,
+        missing_env_vars: ["STRIPE_API_KEY", 123],
+      }),
+    ).toEqual({
+      name: "stripe_reporting",
+      provider: "stripe",
+      manifestToml,
+      connectionOnly: false,
+      missingEnvVars: ["STRIPE_API_KEY"],
+      specText: undefined,
+      step: "connect",
+    });
+
+    expect(
+      restWizardPrefillFromPayload({
+        name: "github_reporting",
+        manifestToml,
+        connectionOnly: true,
+        missingEnvVars: [],
+      }),
+    ).toMatchObject({
+      name: "github_reporting",
+      manifestToml,
+      connectionOnly: true,
+    });
   });
 
   test("sidebar_attach_emits_command", async () => {
