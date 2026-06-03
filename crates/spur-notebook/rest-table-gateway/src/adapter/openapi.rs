@@ -897,7 +897,7 @@ fn table_name(operation: &Operation, path: &str) -> String {
         .unwrap_or_else(|| {
             path.rsplit('/')
                 .find(|segment| {
-                    !segment.is_empty() && !(segment.starts_with('{') && segment.ends_with('}'))
+                    !(segment.is_empty() || segment.starts_with('{') && segment.ends_with('}'))
                 })
                 .map(sanitize_name)
                 .unwrap_or_else(|| "table".to_string())

@@ -171,7 +171,6 @@ mod tests {
             path: "/x".into(),
             query: vec![],
             body: None,
-            auth: Default::default(),
             idempotency_key: None,
             dry_run: false,
         };

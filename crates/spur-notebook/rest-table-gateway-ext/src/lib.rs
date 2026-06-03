@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fs,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
@@ -30,7 +30,13 @@ use spur_rest_table_gateway::{
 const DEFAULT_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const DEFAULT_CLOB_BASE: &str = "https://clob.polymarket.com";
 const CHUNK_SIZE: usize = 2048;
-static ACTION_NAMED_PARAMETERS: OnceLock<Mutex<Vec<(String, DataType)>>> = OnceLock::new();
+
+thread_local! {
+    // Registration is single-threaded per connection; thread-local isolates each
+    // register_*->named_parameters() handshake and cannot race across threads.
+    static ACTION_NAMED_PARAMETERS: std::cell::RefCell<Vec<(String, DataType)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 #[duckdb_entrypoint_c_api(ext_name = "spur_rest", min_duckdb_version = "v1.2.0")]
 pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
@@ -232,22 +238,33 @@ fn register_action_table_function(
     extra: &ApiActionExtra,
 ) -> Result<(), Box<dyn Error>> {
     let named_parameters = action_named_parameter_types(extra)?;
-    {
-        let mut current = action_named_parameters()
-            .lock()
-            .map_err(|err| format!("action named parameter lock poisoned: {err}"))?;
-        *current = named_parameters;
-    }
-    let result = con.register_table_function_with_extra_info::<ApiActionVTab, _>(fn_name, extra);
-    if let Ok(mut current) = action_named_parameters().lock() {
-        current.clear();
-    }
-    result?;
+    with_action_named_parameters_set(named_parameters, || {
+        con.register_table_function_with_extra_info::<ApiActionVTab, _>(fn_name, extra)
+    })?;
     Ok(())
 }
 
-fn action_named_parameters() -> &'static Mutex<Vec<(String, DataType)>> {
-    ACTION_NAMED_PARAMETERS.get_or_init(|| Mutex::new(Vec::new()))
+fn read_action_named_parameters() -> Vec<(String, DataType)> {
+    ACTION_NAMED_PARAMETERS.with(|c| c.borrow().clone())
+}
+
+/// Set the param list, run `f` (which performs DuckDB registration that calls
+/// `named_parameters()`), then ALWAYS clear.
+fn with_action_named_parameters_set<R>(
+    params: Vec<(String, DataType)>,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct ClearActionNamedParameters;
+
+    impl Drop for ClearActionNamedParameters {
+        fn drop(&mut self) {
+            ACTION_NAMED_PARAMETERS.with(|c| c.borrow_mut().clear());
+        }
+    }
+
+    ACTION_NAMED_PARAMETERS.with(|c| *c.borrow_mut() = params);
+    let _guard = ClearActionNamedParameters;
+    f()
 }
 
 fn action_named_parameter_types(
@@ -491,7 +508,7 @@ impl VTab for ApiActionVTab {
     }
 
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        let current = action_named_parameters().lock().ok()?;
+        let current = read_action_named_parameters();
         Some(
             current
                 .iter()
@@ -526,10 +543,7 @@ fn compose_action_request(
 
         match spec.location {
             ArgLocation::Path => {
-                path = path.replace(
-                    &format!("{{{}}}", spec.name),
-                    &duckdb_value_to_string(&value),
-                );
+                substitute_path_arg(&mut path, &spec.name, &duckdb_value_to_string(&value))?;
             }
             ArgLocation::Body => {
                 body.insert(
@@ -542,6 +556,7 @@ fn compose_action_request(
             }
         }
     }
+    ensure_no_unfilled_placeholders(&path)?;
 
     if let Some(arg) = &extra.dry_run_arg {
         if let Some(value) = bind.get_named_parameter(arg) {
@@ -564,7 +579,6 @@ fn compose_action_request(
         } else {
             Some(serde_json::Value::Object(body))
         },
-        auth: ResolvedAuth::None,
         idempotency_key,
         dry_run,
     })
@@ -599,6 +613,27 @@ fn duckdb_value_to_string(value: &DuckValue) -> String {
     value.to_string()
 }
 
+/// Substitute one `{name}` path placeholder with a validated value.
+/// Rejects values that would alter URL structure (path traversal / injection).
+fn substitute_path_arg(path: &mut String, name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    const FORBIDDEN: &[char] = &['/', '?', '#', '%', '\\'];
+    if value.contains("..") || value.chars().any(|c| FORBIDDEN.contains(&c)) {
+        return Err(
+            format!("path argument {name} contains forbidden characters: {value:?}").into(),
+        );
+    }
+    *path = path.replace(&format!("{{{}}}", name), value);
+    Ok(())
+}
+
+/// Error if any `{...}` placeholder remains unsubstituted in the path.
+fn ensure_no_unfilled_placeholders(path: &str) -> Result<(), Box<dyn Error>> {
+    if path.contains('{') && path.contains('}') {
+        return Err(format!("action path has unfilled placeholder(s): {path}").into());
+    }
+    Ok(())
+}
+
 fn duckdb_value_to_json(
     value: &DuckValue,
     data_type: &DataType,
@@ -622,9 +657,15 @@ fn duckdb_value_to_json(
 }
 
 fn duckdb_value_to_bool(value: &DuckValue) -> Result<bool, Box<dyn Error>> {
-    duckdb_value_to_string(value)
-        .parse::<bool>()
-        .map_err(|err| format!("invalid Boolean action argument: {err}").into())
+    parse_bool_str(&duckdb_value_to_string(value))
+}
+
+fn parse_bool_str(s: &str) -> Result<bool, Box<dyn Error>> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("invalid Boolean action argument: {other:?}").into()),
+    }
 }
 
 fn action_arg_duckdb_type(data_type: &DataType) -> LogicalTypeId {
@@ -734,4 +775,42 @@ fn write_batch_rows(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substitute_path_arg_rejects_traversal_and_separators() {
+        let mut p = "/orders/{id}".to_string();
+        assert!(substitute_path_arg(&mut p, "id", "../admin").is_err());
+        let mut p = "/orders/{id}".to_string();
+        assert!(substitute_path_arg(&mut p, "id", "a/b").is_err());
+        let mut p = "/orders/{id}".to_string();
+        assert!(substitute_path_arg(&mut p, "id", "ok-123").is_ok());
+        assert_eq!(p, "/orders/ok-123");
+    }
+
+    #[test]
+    fn ensure_no_unfilled_placeholders_errs_on_leftover() {
+        assert!(ensure_no_unfilled_placeholders("/orders/{id}").is_err());
+        assert!(ensure_no_unfilled_placeholders("/orders/ok-123").is_ok());
+    }
+
+    #[test]
+    fn action_named_parameters_round_trip_and_clear() {
+        with_action_named_parameters_set(vec![("a".into(), DataType::Utf8)], || {
+            assert_eq!(read_action_named_parameters().len(), 1);
+        });
+        // After the scope, the slot must be cleared even though the closure returned.
+        assert!(read_action_named_parameters().is_empty());
+    }
+
+    #[test]
+    fn duckdb_bool_parse_is_case_insensitive() {
+        assert!(parse_bool_str("TRUE").unwrap());
+        assert!(!parse_bool_str("False").unwrap());
+        assert!(parse_bool_str("notabool").is_err());
+    }
 }

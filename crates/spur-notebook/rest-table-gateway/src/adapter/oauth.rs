@@ -53,7 +53,7 @@ pub async fn access_token(client: &reqwest::Client, grant: &RefreshGrant<'_>) ->
         if tok
             .expires_at
             .checked_duration_since(Instant::now())
-            .map_or(false, |left| left > REFRESH_SKEW)
+            .is_some_and(|left| left > REFRESH_SKEW)
         {
             return Ok(tok.access_token.clone());
         }

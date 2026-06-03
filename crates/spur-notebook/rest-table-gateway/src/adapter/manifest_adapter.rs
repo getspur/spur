@@ -177,11 +177,20 @@ impl ManifestAdapter {
     }
 
     fn action_def(action: &ActionCfg) -> Result<TableDef> {
+        const ALLOWED_WRITE_METHODS: &[&str] = &["POST", "PUT", "PATCH", "DELETE"];
+        let method = action.method.to_ascii_uppercase();
+        if !ALLOWED_WRITE_METHODS.contains(&method.as_str()) {
+            return Err(GatewayError::Manifest(format!(
+                "action '{}' uses unsupported method '{}' (allowed: POST, PUT, PATCH, DELETE)",
+                action.name, action.method
+            )));
+        }
+
         Ok(TableDef {
             name: action.name.clone(),
             schema: Self::action_response_schema(action)?,
             kind: TableKind::Action {
-                method: action.method.clone(),
+                method,
                 path: action.path.clone(),
                 arg_specs: Self::action_arg_specs(action)?,
                 dry_run_arg: action.dry_run_arg.clone(),
@@ -242,6 +251,18 @@ impl ManifestAdapter {
             Arc::new(StringArray::from(vec![body_value])) as ArrayRef,
         ];
         let batch = RecordBatch::try_new(Self::generic_action_schema(), arrays)
+            .map_err(|e| GatewayError::Schema(e.to_string()))?;
+        Ok(vec![batch])
+    }
+
+    fn render_typed_dry_run(action: &ActionCfg) -> Result<Vec<RecordBatch>> {
+        let schema = Self::action_response_schema(action)?;
+        let arrays: Vec<ArrayRef> = schema
+            .fields()
+            .iter()
+            .map(|field| arrow_array::new_null_array(field.data_type(), 1))
+            .collect();
+        let batch = RecordBatch::try_new(schema, arrays)
             .map_err(|e| GatewayError::Schema(e.to_string()))?;
         Ok(vec![batch])
     }
@@ -412,7 +433,6 @@ impl Adapter for ManifestAdapter {
             path,
             query,
             body,
-            auth,
             idempotency_key,
             dry_run,
         } = req;
@@ -428,18 +448,22 @@ impl Adapter for ManifestAdapter {
         let url = format!("{}{}", base_url.trim_end_matches('/'), path);
 
         if dry_run {
-            return Self::render_generic_row(
-                0,
-                serde_json::json!({
-                    "dry_run": true,
-                    "method": method,
-                    "url": url,
-                    "query": query,
-                    "body": body,
-                }),
-            );
+            return match &action.columns {
+                Some(_) => Self::render_typed_dry_run(action),
+                None => Self::render_generic_row(
+                    0,
+                    serde_json::json!({
+                        "dry_run": true,
+                        "method": method,
+                        "url": url,
+                        "query": query,
+                        "body": body,
+                    }),
+                ),
+            };
         }
 
+        let auth = self.resolve_auth().await?;
         let idempotency_key = match (&action.idempotency_header, idempotency_key) {
             (Some(header), Some(value)) => Some((header.clone(), value)),
             _ => None,
@@ -817,6 +841,57 @@ active = {{ param = "active" }}
     }
 
     #[tokio::test]
+    async fn action_post_applies_bearer_auth() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/orders"))
+            .and(header("authorization", "Bearer tok-act-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("SPUR_TEST_ACT_BEARER", "tok-act-123");
+        let manifest = Manifest::from_toml(&format!(
+            r#"
+[source]
+name = "svc"
+base_url = "{}"
+allow_writes = true
+auth = {{ scheme = "bearer", env = "SPUR_TEST_ACT_BEARER" }}
+
+[[action]]
+name = "create"
+method = "POST"
+path = "/orders"
+
+[action.args]
+"#,
+            server.uri()
+        ))
+        .expect("manifest parses");
+
+        let adapter = ManifestAdapter::new(manifest);
+        let req = ActionRequest {
+            name: "create".to_string(),
+            method: "POST".to_string(),
+            path: "/orders".to_string(),
+            query: vec![],
+            body: None,
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let batches = adapter
+            .act(req)
+            .await
+            .expect("authenticated action succeeds");
+        std::env::remove_var("SPUR_TEST_ACT_BEARER");
+        assert_eq!(batches.len(), 1);
+    }
+
+    #[tokio::test]
     async fn action_post_renders_typed_columns() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -864,12 +939,105 @@ id = {{ json = "$.id", type = "Utf8" }}
             path: "/orders/tok1".to_string(),
             query: vec![],
             body: Some(serde_json::json!({ "price": 0.5 })),
-            auth: ResolvedAuth::None,
             idempotency_key: None,
             dry_run: false,
         };
         let batches = adapter.act(req).await.unwrap();
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    }
+
+    #[tokio::test]
+    async fn dry_run_with_columns_matches_typed_schema() {
+        let manifest = Manifest::from_toml(
+            r#"
+[source]
+name = "svc"
+base_url = "https://example.invalid"
+allow_writes = true
+
+[[action]]
+name = "create"
+method = "POST"
+path = "/orders"
+dry_run_arg = "dry_run"
+
+[action.args]
+
+[action.columns]
+order_id = { json = "$.id", type = "Utf8" }
+"#,
+        )
+        .expect("parses");
+        let adapter = ManifestAdapter::new(manifest);
+        let req = ActionRequest {
+            name: "create".into(),
+            method: "POST".into(),
+            path: "/orders".into(),
+            query: vec![],
+            body: None,
+            idempotency_key: None,
+            dry_run: true,
+        };
+        let batches = adapter.act(req).await.expect("dry-run ok");
+        let typed = ManifestAdapter::new(
+            Manifest::from_toml(
+                "[source]\nname=\"svc\"\nbase_url=\"https://example.invalid\"\nallow_writes=true\n\n[[action]]\nname=\"create\"\nmethod=\"POST\"\npath=\"/orders\"\n\n[action.args]\n\n[action.columns]\norder_id = { json = \"$.id\", type = \"Utf8\" }\n",
+            )
+            .unwrap(),
+        );
+        let expected = typed
+            .catalog()
+            .into_iter()
+            .find(|d| d.name == "create")
+            .unwrap()
+            .schema;
+
+        assert_eq!(batches[0].schema().fields(), expected.fields());
+    }
+
+    #[test]
+    fn action_def_rejects_non_write_method() {
+        let toml = r#"
+[source]
+name = "svc"
+base_url = "https://x"
+allow_writes = true
+
+[[action]]
+name = "bad"
+method = "GET"
+path = "/x"
+
+[action.args]
+"#;
+        let manifest = Manifest::from_toml(toml).expect("parses");
+        // catalog() filter_maps Ok(...) only, so a GET action must be dropped/erroring.
+        let defs = ManifestAdapter::new(manifest).catalog();
+        assert!(
+            !defs.iter().any(|d| d.name == "bad"),
+            "non-write method must not produce an action def"
+        );
+    }
+
+    #[test]
+    fn action_def_accepts_write_methods() {
+        for method in ["post", "PUT", "Patch", "DELETE"] {
+            let toml = format!(
+                "[source]\nname=\"s\"\nbase_url=\"https://x\"\nallow_writes=true\n\n[[action]]\nname=\"a\"\nmethod=\"{method}\"\npath=\"/x\"\n\n[action.args]\n"
+            );
+            let manifest = Manifest::from_toml(&toml).expect("parses");
+            let defs = ManifestAdapter::new(manifest).catalog();
+            let def = defs
+                .into_iter()
+                .find(|d| d.name == "a")
+                .expect("write method must produce an action def");
+
+            if let TableKind::Action { method: stored, .. } = def.kind {
+                assert_eq!(stored, method.to_ascii_uppercase());
+            } else {
+                panic!("write method must produce an action def");
+            }
+        }
     }
 
     #[tokio::test]

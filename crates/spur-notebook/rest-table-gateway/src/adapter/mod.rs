@@ -59,19 +59,23 @@ pub struct Predicate {
     pub value: ScalarValue,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ResolvedAuth {
+    #[default]
     None,
     Bearer(String),
-    Header { name: String, value: String },
-    Basic { user: String, pass: String },
-    QueryParam { param: String, value: String },
-}
-
-impl Default for ResolvedAuth {
-    fn default() -> Self {
-        ResolvedAuth::None
-    }
+    Header {
+        name: String,
+        value: String,
+    },
+    Basic {
+        user: String,
+        pass: String,
+    },
+    QueryParam {
+        param: String,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +111,6 @@ pub struct ActionRequest {
     pub path: String,
     pub query: Vec<(String, String)>,
     pub body: Option<serde_json::Value>,
-    pub auth: ResolvedAuth,
     pub idempotency_key: Option<String>,
     pub dry_run: bool,
 }
