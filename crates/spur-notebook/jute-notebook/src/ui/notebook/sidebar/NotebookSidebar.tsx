@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useRef } from "react";
 
 import { useSidebar } from "@/stores/sidebar";
 
@@ -17,12 +17,12 @@ export default function NotebookSidebar() {
     SIDEBAR_PANELS[0];
 
   // Keep-alive: a panel mounts on first activation and stays mounted.
-  const [mountedIds, setMountedIds] = useState<string[]>([activePanel.id]);
-  useEffect(() => {
-    setMountedIds((ids) =>
-      ids.includes(activePanel.id) ? ids : [...ids, activePanel.id],
-    );
-  }, [activePanel.id]);
+  // Accumulate synchronously during render (not in an effect) so a newly
+  // activated panel's body is present on the SAME frame its header updates —
+  // otherwise there is a one-frame empty-body flash on panel switch.
+  const mountedIdsRef = useRef<Set<string>>(new Set([activePanel.id]));
+  mountedIdsRef.current.add(activePanel.id);
+  const mountedIds = mountedIdsRef.current;
 
   const ActiveIcon = activePanel.icon;
 
@@ -43,7 +43,7 @@ export default function NotebookSidebar() {
           </div>
         )}
         {SIDEBAR_PANELS.map((panel) => {
-          if (!mountedIds.includes(panel.id)) return null;
+          if (!mountedIds.has(panel.id)) return null;
           const PanelComponent = panel.Component;
           return (
             <div
