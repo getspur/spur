@@ -41,6 +41,23 @@ This syncs the current worktree, runs `npm ci` on the VM only when
 `test` npm script (`vitest run`). Override the command via
 `SPUR_FRONTEND_TEST_CMD` (e.g. `SPUR_FRONTEND_TEST_CMD='npx vitest run src/foo'`).
 
+## Remote pnpm Commands
+
+Run notebook frontend pnpm commands through the same remote sync path with:
+
+```sh
+scripts/spur-pnpm test -- src/ui/notebook/NotebookCells.test.tsx
+scripts/spur-pnpm run typecheck
+```
+
+`scripts/spur-pnpm` dispatches to `build.sh --pnpm` by default and falls back to
+local pnpm only when the VM is unavailable. On the VM, pnpm uses the shared
+store at `/mnt/cargo/pnpm-store`, while each worktree's frontend
+`node_modules` is a symlink to `/mnt/cargo/pnpm-nm/<worktree-key>`. Keeping both
+paths on `/mnt/cargo` lets pnpm hard-link packages from the content-addressable
+store instead of copying them across filesystems. Override the activated pnpm
+version with `SPUR_PNPM_VERSION`.
+
 `deno` is provisioned system-wide by `startup.sh` (pinned, `/usr/local/bin/deno`)
 so the spur-notebook Deno Jupyter kernel tests run on the VM instead of skipping.
 
