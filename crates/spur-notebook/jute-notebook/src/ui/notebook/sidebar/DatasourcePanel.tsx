@@ -34,6 +34,7 @@ import {
   listSavedConnectionsCommand,
   savedConnectionsFromDaemonControlResponse,
 } from "@/daemon/control";
+import { useSidebar } from "@/stores/sidebar";
 import AddRestApiWizard, {
   type AddRestApiWizardPrefill,
 } from "@/ui/notebook/AddRestApiWizard";
@@ -357,6 +358,7 @@ export default function DatasourcePanel() {
         const nextPrefill = restWizardPrefillFromPayload(event.payload);
         if (!nextPrefill) return;
 
+        useSidebar.getState().activatePanel("datasources");
         setEditingConnection(null);
         setRestWizardPrefill(nextPrefill);
         setApiModalOpen(true);

@@ -1,0 +1,98 @@
+import clsx from "clsx";
+import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+
+import { useSidebar } from "@/stores/sidebar";
+
+import { SIDEBAR_PANELS } from "./panels";
+
+export default function NotebookSidebar() {
+  const activePanelId = useSidebar((state) => state.activePanelId);
+  const collapsed = useSidebar((state) => state.collapsed);
+  const activatePanel = useSidebar((state) => state.activatePanel);
+  const toggleCollapsed = useSidebar((state) => state.toggleCollapsed);
+
+  const activePanel =
+    SIDEBAR_PANELS.find((panel) => panel.id === activePanelId) ??
+    SIDEBAR_PANELS[0];
+
+  // Keep-alive: a panel mounts on first activation and stays mounted.
+  const [mountedIds, setMountedIds] = useState<string[]>([activePanel.id]);
+  useEffect(() => {
+    setMountedIds((ids) =>
+      ids.includes(activePanel.id) ? ids : [...ids, activePanel.id],
+    );
+  }, [activePanel.id]);
+
+  const ActiveIcon = activePanel.icon;
+
+  return (
+    <aside className="flex h-full shrink-0 border-l border-gray-200 bg-gray-50 text-gray-700">
+      <div
+        className={clsx(
+          "flex h-full min-h-0 flex-col overflow-hidden transition-[width] duration-200",
+          collapsed ? "w-0" : "w-80",
+        )}
+      >
+        {!collapsed && (
+          <div className="flex items-center gap-2 px-3 pb-2 pt-14">
+            <ActiveIcon className="shrink-0 text-gray-500" size={18} />
+            <h2 className="truncate text-sm font-medium text-gray-950">
+              {activePanel.title}
+            </h2>
+          </div>
+        )}
+        {SIDEBAR_PANELS.map((panel) => {
+          if (!mountedIds.includes(panel.id)) return null;
+          const PanelComponent = panel.Component;
+          return (
+            <div
+              className="min-h-0 flex-1"
+              hidden={collapsed || panel.id !== activePanel.id}
+              key={panel.id}
+            >
+              <PanelComponent />
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex w-12 shrink-0 flex-col items-center gap-1 border-l border-gray-200 bg-white pt-14">
+        <button
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="rounded p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-950"
+          onClick={toggleCollapsed}
+          type="button"
+        >
+          {collapsed ? (
+            <ChevronLeftIcon size={18} strokeWidth={1.5} />
+          ) : (
+            <ChevronRightIcon size={18} strokeWidth={1.5} />
+          )}
+        </button>
+        <div className="my-1 h-px w-5 bg-gray-200" />
+        {SIDEBAR_PANELS.map((panel) => {
+          const Icon = panel.icon;
+          const isActive = !collapsed && panel.id === activePanel.id;
+          return (
+            <button
+              aria-label={panel.ariaLabel}
+              aria-pressed={isActive}
+              className={clsx(
+                "rounded p-1.5 transition-colors",
+                isActive
+                  ? "bg-gray-900 text-white"
+                  : "text-gray-500 hover:bg-gray-100 hover:text-gray-950",
+              )}
+              key={panel.id}
+              onClick={() => activatePanel(panel.id)}
+              type="button"
+            >
+              <Icon size={18} strokeWidth={1.5} />
+            </button>
+          );
+        })}
+      </div>
+    </aside>
+  );
+}

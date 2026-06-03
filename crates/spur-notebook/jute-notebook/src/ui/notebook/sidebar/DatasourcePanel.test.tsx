@@ -15,6 +15,7 @@ import type {
   DaemonControlResponse,
   DatasourceEntry,
 } from "@/bindings";
+import { DEFAULT_SIDEBAR_PANEL_ID, useSidebar } from "@/stores/sidebar";
 
 import DatasourcePanel, {
   restWizardPrefillFromPayload,
@@ -181,6 +182,10 @@ describe("DatasourcePanel", () => {
   });
 
   beforeEach(() => {
+    useSidebar.setState({
+      activePanelId: DEFAULT_SIDEBAR_PANEL_ID,
+      collapsed: false,
+    });
     daemonControlMock.mockReset();
     daemonControlMock.mockImplementation((command: DaemonControlCommand) =>
       Promise.resolve(defaultDaemonResponse(command)),
@@ -385,6 +390,31 @@ describe("DatasourcePanel", () => {
     });
 
     expect(await screen.findByText("stripe_charges")).toBeInTheDocument();
+  });
+
+  test("open_rest_wizard_event_opens_wizard_and_activates_datasources_panel", async () => {
+    useSidebar.getState().activatePanel("chat");
+
+    render(<DatasourcePanel />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("notebook://open_rest_wizard")).toBe(true),
+    );
+
+    await act(async () => {
+      eventCallbacks.get("notebook://open_rest_wizard")?.({
+        payload: {
+          name: "stripe_reporting",
+          provider: "stripe",
+          manifest_toml: "name = 'stripe_reporting'",
+          missing_env_vars: ["STRIPE_API_KEY"],
+        },
+      });
+    });
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("stripe_reporting")).toBeInTheDocument();
+    expect(useSidebar.getState().activePanelId).toBe("datasources");
   });
 
   test("mount_fetch_populates_list_without_datasources_changed_event", async () => {
