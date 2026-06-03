@@ -490,6 +490,16 @@ fn required_env_vars_from_manifest(
             push_unique(&mut values, user_env.clone());
             push_unique(&mut values, pass_env.clone());
         }
+        AuthCfg::Oauth2Refresh {
+            client_id_env,
+            client_secret_env,
+            refresh_token_env,
+            ..
+        } => {
+            push_unique(&mut values, client_id_env.clone());
+            push_unique(&mut values, client_secret_env.clone());
+            push_unique(&mut values, refresh_token_env.clone());
+        }
     }
     for name in &manifest.source.connection_config {
         push_unique(&mut values, format!("SPUR_CONN_{name}"));
