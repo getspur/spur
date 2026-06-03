@@ -5,9 +5,9 @@ import { useNotebook } from "@/stores/notebook";
 import DagView from "@/ui/dag/DagView";
 import { UnhandledError } from "@/ui/shared/UnhandledError";
 
-import DatasourceSidebar from "./DatasourceSidebar";
 import NotebookCells from "./NotebookCells";
 import NotebookLocation from "./NotebookLocation";
+import NotebookSidebar from "./sidebar/NotebookSidebar";
 
 export default function NotebookView() {
   const notebook = useNotebook();
@@ -44,7 +44,7 @@ export default function NotebookView() {
           <NotebookCells />
         )}
       </div>
-      <DatasourceSidebar />
+      <NotebookSidebar />
     </div>
   );
 }
