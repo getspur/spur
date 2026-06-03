@@ -440,9 +440,9 @@ async fn google_ads_gaql_sends_developer_token_and_bearer() {
 name = "google_ads"
 base_url = "{base}"
 allow_writes = true
-connection_config = ["developer_token"]
+connection_config = ["DEVELOPER_TOKEN"]
 [source.headers]
-developer-token = "${{connectionConfig.developer_token}}"
+developer-token = "${{connectionConfig.DEVELOPER_TOKEN}}"
 [[action]]
 name = "google_ads_search"
 method = "POST"
@@ -476,6 +476,8 @@ impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
 }
 ```
 
+> **Env-name note (corrected after T3 attempt 1):** `ConnectionContext::from_env` maps a connection-config param to `SPUR_CONN_{name}` **case-preserving** (templating.rs:14 — `format!("SPUR_CONN_{name}")`). So the param MUST be named `DEVELOPER_TOKEN` (uppercase) for the env var to be the idiomatic `SPUR_CONN_DEVELOPER_TOKEN`; `${connectionConfig.DEVELOPER_TOKEN}` then resolves it. A lowercase param (`developer_token`) would require `SPUR_CONN_developer_token`. This is a **test/manifest-only** fix — no production change.
+>
 > Note: this test mutates a process-global env var. If the crate's test suite shows flakiness from parallel env access, gate it behind the same serialization the existing `${connectionConfig.*}` tests use (a shared `Mutex`/`ENV_LOCK`), matching `base_url_templated`.
 
 - [ ] **Step 2: Run to verify it passes** (T1+T2 already deliver the behavior)
