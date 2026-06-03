@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # spur-cargo — project-standard cargo wrapper.
 #
-# Two modes:
-#   1. Remote (default when <main_repo>/.spur/remote-cargo.enabled exists, or
-#      SPUR_REMOTE=1): for compile-heavy subcommands (build/check/test/clippy/doc)
-#      plus clean (which must clean the remote target, not the local one)
-#      dispatch to scripts/gcp-build/build.sh which runs cargo on the GCP VM with
-#      the GCS-backed sccache. Falls back to local cargo if the VM is missing and
-#      auto-spin fails.
-#   2. Local: original behavior — injects scripts/sccache-worktree.sh as
-#      RUSTC_WRAPPER and execs cargo.
+# Remote is the DEFAULT for heavy compiles; lightweight subcommands auto-run
+# local. Routing (by subcommand):
+#   heavy  — build / check / test / doc / clean: dispatched to the GCP build VM
+#       (scripts/gcp-build/build.sh) with the GCS-backed sccache, falling back
+#       to local cargo only if the VM is unreachable. (clean is here so it
+#       cleans the remote target, not the unused local one.)
+#   lint   — clippy: auto-forced LOCAL by default (fast, incremental, no VM
+#       round-trip). SPUR_REMOTE=1 forces it remote — use that in CI, or in a
+#       sandboxed agent that cannot write the local target/ (EPERM on
+#       provenance-tagged artifacts).
+#   local  — fmt / run / everything else: always local (remote is meaningless).
+#
+# Local execution injects scripts/sccache-worktree.sh as RUSTC_WRAPPER.
 #
 # Per-invocation overrides:
-#   SPUR_REMOTE=0   → force local (e.g. fmt, run, debugging)
-#   SPUR_REMOTE=1   → force remote (e.g. CI)
+#   SPUR_REMOTE=0   → force local (any subcommand)
+#   SPUR_REMOTE=1   → force remote (any compile-capable subcommand, incl. clippy)
 #
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
 #      scripts/gcp-build/ — remote build pipeline
@@ -26,38 +30,37 @@ SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd -P)
 WRAPPER="$SCRIPT_DIR/sccache-worktree.sh"
 REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"
 
-# ---- resolve main repo (where the marker file lives) -----------------------
-MAIN_REPO=""
-if GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null); then
-    # In a worktree, --git-common-dir points to the main repo's .git directory.
-    if [[ -d "$GIT_COMMON_DIR" ]]; then
-        MAIN_REPO=$(cd "$GIT_COMMON_DIR/.." && pwd -P)
-    fi
-fi
-
-# ---- decide local vs remote ------------------------------------------------
-REMOTE_ENABLED=0
-if [[ "${SPUR_REMOTE:-}" == "1" ]]; then
-    REMOTE_ENABLED=1
-elif [[ "${SPUR_REMOTE:-}" == "0" ]]; then
-    REMOTE_ENABLED=0
-elif [[ -n "$MAIN_REPO" && -f "$MAIN_REPO/.spur/remote-cargo.enabled" ]]; then
-    REMOTE_ENABLED=1
-fi
-
+# ---- routing ---------------------------------------------------------------
+# Remote is the default for heavy compiles; lightweight subcommands auto-run
+# local. Precedence: an explicit SPUR_REMOTE wins; otherwise the subcommand
+# class decides. See the header for the full contract.
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
-    build|check|test|clippy|doc)
-        REMOTE_CAPABLE=1 ;;
+    build|check|test|doc)
+        CLASS="heavy" ;;
     clean)
         # clean must target wherever compilation happens. In remote mode the
         # artifacts live in /mnt/cargo on the VM, so `spur-cargo clean -p <pkg>`
         # has to run on the VM — otherwise it silently cleans the (unused) local
         # target dir and the remote stale artifact survives, masking real
         # staleness bugs. Falls back to local clean if the VM is unavailable.
-        REMOTE_CAPABLE=1 ;;
+        CLASS="heavy" ;;
+    clippy)
+        # Lightweight lint: auto-forced local for fast incremental feedback.
+        CLASS="lint" ;;
     *)
-        REMOTE_CAPABLE=0 ;;
+        # fmt, run, and everything else: local only (remote is meaningless).
+        CLASS="local" ;;
+esac
+
+REMOTE_CAPABLE=0
+case "${SPUR_REMOTE:-}" in
+    0)
+        REMOTE_CAPABLE=0 ;;                                       # force local (any cmd)
+    1)
+        if [[ "$CLASS" != "local" ]]; then REMOTE_CAPABLE=1; fi ;; # force remote (not fmt/run)
+    *)
+        if [[ "$CLASS" == "heavy" ]]; then REMOTE_CAPABLE=1; fi ;; # default: heavy → remote
 esac
 
 # ---- remote dispatch -------------------------------------------------------
@@ -67,7 +70,7 @@ esac
 # genuine test/build failure must propagate so the worker doesn't waste
 # effort re-running locally.
 INFRA_UNAVAILABLE=200
-if [[ $REMOTE_ENABLED -eq 1 && $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
+if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
     echo "[spur-cargo] remote ($SUBCOMMAND) → GCP VM" >&2
     set +e
     "$REMOTE_BUILD_SH" --auto-spin -- "$@"
