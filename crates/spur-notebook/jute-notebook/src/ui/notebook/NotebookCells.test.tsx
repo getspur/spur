@@ -1,5 +1,11 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  type RenderResult,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type StoreApi, createStore } from "zustand/vanilla";
 
@@ -107,6 +113,12 @@ function createNotebookStoreForCell(cell: Record<string, unknown>) {
   }));
 }
 
+function expectCellAccent(container: RenderResult["container"], color: string) {
+  const accent = container.querySelector('span[class*="w-[3px]"]');
+  expect(accent).toBeInTheDocument();
+  expect(accent).toHaveStyle({ background: color });
+}
+
 describe("NotebookCells", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -180,11 +192,12 @@ describe("NotebookCells", () => {
       setCellType: vi.fn(),
     };
 
-    render(<NotebookCells />);
+    const { container } = render(<NotebookCells />);
 
-    expect(screen.getByText("✦ AI")).toBeInTheDocument();
+    expect(screen.getByText("AI Agent")).toBeInTheDocument();
     expect(screen.getByText("● LIVE")).toBeInTheDocument();
-    expect(screen.getByText(/✦\[\*\]/)).toBeInTheDocument();
+    expect(screen.getByText(/✦\[\*\]/)).toHaveStyle({ color: "#7C3AED" });
+    expectCellAccent(container, "#7C3AED");
   });
 
   test("renders manual AI cell header when AI live metadata is false", () => {
@@ -200,11 +213,11 @@ describe("NotebookCells", () => {
 
     render(<NotebookCells />);
 
-    expect(screen.getByText("✦ AI")).toBeInTheDocument();
+    expect(screen.getByText("AI Agent")).toBeInTheDocument();
     expect(screen.getByText("manual")).toBeInTheDocument();
   });
 
-  test("does not render AI header for plain code cells", () => {
+  test("renders Python chip and accent for plain code cells", () => {
     mocks.notebook = {
       store: createNotebookStoreForCell({}),
       addCell: vi.fn(),
@@ -212,9 +225,27 @@ describe("NotebookCells", () => {
       setCellType: vi.fn(),
     };
 
-    render(<NotebookCells />);
+    const { container } = render(<NotebookCells />);
 
-    expect(screen.queryByText("✦ AI")).not.toBeInTheDocument();
+    expect(screen.getByText("Python")).toBeInTheDocument();
+    expect(screen.getByText("[*]")).toHaveStyle({ color: "#3776AB" });
+    expectCellAccent(container, "#3776AB");
+    expect(screen.queryByText(/✦\[/)).not.toBeInTheDocument();
+  });
+
+  test("renders Rust chip and accent for Rust code cells", () => {
+    mocks.notebook = {
+      store: createNotebookStoreForCell({ codeType: "rust" }),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+    };
+
+    const { container } = render(<NotebookCells />);
+
+    expect(screen.getByText("Rust")).toBeInTheDocument();
+    expect(screen.getByText("[*]")).toHaveStyle({ color: "#CE422B" });
+    expectCellAccent(container, "#CE422B");
     expect(screen.queryByText(/✦\[/)).not.toBeInTheDocument();
   });
 });
