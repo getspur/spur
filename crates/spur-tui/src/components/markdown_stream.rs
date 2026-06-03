@@ -376,8 +376,11 @@ fn rendered_markdown_tables(parse_input: &str, render_width: Option<u16>) -> Vec
             if source_rows.is_empty() {
                 return None;
             }
-            let rendered_lines = render_markdown_table(&table, render_width);
-            (!rendered_lines.is_empty()).then_some(RenderedTable {
+            let mut rendered_lines = render_markdown_table(&table, render_width);
+            if rendered_lines.is_empty() && !table.header.is_empty() {
+                rendered_lines = render_table_grid_fallback(&table);
+            }
+            Some(RenderedTable {
                 source_rows,
                 rendered_lines,
             })
@@ -481,11 +484,30 @@ fn render_markdown_table(table: &MarkdownTable, render_width: Option<u16>) -> Ve
     let grid_width = table_grid_width(&widths);
 
     if let Some(max_width) = render_width.map(usize::from).filter(|width| *width > 0) {
-        if grid_width > max_width {
+        if grid_width > max_width && !rows.is_empty() {
             return render_table_records(&header, &rows, max_width);
         }
     }
 
+    render_table_grid(&header, &rows, &widths, &table.alignments)
+}
+
+fn render_table_grid_fallback(table: &MarkdownTable) -> Vec<Line<'static>> {
+    let col_count = table
+        .header
+        .len()
+        .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+    if col_count == 0 {
+        return Vec::new();
+    }
+
+    let header = normalized_row(&table.header, col_count);
+    let rows: Vec<Vec<String>> = table
+        .rows
+        .iter()
+        .map(|row| normalized_row(row, col_count))
+        .collect();
+    let widths = table_column_widths(&header, &rows, col_count);
     render_table_grid(&header, &rows, &widths, &table.alignments)
 }
 
@@ -1629,6 +1651,73 @@ mod stream_item_tests {
             rendered.contains("│ longer-name │ much longer value │"),
             "long row should preserve the widest content:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn streamed_wide_header_only_table_never_renders_raw_at_narrow_width() {
+        fn preview_text(stream: &MarkdownStream, width: u16) -> String {
+            stream
+                .preview_items_with_width(&StateLookup::empty(), width)
+                .iter()
+                .filter_map(|item| match item {
+                    StreamItem::Text(lines) => Some(
+                        lines
+                            .iter()
+                            .map(line_plain_text)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    StreamItem::Fence(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let width = 50;
+        let header = "| Feature | Description with enough width to overflow |\n";
+        let separator = "|---|---|\n";
+        let rows = [
+            (
+                "| Auth | Handles login and session refresh for users |\n",
+                "Auth",
+            ),
+            (
+                "| Billing | Presents invoices, plans, and payment history |\n",
+                "Billing",
+            ),
+        ];
+        let mut stream = MarkdownStream::new();
+
+        stream.append(header);
+        stream.append(separator);
+
+        let header_only = preview_text(&stream, width);
+        assert!(
+            header_only.contains('┌') && header_only.contains('│'),
+            "header-only streaming table must render as a grid:\n{header_only}"
+        );
+        assert!(
+            header_only.contains("Feature") && header_only.contains("Description"),
+            "header-only table content must not be dropped:\n{header_only}"
+        );
+
+        let mut rendered_steps = vec![header_only];
+        for (row, expected) in rows {
+            stream.append(row);
+            let rendered = preview_text(&stream, width);
+            assert!(
+                rendered.contains("Feature") && rendered.contains(expected),
+                "streamed table content must stay represented:\n{rendered}"
+            );
+            rendered_steps.push(rendered);
+        }
+
+        for rendered in rendered_steps {
+            assert!(
+                !rendered.contains("|---") && !rendered.contains("| Feature |"),
+                "streamed wide table must never render raw markdown rows:\n{rendered}"
+            );
+        }
     }
 
     #[test]
