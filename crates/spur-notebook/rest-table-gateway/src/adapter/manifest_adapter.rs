@@ -587,6 +587,7 @@ id = {{ json = "$.id", type = "Utf8" }}
 name = "svc"
 base_url = "{base}"
 allow_writes = true
+auth = {{ scheme = "bearer", env = "SVC_BEARER_TOKEN" }}
 [source.headers]
 developer-token = "dev-123"
 [[action]]
@@ -601,6 +602,7 @@ id = {{ json = "$.id", type = "Utf8" }}
 "#,
             base = server.uri()
         );
+        std::env::set_var("SVC_BEARER_TOKEN", "tok-1");
         let adapter = ManifestAdapter::new(Manifest::from_toml(&toml).unwrap());
         let req = ActionRequest {
             name: "create".to_string(),
@@ -608,11 +610,11 @@ id = {{ json = "$.id", type = "Utf8" }}
             path: "/orders".to_string(),
             query: vec![],
             body: Some(serde_json::json!({ "price": 0.5 })),
-            auth: ResolvedAuth::Bearer("tok-1".to_string()),
             idempotency_key: None,
             dry_run: false,
         };
         let batches = adapter.act(req).await.unwrap();
+        std::env::remove_var("SVC_BEARER_TOKEN");
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 
@@ -636,6 +638,7 @@ id = {{ json = "$.id", type = "Utf8" }}
         // ConnectionContext::from_env maps a param to SPUR_CONN_{name} case-preserving,
         // so the param is named DEVELOPER_TOKEN (uppercase) to read SPUR_CONN_DEVELOPER_TOKEN.
         std::env::set_var("SPUR_CONN_DEVELOPER_TOKEN", "dev-tok-xyz");
+        std::env::set_var("GADS_BEARER_TOKEN", "ya29-test");
 
         let toml = format!(
             r#"
@@ -643,6 +646,7 @@ id = {{ json = "$.id", type = "Utf8" }}
 name = "google_ads"
 base_url = "{base}"
 allow_writes = true
+auth = {{ scheme = "bearer", env = "GADS_BEARER_TOKEN" }}
 connection_config = ["DEVELOPER_TOKEN"]
 [source.headers]
 developer-token = "${{connectionConfig.DEVELOPER_TOKEN}}"
@@ -670,13 +674,13 @@ impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
             body: Some(serde_json::json!({
                 "query": "SELECT campaign.id, metrics.impressions FROM campaign"
             })),
-            auth: ResolvedAuth::Bearer("ya29-test".to_string()),
             idempotency_key: None,
             dry_run: false,
         };
         let batches = adapter.act(req).await.unwrap();
 
         std::env::remove_var("SPUR_CONN_DEVELOPER_TOKEN");
+        std::env::remove_var("GADS_BEARER_TOKEN");
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
     }
 
