@@ -3,4 +3,4 @@
 /**
  * Per-cell code language label persisted under `cell.metadata.spur.code_type`.
  */
-export type CodeType = "python" | "javascript" | "rust";
+export type CodeType = "python" | "javascript" | "rust" | "go";
