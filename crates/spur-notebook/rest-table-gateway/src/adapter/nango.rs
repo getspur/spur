@@ -228,6 +228,26 @@ fn auth_to_toml(auth: &AuthCfg) -> String {
             toml_string(param),
             toml_string(env)
         ),
+        AuthCfg::Oauth2Refresh {
+            token_url,
+            client_id_env,
+            client_secret_env,
+            refresh_token_env,
+            scope,
+        } => {
+            let mut out = format!(
+                "{{ scheme = \"oauth2_refresh\", token_url = {}, client_id_env = {}, client_secret_env = {}, refresh_token_env = {}",
+                toml_string(token_url),
+                toml_string(client_id_env),
+                toml_string(client_secret_env),
+                toml_string(refresh_token_env)
+            );
+            if let Some(scope) = scope {
+                out.push_str(&format!(", scope = {}", toml_string(scope)));
+            }
+            out.push_str(" }");
+            out
+        }
     }
 }
 
