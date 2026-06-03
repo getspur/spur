@@ -9,6 +9,13 @@ pub struct ProviderEntry {
     pub categories: Option<Vec<String>>,
     pub auth_mode: Option<String>,
     pub token_url: Option<String>,
+    // Authorization-code (Approach C) provider fields. Parsed now; consumed by the
+    // deferred "Connect with browser" wizard task. Optional so non-OAuth providers
+    // (and the SAMPLE / OAUTH2_CC / TWO_STEP entries) keep parsing unchanged.
+    pub authorization_url: Option<String>,
+    #[serde(default)]
+    pub authorization_params: Option<IndexMap<String, String>>,
+    pub scope_separator: Option<String>,
     pub proxy: Option<Proxy>,
 }
 
@@ -445,6 +452,39 @@ legacy:
             manifest.source.auth,
             crate::adapter::manifest::AuthCfg::Bearer { .. }
         ));
+    }
+
+    #[test]
+    fn parses_authorization_code_fields() {
+        const Y: &str = r#"
+acme:
+  display_name: Acme
+  auth_mode: OAUTH2
+  authorization_url: "https://acme.test/oauth/authorize"
+  token_url: "https://acme.test/oauth/token"
+  authorization_params:
+    response_type: code
+    prompt: consent
+  scope_separator: " "
+  proxy:
+    base_url: "https://api.acme.test"
+"#;
+        let providers = parse_providers(Y).expect("providers yaml should parse");
+        let p = &providers["acme"];
+        assert_eq!(
+            p.authorization_url.as_deref(),
+            Some("https://acme.test/oauth/authorize")
+        );
+        assert_eq!(p.scope_separator.as_deref(), Some(" "));
+        let params = p
+            .authorization_params
+            .as_ref()
+            .expect("authorization_params should be present");
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
+        assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
     }
 
     #[test]
