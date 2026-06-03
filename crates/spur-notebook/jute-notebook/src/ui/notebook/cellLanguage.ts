@@ -32,7 +32,8 @@ interface CellLike {
 export function cellLanguageId(cell: CellLike): CellLanguageId {
   const ks = (cell.cellMetadataOther?.kernelspec as { name?: string } | undefined)?.name;
   if (ks === "spur") return "spur";
-  return (cell.codeType ?? "python") as CellLanguageId;
+  const id = cell.codeType ?? "python";
+  return (id in CELL_LANGUAGE_TOKENS ? id : "python") as CellLanguageId;
 }
 
 export function cellLanguageToken(cell: CellLike): CellLanguageToken {

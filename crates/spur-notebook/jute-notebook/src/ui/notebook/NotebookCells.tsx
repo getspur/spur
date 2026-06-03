@@ -246,7 +246,7 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
             currentType={cell.type}
             onClose={() => setMenuOpen(false)}
             onSelectCodeType={(codeType) => {
-              notebook.setCellCodeType(cellId, codeType);
+              void notebook.setCellCodeType(cellId, codeType);
             }}
             onSelectType={(type) => {
               notebook.setCellType(cellId, type);
