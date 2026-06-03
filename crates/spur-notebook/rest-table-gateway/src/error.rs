@@ -9,6 +9,8 @@ pub enum GatewayError {
     Manifest(String),
     #[error("adapter error: {0}")]
     Adapter(String),
+    #[error("auth error: {0}")]
+    Auth(String),
     #[error("unknown table: {0}")]
     UnknownTable(String),
 }
