@@ -32,6 +32,8 @@ pub struct SourceCfg {
     pub connection_config: Vec<String>,
     #[serde(default)]
     pub allow_writes: bool,
+    #[serde(default)]
+    pub headers: IndexMap<String, String>,
 }
 
 /// Authentication config uses serde's internally tagged representation.
@@ -173,6 +175,39 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_headers_parse() {
+        let toml = r#"
+[source]
+name = "svc"
+base_url = "https://x.test"
+[source.headers]
+developer-token = "${connectionConfig.developer_token}"
+x-api-version = "v17"
+"#;
+        let m = Manifest::from_toml(toml).expect("manifest should parse");
+        assert_eq!(m.source.headers.len(), 2);
+        assert_eq!(
+            m.source.headers.get("x-api-version").map(String::as_str),
+            Some("v17")
+        );
+        assert_eq!(
+            m.source.headers.get("developer-token").map(String::as_str),
+            Some("${connectionConfig.developer_token}")
+        );
+    }
+
+    #[test]
+    fn source_headers_default_empty() {
+        let toml = r#"
+[source]
+name = "svc"
+base_url = "https://x.test"
+"#;
+        let m = Manifest::from_toml(toml).expect("manifest should parse");
+        assert!(m.source.headers.is_empty());
+    }
 
     #[test]
     fn parses_markets_manifest() {

@@ -26,6 +26,28 @@ pub struct ManifestAdapter {
     client: Client,
 }
 
+/// Template each static header value via `resolve_template`, returning name/value
+/// pairs ready to attach to a request. `authorization` is reserved (it would
+/// shadow the resolved auth header, which `reqwest` appends rather than
+/// replaces).
+// wired in T2
+#[allow(dead_code)]
+fn resolve_headers(
+    headers: &IndexMap<String, String>,
+    ctx: &ConnectionContext,
+) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::with_capacity(headers.len());
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("authorization") {
+            return Err(GatewayError::Manifest(
+                "static header 'authorization' is reserved; use [source.auth]".to_string(),
+            ));
+        }
+        out.push((name.clone(), resolve_template(value, ctx)?));
+    }
+    Ok(out)
+}
+
 impl ManifestAdapter {
     pub fn new(manifest: Manifest) -> Self {
         Self {
@@ -452,12 +474,32 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::ManifestAdapter;
+    use super::{resolve_headers, ManifestAdapter};
     use crate::adapter::manifest::Manifest;
+    use crate::adapter::templating::ConnectionContext;
     use crate::adapter::{
         ActionRequest, Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest,
         TableKind,
     };
+    use crate::error::GatewayError;
+
+    #[test]
+    fn resolve_headers_returns_literals_and_rejects_authorization() {
+        use indexmap::IndexMap;
+        let ctx = ConnectionContext::from_env(&[]);
+
+        let mut headers = IndexMap::new();
+        headers.insert("x-api-version".to_string(), "v17".to_string());
+        let out = resolve_headers(&headers, &ctx).expect("resolve");
+        assert_eq!(out, vec![("x-api-version".to_string(), "v17".to_string())]);
+
+        let mut bad = IndexMap::new();
+        bad.insert("Authorization".to_string(), "Bearer x".to_string());
+        assert!(matches!(
+            resolve_headers(&bad, &ctx),
+            Err(GatewayError::Manifest(_))
+        ));
+    }
 
     #[test]
     fn oauth2_refresh_toml_roundtrips() {
