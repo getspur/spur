@@ -25,7 +25,7 @@ impl ManifestAdapter {
     pub fn new(manifest: Manifest) -> Self {
         Self {
             manifest,
-            client: Client::new(),
+            client: crate::adapter::default_http_client(),
         }
     }
 
