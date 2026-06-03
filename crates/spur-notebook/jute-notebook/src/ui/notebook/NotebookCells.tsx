@@ -16,6 +16,7 @@ import { useNotebook } from "@/stores/notebook";
 
 import CellInputFallback from "./CellInputFallback";
 import OutputView from "./OutputView";
+import { cellLanguageId, cellLanguageToken } from "./cellLanguage";
 import {
   compilePhasePresentation,
   formatCompileElapsed,
@@ -23,16 +24,17 @@ import {
 
 const CellInput = lazy(() => import("./CellInput"));
 
-function isAiCell(cell: {
+interface CellLanguageCell {
+  codeType?: string;
   cellMetadataOther?: Record<string, unknown>;
-}): boolean {
-  const ks = (
-    cell.cellMetadataOther?.kernelspec as { name?: string } | undefined
-  )?.name;
-  return ks === "spur";
 }
 
-function cellAiLive(cell: { dagMetadata?: unknown }): boolean {
+function isAiCell(cell: CellLanguageCell): boolean {
+  return cellLanguageId(cell) === "spur";
+}
+
+function cellAiLive(cell: CellLanguageCell & { dagMetadata?: unknown }): boolean {
+  if (!isAiCell(cell)) return false;
   const dag = cell.dagMetadata as
     | { ai_live?: boolean; aiLive?: boolean }
     | undefined;
@@ -186,40 +188,56 @@ function CellExecutionMarker({ cellId }: { cellId: string }) {
         ? String(cell.result.executionCount)
         : " ";
 
+  const token = cellLanguageToken(cell);
   const ai = isAiCell(cell);
   return (
     <div
       aria-hidden="true"
-      className={clsx(
-        markerClassName,
-        ai ? "text-violet-600" : "text-gray-400",
-      )}
+      className={markerClassName}
+      style={{ color: token.accent }}
     >
       {ai ? "✦" : ""}[{executionCount}]
     </div>
   );
 }
 
-function AiCellHeader({ cellId }: { cellId: string }) {
+function CellLanguageHeader({ cellId }: { cellId: string }) {
   const notebook = useNotebook();
   const cell = useStore(notebook.store, (s) => s.serverState.cells[cellId]);
-  if (!cell || cell.type !== "code" || !isAiCell(cell)) return null;
-  const live = cellAiLive(cell);
+  if (!cell || cell.type !== "code") return null;
+  const token = cellLanguageToken(cell);
+  const isAi = cellLanguageId(cell) === "spur";
+  const live = isAi && cellAiLive(cell);
   return (
     <div className="flex items-center gap-2 pl-[57px] pr-[18px] pt-3">
-      <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[10px] font-semibold text-violet-700">
-        ✦ AI
-      </span>
       <span
-        className={clsx(
-          "rounded border px-1.5 py-px font-mono text-[9px]",
-          live
-            ? "border-violet-600 bg-violet-600 text-white"
-            : "border-gray-300 bg-white text-gray-500",
-        )}
+        className="inline-flex items-center gap-1.5 rounded border px-1.5 py-px font-mono text-[10px] font-semibold"
+        style={{
+          color: token.chipText,
+          background: token.chipBg,
+          borderColor: token.chipBorder,
+        }}
       >
-        {live ? "● LIVE" : "manual"}
+        <span
+          className="inline-flex h-[18px] w-[18px] items-center justify-center rounded text-[9px]"
+          style={{ background: token.glyphBg }}
+        >
+          {token.glyph}
+        </span>
+        {token.label}
       </span>
+      {isAi && (
+        <span
+          className={clsx(
+            "rounded border px-1.5 py-px font-mono text-[9px]",
+            live
+              ? "border-violet-600 bg-violet-600 text-white"
+              : "border-gray-300 bg-white text-gray-500",
+          )}
+        >
+          {live ? "● LIVE" : "manual"}
+        </span>
+      )}
     </div>
   );
 }
@@ -250,9 +268,16 @@ export default function NotebookCells() {
         <div key={id} className="relative">
           <hr className="border-gray-200" />
 
+          {cells[id]?.type === "code" && (
+            <span
+              aria-hidden="true"
+              className="absolute bottom-4 left-0 top-4 w-[3px] rounded"
+              style={{ background: cellLanguageToken(cells[id]).accent }}
+            />
+          )}
           <CellExecutionMarker cellId={id} />
           <CellInputAside cellId={id} />
-          <AiCellHeader cellId={id} />
+          <CellLanguageHeader cellId={id} />
           <Suspense fallback={<CellInputFallback cellId={id} />}>
             <CellInput cellId={id} />
           </Suspense>
