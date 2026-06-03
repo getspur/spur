@@ -592,6 +592,70 @@ id = {{ json = "$.id", type = "Utf8" }}
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 
+    #[tokio::test]
+    async fn google_ads_gaql_sends_developer_token_and_bearer() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/customers/123/googleAds:search"))
+            .and(wiremock::matchers::header("authorization", "Bearer ya29-test"))
+            .and(wiremock::matchers::header("developer-token", "dev-tok-xyz"))
+            .and(wiremock::matchers::body_string_contains("SELECT campaign.id"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    { "campaign": { "id": "9482117003" }, "metrics": { "impressions": 128940 } },
+                    { "campaign": { "id": "9482117884" }, "metrics": { "impressions": 86552 } }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        // ConnectionContext::from_env maps a param to SPUR_CONN_{name} case-preserving,
+        // so the param is named DEVELOPER_TOKEN (uppercase) to read SPUR_CONN_DEVELOPER_TOKEN.
+        std::env::set_var("SPUR_CONN_DEVELOPER_TOKEN", "dev-tok-xyz");
+
+        let toml = format!(
+            r#"
+[source]
+name = "google_ads"
+base_url = "{base}"
+allow_writes = true
+connection_config = ["DEVELOPER_TOKEN"]
+[source.headers]
+developer-token = "${{connectionConfig.DEVELOPER_TOKEN}}"
+[[action]]
+name = "google_ads_search"
+method = "POST"
+path = "/customers/{{customer_id}}/googleAds:search"
+response_path = "$.results"
+[action.args]
+customer_id = {{ in = "path", type = "Utf8", required = true }}
+query       = {{ in = "body", type = "Utf8", required = true }}
+[action.columns]
+campaign_id = {{ json = "$.campaign.id", type = "Utf8" }}
+impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
+"#,
+            base = server.uri()
+        );
+        let adapter = ManifestAdapter::new(Manifest::from_toml(&toml).unwrap());
+
+        let req = ActionRequest {
+            name: "google_ads_search".to_string(),
+            method: "POST".to_string(),
+            path: "/customers/123/googleAds:search".to_string(),
+            query: vec![],
+            body: Some(serde_json::json!({
+                "query": "SELECT campaign.id, metrics.impressions FROM campaign"
+            })),
+            auth: ResolvedAuth::Bearer("ya29-test".to_string()),
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let batches = adapter.act(req).await.unwrap();
+
+        std::env::remove_var("SPUR_CONN_DEVELOPER_TOKEN");
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+    }
+
     #[test]
     fn oauth2_refresh_toml_roundtrips() {
         let manifest = Manifest::from_toml(
