@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type StoreApi, createStore } from "zustand/vanilla";
 
@@ -72,6 +72,41 @@ function createNotebookStore(
   }));
 }
 
+function createNotebookStoreForCell(cell: Record<string, unknown>) {
+  return createStore<any>()(() => ({
+    serverState: {
+      lastAppliedVersion: 0,
+      notebookMetadata: {},
+      cellIds: ["cell-1"],
+      cells: {
+        "cell-1": {
+          type: "code",
+          initialText: "print('hello')",
+          source: "print('hello')",
+          version: 1,
+          result: {
+            status: "running",
+            timings: { startedAt: Date.now() },
+            executionCount: undefined,
+            outputs: [],
+          },
+          ...cell,
+        },
+      },
+    },
+    viewState: {
+      selectedCellId: null,
+      isLoading: false,
+      viewMode: "cells",
+    },
+    editBuffer: {
+      cellSources: {},
+    },
+    dagStatus: {},
+    dagPortManifest: {},
+  }));
+}
+
 describe("NotebookCells", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -86,6 +121,7 @@ describe("NotebookCells", () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.useRealTimers();
     mocks.notebook = undefined;
   });
@@ -131,5 +167,54 @@ describe("NotebookCells", () => {
     expect(
       screen.getByRole("status", { name: "Compiling smawk 5s" }),
     ).toHaveTextContent("Compiling smawk");
+  });
+
+  test("renders live AI cell header and execution marker accent", () => {
+    mocks.notebook = {
+      store: createNotebookStoreForCell({
+        cellMetadataOther: { kernelspec: { name: "spur" } },
+        dagMetadata: { ai_live: true },
+      }),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    expect(screen.getByText("✦ AI")).toBeInTheDocument();
+    expect(screen.getByText("● LIVE")).toBeInTheDocument();
+    expect(screen.getByText(/✦\[\*\]/)).toBeInTheDocument();
+  });
+
+  test("renders manual AI cell header when AI live metadata is false", () => {
+    mocks.notebook = {
+      store: createNotebookStoreForCell({
+        cellMetadataOther: { kernelspec: { name: "spur" } },
+        dagMetadata: { ai_live: false },
+      }),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    expect(screen.getByText("✦ AI")).toBeInTheDocument();
+    expect(screen.getByText("manual")).toBeInTheDocument();
+  });
+
+  test("does not render AI header for plain code cells", () => {
+    mocks.notebook = {
+      store: createNotebookStoreForCell({}),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    expect(screen.queryByText("✦ AI")).not.toBeInTheDocument();
+    expect(screen.queryByText(/✦\[/)).not.toBeInTheDocument();
   });
 });
