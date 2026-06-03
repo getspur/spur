@@ -64,7 +64,8 @@ const DATASOURCE_EXTENSIONS = [
   "sqlite",
 ];
 
-function restWizardPrefillFromPayload(
+// eslint-disable-next-line react-refresh/only-export-components
+export function restWizardPrefillFromPayload(
   payload: unknown,
 ): AddRestApiWizardPrefill | null {
   if (!payload || typeof payload !== "object") return null;
@@ -85,6 +86,18 @@ function restWizardPrefillFromPayload(
       : typeof record.spec_text === "string"
         ? record.spec_text
         : undefined;
+  const manifestToml =
+    typeof record.manifestToml === "string"
+      ? record.manifestToml
+      : typeof record.manifest_toml === "string"
+        ? record.manifest_toml
+        : undefined;
+  const connectionOnly =
+    typeof record.connectionOnly === "boolean"
+      ? record.connectionOnly
+      : typeof record.connection_only === "boolean"
+        ? record.connection_only
+        : undefined;
   const provider =
     typeof record.provider === "string" && record.provider.trim().length > 0
       ? record.provider
@@ -94,6 +107,8 @@ function restWizardPrefillFromPayload(
     name: record.name,
     provider,
     specText,
+    manifestToml,
+    connectionOnly,
     missingEnvVars: missingEnvVars.filter(
       (envVar): envVar is string => typeof envVar === "string",
     ),

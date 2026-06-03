@@ -25,6 +25,10 @@ vi.mock("@/daemon/control", async () => {
 });
 
 const SPEC_TEXT = '{"openapi":"3.1.0","paths":{}}';
+const MANIFEST_TOML = `
+name = "stripe_reporting"
+provider = "stripe"
+`;
 
 function providersResponse() {
   return {
@@ -178,6 +182,9 @@ describe("AddRestApiWizard", () => {
         if (command.command === "add_api_datasource_from_import") {
           return Promise.resolve(datasourceResponse());
         }
+        if (command.command === "add_api_datasource_from_manifest") {
+          return Promise.resolve(datasourceResponse());
+        }
         if (command.command === "list_saved_connections") {
           return Promise.resolve(savedConnectionsResponse());
         }
@@ -292,6 +299,64 @@ describe("AddRestApiWizard", () => {
         credentials: [["STRIPE_API_KEY", "sk_test_prefill"]],
       }),
     );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("manifest_prefill_finishes_from_connect_with_credentials", async () => {
+    const onClose = vi.fn();
+
+    render(
+      <AddRestApiWizard
+        open
+        onClose={onClose}
+        prefill={{
+          name: "stripe_reporting",
+          provider: "stripe",
+          specText: null,
+          manifestToml: MANIFEST_TOML,
+          connectionOnly: false,
+          missingEnvVars: ["STRIPE_API_KEY", "STRIPE_ACCOUNT"],
+          step: "connect",
+        }}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to Stripe" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Finishing a connection started by the assistant/i),
+    ).toBeInTheDocument();
+
+    const addButton = screen.getByRole("button", { name: "Add datasource" });
+    expect(addButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("STRIPE_API_KEY"), {
+      target: { value: "sk_test_prefill" },
+    });
+    fireEvent.change(screen.getByLabelText("STRIPE_ACCOUNT"), {
+      target: { value: "acct_123" },
+    });
+    expect(addButton).toBeEnabled();
+
+    fireEvent.click(addButton);
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource_from_manifest",
+        name: "stripe_reporting",
+        manifest_toml: MANIFEST_TOML,
+        credentials: [
+          ["STRIPE_API_KEY", "sk_test_prefill"],
+          ["STRIPE_ACCOUNT", "acct_123"],
+        ],
+      }),
+    );
+    expect(
+      daemonControlMock.mock.calls.some(
+        ([command]) => command.command === "add_api_datasource_from_import",
+      ),
+    ).toBe(false);
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 

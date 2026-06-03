@@ -21,6 +21,7 @@ import type {
 } from "@/bindings";
 import {
   addApiDatasourceFromImportCommand,
+  addApiDatasourceFromManifestCommand,
   attachSavedConnectionCommand,
   attachedSavedConnectionFromDaemonControlResponse,
   daemonControl,
@@ -47,6 +48,8 @@ export type AddRestApiWizardPrefill = {
   name: string;
   provider?: string | null;
   specText?: string | null;
+  manifestToml?: string | null;
+  connectionOnly?: boolean;
   missingEnvVars: string[];
   step: "connect";
 };
@@ -113,6 +116,9 @@ export default function AddRestApiWizard({
   const [prefillCredentialKeys, setPrefillCredentialKeys] = useState<string[]>(
     [],
   );
+  const [prefillManifestToml, setPrefillManifestToml] = useState<string | null>(
+    null,
+  );
   const [specText, setSpecText] = useState("");
   const [tablePreview, setTablePreview] = useState<OpenApiTablePreview | null>(
     null,
@@ -137,6 +143,7 @@ export default function AddRestApiWizard({
       setSavedConnectionCredentials({});
       setMissingSavedCredentialKeys([]);
       setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
       setSpecText("");
       setTablePreview(tablePreviewFromTemplate(editConnection));
       setConnectionOnly(editConnection.tables.length === 0);
@@ -160,9 +167,14 @@ export default function AddRestApiWizard({
       setSavedConnectionCredentials({});
       setMissingSavedCredentialKeys([]);
       setPrefillCredentialKeys(prefill.missingEnvVars);
+      setPrefillManifestToml(
+        prefill.manifestToml && prefill.manifestToml.trim().length > 0
+          ? prefill.manifestToml
+          : null,
+      );
       setSpecText(prefill.specText ?? "");
       setTablePreview(null);
-      setConnectionOnly(false);
+      setConnectionOnly(prefill.connectionOnly ?? false);
       setPendingPreview(false);
       setPendingAdd(false);
       setError(null);
@@ -180,6 +192,7 @@ export default function AddRestApiWizard({
     setSavedConnectionCredentials({});
     setMissingSavedCredentialKeys([]);
     setPrefillCredentialKeys([]);
+    setPrefillManifestToml(null);
     setSpecText("");
     setTablePreview(null);
     setConnectionOnly(false);
@@ -247,6 +260,7 @@ export default function AddRestApiWizard({
       setMissingSavedCredentialKeys([]);
       setSavedConnectionCredentials({});
       setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
 
       if (mode === "catalog") {
         setSelectedSavedConnection(null);
@@ -278,6 +292,7 @@ export default function AddRestApiWizard({
     );
     setCredentials({});
     setPrefillCredentialKeys([]);
+    setPrefillManifestToml(null);
     setError(null);
   }, []);
 
@@ -288,6 +303,7 @@ export default function AddRestApiWizard({
       setMissingSavedCredentialKeys([]);
       setSavedConnectionCredentials({});
       setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
       setError(null);
     },
     [],
@@ -354,6 +370,7 @@ export default function AddRestApiWizard({
     tablePreview,
     editMode,
   });
+  const manifestPrefillMode = prefillManifestToml !== null;
 
   if (!open) return null;
 
@@ -406,6 +423,19 @@ export default function AddRestApiWizard({
     setError(null);
 
     try {
+      if (prefillManifestToml) {
+        const response = await daemonControl(
+          addApiDatasourceFromManifestCommand({
+            name: datasourceName.trim(),
+            manifest_toml: prefillManifestToml,
+            credentials: credentialPairs,
+          }),
+        );
+        importedApiDatasourceFromDaemonControlResponse(response);
+        onClose();
+        return;
+      }
+
       const response = await daemonControl(
         addApiDatasourceFromImportCommand({
           name: datasourceName.trim(),
@@ -512,9 +542,11 @@ export default function AddRestApiWizard({
       ? editMode
         ? "Save changes"
         : "Add datasource"
-      : step === "source" && sourceMode === "saved"
-        ? "Use connection"
-        : "Continue";
+      : manifestPrefillMode && step === "connect"
+        ? "Add datasource"
+        : step === "source" && sourceMode === "saved"
+          ? "Use connection"
+          : "Continue";
 
   return (
     <div
@@ -639,6 +671,7 @@ export default function AddRestApiWizard({
                   }))
                 }
                 onDatasourceNameChange={setDatasourceName}
+                assistantPrefillMode={manifestPrefillMode}
                 selectedProvider={selectedProvider}
                 sourceMode={sourceMode}
               />
@@ -701,6 +734,8 @@ export default function AddRestApiWizard({
               onClick={() => {
                 if (step === "source" && sourceMode === "saved" && !editMode) {
                   void handleAttachSavedConnection();
+                } else if (manifestPrefillMode && step === "connect") {
+                  void handleAddDatasource();
                 } else if (step === "review") {
                   if (editMode) void handleSaveEdit();
                   else void handleAddDatasource();
@@ -1120,6 +1155,7 @@ function CredentialFieldInputs({
 }
 
 function ConnectStep({
+  assistantPrefillMode,
   credentials,
   datasourceName,
   fields,
@@ -1129,6 +1165,7 @@ function ConnectStep({
   selectedProvider,
   sourceMode,
 }: {
+  assistantPrefillMode: boolean;
   credentials: Record<string, string>;
   datasourceName: string;
   fields: CredentialField[];
@@ -1156,6 +1193,18 @@ function ConnectStep({
         Auth, base URL, and credentials are passed to the daemon so it can build
         the datasource manifest.
       </p>
+
+      {assistantPrefillMode && (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <div className="flex items-start gap-2">
+            <AlertCircleIcon className="mt-0.5 shrink-0" size={14} />
+            <p>
+              Finishing a connection started by the assistant - add the missing
+              credentials and it will be saved automatically.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div
         className={clsx(
