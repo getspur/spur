@@ -115,6 +115,7 @@ notion:
   categories:
     - productivity
   auth_mode: OAUTH2
+  token_url: "https://api.notion.com/v1/oauth/token"
   proxy:
     base_url: "https://api.notion.com/v1"
 slack:
@@ -122,6 +123,7 @@ slack:
   categories:
     - communications
   auth_mode: OAUTH2
+  token_url: "https://slack.com/api/oauth.v2.access"
   proxy:
     base_url: "https://slack.com/api"
 hubspot:
@@ -129,6 +131,7 @@ hubspot:
   categories:
     - crm
   auth_mode: OAUTH2
+  token_url: "https://api.hubapi.com/oauth/v1/token"
   proxy:
     base_url: "https://api.hubapi.com"
 salesforce:
@@ -136,6 +139,7 @@ salesforce:
   categories:
     - crm
   auth_mode: OAUTH2
+  token_url: "${connectionConfig.salesforce_instance_url}/services/oauth2/token"
   proxy:
     base_url: "${connectionConfig.salesforce_instance_url}/services/data/v60.0"
 intercom:
@@ -143,6 +147,7 @@ intercom:
   categories:
     - support
   auth_mode: OAUTH2
+  token_url: "https://api.intercom.io/auth/eagle/token"
   proxy:
     base_url: "https://api.intercom.io"
 asana:
@@ -150,6 +155,7 @@ asana:
   categories:
     - project-management
   auth_mode: OAUTH2
+  token_url: "https://app.asana.com/-/oauth_token"
   proxy:
     base_url: "https://app.asana.com/api/1.0"
 google-calendar:
@@ -157,6 +163,7 @@ google-calendar:
   categories:
     - productivity
   auth_mode: OAUTH2
+  token_url: "https://oauth2.googleapis.com/token"
   proxy:
     base_url: "https://www.googleapis.com/calendar/v3"
 gmail:
@@ -164,6 +171,7 @@ gmail:
   categories:
     - communications
   auth_mode: OAUTH2
+  token_url: "https://oauth2.googleapis.com/token"
   proxy:
     base_url: "https://gmail.googleapis.com/gmail/v1"
 jira:
@@ -171,6 +179,7 @@ jira:
   categories:
     - project-management
   auth_mode: OAUTH2
+  token_url: "https://auth.atlassian.com/oauth/token"
   proxy:
     base_url: "${connectionConfig.jira_site_url}/rest/api/3"
 trello:
@@ -178,6 +187,7 @@ trello:
   categories:
     - project-management
   auth_mode: OAUTH2
+  token_url: "https://trello.com/1/OAuthGetAccessToken"
   proxy:
     base_url: "https://api.trello.com/1"
 plaid:

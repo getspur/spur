@@ -8,6 +8,7 @@ pub struct ProviderEntry {
     pub display_name: Option<String>,
     pub categories: Option<Vec<String>>,
     pub auth_mode: Option<String>,
+    pub token_url: Option<String>,
     pub proxy: Option<Proxy>,
 }
 
@@ -115,9 +116,21 @@ fn auth_cfg(name: &str, p: &ProviderEntry, upper: &str) -> AuthCfg {
             user_env: format!("{upper}_USER"),
             pass_env: format!("{upper}_PASS"),
         },
-        _ => AuthCfg::Bearer {
-            env: format!("{}_TOKEN", env_prefix(name)),
-        },
+        _ => {
+            if let Some(token_url) = p.token_url.clone() {
+                AuthCfg::Oauth2Refresh {
+                    token_url,
+                    client_id_env: format!("{upper}_CLIENT_ID"),
+                    client_secret_env: format!("{upper}_CLIENT_SECRET"),
+                    refresh_token_env: format!("{upper}_REFRESH_TOKEN"),
+                    scope: None,
+                }
+            } else {
+                AuthCfg::Bearer {
+                    env: format!("{}_TOKEN", env_prefix(name)),
+                }
+            }
+        }
     }
 }
 
@@ -382,6 +395,56 @@ salesforce:
         assert_eq!(pagination.style, "cursor");
         assert_eq!(pagination.cursor_path.as_deref(), Some("$.next_cursor"));
         assert_eq!(pagination.cursor_param.as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn oauth2_with_token_url_maps_to_refresh_grant() {
+        let providers = parse_providers(
+            r#"
+notion:
+  display_name: Notion
+  auth_mode: OAUTH2
+  token_url: "https://api.notion.com/v1/oauth/token"
+  proxy:
+    base_url: "https://api.notion.com/v1"
+"#,
+        )
+        .expect("providers yaml should parse");
+        let manifest = provider_to_manifest_stub("notion", &providers["notion"]);
+        match manifest.source.auth {
+            crate::adapter::manifest::AuthCfg::Oauth2Refresh {
+                token_url,
+                client_id_env,
+                client_secret_env,
+                refresh_token_env,
+                ..
+            } => {
+                assert_eq!(token_url, "https://api.notion.com/v1/oauth/token");
+                assert_eq!(client_id_env, "NOTION_CLIENT_ID");
+                assert_eq!(client_secret_env, "NOTION_CLIENT_SECRET");
+                assert_eq!(refresh_token_env, "NOTION_REFRESH_TOKEN");
+            }
+            other => panic!("expected oauth2_refresh, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oauth2_without_token_url_stays_bearer() {
+        let providers = parse_providers(
+            r#"
+legacy:
+  display_name: Legacy
+  auth_mode: OAUTH2
+  proxy:
+    base_url: "https://api.legacy.test"
+"#,
+        )
+        .expect("providers yaml should parse");
+        let manifest = provider_to_manifest_stub("legacy", &providers["legacy"]);
+        assert!(matches!(
+            manifest.source.auth,
+            crate::adapter::manifest::AuthCfg::Bearer { .. }
+        ));
     }
 
     #[test]
