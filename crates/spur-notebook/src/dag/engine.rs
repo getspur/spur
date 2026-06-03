@@ -83,6 +83,7 @@ pub enum CellRunStatus {
     Succeeded,
     Failed,
     UpstreamFailed,
+    Stale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,17 +382,29 @@ where
     }
 
     async fn cascade_from(&mut self, seeds: Vec<String>) -> Result<CascadeReport, EngineError> {
-        let mut blocked = BTreeSet::new();
+        let mut blocked = BTreeMap::new();
         let mut report = CascadeReport::default();
 
         for cell_id in seeds {
-            if blocked.contains(&cell_id) {
-                report.runs.push(CellRunReport::new(
-                    cell_id.clone(),
-                    CellRunStatus::UpstreamFailed,
-                ));
-                self.emit_run_report(&cell_id, CellRunStatus::UpstreamFailed)?;
-                blocked.extend(self.downstream_of(&cell_id)?);
+            if let Some(status) = blocked.get(&cell_id).copied() {
+                report
+                    .runs
+                    .push(CellRunReport::new(cell_id.clone(), status));
+                self.emit_run_report(&cell_id, status)?;
+                for downstream in self.downstream_of(&cell_id)? {
+                    blocked.insert(downstream, status);
+                }
+                continue;
+            }
+
+            if self.should_mark_stale_on_cascade(&cell_id)? {
+                report
+                    .runs
+                    .push(CellRunReport::new(cell_id.clone(), CellRunStatus::Stale));
+                self.emit_run_report(&cell_id, CellRunStatus::Stale)?;
+                for downstream in self.downstream_of(&cell_id)? {
+                    blocked.insert(downstream, CellRunStatus::Stale);
+                }
                 continue;
             }
 
@@ -402,7 +415,9 @@ where
                 .push(CellRunReport::new(cell_id.clone(), status));
             self.emit_run_report(&cell_id, status)?;
             if status == CellRunStatus::Failed {
-                blocked.extend(self.downstream_of(&cell_id)?);
+                for downstream in self.downstream_of(&cell_id)? {
+                    blocked.insert(downstream, CellRunStatus::UpstreamFailed);
+                }
             }
         }
 
@@ -655,6 +670,14 @@ where
         }
         Ok(downstream)
     }
+
+    fn should_mark_stale_on_cascade(&self, cell_id: &str) -> Result<bool, EngineError> {
+        let (root, _) = self.store.snapshot();
+        let cell = cell_view(&root, cell_id).ok_or_else(|| EngineError::CellNotFound {
+            cell_id: cell_id.to_owned(),
+        })?;
+        Ok(cell.kernelspec.as_deref() == Some("spur") && !cell.ai_live)
+    }
 }
 
 fn resolve_code_type(root: &NotebookRoot, code_type: Option<CodeType>) -> CodeType {
@@ -702,6 +725,7 @@ impl CellRunStatus {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::UpstreamFailed => "upstream_failed",
+            Self::Stale => "stale",
         }
     }
 
@@ -710,6 +734,7 @@ impl CellRunStatus {
             Self::Succeeded => "fresh",
             Self::Failed => "failed",
             Self::UpstreamFailed => "upstream-failed",
+            Self::Stale => "stale",
         }
     }
 }
@@ -938,6 +963,8 @@ struct CellView {
     source: String,
     version: Option<u64>,
     code_type: Option<CodeType>,
+    kernelspec: Option<String>,
+    ai_live: bool,
 }
 
 fn cell_view(root: &NotebookRoot, target: &str) -> Option<CellView> {
@@ -946,6 +973,8 @@ fn cell_view(root: &NotebookRoot, target: &str) -> Option<CellView> {
             source: cell_source(cell),
             version: cell_version(cell),
             code_type: cell_code_type(cell),
+            kernelspec: cell_kernelspec(cell),
+            ai_live: cell_ai_live(cell),
         })
     })
 }
@@ -980,6 +1009,45 @@ fn cell_code_type(cell: &Cell) -> Option<CodeType> {
         Cell::Markdown(cell) => cell.metadata.spur.as_ref().and_then(|spur| spur.code_type),
         Cell::Code(cell) => cell.metadata.spur.as_ref().and_then(|spur| spur.code_type),
     }
+}
+
+fn cell_kernelspec(cell: &Cell) -> Option<String> {
+    match cell {
+        Cell::Raw(cell) => metadata_kernelspec(&cell.metadata),
+        Cell::Markdown(cell) => metadata_kernelspec(&cell.metadata),
+        Cell::Code(cell) => metadata_kernelspec(&cell.metadata),
+    }
+}
+
+fn metadata_kernelspec(metadata: &jute::backend::notebook::CellMetadata) -> Option<String> {
+    metadata.other.get("kernelspec").and_then(kernelspec_name)
+}
+
+fn kernelspec_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(name) => Some(name.clone()),
+        Value::Object(object) => object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn cell_ai_live(cell: &Cell) -> bool {
+    match cell {
+        Cell::Raw(cell) => metadata_ai_live(&cell.metadata),
+        Cell::Markdown(cell) => metadata_ai_live(&cell.metadata),
+        Cell::Code(cell) => metadata_ai_live(&cell.metadata),
+    }
+}
+
+fn metadata_ai_live(metadata: &jute::backend::notebook::CellMetadata) -> bool {
+    metadata
+        .other
+        .get("ai_live")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn cell_source(cell: &Cell) -> String {
@@ -1267,6 +1335,111 @@ mod tests {
         assert_eq!(requests[0].expected_version, 2);
         assert_eq!(requests[1].expected_version, 2);
         assert_eq!(requests[1].code, "new_source()");
+    }
+
+    #[tokio::test]
+    async fn manual_ai_node_marked_stale_not_run_on_upstream_change() {
+        let temp = TempDir::new().expect("temp dir");
+        let mut root = notebook(vec![
+            cell(
+                "source",
+                "source = spur.get('sales')",
+                1,
+                dag(vec![port("source")], vec![], Some(source("csv", "sales"))),
+            ),
+            cell(
+                "ai",
+                "Summarize sales",
+                1,
+                dag(vec![port("summary")], vec!["source"], None),
+            ),
+        ]);
+        set_kernelspec(&mut root, "ai", "spur");
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            temp.path().join("reactive.ipynb"),
+            temp.path().to_path_buf(),
+        );
+
+        let report = engine
+            .process_source_push(SourcePush {
+                source: source("csv", "sales"),
+                ipc_bytes: ipc_bytes(),
+            })
+            .await
+            .expect("source push");
+
+        assert_eq!(
+            report.runs,
+            vec![
+                CellRunReport::new("source", CellRunStatus::Succeeded),
+                CellRunReport::new("ai", CellRunStatus::Stale),
+            ]
+        );
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .map(|request| request.cell_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source"]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_ai_node_cascades_on_upstream_change() {
+        let temp = TempDir::new().expect("temp dir");
+        let mut root = notebook(vec![
+            cell(
+                "source",
+                "source = spur.get('sales')",
+                1,
+                dag(vec![port("source")], vec![], Some(source("csv", "sales"))),
+            ),
+            cell(
+                "ai",
+                "Summarize sales",
+                1,
+                dag(vec![port("summary")], vec!["source"], None),
+            ),
+        ]);
+        set_kernelspec(&mut root, "ai", "spur");
+        set_ai_live(&mut root, "ai", true);
+        let store = store_with_notebook(root);
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner.clone(),
+            temp.path().join("reactive.ipynb"),
+            temp.path().to_path_buf(),
+        );
+
+        let report = engine
+            .process_source_push(SourcePush {
+                source: source("csv", "sales"),
+                ipc_bytes: ipc_bytes(),
+            })
+            .await
+            .expect("source push");
+
+        assert_eq!(
+            report.runs,
+            vec![
+                CellRunReport::new("source", CellRunStatus::Succeeded),
+                CellRunReport::new("ai", CellRunStatus::Succeeded),
+            ]
+        );
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .map(|request| request.cell_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source", "ai"]
+        );
     }
 
     #[tokio::test]
@@ -1837,6 +2010,34 @@ mod tests {
                         .as_mut()
                         .expect("spur metadata")
                         .code_type = Some(code_type);
+                    return;
+                }
+            }
+        }
+        panic!("missing cell {id}");
+    }
+
+    fn set_kernelspec(root: &mut NotebookRoot, id: &str, spec_name: &str) {
+        for cell in &mut root.cells {
+            if let Cell::Code(cell) = cell {
+                if cell.id.as_deref() == Some(id) {
+                    cell.metadata
+                        .other
+                        .insert("kernelspec".to_string(), json!(spec_name));
+                    return;
+                }
+            }
+        }
+        panic!("missing cell {id}");
+    }
+
+    fn set_ai_live(root: &mut NotebookRoot, id: &str, live: bool) {
+        for cell in &mut root.cells {
+            if let Cell::Code(cell) = cell {
+                if cell.id.as_deref() == Some(id) {
+                    cell.metadata
+                        .other
+                        .insert("ai_live".to_string(), json!(live));
                     return;
                 }
             }

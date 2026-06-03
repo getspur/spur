@@ -1,9 +1,13 @@
+pub mod ai;
+mod cell_runner;
+pub use cell_runner::NotebookCellRunner;
 pub mod engine;
 pub mod graph;
 pub mod inject;
 pub mod ports;
 pub mod run_context;
 
+pub use ai::{AiError, AiNodeBackend, AiRunOutput, AiRunRequest, AiUsage, PortContext};
 pub use engine::{
     CellRunReport, CellRunRequest, CellRunStatus, ReactiveEngine, ReactiveEngineClient,
     ReactiveEngineConfig, SourcePush,
