@@ -23,6 +23,22 @@ import {
 
 const CellInput = lazy(() => import("./CellInput"));
 
+function isAiCell(cell: {
+  cellMetadataOther?: Record<string, unknown>;
+}): boolean {
+  const ks = (
+    cell.cellMetadataOther?.kernelspec as { name?: string } | undefined
+  )?.name;
+  return ks === "spur";
+}
+
+function cellAiLive(cell: { dagMetadata?: unknown }): boolean {
+  const dag = cell.dagMetadata as
+    | { ai_live?: boolean; aiLive?: boolean }
+    | undefined;
+  return Boolean(dag?.ai_live ?? dag?.aiLive);
+}
+
 const Aside = ({ children }: { children: ReactNode }) => (
   <aside className="absolute right-[-200px] w-[200px] px-2">{children}</aside>
 );
@@ -170,9 +186,40 @@ function CellExecutionMarker({ cellId }: { cellId: string }) {
         ? String(cell.result.executionCount)
         : " ";
 
+  const ai = isAiCell(cell);
   return (
-    <div aria-hidden="true" className={clsx(markerClassName, "text-gray-400")}>
-      [{executionCount}]
+    <div
+      aria-hidden="true"
+      className={clsx(
+        markerClassName,
+        ai ? "text-violet-600" : "text-gray-400",
+      )}
+    >
+      {ai ? "✦" : ""}[{executionCount}]
+    </div>
+  );
+}
+
+function AiCellHeader({ cellId }: { cellId: string }) {
+  const notebook = useNotebook();
+  const cell = useStore(notebook.store, (s) => s.serverState.cells[cellId]);
+  if (!cell || cell.type !== "code" || !isAiCell(cell)) return null;
+  const live = cellAiLive(cell);
+  return (
+    <div className="flex items-center gap-2 pl-[57px] pr-[18px] pt-3">
+      <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[10px] font-semibold text-violet-700">
+        ✦ AI
+      </span>
+      <span
+        className={clsx(
+          "rounded border px-1.5 py-px font-mono text-[9px]",
+          live
+            ? "border-violet-600 bg-violet-600 text-white"
+            : "border-gray-300 bg-white text-gray-500",
+        )}
+      >
+        {live ? "● LIVE" : "manual"}
+      </span>
     </div>
   );
 }
@@ -205,6 +252,7 @@ export default function NotebookCells() {
 
           <CellExecutionMarker cellId={id} />
           <CellInputAside cellId={id} />
+          <AiCellHeader cellId={id} />
           <Suspense fallback={<CellInputFallback cellId={id} />}>
             <CellInput cellId={id} />
           </Suspense>
