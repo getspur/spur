@@ -22,6 +22,8 @@ use crate::{
 
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v7";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
+/// Bump when resolver semantics change without query, extractor, or schema changes.
+pub const RESOLVER_VERSION: &str = "2026-06-04-range-constrained-relational-v1";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -128,17 +130,24 @@ struct CurrentFileEntry {
 }
 
 pub fn current_manifest_version() -> String {
-    manifest_version_from_query_bytes(SCHEMA_VERSION, EXTRACTOR_VERSION, MANIFEST_QUERY_BYTES)
+    manifest_version_from_query_bytes(
+        SCHEMA_VERSION,
+        EXTRACTOR_VERSION,
+        RESOLVER_VERSION,
+        MANIFEST_QUERY_BYTES,
+    )
 }
 
 fn manifest_version_from_query_bytes(
     schema_version: &str,
     extractor_version: &str,
+    resolver_version: &str,
     query_bytes: &[ManifestQueryBytes<'_>],
 ) -> String {
     let mut hasher = Sha256::new();
     update_manifest_hash_field(&mut hasher, schema_version.as_bytes());
     update_manifest_hash_field(&mut hasher, extractor_version.as_bytes());
+    update_manifest_hash_field(&mut hasher, resolver_version.as_bytes());
     let mut query_bytes_by_language = query_bytes.iter().collect::<Vec<_>>();
     query_bytes_by_language.sort_by_key(|query| (query.language, query.query));
     for query in query_bytes_by_language {
@@ -1499,8 +1508,22 @@ mod tests {
         ];
 
         assert_ne!(
-            manifest_version_from_query_bytes("schema", "extractor", &base),
-            manifest_version_from_query_bytes("schema", "extractor", &changed)
+            manifest_version_from_query_bytes("schema", "extractor", "resolver", &base),
+            manifest_version_from_query_bytes("schema", "extractor", "resolver", &changed)
+        );
+    }
+
+    #[test]
+    fn manifest_version_changes_when_resolver_version_changes() {
+        let inputs = [ManifestQueryBytes {
+            language: "rust",
+            query: "spur-edges",
+            bytes: b"rust edges",
+        }];
+
+        assert_ne!(
+            manifest_version_from_query_bytes("schema", "extractor", "resolver-v1", &inputs),
+            manifest_version_from_query_bytes("schema", "extractor", "resolver-v2", &inputs)
         );
     }
 
@@ -1519,15 +1542,15 @@ mod tests {
             },
         ];
 
-        let first = manifest_version_from_query_bytes("schema", "extractor", &inputs);
-        let second = manifest_version_from_query_bytes("schema", "extractor", &inputs);
+        let first = manifest_version_from_query_bytes("schema", "extractor", "resolver", &inputs);
+        let second = manifest_version_from_query_bytes("schema", "extractor", "resolver", &inputs);
 
         assert_eq!(first, second);
 
         let reordered = [inputs[1], inputs[0]];
         assert_eq!(
             first,
-            manifest_version_from_query_bytes("schema", "extractor", &reordered)
+            manifest_version_from_query_bytes("schema", "extractor", "resolver", &reordered)
         );
     }
 
