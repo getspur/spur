@@ -258,36 +258,74 @@ systemctl daemon-reload
 systemctl enable --now spur-autoshutdown.timer
 
 # ---------------------------------------------------------------------------
-# Disk-pressure watchdog: prune idle worktree target dirs whenever
-# /mnt/cargo crosses the high-water mark. Independent of the idle-shutdown
-# check above — fires even when other workers are actively building.
-# Per-delegation worktree target dirs balloon to 40-110 GB each and three
-# concurrent workers can fill a 400 GB disk in well under an hour.
+# Disk-pressure watchdog: reclaim space whenever /mnt/cargo crosses the strict
+# high-water mark. Independent of the idle-shutdown check above — fires even
+# when other workers are actively building. Per-delegation worktree target
+# dirs balloon to 40-110 GB each and three concurrent workers can fill the
+# disk in well under an hour.
+#
+# Reclaim is TIERED and re-checks disk between tiers, stopping as soon as usage
+# drops back under HIGH_WATER. Every tier is idle-guarded (mtime within
+# IDLE_MIN ⇒ a build is still touching it ⇒ skip) so we never delete files an
+# in-flight compile depends on:
+#   1. idle per-delegation worktree target dirs   (cheap, never reused)
+#   2. stale build temp — /mnt/cargo/tmp (the big TMPDIR set by build.sh) and
+#      /tmp (small sync manifests on the boot disk)
+#   3. LAST RESORT: idle targets/main — the shared main-repo cache. Clearing it
+#      forces a cold main rebuild, so it only fires if 1+2 left us over the mark.
 # ---------------------------------------------------------------------------
 cat >/usr/local/sbin/spur-disk-watchdog <<'SCRIPT'
 #!/bin/bash
 set -u
-HIGH_WATER=85       # percent
-IDLE_MIN=10         # only prune worktrees idle this long
+HIGH_WATER=70       # percent — strict high-water mark
+IDLE_MIN=10         # only reclaim space idle this long (no active build touching it)
 WORKTREES=/mnt/cargo/targets/worktrees
+MAIN_TARGET=/mnt/cargo/targets/main
+TMP_DIRS=(/mnt/cargo/tmp /tmp)
 
-USED=$(df --output=pcent /mnt/cargo | tail -1 | tr -dc 0-9)
-[[ -z "$USED" || "$USED" -lt "$HIGH_WATER" ]] && exit 0
+used_pct() { df --output=pcent /mnt/cargo | tail -1 | tr -dc 0-9; }
+over_mark() { local u; u=$(used_pct); [[ -n "$u" && "$u" -ge "$HIGH_WATER" ]]; }
 
-echo "disk at ${USED}% — pruning idle worktrees (>${IDLE_MIN}m)"
-[[ ! -d "$WORKTREES" ]] && exit 0
+over_mark || exit 0
+echo "disk at $(used_pct)% (>= ${HIGH_WATER}%) — reclaiming space"
 
-for dir in "$WORKTREES"/*/; do
-    [[ -d "$dir" ]] || continue
-    # Skip if any file modified within IDLE_MIN minutes — build still active.
-    if find "$dir" -mmin -"$IDLE_MIN" -type f -print -quit | grep -q .; then
-        echo "  keep $(basename "$dir") (active)"
-        continue
+# --- Tier 1: idle per-delegation worktree target dirs ---
+if [[ -d "$WORKTREES" ]]; then
+    for dir in "$WORKTREES"/*/; do
+        [[ -d "$dir" ]] || continue
+        if find "$dir" -mmin -"$IDLE_MIN" -type f -print -quit | grep -q .; then
+            echo "  keep worktree $(basename "$dir") (active)"
+            continue
+        fi
+        SIZE=$(du -sh "$dir" 2>/dev/null | cut -f1)
+        rm -rf "$dir"
+        echo "  pruned worktree $(basename "$dir") ($SIZE)"
+    done
+fi
+
+# --- Tier 2: stale build temp (only when still over the mark) ---
+if over_mark; then
+    echo "  still at $(used_pct)% — sweeping stale build temp (>${IDLE_MIN}m)"
+    for t in "${TMP_DIRS[@]}"; do
+        [[ -d "$t" ]] || continue
+        # -mmin +IDLE_MIN keeps anything an in-flight rustc/linker still touches.
+        # Stay on the same filesystem (-xdev); drop stale files then empty dirs.
+        find "$t" -mindepth 1 -xdev -mmin +"$IDLE_MIN" -type f -delete 2>/dev/null || true
+        find "$t" -mindepth 1 -xdev -mmin +"$IDLE_MIN" -type d -empty -delete 2>/dev/null || true
+        echo "  swept $t"
+    done
+fi
+
+# --- Tier 3 (LAST RESORT): idle shared main-repo cache ---
+if over_mark && [[ -d "$MAIN_TARGET" ]]; then
+    if find "$MAIN_TARGET" -mmin -"$IDLE_MIN" -type f -print -quit | grep -q .; then
+        echo "  still at $(used_pct)% but targets/main is active — leaving it"
+    else
+        SIZE=$(du -sh "$MAIN_TARGET" 2>/dev/null | cut -f1)
+        echo "  still at $(used_pct)% — clearing idle targets/main ($SIZE, forces cold main rebuild)"
+        rm -rf "${MAIN_TARGET:?}"/*
     fi
-    SIZE=$(du -sh "$dir" 2>/dev/null | cut -f1)
-    rm -rf "$dir"
-    echo "  pruned $(basename "$dir") ($SIZE)"
-done
+fi
 
 df -h /mnt/cargo | tail -1
 SCRIPT

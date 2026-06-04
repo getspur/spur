@@ -17,7 +17,7 @@
 #
 # Read the output to spot:
 #   - IO pressure rising under burst linking (rust-lld concurrent count high)
-#   - Disk approaching the 85% watchdog threshold
+#   - Disk approaching the 70% watchdog threshold
 #   - Memory pressure if too many concurrent links
 #   - sccache hit rate trending up (cache warming) or stuck at 0% (something broken)
 
@@ -81,8 +81,8 @@ echo
 echo "--- disk /mnt/cargo ---"
 df -h /mnt/cargo | awk 'NR==1 || NR==2'
 USED_PCT=$(df --output=pcent /mnt/cargo | tail -1 | tr -dc 0-9)
-if [[ "$USED_PCT" -ge 85 ]]; then
-    echo "*** WARNING: /mnt/cargo at ${USED_PCT}% — watchdog will prune idle worktrees ***"
+if [[ "$USED_PCT" -ge 70 ]]; then
+    echo "*** WARNING: /mnt/cargo at ${USED_PCT}% — watchdog will reclaim (worktrees → temp → targets/main) ***"
 fi
 
 [[ "$SHORT" == "1" ]] || {
