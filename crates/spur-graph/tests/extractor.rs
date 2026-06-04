@@ -885,17 +885,19 @@ fn typescript_extractor_finds_expected_nodes_and_edges() {
         "Root should call only the uppercase <Greeting> component, with <div> filtered out"
     );
 
-    // The `new App()` instantiation inside createApp must become a Calls edge.
+    // The `new App()` instantiation inside createApp must become a Constructs edge.
     let create_app_id = facts
         .nodes
         .iter()
         .find(|node| node.kind == NodeKind::Function && node.label == "createApp")
         .expect("createApp node")
         .node_id;
-    let create_app_calls: BTreeSet<_> = facts
+    let create_app_constructs: BTreeSet<_> = facts
         .edges
         .iter()
-        .filter(|edge| edge.relation == RelationKind::Calls && edge.source_node_id == create_app_id)
+        .filter(|edge| {
+            edge.relation == RelationKind::Constructs && edge.source_node_id == create_app_id
+        })
         .filter_map(|edge| edge.target_node_id)
         .map(|target_node_id| {
             *node_labels_by_id
@@ -904,8 +906,8 @@ fn typescript_extractor_finds_expected_nodes_and_edges() {
         })
         .collect();
     assert!(
-        create_app_calls.contains("App"),
-        "createApp should have a Calls edge to App via `new App()`; got {create_app_calls:?}"
+        create_app_constructs.contains("App"),
+        "createApp should have a Constructs edge to App via `new App()`; got {create_app_constructs:?}"
     );
 }
 
