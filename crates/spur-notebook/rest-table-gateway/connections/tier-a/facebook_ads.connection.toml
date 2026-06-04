@@ -1,0 +1,26 @@
+# Facebook/Meta Marketing API insights. Requires a Meta app (client_id/secret),
+# a long-lived OAuth2 token, and the ad account id you query (act_<id>).
+[source]
+name = "facebook_ads"
+base_url = "https://graph.facebook.com/v21.0"
+allow_writes = true
+connection_config = ["AD_ACCOUNT_ID"]
+auth = { scheme = "oauth2_refresh", token_url = "https://graph.facebook.com/v21.0/oauth/access_token", client_id_env = "FACEBOOK_ADS_CLIENT_ID", client_secret_env = "FACEBOOK_ADS_CLIENT_SECRET", refresh_token_env = "FACEBOOK_ADS_REFRESH_TOKEN" }
+
+[[action]]
+name = "facebook_ads_insights"
+method = "POST"
+path = "/{ad_account_id}/insights"
+response_path = "$.data"
+pagination = { cursor_path = "$.paging.cursors.after", cursor_param = "after" }
+
+[action.args]
+ad_account_id = { in = "path", type = "Utf8", required = true }
+fields = { in = "query", type = "Utf8", required = true }
+date_preset = { in = "query", type = "Utf8", required = false }
+
+[action.columns]
+campaign_name = { json = "$.campaign_name", type = "Utf8" }
+impressions = { json = "$.impressions", type = "Int64" }
+clicks = { json = "$.clicks", type = "Int64" }
+spend = { json = "$.spend", type = "Utf8" }

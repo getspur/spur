@@ -166,6 +166,22 @@ google-calendar:
   token_url: "https://oauth2.googleapis.com/token"
   proxy:
     base_url: "https://www.googleapis.com/calendar/v3"
+google-ads:
+  display_name: Google Ads
+  categories:
+    - marketing
+  auth_mode: OAUTH2
+  token_url: "https://oauth2.googleapis.com/token"
+  proxy:
+    base_url: "https://googleads.googleapis.com/v17"
+facebook-ads:
+  display_name: Facebook Ads
+  categories:
+    - marketing
+  auth_mode: OAUTH2
+  token_url: "https://graph.facebook.com/v21.0/oauth/access_token"
+  proxy:
+    base_url: "https://graph.facebook.com/v21.0"
 gmail:
   display_name: Gmail
   categories:
