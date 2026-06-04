@@ -361,8 +361,35 @@
       "edge_kind": "references_other"
     },
     {
+      "source_stable_symbol_id": "3c12493bdaca1457",
+      "target_stable_symbol_id": "a2189e8da277ec66",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
       "source_stable_symbol_id": "51e4143c6a874467",
       "target_stable_symbol_id": "88715eb9664f575d",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "51e4143c6a874467",
+      "target_stable_symbol_id": "88715eb9664f575d",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "9ce57cf00efb9967",
+      "target_stable_symbol_id": "d800fd4b1dd22259",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -373,9 +400,9 @@
       "source_stable_symbol_id": "9ce57cf00efb9967",
       "target_stable_symbol_id": "d800fd4b1dd22259",
       "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
       "edge_kind": "references_other"
     },
     {
@@ -523,8 +550,35 @@
       "edge_kind": "references_other"
     },
     {
+      "source_stable_symbol_id": "be1aa2b3e0311fc2",
+      "target_stable_symbol_id": "1c16e5672cd55bac",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
       "source_stable_symbol_id": "becef4d216986a2a",
       "target_stable_symbol_id": "7c70f63e3e522397",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "becef4d216986a2a",
+      "target_stable_symbol_id": "7c70f63e3e522397",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "c7e33b75e565d730",
+      "target_stable_symbol_id": "51e4143c6a874467",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -535,9 +589,9 @@
       "source_stable_symbol_id": "c7e33b75e565d730",
       "target_stable_symbol_id": "51e4143c6a874467",
       "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
       "edge_kind": "references_other"
     },
     {
