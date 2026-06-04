@@ -1,0 +1,23 @@
+# Google Ads (GAQL search). Requires a Google Ads developer token, an OAuth2
+# client (client_id/secret) and a refresh token, plus the customer id you query.
+# login-customer-id is required for manager (MCC) accounts.
+[source]
+name = "google_ads"
+base_url = "https://googleads.googleapis.com/v17"
+allow_writes = true
+connection_config = ["DEVELOPER_TOKEN", "LOGIN_CUSTOMER_ID"]
+auth = { scheme = "oauth2_refresh", token_url = "https://oauth2.googleapis.com/token", client_id_env = "GOOGLE_ADS_CLIENT_ID", client_secret_env = "GOOGLE_ADS_CLIENT_SECRET", refresh_token_env = "GOOGLE_ADS_REFRESH_TOKEN" }
+
+[source.headers]
+developer-token = "${connectionConfig.DEVELOPER_TOKEN}"
+login-customer-id = "${connectionConfig.LOGIN_CUSTOMER_ID}"
+
+[[action]]
+name = "google_ads_search"
+method = "POST"
+path = "/customers/{customer_id}/googleAds:search"
+response_path = "$.results"
+
+[action.args]
+customer_id = { in = "path", type = "Utf8", required = true }
+query = { in = "body", type = "Utf8", required = true }
