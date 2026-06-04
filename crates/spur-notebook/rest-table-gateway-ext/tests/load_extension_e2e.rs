@@ -213,6 +213,21 @@ fn assert_dry_run(conn: &Connection) -> duckdb::Result<()> {
     Ok(())
 }
 
+fn assert_typed_action(conn: &Connection) -> duckdb::Result<()> {
+    let mut stmt = conn.prepare("SELECT id, score FROM demo_search(q := 'needle') ORDER BY id")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<duckdb::Result<Vec<_>>>()?;
+
+    assert_eq!(
+        rows,
+        vec![("1".to_string(), 7), ("2".to_string(), 11)],
+        "typed action table function should return declared columns"
+    );
+    println!("typed-action ok");
+    Ok(())
+}
+
 fn main() -> duckdb::Result<()> {
     let extension_path = env::args()
         .nth(1)
@@ -226,6 +241,7 @@ fn main() -> duckdb::Result<()> {
         "write-actions" => assert_write_actions(&conn)?,
         "gate" => assert_action_missing(&conn)?,
         "dry-run" => assert_dry_run(&conn)?,
+        "typed-action" => assert_typed_action(&conn)?,
         other => panic!("unknown action harness scenario: {other}"),
     }
 
@@ -583,6 +599,79 @@ price = {{ in = "body", type = "Float64", required = true }}
             requests.is_empty(),
             "dry_run := true should not send an HTTP request"
         );
+    });
+}
+
+#[test]
+fn load_extension_queries_action_as_typed_table_function() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/q"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    { "v": { "id": "1", "score": 7 } },
+                    { "v": { "id": "2", "score": 11 } }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let manifest = write_temp_manifest(
+            "spur-rest-typed-action",
+            &format!(
+                r#"[source]
+name = "demo"
+base_url = "{base}"
+allow_writes = true
+
+[[action]]
+name = "search"
+method = "POST"
+path = "/q"
+response_path = "$.results"
+
+[action.args]
+q = {{ in = "body", type = "Utf8", required = true }}
+
+[action.columns]
+id = {{ json = "$.v.id", type = "Utf8" }}
+score = {{ json = "$.v.score", type = "Int64" }}
+"#,
+                base = server.uri()
+            ),
+        );
+
+        let empty_manifest_dir = unique_temp_dir("spur-rest-empty-manifest-dir");
+        let _gamma = EnvGuard::set("SPUR_POLYMARKET_GAMMA_BASE", server.uri());
+        let _clob = EnvGuard::set("SPUR_POLYMARKET_CLOB_BASE", server.uri());
+        let _manifest = EnvGuard::set("SPUR_REST_MANIFEST", manifest.as_os_str());
+        let _manifest_dir = EnvGuard::set("SPUR_REST_MANIFEST_DIR", empty_manifest_dir.as_os_str());
+        let _allow_writes = EnvGuard::remove("SPUR_REST_ALLOW_WRITES");
+        let _expected = EnvGuard::remove("SPUR_REST_EXPECT_FUNCTION");
+        let _install_dir = EnvGuard::set(
+            "SPUR_EXT_INSTALL_DIR",
+            std::env::temp_dir().join(format!(
+                "spur-rest-table-gateway-ext-install-typed-action-{}",
+                std::process::id()
+            )),
+        );
+
+        let extension_path = build_extension();
+        let output = run_action_harness(&extension_path, "typed-action");
+        println!("{output}");
+        assert!(output.contains("typed-action ok"));
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "POST");
+        assert_eq!(requests[0].url.path(), "/q");
+        let body: serde_json::Value = requests[0].body_json().expect("request body JSON");
+        assert_eq!(body["q"], "needle");
     });
 }
 
