@@ -23,7 +23,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v7";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-04-relational-bind-method-v3";
+pub const RESOLVER_VERSION: &str = "2026-06-05-rebind-range-guard-v4";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1025,7 +1025,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             };
             let resolution_is_stamped = matches!(
                 edge.bind_method.as_deref(),
-                Some("fqn" | "scope_match" | "singleton" | "macro_body_singleton")
+                Some("fqn" | "scope_match" | "singleton" | "macro_body_singleton" | "relational")
             );
             let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
                 || target_label.contains("::")
@@ -1040,15 +1040,23 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 edge.target_stable_symbol_id = None;
                 continue;
             };
-            let matches = if edge.relation == RelationKind::Imports {
-                matches
+            let matches = match edge.relation {
+                RelationKind::Imports => matches
                     .iter()
                     .filter(|target| is_import_rebind_candidate_kind(&target.symbol_kind))
-                    .collect::<Vec<_>>()
-            } else {
-                matches.iter().collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                relation => {
+                    if let Some(allowed) = rebind_candidate_kinds(relation) {
+                        matches
+                            .iter()
+                            .filter(|target| allowed.contains(&target.symbol_kind.as_str()))
+                            .collect::<Vec<_>>()
+                    } else {
+                        matches.iter().collect::<Vec<_>>()
+                    }
+                }
             };
-            // Import-candidate filtering above can remove every match, so the
+            // Candidate filtering above can remove every match, so the
             // bucket lookup being non-empty does not guarantee `matches` is.
             let Some(resolved) = matches.first() else {
                 edge.target_stable_symbol_id = None;
@@ -1081,6 +1089,15 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             ambiguous_unresolved,
             "spur-graph: left ambiguous cross-file edges unresolved"
         );
+    }
+}
+
+fn rebind_candidate_kinds(relation: RelationKind) -> Option<&'static [&'static str]> {
+    match relation {
+        RelationKind::Extends => Some(&["trait", "interface", "class"]),
+        RelationKind::Implements => Some(&["trait", "interface"]),
+        RelationKind::Calls => Some(&["function", "method"]),
+        _ => None,
     }
 }
 
@@ -1647,6 +1664,84 @@ mod tests {
         assert_eq!(
             resolved_edge.target_stable_symbol_id, None,
             "import to a filtered-out kind must stay unresolved"
+        );
+    }
+
+    #[test]
+    fn rebind_applies_range_guards_to_relational_edges() {
+        let mut source_bucket = empty_bucket("src/source.rs", "oid-source");
+        let mut foo_symbol = symbol("sym:foo", "src/source.rs");
+        foo_symbol.entity_name = "Foo".to_owned();
+        foo_symbol.qualified_name = "Foo".to_owned();
+        foo_symbol.symbol_kind = "trait".to_owned();
+        source_bucket.symbols.push(foo_symbol);
+
+        let mut extends_send = edge("sym:foo", None, RelationKind::Extends);
+        extends_send.target_label = Some("Send".to_owned());
+        source_bucket.edges.push(extends_send);
+
+        let mut extends_base = edge("sym:foo", None, RelationKind::Extends);
+        extends_base.target_label = Some("Base".to_owned());
+        source_bucket.edges.push(extends_base);
+
+        let mut stamped_extends = edge("sym:foo", Some("sym:send_trait"), RelationKind::Extends);
+        stamped_extends.target_label = Some("Send".to_owned());
+        stamped_extends.bind_method = Some("relational".to_owned());
+        source_bucket.edges.push(stamped_extends);
+
+        let mut calls_field = edge("sym:foo", None, RelationKind::Calls);
+        calls_field.target_label = Some("field".to_owned());
+        source_bucket.edges.push(calls_field);
+
+        let mut def_bucket = empty_bucket("src/def.rs", "oid-def");
+        let mut send_variant = symbol("sym:send_variant", "src/def.rs");
+        send_variant.entity_name = "Send".to_owned();
+        send_variant.qualified_name = "E::Send".to_owned();
+        send_variant.symbol_kind = "enum_variant".to_owned();
+        def_bucket.symbols.push(send_variant);
+
+        let mut send_trait = symbol("sym:send_trait", "src/def.rs");
+        send_trait.entity_name = "SendTrait".to_owned();
+        send_trait.qualified_name = "SendTrait".to_owned();
+        send_trait.symbol_kind = "trait".to_owned();
+        def_bucket.symbols.push(send_trait);
+
+        let mut base_trait = symbol("sym:base_trait", "src/def.rs");
+        base_trait.entity_name = "Base".to_owned();
+        base_trait.qualified_name = "Base".to_owned();
+        base_trait.symbol_kind = "trait".to_owned();
+        def_bucket.symbols.push(base_trait);
+
+        let mut field_symbol = symbol("sym:field", "src/def.rs");
+        field_symbol.entity_name = "field".to_owned();
+        field_symbol.qualified_name = "S::field".to_owned();
+        field_symbol.symbol_kind = "field".to_owned();
+        def_bucket.symbols.push(field_symbol);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("src/def.rs".to_owned(), def_bucket);
+        buckets.insert("src/source.rs".to_owned(), source_bucket);
+
+        rebind_cross_file_edges(&mut buckets);
+
+        let edges = &buckets["src/source.rs"].edges;
+        assert_eq!(
+            edges[0].target_stable_symbol_id, None,
+            "extends must not rebind to an enum_variant"
+        );
+        assert_eq!(
+            edges[1].target_stable_symbol_id.as_deref(),
+            Some("sym:base_trait"),
+            "extends should still rebind to an in-range trait"
+        );
+        assert_eq!(
+            edges[2].target_stable_symbol_id.as_deref(),
+            Some("sym:send_trait"),
+            "relational stamped edges must not be re-resolved"
+        );
+        assert_eq!(
+            edges[3].target_stable_symbol_id, None,
+            "calls must not rebind to a field"
         );
     }
 

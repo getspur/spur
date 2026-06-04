@@ -861,6 +861,15 @@
     {
       "source_stable_symbol_id": "c67ff4e1545e91bc",
       "target_stable_symbol_id": null,
+      "target_label": "D_ASSERT",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "c67ff4e1545e91bc",
+      "target_stable_symbol_id": null,
       "target_label": "clear",
       "relation": "calls",
       "confidence": "syntax_exact",
@@ -871,15 +880,6 @@
       "source_stable_symbol_id": "c67ff4e1545e91bc",
       "target_stable_symbol_id": null,
       "target_label": "empty",
-      "relation": "calls",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "calls"
-    },
-    {
-      "source_stable_symbol_id": "c67ff4e1545e91bc",
-      "target_stable_symbol_id": "9fc5f50790458ce2",
-      "target_label": "D_ASSERT",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
