@@ -1211,6 +1211,40 @@ mod gate_contract {
         }
     }
 
+    #[test]
+    fn relation_coverage_matches_declared_contract() {
+        let expected = expected_relation_predicates();
+        let mut actual = BTreeMap::new();
+
+        for descriptor in language_registry() {
+            let language = descriptor.language;
+            let config = (descriptor.factory)();
+            let label = language.label();
+            let expected_relations = expected
+                .get(label)
+                .unwrap_or_else(|| panic!("{label}: missing relation coverage contract row"));
+            let realized = compiled_relation_predicates(language, label, &config);
+
+            for gap in allowlisted_relation_gaps(language) {
+                assert!(
+                    !expected_relations.contains(gap),
+                    "{label}: README TODO gap `{gap}` must be absent from the expected relation set"
+                );
+                assert!(
+                    !realized.contains(gap),
+                    "{label}: README TODO gap `{gap}` is now realized; update the README matrix and expected table together"
+                );
+            }
+
+            actual.insert(label, realized);
+        }
+
+        assert_eq!(
+            actual, expected,
+            "relation coverage matrix drifted; update the README matrix and expected table together, or emit risk if the mismatch is unexpected"
+        );
+    }
+
     fn assert_registry_extensions_are_unique() {
         let mut owners: BTreeMap<&str, Language> = BTreeMap::new();
         for descriptor in language_registry() {
@@ -1257,6 +1291,191 @@ mod gate_contract {
             );
         }
         captures
+    }
+
+    fn compiled_relation_predicates(
+        language: Language,
+        language_label: &str,
+        config: &LanguageConfig,
+    ) -> BTreeSet<&'static str> {
+        let mut relations = BTreeSet::new();
+
+        for capture_name in compiled_capture_names(language_label, config) {
+            if let Some(relation) = relation_kind_for_edge_capture(config, &capture_name) {
+                relations.insert(relation_predicate(relation));
+            }
+        }
+
+        let definition_captures = compiled_definition_captures(language_label, config);
+        if !definition_captures.is_empty() {
+            relations.insert(relation_predicate(RelationKind::Contains));
+            if language != Language::Markdown {
+                relations.insert(relation_predicate(RelationKind::Defines));
+            }
+        }
+
+        if relations.contains(relation_predicate(RelationKind::Calls))
+            && has_construct_targets(config)
+        {
+            relations.insert(relation_predicate(RelationKind::Constructs));
+        }
+
+        if language == Language::Python
+            && relations.contains(relation_predicate(RelationKind::Extends))
+        {
+            // Python `extends` captures targeting Protocol/ABC classes are
+            // reclassified to Implements after resolution.
+            relations.insert(relation_predicate(RelationKind::Implements));
+        }
+
+        relations
+    }
+
+    fn compiled_capture_names(language_label: &str, config: &LanguageConfig) -> BTreeSet<String> {
+        let mut captures = BTreeSet::new();
+        for (name, source) in config.queries {
+            let query_language = query_language_for(config, name, language_label);
+            let query = Query::new(query_language, source).unwrap_or_else(|err| {
+                panic!("failed to compile tree-sitter query `{name}` for `{language_label}`: {err}")
+            });
+            captures.extend(
+                query
+                    .capture_names()
+                    .iter()
+                    .map(|capture_name| (*capture_name).to_owned()),
+            );
+        }
+        captures
+    }
+
+    fn relation_kind_for_edge_capture(
+        config: &LanguageConfig,
+        capture_name: &str,
+    ) -> Option<RelationKind> {
+        // Keep this dispatch in lockstep with emit_edges plus Markdown link
+        // emitters. Helper captures such as `import.name` and `call.name` do
+        // not create edges by themselves.
+        match capture_name {
+            "import" => Some(relation_kind_for_capture(
+                config,
+                "import",
+                RelationKind::Imports,
+            )),
+            "call" | "jsx_call" | "macro_call" => Some(RelationKind::Calls),
+            "implements" => Some(RelationKind::Implements),
+            "extends" => Some(RelationKind::Extends),
+            "reference.name" => Some(RelationKind::References),
+            _ => None,
+        }
+    }
+
+    fn has_construct_targets(config: &LanguageConfig) -> bool {
+        config.definition_kind_map.iter().any(|(_, kind)| {
+            matches!(
+                kind,
+                NodeKind::Class | NodeKind::Struct | NodeKind::EnumVariant
+            )
+        })
+    }
+
+    fn relation_predicate(relation: RelationKind) -> &'static str {
+        match relation {
+            RelationKind::Imports => "imports",
+            RelationKind::Calls => "calls",
+            RelationKind::Constructs => "constructs",
+            RelationKind::Contains => "contains",
+            RelationKind::Implements => "implements",
+            RelationKind::Defines => "defines",
+            RelationKind::References => "references",
+            RelationKind::Extends => "extends",
+            RelationKind::Links => "links",
+            RelationKind::Touches => "touches",
+        }
+    }
+
+    fn expected_relation_predicates() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
+        BTreeMap::from([
+            (
+                Language::Rust.label(),
+                relation_set(&[
+                    "imports",
+                    "calls",
+                    "constructs",
+                    "contains",
+                    "defines",
+                    "references",
+                    "implements",
+                    "extends",
+                ]),
+            ),
+            (
+                Language::Python.label(),
+                relation_set(&[
+                    "imports",
+                    "calls",
+                    "constructs",
+                    "contains",
+                    "defines",
+                    "references",
+                    "implements",
+                    "extends",
+                ]),
+            ),
+            (
+                Language::TypeScript.label(),
+                relation_set(&[
+                    "imports",
+                    "calls",
+                    "constructs",
+                    "contains",
+                    "defines",
+                    "implements",
+                    "extends",
+                ]),
+            ),
+            (
+                Language::Tsx.label(),
+                relation_set(&[
+                    "imports",
+                    "calls",
+                    "constructs",
+                    "contains",
+                    "defines",
+                    "implements",
+                    "extends",
+                ]),
+            ),
+            (
+                Language::Cpp.label(),
+                relation_set(&[
+                    "imports",
+                    "calls",
+                    "constructs",
+                    "contains",
+                    "defines",
+                    "references",
+                    "extends",
+                ]),
+            ),
+            (
+                Language::Markdown.label(),
+                // README's Markdown `imports` cell is `Y(links)`: the
+                // @import capture channel is remapped to RelationKind::Links.
+                relation_set(&["contains", "links"]),
+            ),
+        ])
+    }
+
+    fn relation_set(predicates: &[&'static str]) -> BTreeSet<&'static str> {
+        predicates.iter().copied().collect()
+    }
+
+    fn allowlisted_relation_gaps(language: Language) -> &'static [&'static str] {
+        match language {
+            // README TODO: TypeScript/TSX do not yet capture HOF references.
+            Language::TypeScript | Language::Tsx => &["references"],
+            _ => &[],
+        }
     }
 
     fn query_language_for<'a>(
