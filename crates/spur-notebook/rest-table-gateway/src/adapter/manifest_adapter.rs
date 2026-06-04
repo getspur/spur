@@ -790,6 +790,28 @@ impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
         assert!(manifest.source.allow_writes);
     }
 
+    #[test]
+    fn facebook_ads_preset_parses_with_typed_insights_action() {
+        let toml = include_str!("../../connections/tier-a/facebook_ads.connection.toml");
+        let manifest = Manifest::from_toml(toml).expect("facebook ads preset parses");
+        assert!(manifest.source.allow_writes);
+        assert!(matches!(
+            manifest.source.auth,
+            crate::adapter::manifest::AuthCfg::Oauth2Refresh { .. }
+        ));
+        let action = manifest
+            .actions
+            .iter()
+            .find(|a| a.name == "facebook_ads_insights")
+            .expect("insights action present");
+        assert_eq!(action.method, "POST");
+        let columns = action.columns.as_ref().expect("typed columns present");
+        let impressions = columns
+            .get("impressions")
+            .expect("impressions column present");
+        assert_eq!(impressions.ty, "Int64");
+    }
+
     #[tokio::test]
     async fn google_ads_action_uses_refresh_bearer_and_both_headers() {
         use wiremock::matchers::{header, method, path};
