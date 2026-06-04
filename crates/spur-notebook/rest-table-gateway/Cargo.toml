@@ -21,11 +21,14 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json.workspace = true
 serde_yaml = "0.9"
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
 toml = { version = "0.8", features = ["preserve_order"] }
 tracing.workspace = true
 indexmap = { version = "2", features = ["serde"] }
+base64 = "0.22"
+rand = "0.9"
 
 [dev-dependencies]
 wiremock = "0.6"

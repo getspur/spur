@@ -4,6 +4,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::error::{GatewayError, Result};
+use base64::Engine as _;
+use rand::RngCore as _;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -29,6 +32,67 @@ pub struct RefreshGrant<'a> {
     pub client_secret: &'a str,
     pub refresh_token: &'a str,
     pub scope: Option<&'a str>,
+}
+
+/// PKCE verifier + its S256 challenge.
+#[allow(dead_code)]
+pub struct Pkce {
+    pub verifier: String,
+    pub challenge: String,
+}
+
+/// Generate a PKCE pair: a high-entropy verifier and its base64url(S256) challenge.
+#[allow(dead_code)]
+pub fn generate_pkce() -> Pkce {
+    let mut bytes = [0u8; 64];
+    rand::rng().fill_bytes(&mut bytes);
+    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    Pkce {
+        verifier,
+        challenge,
+    }
+}
+
+/// Generate a single-use CSRF `state` nonce (URL-safe, no padding).
+#[allow(dead_code)]
+pub fn generate_state() -> String {
+    let mut bytes = [0u8; 24];
+    rand::rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Inputs for the consent URL. `extra` carries provider `authorization_params`
+/// (e.g. `access_type=offline`, `prompt=consent`).
+#[allow(dead_code)]
+pub struct AuthorizeUrlParams<'a> {
+    pub authorization_url: &'a str,
+    pub client_id: &'a str,
+    pub redirect_uri: &'a str,
+    pub scope: &'a str,
+    pub state: &'a str,
+    pub code_challenge: &'a str,
+    pub extra: &'a [(&'a str, &'a str)],
+}
+
+/// Build the provider consent URL with PKCE + state. Uses `reqwest::Url`
+/// so query values are correctly percent-encoded.
+#[allow(dead_code)]
+pub fn build_authorize_url(p: &AuthorizeUrlParams<'_>) -> Result<String> {
+    let mut params = vec![
+        ("client_id", p.client_id),
+        ("redirect_uri", p.redirect_uri),
+        ("response_type", "code"),
+        ("scope", p.scope),
+        ("state", p.state),
+        ("code_challenge", p.code_challenge),
+        ("code_challenge_method", "S256"),
+    ];
+    params.extend_from_slice(p.extra);
+    let url = reqwest::Url::parse_with_params(p.authorization_url, &params)
+        .map_err(|e| GatewayError::Auth(format!("authorize url build failed: {e}")))?;
+    Ok(url.to_string())
 }
 
 #[derive(serde::Deserialize)]
@@ -309,6 +373,51 @@ mod tests {
         assert_eq!(percent_decode("a+b"), "a b");
         assert_eq!(percent_decode("plain"), "plain");
         assert_eq!(percent_decode("%41%42"), "AB");
+    }
+
+    #[test]
+    fn pkce_challenge_is_s256_of_verifier() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        let pkce = generate_pkce();
+        assert!(!pkce.verifier.is_empty());
+        let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(pkce.verifier.as_bytes()));
+        assert_eq!(pkce.challenge, expected);
+        assert!(!pkce.challenge.contains('='));
+    }
+
+    #[test]
+    fn state_nonce_is_unique_and_urlsafe() {
+        let a = generate_state();
+        let b = generate_state();
+        assert_ne!(a, b);
+        assert!(!a.is_empty());
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn authorize_url_contains_required_params() {
+        let url = build_authorize_url(&AuthorizeUrlParams {
+            authorization_url: "https://accounts.google.com/o/oauth2/v2/auth",
+            client_id: "cid.apps.googleusercontent.com",
+            redirect_uri: "http://127.0.0.1:51847/callback",
+            scope: "https://www.googleapis.com/auth/adwords",
+            state: "st8",
+            code_challenge: "chal",
+            extra: &[("access_type", "offline"), ("prompt", "consent")],
+        })
+        .expect("url");
+        assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("code_challenge=chal"));
+        assert!(url.contains("state=st8"));
+        assert!(url.contains("access_type=offline"));
+        assert!(url.contains("prompt=consent"));
+        assert!(url.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fadwords"));
     }
 
     #[tokio::test]
