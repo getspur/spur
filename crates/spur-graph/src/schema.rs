@@ -282,6 +282,7 @@ impl NodeKind {
 pub enum RelationKind {
     Imports,
     Calls,
+    Constructs,
     Contains,
     Implements,
     Defines,
@@ -306,7 +307,7 @@ pub fn graph_edge_kind_or_default(
     edge_kind: Option<GraphEdgeKind>,
 ) -> GraphEdgeKind {
     edge_kind.unwrap_or(match relation {
-        RelationKind::Calls => GraphEdgeKind::Calls,
+        RelationKind::Calls | RelationKind::Constructs => GraphEdgeKind::Calls,
         RelationKind::References => GraphEdgeKind::ReferencesOther,
         _ => GraphEdgeKind::ReferencesOther,
     })

@@ -361,7 +361,7 @@
       "source_stable_symbol_id": "74ec69dd6e04be1b",
       "target_stable_symbol_id": "23f3dd6a1c0267b5",
       "target_label": "User",
-      "relation": "calls",
+      "relation": "constructs",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls"
