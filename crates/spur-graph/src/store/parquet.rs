@@ -2766,6 +2766,7 @@ fn relation_to_str(relation: RelationKind) -> &'static str {
     match relation {
         RelationKind::Imports => "imports",
         RelationKind::Calls => "calls",
+        RelationKind::Constructs => "constructs",
         RelationKind::Contains => "contains",
         RelationKind::Implements => "implements",
         RelationKind::Defines => "defines",
@@ -2781,6 +2782,7 @@ pub(crate) fn relation_from_str(value: &str) -> anyhow::Result<RelationKind> {
     match value {
         "imports" => Ok(RelationKind::Imports),
         "calls" => Ok(RelationKind::Calls),
+        "constructs" => Ok(RelationKind::Constructs),
         "contains" => Ok(RelationKind::Contains),
         "implements" => Ok(RelationKind::Implements),
         "defines" => Ok(RelationKind::Defines),
