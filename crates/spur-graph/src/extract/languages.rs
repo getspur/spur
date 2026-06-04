@@ -475,6 +475,21 @@ pub(crate) fn emit_edges(
                     });
                 }
             }
+            "extends" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                for super_name in contained_capture_text(capture, source, captures, "extends.name")
+                {
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: super_name,
+                        relation: RelationKind::Extends,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
+                    });
+                }
+            }
             "call" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
                 let receiver_text =
