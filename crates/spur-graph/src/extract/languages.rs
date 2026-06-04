@@ -365,6 +365,7 @@ pub(crate) fn emit_definitions<'tree>(
     )
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn emit_definitions_with_parents<'tree>(
     config: &LanguageConfig,
     builder: &mut FactBuilder<'_>,
@@ -451,6 +452,22 @@ pub(crate) fn emit_edges(
                         source: source_id,
                         target_name: imported,
                         relation,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
+                    });
+                }
+            }
+            "implements" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                for trait_name in
+                    contained_capture_text(capture, source, captures, "implements.name")
+                {
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: trait_name,
+                        relation: RelationKind::Implements,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: None,
