@@ -450,7 +450,8 @@
       "relation": "implements",
       "confidence": "heuristic",
       "confidence_score": 0.5,
-      "edge_kind": "references_other"
+      "edge_kind": "references_other",
+      "bind_method": "relational"
     },
     {
       "source_stable_symbol_id": "925e9bcc2a4a5ecd",
@@ -513,7 +514,8 @@
       "relation": "extends",
       "confidence": "heuristic",
       "confidence_score": 0.5,
-      "edge_kind": "references_other"
+      "edge_kind": "references_other",
+      "bind_method": "relational"
     },
     {
       "source_stable_symbol_id": "ba77b7195f718134",
