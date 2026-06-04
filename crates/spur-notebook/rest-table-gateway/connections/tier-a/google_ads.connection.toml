@@ -22,3 +22,10 @@ pagination = { cursor_path = "$.nextPageToken", cursor_param = "pageToken" }
 [action.args]
 customer_id = { in = "path", type = "Utf8", required = true }
 query = { in = "body", type = "Utf8", required = true }
+
+[action.columns]
+campaign_id = { json = "$.campaign.id", type = "Utf8" }
+campaign_name = { json = "$.campaign.name", type = "Utf8" }
+impressions = { json = "$.metrics.impressions", type = "Int64" }
+clicks = { json = "$.metrics.clicks", type = "Int64" }
+cost_micros = { json = "$.metrics.costMicros", type = "Int64" }
