@@ -220,6 +220,18 @@ pub async fn call_add_api_connection(
     let missing_env_vars = missing_env_vars(&prepared.required_env_vars);
     if !missing_env_vars.is_empty() {
         if let Some(action) = oauth_action_for(&prepared) {
+            let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
+            let response = daemon
+                .handle(daemon_request(
+                    jute::commands::DaemonControlCommand::SaveApiConnectionTemplate {
+                        name: params.name.clone(),
+                        provider: params.provider.clone(),
+                        manifest_toml: prepared.manifest_toml.clone(),
+                    },
+                ))
+                .await;
+            check_response(response)?;
+
             return Ok(CallToolResult::structured(json!({
                 "status": "awaiting_oauth",
                 "name": params.name,
@@ -442,26 +454,13 @@ fn oauth_action_for(prepared: &PreparedManifest) -> Option<String> {
 
     let manifest = Manifest::from_toml(&prepared.manifest_toml).ok()?;
     let AuthCfg::Oauth2Refresh {
-        client_id_env,
-        client_secret_env,
-        refresh_token_env,
-        ..
+        refresh_token_env, ..
     } = manifest.source.auth
     else {
         return None;
     };
-    let missing_env_vars = missing_env_vars(&prepared.required_env_vars);
-    let missing_auth_env_vars = missing_env_vars
-        .iter()
-        .filter(|name| {
-            name.as_str() == client_id_env.as_str()
-                || name.as_str() == client_secret_env.as_str()
-                || name.as_str() == refresh_token_env.as_str()
-        })
-        .collect::<Vec<_>>();
-    if missing_auth_env_vars.len() == 1
-        && missing_auth_env_vars[0].as_str() == refresh_token_env.as_str()
-    {
+    let missing = missing_env_vars(&prepared.required_env_vars);
+    if missing.len() == 1 && missing[0] == refresh_token_env {
         Some("connect_with_browser".to_owned())
     } else {
         None
@@ -632,6 +631,14 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     struct EnvVarGuard {
         key: String,
         previous: Option<String>,
@@ -745,9 +752,12 @@ mod tests {
 
     #[test]
     fn oauth_only_missing_refresh_token_returns_connect_with_browser() {
+        let _env_lock = env_lock();
         let _cid = EnvVarGuard::set("GOOGLE_ADS_CLIENT_ID", "x");
         let _sec = EnvVarGuard::set("GOOGLE_ADS_CLIENT_SECRET", "y");
         let _refresh = EnvVarGuard::unset("GOOGLE_ADS_REFRESH_TOKEN");
+        let _dev = EnvVarGuard::set("SPUR_CONN_DEVELOPER_TOKEN", "dev");
+        let _login = EnvVarGuard::set("SPUR_CONN_LOGIN_CUSTOMER_ID", "123");
         let prepared = prepare_manifest(&AddApiConnectionParams {
             name: "google_ads".into(),
             provider: Some("google-ads".into()),
@@ -760,6 +770,26 @@ mod tests {
         let action = oauth_action_for(&prepared);
 
         assert_eq!(action.as_deref(), Some("connect_with_browser"));
+    }
+
+    #[test]
+    fn oauth_action_none_when_non_oauth_var_also_missing() {
+        let _env_lock = env_lock();
+        let _cid = EnvVarGuard::set("GOOGLE_ADS_CLIENT_ID", "x");
+        let _sec = EnvVarGuard::set("GOOGLE_ADS_CLIENT_SECRET", "y");
+        let _refresh = EnvVarGuard::unset("GOOGLE_ADS_REFRESH_TOKEN");
+        let _dev = EnvVarGuard::unset("SPUR_CONN_DEVELOPER_TOKEN");
+        let _login = EnvVarGuard::unset("SPUR_CONN_LOGIN_CUSTOMER_ID");
+        let prepared = prepare_manifest(&AddApiConnectionParams {
+            name: "google_ads".into(),
+            provider: Some("google-ads".into()),
+            spec_text: None,
+            manifest_toml: None,
+            connection_only: None,
+        })
+        .expect("prepare");
+
+        assert_eq!(oauth_action_for(&prepared), None);
     }
 
     #[test]
