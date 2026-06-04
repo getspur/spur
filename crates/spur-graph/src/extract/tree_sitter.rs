@@ -739,6 +739,25 @@ fn resolve_bare_pending_edge(
         }
     }
 
+    if let Some(allowed) = relational_target_kinds(edge.relation) {
+        let candidates = relational_symbol_candidates(builder, edge, indexes, allowed);
+        match candidates.as_slice() {
+            [target] if *target != edge.source => {
+                builder.add_pending_edge(edge, Some(*target));
+                return;
+            }
+            cands if cands.len() > 1 => {
+                *ambiguous_unresolved += 1;
+                builder.add_pending_edge(edge, None);
+                return;
+            }
+            _ => {
+                builder.add_pending_edge(edge, None);
+                return;
+            }
+        }
+    }
+
     if let Some(candidates) = indexes
         .ambiguous_symbols_by_label
         .get(&edge.target_name)
@@ -837,6 +856,39 @@ fn callable_symbol_candidates(
                 .get(target)
                 .copied()
                 .is_some_and(is_callable_target_kind)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+fn relational_target_kinds(relation: RelationKind) -> Option<&'static [NodeKind]> {
+    match relation {
+        RelationKind::Implements => Some(&[NodeKind::Trait, NodeKind::Interface]),
+        RelationKind::Extends => Some(&[NodeKind::Trait, NodeKind::Interface, NodeKind::Class]),
+        _ => None,
+    }
+}
+
+fn relational_symbol_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+    allowed: &[NodeKind],
+) -> Vec<NodeId> {
+    let mut candidates = builder
+        .symbol_index
+        .get(&edge.target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| *target != edge.source)
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(|kind| allowed.contains(&kind))
         })
         .collect::<Vec<_>>();
     candidates.sort_by_key(|id| id.get());
