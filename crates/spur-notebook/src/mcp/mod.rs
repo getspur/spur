@@ -1248,6 +1248,37 @@ fn datasource_tables_from_catalog(
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn pending_connection_template(
+    name: String,
+    provider: Option<String>,
+    manifest_toml: String,
+) -> Result<crate::connection_store::ConnectionTemplate, BridgeError> {
+    use spur_rest_table_gateway::adapter::Adapter as _;
+
+    let manifest = spur_rest_table_gateway::adapter::manifest::Manifest::from_toml(&manifest_toml)
+        .map_err(|error| BridgeError::Handler {
+            code: "api_manifest_parse_failed".to_string(),
+            message: format!("failed to parse API datasource manifest: {error}"),
+        })?;
+    let adapter =
+        spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
+    let adapter_name = adapter.name().to_string();
+    let tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog());
+    let now = chrono::Utc::now();
+
+    Ok(crate::connection_store::ConnectionTemplate {
+        name,
+        provider,
+        group: Some(API_DATASOURCE_GROUP.to_string()),
+        manifest_toml,
+        tables,
+        credential_env_vars: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
 fn datasource_entry_success(
     entry: jute::commands::DatasourceEntry,
 ) -> Result<DaemonControlSuccess, BridgeError> {
@@ -1544,6 +1575,14 @@ impl NotebookDaemonControl {
                 credentials,
             } => {
                 self.add_api_datasource_from_manifest(name, manifest_toml, credentials)
+                    .await
+            }
+            DaemonControlCommand::SaveApiConnectionTemplate {
+                name,
+                provider,
+                manifest_toml,
+            } => {
+                self.save_api_connection_template(name, provider, manifest_toml)
                     .await
             }
             DaemonControlCommand::OauthConnect { name } => self.oauth_connect(name).await,
@@ -2027,6 +2066,24 @@ impl NotebookDaemonControl {
     }
 
     #[cfg(feature = "datasource-introspect")]
+    async fn save_api_connection_template(
+        &self,
+        name: String,
+        provider: Option<String>,
+        manifest_toml: String,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        let template = pending_connection_template(name, provider, manifest_toml)?;
+        crate::connection_store::upsert(template)
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "save_api_connection_template_failed".to_string(),
+                message: error.to_string(),
+            })?;
+        self.emit_connections_changed().await;
+        Ok(DaemonControlSuccess::empty())
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     async fn oauth_connect(&self, name: String) -> Result<DaemonControlSuccess, BridgeError> {
         use spur_rest_table_gateway::adapter::{
             manifest::{AuthCfg, Manifest},
@@ -2469,6 +2526,19 @@ impl NotebookDaemonControl {
         _name: String,
         _manifest_toml: String,
         _credentials: Vec<(String, String)>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
+    async fn save_api_connection_template(
+        &self,
+        _name: String,
+        _provider: Option<String>,
+        _manifest_toml: String,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
@@ -3457,6 +3527,62 @@ mod tests {
     }
 
     #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn save_api_connection_template_pending_template_roundtrips_without_credentials() {
+        let manifest_toml = r#"
+[source]
+name = "manifest"
+base_url = "https://api.example.test"
+auth = { scheme = "none" }
+
+[[table]]
+name = "scores"
+path = "/scores"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+score = { json = "$.score", type = "Int64" }
+"#
+        .to_string();
+        let template = pending_connection_template(
+            "scores_api".to_string(),
+            Some("example".to_string()),
+            manifest_toml.clone(),
+        )
+        .expect("template builds");
+
+        assert_eq!(template.name, "scores_api");
+        assert_eq!(template.provider.as_deref(), Some("example"));
+        assert_eq!(template.group.as_deref(), Some(API_DATASOURCE_GROUP));
+        assert_eq!(template.manifest_toml, manifest_toml);
+        assert!(template.credential_env_vars.is_empty());
+        assert!(template
+            .tables
+            .iter()
+            .any(|table| table.name == "manifest_scores"));
+
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-save-api-connection-template-")
+            .tempdir()
+            .expect("temp dir");
+        let record_path = temp_dir.path().join("connections.json");
+        crate::connection_store::upsert_at(&record_path, template)
+            .await
+            .expect("template upserts");
+
+        let templates = crate::connection_store::list_at(&record_path)
+            .await
+            .expect("templates list");
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].name, "scores_api");
+        assert_eq!(templates[0].provider.as_deref(), Some("example"));
+        assert_eq!(templates[0].group.as_deref(), Some(API_DATASOURCE_GROUP));
+        assert_eq!(templates[0].manifest_toml, manifest_toml);
+        assert!(templates[0].credential_env_vars.is_empty());
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     #[test]
     fn build_api_import_manifest_prefers_curated_google_ads_preset() {
         let (source, manifest) =
@@ -3514,6 +3640,28 @@ mod tests {
                 assert_eq!(source, "print(1)");
                 assert_eq!(expected_version, Some(7));
                 assert_eq!(last_edited_by.as_deref(), Some("brain"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        let request: DaemonControlRequest = serde_json::from_value(json!({
+            "daemon": "notebook.v1",
+            "command": "save_api_connection_template",
+            "name": "google_ads",
+            "provider": "google-ads",
+            "manifest_toml": "[source]\nname = \"google_ads\"\nbase_url = \"https://api.example.test\"\n"
+        }))
+        .expect("save API connection template request decodes");
+
+        match request.request.command {
+            jute::commands::DaemonControlCommand::SaveApiConnectionTemplate {
+                name,
+                provider,
+                manifest_toml,
+            } => {
+                assert_eq!(name, "google_ads");
+                assert_eq!(provider.as_deref(), Some("google-ads"));
+                assert!(manifest_toml.contains("google_ads"));
             }
             command => panic!("unexpected command: {command:?}"),
         }

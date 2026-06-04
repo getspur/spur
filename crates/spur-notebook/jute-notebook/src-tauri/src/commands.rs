@@ -314,6 +314,13 @@ pub enum DaemonControlCommand {
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
     },
+    /// Persist a saved API connection template without registering a datasource.
+    SaveApiConnectionTemplate {
+        name: String,
+        #[ts(optional)]
+        provider: Option<String>,
+        manifest_toml: String,
+    },
     /// Complete OAuth browser authorization for a saved API connection.
     OauthConnect { name: String },
     /// Detach a datasource from the current notebook.
