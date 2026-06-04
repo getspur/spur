@@ -96,8 +96,8 @@ seed of the Tier-0 ontology realization contract
 | contains | Y | Y | Y | Y | Y | Y |
 | references (HOF) | Y | TODO | Y | Y | TODO | — |
 | links | — | — | — | — | — | Y |
-| implements | Y | TODO | TODO | TODO | TODO | — |
-| extends | Y | TODO | TODO | TODO | TODO | — |
+| implements | Y | TODO | Y | Y | — | — |
+| extends | Y | TODO | Y | Y | Y | — |
 
 ## Reference Capture Divergence
 
