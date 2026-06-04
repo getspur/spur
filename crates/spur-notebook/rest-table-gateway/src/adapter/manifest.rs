@@ -138,6 +138,16 @@ pub struct ActionCfg {
     pub args: IndexMap<String, ArgCfg>,
     #[serde(default)]
     pub columns: Option<IndexMap<String, ColumnCfg>>,
+    #[serde(default)]
+    pub pagination: Option<ActionPaginationCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionPaginationCfg {
+    /// JSON path to the next-page cursor in the response body, e.g. "$.nextPageToken".
+    pub cursor_path: String,
+    /// Request body field the cursor is written into on the next request, e.g. "pageToken".
+    pub cursor_param: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde_json::{Map, Number, Value};
 
 use crate::adapter::graphql::{fetch_graphql_rows, GraphqlFetch};
-use crate::adapter::http::{fetch_rows, send_request, HttpAction, HttpFetch};
+use crate::adapter::http::{cursor_value, fetch_rows, send_request, HttpAction, HttpFetch};
 use crate::adapter::json_to_batch::{arrow_type, json_path_get, rows_to_batch, ColumnExtract};
 use crate::adapter::manifest::{
     ActionCfg, ArgLocation as ManifestArgLocation, AuthCfg, ColumnCfg, GraphqlTableCfg, Manifest,
@@ -474,27 +474,91 @@ impl Adapter for ManifestAdapter {
             (Some(header), Some(value)) => Some((header.clone(), value)),
             _ => None,
         };
-        let http_action = HttpAction {
-            client: &self.client,
-            method: reqwest::Method::from_bytes(method.as_bytes())
-                .map_err(|e| GatewayError::Http(e.to_string()))?,
-            url,
-            query,
-            body,
-            auth: &auth,
-            idempotency_key,
-            headers: resolve_headers(&self.manifest.source.headers, &connection_ctx)?,
-        };
 
-        let (status, body) = send_request(&http_action).await?;
+        if action.pagination.is_none() {
+            let http_action = HttpAction {
+                client: &self.client,
+                method: reqwest::Method::from_bytes(method.as_bytes())
+                    .map_err(|e| GatewayError::Http(e.to_string()))?,
+                url,
+                query,
+                body,
+                auth: &auth,
+                idempotency_key,
+                headers: resolve_headers(&self.manifest.source.headers, &connection_ctx)?,
+            };
+
+            let (status, body) = send_request(&http_action).await?;
+
+            return match &action.columns {
+                Some(_) => {
+                    let columns = Self::action_column_extracts(action)?;
+                    let rows = Self::action_rows(&body, action.response_path.as_deref())?;
+                    Ok(vec![rows_to_batch(&columns, &rows)?])
+                }
+                None => Self::render_generic_row(status, body),
+            };
+        }
+
+        let pagination = action
+            .pagination
+            .as_ref()
+            .expect("pagination checked as Some");
+        let mut pages = Vec::new();
+        let mut next: Option<String> = None;
+
+        loop {
+            let mut page_body = body.clone().unwrap_or_else(|| serde_json::json!({}));
+            if let Some(token) = &next {
+                page_body
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        GatewayError::Adapter(
+                            "paginated action body must be a JSON object".to_string(),
+                        )
+                    })?
+                    .insert(pagination.cursor_param.clone(), serde_json::json!(token));
+            }
+            let http_action = HttpAction {
+                client: &self.client,
+                method: reqwest::Method::from_bytes(method.as_bytes())
+                    .map_err(|e| GatewayError::Http(e.to_string()))?,
+                url: url.clone(),
+                query: query.clone(),
+                body: Some(page_body),
+                auth: &auth,
+                idempotency_key: idempotency_key.clone(),
+                headers: resolve_headers(&self.manifest.source.headers, &connection_ctx)?,
+            };
+
+            let (status, resp_body) = send_request(&http_action).await?;
+            let cursor = cursor_value(&resp_body, &pagination.cursor_path);
+            pages.push((status, resp_body));
+
+            match cursor {
+                Some(cursor) if !cursor.is_empty() && next.as_deref() != Some(cursor.as_str()) => {
+                    next = Some(cursor);
+                }
+                _ => break,
+            }
+        }
 
         match &action.columns {
             Some(_) => {
                 let columns = Self::action_column_extracts(action)?;
-                let rows = Self::action_rows(&body, action.response_path.as_deref())?;
+                let mut rows = Vec::new();
+                for (_, body) in &pages {
+                    rows.extend(Self::action_rows(body, action.response_path.as_deref())?);
+                }
                 Ok(vec![rows_to_batch(&columns, &rows)?])
             }
-            None => Self::render_generic_row(status, body),
+            None => {
+                let (status, body) = pages
+                    .into_iter()
+                    .last()
+                    .expect("paginated actions always request at least one page");
+                Self::render_generic_row(status, body)
+            }
         }
     }
 }
@@ -806,6 +870,72 @@ query = {{ in = "body", type = "Utf8", required = true }}
         std::env::remove_var("GADS_TEST_CLIENT_SECRET");
         std::env::remove_var("GADS_TEST_REFRESH_TOKEN");
         assert_eq!(batches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn action_paginates_with_cursor_until_exhausted() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Page 2: request carries the page token; response has no further cursor.
+        Mock::given(method("POST"))
+            .and(path("/customers/1/googleAds:search"))
+            .and(body_partial_json(
+                serde_json::json!({ "pageToken": "tok-2" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{ "id": "b" }]
+            })))
+            .mount(&server)
+            .await;
+        // Page 1: no page token in the body; response returns nextPageToken.
+        Mock::given(method("POST"))
+            .and(path("/customers/1/googleAds:search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{ "id": "a" }],
+                "nextPageToken": "tok-2"
+            })))
+            .mount(&server)
+            .await;
+
+        let manifest = Manifest::from_toml(&format!(
+            r#"
+[source]
+name = "g"
+base_url = "{base}"
+allow_writes = true
+
+[[action]]
+name = "search"
+method = "POST"
+path = "/customers/1/googleAds:search"
+response_path = "$.results"
+pagination = {{ cursor_path = "$.nextPageToken", cursor_param = "pageToken" }}
+
+[action.args]
+query = {{ in = "body", type = "Utf8", required = true }}
+
+[action.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+"#,
+            base = server.uri()
+        ))
+        .expect("manifest parses");
+
+        let adapter = ManifestAdapter::new(manifest);
+        let req = ActionRequest {
+            name: "search".to_string(),
+            method: "POST".to_string(),
+            path: "/customers/1/googleAds:search".to_string(),
+            query: vec![],
+            body: Some(serde_json::json!({ "query": "SELECT x" })),
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let batches = adapter.act(req).await.expect("paginated action succeeds");
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 2, "rows from both pages accumulate");
     }
 
     #[test]

@@ -17,6 +17,7 @@ name = "google_ads_search"
 method = "POST"
 path = "/customers/{customer_id}/googleAds:search"
 response_path = "$.results"
+pagination = { cursor_path = "$.nextPageToken", cursor_param = "pageToken" }
 
 [action.args]
 customer_id = { in = "path", type = "Utf8", required = true }
