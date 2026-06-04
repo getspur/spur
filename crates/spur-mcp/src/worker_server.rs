@@ -1067,8 +1067,8 @@ impl WorkerToolHandler {
     }
 
     #[tool(
-        name = "code_search",
-        description = "Search the worktree graph artifact for symbols by name. Lexical retrieval, not graph resolution — returns ranked candidates matching the query.",
+        name = "code_symbol_search",
+        description = "Search the worktree graph artifact for symbols by NAME (exact/prefix/substring). Lexical retrieval over symbol identifiers, not content. For concept/content retrieval over docs + code bodies, use code_semantic_search. Legacy alias: code_search.",
         input_schema = crate::tool_schemas::schema_object::<CodeSearchParams>()
     )]
     async fn code_search_tool(
@@ -1079,7 +1079,7 @@ impl WorkerToolHandler {
         let args = Value::Object(arguments);
         let deps = Arc::clone(&self.deps);
         self.invoke_with_lifecycle(
-            "code_search",
+            "code_symbol_search",
             context,
             Some(None),
             move |worker_ctx| async move {

@@ -895,10 +895,14 @@ fn code_callees_def() -> ToolDefinition {
     }
 }
 
-fn code_search_def() -> ToolDefinition {
+// Renamed from `code_search` → `code_symbol_search` to pair with the
+// `code_semantic_search` (BM25 over doc/code content) tool: symbol-name lookup
+// vs content retrieval. The legacy `code_search` name still dispatches to the
+// same handler (see handlers/mod.rs) as a back-compat alias.
+fn code_symbol_search_def() -> ToolDefinition {
     ToolDefinition {
-        name: "code_search".into(),
-        description: "Search the worktree graph artifact for symbols by name. Lexical retrieval, not graph resolution — returns ranked candidates matching the query. Use after `code_callees` returns empty (e.g., on macro-bodied functions whose bodies are opaque to the graph) to recover candidate identifiers from the symbol index.".into(),
+        name: "code_symbol_search".into(),
+        description: "Search the worktree graph artifact for symbols by NAME (exact/prefix/substring). Lexical retrieval over symbol identifiers, not content — returns ranked candidate symbols. For concept/content/natural-language retrieval over docs + code bodies, use code_semantic_search instead. Legacy alias: code_search.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -1495,7 +1499,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
-        code_search_def(),
+        code_symbol_search_def(),
         code_subgraph_def(),
         code_symbol_history_def(),
         doc_navigate_def(),
@@ -1538,7 +1542,7 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_read_symbol_def(),
         code_callers_def(),
         code_callees_def(),
-        code_search_def(),
+        code_symbol_search_def(),
         code_subgraph_def(),
         code_symbol_history_def(),
         doc_navigate_def(),
@@ -1701,7 +1705,7 @@ mod schema_truthfulness_tests {
 
     #[test]
     fn code_search_schema_uses_query_not_selector_or_legacy_symbol() {
-        let def = code_search_def();
+        let def = code_symbol_search_def();
         let props = def
             .input_schema
             .get("properties")
@@ -1802,7 +1806,7 @@ mod worker_tools_subset_tests {
         "code_read_symbol",
         "code_callers",
         "code_callees",
-        "code_search",
+        "code_symbol_search",
         "code_subgraph",
         "code_symbol_history",
         "doc_navigate",
@@ -1852,8 +1856,8 @@ mod worker_tools_subset_tests {
             "graph_subgraph",
         ];
         assert!(
-            !forbidden.contains(&"code_search"),
-            "code_search is read-only and worker-facing, not brain-only",
+            !forbidden.contains(&"code_symbol_search"),
+            "code_symbol_search is read-only and worker-facing, not brain-only",
         );
         for tool in &forbidden {
             assert!(
