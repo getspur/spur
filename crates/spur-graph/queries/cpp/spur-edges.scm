@@ -61,6 +61,63 @@
   function: (template_function
     name: (identifier) @call.name)) @call
 
+; Bare function/functor values passed to a closed list of STL higher-order
+; algorithms. Qualified callable arguments capture only the rightmost name,
+; mirroring normal C++ call extraction.
+((call_expression
+   function: (qualified_identifier
+     scope: (namespace_identifier) @hof_scope
+     name: (identifier) @hof_algorithm)
+   arguments: (argument_list
+     .
+     (_)
+     .
+     (_)
+     .
+     [(identifier) @reference.name
+      (qualified_identifier
+        name: (identifier) @reference.name)]))
+ (#match? @hof_scope "^std$")
+ (#match? @hof_algorithm "^(for_each|sort|find_if|remove_if|count_if)$"))
+
+((call_expression
+   function: (qualified_identifier
+     scope: (namespace_identifier) @hof_scope
+     name: (identifier) @hof_algorithm)
+   arguments: (argument_list
+     .
+     (_)
+     .
+     (_)
+     .
+     (_)
+     .
+     [(identifier) @reference.name
+      (qualified_identifier
+        name: (identifier) @reference.name)]))
+ (#match? @hof_scope "^std$")
+ (#match? @hof_algorithm "^(transform|accumulate)$"))
+
+((call_expression
+   function: (qualified_identifier
+     scope: (namespace_identifier) @hof_scope
+     name: (identifier) @hof_algorithm)
+   arguments: (argument_list
+     .
+     (_)
+     .
+     (_)
+     .
+     (_)
+     .
+     (_)
+     .
+     [(identifier) @reference.name
+      (qualified_identifier
+        name: (identifier) @reference.name)]))
+ (#match? @hof_scope "^std$")
+ (#match? @hof_algorithm "^transform$"))
+
 ; ============ macro-wrapped call sites ============
 ;
 ; `preproc_call` captures `IDENT(args)` shapes at the file/namespace level
