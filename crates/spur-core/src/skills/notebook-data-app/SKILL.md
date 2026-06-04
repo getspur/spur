@@ -62,15 +62,31 @@ derived port the artifact consumes.
 
 ### 4. Artifact — consumes ports, renders `text/html`
 
-The artifact reads its inputs with `spur.get(port)` and emits one HTML document
-(inline CSS + optional inline `<script>`; self-contained, no external assets).
+The artifact reads its inputs with `spur.get(port)` and emits one `text/html` output.
 - **Python cell:** `from IPython.display import HTML; HTML(html)`.
 - **Deno cell** (set `code_type="javascript"`): `spur.get` returns an
   apache-arrow Table; finish with `await Deno.jupyter.display({"text/html": html}, {raw:true})`.
 
 Build the HTML data-driven (rows, markers, bars derived from the ports) — never
-hardcode values. For the visual direction, palette, layout specialism, and the
-anti-slop critique, follow **open-design**.
+hardcode values.
+
+**Pick an artifact track — see open-design's `references/artifact-tracks.md`.** A
+data app IS the dashboard / monitor surface those tracks were written for, so the
+choice is load-bearing here, and it decides whether the artifact is self-contained:
+- **Static / mostly-display app** → **Track B** (componentized + SSR on the Deno
+  kernel) by default, or **Track A** (single-file HTML, pre-rendered DOM) for a
+  simple read-out. Charts use **Observable Plot**, server-rendered to inline SVG.
+  Self-contained: zero external URLs, reads correctly with scripts off.
+- **Live / interactive / large-data dashboard** → **Perspective**
+  (`<perspective-viewer>`, Datagrid + d3fc) — the default heavy-data visualizer for
+  pivot/aggregate/filter and streaming `table.update()`. This is the **one accepted
+  exception** to "self-contained": it loads WASM from a CDN and needs active content
+  on, with no scripts-off baseline. Reach for it only when interactive exploration
+  IS the product; otherwise stay on Plot.
+
+For palette, font binding, layout specialism, and the anti-slop critique, follow
+**open-design** (its `references/critique.md` self-contained gate applies to every
+track except the Perspective dashboard exception above).
 
 ### 5. Run & verify
 
@@ -103,4 +119,5 @@ Deno kernel/slot mechanics.
 
 ## Reference
 - `references/ports-and-kernels.md` — PortStore layout, `spur.put/get` contract, Deno slot + `code_type` routing, the parallel-edge invariant.
+- **open-design** `references/artifact-tracks.md` — Track A/B build pipeline, the Plot-vs-Perspective chart decision, and the self-contained gate. The artifact track for any data app.
 - **open-design** — visual direction, palette/font binding, surface specialism, five-dimensional + anti-slop critique for the artifact.
