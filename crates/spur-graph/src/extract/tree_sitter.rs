@@ -399,8 +399,9 @@ impl<'a> FactBuilder<'a> {
         edge: &PendingEdge,
         target: Option<NodeId>,
         relation: RelationKind,
+        bind_method: Option<&'static str>,
     ) {
-        let metadata = metadata_for_pending_edge(edge, target, None);
+        let metadata = metadata_for_pending_edge(edge, target, bind_method);
         self.add_edge_with_metadata(
             edge.source,
             target,
@@ -595,6 +596,7 @@ impl<'a> FactBuilder<'a> {
                                 &edge,
                                 Some(*target),
                                 RelationKind::Constructs,
+                                None,
                             );
                         } else {
                             self.add_pending_edge_with_bind_method(
@@ -872,9 +874,14 @@ fn resolve_singleton_bare_target(
                     Some(NodeKind::Struct | NodeKind::EnumVariant | NodeKind::Class)
                 )
             {
-                builder.add_pending_edge_as(edge, Some(target), RelationKind::Constructs);
+                builder.add_pending_edge_as(edge, Some(target), RelationKind::Constructs, None);
             } else if should_reclassify_python_extends_as_implements(edge, target, indexes) {
-                builder.add_pending_edge_as(edge, Some(target), RelationKind::Implements);
+                builder.add_pending_edge_as(
+                    edge,
+                    Some(target),
+                    RelationKind::Implements,
+                    Some("relational"),
+                );
             } else if edge.relation == RelationKind::Calls {
                 // P1a: calls only resolve to callable symbols (handled above) or
                 // constructible types. Other singleton kinds are misresolutions.
@@ -951,9 +958,14 @@ impl FactBuilder<'_> {
         indexes: &PendingResolutionIndexes<'_>,
     ) {
         if should_reclassify_python_extends_as_implements(edge, target, indexes) {
-            self.add_pending_edge_as(edge, Some(target), RelationKind::Implements);
+            self.add_pending_edge_as(
+                edge,
+                Some(target),
+                RelationKind::Implements,
+                Some("relational"),
+            );
         } else {
-            self.add_pending_edge(edge, Some(target));
+            self.add_pending_edge_with_bind_method(edge, Some(target), Some("relational"));
         }
     }
 }
