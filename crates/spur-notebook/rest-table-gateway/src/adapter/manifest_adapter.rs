@@ -873,6 +873,118 @@ query = {{ in = "body", type = "Utf8", required = true }}
     }
 
     #[tokio::test]
+    async fn google_ads_action_returns_typed_columns_from_preset() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        struct EnvGuard(&'static [&'static str]);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for key in self.0 {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "ya29-typed-test-token",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/customers/123/googleAds:search"))
+            .and(header("authorization", "Bearer ya29-typed-test-token"))
+            .and(header("developer-token", "dev-tok-typed"))
+            .and(header("login-customer-id", "987654321"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {
+                        "campaign": { "id": "11", "name": "A" },
+                        "metrics": {
+                            "impressions": "100",
+                            "clicks": "5",
+                            "costMicros": "2000000"
+                        }
+                    },
+                    {
+                        "campaign": { "id": "12", "name": "B" },
+                        "metrics": {
+                            "impressions": "50",
+                            "clicks": "1",
+                            "costMicros": "500000"
+                        }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        const ENV_KEYS: &[&str] = &[
+            "SPUR_CONN_GADS_TYPED_TEST_DEVELOPER_TOKEN",
+            "SPUR_CONN_GADS_TYPED_TEST_LOGIN_CUSTOMER_ID",
+            "GADS_TYPED_TEST_CLIENT_ID",
+            "GADS_TYPED_TEST_CLIENT_SECRET",
+            "GADS_TYPED_TEST_REFRESH_TOKEN",
+        ];
+        let _env_guard = EnvGuard(ENV_KEYS);
+        std::env::set_var("SPUR_CONN_GADS_TYPED_TEST_DEVELOPER_TOKEN", "dev-tok-typed");
+        std::env::set_var("SPUR_CONN_GADS_TYPED_TEST_LOGIN_CUSTOMER_ID", "987654321");
+        std::env::set_var("GADS_TYPED_TEST_CLIENT_ID", "cid");
+        std::env::set_var("GADS_TYPED_TEST_CLIENT_SECRET", "secret");
+        std::env::set_var("GADS_TYPED_TEST_REFRESH_TOKEN", "rt-typed");
+
+        let token_url = format!("{}/token", server.uri());
+        let toml = include_str!("../../connections/tier-a/google_ads.connection.toml")
+            .replace("https://googleads.googleapis.com/v17", &server.uri())
+            .replace("https://oauth2.googleapis.com/token", &token_url)
+            .replace("DEVELOPER_TOKEN", "GADS_TYPED_TEST_DEVELOPER_TOKEN")
+            .replace("LOGIN_CUSTOMER_ID", "GADS_TYPED_TEST_LOGIN_CUSTOMER_ID")
+            .replace("GOOGLE_ADS_CLIENT_ID", "GADS_TYPED_TEST_CLIENT_ID")
+            .replace("GOOGLE_ADS_CLIENT_SECRET", "GADS_TYPED_TEST_CLIENT_SECRET")
+            .replace("GOOGLE_ADS_REFRESH_TOKEN", "GADS_TYPED_TEST_REFRESH_TOKEN");
+        let manifest = Manifest::from_toml(&toml).expect("preset parses");
+        let adapter = ManifestAdapter::new(manifest);
+        let req = ActionRequest {
+            name: "google_ads_search".to_string(),
+            method: "POST".to_string(),
+            path: "/customers/123/googleAds:search".to_string(),
+            query: vec![],
+            body: Some(serde_json::json!({
+                "query": "SELECT campaign.id, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros FROM campaign"
+            })),
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let batches = adapter.act(req).await.expect("act returns typed rows");
+
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(rows, 2, "two GAQL results map to two typed rows");
+        let schema = batches[0].schema();
+        assert!(
+            schema.column_with_name("http_status").is_none(),
+            "typed action must not use generic status/body schema"
+        );
+        let expected = [
+            ("campaign_id", arrow_schema::DataType::Utf8),
+            ("campaign_name", arrow_schema::DataType::Utf8),
+            ("impressions", arrow_schema::DataType::Int64),
+            ("clicks", arrow_schema::DataType::Int64),
+            ("cost_micros", arrow_schema::DataType::Int64),
+        ];
+        assert_eq!(schema.fields().len(), expected.len());
+        for (name, data_type) in expected {
+            let (_, field) = schema
+                .column_with_name(name)
+                .unwrap_or_else(|| panic!("missing typed column {name}"));
+            assert_eq!(field.data_type(), &data_type, "column type for {name}");
+        }
+    }
+
+    #[tokio::test]
     async fn action_paginates_with_cursor_until_exhausted() {
         use wiremock::matchers::{body_partial_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
