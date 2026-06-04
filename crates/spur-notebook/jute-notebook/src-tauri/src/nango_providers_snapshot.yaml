@@ -172,6 +172,11 @@ google-ads:
     - marketing
   auth_mode: OAUTH2
   token_url: "https://oauth2.googleapis.com/token"
+  authorization_url: "https://accounts.google.com/o/oauth2/v2/auth"
+  authorization_params:
+    access_type: offline
+    prompt: consent
+  scope_separator: " "
   proxy:
     base_url: "https://googleads.googleapis.com/v17"
 facebook-ads:
@@ -180,6 +185,8 @@ facebook-ads:
     - marketing
   auth_mode: OAUTH2
   token_url: "https://graph.facebook.com/v21.0/oauth/access_token"
+  authorization_url: "https://www.facebook.com/v21.0/dialog/oauth"
+  scope_separator: ","
   proxy:
     base_url: "https://graph.facebook.com/v21.0"
 gmail:

@@ -491,6 +491,22 @@ acme:
     }
 
     #[test]
+    fn google_ads_snapshot_has_authorization_url() {
+        const SNAPSHOT: &str =
+            include_str!("../../../jute-notebook/src-tauri/src/nango_providers_snapshot.yaml");
+        let providers = parse_providers(SNAPSHOT).expect("parse snapshot");
+        let g = providers.get("google-ads").expect("google-ads present");
+        assert_eq!(
+            g.authorization_url.as_deref(),
+            Some("https://accounts.google.com/o/oauth2/v2/auth")
+        );
+        assert!(g
+            .authorization_params
+            .as_ref()
+            .is_some_and(|p| p.contains_key("access_type")));
+    }
+
+    #[test]
     fn toml_roundtrips() {
         let providers = parse_providers(SAMPLE).expect("providers yaml should parse");
         let manifest = provider_to_manifest_stub("stripe", &providers["stripe"]);
