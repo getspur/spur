@@ -69,3 +69,18 @@
 
 (preproc_call
   directive: (preproc_directive) @call.name) @call
+
+; ============ inheritance ============
+;
+; C++ base classes: `class D : public Base` / `struct D : Base`. C++ has no
+; syntactic interface, so inheritance maps to `extends` (not `implements`).
+
+(class_specifier
+  (base_class_clause
+    [(type_identifier) @extends.name
+     (qualified_identifier name: (type_identifier) @extends.name)])) @extends
+
+(struct_specifier
+  (base_class_clause
+    [(type_identifier) @extends.name
+     (qualified_identifier name: (type_identifier) @extends.name)])) @extends
