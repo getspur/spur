@@ -142,7 +142,6 @@ impl CellRunner for RunCellCommandRunner {
                     "cell_id": request.cell_id,
                     "notebook_path": request.notebook_path,
                     "kernel_id": request.kernel_id,
-                    "code": request.code,
                     "expected_version": request.expected_version,
                 }),
             )

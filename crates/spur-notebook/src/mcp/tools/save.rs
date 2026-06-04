@@ -75,16 +75,21 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         }
     }
 
-    state
-        .save_coordinator
-        .save(path, params.contents)
-        .await
-        .map_err(|error| {
-            McpError::internal_error(
-                "notebook.save failed to write notebook",
-                Some(json!({ "error": error.to_string() })),
-            )
-        })?;
+    let notebook = state.get_notebook();
+    if notebook.path().as_deref() == Some(path.as_path()) {
+        notebook.replace(path, params.contents);
+    } else {
+        state
+            .save_coordinator
+            .save(path, params.contents)
+            .await
+            .map_err(|error| {
+                McpError::internal_error(
+                    "notebook.save failed to write notebook",
+                    Some(json!({ "error": error.to_string() })),
+                )
+            })?;
+    }
 
     if let Some(app) = deps.app.as_ref() {
         app.emit("notebook://saved", &json!({ "path": saved_path }))
@@ -228,6 +233,45 @@ mod tests {
         .await
         .expect("empty save succeeds for fresh path");
         assert!(tokio::fs::metadata(&path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn save_to_open_notebook_routes_through_store() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-mcp-save-open-")
+            .tempdir()
+            .expect("temp dir");
+        let path = temp_dir.path().join("open.ipynb");
+        let state = Arc::new(State::new());
+        state.get_notebook().load(&path, sample_notebook());
+        let replacement: NotebookRoot = serde_json::from_value(json!({
+            "metadata": {},
+            "nbformat_minor": 5,
+            "nbformat": 4,
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "id": "cell-1",
+                    "metadata": {},
+                    "source": "replacement"
+                }
+            ]
+        }))
+        .expect("replacement notebook parses");
+        let deps = deps_with_state(Arc::clone(&state));
+
+        call(
+            &deps,
+            json!({
+                "path": path.display().to_string(),
+                "contents": replacement.clone()
+            }),
+        )
+        .await
+        .expect("save succeeds");
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        assert_eq!(snapshot, replacement);
     }
 
     #[tokio::test]
