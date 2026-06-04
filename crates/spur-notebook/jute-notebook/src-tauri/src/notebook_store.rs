@@ -324,6 +324,12 @@ impl NotebookStore {
         self.path.lock().clone()
     }
 
+    /// Check that an existing cell's SPUR metadata version matches the caller's expectation.
+    pub fn check_cell_version(&self, cell_id: &str, expected: u64) -> Result<(), StoreError> {
+        let root = self.inner.read();
+        self.ensure_cell_version(&root, cell_id, expected)
+    }
+
     /// Apply a notebook edit operation.
     pub fn apply(&self, op: NotebookOp) -> Result<NotebookDelta, StoreError> {
         let mut root = self.inner.write();
@@ -1264,6 +1270,20 @@ mod tests {
                 expected: 1,
                 actual: 2,
             }
+        );
+    }
+
+    #[test]
+    fn check_cell_version_matches_apply_path() {
+        let store = store_with_notebook();
+
+        assert_eq!(store.check_cell_version(CELL_ID, 1), Ok(()));
+        assert_eq!(
+            store.check_cell_version(CELL_ID, 99),
+            Err(StoreError::OptimisticConcurrency {
+                expected: 99,
+                actual: 1,
+            })
         );
     }
 
