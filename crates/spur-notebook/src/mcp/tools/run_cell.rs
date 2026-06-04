@@ -23,7 +23,6 @@ struct RunCellParams {
     notebook_path: String,
     #[serde(default)]
     kernel_id: Option<String>,
-    code: String,
     #[serde(default)]
     expected_version: Option<u64>,
 }
@@ -39,12 +38,11 @@ pub fn tool() -> Tool {
         ),
         rmcp_object(json!({
             "type": "object",
-            "required": ["cell_id", "notebook_path", "code"],
+            "required": ["cell_id", "notebook_path"],
             "properties": {
                 "cell_id": { "type": "string", "minLength": 1 },
                 "notebook_path": { "type": "string", "minLength": 1 },
                 "kernel_id": { "type": "string" },
-                "code": { "type": "string" },
                 "expected_version": { "type": "integer", "minimum": 1 }
             },
             "additionalProperties": false
@@ -55,7 +53,7 @@ pub fn tool() -> Tool {
 pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
     let params: RunCellParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
-            "notebook.run_cell requires { cell_id, notebook_path, kernel_id?, code }",
+            "notebook.run_cell requires { cell_id, notebook_path, kernel_id? }",
             Some(json!({ "error": error.to_string() })),
         )
     })?;
@@ -84,7 +82,6 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         &params.notebook_path,
         Some(&kernel_id),
         &params.cell_id,
-        &params.code,
         state,
     )
     .await
@@ -388,6 +385,52 @@ mod tests {
         assert!(description.contains("Long-running cells will hold the MCP request open"));
     }
 
+    #[test]
+    fn schema_has_no_code_property() {
+        let tool = tool();
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+
+        assert!(
+            schema["properties"].get("code").is_none(),
+            "code must be removed"
+        );
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|value| value != "code"));
+    }
+
+    #[tokio::test]
+    async fn runs_stored_source_without_a_code_param() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_code_cell());
+        let deps = deps_with_state(Arc::clone(&state));
+        let (tx, rx) = async_channel::unbounded();
+
+        tx.send(RunCellEvent::Stdout("old".to_string()))
+            .await
+            .unwrap();
+        tx.send(RunCellEvent::Finished {
+            exec_count: Some(2),
+            status: "ok".to_string(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let summary = drain_run_cell_events(&deps, &state, "code-1", "kernel-1", rx).await;
+
+        assert_eq!(summary.status, "ok");
+        let (snapshot, _) = state.get_notebook().snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("code cell")
+        };
+        assert_eq!(cell.execution_count, Some(2));
+    }
+
     #[tokio::test]
     async fn missing_slot_yields_dispatch_error() {
         let deps = deps_with_state(Arc::new(State::new()));
@@ -396,8 +439,7 @@ mod tests {
             json!({
                 "cell_id": "code-1",
                 "notebook_path": "/tmp/test.ipynb",
-                "kernel_id": "missing",
-                "code": "1+1"
+                "kernel_id": "missing"
             }),
         )
         .await
@@ -417,8 +459,7 @@ mod tests {
             json!({
                 "cell_id": "code-1",
                 "notebook_path": "/tmp/test.ipynb",
-                "kernel_id": "",
-                "code": ""
+                "kernel_id": ""
             }),
         )
         .await
@@ -446,7 +487,6 @@ mod tests {
                 "cell_id": "code-1",
                 "notebook_path": "/tmp/test.ipynb",
                 "kernel_id": "missing",
-                "code": "print('new')",
                 "expected_version": 99
             }),
         )
@@ -473,8 +513,7 @@ mod tests {
             json!({
                 "cell_id": "markdown-1",
                 "notebook_path": "/tmp/test.ipynb",
-                "kernel_id": "missing",
-                "code": "print('new')"
+                "kernel_id": "missing"
             }),
         )
         .await
@@ -498,7 +537,6 @@ mod tests {
             cell_id: "code-1".to_string(),
             notebook_path: "/tmp/test.ipynb".to_string(),
             kernel_id: Some("kernel-1".to_string()),
-            code: "print('new')".to_string(),
             expected_version: None,
         };
         let (tx, rx) = async_channel::unbounded();
