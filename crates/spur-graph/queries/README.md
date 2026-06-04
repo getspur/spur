@@ -94,6 +94,7 @@ seed of the Tier-0 ontology realization contract
 | imports | Y | Y | Y | Y | Y | Y(links) |
 | calls | Y | Y | Y | Y | Y | — |
 | contains | Y | Y | Y | Y | Y | Y |
+| defines | Y | Y | Y | Y | Y | — |
 | references (HOF) | Y | TODO | Y | Y | TODO | — |
 | links | — | — | — | — | — | Y |
 | implements | Y | TODO | Y | Y | — | — |
