@@ -119,6 +119,12 @@ struct LoadNotebookParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReplaceNotebookParams {
+    path: String,
+    contents: NotebookRoot,
+}
+
+#[derive(Debug, Deserialize)]
 struct DeleteCellParams {
     id: String,
     #[serde(alias = "expectedVersion")]
@@ -200,6 +206,16 @@ fn command_from_bridge_method(
                 return Err(invalid_params("notebook.load path must not be empty"));
             }
             Ok(DaemonControlCommand::LoadNotebook { path: params.path })
+        }
+        "notebook.replace" => {
+            let params: ReplaceNotebookParams = decode_params(method, params)?;
+            if params.path.is_empty() {
+                return Err(invalid_params("notebook.replace path must not be empty"));
+            }
+            Ok(DaemonControlCommand::ReplaceNotebook {
+                path: params.path,
+                contents: params.contents,
+            })
         }
         "notebook.delete_cell" => {
             let params: DeleteCellParams = decode_params(method, params)?;
@@ -334,6 +350,7 @@ fn bridge_response_from_daemon_result(
             let _ = delta_version(result, "loaded")?;
             Ok(Value::Null)
         }
+        "notebook.replace" => Ok(json!({ "ok": true })),
         "notebook.flush" | "notebook.flush_pending" | "notebook.flush_notebook" => Ok(Value::Null),
         method => Err(BridgeError::Handler {
             code: "unknown_method".to_string(),
