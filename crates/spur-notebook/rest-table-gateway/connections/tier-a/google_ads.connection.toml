@@ -3,7 +3,7 @@
 # login-customer-id is required for manager (MCC) accounts.
 [source]
 name = "google_ads"
-base_url = "https://googleads.googleapis.com/v17"
+base_url = "https://googleads.googleapis.com/v20"
 allow_writes = true
 connection_config = ["DEVELOPER_TOKEN", "LOGIN_CUSTOMER_ID"]
 auth = { scheme = "oauth2_refresh", token_url = "https://oauth2.googleapis.com/token", client_id_env = "GOOGLE_ADS_CLIENT_ID", client_secret_env = "GOOGLE_ADS_CLIENT_SECRET", refresh_token_env = "GOOGLE_ADS_REFRESH_TOKEN", scope = "https://www.googleapis.com/auth/adwords" }
