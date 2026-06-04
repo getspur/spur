@@ -19,3 +19,32 @@
 ; Constructor instantiation: `new Foo()` becomes a Calls edge to `Foo`.
 (new_expression
   constructor: (identifier) @call.name) @call
+
+; `class C implements I` emits an Implements edge to each interface.
+(class_declaration
+  (class_heritage
+    (implements_clause
+      [
+        (type_identifier) @implements.name
+        (generic_type
+          (type_identifier) @implements.name)
+      ]))) @implements
+
+; `class C extends B` emits an Extends edge to the base class.
+(class_declaration
+  (class_heritage
+    (extends_clause
+      value: [
+        (identifier) @extends.name
+        (member_expression
+          property: (property_identifier) @extends.name)
+      ]))) @extends
+
+; `interface I extends J` emits an Extends edge between interfaces.
+(interface_declaration
+  (extends_type_clause
+    [
+      (type_identifier) @extends.name
+      (generic_type
+        (type_identifier) @extends.name)
+    ])) @extends
