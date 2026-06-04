@@ -76,7 +76,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     }
 
     let notebook = state.get_notebook();
-    if notebook.path().as_deref() == Some(path.as_path()) {
+    if is_same_open_target(notebook.path().as_deref(), path.as_path()) {
         notebook.replace(path, params.contents);
     } else {
         state
@@ -102,6 +102,22 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     }
 
     Ok(CallToolResult::structured(json!({ "ok": true })))
+}
+
+fn is_same_open_target(store_path: Option<&Path>, candidate: &Path) -> bool {
+    let Some(store_path) = store_path else {
+        return false;
+    };
+    if store_path == candidate {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(store_path),
+        std::fs::canonicalize(candidate),
+    ) {
+        (Ok(store_path), Ok(candidate)) => store_path == candidate,
+        _ => false,
+    }
 }
 
 async fn existing_cell_count(path: &Path) -> Option<usize> {
@@ -264,6 +280,50 @@ mod tests {
             &deps,
             json!({
                 "path": path.display().to_string(),
+                "contents": replacement.clone()
+            }),
+        )
+        .await
+        .expect("save succeeds");
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        assert_eq!(snapshot, replacement);
+    }
+
+    #[tokio::test]
+    async fn save_to_symlinked_open_path_routes_through_store() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-mcp-save-open-symlink-")
+            .tempdir()
+            .expect("temp dir");
+        let real_path = temp_dir.path().join("open.ipynb");
+        tokio::fs::write(&real_path, serde_json::to_vec(&sample_notebook()).unwrap())
+            .await
+            .expect("seed disk");
+        let alias_path = temp_dir.path().join("alias.ipynb");
+        std::os::unix::fs::symlink(&real_path, &alias_path).expect("symlink notebook");
+        let state = Arc::new(State::new());
+        state.get_notebook().load(&real_path, sample_notebook());
+        let replacement: NotebookRoot = serde_json::from_value(json!({
+            "metadata": {},
+            "nbformat_minor": 5,
+            "nbformat": 4,
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "id": "cell-1",
+                    "metadata": {},
+                    "source": "replacement through symlink"
+                }
+            ]
+        }))
+        .expect("replacement notebook parses");
+        let deps = deps_with_state(Arc::clone(&state));
+
+        call(
+            &deps,
+            json!({
+                "path": alias_path.display().to_string(),
                 "contents": replacement.clone()
             }),
         )
