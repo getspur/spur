@@ -9,7 +9,7 @@ role: both
 The SPUR graph artifact already knows every symbol, definition site, call edge, and reference in the worktree. Use the `code_*` MCP tools to query it. Text search is a fallback, not a starting point.
 
 <HARD-GATE>
-Before opening more than one file with Read, or running more than one Grep/Glob to locate code, you MUST attempt the relevant `code_*` tool. Grepping for a function name when filtered `code_search` would return its definition is the anti-pattern this skill exists to prevent.
+Before opening more than one file with Read, or running more than one Grep/Glob to locate code, you MUST attempt the relevant `code_*` tool. Grepping for a function name when filtered `code_symbol_search` would return its definition is the anti-pattern this skill exists to prevent.
 </HARD-GATE>
 
 ## Why graph-first
@@ -25,26 +25,30 @@ Most code questions are not call-graph questions. Pick the right shape before re
 
 | Question shape | Right tool sequence |
 |---|---|
-| **"What does X mean / contain / advertise?"** (schema audit, doc read, single-symbol body) | filtered `code_search` → `code_read_symbol`. **No call graph.** |
+| **"How does <concept> work / where is it documented?"** (you know the *topic*, not the symbol name) | `code_semantic_search` — BM25 over doc + code content. Then `code_read_symbol` / `doc_navigate` on a hit. |
+| **"What does X mean / contain / advertise?"** (schema audit, doc read, single-symbol body) | filtered `code_symbol_search` → `code_read_symbol`. **No call graph.** |
 | **"What breaks if I change X?"** (refactor, rename) | `code_callers` with `include_unresolved=true`. Counts-first; bail on popular sinks. |
 | **"What does X end up doing?"** (trace one branch) | Iterated `code_callees`. Pick one non-sink child per hop. Never `code_subgraph r=2`. |
 | **"What's around X?"** (neighborhood map for a reviewer) | `code_subgraph radius=1` first. Escalate to `r=2` only if no direct callee is a popular sink. |
-| **"What's in this file?"** (outline) | Filtered `code_search file=<path> symbol_kind=<kind>`. `code_file_symbols` only on small files (< ~1k lines). |
-| **"Where is X declared?"** (find by name) | `code_search substring + symbol_kind + file_glob`. `code_resolve` only when the name is exact and canonical. |
+| **"What's in this file?"** (outline) | Filtered `code_symbol_search file=<path> symbol_kind=<kind>`. `code_file_symbols` only on small files (< ~1k lines). |
+| **"Where is X declared?"** (find by name) | `code_symbol_search substring + symbol_kind + file_glob`. `code_resolve` only when the name is exact and canonical. |
 
 For schema audits, doc reads, and "what does this field mean?" questions, skip the call graph entirely — the schema↔handler link is by string name, not call edge.
 
-## The eight tools (primary → fast-path → specialised)
+## The tools (primary → fast-path → specialised)
+
+> **Naming:** `code_search` was renamed to **`code_symbol_search`** (the old name still works as a deprecated alias). It pairs with **`code_semantic_search`** — symbol-*name* lookup vs content-*relevance*. Pick by what you know: a name → `code_symbol_search`; a concept/topic → `code_semantic_search`.
 
 | Tool | Tier | Use when |
 |---|---|---|
-| `code_search` | **PRIMARY** | Default discovery tool. Filter with `mode=exact|prefix|substring`, `symbol_kind`, `file`/`file_glob`. Cannot overflow (returns ranked candidates). |
+| `code_symbol_search` | **PRIMARY (by name)** | Default name-lookup. Filter with `mode=exact|prefix|substring`, `symbol_kind`, `file`/`file_glob`. Cannot overflow (returns ranked candidates). Legacy alias: `code_search`. |
+| `code_semantic_search` | **PRIMARY (by concept)** | BM25 retrieval over doc/skill/plan section *bodies* + symbol *token text*; code hits carry centrality/churn/posture. For "how does X work / where is X documented" when you don't know the symbol name. Served by the **notebook MCP** (reads `.spur/analyst.duckdb`), not spur-mcp. NOT a call-graph tool. |
 | `code_read_symbol` | **TERMINAL** | Best tool in the set. Narrow source by stable_symbol_id with optional `context_lines`. Use as the last step of every flow. |
 | `code_callers` | After counts-probe | Impact analysis. **Default `include_unresolved=true`** — a silently-missed caller is the worst failure for refactor/rename scope. Read `counts_by_kind` BEFORE the list. Bail on `counts.calls > ~30`. |
 | `code_callees` | After counts-probe | Behavior analysis. **Default `include_unresolved=false`** — unresolved callee rows are usually std / `Option` / `Result` / iterator mechanics, not domain calls. Inspect `counts_by_kind.unresolved` + `unresolved_sample`; only re-run with `include_unresolved=true` when sample labels look behavior-relevant or the code is macro/dynamic/trait-heavy. |
 | `code_subgraph` | Sparingly | `radius=1 edge_kinds=["calls"]` by default. Never seed at a popular sink. `format=mermaid` for humans. |
-| `code_resolve` | Fast path | Only when you have an exact canonical bare name. Errors hard on near-misses (the error message implies the artifact is broken — it isn't, the name is wrong). Fall through to filtered `code_search` on miss. |
-| `code_file_symbols` | Small files only | Overflows on files > ~2k lines. For anything larger, use filtered `code_search`. |
+| `code_resolve` | Fast path | Only when you have an exact canonical bare name. Errors hard on near-misses (the error message implies the artifact is broken — it isn't, the name is wrong). Fall through to filtered `code_symbol_search` on miss. |
+| `code_file_symbols` | Small files only | Overflows on files > ~2k lines. For anything larger, use filtered `code_symbol_search`. |
 | `code_symbol_info` | Rarely needed | `code_read_symbol` returns the same metadata plus the body. |
 
 ## Selector grammar
@@ -59,7 +63,7 @@ All edge tools accept a single `selector` string. In order of specificity:
 
 Prefer (1) once you have it. Carry the `uri` from response to response instead of re-resolving by name.
 
-**Format gotcha:** methods are stored as `impl Type::method`, NOT `Type::method`. `code_search exact "JsonRpcResponse::success"` returns zero hits; `code_search exact "success" file=<types.rs>` returns the same symbol with qualified_name `impl JsonRpcResponse::success`. Use scoped search when the bare-method name might collide.
+**Format gotcha:** methods are stored as `impl Type::method`, NOT `Type::method`. `code_symbol_search exact "JsonRpcResponse::success"` returns zero hits; `code_symbol_search exact "success" file=<types.rs>` returns the same symbol with qualified_name `impl JsonRpcResponse::success`. Use scoped search when the bare-method name might collide.
 
 ## Counts-first rule (mandatory for callers/callees)
 
@@ -111,7 +115,7 @@ digraph code_explore {
     "Question received" [shape=doublecircle];
     "Classify shape" [shape=diamond];
     "Have a uri already?" [shape=diamond];
-    "code_search filtered" [shape=box];
+    "code_symbol_search filtered" [shape=box];
     "Ambiguous?" [shape=diamond];
     "Refine kind/scope or pick candidate" [shape=box];
     "code_read_symbol" [shape=box];
@@ -126,10 +130,10 @@ digraph code_explore {
     "Question received" -> "Classify shape";
     "Classify shape" -> "Have a uri already?";
     "Have a uri already?" -> "code_read_symbol" [label="yes"];
-    "Have a uri already?" -> "code_search filtered" [label="no"];
-    "code_search filtered" -> "Ambiguous?";
+    "Have a uri already?" -> "code_symbol_search filtered" [label="no"];
+    "code_symbol_search filtered" -> "Ambiguous?";
     "Ambiguous?" -> "Refine kind/scope or pick candidate" [label="yes"];
-    "Refine kind/scope or pick candidate" -> "code_search filtered";
+    "Refine kind/scope or pick candidate" -> "code_symbol_search filtered";
     "Ambiguous?" -> "code_read_symbol" [label="no"];
     "code_read_symbol" -> "Need call graph?";
     "Need call graph?" -> "Answer assembled" [label="no (most schema/doc reads)"];
@@ -148,13 +152,13 @@ digraph code_explore {
 
 | Thought | Reality |
 |---|---|
-| "Let me grep for the function name." | Filtered `code_search` returns ranked definitions, no false positives. |
+| "Let me grep for the function name." | Filtered `code_symbol_search` returns ranked definitions, no false positives. |
 | "I'll read the file to find callers." | `code_callers` returns every caller's file+line in one call. |
-| "Let me Read the whole file to see structure." | `code_search file=<path> symbol_kind=function` outlines without overflow. |
-| "Grep returned 80 matches — let me filter." | `code_search` with `symbol_kind` + `file_glob` filters in-tool. |
+| "Let me Read the whole file to see structure." | `code_symbol_search file=<path> symbol_kind=function` outlines without overflow. |
+| "Grep returned 80 matches — let me filter." | `code_symbol_search` with `symbol_kind` + `file_glob` filters in-tool. |
 | "I'll trace this by reading each callsite." | Iterate `code_callees` depth-first by hand. `code_subgraph r=2` is for maps, not traces. |
-| "The macro hides the call so the graph won't help." | `code_search` is the documented fallback for opaque macro bodies. Bodies of `#[derive]`/attribute macros ARE parsed; only `use`-imported call resolution is sometimes incomplete. |
-| "`code_resolve` says 'not found in graph artifact', the graph must be broken." | The name is wrong, not the artifact. Re-run as `code_search substring` with `symbol_kind` + `file_glob` filters. |
+| "The macro hides the call so the graph won't help." | `code_symbol_search` is the documented fallback for opaque macro bodies. Bodies of `#[derive]`/attribute macros ARE parsed; only `use`-imported call resolution is sometimes incomplete. |
+| "`code_resolve` says 'not found in graph artifact', the graph must be broken." | The name is wrong, not the artifact. Re-run as `code_symbol_search substring` with `symbol_kind` + `file_glob` filters. |
 | "Callers returned empty — there are no callers." | For `code_callers` the default *should be* `include_unresolved=true`. If you got an empty list with `counts.unresolved > 0`, you ran with the wrong flag. Re-run. |
 | "Callees include 29 unresolved rows like `get`, `map`, `clone` — I need to read them all." | No. Those are std/iterator mechanics. With `code_callees include_unresolved=false` (the recommended default), they disappear; `counts_by_kind.unresolved` still tells you how many were hidden. |
 | "A resolved row points at a symbol in a totally unrelated crate — must be a real edge." | Bare-method-name collision. Cross-crate resolution for `take` / `filter` / `lock` / `new` is suspect. Verify with `code_read_symbol` before trusting. |
@@ -175,7 +179,7 @@ digraph code_explore {
 | "What's around X?" (map, often for a reviewer) | `code_subgraph radius=1 format=mermaid` |
 | Map, but X has popular-sink callees | start with `code_callees`, then `code_subgraph radius=1` on each non-sink child |
 | Renaming/refactoring impact | `code_callers` with counts-first probe, NOT `code_subgraph` |
-| Outline a 2k+ line file | `code_search file=<path> symbol_kind=<kind>`, NOT `code_file_symbols` |
+| Outline a 2k+ line file | `code_symbol_search file=<path> symbol_kind=<kind>`, NOT `code_file_symbols` |
 
 **Tactical rules for `code_subgraph` when you do use it.**
 
@@ -194,7 +198,7 @@ Two tools can exceed the inline response budget and save to an out-of-band file:
 
 When this happens, do NOT chunk-read the saved file. Switch strategy:
 
-- For file outline: `code_search file=<path> symbol_kind=function limit=30` (then again for `struct`, `enum`, `method`). This returns the same information in filtered slices.
+- For file outline: `code_symbol_search file=<path> symbol_kind=function limit=30` (then again for `struct`, `enum`, `method`). This returns the same information in filtered slices.
 - For popular-sink impact: bail. The question needs reframing — the symbol is a boundary, not an investigation target.
 
 ## Anti-patterns
@@ -206,8 +210,8 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 - **Trusting empty `callers` without reading `counts_by_kind`.** For `code_callers`, the noise/signal asymmetry inverts: the default *should* be `include_unresolved=true` because a hidden caller breaks refactor scope. Empty `callers` with `counts.unresolved > 0` = you ran with the wrong flag.
 - **Using `unresolved > resolved` as a re-run trigger for `code_callees`.** In Rust handlers, std/iterator/serde calls routinely outnumber domain calls. This heuristic fires constantly and re-introduces the noise the asymmetric default is meant to suppress. Use *sample inspection* (semantic) instead of *row counts* (statistical).
 - **Trusting resolved rows blindly when the bare name is common.** `take`, `filter`, `lock`, `new`, `send`, `format` collide across crates; the resolver can pick a wrong cross-crate symbol. Sanity-check that the resolved file_path and enclosing_scope make domain sense.
-- **Treating `code_resolve` as the primary discovery tool.** It errors on imperfect names with a misleading message. Filtered `code_search` is the primary; `code_resolve` is a fast path for canonical names.
-- **`code_file_symbols` on any file you haven't sized first.** If the file is > ~1k lines, go straight to filtered `code_search`.
+- **Treating `code_resolve` as the primary discovery tool.** It errors on imperfect names with a misleading message. Filtered `code_symbol_search` is the primary; `code_resolve` is a fast path for canonical names.
+- **`code_file_symbols` on any file you haven't sized first.** If the file is > ~1k lines, go straight to filtered `code_symbol_search`.
 - **Trusting stale graph data silently.** Every response includes `indexed_head_oid`, `worktree_dirty`, and `response_file_oids_match`.
   - `worktree_dirty: true` means **either** there are uncommitted edits to *tracked* files **or** HEAD has advanced past `indexed_head_oid`. Untracked files do NOT flip the flag.
   - `response_file_oids_match: Some(true)` certifies every file referenced in *this* response is byte-for-byte identical to what the graph indexed. `Some(false)` means at least one such file changed. `None` means undetermined (no worktree, no graph pointer, or read race).
@@ -218,7 +222,7 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 
 - **Graph before text.** Every code question gets a `code_*` attempt before Grep/Glob/Read-walking.
 - **Classify the question first.** Most are "read one symbol," not "trace the call graph."
-- **`code_search` is primary, filtered.** Always pair with `symbol_kind` and `file`/`file_glob` to avoid noise (markdown sections, test duplicates) and overflow.
+- **`code_symbol_search` is primary, filtered.** Always pair with `symbol_kind` and `file`/`file_glob` to avoid noise (markdown sections, test duplicates) and overflow.
 - **Carry the uri.** Resolve once, use the `graph://symbol/<id>` across the rest of the investigation.
 - **Counts before list.** For `code_callers`/`code_callees`, read `counts_by_kind` first; bail on popular sinks.
 - **Asymmetric unresolved defaults.** `code_callers` → on (missed-row is the worst failure). `code_callees` → off (std mechanics dominate). For callees, re-enable only when `unresolved_sample` looks domain-relevant.
@@ -231,7 +235,7 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 
 ```
 0. Classify the question. Most are "read one symbol" — skip the call graph.
-1. Filtered code_search (substring + symbol_kind + file_glob) — DEFAULT discovery.
+1. Filtered code_symbol_search (substring + symbol_kind + file_glob) — DEFAULT discovery.
 2. code_read_symbol on the chosen URI — narrow body.
 3. If the question is about impact or behavior:
      code_callers with include_unresolved=true   (missed-row is worst failure)
