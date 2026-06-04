@@ -367,6 +367,11 @@ pub enum DaemonControlCommand {
     #[serde(rename = "load")]
     #[ts(rename = "load")]
     LoadNotebook { path: String },
+    /// Replace the authoritative store with supplied notebook contents.
+    ReplaceNotebook {
+        path: String,
+        contents: NotebookRoot,
+    },
     /// Delete one cell.
     DeleteCell {
         id: String,
@@ -875,6 +880,10 @@ async fn handle_daemon_control_inner(
             *state.datasource_catalog.lock() = catalog;
             state.emit_datasources_changed(entries);
             let delta = notebook.load(PathBuf::from(path), root);
+            Ok(DaemonControlResult::Delta(delta))
+        }
+        DaemonControlCommand::ReplaceNotebook { path, contents } => {
+            let delta = notebook.replace(PathBuf::from(path), contents);
             Ok(DaemonControlResult::Delta(delta))
         }
         DaemonControlCommand::ListDatasources {} => {

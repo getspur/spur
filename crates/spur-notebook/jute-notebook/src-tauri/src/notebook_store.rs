@@ -312,6 +312,28 @@ impl NotebookStore {
         delta
     }
 
+    /// Replace the current notebook document and mark it dirty for persistence.
+    pub fn replace<P: Into<PathBuf>>(&self, path: P, root: NotebookRoot) -> NotebookDelta {
+        let (version, root_snapshot) = {
+            let mut stored_path = self.path.lock();
+            let mut inner = self.inner.write();
+            *inner = root;
+            *stored_path = Some(path.into());
+            let version = self.bump_version();
+            (version, inner.clone())
+        };
+
+        let delta = NotebookDelta {
+            version,
+            kind: DeltaKind::Loaded {
+                root: root_snapshot,
+            },
+        };
+        self.mark_dirty();
+        self.publish(&delta);
+        delta
+    }
+
     /// Return a point-in-time notebook snapshot and version.
     pub fn snapshot(&self) -> (NotebookRoot, u64) {
         let inner = self.inner.read();
@@ -322,6 +344,11 @@ impl NotebookStore {
     /// Return the path of the loaded notebook, if one has been loaded.
     pub fn path(&self) -> Option<PathBuf> {
         self.path.lock().clone()
+    }
+
+    #[cfg(test)]
+    fn is_dirty_for_test(&self) -> bool {
+        self.dirty.load(Ordering::SeqCst)
     }
 
     /// Check that an existing cell's SPUR metadata version matches the caller's expectation.
@@ -1240,6 +1267,59 @@ mod tests {
             cell.source,
             MultilineString::Single("loaded body".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn replace_marks_dirty_and_flushes_new_contents() {
+        let dir = std::env::temp_dir().join(format!("jute-store-replace-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let initial_path = dir.join("initial.ipynb");
+        let replacement_path = dir.join("replacement.ipynb");
+        std::fs::write(
+            &initial_path,
+            serde_json::to_string_pretty(&notebook_with_source("initial")).unwrap(),
+        )
+        .unwrap();
+
+        let store = NotebookStore::new(Arc::new(SaveCoordinator::default()));
+        store.load(&initial_path, notebook_with_source("initial"));
+
+        let delta = store.replace(&replacement_path, notebook_with_source("replacement"));
+
+        let DeltaKind::Loaded { root } = delta.kind else {
+            panic!("expected Loaded delta");
+        };
+        let Cell::Code(cell) = &root.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.source,
+            MultilineString::Single("replacement".to_string())
+        );
+        assert!(store.is_dirty_for_test());
+        assert_eq!(store.path().as_deref(), Some(replacement_path.as_path()));
+
+        let (snapshot, _version) = store.snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.source,
+            MultilineString::Single("replacement".to_string())
+        );
+
+        store.flush().await.unwrap();
+        let contents = std::fs::read_to_string(&replacement_path).unwrap();
+        let parsed: NotebookRoot = serde_json::from_str(&contents).unwrap();
+        let Cell::Code(cell) = &parsed.cells[0] else {
+            panic!("expected code cell");
+        };
+        assert_eq!(
+            cell.source,
+            MultilineString::Single("replacement".to_string())
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
