@@ -435,6 +435,24 @@
       "edge_kind": "references_other"
     },
     {
+      "source_stable_symbol_id": "9156eac9b8c3b2ba",
+      "target_stable_symbol_id": "8070bc0cbf8984f8",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "9156eac9b8c3b2ba",
+      "target_stable_symbol_id": "a643b3bc176ed041",
+      "target_label": "Runner",
+      "relation": "implements",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
       "source_stable_symbol_id": "925e9bcc2a4a5ecd",
       "target_stable_symbol_id": "88c2887e42a7e154",
       "target_label": "boot",
@@ -462,12 +480,39 @@
       "edge_kind": "references_other"
     },
     {
+      "source_stable_symbol_id": "a643b3bc176ed041",
+      "target_stable_symbol_id": "784f50a6d0f7404e",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
       "source_stable_symbol_id": "b157cefaf7fe3c8c",
       "target_stable_symbol_id": "88c2887e42a7e154",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "b157cefaf7fe3c8c",
+      "target_stable_symbol_id": "88c2887e42a7e154",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "b157cefaf7fe3c8c",
+      "target_stable_symbol_id": "9156eac9b8c3b2ba",
+      "target_label": "Helper",
+      "relation": "extends",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
       "edge_kind": "references_other"
     },
     {
@@ -481,11 +526,29 @@
     },
     {
       "source_stable_symbol_id": "ba77b7195f718134",
+      "target_stable_symbol_id": "4470fd57a3060a64",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ba77b7195f718134",
       "target_stable_symbol_id": "fe633dde0d47a2f9",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ba77b7195f718134",
+      "target_stable_symbol_id": "fe633dde0d47a2f9",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
       "edge_kind": "references_other"
     },
     {
