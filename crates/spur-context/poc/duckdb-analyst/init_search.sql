@@ -20,16 +20,22 @@ FROM lance_ns.section_bodies
 WHERE body_text IS NOT NULL AND length(body_text) > 0;
 
 -- Deduped search corpus. Skills are installed into ~6 agent dirs
--- (.claude/.codex/.kiro/.gemini/.kimi/.opencode), so the raw `sections` table is
--- ~95% duplicate by body — FTS over it would return the same skill section many
+-- (.claude/.codex/.kiro/.gemini/.kimi/.opencode), so a skill's sections appear
+-- 6-10x by identical body — FTS over the raw table returns the same section many
 -- times. Keep `sections` FULL (v_doc_tree needs the whole forest), but index a
--- deduped copy: one row per distinct body, preferring the canonical (non-dot-dir)
--- path. Empty-body sections collapse to one row here but never match FTS anyway.
+-- deduped copy: one row per distinct SECTION (same heading-path + same body),
+-- preferring the canonical (non-dot-dir) path.
+--
+-- Dedup on the SECTION BODY, NOT `content_hash`: content_hash is the *whole-file*
+-- document hash (one value per file, shared by every section in it), so
+-- partitioning by it would keep only ONE section per document — collapsing 19.7k
+-- rows to ~990 and destroying ~17k distinct bodies. Genuine cross-copy
+-- duplication is only ~8% (19.7k -> ~18.2k); the rest is unique prose.
 CREATE OR REPLACE TABLE sections_search AS
 SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
 FROM sections
 QUALIFY row_number() OVER (
-  PARTITION BY content_hash
+  PARTITION BY COALESCE(qualified_name, ''), body_text
   ORDER BY (file_path LIKE '.%')::INT, length(file_path), file_path
 ) = 1;
 
