@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod connection_secrets;
 pub mod connection_store;
 pub mod dag;
 #[cfg(feature = "datasource-introspect")]
