@@ -192,7 +192,8 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                                 status: Some("open".to_string()),
                                 comment: Some(audit_sentinel::encode_comment(&audit)),
                                 add_labels: vec![
-                                    crate::plan::labels::SIGNAL_ESCALATED.to_string(),
+                                    crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL
+                                        .to_string(),
                                     processed_label,
                                 ],
                                 remove_labels: vec![
@@ -410,7 +411,7 @@ mod tests {
         assert!(
             issue
                 .labels
-                .contains(&crate::plan::labels::SIGNAL_ESCALATED.to_string()),
+                .contains(&crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()),
             "escalation must add signal:escalated label; labels={:?}",
             issue.labels
         );
