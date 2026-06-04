@@ -9,7 +9,6 @@ use super::BRIDGE_TIMEOUT;
 use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook.set_cell_metadata";
-const LAST_EDITED_BY: &str = "brain";
 
 #[derive(Debug, Deserialize)]
 struct SetCellMetadataParams {
@@ -69,8 +68,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             json!({
                 "id": params.id,
                 "patch": params.patch,
-                "expected_version": params.expected_version,
-                "last_edited_by": LAST_EDITED_BY
+                "expected_version": params.expected_version
             }),
             BRIDGE_TIMEOUT,
         )

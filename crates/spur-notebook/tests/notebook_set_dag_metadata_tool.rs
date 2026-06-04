@@ -97,8 +97,7 @@ async fn notebook_set_dag_metadata_builds_spur_dag_patch_request() {
                         }
                     }
                 },
-                "expected_version": 6,
-                "last_edited_by": "brain"
+                "expected_version": 6
             })
         )]
     );
