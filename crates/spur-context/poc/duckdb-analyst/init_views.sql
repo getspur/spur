@@ -279,3 +279,209 @@ FROM agg a
 LEFT JOIN static s
   ON s.file_a = a.file_a
  AND s.file_b = a.file_b;
+
+-- ============================================================================
+-- One-stop analyst surface (Tier B).
+--
+-- Lazy views that compose the static graph, the temporal layer, and the
+-- materialized algorithm tables from init_algorithms.sql into the named
+-- answers an analyst actually asks for. The goal: one named view per question,
+-- so the brain never hand-rolls an Onager call or a four-table join.
+--
+-- Dependency note: v_symbol_risk / v_symbol_scorecard reference the
+-- v_symbol_centrality / v_symbol_component / v_symbol_community views created in
+-- init_algorithms.sql, which the analyst build concatenates BEFORE this file.
+-- ============================================================================
+
+-- Conventional-commit classification — feat/fix/docs/refactor/test/chore/...
+-- `commit_type` is the lowercase prefix before the first '(' / ':' / '!'.
+CREATE OR REPLACE VIEW v_commit_classified AS
+SELECT
+  c.sha,
+  c.author_ts,
+  c.summary,
+  NULLIF(regexp_extract(c.summary, '^([a-z]+)(\(|:|!)', 1), '') AS commit_type,
+  (c.summary LIKE 'fix%') AS is_fix
+FROM commits c;
+
+-- Fix-magnets — per-file commit volume, fix-commit count, and fix-rate.
+-- The defect-density signal (replaces bus-factor on single-author repos).
+CREATE OR REPLACE VIEW v_fix_hotspots AS
+SELECT
+  vcf.file_path,
+  count(DISTINCT vcf.commit_sha) AS commits,
+  count(DISTINCT CASE WHEN c.is_fix THEN vcf.commit_sha END) AS fix_commits,
+  round(100.0 * count(DISTINCT CASE WHEN c.is_fix THEN vcf.commit_sha END)
+        / nullif(count(DISTINCT vcf.commit_sha), 0), 1) AS fix_pct
+FROM v_commit_files vcf
+JOIN v_commit_classified c ON c.sha = vcf.commit_sha
+GROUP BY vcf.file_path;
+
+-- Hidden coupling — files that co-change but have NO static edge connecting
+-- them. The highest-value refactoring signal: logical dependencies the call
+-- graph cannot see (shared contracts, generated pairs, protocol seams).
+CREATE OR REPLACE VIEW v_hidden_coupling AS
+SELECT file_a, file_b, cochange_count
+FROM v_file_cochange
+WHERE NOT has_static_edge;
+
+-- Velocity — per-month symbol touches, distinct commits, and churn direction.
+CREATE OR REPLACE VIEW v_velocity AS
+SELECT
+  date_trunc('month', c.author_ts) AS month,
+  count(*) AS touches,
+  count(DISTINCT c.sha) AS commits,
+  sum(CASE WHEN t.change_kind = 'added'   THEN 1 ELSE 0 END) AS added,
+  sum(CASE WHEN t.change_kind = 'deleted' THEN 1 ELSE 0 END) AS deleted
+FROM temporal_edges t
+JOIN commits c ON c.sha = t.source_commit
+GROUP BY date_trunc('month', c.author_ts);
+
+-- Symbol age / stability — born, last_seen, lifespan.
+--
+-- Keyed on STRUCTURAL identity (file, entity, kind, scope), NOT raw
+-- stable_symbol_id: the latter embeds a byte offset, so a symbol that merely
+-- shifts position mints a fresh id, yielding hundreds of thousands of phantom
+-- "symbols" with a bogus ~1.6-day lifespan. This mirrors the reconciliation in
+-- v_symbol_churn_90d and keeps only unambiguously-identified symbols.
+CREATE OR REPLACE VIEW v_symbol_age AS
+WITH structural_unique AS (
+  SELECT file_path, entity_name, symbol_kind, enclosing_scope,
+         MIN(stable_symbol_id) AS stable_symbol_id
+  FROM nodes
+  WHERE file_path IS NOT NULL AND entity_name IS NOT NULL AND symbol_kind IS NOT NULL
+  GROUP BY file_path, entity_name, symbol_kind, enclosing_scope
+  HAVING COUNT(*) = 1 AND COUNT(DISTINCT stable_symbol_id) = 1
+),
+snap AS (
+  SELECT s.file_path, s.entity_name, s.symbol_kind, s.enclosing_scope,
+         min(c.author_ts) AS born,
+         max(c.author_ts) AS last_seen,
+         count(DISTINCT s.commit_sha) AS history_commits
+  FROM symbol_snapshots s
+  JOIN commits c ON c.sha = s.commit_sha
+  WHERE s.entity_name IS NOT NULL AND s.symbol_kind IS NOT NULL
+  GROUP BY s.file_path, s.entity_name, s.symbol_kind, s.enclosing_scope
+)
+SELECT
+  su.stable_symbol_id,
+  sn.born,
+  sn.last_seen,
+  date_diff('day', sn.born, sn.last_seen) AS lifespan_days,
+  sn.history_commits
+FROM structural_unique su
+JOIN snap sn
+  ON sn.file_path = su.file_path
+ AND sn.entity_name = su.entity_name
+ AND sn.symbol_kind = su.symbol_kind
+ AND sn.enclosing_scope IS NOT DISTINCT FROM su.enclosing_scope;
+
+-- Symbol genealogy — rename trails from the temporal walk.
+CREATE OR REPLACE VIEW v_symbol_genealogy AS
+SELECT
+  t.target_stable_symbol_id AS stable_symbol_id,
+  t.source_commit AS commit_sha,
+  t.change_kind,
+  t.rename_prev_stable_symbol_id,
+  t.rename_prev_commit
+FROM temporal_edges t
+WHERE t.change_kind IN ('renamed_from_symbol', 'renamed_from_file');
+
+-- Resolver blind spots — unresolved call labels ranked by call-site count.
+CREATE OR REPLACE VIEW v_unresolved_hotspots AS
+SELECT target_label, edge_kind, count(*) AS sites
+FROM edges_unresolved
+WHERE target_label IS NOT NULL
+GROUP BY target_label, edge_kind;
+
+-- Risk board — centrality × recent churn, bucketed into a posture.
+CREATE OR REPLACE VIEW v_symbol_risk AS
+SELECT
+  n.stable_symbol_id,
+  n.entity_name,
+  n.symbol_kind,
+  n.file_path,
+  COALESCE(ct.pagerank, 0.0) AS pagerank,
+  COALESCE(ct.in_degree, 0)  AS in_degree,
+  COALESCE(ct.out_degree, 0) AS out_degree,
+  COALESCE(ch.events, 0) AS churn_90d,
+  ch.last_touched,
+  CASE
+    WHEN COALESCE(ct.in_degree, 0) = 0 THEN 'leaf'
+    WHEN COALESCE(ch.events, 0) = 0 THEN 'load-bearing wall'
+    WHEN ch.events >= 10 THEN 'hot-central'
+    ELSE 'active'
+  END AS posture
+FROM nodes n
+LEFT JOIN v_symbol_centrality ct USING (stable_symbol_id)
+LEFT JOIN v_symbol_churn_90d  ch USING (stable_symbol_id);
+
+-- MASTER one-stop row — every signal per live symbol, pre-joined.
+-- After this view exists, the mining queries collapse to single WHERE/ORDER BY
+-- clauses against v_symbol_scorecard.
+CREATE OR REPLACE VIEW v_symbol_scorecard AS
+SELECT
+  n.stable_symbol_id,
+  n.entity_name,
+  n.qualified_name,
+  n.symbol_kind,
+  n.file_path,
+  COALESCE(ct.pagerank, 0.0) AS pagerank,
+  COALESCE(ct.in_degree, 0)  AS in_degree,
+  COALESCE(ct.out_degree, 0) AS out_degree,
+  cmp.component_id,
+  cmp.component_size,
+  comm.community_id,
+  COALESCE(ib.callers, 0)       AS callers,
+  COALESCE(ib.importers, 0)     AS importers,
+  COALESCE(ib.inbound_total, 0) AS inbound_total,
+  COALESCE(ch.events, 0) AS churn_90d,
+  ch.last_touched,
+  age.born,
+  age.last_seen,
+  age.lifespan_days,
+  br.blast_radius_score,
+  CASE
+    WHEN COALESCE(ct.in_degree, 0) = 0 THEN 'leaf'
+    WHEN COALESCE(ch.events, 0) = 0 THEN 'load-bearing wall'
+    WHEN ch.events >= 10 THEN 'hot-central'
+    ELSE 'active'
+  END AS posture
+FROM nodes n
+LEFT JOIN v_symbol_centrality ct  USING (stable_symbol_id)
+LEFT JOIN v_symbol_component  cmp USING (stable_symbol_id)
+LEFT JOIN v_symbol_community  comm USING (stable_symbol_id)
+LEFT JOIN v_symbol_inbound    ib  USING (stable_symbol_id)
+LEFT JOIN v_symbol_churn_90d  ch  USING (stable_symbol_id)
+LEFT JOIN v_symbol_age        age USING (stable_symbol_id)
+LEFT JOIN v_blast_radius      br  USING (stable_symbol_id);
+
+-- Self-describing catalog — the discoverable surface (SELECT * FROM v_catalog).
+CREATE OR REPLACE VIEW v_catalog AS
+SELECT * FROM (VALUES
+  ('v_symbol_scorecard',   'symbol',  'master per-symbol row: centrality+churn+age+inbound+component+posture'),
+  ('v_symbol_risk',        'symbol',  'centrality x churn posture (leaf / load-bearing wall / hot-central)'),
+  ('v_symbol_centrality',  'symbol',  'PageRank + in/out degree (materialized via Onager)'),
+  ('v_symbol_component',   'symbol',  'weakly-connected component id + size (connectivity islands)'),
+  ('v_symbol_community',   'symbol',  'Louvain community id (de-facto modules)'),
+  ('v_symbol_age',         'symbol',  'born / last_seen / lifespan (structural-identity keyed)'),
+  ('v_symbol_genealogy',   'symbol',  'rename trails (renamed_from_symbol / renamed_from_file)'),
+  ('v_symbol_churn_90d',   'symbol',  '90-day per-symbol churn (events/added/modified/deleted)'),
+  ('v_symbol_inbound',     'symbol',  'inbound callers / importers / containers'),
+  ('v_blast_radius',       'symbol',  'refactor-risk score ln(callers)*ln(caller_churn)+ln(self_churn)'),
+  ('v_hidden_coupling',    'file',    'co-change pairs with NO static edge (logical dependencies)'),
+  ('v_file_cochange',      'file',    '90-day file co-change pairs (+has_static_edge flag)'),
+  ('v_fix_hotspots',       'file',    'per-file fix-commit count + fix-rate (defect density)'),
+  ('v_commit_classified',  'commit',  'conventional-commit type per commit'),
+  ('v_velocity',           'temporal','per-month touches / commits / added / deleted'),
+  ('v_unresolved_hotspots','edge',    'unresolved call labels by site count (resolver gaps)'),
+  ('v_graph_metrics',      'graph',   'one-row whole-graph metrics (density, components, communities)'),
+  -- search appliance (init_search.sql; present when the Lance section store is attached)
+  ('search',               'macro',   'SELECT * FROM search(''q'') — fused doc+code BM25 with high-value signal'),
+  ('search_docs',          'macro',   'SELECT * FROM search_docs(''q'') — BM25 over section bodies'),
+  ('search_code',          'macro',   'SELECT * FROM search_code(''q'') — BM25 over symbol tokens, fused with scorecard'),
+  ('sections',             'doc',     'full section forest (every copy) — backs v_doc_tree'),
+  ('sections_search',      'doc',     'deduped prose corpus + FTS (backs search_docs/search)'),
+  ('symbol_text',          'symbol',  'per-symbol identifier text, deduped + FTS (code corpus)'),
+  ('v_doc_tree',           'doc',     'section heading tree with depth (PageIndex navigation substrate)')
+) AS t(view_name, grain, purpose);
