@@ -76,8 +76,24 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     }
 
     let notebook = state.get_notebook();
-    if is_same_open_target(notebook.path().as_deref(), path.as_path()) {
-        jute::commands::replace_notebook_and_hydrate_catalog(state.as_ref(), path, params.contents);
+    let notebook_path = notebook.path();
+    if is_same_open_target(notebook_path.as_deref(), path.as_path()).await {
+        let state_cloned = std::sync::Arc::clone(state);
+        let contents = params.contents;
+        let _delta = tokio::task::spawn_blocking(move || {
+            jute::commands::replace_notebook_and_hydrate_catalog(
+                state_cloned.as_ref(),
+                path,
+                contents,
+            )
+        })
+        .await
+        .map_err(|error| {
+            McpError::internal_error(
+                "notebook.save failed to update open notebook",
+                Some(json!({ "error": error.to_string() })),
+            )
+        })?;
     } else {
         state
             .save_coordinator
@@ -104,7 +120,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     Ok(CallToolResult::structured(json!({ "ok": true })))
 }
 
-fn is_same_open_target(store_path: Option<&Path>, candidate: &Path) -> bool {
+async fn is_same_open_target(store_path: Option<&Path>, candidate: &Path) -> bool {
     let Some(store_path) = store_path else {
         return false;
     };
@@ -112,8 +128,8 @@ fn is_same_open_target(store_path: Option<&Path>, candidate: &Path) -> bool {
         return true;
     }
     match (
-        std::fs::canonicalize(store_path),
-        std::fs::canonicalize(candidate),
+        tokio::fs::canonicalize(store_path).await,
+        tokio::fs::canonicalize(candidate).await,
     ) {
         (Ok(store_path), Ok(candidate)) => store_path == candidate,
         _ => false,
