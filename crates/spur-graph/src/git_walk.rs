@@ -22,6 +22,7 @@ use gix::object::tree::diff::{Action, Change};
 use gix::objs::tree::EntryMode;
 use indicatif::ProgressBar;
 
+use crate::content_hash::compute_graph_content_hash;
 use crate::extract::languages::Language;
 use crate::extract::tree_sitter::{BytesExtractor, ExtractError, ExtractedSymbol};
 use crate::schema::{
@@ -33,7 +34,8 @@ use crate::store::parquet::{
     load_temporal_artifact_metadata_parquet, stream_temporal_artifact_parquet_into_sink,
 };
 use crate::store::{
-    commit_index, load_temporal_artifact_parquet, resolve_artifact_location, TemporalShardSink,
+    commit_index, current_manifest_version, load_temporal_artifact_parquet,
+    resolve_artifact_location, TemporalShardSink,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,8 +592,8 @@ fn empty_graph_artifact() -> GraphIndexArtifact {
             graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_owned(),
             content_hash_blake3: None,
         },
-        manifest_version: String::new(),
-        graph_content_hash: String::new(),
+        manifest_version: current_manifest_version(),
+        graph_content_hash: compute_graph_content_hash(std::iter::empty::<(&str, &str)>()),
         file_manifests: Vec::new(),
         files: Vec::new(),
         file_node_ids: Vec::new(),
