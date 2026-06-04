@@ -1261,6 +1261,7 @@ fn relation_discriminator(relation: RelationKind) -> &'static str {
     match relation {
         RelationKind::Imports => "imports",
         RelationKind::Calls => "calls",
+        RelationKind::Constructs => "constructs",
         RelationKind::Contains => "contains",
         RelationKind::Implements => "implements",
         RelationKind::Defines => "defines",
