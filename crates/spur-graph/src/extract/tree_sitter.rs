@@ -875,6 +875,10 @@ fn resolve_singleton_bare_target(
                 builder.add_pending_edge_as(edge, Some(target), RelationKind::Constructs);
             } else if should_reclassify_python_extends_as_implements(edge, target, indexes) {
                 builder.add_pending_edge_as(edge, Some(target), RelationKind::Implements);
+            } else if edge.relation == RelationKind::Calls {
+                // P1a: calls only resolve to callable symbols (handled above) or
+                // constructible types. Other singleton kinds are misresolutions.
+                builder.add_pending_edge(edge, None);
             } else {
                 builder.add_pending_edge(edge, Some(target));
             }
