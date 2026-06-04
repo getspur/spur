@@ -109,6 +109,7 @@ impl NotebookMcpServer {
             })),
         )];
         all_tools.extend(self::tools::tools());
+        all_tools.push(tools::api_connection::oauth_connect_tool());
         all_tools
     }
 
@@ -241,6 +242,9 @@ impl ServerHandler for NotebookMcpServer {
             }
             "notebook_api_connection_status" => {
                 tools::api_connection::call_api_connection_status(&self.deps, arguments).await
+            }
+            "notebook.oauth_connect" => {
+                tools::api_connection::call_oauth_connect(&self.deps, arguments).await
             }
             name => Err(McpError::invalid_params(
                 format!("unknown notebook tool: {name}"),
