@@ -169,8 +169,7 @@ async fn notebook_set_cell_code_type_builds_spur_code_type_patch_request() {
                         "code_type": "javascript"
                     }
                 },
-                "expected_version": 6,
-                "last_edited_by": "brain"
+                "expected_version": 6
             })
         )]
     );

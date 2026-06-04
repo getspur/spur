@@ -10,7 +10,6 @@ use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook_set_dag_metadata";
 const BRIDGE_METHOD: &str = "notebook.set_cell_metadata";
-const LAST_EDITED_BY: &str = "brain";
 
 #[derive(Debug, Deserialize)]
 struct SetDagMetadataParams {
@@ -81,8 +80,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
                         "dag": params.dag
                     }
                 },
-                "expected_version": params.expected_version,
-                "last_edited_by": LAST_EDITED_BY
+                "expected_version": params.expected_version
             }),
             BRIDGE_TIMEOUT,
         )
@@ -96,4 +94,104 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     })?;
 
     Ok(CallToolResult::structured(json!(result)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{json, Value};
+
+    use crate::mcp::{
+        bridge::{BridgeRequestFuture, BridgeRequester},
+        ServerDeps,
+    };
+
+    use super::{call, BRIDGE_METHOD};
+
+    #[derive(Default)]
+    struct CapturingBridge {
+        method: Mutex<Option<&'static str>>,
+        params: Mutex<Option<Value>>,
+    }
+
+    impl CapturingBridge {
+        fn take_request(&self) -> (&'static str, Value) {
+            let method = self
+                .method
+                .lock()
+                .expect("method lock")
+                .take()
+                .expect("bridge method captured");
+            let params = self
+                .params
+                .lock()
+                .expect("params lock")
+                .take()
+                .expect("bridge params captured");
+            (method, params)
+        }
+    }
+
+    impl BridgeRequester for CapturingBridge {
+        fn listener_registered(&self) -> bool {
+            true
+        }
+
+        fn window_alive(&self) -> bool {
+            true
+        }
+
+        fn notebook_open(&self) -> bool {
+            true
+        }
+
+        fn request<'a>(
+            &'a self,
+            method: &'static str,
+            params: Value,
+            _timeout: std::time::Duration,
+        ) -> BridgeRequestFuture<'a> {
+            *self.method.lock().expect("method lock") = Some(method);
+            *self.params.lock().expect("params lock") = Some(params);
+            Box::pin(async { Ok(json!({ "ok": true, "version": 8 })) })
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_bridge_params_without_last_edited_by() {
+        let bridge = Arc::new(CapturingBridge::default());
+        let deps = ServerDeps::from_bridge(bridge.clone());
+
+        let result = call(
+            &deps,
+            json!({
+                "id": "cell-1",
+                "dag": { "produces": ["out"] },
+                "expected_version": 7
+            }),
+        )
+        .await
+        .expect("set dag metadata succeeds");
+
+        assert_eq!(
+            result.structured_content.expect("structured content"),
+            json!({ "ok": true, "version": 8 })
+        );
+        let (method, params) = bridge.take_request();
+        assert_eq!(method, BRIDGE_METHOD);
+        assert_eq!(
+            params,
+            json!({
+                "id": "cell-1",
+                "patch": {
+                    "spur": {
+                        "dag": { "produces": ["out"] }
+                    }
+                },
+                "expected_version": 7
+            })
+        );
+        assert!(params.get("last_edited_by").is_none());
+    }
 }
