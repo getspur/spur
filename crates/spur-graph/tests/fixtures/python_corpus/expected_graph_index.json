@@ -259,7 +259,34 @@
     },
     {
       "source_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_stable_symbol_id": "3df01b68f42059d5",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "23f3dd6a1c0267b5",
       "target_stable_symbol_id": "65b7728fe805305b",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_stable_symbol_id": "65b7728fe805305b",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "23f3dd6a1c0267b5",
+      "target_stable_symbol_id": "81fdbe50fb39044f",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
@@ -270,9 +297,9 @@
       "source_stable_symbol_id": "23f3dd6a1c0267b5",
       "target_stable_symbol_id": "81fdbe50fb39044f",
       "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
       "edge_kind": "references_other"
     },
     {
@@ -291,6 +318,15 @@
       "relation": "contains",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "711fe77e5e26d211",
+      "target_stable_symbol_id": "8725ca36d1c96bdc",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
       "edge_kind": "references_other"
     },
     {
