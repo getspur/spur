@@ -10,6 +10,12 @@ export type NotebookDelta = {
    */
   version: number;
   /**
+   * Worktree path of the notebook this delta belongs to. `None` only when the
+   * store has no loaded path yet (a fresh/unsaved store). Used by the frontend
+   * to drop deltas that belong to a different open notebook window.
+   */
+  path?: string;
+  /**
    * Kind of mutation represented by this delta.
    */
   kind: DeltaKind;
