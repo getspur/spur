@@ -757,6 +757,7 @@ pub async fn report_signal(
         args.signal,
         WorkerSignal::ScopeDrift { .. }
             | WorkerSignal::RetryExhausted { .. }
+            | WorkerSignal::Escalate { .. }
             | WorkerSignal::MarkNoop { .. }
     ) {
         return Err(McpHandlerError::InvalidParams(format!(
@@ -830,6 +831,9 @@ pub async fn report_signal(
         }
         WorkerSignal::RetryExhausted { .. } => {
             (0.0, String::new(), args.signal.kind_label().to_string())
+        }
+        WorkerSignal::Escalate { reason, .. } => {
+            (0.0, reason.clone(), args.signal.kind_label().to_string())
         }
         WorkerSignal::MarkNoop { reason, .. } => {
             (0.0, reason.clone(), args.signal.kind_label().to_string())

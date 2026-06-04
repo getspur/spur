@@ -85,6 +85,7 @@ impl MutationProposer for ScopeDriftSplitProposer {
             }
             WorkerSignal::PotentialClobber { .. } => vec![],
             WorkerSignal::RetryExhausted { .. } => vec![],
+            WorkerSignal::Escalate { .. } => vec![],
             WorkerSignal::MarkNoop { .. } => vec![],
         }
     }
@@ -111,16 +112,17 @@ impl MutationProposer for RetryExhaustedProposer {
         signal: &WorkerSignal,
         triggering_task: &str,
     ) -> Vec<MutationBatch> {
-        let WorkerSignal::RetryExhausted {
-            signal_id, task_id, ..
-        } = signal
-        else {
-            return vec![];
+        let (signal_id, task_id) = match signal {
+            WorkerSignal::RetryExhausted {
+                signal_id, task_id, ..
+            } => (*signal_id, task_id.as_str()),
+            WorkerSignal::Escalate { .. } => return vec![],
+            _ => return vec![],
         };
         let target_id = if task_id.is_empty() {
             triggering_task
         } else {
-            task_id.as_str()
+            task_id
         };
         let entry = state.tasks.iter().find(|entry| {
             entry.spec.task_id == target_id || entry.spec.issue_id.as_deref() == Some(target_id)
@@ -144,7 +146,7 @@ impl MutationProposer for RetryExhaustedProposer {
         }
         vec![MutationBatch {
             mutation_id: Uuid::new_v4(),
-            trigger_signal_id: Some(*signal_id),
+            trigger_signal_id: Some(signal_id),
             trigger_task_id: triggering_task.to_string(),
             ops: vec![PlanMutationOp::RetryTask {
                 issue_id: target_id.to_string(),
@@ -240,6 +242,7 @@ mod tests {
             WorkerSignal::ScopeDrift { severity, .. } => *severity >= threshold,
             WorkerSignal::PotentialClobber { .. } => false,
             WorkerSignal::RetryExhausted { .. } => false,
+            WorkerSignal::Escalate { .. } => false,
             WorkerSignal::MarkNoop { .. } => false,
         }
     }
