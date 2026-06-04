@@ -144,11 +144,16 @@ SELECT * FROM search_code('review gate approve reject completed task');
 ```
 
 **Dedup:** SPUR installs skills into ~6 agent dirs (`.claude`/`.codex`/`.kiro`/…),
-so the raw section corpus is ~95% duplicate by body (19.7k rows → 989 distinct).
-`sections_search` and `symbol_text` are deduped by content (preferring the
-canonical, non-dot-dir path) before indexing, so a query returns each skill
-section/symbol **once**, not once per agent dir. `sections` stays full so
-`v_doc_tree` keeps every copy's heading hierarchy.
+so a duplicated skill section appears 6-10× by identical body and FTS over the
+raw table returns it that many times. `sections_search` and `symbol_text` dedup
+by **section/symbol body** (preferring the canonical, non-dot-dir path) before
+indexing, so a query returns each section/symbol **once**, not once per agent
+dir. Overall shrink is modest — genuine cross-copy duplication is ~8% (19.7k →
+~18.2k sections); the corpus is mostly unique prose. **Do not dedup on
+`content_hash`** — that is the whole-*file* document hash (one value per file),
+so partitioning by it keeps only one section per document and destroys ~17k
+distinct bodies. `sections` stays full so `v_doc_tree` keeps every copy's
+heading hierarchy.
 
 Each `search_code` hit carries its centrality/churn/posture, so a free-text query
 returns *high-value* results — "the relevant symbol **and** how central/risky it
