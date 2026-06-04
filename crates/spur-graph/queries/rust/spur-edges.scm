@@ -36,6 +36,16 @@
   trait: (scoped_type_identifier
     name: (type_identifier) @implements.name)) @implements
 
+; `trait A: B` emits an extends edge to the supertrait.
+(trait_item
+  bounds: (trait_bounds
+    (type_identifier) @extends.name)) @extends
+
+(trait_item
+  bounds: (trait_bounds
+    (scoped_type_identifier
+      name: (type_identifier) @extends.name))) @extends
+
 (call_expression
   function: [
     (identifier) @call.name
