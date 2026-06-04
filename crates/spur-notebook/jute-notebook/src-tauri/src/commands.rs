@@ -813,6 +813,25 @@ pub async fn handle_daemon_control_request(
     }
 }
 
+/// Replace the active notebook and refresh the in-memory datasource catalog
+/// from the replacement document's metadata.
+pub fn replace_notebook_and_hydrate_catalog(
+    state: &State,
+    path: PathBuf,
+    contents: NotebookRoot,
+) -> NotebookDelta {
+    hydrate_datasource_catalog_from_root(state, path.as_path(), &contents);
+    state.get_notebook().replace(path, contents)
+}
+
+fn hydrate_datasource_catalog_from_root(state: &State, path: &Path, root: &NotebookRoot) {
+    let catalog =
+        crate::state::DatasourceCatalog::hydrate_from_metadata(&root.metadata, Some(path));
+    let entries = catalog.list();
+    *state.datasource_catalog.lock() = catalog;
+    state.emit_datasources_changed(entries);
+}
+
 async fn handle_daemon_control_inner(
     command: DaemonControlCommand,
     state: &State,
@@ -872,18 +891,12 @@ async fn handle_daemon_control_inner(
             let root: NotebookRoot = serde_json::from_str(&contents).map_err(|error| {
                 DaemonControlResponse::failure("load_failed", error.to_string())
             })?;
-            let catalog = crate::state::DatasourceCatalog::hydrate_from_metadata(
-                &root.metadata,
-                Some(Path::new(&path)),
-            );
-            let entries = catalog.list();
-            *state.datasource_catalog.lock() = catalog;
-            state.emit_datasources_changed(entries);
+            hydrate_datasource_catalog_from_root(state, Path::new(&path), &root);
             let delta = notebook.load(PathBuf::from(path), root);
             Ok(DaemonControlResult::Delta(delta))
         }
         DaemonControlCommand::ReplaceNotebook { path, contents } => {
-            let delta = notebook.replace(PathBuf::from(path), contents);
+            let delta = replace_notebook_and_hydrate_catalog(state, PathBuf::from(path), contents);
             Ok(DaemonControlResult::Delta(delta))
         }
         DaemonControlCommand::ListDatasources {} => {
@@ -1983,6 +1996,27 @@ mod tests {
         }
     }
 
+    fn notebook_with_datasource(name: &str, path: &str) -> NotebookRoot {
+        let mut notebook = notebook_with_source(&format!("spur.put('{name}', [])"), 1);
+        let catalog = crate::state::DatasourceCatalog {
+            schema_version: crate::state::DATASOURCE_CATALOG_SCHEMA_VERSION,
+            entries: vec![DatasourceEntry {
+                name: name.to_string(),
+                path: path.to_string(),
+                kind: DatasourceKind::Csv,
+                group: None,
+                columns: vec![Column {
+                    name: "amount".to_string(),
+                    sql_type: "DOUBLE".to_string(),
+                }],
+                row_count: Some(1),
+                tables: Vec::new(),
+            }],
+        };
+        catalog.persist_to_metadata(&mut notebook.metadata, None);
+        notebook
+    }
+
     fn cell_id(cell: &Cell) -> Option<&str> {
         match cell {
             Cell::Raw(cell) => cell.id.as_deref(),
@@ -2185,6 +2219,47 @@ mod tests {
         assert_eq!(dispatch.wrapped_code, "spur.put('sales', [1])");
         assert!(!dispatch.wrapped_code.contains("class _Spur"));
         assert!(!dispatch.wrapped_code.contains("globalThis.spur"));
+    }
+
+    #[tokio::test]
+    async fn replace_notebook_hydrates_datasource_catalog_from_metadata() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("jute-replace-datasource-catalog-")
+            .tempdir()
+            .expect("temp dir");
+        let path = temp_dir.path().join("catalog.ipynb");
+        let initial = notebook_with_datasource("sales", "/tmp/sales.csv");
+        let replacement = notebook_with_datasource("inventory", "/tmp/inventory.csv");
+        tokio::fs::write(&path, serde_json::to_vec(&initial).unwrap())
+            .await
+            .expect("seed notebook");
+        let path = path.display().to_string();
+        let state = State::new();
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook { path: path.clone() }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("load succeeds");
+        let loaded_entries = state.datasource_catalog.lock().list();
+        assert_eq!(loaded_entries[0].name, "sales");
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::ReplaceNotebook {
+                path,
+                contents: replacement,
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("replace succeeds");
+
+        let entries = state.datasource_catalog.lock().list();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "inventory");
     }
 
     #[test]
