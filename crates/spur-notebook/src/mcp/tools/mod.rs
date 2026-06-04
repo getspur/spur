@@ -73,7 +73,6 @@ pub fn tools() -> Vec<Tool> {
         save::tool(),
         delete_cell::tool(),
         interrupt::tool(),
-        run_cell::tool(),
         start_kernel::tool(),
         restart_kernel::tool(),
         stop_kernel::tool(),
@@ -264,6 +263,17 @@ mod tests {
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
         assert!(names.iter().any(|name| name == "notebook_run_cell"));
         assert!(names.iter().any(|name| name == "notebook_run_cascade"));
+    }
+
+    #[test]
+    fn tools_exclude_raw_run_cell_but_keep_dag_run_cell() {
+        let names = tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "notebook_run_cell"));
+        assert!(!names.iter().any(|name| name == "notebook.run_cell"));
     }
 
     #[test]

@@ -11,7 +11,6 @@ use crate::mcp::ServerDeps;
 
 const METHOD: &str = "notebook_set_cell_code_type";
 const BRIDGE_METHOD: &str = "notebook.set_cell_metadata";
-const LAST_EDITED_BY: &str = "brain";
 
 #[derive(Debug, Deserialize)]
 struct SetCellCodeTypeParams {
@@ -75,8 +74,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
                         "code_type": params.code_type
                     }
                 },
-                "expected_version": params.expected_version,
-                "last_edited_by": LAST_EDITED_BY
+                "expected_version": params.expected_version
             }),
             BRIDGE_TIMEOUT,
         )

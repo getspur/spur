@@ -196,7 +196,6 @@ impl ServerHandler for NotebookMcpServer {
             "notebook.save" => tools::save::call(&self.deps, arguments).await,
             "notebook.delete_cell" => tools::delete_cell::call(&self.deps, arguments).await,
             "notebook.interrupt" => tools::interrupt::call(&self.deps, arguments).await,
-            "notebook.run_cell" => tools::run_cell::call(&self.deps, arguments).await,
             "notebook.start_kernel" => tools::start_kernel::call(&self.deps, arguments).await,
             "notebook.restart_kernel" => tools::restart_kernel::call(&self.deps, arguments).await,
             "notebook.stop_kernel" => tools::stop_kernel::call(&self.deps, arguments).await,
