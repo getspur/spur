@@ -394,6 +394,23 @@ impl<'a> FactBuilder<'a> {
         self.add_pending_edge_with_bind_method(edge, target, None);
     }
 
+    fn add_pending_edge_as(
+        &mut self,
+        edge: &PendingEdge,
+        target: Option<NodeId>,
+        relation: RelationKind,
+    ) {
+        let metadata = metadata_for_pending_edge(edge, target, None);
+        self.add_edge_with_metadata(
+            edge.source,
+            target,
+            relation,
+            Some(edge.target_name.clone()),
+            edge.edge_kind,
+            metadata,
+        );
+    }
+
     fn add_pending_edge_with_bind_method(
         &mut self,
         edge: &PendingEdge,
@@ -570,7 +587,22 @@ impl<'a> FactBuilder<'a> {
                 let candidates = qualified_edge_candidates(&edge, &qualified_symbols_by_name);
                 match candidates.as_slice() {
                     [target] if *target != edge.source => {
-                        self.add_pending_edge_with_bind_method(&edge, Some(*target), Some("fqn"));
+                        if matches!(
+                            node_kind_by_id.get(target).copied(),
+                            Some(NodeKind::Struct | NodeKind::EnumVariant | NodeKind::Class)
+                        ) {
+                            self.add_pending_edge_as(
+                                &edge,
+                                Some(*target),
+                                RelationKind::Constructs,
+                            );
+                        } else {
+                            self.add_pending_edge_with_bind_method(
+                                &edge,
+                                Some(*target),
+                                Some("fqn"),
+                            );
+                        }
                     }
                     candidates if candidates.len() > 1 => {
                         ambiguous_unresolved += 1;
@@ -834,7 +866,16 @@ fn resolve_singleton_bare_target(
             builder.add_pending_edge_with_bind_method(edge, Some(target), Some("singleton"));
         }
         _ => {
-            builder.add_pending_edge(edge, Some(target));
+            if edge.relation == RelationKind::Calls
+                && matches!(
+                    indexes.node_kind_by_id.get(&target).copied(),
+                    Some(NodeKind::Struct | NodeKind::EnumVariant | NodeKind::Class)
+                )
+            {
+                builder.add_pending_edge_as(edge, Some(target), RelationKind::Constructs);
+            } else {
+                builder.add_pending_edge(edge, Some(target));
+            }
         }
     }
 }
@@ -1233,7 +1274,9 @@ fn confidence_for_edge(
         return (Confidence::Heuristic, 0.8);
     }
     match relation {
-        RelationKind::Contains | RelationKind::Calls => (Confidence::SyntaxExact, 1.0),
+        RelationKind::Contains | RelationKind::Calls | RelationKind::Constructs => {
+            (Confidence::SyntaxExact, 1.0)
+        }
         RelationKind::Imports | RelationKind::Links => (Confidence::Heuristic, 0.8),
         _ => (Confidence::Heuristic, 0.5),
     }
