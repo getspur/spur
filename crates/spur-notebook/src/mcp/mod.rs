@@ -188,6 +188,9 @@ impl ServerHandler for NotebookMcpServer {
             }
             "open_design_search" => tools::open_design_search::call(&self.deps, arguments).await,
             "open_design_get" => tools::open_design_get::call(&self.deps, arguments).await,
+            "code_semantic_search" => {
+                tools::code_semantic_search::call(&self.deps, arguments).await
+            }
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,

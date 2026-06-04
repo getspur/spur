@@ -10,6 +10,7 @@ use super::{DaemonControlResponse, ServerDeps};
 
 pub mod add_api_datasource;
 pub mod api_connection;
+pub mod code_semantic_search;
 pub mod daemon_files;
 pub mod daemon_lifecycle;
 pub mod daemon_recents;
@@ -65,6 +66,7 @@ pub fn tools() -> Vec<Tool> {
         notebook_set_dag_metadata::tool(),
         open_design_search::tool(),
         open_design_get::tool(),
+        code_semantic_search::tool(),
         insert_cell::tool(),
         write_cell::tool(),
         set_cell_metadata::tool(),
