@@ -24,3 +24,11 @@
     (attribute
       attribute: (identifier) @call.name)
   ]) @call
+
+; `class C(Base):` inheritance. Python has no `implements` keyword, so a base
+; class maps to `extends`. keyword_argument (e.g. metaclass=) is not matched.
+(class_definition
+  superclasses: (argument_list
+    [(identifier) @extends.name
+     (attribute
+       attribute: (identifier) @extends.name)])) @extends
