@@ -17,6 +17,7 @@ const PREVIEW_API_TABLES_METHOD: &str = "notebook_preview_api_tables";
 const ADD_API_CONNECTION_METHOD: &str = "notebook_add_api_connection";
 const LIST_API_CONNECTIONS_METHOD: &str = "notebook_list_api_connections";
 const API_CONNECTION_STATUS_METHOD: &str = "notebook_api_connection_status";
+pub const OAUTH_CONNECT_METHOD: &str = "notebook.oauth_connect";
 const OPEN_REST_WIZARD_EVENT: &str = "notebook://open_rest_wizard";
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +43,12 @@ struct AddApiConnectionParams {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApiConnectionStatusParams {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OauthConnectParams {
     name: String,
 }
 
@@ -130,6 +137,21 @@ pub fn api_connection_status_tool() -> Tool {
     )
 }
 
+pub fn oauth_connect_tool() -> Tool {
+    Tool::new(
+        OAUTH_CONNECT_METHOD,
+        "Complete browser OAuth authorization for a saved notebook API connection.",
+        rmcp_object(json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+        })),
+    )
+}
+
 pub async fn call_list_api_providers(
     deps: &ServerDeps,
     arguments: Value,
@@ -197,6 +219,16 @@ pub async fn call_add_api_connection(
     let prepared = prepare_manifest(&params)?;
     let missing_env_vars = missing_env_vars(&prepared.required_env_vars);
     if !missing_env_vars.is_empty() {
+        if let Some(action) = oauth_action_for(&prepared) {
+            return Ok(CallToolResult::structured(json!({
+                "status": "awaiting_oauth",
+                "name": params.name,
+                "action": action,
+                "tool": OAUTH_CONNECT_METHOD,
+                "message": "Click Connect with browser to authorize this connection."
+            })));
+        }
+
         let wizard_opened =
             open_rest_wizard(deps, &params, &prepared.manifest_toml, &missing_env_vars);
         return Ok(CallToolResult::structured(json!({
@@ -281,6 +313,28 @@ pub async fn call_api_connection_status(
         "table_functions": connection["table_functions"],
         "callable_table_functions": connection["callable_table_functions"]
     })))
+}
+
+pub async fn call_oauth_connect(
+    deps: &ServerDeps,
+    arguments: Value,
+) -> Result<CallToolResult, McpError> {
+    let params: OauthConnectParams = serde_json::from_value(arguments).map_err(|error| {
+        McpError::invalid_params(
+            format!("{OAUTH_CONNECT_METHOD} requires {{ name }}"),
+            Some(json!({ "error": error.to_string() })),
+        )
+    })?;
+    let daemon = deps.daemon.as_ref().ok_or_else(daemon_unavailable)?;
+    let response = daemon
+        .handle(daemon_request(
+            jute::commands::DaemonControlCommand::OauthConnect { name: params.name },
+        ))
+        .await;
+    let response = check_response(response)?;
+    let _ = daemon_result(OAUTH_CONNECT_METHOD, response)?;
+
+    Ok(CallToolResult::structured(json!({ "status": "ready" })))
 }
 
 async fn saved_connections(
@@ -380,6 +434,43 @@ fn missing_env_vars(required_env_vars: &[String]) -> Vec<String> {
         .filter(|env_var| std::env::var_os(env_var).is_none())
         .cloned()
         .collect()
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn oauth_action_for(prepared: &PreparedManifest) -> Option<String> {
+    use spur_rest_table_gateway::adapter::manifest::{AuthCfg, Manifest};
+
+    let manifest = Manifest::from_toml(&prepared.manifest_toml).ok()?;
+    let AuthCfg::Oauth2Refresh {
+        client_id_env,
+        client_secret_env,
+        refresh_token_env,
+        ..
+    } = manifest.source.auth
+    else {
+        return None;
+    };
+    let missing_env_vars = missing_env_vars(&prepared.required_env_vars);
+    let missing_auth_env_vars = missing_env_vars
+        .iter()
+        .filter(|name| {
+            name.as_str() == client_id_env.as_str()
+                || name.as_str() == client_secret_env.as_str()
+                || name.as_str() == refresh_token_env.as_str()
+        })
+        .collect::<Vec<_>>();
+    if missing_auth_env_vars.len() == 1
+        && missing_auth_env_vars[0].as_str() == refresh_token_env.as_str()
+    {
+        Some("connect_with_browser".to_owned())
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "datasource-introspect"))]
+fn oauth_action_for(_prepared: &PreparedManifest) -> Option<String> {
+    None
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -541,6 +632,37 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: impl Into<String>, value: &str) -> Self {
+            let key = key.into();
+            let previous = std::env::var(&key).ok();
+            std::env::set_var(&key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: impl Into<String>) -> Self {
+            let key = key.into();
+            let previous = std::env::var(&key).ok();
+            std::env::remove_var(&key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(&self.key, previous);
+            } else {
+                std::env::remove_var(&self.key);
+            }
+        }
+    }
+
     fn schema(tool: Tool) -> Value {
         Value::Object((*tool.input_schema).clone())
     }
@@ -553,6 +675,7 @@ mod tests {
             add_api_connection_tool().name.to_string(),
             list_api_connections_tool().name.to_string(),
             api_connection_status_tool().name.to_string(),
+            oauth_connect_tool().name.to_string(),
         ];
 
         assert_eq!(
@@ -562,7 +685,8 @@ mod tests {
                 "notebook_preview_api_tables",
                 "notebook_add_api_connection",
                 "notebook_list_api_connections",
-                "notebook_api_connection_status"
+                "notebook_api_connection_status",
+                "notebook.oauth_connect"
             ]
         );
     }
@@ -613,6 +737,29 @@ mod tests {
         let status = schema(api_connection_status_tool());
         assert_eq!(status["required"], json!(["name"]));
         assert!(status["properties"].get("credentials").is_none());
+
+        let oauth = schema(oauth_connect_tool());
+        assert_eq!(oauth["required"], json!(["name"]));
+        assert!(oauth["properties"].get("credentials").is_none());
+    }
+
+    #[test]
+    fn oauth_only_missing_refresh_token_returns_connect_with_browser() {
+        let _cid = EnvVarGuard::set("GOOGLE_ADS_CLIENT_ID", "x");
+        let _sec = EnvVarGuard::set("GOOGLE_ADS_CLIENT_SECRET", "y");
+        let _refresh = EnvVarGuard::unset("GOOGLE_ADS_REFRESH_TOKEN");
+        let prepared = prepare_manifest(&AddApiConnectionParams {
+            name: "google_ads".into(),
+            provider: Some("google-ads".into()),
+            spec_text: None,
+            manifest_toml: None,
+            connection_only: None,
+        })
+        .expect("prepare");
+
+        let action = oauth_action_for(&prepared);
+
+        assert_eq!(action.as_deref(), Some("connect_with_browser"));
     }
 
     #[test]
