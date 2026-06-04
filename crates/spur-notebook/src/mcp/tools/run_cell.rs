@@ -1,6 +1,7 @@
 use jute::{
     backend::{commands::RunCellEvent, notebook::Cell},
     commands::run_cell_events,
+    notebook_store::StoreError,
     state::State,
 };
 use rmcp::{
@@ -114,53 +115,25 @@ fn ensure_expected_version(
         ));
     }
 
-    let (root, _) = state.get_notebook().snapshot();
-    let actual = root
-        .cells
-        .iter()
-        .find_map(|cell| {
-            let (id, version) = match cell {
-                Cell::Raw(cell) => (
-                    &cell.id,
-                    cell.metadata.spur.as_ref().map(|spur| spur.version),
-                ),
-                Cell::Markdown(cell) => (
-                    &cell.id,
-                    cell.metadata.spur.as_ref().map(|spur| spur.version),
-                ),
-                Cell::Code(cell) => (
-                    &cell.id,
-                    cell.metadata.spur.as_ref().map(|spur| spur.version),
-                ),
-            };
-            (id.as_deref() == Some(cell_id)).then_some(version)
+    state
+        .get_notebook()
+        .check_cell_version(cell_id, expected_version)
+        .map_err(|error| match error {
+            StoreError::OptimisticConcurrency { expected, actual } => McpError::invalid_params(
+                "notebook.run_cell stale_version",
+                Some(json!({
+                    "code": "stale_version",
+                    "cell_id": cell_id,
+                    "expected": expected,
+                    "actual": actual,
+                })),
+            ),
+            StoreError::CellNotFound { id } => McpError::invalid_params(
+                "notebook.run_cell cell_not_found",
+                Some(json!({ "code": "cell_not_found", "cell_id": id })),
+            ),
+            StoreError::NotCodeCell { id } => not_code_cell(&id),
         })
-        .ok_or_else(|| {
-            McpError::invalid_params(
-                "notebook.run_cell cell_id was not found",
-                Some(json!({ "code": "cell_not_found", "cell_id": cell_id })),
-            )
-        })?
-        .ok_or_else(|| {
-            McpError::invalid_params(
-                "notebook.run_cell cell has no spur version",
-                Some(json!({ "cell_id": cell_id })),
-            )
-        })?;
-
-    if actual != expected_version {
-        return Err(McpError::invalid_params(
-            "notebook.run_cell stale_version",
-            Some(json!({
-                "code": "stale_version",
-                "cell_id": cell_id,
-                "expected": expected_version,
-                "actual": actual,
-            })),
-        ));
-    }
-
-    Ok(())
 }
 
 fn ensure_code_cell(state: &State, cell_id: &str) -> Result<(), McpError> {
