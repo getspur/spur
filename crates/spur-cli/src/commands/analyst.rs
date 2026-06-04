@@ -18,8 +18,12 @@ const INIT_TEMPORAL_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_temporal.sql");
 const INIT_DIAGNOSTICS_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_diagnostics.sql");
+const INIT_ALGORITHMS_SQL: &str =
+    include_str!("../../../spur-context/poc/duckdb-analyst/init_algorithms.sql");
 const INIT_VIEWS_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_views.sql");
+const INIT_SEARCH_SQL: &str =
+    include_str!("../../../spur-context/poc/duckdb-analyst/init_search.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
 
@@ -101,6 +105,57 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         return Ok(());
     }
 
+    // Assemble the (pre-substitution) SQL template now so the freshness guard can
+    // fingerprint it. Which scripts are included depends on temporal/lance
+    // presence, so the fingerprint captures config as well as SQL content.
+    let lance_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
+    let lance_present = lance_dataset_dir.is_dir();
+    let sql_template = [
+        INIT_SQL,
+        if want_temporal { INIT_TEMPORAL_SQL } else { "" },
+        if want_diag { INIT_DIAGNOSTICS_SQL } else { "" },
+        // Graph-algorithm materialization (PageRank/components/communities) only
+        // needs the static graph + onager (both from init.sql), so it always
+        // runs — and must precede init_views.sql, whose Tier-B views join the
+        // v_symbol_centrality/_component/_community surfaces it creates.
+        INIT_ALGORITHMS_SQL,
+        // Views depend on temporal_edges / symbol_snapshots; only install when
+        // the temporal layer is present.
+        if want_temporal { INIT_VIEWS_SQL } else { "" },
+        // Search appliance: materializes the prose (section bodies, from Lance)
+        // and code (symbol tokens) FTS indexes + search() macros. Needs the
+        // Lance section store attached AND v_symbol_scorecard (temporal views).
+        if want_temporal && lance_present {
+            INIT_SEARCH_SQL
+        } else {
+            ""
+        },
+    ]
+    .concat();
+
+    // ---- Freshness skip-guard ----
+    // The materialized DB is a pure function of (graph content, analyst SQL). If a
+    // prior build recorded the same fingerprint, there is nothing to recompute, so
+    // a redundant `graph build` / `analyst build` becomes an instant no-op. The
+    // fingerprint folds in the analyst SQL too, so a spur-cli upgrade that changes
+    // the views still forces a rebuild even when the graph hash is unchanged.
+    let content_hash = read_graph_content_hash(&artifact_dir).unwrap_or_default();
+    let fingerprint = build_fingerprint(&content_hash, &sql_template);
+    let fp_path = fingerprint_path(&db_path);
+    if db_path.is_file() && !content_hash.is_empty() {
+        if let Ok(prev) = std::fs::read_to_string(&fp_path) {
+            if prev.trim() == fingerprint {
+                if !quiet {
+                    eprintln!(
+                        "[spur] Analyst DB already fresh (graph {} + analyst SQL unchanged), skipping rebuild",
+                        short_hash(&content_hash)
+                    );
+                }
+                return Ok(());
+            }
+        }
+    }
+
     let started = Instant::now();
     if !quiet {
         eprintln!("[spur] Refreshing analyst DB at {}", db_path.display());
@@ -110,8 +165,7 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let _ = std::fs::remove_file(&tmp_db);
 
     let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
-    let lance_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    let lance_attach_sql = if lance_dataset_dir.is_dir() {
+    let lance_attach_sql = if lance_present {
         format!(
             "ATTACH '{}' AS lance_ns (TYPE LANCE);\n",
             lance_dataset_dir.display().to_string().replace('\'', "''")
@@ -125,15 +179,6 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         }
         String::new()
     };
-    let sql_template = [
-        INIT_SQL,
-        if want_temporal { INIT_TEMPORAL_SQL } else { "" },
-        if want_diag { INIT_DIAGNOSTICS_SQL } else { "" },
-        // Views depend on temporal_edges / symbol_snapshots; only install when
-        // the temporal layer is present.
-        if want_temporal { INIT_VIEWS_SQL } else { "" },
-    ]
-    .concat();
     let sql = sql_template
         .replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql)
         .replace(LANCE_ATTACH_PLACEHOLDER, &lance_attach_sql);
@@ -178,6 +223,17 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         )
     })?;
 
+    // Record the fingerprint so the next invocation can skip an identical rebuild.
+    // Best-effort: a missing/unwritable sidecar simply forces a (correct) rebuild.
+    if let Err(err) = std::fs::write(&fp_path, &fingerprint) {
+        if !quiet {
+            eprintln!(
+                "[spur] note: could not write freshness fingerprint {}: {err}",
+                fp_path.display()
+            );
+        }
+    }
+
     if !quiet {
         let lance_version = lance_extension_version(&db_path).unwrap_or_else(|| "<unknown>".into());
         // Surface the schema/content hash from the manifest we already validated.
@@ -220,6 +276,41 @@ fn short_hash(hash: &str) -> String {
     } else {
         hash.to_string()
     }
+}
+
+/// Sidecar path holding the last build's freshness fingerprint.
+fn fingerprint_path(db_path: &Path) -> PathBuf {
+    let mut s = db_path.as_os_str().to_owned();
+    s.push(".fingerprint");
+    PathBuf::from(s)
+}
+
+/// `graph_content_hash` from the artifact manifest, if present.
+fn read_graph_content_hash(artifact_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(artifact_dir.join("manifest.json")).ok()?;
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    parsed
+        .get("graph_content_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
+/// FNV-1a fingerprint over `(graph content hash, assembled analyst SQL)`. Changes
+/// whenever the indexed graph OR the analyst build logic changes, so the
+/// skip-guard never serves a stale DB after a spur-cli upgrade. Not cryptographic
+/// — change-detection only.
+fn build_fingerprint(content_hash: &str, sql_template: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in content_hash
+        .as_bytes()
+        .iter()
+        .chain(b"\0".iter())
+        .chain(sql_template.as_bytes().iter())
+    {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{content_hash}:{h:016x}")
 }
 
 pub(crate) fn resolve_artifact_dir(root: &Path, options: &AnalystBuildOptions) -> Result<PathBuf> {
@@ -480,6 +571,35 @@ mod tests {
         std::fs::write(dir.path().join("manifest.json"), "not json").unwrap();
         let err = verify_schema_version(dir.path()).expect_err("malformed should error");
         assert!(format!("{err:#}").contains("manifest.json"));
+    }
+
+    #[test]
+    fn build_fingerprint_is_deterministic_and_sensitive() {
+        let base = build_fingerprint("hashA", "SQL-1");
+        // deterministic
+        assert_eq!(base, build_fingerprint("hashA", "SQL-1"));
+        // a different graph hash changes the fingerprint
+        assert_ne!(base, build_fingerprint("hashB", "SQL-1"));
+        // a different analyst SQL changes the fingerprint (spur-cli upgrade case)
+        assert_ne!(base, build_fingerprint("hashA", "SQL-2"));
+        // the human-readable prefix is the content hash
+        assert!(base.starts_with("hashA:"));
+    }
+
+    #[test]
+    fn read_graph_content_hash_round_trips() {
+        let dir = temp_root();
+        std::fs::write(
+            dir.path().join("manifest.json"),
+            r#"{"graph_content_hash":"abc123","schema_version":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_graph_content_hash(dir.path()).as_deref(),
+            Some("abc123")
+        );
+        // missing manifest → None (forces a rebuild, never a wrong skip)
+        assert_eq!(read_graph_content_hash(temp_root().path()), None);
     }
 
     const REQUIRED_PARQUETS: &[&str] = &[
