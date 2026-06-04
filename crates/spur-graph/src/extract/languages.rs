@@ -390,9 +390,6 @@ pub(crate) fn emit_definitions_with_parents<'tree>(
         let fqn = scoped_name(parent.fqn.unwrap_or(""), &fqn_segment(kind, &label));
         let node_id = builder.add_node(relative_path, label, fqn.clone(), kind, file_id, node);
         builder.add_edge(parent.node_id, Some(node_id), RelationKind::Contains, None);
-        if parent.node_id != file_node_id {
-            builder.add_edge(parent.node_id, Some(node_id), RelationKind::Defines, None);
-        }
         let binding = DefinitionBinding { node, node_id, fqn };
         bindings.push(binding.clone());
         emitted.push(binding);
