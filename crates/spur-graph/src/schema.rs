@@ -287,7 +287,6 @@ pub enum RelationKind {
     Implements,
     Defines,
     References,
-    Uses,
     Extends,
     Links,
     Touches,
