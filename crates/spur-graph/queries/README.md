@@ -82,6 +82,23 @@ Notes:
   now reuses Python `tags.scm`, matching Rust/TypeScript/C++ and avoiding a
   stale duplicate symbol policy.
 
+## Relation Coverage Matrix
+
+Predicate realization per language family (`Y` realized · `—` not realizable · `TODO` gap).
+This table is the relation-level analogue of the Definition Coverage Matrix and the
+seed of the Tier-0 ontology realization contract
+(`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
+
+| Predicate | Rust | Python | TypeScript | Tsx | Cpp | Markdown |
+|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y(links) |
+| calls | Y | Y | Y | Y | Y | — |
+| contains | Y | Y | Y | Y | Y | Y |
+| references (HOF) | Y | TODO | Y | Y | TODO | — |
+| links | — | — | — | — | — | Y |
+| implements | Y | TODO | TODO | TODO | TODO | — |
+| extends | Y | TODO | TODO | TODO | TODO | — |
+
 ## Reference Capture Divergence
 
 SPUR deliberately diverges from canonical tree-sitter `tags.scm` reference
