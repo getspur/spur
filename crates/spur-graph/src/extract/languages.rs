@@ -846,6 +846,7 @@ fn definition_kind(
     config: &LanguageConfig,
     capture_name: &str,
     node: Node<'_>,
+    source: &str,
 ) -> Option<NodeKind> {
     let mut kind = config
         .definition_kind_map
@@ -853,8 +854,32 @@ fn definition_kind(
         .find_map(|(name, kind)| (*name == capture_name).then_some(*kind))?;
     if kind == NodeKind::Function && config.is_method.is_some_and(|is_method| is_method(node)) {
         kind = NodeKind::Method;
+    } else if kind == NodeKind::Class && python_protocol_like_class(node, source) {
+        kind = NodeKind::Interface;
     }
     Some(kind)
+}
+
+fn python_protocol_like_class(node: Node<'_>, source: &str) -> bool {
+    if node.kind() != "class_definition" {
+        return false;
+    }
+
+    let Some(superclasses) = node.child_by_field_name("superclasses") else {
+        return false;
+    };
+
+    // Protocol and ABC are stdlib conventions, not definitions inside most
+    // worktrees. Recognizing the local class declaration lets subclasses target
+    // the local Protocol/ABC-like class as an Interface after resolution.
+    (0..superclasses.named_child_count())
+        .filter_map(|index| superclasses.named_child(index))
+        .any(|base| {
+            matches!(
+                child_text(base, source).trim(),
+                "Protocol" | "ABC" | "abc.ABC"
+            )
+        })
 }
 
 fn definition_candidates<'tree>(
@@ -865,7 +890,7 @@ fn definition_candidates<'tree>(
     let mut definitions: Vec<_> = captures
         .iter()
         .filter_map(|capture| {
-            definition_kind(config, capture.name.as_str(), capture.node).map(|kind| {
+            definition_kind(config, capture.name.as_str(), capture.node, source).map(|kind| {
                 (
                     kind,
                     capture.node,

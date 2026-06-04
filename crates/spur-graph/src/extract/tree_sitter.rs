@@ -775,7 +775,7 @@ fn resolve_bare_pending_edge(
         let candidates = relational_symbol_candidates(builder, edge, indexes, allowed);
         match candidates.as_slice() {
             [target] if *target != edge.source => {
-                builder.add_pending_edge(edge, Some(*target));
+                builder.add_pending_relational_edge(edge, *target, indexes);
                 return;
             }
             cands if cands.len() > 1 => {
@@ -873,6 +873,8 @@ fn resolve_singleton_bare_target(
                 )
             {
                 builder.add_pending_edge_as(edge, Some(target), RelationKind::Constructs);
+            } else if should_reclassify_python_extends_as_implements(edge, target, indexes) {
+                builder.add_pending_edge_as(edge, Some(target), RelationKind::Implements);
             } else {
                 builder.add_pending_edge(edge, Some(target));
             }
@@ -935,6 +937,45 @@ fn relational_symbol_candidates(
     candidates.sort_by_key(|id| id.get());
     candidates.dedup();
     candidates
+}
+
+impl FactBuilder<'_> {
+    fn add_pending_relational_edge(
+        &mut self,
+        edge: &PendingEdge,
+        target: NodeId,
+        indexes: &PendingResolutionIndexes<'_>,
+    ) {
+        if should_reclassify_python_extends_as_implements(edge, target, indexes) {
+            self.add_pending_edge_as(edge, Some(target), RelationKind::Implements);
+        } else {
+            self.add_pending_edge(edge, Some(target));
+        }
+    }
+}
+
+fn should_reclassify_python_extends_as_implements(
+    edge: &PendingEdge,
+    target: NodeId,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> bool {
+    edge.relation == RelationKind::Extends
+        && indexes.node_kind_by_id.get(&target).copied() == Some(NodeKind::Interface)
+        && indexes
+            .file_by_id
+            .get(&edge.source)
+            .is_some_and(|path| is_python_path(path))
+        && indexes
+            .file_by_id
+            .get(&target)
+            .is_some_and(|path| is_python_path(path))
+}
+
+fn is_python_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
 }
 
 fn import_resolution_candidates(
