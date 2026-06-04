@@ -38,6 +38,29 @@ type NotebookStoreActions = {
 
 const INITIAL_CELL_VERSION = 1;
 const AUTOSAVE_DEBOUNCE_MS = 5000;
+
+function normalizeNotebookPath(path: string): string {
+  return path.replace(/\/+$/, "");
+}
+
+/**
+ * Whether an authoritative delta belongs to the notebook displayed by this
+ * window. The daemon holds a single process-wide store but broadcasts every
+ * delta to all windows; this guard prevents a mutation to one notebook from
+ * leaking into the others. When either side has no path (unsaved/scratch
+ * notebook, or a pre-`path` daemon build) we apply the delta for backward
+ * compatibility.
+ */
+export function notebookDeltaIsForPath(
+  notebookPath: string | undefined,
+  deltaPath: string | null | undefined,
+): boolean {
+  if (!notebookPath || !deltaPath) {
+    return true;
+  }
+  return normalizeNotebookPath(notebookPath) === normalizeNotebookPath(deltaPath);
+}
+
 type SupportedKernelSpecName = "deno" | "python3" | "evcxr" | "gonb";
 
 function supportedKernelSpecName(name?: string): SupportedKernelSpecName {
@@ -982,6 +1005,16 @@ export async function reconcileNotebookDelta(
   notebook: Notebook,
   delta: AuthoritativeNotebookDelta,
 ) {
+  if (
+    !notebookDeltaIsForPath(
+      notebook.state.viewState.path,
+      (delta as { path?: string | null }).path,
+    )
+  ) {
+    // Delta belongs to a different open notebook window; ignore it.
+    return;
+  }
+
   const lastAppliedVersion = notebook.state.serverState.lastAppliedVersion;
   if (hasAuthoritativeVersionGap(notebook.state.serverState, delta)) {
     console.warn(
