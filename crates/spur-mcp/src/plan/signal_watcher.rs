@@ -12,12 +12,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use spur_pm::{IssueFilter, PmService};
+use spur_pm::{IssueFilter, IssueUpdate, PmService};
 use uuid::Uuid;
 
+use super::audit_sentinel::{self, AuditSentinelKind};
 use super::mutation_executor::apply_mutation;
 use super::proposers::{MutationProposer, MutationScorer};
-use super::signals::{parse_comment, SENTINEL_PREFIX};
+use super::signals::{parse_comment, WorkerSignal, SENTINEL_PREFIX};
 
 pub struct SignalWatcher<P: MutationProposer, S: MutationScorer> {
     pm: Arc<PmService>,
@@ -169,6 +170,42 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     .ok_or_else(|| {
                         anyhow::anyhow!("signal task {} missing spur:plan-id label", issue.id)
                     })?;
+                if let WorkerSignal::Escalate { reason, .. } = &signal {
+                    let (attempt, delegation_id, worker_branch) = escalation_audit_context(&audits);
+                    let task_id = issue
+                        .labels
+                        .iter()
+                        .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
+                        .unwrap_or_else(|| issue.id.clone());
+                    let audit = AuditSentinelKind::EscalationRequested {
+                        plan_id: plan_id.to_string(),
+                        task_id,
+                        attempt,
+                        last_error: reason.clone(),
+                        worker_branch,
+                        delegation_id,
+                    };
+                    self.pm
+                        .update_issue(
+                            &issue.id,
+                            IssueUpdate {
+                                status: Some("open".to_string()),
+                                comment: Some(audit_sentinel::encode_comment(&audit)),
+                                add_labels: vec![
+                                    crate::plan::labels::SIGNAL_ESCALATED.to_string(),
+                                    processed_label,
+                                ],
+                                remove_labels: vec![
+                                    crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                                    "ready-for-review".to_string(),
+                                ],
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    self.seen.lock().insert(signal_id);
+                    break;
+                }
                 let state = crate::plan::projector::project_plan_from_beads(
                     self.pm.as_ref(),
                     plan_id,
@@ -221,5 +258,194 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
         }
 
         Ok(())
+    }
+}
+
+fn escalation_audit_context(audits: &[AuditSentinelKind]) -> (u32, Option<String>, Option<String>) {
+    let mut attempt = 0;
+    let mut delegation_id = None;
+    let mut worker_branch = None;
+
+    for audit in audits {
+        match audit {
+            AuditSentinelKind::Dispatch {
+                delegation_id: current_delegation_id,
+                attempt: current_attempt,
+                ..
+            } => {
+                attempt = *current_attempt;
+                delegation_id = Some(current_delegation_id.clone());
+                worker_branch = None;
+            }
+            AuditSentinelKind::Completion {
+                delegation_id: current_delegation_id,
+                worker_branch: current_worker_branch,
+                ..
+            } => {
+                delegation_id = Some(current_delegation_id.clone());
+                if current_worker_branch.is_some() {
+                    worker_branch = current_worker_branch.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (attempt, delegation_id, worker_branch)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
+    use crate::plan::mutation::MutationBatch;
+    use crate::plan::signals::{encode_comment as encode_signal, WorkerSignal};
+
+    struct PanicProposer;
+
+    #[async_trait]
+    impl MutationProposer for PanicProposer {
+        async fn propose(
+            &self,
+            _state: &crate::plan::PlanState,
+            _signal: &WorkerSignal,
+            _triggering_task: &str,
+        ) -> Vec<MutationBatch> {
+            panic!("escalate signals must not invoke mutation proposers");
+        }
+    }
+
+    struct PanicScorer;
+
+    #[async_trait]
+    impl MutationScorer for PanicScorer {
+        async fn score(&self, _state: &crate::plan::PlanState, _batch: &MutationBatch) -> f32 {
+            panic!("escalate signals must not invoke mutation scoring");
+        }
+    }
+
+    #[tokio::test]
+    async fn escalate_signal_routes_to_brain_escalation_without_proposer() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+                .await
+                .expect("pm service init")
+                .expect("beads pm service"),
+        );
+        let task_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Escalate me".into(),
+                description: Some("task body".into()),
+                issue_type: Some("task".into()),
+                labels: vec![
+                    crate::plan::labels::plan_id("plan-watch"),
+                    crate::plan::labels::plan_task_id("task-escalate"),
+                    crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                    crate::plan::labels::signal_kind("escalate"),
+                ],
+                ..Default::default()
+            })
+            .await
+            .expect("create task issue");
+        let adv = pm.advanced().expect("advanced beads surface");
+        adv.add_comment(
+            &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "del-watch".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            }),
+        )
+        .await
+        .expect("dispatch audit");
+        adv.add_comment(
+            &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-watch".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-watch".into()),
+                result_summary: Some("worker paused".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            }),
+        )
+        .await
+        .expect("completion audit");
+        let signal_id = Uuid::new_v4();
+        let reason = "architecture needs brain confirmation".to_string();
+        adv.add_comment(
+            &task_id,
+            &encode_signal(&WorkerSignal::Escalate {
+                signal_id,
+                reason: reason.clone(),
+            }),
+        )
+        .await
+        .expect("signal comment");
+
+        let watcher = SignalWatcher::new(
+            Arc::clone(&pm),
+            PanicProposer,
+            PanicScorer,
+            crate::server::pro_feature_gate(),
+        );
+
+        watcher.tick_once().await.expect("watcher tick");
+
+        let issue = pm.get_issue(&task_id).await.expect("updated issue");
+        assert!(
+            !issue
+                .labels
+                .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+            "escalation must remove ready-for-review label; labels={:?}",
+            issue.labels
+        );
+        assert!(
+            issue
+                .labels
+                .contains(&crate::plan::labels::SIGNAL_ESCALATED.to_string()),
+            "escalation must add signal:escalated label; labels={:?}",
+            issue.labels
+        );
+        assert!(
+            issue
+                .labels
+                .contains(&crate::plan::labels::signal_processed_label(&signal_id)),
+            "escalation must mark signal processed; labels={:?}",
+            issue.labels
+        );
+
+        let comments = adv.list_comments(&task_id).await.expect("comments");
+        let audits = comments
+            .iter()
+            .filter_map(|comment| audit_sentinel::parse_comment(&comment.body))
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert!(
+            audits.iter().any(|audit| matches!(
+                audit,
+                AuditSentinelKind::EscalationRequested {
+                    plan_id,
+                    task_id,
+                    attempt,
+                    last_error,
+                    worker_branch,
+                    delegation_id,
+                } if plan_id == "plan-watch"
+                    && task_id == "task-escalate"
+                    && *attempt == 2
+                    && last_error == &reason
+                    && worker_branch.as_deref() == Some("spur/worker-watch")
+                    && delegation_id.as_deref() == Some("del-watch")
+            )),
+            "watcher must emit EscalationRequested audit; audits={audits:?}"
+        );
     }
 }

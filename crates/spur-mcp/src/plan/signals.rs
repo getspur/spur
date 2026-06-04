@@ -49,6 +49,8 @@ pub enum WorkerSignal {
         attempt: u32,
         last_error: String,
     },
+    /// Worker requests brain review before autonomous processing continues.
+    Escalate { signal_id: Uuid, reason: String },
     /// Worker asserts that completing with no file changes is intentional.
     /// The orchestrator uses this as the no-op acknowledgement when branch
     /// finalization observes zero commits and a clean tree.
@@ -62,6 +64,7 @@ impl WorkerSignal {
             WorkerSignal::ScopeDrift { signal_id, .. } => *signal_id,
             WorkerSignal::PotentialClobber { signal_id, .. } => *signal_id,
             WorkerSignal::RetryExhausted { signal_id, .. } => *signal_id,
+            WorkerSignal::Escalate { signal_id, .. } => *signal_id,
             WorkerSignal::MarkNoop { signal_id, .. } => *signal_id,
         }
     }
@@ -72,6 +75,7 @@ impl WorkerSignal {
             WorkerSignal::ScopeDrift { .. } => "scope-drift",
             WorkerSignal::PotentialClobber { .. } => "potential-clobber",
             WorkerSignal::RetryExhausted { .. } => "retry-exhausted",
+            WorkerSignal::Escalate { .. } => "escalate",
             WorkerSignal::MarkNoop { .. } => "mark-noop",
         }
     }
@@ -156,6 +160,19 @@ mod tests {
         let parsed = parse_comment(&body).unwrap().unwrap();
         assert_eq!(parsed, sig);
         assert_eq!(sig.kind_label(), "potential-clobber");
+        assert_eq!(sig.signal_id(), Uuid::nil());
+    }
+
+    #[test]
+    fn escalate_round_trips_and_has_label() {
+        let sig = WorkerSignal::Escalate {
+            signal_id: Uuid::nil(),
+            reason: "needs brain review before continuing".to_string(),
+        };
+        let body = encode_comment(&sig);
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        assert_eq!(parsed, sig);
+        assert_eq!(sig.kind_label(), "escalate");
         assert_eq!(sig.signal_id(), Uuid::nil());
     }
 
