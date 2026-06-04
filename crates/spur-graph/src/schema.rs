@@ -292,6 +292,83 @@ pub enum RelationKind {
     Touches,
 }
 
+/// Cardinality of a predicate: how many objects one subject may relate to (and back).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationCardinality {
+    OneToOne,
+    OneToMany,
+    ManyToOne,
+    ManyToMany,
+}
+
+/// Tier-0 algebra of a predicate. Inverses are virtual reverse-edge labels, not
+/// distinct `RelationKind` variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationMetadata {
+    pub inverse_label: Option<&'static str>,
+    pub cardinality: RelationCardinality,
+    pub transitive: bool,
+}
+
+impl RelationKind {
+    pub fn metadata(self) -> RelationMetadata {
+        use RelationCardinality::*;
+
+        match self {
+            Self::Imports => RelationMetadata {
+                inverse_label: Some("imported_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Calls => RelationMetadata {
+                inverse_label: Some("called_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Constructs => RelationMetadata {
+                inverse_label: Some("constructed_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Contains => RelationMetadata {
+                inverse_label: Some("contained_by"),
+                cardinality: OneToMany,
+                transitive: true,
+            },
+            Self::Implements => RelationMetadata {
+                inverse_label: Some("implemented_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Defines => RelationMetadata {
+                inverse_label: Some("defined_in"),
+                cardinality: OneToMany,
+                transitive: false,
+            },
+            Self::References => RelationMetadata {
+                inverse_label: Some("referenced_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Extends => RelationMetadata {
+                inverse_label: Some("extended_by"),
+                cardinality: ManyToMany,
+                transitive: true,
+            },
+            Self::Links => RelationMetadata {
+                inverse_label: Some("linked_from"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Touches => RelationMetadata {
+                inverse_label: Some("touched_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphEdgeKind {
@@ -937,6 +1014,28 @@ mod change_kind_tests {
         let r = RelationKind::Touches;
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(s, "\"touches\"");
+    }
+
+    #[test]
+    fn relation_metadata_declares_algebra() {
+        use RelationKind::*;
+
+        assert_eq!(Calls.metadata().inverse_label, Some("called_by"));
+        assert!(Contains.metadata().transitive);
+        assert_eq!(Contains.metadata().inverse_label, Some("contained_by"));
+        assert_eq!(
+            Implements.metadata().cardinality,
+            RelationCardinality::ManyToMany
+        );
+        assert_eq!(Imports.metadata().inverse_label, Some("imported_by"));
+        assert!(Extends.metadata().transitive);
+
+        for relation in [
+            Imports, Calls, Constructs, Contains, Implements, Defines, References, Extends, Links,
+            Touches,
+        ] {
+            let _ = relation.metadata();
+        }
     }
 
     #[test]
