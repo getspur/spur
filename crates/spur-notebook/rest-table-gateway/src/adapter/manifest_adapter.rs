@@ -691,6 +691,124 @@ impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
     }
 
     #[test]
+    fn google_ads_preset_has_refresh_auth_and_required_headers() {
+        let toml = include_str!("../../connections/tier-a/google_ads.connection.toml");
+        let manifest = Manifest::from_toml(toml).expect("preset parses");
+        // Both Google Ads headers are present.
+        assert_eq!(
+            manifest
+                .source
+                .headers
+                .get("developer-token")
+                .map(String::as_str),
+            Some("${connectionConfig.DEVELOPER_TOKEN}")
+        );
+        assert_eq!(
+            manifest
+                .source
+                .headers
+                .get("login-customer-id")
+                .map(String::as_str),
+            Some("${connectionConfig.LOGIN_CUSTOMER_ID}")
+        );
+        // Auth is oauth2_refresh (not a static bearer).
+        assert!(matches!(
+            manifest.source.auth,
+            crate::adapter::manifest::AuthCfg::Oauth2Refresh { .. }
+        ));
+        // The search action exists and is a POST.
+        let action = manifest
+            .actions
+            .iter()
+            .find(|a| a.name == "google_ads_search")
+            .expect("search action present");
+        assert_eq!(action.method, "POST");
+        assert!(manifest.source.allow_writes);
+    }
+
+    #[tokio::test]
+    async fn google_ads_action_uses_refresh_bearer_and_both_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // 1) token endpoint exchanges the refresh token for an access token.
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "ya29-test-token",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        // 2) GAQL search requires Bearer + developer-token + login-customer-id.
+        Mock::given(method("POST"))
+            .and(path("/customers/123/googleAds:search"))
+            .and(header("authorization", "Bearer ya29-test-token"))
+            .and(header("developer-token", "dev-tok-1"))
+            .and(header("login-customer-id", "987654321"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{ "resourceName": "customers/123/campaigns/1" }]
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("SPUR_CONN_GADS_TEST_DEVELOPER_TOKEN", "dev-tok-1");
+        std::env::set_var("SPUR_CONN_GADS_TEST_LOGIN_CUSTOMER_ID", "987654321");
+        std::env::set_var("GADS_TEST_CLIENT_ID", "cid");
+        std::env::set_var("GADS_TEST_CLIENT_SECRET", "secret");
+        std::env::set_var("GADS_TEST_REFRESH_TOKEN", "rt-1");
+
+        let manifest = Manifest::from_toml(&format!(
+            r#"
+[source]
+name = "google_ads"
+base_url = "{base}"
+allow_writes = true
+connection_config = ["GADS_TEST_DEVELOPER_TOKEN", "GADS_TEST_LOGIN_CUSTOMER_ID"]
+auth = {{ scheme = "oauth2_refresh", token_url = "{base}/token", client_id_env = "GADS_TEST_CLIENT_ID", client_secret_env = "GADS_TEST_CLIENT_SECRET", refresh_token_env = "GADS_TEST_REFRESH_TOKEN" }}
+
+[source.headers]
+developer-token = "${{connectionConfig.GADS_TEST_DEVELOPER_TOKEN}}"
+login-customer-id = "${{connectionConfig.GADS_TEST_LOGIN_CUSTOMER_ID}}"
+
+[[action]]
+name = "google_ads_search"
+method = "POST"
+path = "/customers/{{customer_id}}/googleAds:search"
+response_path = "$.results"
+
+[action.args]
+customer_id = {{ in = "path", type = "Utf8", required = true }}
+query = {{ in = "body", type = "Utf8", required = true }}
+"#,
+            base = server.uri()
+        ))
+        .expect("manifest parses");
+
+        let adapter = ManifestAdapter::new(manifest);
+        let req = ActionRequest {
+            name: "google_ads_search".to_string(),
+            method: "POST".to_string(),
+            path: "/customers/123/googleAds:search".to_string(),
+            query: vec![],
+            body: Some(serde_json::json!({
+                "query": "SELECT campaign.id FROM campaign"
+            })),
+            idempotency_key: None,
+            dry_run: false,
+        };
+        let batches = adapter.act(req).await.expect("gaql search succeeds");
+
+        std::env::remove_var("SPUR_CONN_GADS_TEST_DEVELOPER_TOKEN");
+        std::env::remove_var("SPUR_CONN_GADS_TEST_LOGIN_CUSTOMER_ID");
+        std::env::remove_var("GADS_TEST_CLIENT_ID");
+        std::env::remove_var("GADS_TEST_CLIENT_SECRET");
+        std::env::remove_var("GADS_TEST_REFRESH_TOKEN");
+        assert_eq!(batches.len(), 1);
+    }
+
+    #[test]
     fn oauth2_refresh_toml_roundtrips() {
         let manifest = Manifest::from_toml(
             r#"
