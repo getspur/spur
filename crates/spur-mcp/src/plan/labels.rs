@@ -176,6 +176,7 @@ pub fn signal_kind_bucket(kind: &str, bucket: &str) -> String {
 }
 
 pub const SIGNAL_LATE_ARRIVAL: &str = "signal:late-arrival";
+pub const SIGNAL_ESCALATED: &str = "signal:escalated";
 pub const SIGNAL_LABEL_INTEGRATION_CONFLICT: &str = "signal:integration-conflict";
 pub const READY_FOR_REVIEW: &str = "spur:ready-for-review";
 pub const REVIEW_REJECTED: &str = "spur:review-rejected";
@@ -322,6 +323,7 @@ mod tests {
             "signal:scope-drift:high"
         );
         assert_eq!(SIGNAL_LATE_ARRIVAL, "signal:late-arrival");
+        assert_eq!(SIGNAL_ESCALATED, "signal:escalated");
         assert_eq!(
             SIGNAL_LABEL_INTEGRATION_CONFLICT,
             "signal:integration-conflict"
