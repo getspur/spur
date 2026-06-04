@@ -145,6 +145,12 @@ pub struct NotebookDelta {
     /// Monotonic document version after the mutation.
     #[ts(type = "number")]
     pub version: u64,
+    /// Worktree path of the notebook this delta belongs to. `None` only when the
+    /// store has no loaded path yet (a fresh/unsaved store). Used by the frontend
+    /// to drop deltas that belong to a different open notebook window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
     /// Kind of mutation represented by this delta.
     pub kind: DeltaKind,
 }
@@ -302,12 +308,12 @@ impl NotebookStore {
             (version, inner.clone())
         };
 
-        let delta = NotebookDelta {
+        let delta = self.make_delta(
             version,
-            kind: DeltaKind::Loaded {
+            DeltaKind::Loaded {
                 root: root_snapshot,
             },
-        };
+        );
         self.publish(&delta);
         delta
     }
@@ -323,12 +329,12 @@ impl NotebookStore {
             (version, inner.clone())
         };
 
-        let delta = NotebookDelta {
+        let delta = self.make_delta(
             version,
-            kind: DeltaKind::Loaded {
+            DeltaKind::Loaded {
                 root: root_snapshot,
             },
-        };
+        );
         self.mark_dirty();
         self.publish(&delta);
         delta
@@ -344,6 +350,15 @@ impl NotebookStore {
     /// Return the path of the loaded notebook, if one has been loaded.
     pub fn path(&self) -> Option<PathBuf> {
         self.path.lock().clone()
+    }
+
+    /// Build a delta stamped with the store's current notebook path.
+    fn make_delta(&self, version: u64, kind: DeltaKind) -> NotebookDelta {
+        NotebookDelta {
+            version,
+            path: self.path().map(|path| path.display().to_string()),
+            kind,
+        }
     }
 
     #[cfg(test)]
@@ -517,7 +532,7 @@ impl NotebookStore {
             PendingDelta::CellDeleted { id } => DeltaKind::CellDeleted { id },
         };
 
-        let delta = NotebookDelta { version, kind };
+        let delta = self.make_delta(version, kind);
         self.mark_dirty();
         drop(root);
         self.publish(&delta);
@@ -540,10 +555,10 @@ impl NotebookStore {
         };
         apply_event_to_code_cell(code_cell, &event);
 
-        let delta = NotebookDelta {
-            version: self.bump_version(),
-            kind: DeltaKind::RunCellEvent { cell_id, event },
-        };
+        let delta = self.make_delta(
+            self.bump_version(),
+            DeltaKind::RunCellEvent { cell_id, event },
+        );
         self.mark_dirty();
         drop(root);
         self.publish(&delta);
@@ -582,10 +597,10 @@ impl NotebookStore {
 
     /// Publish a reactive DAG status snapshot on the notebook delta channel.
     pub fn publish_dag_status_changed(&self, snapshot: Value) -> NotebookDelta {
-        let delta = NotebookDelta {
-            version: self.version.load(Ordering::SeqCst),
-            kind: DeltaKind::DagStatusChanged { snapshot },
-        };
+        let delta = self.make_delta(
+            self.version.load(Ordering::SeqCst),
+            DeltaKind::DagStatusChanged { snapshot },
+        );
         self.publish(&delta);
         delta
     }
@@ -1143,6 +1158,33 @@ mod tests {
         assert_eq!(write.version, 2);
         assert_eq!(run.version, 3);
         assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn deltas_carry_owning_notebook_path() {
+        let store = store_with_notebook(); // loads "/tmp/test.ipynb"
+
+        let write = store
+            .apply(NotebookOp::WriteCell {
+                id: CELL_ID.to_string(),
+                source: "x = 1".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .unwrap();
+        assert_eq!(write.path.as_deref(), Some("/tmp/test.ipynb"));
+
+        let run = store
+            .apply_run_event(CELL_ID, RunCellEvent::Stdout("hi".to_string()))
+            .unwrap();
+        assert_eq!(run.path.as_deref(), Some("/tmp/test.ipynb"));
+    }
+
+    #[test]
+    fn delta_path_is_none_before_any_notebook_is_loaded() {
+        let store = NotebookStore::new(Arc::new(SaveCoordinator::default()));
+        let delta = store.publish_dag_status_changed(serde_json::json!({"nodes": []}));
+        assert_eq!(delta.path, None);
     }
 
     #[tokio::test]

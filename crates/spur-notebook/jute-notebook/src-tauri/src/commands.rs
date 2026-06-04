@@ -2924,6 +2924,7 @@ mod tests {
             DaemonControlResult::Delta(NotebookDelta {
                 version: 2,
                 kind: DeltaKind::CellWritten { ref cell },
+                ..
             }) if cell.id == cell_id
         ));
 
@@ -2948,6 +2949,7 @@ mod tests {
                     cell: inserted_cell,
                     after_id: Some(after_id),
                 },
+            ..
         }) = insert
         else {
             panic!("expected insert delta");
@@ -2972,6 +2974,7 @@ mod tests {
             DaemonControlResult::Delta(NotebookDelta {
                 version: 4,
                 kind: DeltaKind::CellWritten { ref cell },
+                ..
             }) if cell.id == inserted_id
         ));
 
@@ -3005,6 +3008,7 @@ mod tests {
             DaemonControlResult::Delta(NotebookDelta {
                 version: 5,
                 kind: DeltaKind::CellDeleted { ref id },
+                ..
             }) if id == &inserted_id
         ));
 
