@@ -1299,6 +1299,7 @@ impl NotebookDaemonControl {
             | DaemonControlCommand::ReadCell { .. }
             | DaemonControlCommand::InsertCell { .. }
             | DaemonControlCommand::LoadNotebook { .. }
+            | DaemonControlCommand::ReplaceNotebook { .. }
             | DaemonControlCommand::DeleteCell { .. }
             | DaemonControlCommand::Snapshot {}
             | DaemonControlCommand::SetCellMetadata { .. }
