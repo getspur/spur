@@ -961,7 +961,7 @@ query = {{ in = "body", type = "Utf8", required = true }}
 
         let token_url = format!("{}/token", server.uri());
         let toml = include_str!("../../connections/tier-a/google_ads.connection.toml")
-            .replace("https://googleads.googleapis.com/v17", &server.uri())
+            .replace("https://googleads.googleapis.com/v20", &server.uri())
             .replace("https://oauth2.googleapis.com/token", &token_url)
             .replace("DEVELOPER_TOKEN", "GADS_TYPED_TEST_DEVELOPER_TOKEN")
             .replace("LOGIN_CUSTOMER_ID", "GADS_TYPED_TEST_LOGIN_CUSTOMER_ID")
