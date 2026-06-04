@@ -23,6 +23,19 @@
       (scoped_identifier
         name: (identifier) @import.name)))) @import
 
+; `impl Trait for Type` emits an implements edge to the trait. Inherent impls
+; have no `trait:` field, so they do not match these patterns.
+(impl_item
+  trait: (type_identifier) @implements.name) @implements
+
+(impl_item
+  trait: (generic_type
+    type: (type_identifier) @implements.name)) @implements
+
+(impl_item
+  trait: (scoped_type_identifier
+    name: (type_identifier) @implements.name)) @implements
+
 (call_expression
   function: [
     (identifier) @call.name
