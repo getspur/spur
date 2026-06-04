@@ -11539,6 +11539,7 @@ dependencies = [
  "futures",
  "jute",
  "memmap2",
+ "reqwest 0.12.28",
  "rmcp",
  "serde",
  "serde_json",

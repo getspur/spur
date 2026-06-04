@@ -314,6 +314,8 @@ pub enum DaemonControlCommand {
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
     },
+    /// Complete OAuth browser authorization for a saved API connection.
+    OauthConnect { name: String },
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.

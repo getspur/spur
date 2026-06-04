@@ -462,6 +462,7 @@ pub struct NotebookDaemonControl {
     requester: Arc<dyn BridgeRequester>,
     jute_state: Arc<State>,
     windows: Arc<dyn DaemonWindowOps>,
+    app: Option<tauri::AppHandle>,
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
     reactive_engine: Arc<tokio::sync::Mutex<Option<crate::dag::ReactiveEngineClient>>>,
     last_record_path: Option<PathBuf>,
@@ -1037,6 +1038,103 @@ fn build_api_import_manifest(
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn oauth_handler_error(code: &str, error: impl std::fmt::Display) -> BridgeError {
+    BridgeError::Handler {
+        code: code.to_string(),
+        message: error.to_string(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn required_env_var(name: &str, code: &str) -> Result<String, BridgeError> {
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(_) => Err(BridgeError::Handler {
+            code: code.to_string(),
+            message: format!("required environment variable {name} is not set or empty"),
+        }),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn oauth_connect_registration_credentials(
+    existing_env_vars: &[String],
+    client_id_env: &str,
+    client_id: &str,
+    client_secret_env: &str,
+    client_secret: &str,
+    refresh_token_env: &str,
+    refresh_token: &str,
+) -> Vec<(String, String)> {
+    fn push_unique(credentials: &mut Vec<(String, String)>, key: String, value: String) {
+        if !credentials.iter().any(|(existing, _)| existing == &key) {
+            credentials.push((key, value));
+        }
+    }
+
+    let mut credentials = Vec::new();
+    for key in existing_env_vars {
+        if key == client_id_env {
+            push_unique(&mut credentials, key.clone(), client_id.to_string());
+        } else if key == client_secret_env {
+            push_unique(&mut credentials, key.clone(), client_secret.to_string());
+        } else if key == refresh_token_env {
+            push_unique(&mut credentials, key.clone(), refresh_token.to_string());
+        } else if let Ok(value) = std::env::var(key) {
+            push_unique(&mut credentials, key.clone(), value);
+        }
+    }
+    push_unique(
+        &mut credentials,
+        client_id_env.to_string(),
+        client_id.to_string(),
+    );
+    push_unique(
+        &mut credentials,
+        client_secret_env.to_string(),
+        client_secret.to_string(),
+    );
+    push_unique(
+        &mut credentials,
+        refresh_token_env.to_string(),
+        refresh_token.to_string(),
+    );
+    credentials
+}
+
+#[cfg(feature = "datasource-introspect")]
+async fn complete_oauth_connect(
+    client: &reqwest::Client,
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+    refresh_token_env: &str,
+    sink: &dyn crate::connection_secrets::CredentialSink,
+) -> Result<String, BridgeError> {
+    let tokens = spur_rest_table_gateway::adapter::oauth::exchange_code(
+        client,
+        &spur_rest_table_gateway::adapter::oauth::AuthCodeGrant {
+            token_url,
+            client_id,
+            client_secret,
+            code,
+            code_verifier,
+            redirect_uri,
+        },
+    )
+    .await
+    .map_err(|error| oauth_handler_error("oauth_exchange_failed", error))?;
+    sink.store(refresh_token_env, &tokens.refresh_token)
+        .await
+        .map_err(|error| oauth_handler_error("oauth_persist_failed", error))?;
+    std::env::set_var(refresh_token_env, &tokens.refresh_token);
+    Ok(tokens.refresh_token)
+}
+
+#[cfg(feature = "datasource-introspect")]
 fn api_import_source_name(name: &str) -> String {
     let mut source = normalize_api_datasource_source(name).unwrap_or_else(|_| "api".to_string());
     source = source
@@ -1227,11 +1325,30 @@ impl NotebookDaemonControl {
         windows: Arc<dyn DaemonWindowOps>,
         last_record_path: Option<PathBuf>,
     ) -> Self {
+        Self::new_with_parts_and_app(
+            bridge,
+            requester,
+            jute_state,
+            windows,
+            None,
+            last_record_path,
+        )
+    }
+
+    fn new_with_parts_and_app(
+        bridge: Arc<AgentBridge>,
+        requester: Arc<dyn BridgeRequester>,
+        jute_state: Arc<State>,
+        windows: Arc<dyn DaemonWindowOps>,
+        app: Option<tauri::AppHandle>,
+        last_record_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             bridge,
             requester,
             jute_state,
             windows,
+            app,
             state: Arc::new(tokio::sync::Mutex::new(NotebookDaemonState::default())),
             reactive_engine: Arc::new(tokio::sync::Mutex::new(None)),
             last_record_path,
@@ -1425,6 +1542,7 @@ impl NotebookDaemonControl {
                 self.add_api_datasource_from_manifest(name, manifest_toml, credentials)
                     .await
             }
+            DaemonControlCommand::OauthConnect { name } => self.oauth_connect(name).await,
             DaemonControlCommand::DetachDatasource { name } => self.detach_datasource(name).await,
             DaemonControlCommand::ListDatasources {} => {
                 async {
@@ -1902,6 +2020,153 @@ impl NotebookDaemonControl {
     ) -> Result<DaemonControlSuccess, BridgeError> {
         self.persist_and_register_manifest_api_datasource(name, None, manifest_toml, credentials)
             .await
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    async fn oauth_connect(&self, name: String) -> Result<DaemonControlSuccess, BridgeError> {
+        use spur_rest_table_gateway::adapter::{
+            manifest::{AuthCfg, Manifest},
+            oauth,
+        };
+        use tauri_plugin_opener::OpenerExt as _;
+
+        let template = crate::connection_store::list()
+            .await
+            .map_err(|error| oauth_handler_error("saved_connections_list_failed", error))?
+            .into_iter()
+            .find(|template| template.name == name)
+            .ok_or_else(|| BridgeError::Handler {
+                code: "saved_connection_not_found".to_string(),
+                message: format!("no saved connection named {name}"),
+            })?;
+
+        let manifest_toml = template.manifest_toml.clone();
+        let manifest = Manifest::from_toml(&manifest_toml).map_err(|error| {
+            oauth_handler_error("saved_connection_manifest_parse_failed", error)
+        })?;
+        let AuthCfg::Oauth2Refresh {
+            token_url,
+            client_id_env,
+            client_secret_env,
+            refresh_token_env,
+            scope,
+        } = manifest.source.auth
+        else {
+            return Err(BridgeError::Handler {
+                code: "oauth_auth_not_supported".to_string(),
+                message: format!("saved connection {name} is not configured for oauth2_refresh"),
+            });
+        };
+
+        let provider = template
+            .provider
+            .clone()
+            .ok_or_else(|| BridgeError::Handler {
+                code: "oauth_provider_missing".to_string(),
+                message: format!("saved connection {name} does not have a Nango provider key"),
+            })?;
+        let provider_key = normalize_api_datasource_source(&provider)?;
+        let providers =
+            spur_rest_table_gateway::adapter::nango::parse_providers(NANGO_PROVIDERS_SNAPSHOT)
+                .map_err(|error| {
+                    oauth_handler_error(
+                        "nango_provider_snapshot_failed",
+                        format!("failed to parse bundled Nango providers snapshot: {error}"),
+                    )
+                })?;
+        let provider_entry = providers
+            .get(&provider_key)
+            .ok_or_else(|| BridgeError::Handler {
+                code: "unknown_nango_provider".to_string(),
+                message: format!("unknown Nango provider: {provider}"),
+            })?;
+        let authorization_url =
+            provider_entry
+                .authorization_url
+                .clone()
+                .ok_or_else(|| BridgeError::Handler {
+                    code: "oauth_authorization_url_missing".to_string(),
+                    message: format!(
+                        "Nango provider {provider_key} does not define authorization_url"
+                    ),
+                })?;
+        let authorization_params = provider_entry
+            .authorization_params
+            .clone()
+            .unwrap_or_default();
+        let extra = authorization_params
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+
+        let client_id = required_env_var(&client_id_env, "oauth_client_id_missing")?;
+        let client_secret = required_env_var(&client_secret_env, "oauth_client_secret_missing")?;
+        let pkce = oauth::generate_pkce();
+        let state = oauth::generate_state();
+        let (redirect_uri, listener) = oauth::bind_loopback()
+            .await
+            .map_err(|error| oauth_handler_error("oauth_loopback_failed", error))?;
+        let auth_url = oauth::build_authorize_url(&oauth::AuthorizeUrlParams {
+            authorization_url: &authorization_url,
+            client_id: &client_id,
+            redirect_uri: &redirect_uri,
+            scope: scope.as_deref().unwrap_or(""),
+            state: &state,
+            code_challenge: &pkce.challenge,
+            extra: &extra,
+        })
+        .map_err(|error| oauth_handler_error("oauth_url_failed", error))?;
+
+        let app = self.app.as_ref().ok_or_else(|| BridgeError::Handler {
+            code: "oauth_app_unavailable".to_string(),
+            message: "OAuth browser flow requires the Tauri app handle".to_string(),
+        })?;
+        app.opener()
+            .open_url(auth_url, None::<&str>)
+            .map_err(|error| oauth_handler_error("oauth_browser_open_failed", error))?;
+
+        let callback = oauth::await_callback(listener)
+            .await
+            .map_err(|error| oauth_handler_error("oauth_callback_failed", error))?;
+        if callback.state != state {
+            return Err(BridgeError::Handler {
+                code: "oauth_state_mismatch".to_string(),
+                message: "redirect state did not match the issued nonce".to_string(),
+            });
+        }
+
+        let client = reqwest::Client::new();
+        let sink = crate::connection_secrets::FileCredentialSink::from_home_dir()
+            .map_err(|error| oauth_handler_error("oauth_sink_unavailable", error))?;
+        let refresh_token = complete_oauth_connect(
+            &client,
+            &token_url,
+            &client_id,
+            &client_secret,
+            &callback.code,
+            &pkce.verifier,
+            &redirect_uri,
+            &refresh_token_env,
+            &sink,
+        )
+        .await?;
+
+        let credentials = oauth_connect_registration_credentials(
+            &template.credential_env_vars,
+            &client_id_env,
+            &client_id,
+            &client_secret_env,
+            &client_secret,
+            &refresh_token_env,
+            &refresh_token,
+        );
+        self.persist_and_register_manifest_api_datasource(
+            name,
+            template.provider,
+            manifest_toml,
+            credentials,
+        )
+        .await
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -2847,14 +3112,16 @@ pub async fn start_daemon_server(
 ) -> Result<(NotebookMcpServerHandle, NotebookDaemonControl)> {
     let socket_path = socket_path.as_ref().to_path_buf();
     let app_for_deps = app.clone();
+    let app_for_control = app.clone();
     let requester: Arc<dyn BridgeRequester> =
         Arc::new(LoopbackDaemonRequester::new(socket_path.clone()));
     let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
-    let control = NotebookDaemonControl::new_with_parts(
+    let control = NotebookDaemonControl::new_with_parts_and_app(
         lifecycle_bridge,
         Arc::clone(&requester),
         Arc::clone(&state),
         windows,
+        Some(app_for_control),
         None,
     );
     let deps = Arc::new(ServerDeps::new(
@@ -3060,6 +3327,7 @@ async fn prepare_socket_path(socket_path: impl AsRef<Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection_secrets::CredentialSink as _;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
     use tokio::net::UnixStream;
@@ -3068,6 +3336,51 @@ mod tests {
     use jute::state::State;
 
     use super::bridge::BridgeRequestFuture;
+
+    #[tokio::test]
+    #[cfg(feature = "datasource-introspect")]
+    async fn complete_oauth_connect_persists_refresh_token() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_string_contains(
+                "grant_type=authorization_code",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "at",
+                "refresh_token": "rt-123",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let sink =
+            crate::connection_secrets::FileCredentialSink::at(dir.path().join("credentials.json"));
+
+        let token = complete_oauth_connect(
+            &reqwest::Client::new(),
+            &format!("{}/token", server.uri()),
+            "cid",
+            "secret",
+            "code-xyz",
+            "verifier",
+            "http://127.0.0.1:0/callback",
+            "GOOGLE_ADS_REFRESH_TOKEN",
+            &sink,
+        )
+        .await
+        .expect("complete");
+
+        assert_eq!(token, "rt-123");
+        assert_eq!(
+            sink.load_all()
+                .await
+                .expect("load")
+                .get("GOOGLE_ADS_REFRESH_TOKEN")
+                .map(String::as_str),
+            Some("rt-123")
+        );
+    }
 
     #[derive(Clone, Default)]
     struct RecordingDaemonControl {
