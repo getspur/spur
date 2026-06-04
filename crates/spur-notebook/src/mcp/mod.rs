@@ -953,6 +953,17 @@ fn preview_open_api_tables(
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn curated_preset_toml(source: &str) -> Option<&'static str> {
+    let key = source.replace('-', "_");
+    match key.as_str() {
+        "google_ads" => Some(include_str!(
+            "../../rest-table-gateway/connections/tier-a/google_ads.connection.toml"
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
 fn build_api_import_manifest(
     name: &str,
     provider: Option<String>,
@@ -964,19 +975,26 @@ fn build_api_import_manifest(
         .transpose()?
         .unwrap_or_else(|| api_import_source_name(name));
     let mut toml = if let Some(provider) = provider {
-        let providers =
-            spur_rest_table_gateway::adapter::nango::parse_providers(NANGO_PROVIDERS_SNAPSHOT)
-                .map_err(|error| BridgeError::Handler {
-                    code: "nango_provider_snapshot_failed".to_string(),
-                    message: format!("failed to parse bundled Nango providers snapshot: {error}"),
-                })?;
-        let provider = providers.get(&source).ok_or_else(|| BridgeError::Handler {
-            code: "unknown_nango_provider".to_string(),
-            message: format!("unknown Nango provider: {}", provider.trim()),
-        })?;
-        let manifest_stub =
-            spur_rest_table_gateway::adapter::nango::provider_to_manifest_stub(&source, provider);
-        spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest_stub)
+        if let Some(preset) = curated_preset_toml(&source) {
+            preset.to_string()
+        } else {
+            let providers =
+                spur_rest_table_gateway::adapter::nango::parse_providers(NANGO_PROVIDERS_SNAPSHOT)
+                    .map_err(|error| BridgeError::Handler {
+                        code: "nango_provider_snapshot_failed".to_string(),
+                        message: format!(
+                            "failed to parse bundled Nango providers snapshot: {error}"
+                        ),
+                    })?;
+            let provider = providers.get(&source).ok_or_else(|| BridgeError::Handler {
+                code: "unknown_nango_provider".to_string(),
+                message: format!("unknown Nango provider: {}", provider.trim()),
+            })?;
+            let manifest_stub = spur_rest_table_gateway::adapter::nango::provider_to_manifest_stub(
+                &source, provider,
+            );
+            spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest_stub)
+        }
     } else {
         let manifest_stub = spur_rest_table_gateway::adapter::manifest::Manifest {
             source: spur_rest_table_gateway::adapter::manifest::SourceCfg {
@@ -1015,6 +1033,7 @@ fn build_api_import_manifest(
             message: format!("failed to build API datasource manifest: {error}"),
         },
     )?;
+    let source = manifest.source.name.clone();
     Ok((source, manifest))
 }
 
@@ -3118,6 +3137,24 @@ mod tests {
 
         assert!(tables.iter().any(|table| table.name == "svc_markets"));
         assert!(!tables.iter().any(|table| table.name == "svc_create"));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn build_api_import_manifest_prefers_curated_google_ads_preset() {
+        let (source, manifest) =
+            build_api_import_manifest("gads", Some("google-ads".to_string()), None)
+                .expect("manifest builds from preset");
+
+        assert_eq!(source, "google_ads");
+        assert!(manifest.source.allow_writes, "preset enables writes");
+        assert!(
+            manifest
+                .actions
+                .iter()
+                .any(|action| action.name == "google_ads_search"),
+            "curated preset carries the search action, not the empty stub"
+        );
     }
 
     #[test]
