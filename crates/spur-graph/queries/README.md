@@ -96,7 +96,7 @@ seed of the Tier-0 ontology realization contract
 | constructs | Y | Y | Y | Y | Y | — |
 | contains | Y | Y | Y | Y | Y | Y |
 | defines | Y | Y | Y | Y | Y | — |
-| references (HOF) | Y | TODO | Y | Y | TODO | — |
+| references (HOF) | Y | TODO | TODO | TODO | TODO | — |
 | links | — | — | — | — | — | Y |
 | implements | Y | Y | Y | Y | — | — |
 | extends | Y | Y | Y | Y | Y | — |
@@ -104,6 +104,9 @@ seed of the Tier-0 ontology realization contract
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
 reclassified to `implements`.
+
+HOF references are realized in Rust, Python, and C++ via closed HOF-method
+allowlists in the respective `spur-edges.scm`; TypeScript/Tsx are TODO.
 
 ## Reference Capture Divergence
 
