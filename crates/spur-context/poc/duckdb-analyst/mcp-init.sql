@@ -4,3 +4,4 @@
 -- resolve. The MCP server runs this on each connection via --init-sql.
 LOAD duckpgq;
 LOAD onager;
+LOAD fts;

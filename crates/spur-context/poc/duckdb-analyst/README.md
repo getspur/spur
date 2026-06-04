@@ -80,6 +80,82 @@ The primary analytical substrate is the Parquet-backed view set. The DuckPGQ
 tables are compatibility copies because the current DuckPGQ extension rejects
 property graphs over DuckDB views.
 
+### One-stop analyst surface (`init_algorithms.sql` + `init_views.sql`)
+
+So an analyst can ask one named view per question — never hand-rolling an Onager
+call or a four-table join — the build layers two extra tiers on top of the base
+views. `SELECT * FROM v_catalog` lists the whole surface.
+
+**Tier A — graph algorithms, materialized once per build (`init_algorithms.sql`).**
+Onager table functions need `LOAD onager` and are too costly to recompute per
+query, so they are baked into TABLEs in the same build session (where init.sql
+already loaded onager), then exposed as symbol-keyed views:
+
+| View | Source | Notes |
+|------|--------|-------|
+| `v_symbol_centrality` | `onager_par_pagerank` + SQL degree | PageRank, in/out degree per symbol |
+| `v_symbol_component`  | `onager_par_components` | weakly-connected component id + size |
+| `v_symbol_community`  | `onager_cmm_louvain` | de-facto module id (label not stable across builds) |
+| `v_graph_metrics`     | `onager_mtr_density` + rollups | one-row whole-graph metrics |
+
+**Tier B — analytical views (`init_views.sql`).** Lazy compositions of the static
+graph, the temporal layer, and the Tier-A tables:
+
+| View | Answers |
+|------|---------|
+| `v_symbol_scorecard` | master per-symbol row (centrality+churn+age+inbound+component+posture) |
+| `v_symbol_risk` | centrality × churn posture (`leaf` / `load-bearing wall` / `hot-central`) |
+| `v_symbol_age` | born/last_seen/lifespan, keyed on **structural** identity (not raw stable_symbol_id) |
+| `v_symbol_genealogy` | rename trails |
+| `v_hidden_coupling` | co-change pairs with NO static edge (logical deps) |
+| `v_fix_hotspots` | per-file fix-commit count + fix-rate |
+| `v_commit_classified` | conventional-commit type per commit |
+| `v_velocity` | per-month touches/commits/added/deleted |
+| `v_unresolved_hotspots` | unresolved call labels by site count |
+| `v_catalog` | self-describing list of the surface |
+
+Build order is enforced in `analyst.rs`: `init.sql` → temporal → diagnostics →
+**algorithms** → views (Tier-B views join the Tier-A surfaces). The `v_symbol_age`
+view keys on `(file, entity, kind, scope)` because `stable_symbol_id` embeds a
+byte offset — raw-id keying mints a fresh id whenever a symbol moves, producing
+hundreds of thousands of phantom symbols with bogus sub-day lifespans.
+
+### Search appliance (`init_search.sql`)
+
+So an agent answers a question with **one query** — no per-session index build —
+the build also materializes a full-text search surface and exposes `search()`
+macros. Runs last (needs `v_symbol_scorecard` + the attached Lance section
+store); `analyst.rs` gates it on `temporal && lance_present`. ~12s of the build.
+
+| Object | Kind | Purpose |
+|--------|------|---------|
+| `sections` | TABLE | full section forest (every copy) — backs `v_doc_tree` navigation |
+| `sections_search` | TABLE + FTS | **deduped** prose corpus (one row per distinct body) — backs `search_docs`/`search` |
+| `symbol_text` | TABLE + FTS | per-symbol identifier text (name + aggregated tokens), **deduped** by content + BM25 index (code corpus) |
+| `v_doc_tree` | VIEW | section heading tree with depth (PageIndex navigation substrate) |
+| `search_docs(q)` | MACRO | BM25 over section bodies |
+| `search_code(q)` | MACRO | BM25 over symbol tokens, **fused with `v_symbol_scorecard`** (pagerank/churn/posture/component) |
+| `search(q)` | MACRO | unified doc+code ranked result with high-value signal inline |
+
+```sql
+LOAD fts;                                   -- mcp-init.sql does this per connection
+SELECT * FROM search('oauth token refresh resolve auth');
+SELECT * FROM search_code('review gate approve reject completed task');
+```
+
+**Dedup:** SPUR installs skills into ~6 agent dirs (`.claude`/`.codex`/`.kiro`/…),
+so the raw section corpus is ~95% duplicate by body (19.7k rows → 989 distinct).
+`sections_search` and `symbol_text` are deduped by content (preferring the
+canonical, non-dot-dir path) before indexing, so a query returns each skill
+section/symbol **once**, not once per agent dir. `sections` stays full so
+`v_doc_tree` keeps every copy's heading hierarchy.
+
+Each `search_code` hit carries its centrality/churn/posture, so a free-text query
+returns *high-value* results — "the relevant symbol **and** how central/risky it
+is" — in a single round trip. FTS indexes (`fts_main_sections`,
+`fts_main_symbol_text`) are persisted in the `.duckdb`; only `LOAD fts` is needed
+per connection (no rebuild).
+
 ## The three query tiers (all in `examples.sql`)
 
 | Tier | Tool         | Example query                                           |
