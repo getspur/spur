@@ -5,7 +5,7 @@ name = "facebook_ads"
 base_url = "https://graph.facebook.com/v21.0"
 allow_writes = true
 connection_config = ["AD_ACCOUNT_ID"]
-auth = { scheme = "oauth2_refresh", token_url = "https://graph.facebook.com/v21.0/oauth/access_token", client_id_env = "FACEBOOK_ADS_CLIENT_ID", client_secret_env = "FACEBOOK_ADS_CLIENT_SECRET", refresh_token_env = "FACEBOOK_ADS_REFRESH_TOKEN" }
+auth = { scheme = "oauth2_refresh", token_url = "https://graph.facebook.com/v21.0/oauth/access_token", client_id_env = "FACEBOOK_ADS_CLIENT_ID", client_secret_env = "FACEBOOK_ADS_CLIENT_SECRET", refresh_token_env = "FACEBOOK_ADS_REFRESH_TOKEN", scope = "ads_read" }
 
 [[action]]
 name = "facebook_ads_insights"
