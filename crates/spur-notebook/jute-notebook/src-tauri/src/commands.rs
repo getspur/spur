@@ -1589,10 +1589,9 @@ pub async fn run_cell_events(
     notebook_path: &str,
     kernel_id: Option<&str>,
     cell_id: &str,
-    code: &str,
     state: &State,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
-    let dispatch = resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, code, state)?;
+    let dispatch = resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, state)?;
     ensure_kernel_slot_live(
         state,
         notebook_path,
@@ -1716,11 +1715,11 @@ fn resolve_run_cell_dispatch(
     notebook_path: &str,
     supplied_kernel_id: Option<&str>,
     cell_id: &str,
-    code: &str,
     state: &State,
 ) -> Result<RunCellDispatch, Error> {
     let (root, _version) = state.get_notebook().snapshot();
     let code_type = resolve_cell_code_type(&root, cell_id)?;
+    let source = resolve_cell_source(&root, cell_id)?;
     let spec_name = kernelspec_for(code_type).to_string();
     let slot_id = slot_id_for(notebook_path, code_type);
 
@@ -1737,8 +1736,23 @@ fn resolve_run_cell_dispatch(
         slot_id,
         spec_name: spec_name.clone(),
         code_type,
-        wrapped_code: code.to_string(),
+        wrapped_code: source,
     })
+}
+
+fn resolve_cell_source(root: &NotebookRoot, cell_id: &str) -> Result<String, Error> {
+    let cell = root
+        .cells
+        .iter()
+        .find(|cell| notebook_cell_id(cell) == Some(cell_id))
+        .ok_or_else(|| Error::NotebookDaemon(format!("cell not found: {cell_id}")))?;
+    let Cell::Code(code_cell) = cell else {
+        return Err(Error::NotebookDaemon(format!(
+            "cell is not a code cell: {cell_id}"
+        )));
+    };
+
+    Ok(code_cell.source.clone().into())
 }
 
 fn resolve_cell_code_type(root: &NotebookRoot, cell_id: &str) -> Result<CodeType, Error> {
@@ -1874,11 +1888,11 @@ pub async fn run_cell(
     notebook_path: &str,
     kernel_id: Option<String>,
     cell_id: &str,
-    code: &str,
+    _code: &str,
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
-    let rx = run_cell_events(notebook_path, kernel_id.as_deref(), cell_id, code, &state).await?;
+    let rx = run_cell_events(notebook_path, kernel_id.as_deref(), cell_id, &state).await?;
     while let Ok(event) = rx.recv().await {
         if on_event.send(event).is_err() {
             break;
@@ -2049,24 +2063,23 @@ mod tests {
     }
 
     #[test]
-    fn run_cell_chokepoint_passes_user_code_verbatim() {
+    fn run_cell_chokepoint_uses_stored_source() {
         let notebook_path = "/tmp/demo-notebook.ipynb";
         let state = State::new();
-        let input = "spur.put('sales', [1, 2])";
+        let stored_source = "spur.put('sales', [1, 2])";
         state
             .get_notebook()
-            .load(notebook_path, notebook_with_source(input, 1));
+            .load(notebook_path, notebook_with_source(stored_source, 1));
 
         let dispatch = resolve_run_cell_dispatch(
             notebook_path,
             None,
             "550e8400-e29b-41d4-a716-446655440000",
-            input,
             &state,
         )
         .unwrap();
 
-        assert_eq!(dispatch.wrapped_code, input);
+        assert_eq!(dispatch.wrapped_code, stored_source);
         assert!(!dispatch.wrapped_code.contains("class _Spur"));
     }
 
@@ -2118,7 +2131,6 @@ mod tests {
             notebook_path,
             Some(&supplied_python_slot),
             "550e8400-e29b-41d4-a716-446655440000",
-            "await spur.put('sales', [])",
             &state,
         )
         .unwrap();
@@ -2154,7 +2166,6 @@ mod tests {
             notebook_path,
             Some(&supplied_python_slot),
             "550e8400-e29b-41d4-a716-446655440000",
-            "spur.put('sales', [1])",
             &state,
         )
         .unwrap();
