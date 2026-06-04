@@ -98,8 +98,12 @@ seed of the Tier-0 ontology realization contract
 | defines | Y | Y | Y | Y | Y | — |
 | references (HOF) | Y | TODO | Y | Y | TODO | — |
 | links | — | — | — | — | — | Y |
-| implements | Y | TODO | Y | Y | — | — |
+| implements | Y | Y | Y | Y | — | — |
 | extends | Y | Y | Y | Y | Y | — |
+
+Python `implements` is realized after resolution: `@extends` captures targeting
+local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
+reclassified to `implements`.
 
 ## Reference Capture Divergence
 
