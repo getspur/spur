@@ -76,8 +76,8 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     }
 
     let notebook = state.get_notebook();
-    if notebook.path().as_deref() == Some(path.as_path()) {
-        notebook.replace(path, params.contents);
+    if is_same_open_target(notebook.path().as_deref(), path.as_path()) {
+        jute::commands::replace_notebook_and_hydrate_catalog(state.as_ref(), path, params.contents);
     } else {
         state
             .save_coordinator
@@ -102,6 +102,22 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     }
 
     Ok(CallToolResult::structured(json!({ "ok": true })))
+}
+
+fn is_same_open_target(store_path: Option<&Path>, candidate: &Path) -> bool {
+    let Some(store_path) = store_path else {
+        return false;
+    };
+    if store_path == candidate {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(store_path),
+        std::fs::canonicalize(candidate),
+    ) {
+        (Ok(store_path), Ok(candidate)) => store_path == candidate,
+        _ => false,
+    }
 }
 
 async fn existing_cell_count(path: &Path) -> Option<usize> {
@@ -155,6 +171,31 @@ mod tests {
             "cells": []
         }))
         .expect("empty notebook parses")
+    }
+
+    fn datasource_entry(name: &str, path: &str) -> jute::commands::DatasourceEntry {
+        jute::commands::DatasourceEntry {
+            name: name.to_string(),
+            path: path.to_string(),
+            kind: jute::commands::DatasourceKind::Csv,
+            group: None,
+            columns: vec![jute::commands::Column {
+                name: "amount".to_string(),
+                sql_type: "DOUBLE".to_string(),
+            }],
+            row_count: Some(1),
+            tables: Vec::new(),
+        }
+    }
+
+    fn notebook_with_datasource(name: &str, path: &str) -> NotebookRoot {
+        let mut notebook = sample_notebook();
+        let catalog = jute::state::DatasourceCatalog {
+            schema_version: jute::state::DATASOURCE_CATALOG_SCHEMA_VERSION,
+            entries: vec![datasource_entry(name, path)],
+        };
+        catalog.persist_to_metadata(&mut notebook.metadata, None);
+        notebook
     }
 
     #[tokio::test]
@@ -243,7 +284,44 @@ mod tests {
             .expect("temp dir");
         let path = temp_dir.path().join("open.ipynb");
         let state = Arc::new(State::new());
-        state.get_notebook().load(&path, sample_notebook());
+        state
+            .get_notebook()
+            .load(&path, notebook_with_datasource("sales", "/tmp/sales.csv"));
+        state.attach_datasource(datasource_entry("sales", "/tmp/sales.csv"));
+        let replacement = notebook_with_datasource("inventory", "/tmp/inventory.csv");
+        let deps = deps_with_state(Arc::clone(&state));
+
+        call(
+            &deps,
+            json!({
+                "path": path.display().to_string(),
+                "contents": replacement.clone()
+            }),
+        )
+        .await
+        .expect("save succeeds");
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        assert_eq!(snapshot, replacement);
+        let entries = state.datasource_catalog.lock().list();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "inventory");
+    }
+
+    #[tokio::test]
+    async fn save_to_symlinked_open_path_routes_through_store() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-mcp-save-open-symlink-")
+            .tempdir()
+            .expect("temp dir");
+        let real_path = temp_dir.path().join("open.ipynb");
+        tokio::fs::write(&real_path, serde_json::to_vec(&sample_notebook()).unwrap())
+            .await
+            .expect("seed disk");
+        let alias_path = temp_dir.path().join("alias.ipynb");
+        std::os::unix::fs::symlink(&real_path, &alias_path).expect("symlink notebook");
+        let state = Arc::new(State::new());
+        state.get_notebook().load(&real_path, sample_notebook());
         let replacement: NotebookRoot = serde_json::from_value(json!({
             "metadata": {},
             "nbformat_minor": 5,
@@ -253,7 +331,7 @@ mod tests {
                     "cell_type": "markdown",
                     "id": "cell-1",
                     "metadata": {},
-                    "source": "replacement"
+                    "source": "replacement through symlink"
                 }
             ]
         }))
@@ -263,7 +341,7 @@ mod tests {
         call(
             &deps,
             json!({
-                "path": path.display().to_string(),
+                "path": alias_path.display().to_string(),
                 "contents": replacement.clone()
             }),
         )
