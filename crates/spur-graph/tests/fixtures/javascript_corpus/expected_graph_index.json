@@ -1,0 +1,439 @@
+{
+  "header": {
+    "graph_index_version": "4"
+  },
+  "manifest_version": "<normalized>",
+  "graph_content_hash": "49da0c25d19f00b6771322df1e53068b8461e7b9e651d5a848e59415746aab10",
+  "file_manifests": [
+    {
+      "stable_file_id": "73295e90e7dc5f72",
+      "path": "src/app.js",
+      "content_oid": "3e9b72b561c495a55777b6b65e9b3b3507e51f4a",
+      "node_ids": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "stable_file_id": "4a46fb9e4ce1d0e1",
+      "path": "src/component.jsx",
+      "content_oid": "8ba5dcc4bd3ac72c9576741ea2512bfbca16a0c2",
+      "node_ids": [
+        5,
+        6
+      ]
+    },
+    {
+      "stable_file_id": "0cfc6a5d22cad34f",
+      "path": "src/helpers.mjs",
+      "content_oid": "47dab1818f60372f8e64192b2b9390272c79efcd",
+      "node_ids": [
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "stable_file_id": "0cc06dc368e1f901",
+      "path": "src/legacy.cjs",
+      "content_oid": "25805a6d5fcd9e3bd43dc250c981818fa40f9522",
+      "node_ids": [
+        11,
+        12
+      ]
+    }
+  ],
+  "files": [
+    {
+      "stable_file_id": "73295e90e7dc5f72",
+      "file_path": "src/app.js"
+    },
+    {
+      "stable_file_id": "4a46fb9e4ce1d0e1",
+      "file_path": "src/component.jsx"
+    },
+    {
+      "stable_file_id": "0cfc6a5d22cad34f",
+      "file_path": "src/helpers.mjs"
+    },
+    {
+      "stable_file_id": "0cc06dc368e1f901",
+      "file_path": "src/legacy.cjs"
+    }
+  ],
+  "symbols": [
+    {
+      "stable_symbol_id": "2ab376508a3b1eb1",
+      "file_path": "src/app.js",
+      "byte_range": [
+        101,
+        239
+      ],
+      "line_range": [
+        4,
+        10
+      ],
+      "entity_name": "Dashboard",
+      "qualified_name": "Dashboard",
+      "symbol_kind": "class",
+      "anchor_hash": "4383770813064643572",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "7cf131a41e53f73f",
+      "file_path": "src/app.js",
+      "byte_range": [
+        140,
+        237
+      ],
+      "line_range": [
+        5,
+        9
+      ],
+      "entity_name": "render",
+      "qualified_name": "Dashboard::render",
+      "symbol_kind": "method",
+      "anchor_hash": "13968843087863902675",
+      "enclosing_scope": "Dashboard"
+    },
+    {
+      "stable_symbol_id": "51927cd06ab7bd49",
+      "file_path": "src/app.js",
+      "byte_range": [
+        248,
+        365
+      ],
+      "line_range": [
+        12,
+        16
+      ],
+      "entity_name": "createDashboard",
+      "qualified_name": "createDashboard",
+      "symbol_kind": "function",
+      "anchor_hash": "15717887242377643929",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "84a61c12b3ef5845",
+      "file_path": "src/component.jsx",
+      "byte_range": [
+        7,
+        67
+      ],
+      "line_range": [
+        1,
+        3
+      ],
+      "entity_name": "Badge",
+      "qualified_name": "Badge",
+      "symbol_kind": "function",
+      "anchor_hash": "14294966535704298901",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "0afc01a1553ba0d6",
+      "file_path": "src/helpers.mjs",
+      "byte_range": [
+        7,
+        75
+      ],
+      "line_range": [
+        1,
+        3
+      ],
+      "entity_name": "normalizeName",
+      "qualified_name": "normalizeName",
+      "symbol_kind": "function",
+      "anchor_hash": "14682526052255073928",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "0649aa0a4e8b9cc4",
+      "file_path": "src/helpers.mjs",
+      "byte_range": [
+        84,
+        157
+      ],
+      "line_range": [
+        5,
+        9
+      ],
+      "entity_name": "BaseWidget",
+      "qualified_name": "BaseWidget",
+      "symbol_kind": "class",
+      "anchor_hash": "8961717066088629129",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "88e47eeb43e558be",
+      "file_path": "src/helpers.mjs",
+      "byte_range": [
+        105,
+        155
+      ],
+      "line_range": [
+        6,
+        8
+      ],
+      "entity_name": "mount",
+      "qualified_name": "BaseWidget::mount",
+      "symbol_kind": "method",
+      "anchor_hash": "16718759301529155082",
+      "enclosing_scope": "BaseWidget"
+    },
+    {
+      "stable_symbol_id": "930f3be6b13e6685",
+      "file_path": "src/legacy.cjs",
+      "byte_range": [
+        0,
+        55
+      ],
+      "line_range": [
+        1,
+        3
+      ],
+      "entity_name": "legacyBridge",
+      "qualified_name": "legacyBridge",
+      "symbol_kind": "function",
+      "anchor_hash": "4405914909217312255",
+      "enclosing_scope": null
+    }
+  ],
+  "edges": [
+    {
+      "source_stable_symbol_id": "0649aa0a4e8b9cc4",
+      "target_stable_symbol_id": "88e47eeb43e558be",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "0649aa0a4e8b9cc4",
+      "target_stable_symbol_id": "88e47eeb43e558be",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "0afc01a1553ba0d6",
+      "target_stable_symbol_id": null,
+      "target_label": "toUpperCase",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "0afc01a1553ba0d6",
+      "target_stable_symbol_id": null,
+      "target_label": "trim",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "0cc06dc368e1f901",
+      "target_stable_symbol_id": "930f3be6b13e6685",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "0cfc6a5d22cad34f",
+      "target_stable_symbol_id": "0649aa0a4e8b9cc4",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "0cfc6a5d22cad34f",
+      "target_stable_symbol_id": "0afc01a1553ba0d6",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "2ab376508a3b1eb1",
+      "target_stable_symbol_id": "0649aa0a4e8b9cc4",
+      "target_label": "BaseWidget",
+      "relation": "extends",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other",
+      "bind_method": "relational"
+    },
+    {
+      "source_stable_symbol_id": "2ab376508a3b1eb1",
+      "target_stable_symbol_id": "7cf131a41e53f73f",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "2ab376508a3b1eb1",
+      "target_stable_symbol_id": "7cf131a41e53f73f",
+      "target_label": null,
+      "relation": "defines",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "4a46fb9e4ce1d0e1",
+      "target_stable_symbol_id": "84a61c12b3ef5845",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "51927cd06ab7bd49",
+      "target_stable_symbol_id": "2ab376508a3b1eb1",
+      "target_label": "Dashboard",
+      "relation": "constructs",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "51927cd06ab7bd49",
+      "target_stable_symbol_id": "7cf131a41e53f73f",
+      "target_label": "render",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "method_crate_singleton"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": null,
+      "target_label": "./component.jsx",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": null,
+      "target_label": "./helpers.mjs",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": "0649aa0a4e8b9cc4",
+      "target_label": "BaseWidget",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": "0afc01a1553ba0d6",
+      "target_label": "normalizeName",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": "2ab376508a3b1eb1",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": "51927cd06ab7bd49",
+      "target_label": "createDashboard",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": "51927cd06ab7bd49",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": "84a61c12b3ef5845",
+      "target_label": "Badge",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "7cf131a41e53f73f",
+      "target_stable_symbol_id": "0afc01a1553ba0d6",
+      "target_label": "normalizeName",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
+      "source_stable_symbol_id": "7cf131a41e53f73f",
+      "target_stable_symbol_id": "84a61c12b3ef5845",
+      "target_label": "Badge",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
+      "source_stable_symbol_id": "88e47eeb43e558be",
+      "target_stable_symbol_id": "0afc01a1553ba0d6",
+      "target_label": "normalizeName",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls",
+      "bind_method": "singleton"
+    },
+    {
+      "source_stable_symbol_id": "930f3be6b13e6685",
+      "target_stable_symbol_id": null,
+      "target_label": "trim",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    }
+  ],
+  "tombstones": []
+}
