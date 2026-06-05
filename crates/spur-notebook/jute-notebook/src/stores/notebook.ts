@@ -65,7 +65,9 @@ export function notebookDeltaIsForPath(
   if (!notebookPath || !deltaPath) {
     return true;
   }
-  return normalizeNotebookPath(notebookPath) === normalizeNotebookPath(deltaPath);
+  return (
+    normalizeNotebookPath(notebookPath) === normalizeNotebookPath(deltaPath)
+  );
 }
 
 type SupportedKernelSpecName = "deno" | "python3" | "evcxr" | "gonb";
@@ -105,7 +107,7 @@ export type CellFrontendMetadata = Record<string, unknown> & {
   emits?: string[];
 };
 
-export type NotebookViewMode = "cells" | "dag";
+export type NotebookViewMode = "cells" | "dag" | "app";
 
 export type NodeStatus = {
   state:

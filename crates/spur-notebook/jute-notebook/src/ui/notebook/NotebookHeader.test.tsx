@@ -45,7 +45,7 @@ describe("NotebookHeader", () => {
       dagStatus: {},
       dagPortManifest: {},
       viewStateActions: {
-        setViewMode: (viewMode: "cells" | "dag") =>
+        setViewMode: (viewMode: "cells" | "dag" | "app") =>
           set((state: any) => ({
             viewState: { ...state.viewState, viewMode },
           })),
@@ -64,8 +64,14 @@ describe("NotebookHeader", () => {
 
     const notebookButton = screen.getByRole("button", { name: "Notebook" });
     const dagButton = screen.getByRole("button", { name: "DAG" });
+    const appButton = screen.getByRole("button", { name: "App" });
     expect(notebookButton).toHaveAttribute("aria-pressed", "true");
     expect(dagButton).toHaveAttribute("aria-pressed", "false");
+    expect(appButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(appButton);
+    expect(mocks.notebook?.store.getState().viewState.viewMode).toBe("app");
+    expect(appButton).toHaveAttribute("aria-pressed", "true");
 
     fireEvent.click(dagButton);
     expect(mocks.notebook?.store.getState().viewState.viewMode).toBe("dag");
