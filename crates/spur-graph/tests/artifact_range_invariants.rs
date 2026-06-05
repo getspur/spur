@@ -76,3 +76,39 @@ fn assembled_artifact_has_no_out_of_range_resolved_edges() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn artifact_rebind_preserves_cross_crate_singleton_function_unresolved() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("crates/source/src")).expect("source crate dir");
+    std::fs::create_dir_all(dir.path().join("crates/callee/src")).expect("callee crate dir");
+    std::fs::write(
+        dir.path().join("crates/source/src/lib.rs"),
+        r#"
+pub fn caller() {
+    cross_crate_helper();
+}
+"#,
+    )
+    .expect("write source lib");
+    std::fs::write(
+        dir.path().join("crates/callee/src/lib.rs"),
+        "pub fn cross_crate_helper() {}\n",
+    )
+    .expect("write callee lib");
+
+    let facts = build_facts(dir.path(), None).expect("build facts").0;
+    let artifact = artifact_from_facts(&facts, dir.path()).expect("assemble artifact");
+
+    let edge = artifact
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.target_label.as_deref() == Some("cross_crate_helper")
+        })
+        .expect("cross-crate call edge");
+
+    assert_eq!(edge.target_stable_symbol_id, None);
+    assert_eq!(edge.bind_method.as_deref(), None);
+}
