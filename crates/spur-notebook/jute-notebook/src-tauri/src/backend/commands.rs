@@ -1,13 +1,13 @@
 //! High-level APIs for doing operations over [`KernelConnection`] objects.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
     wire_protocol::{
-        ClearOutput, DisplayData, ErrorReply, ExecuteReply, ExecuteRequest, ExecuteResult,
-        InterruptReply, InterruptRequest, KernelInfoReply, KernelInfoRequest, KernelMessage,
-        KernelMessageType, KernelStatus, Reply, Status, Stream,
+        ClearOutput, CommMessage, CommOpen, DisplayData, ErrorReply, ExecuteReply, ExecuteRequest,
+        ExecuteResult, InterruptReply, InterruptRequest, KernelInfoReply, KernelInfoRequest,
+        KernelMessage, KernelMessageType, KernelStatus, Reply, Status, Stream,
     },
     KernelConnection,
 };
@@ -29,7 +29,7 @@ pub async fn kernel_info(conn: &KernelConnection) -> Result<KernelInfoReply, Err
 }
 
 /// Events that can be received while running a cell.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case", tag = "event", content = "data")]
 pub enum RunCellEvent {
     /// Cell execution was submitted to the kernel.
@@ -61,6 +61,15 @@ pub enum RunCellEvent {
     /// Clear the output of a cell.
     ClearOutput(ClearOutput),
 
+    /// Open a comm to the frontend for interactive widgets.
+    CommOpen(CommOpen),
+
+    /// Send a one-way comm message to the frontend.
+    CommMsg(CommMessage),
+
+    /// Close a frontend comm.
+    CommClose(CommMessage),
+
     /// Error if the cell raised an exception.
     Error(ErrorReply),
 
@@ -77,7 +86,7 @@ pub enum RunCellEvent {
 }
 
 /// Coarse compile/run phase for compiled notebook cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum CompilePhase {
