@@ -4,6 +4,14 @@
 
 **Source:** graph-grounded + structural analysis (code-explore + spur-analyst, artifact `541a44a1…`, indexed HEAD `483ca0ad`).
 
+> **⚠️ UPDATE (attempt 2 — scope expanded):** attempt 1 correctly found that the resolver gate
+> alone is masked by `rebind_cross_file_edges`, which re-binds the now-unresolved labels back to
+> the singleton function by name (the rebind `Calls`→`function` branch has a *kind* guard but no
+> *crate* guard). The fix needs BOTH halves — resolver gate **and** rebind crate-safety — exactly
+> as the Tier-0 range guard did. The rebind pass is therefore now **IN SCOPE** (see Step 2b and
+> the updated Scope Boundary). `function_singleton_safe` becomes `pub(crate)` so both paths share
+> one predicate.
+
 **The bug (exact, grounded):** in `resolve_singleton_bare_target`
 (`crates/spur-graph/src/extract/tree_sitter.rs`, the `Some(NodeKind::Function) if edge.relation == RelationKind::Calls` arm, ~lines 864-875), the resolver computes the safety signal and then **ignores it**:
 
@@ -40,8 +48,8 @@ Some(NodeKind::Function) if edge.relation == RelationKind::Calls => {
 **Task ID:** `task-singleton-crate-safety`
 
 **Files (all in scope):**
-- Modify: `crates/spur-graph/src/extract/tree_sitter.rs` (the one Function arm of `resolve_singleton_bare_target` + a unit test in the existing `tests` module beside `function_singleton_safe_*`)
-- Modify: `crates/spur-graph/src/store/build.rs` (`RESOLVER_VERSION` bump → v6)
+- Modify: `crates/spur-graph/src/extract/tree_sitter.rs` (the one Function arm of `resolve_singleton_bare_target` + a unit test in the existing `tests` module beside `function_singleton_safe_*`; make `function_singleton_safe` `pub(crate)`)
+- Modify: `crates/spur-graph/src/store/build.rs` (`RESOLVER_VERSION` bump → v6; **+ crate-safety guard in `rebind_cross_file_edges` Calls→function branch** — see Step 2b)
 - Regenerate (bless, expected): `crates/spur-graph/tests/fixtures/{sample_corpus,python_corpus,typescript_corpus,cpp_corpus}/expected_graph_index.json`
 - Modify (only if an assertion legitimately changes): `crates/spur-graph/tests/extractor.rs`, `crates/spur-graph/tests/resolver.rs`
 
@@ -58,7 +66,7 @@ Some(NodeKind::Function) if edge.relation == RelationKind::Calls => {
 
 **Suggested Worker:** codex.
 
-**Scope Boundary:** IN: the one Function arm + its unit test + `RESOLVER_VERSION` + re-blessed goldens. OUT: the method `scope_match` path (the 1,188 cross-crate method binds — separate follow-up T1.b.2-b), threading an import index into `PendingResolutionIndexes` (that IS T1.b.2-b), `schema.rs`, the rebind/qualified paths, other relations, other crates. Do NOT change `function_singleton_safe` itself, `method_scope_matches`, the constructs reclassification, or the Method arm.
+**Scope Boundary:** IN: the resolver Function arm + its unit test + making `function_singleton_safe` `pub(crate)` + **the `rebind_cross_file_edges` Calls→function crate guard (Step 2b)** + `RESOLVER_VERSION` + re-blessed goldens + an artifact-level test. OUT: the method `scope_match` resolver path AND the rebind `Calls`→`method` branch (the cross-crate method binds — separate follow-up T1.b.2-b), threading an import index into `PendingResolutionIndexes` (that IS T1.b.2-b), `schema.rs`, the qualified path, the range/kind guards, Imports rebind, `rebind_candidate_kinds`, other relations, other crates. Do NOT change the *logic* of `function_singleton_safe` (only its visibility), `method_scope_matches`, `same_directory_path`, the constructs reclassification, or the resolver Method arm.
 
 **Implementation:**
 
@@ -85,6 +93,30 @@ Some(NodeKind::Function) if edge.relation == RelationKind::Calls => {
 ```
 
   (Preserve current behavior when file info is missing — only the *provably* unsafe case drops. The `phantom_blocked_calls` increment now genuinely corresponds to a dropped edge.) Run Step 1 again → expect PASS.
+
+- [ ] **Step 2b: Mirror the guard in the rebind pass (the second half — without this the resolver gate is masked).**
+  `rebind_cross_file_edges` (`store/build.rs` ~lines 1073-1084) re-binds unresolved labels by name. The `Calls`→`method` branch already has a locality guard (`!same_directory_path(...) → unresolved`); the `Calls`→`function` branch (the `else` that does `edge.bind_method.get_or_insert_with(|| "singleton")`) has **none**, so it re-binds cross-crate singleton functions. Make `function_singleton_safe` `pub(crate)` in `tree_sitter.rs`, import it into `build.rs`, and gate the function rebind:
+
+```rust
+} else if edge.relation == RelationKind::Calls
+    && resolved.symbol_kind == "method"
+    && !same_directory_path(&resolved.file_path, source_file_path)
+{
+    edge.target_stable_symbol_id = None;
+} else if edge.relation == RelationKind::Calls
+    && resolved.symbol_kind == "function"
+    && !function_singleton_safe(source_file_path, &resolved.file_path)
+{
+    edge.target_stable_symbol_id = None; // cross-crate function rebind = phantom; leave unresolved
+} else {
+    edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+    if edge.relation == RelationKind::Calls && resolved.symbol_kind == "function" {
+        edge.bind_method.get_or_insert_with(|| "singleton".to_owned());
+    }
+}
+```
+
+  Leave the Imports path, `rebind_candidate_kinds`, the kind/range guards, the ambiguous (len>1) handling, and all non-Calls relations UNCHANGED. Add an artifact-level test (in `tests/artifact_range_invariants.rs` or a `build.rs` rebind unit test) proving a cross-crate singleton function call is unresolved AFTER `artifact_from_facts` (not re-bound).
 
 - [ ] **Step 3: Bump `RESOLVER_VERSION`** in `build.rs` (~line 26) `…-qualified-calls-callable-v5` → `"2026-06-05-singleton-crate-safety-v6"`.
 
