@@ -6,6 +6,11 @@ import { MultilineString, OutputDisplayData } from "@/bindings";
 import { CellResult } from "@/stores/notebook";
 import { useOutputActiveContentEnabled } from "@/stores/settings";
 
+import JuteAppOutput, {
+  JUTE_APP_MIME,
+  WIDGET_VIEW_MIME,
+  anywidgetViewFromData,
+} from "./JuteAppOutput";
 import MarkdownRenderer from "./MarkdownRenderer";
 import {
   compilePhasePresentation,
@@ -158,6 +163,16 @@ const IFRAME_HEIGHT_MESSAGE = "jute-iframe-height";
 
 const OutputViewDisplayData = memo(
   ({ output }: { output: OutputDisplayData }) => {
+    const widgetView = anywidgetViewFromData(output.data[WIDGET_VIEW_MIME]);
+    if (widgetView) {
+      return (
+        <JuteAppOutput
+          widgetView={widgetView}
+          appPayload={output.data[JUTE_APP_MIME]}
+        />
+      );
+    }
+
     const imageHtml = displayImageDataToHtml(output.data, output.metadata);
     if (imageHtml) {
       return <div dangerouslySetInnerHTML={{ __html: imageHtml }}></div>;
