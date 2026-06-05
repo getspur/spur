@@ -67,6 +67,88 @@ fn calls_never_resolve_to_non_callable_targets() {
 }
 
 #[test]
+fn qualified_calls_do_not_resolve_to_same_fqn_fields() {
+    let facts = build(
+        "struct App { helper: u32 }\n\
+         fn caller() {\n\
+             App::helper();\n\
+         }\n",
+    );
+    let helper_field = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "helper" && node.kind == NodeKind::Field)
+        .expect("helper field");
+
+    assert!(
+        facts.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.target_label.as_deref() == Some("helper")
+                && edge.target_node_id.is_none()
+        }),
+        "qualified App::helper() call should remain unresolved; edges: {:?}",
+        facts
+            .edges
+            .iter()
+            .filter(|edge| edge.target_label.as_deref() == Some("helper"))
+            .map(|edge| (
+                edge.relation,
+                edge.target_node_id,
+                edge.target_label.clone(),
+                edge.bind_method.clone()
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !facts.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.target_label.as_deref() == Some("helper")
+                && edge.target_node_id == Some(helper_field.node_id)
+                && edge.bind_method.as_deref() == Some("fqn")
+        }),
+        "qualified App::helper() must not resolve to the same-FQN field"
+    );
+}
+
+#[test]
+fn qualified_function_calls_still_resolve_with_fqn_bind_method() {
+    let facts = build(
+        "mod inner {\n\
+             pub fn helper() {}\n\
+         }\n\
+         fn caller() {\n\
+             inner::helper();\n\
+         }\n",
+    );
+    let helper = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "helper" && node.kind == NodeKind::Function)
+        .expect("helper function");
+
+    assert!(
+        facts.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.target_label.as_deref() == Some("helper")
+                && edge.target_node_id == Some(helper.node_id)
+                && edge.bind_method.as_deref() == Some("fqn")
+        }),
+        "qualified inner::helper() call should resolve via fqn; edges: {:?}",
+        facts
+            .edges
+            .iter()
+            .filter(|edge| edge.target_label.as_deref() == Some("helper"))
+            .map(|edge| (
+                edge.relation,
+                edge.target_node_id,
+                edge.target_label.clone(),
+                edge.bind_method.clone()
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn local_function_calls_still_resolve() {
     let facts = build("fn h() {}\nfn c() { h(); }\n");
     let h = facts
