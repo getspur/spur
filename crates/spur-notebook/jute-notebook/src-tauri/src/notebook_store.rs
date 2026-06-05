@@ -1311,6 +1311,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn loaded_delta_carries_path_on_load_and_replace() {
+        let store = NotebookStore::new(Arc::new(SaveCoordinator::default()));
+        let load = store.load("/tmp/load.ipynb", notebook_with_source("a"));
+        assert_eq!(load.path.as_deref(), Some("/tmp/load.ipynb"));
+        assert!(matches!(load.kind, DeltaKind::Loaded { .. }));
+
+        let replace = store.replace("/tmp/replace.ipynb", notebook_with_source("b"));
+        assert_eq!(replace.path.as_deref(), Some("/tmp/replace.ipynb"));
+        assert!(matches!(replace.kind, DeltaKind::Loaded { .. }));
+    }
+
     #[tokio::test]
     async fn replace_marks_dirty_and_flushes_new_contents() {
         let dir = std::env::temp_dir().join(format!("jute-store-replace-{}", Uuid::new_v4()));
