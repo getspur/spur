@@ -6,8 +6,7 @@ import { MultilineString, OutputDisplayData } from "@/bindings";
 import { CellResult } from "@/stores/notebook";
 import { useOutputActiveContentEnabled } from "@/stores/settings";
 
-import JuteAppOutput, {
-  JUTE_APP_MIME,
+import AfmView, {
   WIDGET_VIEW_MIME,
   anywidgetViewFromData,
 } from "./JuteAppOutput";
@@ -166,9 +165,10 @@ const OutputViewDisplayData = memo(
     const widgetView = anywidgetViewFromData(output.data[WIDGET_VIEW_MIME]);
     if (widgetView) {
       return (
-        <JuteAppOutput
+        <AfmView
+          key={widgetView.modelId}
+          modelId={widgetView.modelId}
           widgetView={widgetView}
-          appPayload={output.data[JUTE_APP_MIME]}
         />
       );
     }
