@@ -1,5 +1,23 @@
 # GCP Build Helpers
 
+## Production Builder Shape
+
+The default remote builder is `c4d-highcpu-16` in `asia-southeast1-a`, running
+as a Spot VM with a persistent 300 GB `hyperdisk-balanced` cache disk. This
+replaces the previous `c2d-highcpu-16` + `pd-ssd` setup: the C4D builder
+benchmarked faster for the Rust workspace, and Hyperdisk Balanced is cheaper
+than the old 300 GB SSD Persistent Disk while still providing enough IOPS for
+the cargo target/cache workload.
+
+The production resource names intentionally stay stable:
+
+- VM: `spur-builder`
+- cache disk: `spur-cargo-cache`
+- sccache bucket: `wiilearn-spur-sccache-asia`
+
+Use environment overrides only for one-off benchmarks, for example
+`VM_NAME=spur-builder-c4d-bench CACHE_DISK=spur-cargo-cache-c4d-bench`.
+
 ## Remote xtask Install
 
 Run this from any SPUR worktree to build the Linux release binaries on the GCP
