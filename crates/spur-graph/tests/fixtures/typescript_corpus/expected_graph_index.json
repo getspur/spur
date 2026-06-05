@@ -460,7 +460,8 @@
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
-      "edge_kind": "calls"
+      "edge_kind": "calls",
+      "bind_method": "method_crate_singleton"
     },
     {
       "source_stable_symbol_id": "925e9bcc2a4a5ecd",
