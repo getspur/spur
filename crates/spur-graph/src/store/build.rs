@@ -11,7 +11,10 @@ use sha2::{Digest as _, Sha256};
 use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
 use crate::discovery::discover_files;
 use crate::extract::GraphFacts;
-use crate::extract::{build_facts_for_paths, languages::all_supported_extensions};
+use crate::extract::{
+    build_facts_for_paths, languages::all_supported_extensions,
+    tree_sitter::function_singleton_safe,
+};
 use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::validation::compute_anchor_hash;
 use crate::{
@@ -23,7 +26,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v7";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-05-qualified-calls-callable-v5";
+pub const RESOLVER_VERSION: &str = "2026-06-05-singleton-crate-safety-v6";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1071,8 +1074,10 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 );
                 edge.target_stable_symbol_id = None;
             } else if edge.relation == RelationKind::Calls
-                && resolved.symbol_kind == "method"
-                && !same_directory_path(&resolved.file_path, source_file_path)
+                && ((resolved.symbol_kind == "method"
+                    && !same_directory_path(&resolved.file_path, source_file_path))
+                    || (resolved.symbol_kind == "function"
+                        && !function_singleton_safe(source_file_path, &resolved.file_path)))
             {
                 edge.target_stable_symbol_id = None;
             } else {
