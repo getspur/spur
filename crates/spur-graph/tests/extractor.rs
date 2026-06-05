@@ -52,6 +52,15 @@ fn typescript_golden_path() -> PathBuf {
         .join("tests/fixtures/typescript_corpus/expected_graph_index.json")
 }
 
+fn javascript_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/javascript_corpus")
+}
+
+fn javascript_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/javascript_corpus/expected_graph_index.json")
+}
+
 fn cpp_fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpp_corpus")
 }
@@ -426,6 +435,93 @@ fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
     }
 
     let expected = fs::read_to_string(typescript_golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
+}
+
+fn assert_javascript_fixture_surface(artifact: &spur_graph::GraphIndexArtifact) {
+    let file_paths: BTreeSet<_> = artifact
+        .files
+        .iter()
+        .map(|file| file.file_path.as_str())
+        .collect();
+    assert_eq!(
+        file_paths,
+        BTreeSet::from([
+            "src/app.js",
+            "src/component.jsx",
+            "src/helpers.mjs",
+            "src/legacy.cjs"
+        ])
+    );
+
+    let symbol_keys: BTreeSet<_> = artifact
+        .symbols
+        .iter()
+        .map(|symbol| {
+            (
+                symbol.file_path.as_str(),
+                symbol.symbol_kind.as_str(),
+                symbol.qualified_name.as_str(),
+            )
+        })
+        .collect();
+    for expected in [
+        ("src/app.js", "class", "Dashboard"),
+        ("src/app.js", "method", "Dashboard::render"),
+        ("src/app.js", "function", "createDashboard"),
+        ("src/component.jsx", "function", "Badge"),
+        ("src/helpers.mjs", "function", "normalizeName"),
+        ("src/helpers.mjs", "class", "BaseWidget"),
+        ("src/helpers.mjs", "method", "BaseWidget::mount"),
+        ("src/legacy.cjs", "function", "legacyBridge"),
+    ] {
+        assert!(
+            symbol_keys.contains(&expected),
+            "missing JavaScript fixture symbol {expected:?}"
+        );
+    }
+
+    for relation in [
+        RelationKind::Imports,
+        RelationKind::Calls,
+        RelationKind::Constructs,
+    ] {
+        assert!(
+            artifact.edges.iter().any(|edge| edge.relation == relation),
+            "missing JavaScript fixture relation {relation:?}"
+        );
+    }
+
+    let symbol_ids: BTreeSet<_> = artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.stable_symbol_id.as_str())
+        .collect();
+    for edge in &artifact.edges {
+        if let Some(target_id) = edge.target_stable_symbol_id.as_deref() {
+            assert!(
+                symbol_ids.contains(target_id),
+                "JavaScript fixture edge resolved outside the fixture symbol set: {edge:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn javascript_extractor_matches_javascript_corpus_golden_artifact() {
+    let root = javascript_fixture_root();
+    let (facts, file_counts) = build_facts(&root, None).expect("extract fixture");
+    assert_eq!(file_counts.get("javascript").copied(), Some(4));
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
+    assert_javascript_fixture_surface(&artifact);
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(javascript_golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected = fs::read_to_string(javascript_golden_path()).expect("read golden artifact");
     assert_eq!(actual, expected);
 }
 

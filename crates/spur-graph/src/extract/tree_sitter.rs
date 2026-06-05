@@ -92,6 +92,7 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::Python
         | Language::TypeScript
         | Language::Tsx
+        | Language::Javascript
         | Language::Cpp => SymbolQueryPolicy::ReuseTags,
         Language::Markdown => {
             SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
