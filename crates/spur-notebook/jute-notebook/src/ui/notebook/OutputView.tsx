@@ -7,10 +7,12 @@ import { CellResult } from "@/stores/notebook";
 import { useOutputActiveContentEnabled } from "@/stores/settings";
 
 import AfmView, {
+  type AfmPortBindingSnapshot,
   WIDGET_VIEW_MIME,
   anywidgetViewFromData,
 } from "./JuteAppOutput";
 import MarkdownRenderer from "./MarkdownRenderer";
+import { installAfmHostTransport } from "./afmHost";
 import {
   compilePhasePresentation,
   compileProgressMessage,
@@ -21,15 +23,22 @@ import { htmlOutputSandbox } from "./rendering";
 type Props = {
   value: CellResult | undefined;
   chromeless?: boolean;
+  afmPortBindings?: AfmPortBindingSnapshot;
 };
 
 type CompileProgressState = NonNullable<CellResult["compile"]>;
 
-export default function OutputView({ value, chromeless = false }: Props) {
+export default function OutputView({
+  value,
+  chromeless = false,
+  afmPortBindings,
+}: Props) {
   const compile = value?.compile;
   const outputs = value?.outputs ?? [];
   const showCompileRail = Boolean(compile && outputs.length === 0);
   const now = useCompileNow(showCompileRail, compile?.startedAt);
+
+  useEffect(() => installAfmHostTransport(), []);
 
   if (!value) {
     return null;
@@ -50,9 +59,15 @@ export default function OutputView({ value, chromeless = false }: Props) {
           {output.output_type === "stream" ? (
             <pre>{multiline(output.text)}</pre>
           ) : output.output_type === "display_data" ? (
-            <OutputViewDisplayData output={output} />
+            <OutputViewDisplayData
+              output={output}
+              afmPortBindings={afmPortBindings}
+            />
           ) : output.output_type === "execute_result" ? (
-            <OutputViewDisplayData output={output} />
+            <OutputViewDisplayData
+              output={output}
+              afmPortBindings={afmPortBindings}
+            />
           ) : output.output_type === "error" ? (
             // TODO: Display error tracebacks.
             <pre className="text-red-500">
@@ -161,7 +176,13 @@ const IFRAME_MIN_HEIGHT = 40;
 const IFRAME_HEIGHT_MESSAGE = "jute-iframe-height";
 
 const OutputViewDisplayData = memo(
-  ({ output }: { output: OutputDisplayData }) => {
+  ({
+    output,
+    afmPortBindings,
+  }: {
+    output: OutputDisplayData;
+    afmPortBindings?: AfmPortBindingSnapshot;
+  }) => {
     const widgetView = anywidgetViewFromData(output.data[WIDGET_VIEW_MIME]);
     if (widgetView) {
       return (
@@ -169,6 +190,7 @@ const OutputViewDisplayData = memo(
           key={widgetView.modelId}
           modelId={widgetView.modelId}
           widgetView={widgetView}
+          portBindings={afmPortBindings}
         />
       );
     }

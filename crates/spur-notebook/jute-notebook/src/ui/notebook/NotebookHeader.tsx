@@ -21,6 +21,11 @@ import SettingsPanel from "../settings/SettingsPanel";
 import Header from "../shared/Header";
 
 const KERNEL_STATS_POLL_MS = 2000;
+const VIEW_MODES = [
+  "cells",
+  "dag",
+  "app",
+] as const satisfies readonly NotebookViewMode[];
 
 type Props = {
   kernelName: string;
@@ -189,7 +194,7 @@ export default function NotebookHeader({ kernelName }: Props) {
           role="group"
           aria-label="Notebook view mode"
         >
-          {(["cells", "dag"] as const).map((mode) => (
+          {VIEW_MODES.map((mode) => (
             <button
               key={mode}
               className={clsx(
@@ -200,7 +205,7 @@ export default function NotebookHeader({ kernelName }: Props) {
               )}
               type="button"
               aria-pressed={viewMode === mode}
-              title={mode === "cells" ? "Notebook cells" : "DAG view"}
+              title={viewModeTitle(mode)}
               onClick={() => setViewMode(mode)}
             >
               {viewModeLabel(mode)}
@@ -237,5 +242,23 @@ export default function NotebookHeader({ kernelName }: Props) {
 }
 
 function viewModeLabel(mode: NotebookViewMode): string {
-  return mode === "cells" ? "Notebook" : "DAG";
+  switch (mode) {
+    case "cells":
+      return "Notebook";
+    case "dag":
+      return "DAG";
+    case "app":
+      return "App";
+  }
+}
+
+function viewModeTitle(mode: NotebookViewMode): string {
+  switch (mode) {
+    case "cells":
+      return "Notebook cells";
+    case "dag":
+      return "DAG view";
+    case "app":
+      return "App view";
+  }
 }
