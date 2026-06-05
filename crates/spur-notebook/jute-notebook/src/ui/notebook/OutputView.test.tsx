@@ -1,10 +1,16 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, test } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { dispose, set } from "@/stores/widgetRegistry";
+import { dispose, on, set } from "@/stores/widgetRegistry";
 
 import OutputView from "./OutputView";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+}));
 
 const WIDGET_VIEW_MIME = "application/vnd.jupyter.widget-view+json";
 const AFM_MODEL_ID = "jute-afm-model";
@@ -54,6 +60,7 @@ describe("OutputView AFM widget rendering", () => {
     cleanup();
     dispose(AFM_MODEL_ID);
     dispose("model-only");
+    invokeMock.mockReset();
   });
 
   test("renders a standard anywidget placeholder when registry assets are not available", () => {
@@ -117,5 +124,45 @@ describe("OutputView AFM widget rendering", () => {
     expect(srcDoc).toContain("jute-afm-custom-message");
     expect(srcDoc).not.toContain("signal: undefined");
     expect(srcDoc).not.toContain("exports");
+  });
+
+  test("routes AFM iframe command responses back through widget custom messages", async () => {
+    set(AFM_MODEL_ID, {
+      state: { letters: "abcd" },
+      esm: DENO_STYLE_ESM,
+    });
+    const customListener = vi.fn();
+    on(AFM_MODEL_ID, "msg:custom", customListener);
+    const content = {
+      id: "cmd-output-view",
+      kind: "anywidget-command",
+      name: "source.push",
+      msg: { port: "letters", payload: [97, 98] },
+    };
+    const response = {
+      id: "cmd-output-view",
+      kind: "anywidget-command-response",
+      response: { accepted: true, port: "letters" },
+    };
+    invokeMock.mockResolvedValueOnce(response);
+
+    render(<OutputView value={outputValue()} />);
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: "jute-afm",
+          type: "send",
+          modelId: AFM_MODEL_ID,
+          content,
+          buffers: [[1, 2, 3]],
+        },
+      }),
+    );
+
+    await waitFor(() => expect(customListener).toHaveBeenCalledTimes(1));
+    expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
+      intent: { ...content, buffers: [[1, 2, 3]] },
+    });
+    expect(customListener).toHaveBeenCalledWith(response, []);
   });
 });
