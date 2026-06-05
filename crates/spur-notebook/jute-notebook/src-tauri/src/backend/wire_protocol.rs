@@ -534,6 +534,10 @@ pub struct CommOpen {
 
     /// The data to be sent to the frontend.
     pub data: serde_json::Value,
+
+    /// Binary buffers attached to the kernel message envelope.
+    #[serde(default)]
+    pub buffers: Vec<Vec<u8>>,
 }
 
 /// A one-way comm message, with no expected reply format. This struct is reused
@@ -545,6 +549,10 @@ pub struct CommMessage {
 
     /// The data to be sent to the frontend.
     pub data: serde_json::Value,
+
+    /// Binary buffers attached to the kernel message envelope.
+    #[serde(default)]
+    pub buffers: Vec<Vec<u8>>,
 }
 
 /// Represents a stateful kernel connection that can be used to communicate with
