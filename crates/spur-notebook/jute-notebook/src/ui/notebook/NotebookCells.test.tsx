@@ -10,6 +10,12 @@ import {
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type StoreApi, createStore } from "zustand/vanilla";
 
+import {
+  dispose as disposeWidgetModel,
+  get as getWidgetModel,
+  set as setWidgetModel,
+} from "@/stores/widgetRegistry";
+
 import NotebookCells from "./NotebookCells";
 
 const mocks = vi.hoisted(() => ({
@@ -30,6 +36,9 @@ vi.mock("@/stores/notebook", () => ({
     return mocks.notebook;
   },
 }));
+
+const WIDGET_VIEW_MIME = "application/vnd.jupyter.widget-view+json";
+const AFM_MODEL_ID = "notebook-cells-afm-model";
 
 vi.mock("./CellInput", () => ({
   default: ({ cellId }: { cellId: string }) => (
@@ -138,6 +147,7 @@ describe("NotebookCells", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    disposeWidgetModel(AFM_MODEL_ID);
     mocks.notebook = undefined;
   });
 
@@ -221,6 +231,73 @@ describe("NotebookCells", () => {
 
     expect(screen.getByText("AI Agent")).toBeInTheDocument();
     expect(screen.getByText("manual")).toBeInTheDocument();
+  });
+
+  test("updates AFM bound-port model state without reloading the iframe", async () => {
+    setWidgetModel(AFM_MODEL_ID, {
+      state: { preserved: true },
+      esm: "export default { render() {} }",
+    });
+    mocks.notebook = {
+      store: createNotebookStoreForCell({
+        frontendMetadata: { binds: ["forecast"] },
+        result: {
+          status: "success",
+          outputs: [
+            {
+              output_type: "display_data",
+              data: {
+                [WIDGET_VIEW_MIME]: {
+                  version_major: 2,
+                  version_minor: 1,
+                  model_id: AFM_MODEL_ID,
+                },
+                "text/plain": "anywidget view",
+              },
+              metadata: {},
+            },
+          ],
+        },
+      }),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    const iframe = screen.getByTitle(`anywidget ${AFM_MODEL_ID}`);
+    const srcDocBefore = iframe.getAttribute("srcdoc");
+
+    await act(async () => {
+      mocks.notebook?.store.setState((state: any) => ({
+        ...state,
+        dagStatus: {
+          "cell-1": {
+            state: "fresh",
+            ranPortVersions: { forecast: 1 },
+            executionCount: 7,
+          },
+        },
+        dagPortManifest: { forecast: 2 },
+      }));
+    });
+
+    expect(getWidgetModel(AFM_MODEL_ID)?.state.__jute_port_bindings).toEqual({
+      cellId: "cell-1",
+      binds: ["forecast"],
+      ports: {
+        forecast: {
+          currentVersion: 2,
+          executionCount: 7,
+          ranVersion: 1,
+          state: "fresh",
+        },
+      },
+    });
+    expect(getWidgetModel(AFM_MODEL_ID)?.state.preserved).toBe(true);
+    expect(iframe.getAttribute("srcdoc")).toBe(srcDocBefore);
   });
 
   test("renders Python chip and accent for plain code cells", () => {
