@@ -22,6 +22,7 @@ pub enum Language {
     Python,
     TypeScript,
     Tsx,
+    Javascript,
     Markdown,
     Cpp,
 }
@@ -268,6 +269,7 @@ impl Language {
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Self::Javascript => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Markdown => tree_sitter_md::LANGUAGE.into(),
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         }
@@ -279,6 +281,7 @@ impl Language {
             Self::Python => python_config(),
             Self::TypeScript => typescript_config(),
             Self::Tsx => tsx_config(),
+            Self::Javascript => javascript_config(),
             Self::Markdown => markdown_config(),
             Self::Cpp => cpp_config(),
         }
@@ -289,7 +292,7 @@ impl Language {
         match self {
             Self::Rust => RUST_BUILTIN_METHODS,
             Self::Python => PYTHON_BUILTIN_METHODS,
-            Self::TypeScript | Self::Tsx => TS_BUILTIN_METHODS,
+            Self::TypeScript | Self::Tsx | Self::Javascript => TS_BUILTIN_METHODS,
             Self::Cpp => CPP_BUILTIN_METHODS,
             Self::Markdown => &[],
         }
@@ -301,6 +304,7 @@ impl Language {
             Self::Python => "python",
             Self::TypeScript => "typescript",
             Self::Tsx => "tsx",
+            Self::Javascript => "javascript",
             Self::Markdown => "markdown",
             Self::Cpp => "cpp",
         }
@@ -436,6 +440,10 @@ pub(crate) fn tsx_config() -> LanguageConfig {
     typescript_config_for(tree_sitter_typescript::LANGUAGE_TSX.into(), TSX_QUERIES)
 }
 
+pub(crate) fn javascript_config() -> LanguageConfig {
+    typescript_config_for(tree_sitter_typescript::LANGUAGE_TSX.into(), TSX_QUERIES)
+}
+
 pub(crate) fn cpp_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_cpp::LANGUAGE.into(),
@@ -516,6 +524,18 @@ fn tsx_matcher(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"))
 }
 
+const JAVASCRIPT_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "cjs"];
+
+fn javascript_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            JAVASCRIPT_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
 const CPP_EXTENSIONS: &[&str] = &[
     "cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp", "tpp", "h",
 ];
@@ -559,6 +579,13 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Tsx,
             label: "tsx",
             extensions: &["tsx"],
+        },
+        LanguageDescriptor {
+            matcher: javascript_matcher,
+            factory: javascript_config,
+            language: Language::Javascript,
+            label: "javascript",
+            extensions: JAVASCRIPT_EXTENSIONS,
         },
         LanguageDescriptor {
             matcher: cpp_matcher,
@@ -1374,10 +1401,73 @@ fn is_literal_kind(kind: &str) -> bool {
 #[cfg(test)]
 mod gate_contract {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
 
-    use tree_sitter::Query;
+    use tree_sitter::{Parser, Query};
 
     use super::*;
+
+    #[test]
+    fn javascript_files_route_to_javascript_language() {
+        for path in [
+            "a.js", "b.jsx", "c.mjs", "d.cjs", "e.JS", "f.JSX", "g.MJS", "h.CJS",
+        ] {
+            assert_eq!(
+                Language::from_path(Path::new(path)),
+                Some(Language::Javascript),
+                "{path} should route to JavaScript extraction"
+            );
+        }
+
+        assert_eq!(
+            Language::from_path(Path::new("component.ts")),
+            Some(Language::TypeScript),
+            ".ts files must continue to route to TypeScript extraction"
+        );
+
+        assert_eq!(Language::Javascript.label(), "javascript");
+        assert_eq!(
+            Language::Javascript.builtin_method_names(),
+            TS_BUILTIN_METHODS
+        );
+
+        let extensions: BTreeSet<_> = all_supported_extensions().into_iter().collect();
+        for extension in ["js", "jsx", "mjs", "cjs"] {
+            assert!(
+                extensions.contains(extension),
+                "supported extensions should include {extension}"
+            );
+        }
+    }
+
+    #[test]
+    fn tsx_grammar_parses_plain_javascript_with_jsx_without_error() {
+        let mut parser = Parser::new();
+        let language = tree_sitter_typescript::LANGUAGE_TSX.into();
+        parser.set_language(&language).expect("set TSX language");
+
+        let source = r#"
+            import { h } from "preact";
+
+            function view(name) {
+                return <span>{name}</span>;
+            }
+
+            class Widget {
+                render() {
+                    return view("ok");
+                }
+            }
+
+            new Widget().render();
+        "#;
+
+        let tree = parser.parse(source, None).expect("parse plain JS as TSX");
+        assert!(
+            !tree.root_node().has_error(),
+            "TSX grammar should parse plain JavaScript with JSX without syntax errors"
+        );
+    }
 
     #[test]
     fn builtin_method_lists_are_sorted_and_deduplicated() {
@@ -1386,6 +1476,7 @@ mod gate_contract {
             ("python", PYTHON_BUILTIN_METHODS),
             ("rust", RUST_BUILTIN_METHODS),
             ("typescript", TS_BUILTIN_METHODS),
+            ("javascript", TS_BUILTIN_METHODS),
         ] {
             assert!(
                 methods.is_sorted(),
@@ -1705,6 +1796,18 @@ mod gate_contract {
                 ]),
             ),
             (
+                Language::Javascript.label(),
+                relation_set(&[
+                    "imports",
+                    "calls",
+                    "constructs",
+                    "contains",
+                    "defines",
+                    "implements",
+                    "extends",
+                ]),
+            ),
+            (
                 Language::Cpp.label(),
                 relation_set(&[
                     "imports",
@@ -1732,7 +1835,7 @@ mod gate_contract {
     fn allowlisted_relation_gaps(language: Language) -> &'static [&'static str] {
         match language {
             // README TODO: TypeScript/TSX do not yet capture HOF references.
-            Language::TypeScript | Language::Tsx => &["references"],
+            Language::TypeScript | Language::Tsx | Language::Javascript => &["references"],
             _ => &[],
         }
     }
@@ -1771,7 +1874,7 @@ mod gate_contract {
                 "definition.class",
                 "definition.constant",
             ],
-            Language::TypeScript | Language::Tsx => &[
+            Language::TypeScript | Language::Tsx | Language::Javascript => &[
                 "definition.class",
                 "definition.interface",
                 "definition.enum",
