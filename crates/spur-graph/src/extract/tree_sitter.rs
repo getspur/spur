@@ -860,15 +860,32 @@ fn resolve_singleton_bare_target(
             }
         }
         Some(NodeKind::Function) if edge.relation == RelationKind::Calls => {
-            if let (Some(src_file), Some(tgt_file)) = (
-                indexes.file_by_id.get(&edge.source).copied(),
-                indexes.file_by_id.get(&target).copied(),
-            ) {
-                if !function_singleton_safe(src_file, tgt_file) {
-                    *phantom_blocked_calls += 1;
-                }
+            let file_for_node = |node_id| {
+                indexes.file_by_id.get(&node_id).copied().or_else(|| {
+                    let file_id = builder
+                        .facts
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == node_id)?
+                        .file_id?;
+                    builder
+                        .facts
+                        .nodes
+                        .iter()
+                        .find(|node| node.kind == NodeKind::File && node.file_id == Some(file_id))
+                        .map(|node| node.label.as_str())
+                })
+            };
+            let provably_unsafe = matches!(
+                (file_for_node(edge.source), file_for_node(target)),
+                (Some(src_file), Some(tgt_file)) if !function_singleton_safe(src_file, tgt_file)
+            );
+            if provably_unsafe {
+                *phantom_blocked_calls += 1;
+                builder.add_pending_edge(edge, None);
+            } else {
+                builder.add_pending_edge_with_bind_method(edge, Some(target), Some("singleton"));
             }
-            builder.add_pending_edge_with_bind_method(edge, Some(target), Some("singleton"));
         }
         _ => {
             if edge.relation == RelationKind::Calls
@@ -1102,7 +1119,7 @@ fn same_file_duplicate_function_candidate(
     Some(candidates[0])
 }
 
-fn function_singleton_safe(src_file: &str, tgt_file: &str) -> bool {
+pub(crate) fn function_singleton_safe(src_file: &str, tgt_file: &str) -> bool {
     if src_file == tgt_file {
         return true;
     }
@@ -1880,6 +1897,60 @@ mod tests {
             "xtask/src/main.rs",
             "crates/spur-graph/src/git_walk.rs"
         ));
+    }
+
+    #[test]
+    fn singleton_function_call_respects_crate_safety() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/source/src")).expect("source crate dir");
+        std::fs::create_dir_all(dir.path().join("crates/callee/src")).expect("callee crate dir");
+        std::fs::write(
+            dir.path().join("crates/source/src/lib.rs"),
+            r#"
+pub fn caller() {
+    cross_crate_helper();
+    same_crate_helper();
+    same_file_helper();
+}
+
+pub fn same_file_helper() {}
+"#,
+        )
+        .expect("write source lib");
+        std::fs::write(
+            dir.path().join("crates/source/src/helpers.rs"),
+            "pub fn same_crate_helper() {}\n",
+        )
+        .expect("write source helper");
+        std::fs::write(
+            dir.path().join("crates/callee/src/lib.rs"),
+            "pub fn cross_crate_helper() {}\n",
+        )
+        .expect("write callee lib");
+
+        let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+        let call = |label: &str| {
+            facts
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::Calls
+                        && edge.target_label.as_deref() == Some(label)
+                })
+                .unwrap_or_else(|| panic!("missing call edge for {label}"))
+        };
+
+        let cross_crate = call("cross_crate_helper");
+        assert_eq!(cross_crate.target_node_id, None);
+        assert_eq!(cross_crate.bind_method.as_deref(), None);
+
+        let same_crate = call("same_crate_helper");
+        assert!(same_crate.target_node_id.is_some());
+        assert_eq!(same_crate.bind_method.as_deref(), Some("singleton"));
+
+        let same_file = call("same_file_helper");
+        assert!(same_file.target_node_id.is_some());
+        assert_eq!(same_file.bind_method.as_deref(), Some("singleton"));
     }
 
     #[test]
