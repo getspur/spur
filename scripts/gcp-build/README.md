@@ -9,6 +9,12 @@ benchmarked faster for the Rust workspace, and Hyperdisk Balanced is cheaper
 than the old 300 GB SSD Persistent Disk while still providing enough IOPS for
 the cargo target/cache workload.
 
+Source sync prefers direct SSH to the VM's external IP on
+`SPUR_DIRECT_SSH_PORT` (default `443`) and falls back to IAP. Fresh VMs keep
+sshd on tcp:22 for GCE/IAP compatibility and also listen on the configured
+direct port because some workstation networks drop outbound tcp:22. Set
+`SPUR_DIRECT_SSH=0` to force IAP-only.
+
 The production resource names intentionally stay stable:
 
 - VM: `spur-builder`
