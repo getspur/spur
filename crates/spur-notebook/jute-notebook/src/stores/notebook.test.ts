@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { notebookDeltaIsForPath } from "./notebook";
+import { notebookDeltaIsForPath, reconcileNotebookDelta } from "./notebook";
+
+function stubNotebook(path: string | undefined) {
+  const calls = { applied: 0, resynced: 0 };
+  const notebook = {
+    state: {
+      viewState: { path },
+      serverState: { lastAppliedVersion: 1 },
+    },
+    applyNotebookDelta: () => {
+      calls.applied += 1;
+    },
+    resyncFromSnapshot: async () => {
+      calls.resynced += 1;
+    },
+  };
+  // reconcileNotebookDelta only touches the members above.
+  return { notebook: notebook as unknown as import("./notebook").Notebook, calls };
+}
 
 describe("notebookDeltaIsForPath", () => {
   it("applies a delta whose path matches the open notebook", () => {
@@ -21,5 +39,28 @@ describe("notebookDeltaIsForPath", () => {
 
   it("applies when the notebook has no path yet", () => {
     expect(notebookDeltaIsForPath(undefined, "/tmp/a.ipynb")).toBe(true);
+  });
+});
+
+describe("reconcileNotebookDelta path guard", () => {
+  it("drops a foreign-path delta without applying or resyncing", async () => {
+    const { notebook, calls } = stubNotebook("/tmp/a.ipynb");
+    await reconcileNotebookDelta(notebook, {
+      version: 2,
+      path: "/tmp/b.ipynb",
+      kind: { type: "cellDeleted", id: "c1" },
+    } as never);
+    expect(calls.applied).toBe(0);
+    expect(calls.resynced).toBe(0);
+  });
+
+  it("applies a matching-path delta", async () => {
+    const { notebook, calls } = stubNotebook("/tmp/a.ipynb");
+    await reconcileNotebookDelta(notebook, {
+      version: 2,
+      path: "/tmp/a.ipynb",
+      kind: { type: "cellDeleted", id: "c1" },
+    } as never);
+    expect(calls.applied).toBe(1);
   });
 });
