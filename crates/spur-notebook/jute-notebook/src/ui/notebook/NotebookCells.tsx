@@ -9,13 +9,22 @@ import {
   XIcon,
   XSquareIcon,
 } from "lucide-react";
-import { ReactNode, Suspense, lazy, useEffect, useRef, useState } from "react";
+import {
+  ReactNode,
+  Suspense,
+  lazy,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useStore } from "zustand";
 
-import { useNotebook } from "@/stores/notebook";
+import { type NotebookStoreState, useNotebook } from "@/stores/notebook";
 
 import CellInputFallback from "./CellInputFallback";
 import CellLanguageMenu from "./CellLanguageMenu";
+import type { AfmPortBindingSnapshot } from "./JuteAppOutput";
 import OutputView from "./OutputView";
 import { cellLanguageId, cellLanguageToken } from "./cellLanguage";
 import {
@@ -270,6 +279,65 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
   );
 }
 
+function CellOutput({ cellId }: { cellId: string }) {
+  const notebook = useNotebook();
+  const output = useStore(
+    notebook.store,
+    (state) => state.serverState.cells[cellId]?.result,
+  );
+  const afmPortBindingsKey = useStore(notebook.store, (state) =>
+    selectAfmPortBindingsKey(state, cellId),
+  );
+  const afmPortBindings = useMemo(
+    () => parseAfmPortBindingsKey(afmPortBindingsKey),
+    [afmPortBindingsKey],
+  );
+
+  if (!output) return null;
+  return <OutputView value={output} afmPortBindings={afmPortBindings} />;
+}
+
+function selectAfmPortBindingsKey(
+  state: NotebookStoreState,
+  cellId: string,
+): string | undefined {
+  const bindings = selectAfmPortBindings(state, cellId);
+  return bindings ? JSON.stringify(bindings) : undefined;
+}
+
+function parseAfmPortBindingsKey(
+  key: string | undefined,
+): AfmPortBindingSnapshot | undefined {
+  if (!key) return undefined;
+  return JSON.parse(key) as AfmPortBindingSnapshot;
+}
+
+function selectAfmPortBindings(
+  state: NotebookStoreState,
+  cellId: string,
+): AfmPortBindingSnapshot | undefined {
+  const cell = state.serverState.cells[cellId];
+  const binds = cell?.frontendMetadata?.binds ?? [];
+  if (binds.length === 0) return undefined;
+
+  const status = state.dagStatus[cellId];
+  const ports: AfmPortBindingSnapshot["ports"] = {};
+  for (const port of binds) {
+    const currentVersion = state.dagPortManifest[port];
+    const ranVersion = status?.ranPortVersions[port];
+    ports[port] = {
+      ...(currentVersion !== undefined ? { currentVersion } : {}),
+      ...(status?.executionCount !== undefined
+        ? { executionCount: status.executionCount }
+        : {}),
+      ...(ranVersion !== undefined ? { ranVersion } : {}),
+      ...(status?.state !== undefined ? { state: status.state } : {}),
+    };
+  }
+
+  return { cellId, binds, ports };
+}
+
 export default function NotebookCells() {
   const notebook = useNotebook();
   const cellIds = useStore(
@@ -325,7 +393,7 @@ export default function NotebookCells() {
                 {/* TODO: Move this icon into the output view itself. Also it should only be displayed
                   when the cell has a return value, and next to the return value. */}
                 {/* <CornerDownRightIcon size={16} className="text-gray-400" /> */}
-                <OutputView value={cells[id].result} />
+                <CellOutput cellId={id} />
               </div>
             </>
           )}
