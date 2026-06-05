@@ -123,6 +123,91 @@ struct EdgeMetadata {
     bind_method: Option<&'static str>,
 }
 
+/// Precision heuristic for common std/core/trait methods, not an exhaustive std method list.
+const STD_PRELUDE_METHOD_NAMES: &[&str] = &[
+    "and_then",
+    "as_bytes",
+    "as_mut",
+    "as_path",
+    "as_ref",
+    "as_str",
+    "borrow",
+    "borrow_mut",
+    "build",
+    "bytes",
+    "chars",
+    "clear",
+    "clone",
+    "cmp",
+    "collect",
+    "contains",
+    "contains_key",
+    "count",
+    "dedup",
+    "default",
+    "deref",
+    "drain",
+    "ends_with",
+    "entry",
+    "eq",
+    "expect",
+    "extend",
+    "filter",
+    "find",
+    "first",
+    "flush",
+    "fmt",
+    "from",
+    "get",
+    "get_mut",
+    "insert",
+    "into",
+    "into_iter",
+    "is_empty",
+    "iter",
+    "iter_mut",
+    "join",
+    "keys",
+    "last",
+    "len",
+    "lines",
+    "lock",
+    "map",
+    "max",
+    "min",
+    "next",
+    "nth",
+    "ok_or",
+    "or_default",
+    "or_insert",
+    "parse",
+    "pop",
+    "push",
+    "push_str",
+    "read",
+    "recv",
+    "remove",
+    "replace",
+    "retain",
+    "send",
+    "sort",
+    "split",
+    "starts_with",
+    "take",
+    "to_lowercase",
+    "to_owned",
+    "to_path_buf",
+    "to_string",
+    "to_uppercase",
+    "to_vec",
+    "trim",
+    "truncate",
+    "unwrap",
+    "unwrap_or",
+    "values",
+    "write",
+];
+
 struct PendingResolutionIndexes<'a> {
     singleton_symbols_by_label: &'a HashMap<String, NodeId>,
     ambiguous_symbols_by_label: &'a HashMap<String, usize>,
@@ -856,7 +941,40 @@ fn resolve_singleton_bare_target(
             {
                 builder.add_pending_edge_with_bind_method(edge, Some(target), Some("scope_match"));
             } else if edge.relation == RelationKind::Calls {
-                builder.add_pending_edge(edge, None);
+                let file_for_node = |node_id| {
+                    indexes.file_by_id.get(&node_id).copied().or_else(|| {
+                        let file_id = builder
+                            .facts
+                            .nodes
+                            .iter()
+                            .find(|node| node.node_id == node_id)?
+                            .file_id?;
+                        builder
+                            .facts
+                            .nodes
+                            .iter()
+                            .find(|node| {
+                                node.kind == NodeKind::File && node.file_id == Some(file_id)
+                            })
+                            .map(|node| node.label.as_str())
+                    })
+                };
+                let same_crate_safe = matches!(
+                    (file_for_node(edge.source), file_for_node(target)),
+                    (Some(src_file), Some(tgt_file)) if function_singleton_safe(src_file, tgt_file)
+                );
+                let std_prelude_method = STD_PRELUDE_METHOD_NAMES
+                    .binary_search(&edge.target_name.as_str())
+                    .is_ok();
+                if same_crate_safe && !std_prelude_method {
+                    builder.add_pending_edge_with_bind_method(
+                        edge,
+                        Some(target),
+                        Some("method_crate_singleton"),
+                    );
+                } else {
+                    builder.add_pending_edge(edge, None);
+                }
             } else {
                 builder.add_pending_edge(edge, Some(target));
             }
@@ -1953,6 +2071,74 @@ pub fn same_file_helper() {}
         let same_file = call("same_file_helper");
         assert!(same_file.target_node_id.is_some());
         assert_eq!(same_file.bind_method.as_deref(), Some("singleton"));
+    }
+
+    #[test]
+    fn method_crate_singleton_recovers_cross_module_same_crate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/foo/src/sub")).expect("foo sub dir");
+        std::fs::create_dir_all(dir.path().join("crates/bar/src")).expect("bar crate dir");
+        std::fs::write(
+            dir.path().join("crates/foo/src/a.rs"),
+            r#"
+pub struct Widget;
+
+impl Widget {
+    pub fn repaint_panel(&self) {}
+    pub fn clone(&self) {}
+}
+"#,
+        )
+        .expect("write foo a");
+        std::fs::write(
+            dir.path().join("crates/foo/src/sub/b.rs"),
+            r#"
+pub fn caller(panel: &Panel, shadow: &Shadow) {
+    panel.repaint_panel();
+    panel.repaint_from_bar();
+    shadow.clone();
+}
+"#,
+        )
+        .expect("write foo b");
+        std::fs::write(
+            dir.path().join("crates/bar/src/lib.rs"),
+            r#"
+pub struct ExternalPanel;
+
+impl ExternalPanel {
+    pub fn repaint_from_bar(&self) {}
+}
+"#,
+        )
+        .expect("write bar lib");
+
+        let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+        let call = |label: &str| {
+            facts
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::Calls
+                        && edge.target_label.as_deref() == Some(label)
+                })
+                .unwrap_or_else(|| panic!("missing call edge for {label}"))
+        };
+
+        let same_crate = call("repaint_panel");
+        assert!(same_crate.target_node_id.is_some());
+        assert_eq!(
+            same_crate.bind_method.as_deref(),
+            Some("method_crate_singleton")
+        );
+
+        let cross_crate = call("repaint_from_bar");
+        assert_eq!(cross_crate.target_node_id, None);
+        assert_eq!(cross_crate.bind_method.as_deref(), None);
+
+        let std_named = call("clone");
+        assert_eq!(std_named.target_node_id, None);
+        assert_eq!(std_named.bind_method.as_deref(), None);
     }
 
     #[test]
