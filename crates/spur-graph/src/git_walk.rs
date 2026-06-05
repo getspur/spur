@@ -331,7 +331,16 @@ fn load_incremental_base(
     let Some(pointer) = commit_index::load_pointer(worktree)? else {
         return Ok(None);
     };
-    let commits = commit_index::load_artifact(worktree, &pointer)?;
+    let commits = match commit_index::load_artifact(worktree, &pointer) {
+        Ok(commits) => commits,
+        Err(error) => {
+            tracing::info!(
+                error = %error,
+                "spur-graph: commit-index pointer exists but prior commit-index artifact is missing or unreadable; selecting cold temporal walk"
+            );
+            return Ok(None);
+        }
+    };
     if commits.walk_strategy != walk_strategy {
         tracing::info!(
             stored = ?commits.walk_strategy,
