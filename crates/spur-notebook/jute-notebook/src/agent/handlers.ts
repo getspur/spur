@@ -1,6 +1,11 @@
 import type { CodeType, NotebookDelta } from "@/bindings";
 import { daemonControl } from "@/daemon/control";
-import { type CellType, type Notebook, selectCell } from "@/stores/notebook";
+import {
+  type CellType,
+  type Notebook,
+  reconcileNotebookDelta,
+  selectCell,
+} from "@/stores/notebook";
 
 import {
   type AgentBridgeRequest,
@@ -212,7 +217,7 @@ async function setCellMetadata(
       "notebook.set_cell_metadata did not update a cell",
     );
   }
-  notebook.applyNotebookDelta(delta);
+  await reconcileNotebookDelta(notebook, delta);
   return { ok: true, version: delta.version };
 }
 
