@@ -481,11 +481,16 @@ fn render_markdown_table(table: &MarkdownTable, render_width: Option<u16>) -> Ve
         .map(|row| normalized_row(row, col_count))
         .collect();
     let widths = table_column_widths(&header, &rows, col_count);
-    let grid_width = table_grid_width(&widths);
 
     if let Some(max_width) = render_width.map(usize::from).filter(|width| *width > 0) {
-        if grid_width > max_width && !rows.is_empty() {
-            return render_table_records(&header, &rows, max_width);
+        if table_grid_width(&widths) > max_width {
+            if let Some(budgeted) = budget_column_widths(&widths, max_width) {
+                return render_table_grid(&header, &rows, &budgeted, &table.alignments);
+            }
+            // Even a floor-width grid cannot fit → records layout (data rows only).
+            if !rows.is_empty() {
+                return render_table_records(&header, &rows, max_width);
+            }
         }
     }
 
@@ -519,10 +524,14 @@ fn render_table_grid(
 ) -> Vec<Line<'static>> {
     let mut out = Vec::with_capacity(rows.len() + 4);
     out.push(table_line(top_border(widths)));
-    out.push(table_line(format_table_row(header, widths, alignments)));
+    for line in format_table_row_wrapped(header, widths, alignments) {
+        out.push(table_line(line));
+    }
     out.push(table_line(header_border(widths)));
     for row in rows {
-        out.push(table_line(format_table_row(row, widths, alignments)));
+        for line in format_table_row_wrapped(row, widths, alignments) {
+            out.push(table_line(line));
+        }
     }
     out.push(table_line(bottom_border(widths)));
     out
@@ -576,18 +585,38 @@ fn table_grid_width(widths: &[usize]) -> usize {
     widths.iter().sum::<usize>() + widths.len() * 3 + 1
 }
 
-fn format_table_row(cells: &[String], widths: &[usize], alignments: &[Alignment]) -> String {
-    let mut out = String::new();
-    out.push('│');
-    for (idx, cell) in cells.iter().enumerate() {
-        out.push(' ');
-        out.push_str(&pad_cell(
-            cell,
-            widths[idx],
-            alignments.get(idx).copied().unwrap_or(Alignment::None),
-        ));
-        out.push(' ');
-        out.push('│');
+/// Render one logical row as one-or-more physical grid lines, wrapping each
+/// cell to its column width. Every physical line carries full borders; cells
+/// with fewer wrapped lines are blank-padded. When every cell fits on one line
+/// this is byte-identical to `format_table_row`.
+fn format_table_row_wrapped(
+    cells: &[String],
+    widths: &[usize],
+    alignments: &[Alignment],
+) -> Vec<String> {
+    let wrapped: Vec<Vec<String>> = (0..widths.len())
+        .map(|idx| {
+            let cell = cells.get(idx).map(String::as_str).unwrap_or("");
+            wrap_cell_to_width(cell, widths[idx])
+        })
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let mut out = Vec::with_capacity(height);
+    for line_idx in 0..height {
+        let mut s = String::new();
+        s.push('│');
+        for (idx, cell_lines) in wrapped.iter().enumerate() {
+            let piece = cell_lines.get(line_idx).map(String::as_str).unwrap_or("");
+            s.push(' ');
+            s.push_str(&pad_cell(
+                piece,
+                widths[idx],
+                alignments.get(idx).copied().unwrap_or(Alignment::None),
+            ));
+            s.push(' ');
+            s.push('│');
+        }
+        out.push(s);
     }
     out
 }
@@ -1737,6 +1766,48 @@ mod stream_item_tests {
         // 3 columns need 3*MIN_COL_WIDTH + chrome(10) at minimum; width 12 is too small.
         let widths = vec![10usize, 10, 10];
         assert_eq!(budget_column_widths(&widths, 12), None);
+    }
+
+    #[test]
+    fn over_budget_table_wraps_cells_within_grid() {
+        // A two-column table whose grid is far wider than the render width must
+        // wrap the long cell across multiple physical lines WITHOUT any grid line
+        // exceeding the budget, and without falling back to the "Header: value"
+        // records layout.
+        let table = MarkdownTable {
+            alignments: vec![Alignment::None, Alignment::None],
+            header: vec!["Criterion".to_string(), "Verdict".to_string()],
+            rows: vec![vec![
+                "Resolver References arm gates on function_singleton_safe".to_string(),
+                "exact match".to_string(),
+            ]],
+        };
+        let width: u16 = 32;
+        let lines = render_markdown_table(&table, Some(width));
+        let rendered: Vec<String> = lines.iter().map(line_plain_text).collect();
+
+        // Still a grid (top border present), not records ("Criterion: ..." prose).
+        assert!(
+            rendered[0].starts_with('┌'),
+            "want grid top border:\n{rendered:#?}"
+        );
+        assert!(
+            !rendered.iter().any(|l| l.starts_with("Criterion:")),
+            "must not use records fallback:\n{rendered:#?}"
+        );
+        // No physical line exceeds the budget.
+        for l in &rendered {
+            assert!(
+                display_width(l) <= width as usize,
+                "line over budget: {l:?}"
+            );
+        }
+        // The long criterion text wrapped onto more than one body line.
+        let body_lines = rendered.iter().filter(|l| l.starts_with('│')).count();
+        assert!(
+            body_lines >= 3,
+            "expected wrapped multi-line row:\n{rendered:#?}"
+        );
     }
 
     #[test]
