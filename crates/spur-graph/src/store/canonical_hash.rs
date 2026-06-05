@@ -85,6 +85,7 @@ mod tests {
                 source_stable_symbol_id: "sym:src/lib.rs:demo".to_owned(),
                 target_stable_symbol_id: Some("sym:src/lib.rs:helper".to_owned()),
                 target_label: Some("helper".to_owned()),
+                import_path: None,
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 0.875,
