@@ -768,7 +768,31 @@ fn resolve_bare_pending_edge(
     }
 
     if edge.relation == RelationKind::Imports {
-        let candidates = import_resolution_candidates(builder, edge, indexes);
+        let path_candidates = module_path_resolution_candidates(builder, edge, indexes);
+        match path_candidates.as_slice() {
+            [target] if *target != edge.source => {
+                builder.add_pending_edge_with_bind_method(edge, Some(*target), Some("import_path"));
+                return;
+            }
+            candidates if candidates.len() > 1 => {
+                *ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = %edge.target_name,
+                    import_path = ?edge.import_path,
+                    candidates = candidates.len(),
+                    "spur-graph: ambiguous module-path import target; leaving unresolved"
+                );
+                builder.add_pending_edge(edge, None);
+                return;
+            }
+            _ => {}
+        }
+
+        let candidates = if edge.import_path.is_some() {
+            type_like_import_resolution_candidates(builder, edge, indexes)
+        } else {
+            import_resolution_candidates(builder, edge, indexes)
+        };
         match candidates.as_slice() {
             [target] if *target != edge.source => {
                 builder.add_pending_edge(edge, Some(*target));
@@ -784,7 +808,10 @@ fn resolve_bare_pending_edge(
                 builder.add_pending_edge(edge, None);
                 return;
             }
-            _ => {}
+            _ => {
+                builder.add_pending_edge(edge, None);
+                return;
+            }
         }
     }
 
@@ -1237,6 +1264,568 @@ fn import_resolution_candidates(
     candidates.sort_by_key(|id| id.get());
     candidates.dedup();
     candidates
+}
+
+fn type_like_import_resolution_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let Some(source_file) = indexes.file_by_id.get(&edge.source).copied() else {
+        return Vec::new();
+    };
+    let mut candidates = builder
+        .symbol_index
+        .get(&edge.target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| *target != edge.source)
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(is_import_resolution_type_like_candidate_kind)
+        })
+        .filter(|target| {
+            indexes
+                .file_by_id
+                .get(target)
+                .copied()
+                .is_some_and(|target_file| {
+                    import_path_language_family_allows(source_file, target_file)
+                })
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+fn module_path_resolution_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let Some(import_path) = edge.import_path.as_deref().map(str::trim) else {
+        return Vec::new();
+    };
+    if import_path.is_empty() {
+        return Vec::new();
+    }
+    let Some(source_file) = indexes.file_by_id.get(&edge.source).copied() else {
+        return Vec::new();
+    };
+
+    let raw_candidates = builder
+        .symbol_index
+        .get(&edge.target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| *target != edge.source)
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(is_import_resolution_candidate_kind)
+        })
+        .filter(|target| {
+            let Some(target_file) = indexes.file_by_id.get(target).copied() else {
+                return false;
+            };
+            import_path_language_family_allows(source_file, target_file)
+                && import_path_matches_target(
+                    import_path,
+                    edge,
+                    source_file,
+                    target_file,
+                    *target,
+                    indexes,
+                )
+        })
+        .collect::<Vec<_>>();
+
+    narrow_import_candidates(raw_candidates, indexes, true)
+}
+
+fn narrow_import_candidates(
+    raw_candidates: Vec<NodeId>,
+    indexes: &PendingResolutionIndexes<'_>,
+    allow_fallback_candidates: bool,
+) -> Vec<NodeId> {
+    let mut candidates = raw_candidates
+        .iter()
+        .copied()
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(is_import_resolution_type_like_candidate_kind)
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() && allow_fallback_candidates {
+        candidates = raw_candidates
+            .into_iter()
+            .filter(|target| {
+                indexes
+                    .node_kind_by_id
+                    .get(target)
+                    .copied()
+                    .is_some_and(is_import_resolution_fallback_candidate_kind)
+            })
+            .collect();
+    }
+
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportLanguageFamily {
+    Rust,
+    Python,
+    Javascript,
+}
+
+fn import_path_language_family_allows(source_file: &str, target_file: &str) -> bool {
+    let Some(source_family) = import_language_family(source_file) else {
+        return false;
+    };
+    import_language_family(target_file) == Some(source_family)
+}
+
+fn import_language_family(path: &str) -> Option<ImportLanguageFamily> {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("rs") => Some(ImportLanguageFamily::Rust),
+        Some("py") => Some(ImportLanguageFamily::Python),
+        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") => Some(ImportLanguageFamily::Javascript),
+        _ => None,
+    }
+}
+
+fn import_path_matches_target(
+    import_path: &str,
+    edge: &PendingEdge,
+    source_file: &str,
+    target_file: &str,
+    target: NodeId,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> bool {
+    match import_language_family(source_file) {
+        Some(ImportLanguageFamily::Rust) => rust_import_path_matches_target(
+            import_path,
+            edge,
+            source_file,
+            target_file,
+            target,
+            indexes,
+        ),
+        Some(ImportLanguageFamily::Python) => {
+            python_import_path_matches_target(import_path, edge, source_file, target_file)
+        }
+        Some(ImportLanguageFamily::Javascript) => {
+            javascript_import_path_matches_target(import_path, source_file, target_file)
+        }
+        None => false,
+    }
+}
+
+fn rust_import_path_matches_target(
+    import_path: &str,
+    edge: &PendingEdge,
+    source_file: &str,
+    target_file: &str,
+    target: NodeId,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> bool {
+    let Some(segments) =
+        rust_absolute_import_segments(import_path, &edge.target_name, edge, source_file, indexes)
+    else {
+        return false;
+    };
+    if segments.is_empty() {
+        return false;
+    }
+    if path_scope(source_file) != path_scope(target_file) {
+        return false;
+    }
+    let qualified_import_path = segments.join("::");
+    if indexes
+        .qualified_name_by_id
+        .get(&target)
+        .is_some_and(|qualified_name| qualified_name == &qualified_import_path)
+    {
+        return true;
+    }
+    if segments
+        .last()
+        .is_none_or(|segment| segment != &edge.target_name)
+    {
+        return false;
+    }
+    rust_module_file_matches(source_file, target_file, &segments[..segments.len() - 1])
+}
+
+fn rust_absolute_import_segments(
+    import_path: &str,
+    target_name: &str,
+    edge: &PendingEdge,
+    source_file: &str,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Option<Vec<String>> {
+    let segments = rust_import_path_segments(import_path, target_name);
+    let (first, rest) = segments.split_first()?;
+    let current_module = rust_current_module_segments(edge, source_file, indexes);
+    let mut resolved = match first.as_str() {
+        "crate" => rest.to_vec(),
+        "self" => {
+            let mut segments = current_module;
+            segments.extend_from_slice(rest);
+            segments
+        }
+        "super" => {
+            let mut segments = current_module;
+            segments.pop();
+            let mut remainder = rest;
+            while let Some((next, next_rest)) = remainder.split_first() {
+                if next != "super" {
+                    break;
+                }
+                segments.pop();
+                remainder = next_rest;
+            }
+            segments.extend_from_slice(remainder);
+            segments
+        }
+        root if rust_source_crate_name(source_file).as_deref() == Some(root) => rest.to_vec(),
+        _ => segments,
+    };
+    if resolved.last().is_none_or(|segment| segment != target_name) {
+        resolved.push(target_name.to_owned());
+    }
+    Some(resolved)
+}
+
+fn rust_import_path_segments(import_path: &str, target_name: &str) -> Vec<String> {
+    let mut path = import_path.trim();
+    if let Some((prefix, _)) = path.split_once('{') {
+        path = prefix.trim_end_matches(':').trim();
+    }
+    let mut segments = path
+        .split("::")
+        .map(|segment| segment.trim())
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.trim_start_matches("r#").to_owned())
+        .collect::<Vec<_>>();
+    if segments.last().is_none_or(|segment| segment != target_name) {
+        segments.push(target_name.to_owned());
+    }
+    segments
+}
+
+fn rust_current_module_segments(
+    edge: &PendingEdge,
+    source_file: &str,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<String> {
+    if indexes.node_kind_by_id.get(&edge.source).copied() == Some(NodeKind::Module) {
+        if let Some(qualified_name) = indexes.qualified_name_by_id.get(&edge.source) {
+            return qualified_name
+                .split("::")
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+    }
+    rust_file_module_segments(source_file)
+}
+
+fn rust_file_module_segments(source_file: &str) -> Vec<String> {
+    let Some(src_relative) = rust_src_relative_path(source_file) else {
+        return Vec::new();
+    };
+    if matches!(src_relative, "lib.rs" | "main.rs") {
+        return Vec::new();
+    }
+    let module_path = src_relative
+        .strip_suffix("/mod.rs")
+        .or_else(|| src_relative.strip_suffix(".rs"))
+        .unwrap_or(src_relative);
+    module_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn rust_src_relative_path(source_file: &str) -> Option<&str> {
+    source_file
+        .strip_prefix("src/")
+        .or_else(|| source_file.split_once("/src/").map(|(_, path)| path))
+}
+
+fn rust_crate_root(source_file: &str) -> Option<&str> {
+    if source_file.starts_with("src/") {
+        return Some("");
+    }
+    source_file.split_once("/src/").map(|(root, _)| root)
+}
+
+fn rust_source_crate_name(source_file: &str) -> Option<String> {
+    let root = rust_crate_root(source_file)?;
+    let crate_dir = root
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())?;
+    Some(crate_dir.replace('-', "_"))
+}
+
+fn rust_module_file_matches(
+    source_file: &str,
+    target_file: &str,
+    module_segments: &[String],
+) -> bool {
+    let Some(crate_root) = rust_crate_root(source_file) else {
+        return false;
+    };
+    let src_prefix = if crate_root.is_empty() {
+        "src".to_owned()
+    } else {
+        format!("{crate_root}/src")
+    };
+    if module_segments.is_empty() {
+        return target_file == format!("{src_prefix}/lib.rs")
+            || target_file == format!("{src_prefix}/main.rs");
+    }
+    let module_path = module_segments.join("/");
+    target_file == format!("{src_prefix}/{module_path}.rs")
+        || target_file == format!("{src_prefix}/{module_path}/mod.rs")
+}
+
+fn python_import_path_matches_target(
+    import_path: &str,
+    edge: &PendingEdge,
+    source_file: &str,
+    target_file: &str,
+) -> bool {
+    python_import_module_candidates(import_path, &edge.target_name, source_file)
+        .into_iter()
+        .any(|candidate| candidate.matches_python_file(target_file))
+}
+
+enum PythonModuleCandidate {
+    Exact(Vec<String>),
+    Suffix(Vec<String>),
+}
+
+impl PythonModuleCandidate {
+    fn matches_python_file(&self, target_file: &str) -> bool {
+        match self {
+            Self::Exact(segments) => module_file_matches_exact(target_file, segments, &["py"]),
+            Self::Suffix(segments) => module_file_matches_suffix(target_file, segments, &["py"]),
+        }
+    }
+}
+
+fn python_import_module_candidates(
+    import_path: &str,
+    target_name: &str,
+    source_file: &str,
+) -> Vec<PythonModuleCandidate> {
+    let import_path = import_path.trim();
+    if import_path.starts_with('.') {
+        let dot_count = import_path.chars().take_while(|ch| *ch == '.').count();
+        let rest = import_path[dot_count..].trim_start_matches('.');
+        let mut base = path_dir_segments(source_file);
+        for _ in 1..dot_count {
+            base.pop();
+        }
+        let mut module = base.clone();
+        module.extend(split_module_path(rest, '.'));
+        let mut with_target = module.clone();
+        with_target.push(target_name.to_owned());
+        return vec![
+            PythonModuleCandidate::Exact(module),
+            PythonModuleCandidate::Exact(with_target),
+        ];
+    }
+
+    let module = split_module_path(import_path, '.');
+    let mut candidates = vec![PythonModuleCandidate::Suffix(module.clone())];
+    if module.last().is_some_and(|segment| segment == target_name) && module.len() > 1 {
+        candidates.push(PythonModuleCandidate::Suffix(
+            module[..module.len() - 1].to_vec(),
+        ));
+    } else {
+        let mut with_target = module;
+        with_target.push(target_name.to_owned());
+        candidates.push(PythonModuleCandidate::Suffix(with_target));
+    }
+    candidates
+}
+
+fn javascript_import_path_matches_target(
+    import_path: &str,
+    source_file: &str,
+    target_file: &str,
+) -> bool {
+    javascript_import_module_candidates(import_path, source_file)
+        .into_iter()
+        .any(|candidate| candidate.matches_javascript_file(target_file))
+}
+
+enum JavascriptModuleCandidate {
+    Exact(Vec<String>),
+    Suffix(Vec<String>),
+}
+
+impl JavascriptModuleCandidate {
+    fn matches_javascript_file(&self, target_file: &str) -> bool {
+        let extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+        match self {
+            Self::Exact(segments) => {
+                module_file_matches_exact(target_file, segments, &extensions)
+                    || module_file_with_known_extension_matches_exact(target_file, segments)
+            }
+            Self::Suffix(segments) => {
+                module_file_matches_suffix(target_file, segments, &extensions)
+                    || module_file_with_known_extension_matches_suffix(target_file, segments)
+            }
+        }
+    }
+}
+
+fn javascript_import_module_candidates(
+    import_path: &str,
+    source_file: &str,
+) -> Vec<JavascriptModuleCandidate> {
+    let import_path = import_path.trim();
+    let path = import_path.strip_prefix("@/").unwrap_or(import_path);
+    let segments = split_path_like_segments(path);
+    if path.starts_with("./") || path.starts_with("../") {
+        let mut base = path_dir_segments(source_file);
+        base.extend(segments);
+        normalize_module_segments(&mut base);
+        vec![JavascriptModuleCandidate::Exact(base)]
+    } else {
+        vec![JavascriptModuleCandidate::Suffix(segments)]
+    }
+}
+
+fn split_module_path(path: &str, separator: char) -> Vec<String> {
+    path.split(separator)
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn split_path_like_segments(path: &str) -> Vec<String> {
+    path.split(['/', '\\'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn path_dir_segments(path: &str) -> Vec<String> {
+    path.rsplit_once('/')
+        .map(|(dir, _)| split_path_like_segments(dir))
+        .unwrap_or_default()
+}
+
+fn normalize_module_segments(segments: &mut Vec<String>) {
+    let mut normalized = Vec::new();
+    for segment in std::mem::take(segments) {
+        match segment.as_str() {
+            "." => {}
+            ".." => {
+                normalized.pop();
+            }
+            _ => normalized.push(segment),
+        }
+    }
+    *segments = normalized;
+}
+
+fn module_file_matches_exact(
+    target_file: &str,
+    module_segments: &[String],
+    extensions: &[&str],
+) -> bool {
+    if module_segments.is_empty() {
+        return false;
+    }
+    extensions.iter().any(|extension| {
+        target_file == format!("{}.{}", module_segments.join("/"), extension)
+            || target_file == format!("{}/__init__.{}", module_segments.join("/"), extension)
+            || target_file == format!("{}/index.{}", module_segments.join("/"), extension)
+    })
+}
+
+fn module_file_matches_suffix(
+    target_file: &str,
+    module_segments: &[String],
+    extensions: &[&str],
+) -> bool {
+    if module_segments.is_empty() {
+        return false;
+    }
+    extensions.iter().any(|extension| {
+        let module_path = module_segments.join("/");
+        target_file == format!("{module_path}.{extension}")
+            || target_file.ends_with(&format!("/{module_path}.{extension}"))
+            || target_file == format!("{module_path}/__init__.{extension}")
+            || target_file.ends_with(&format!("/{module_path}/__init__.{extension}"))
+            || target_file == format!("{module_path}/index.{extension}")
+            || target_file.ends_with(&format!("/{module_path}/index.{extension}"))
+    })
+}
+
+fn module_file_with_known_extension_matches_exact(
+    target_file: &str,
+    module_segments: &[String],
+) -> bool {
+    let Some((last, extension)) = module_segments
+        .last()
+        .and_then(|segment| segment.rsplit_once('.'))
+    else {
+        return false;
+    };
+    if !matches!(extension, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") {
+        return false;
+    }
+    let mut expected = module_segments[..module_segments.len() - 1].to_vec();
+    expected.push(format!("{last}.{extension}"));
+    target_file == expected.join("/")
+}
+
+fn module_file_with_known_extension_matches_suffix(
+    target_file: &str,
+    module_segments: &[String],
+) -> bool {
+    let Some((last, extension)) = module_segments
+        .last()
+        .and_then(|segment| segment.rsplit_once('.'))
+    else {
+        return false;
+    };
+    if !matches!(extension, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") {
+        return false;
+    }
+    let mut expected = module_segments[..module_segments.len() - 1].to_vec();
+    expected.push(format!("{last}.{extension}"));
+    let expected = expected.join("/");
+    target_file == expected || target_file.ends_with(&format!("/{expected}"))
 }
 
 fn is_callable_target_kind(kind: NodeKind) -> bool {
@@ -3139,6 +3728,165 @@ pub enum SomeEnum {
             .expect("Foo import edge");
 
         assert_eq!(edge.target_node_id, Some(target.node_id));
+    }
+
+    #[test]
+    fn import_path_disambiguates_same_bare_type_across_modules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod left;
+mod right;
+
+use crate::right::Dup;
+
+pub fn consume(_value: Dup) {}
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(root.join("src/left.rs"), "pub struct Dup;\n").expect("write left.rs");
+        fs::write(root.join("src/right.rs"), "pub struct Dup;\n").expect("write right.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let right_file_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "src/right.rs")
+            .and_then(|node| node.file_id)
+            .expect("right file id");
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Struct
+                    && node.label == "Dup"
+                    && node.file_id == Some(right_file_id)
+            })
+            .expect("right Dup struct");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Dup")
+                    && edge.import_path.as_deref() == Some("crate::right::Dup")
+            })
+            .expect("Dup import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_empty_workspace_match_falls_back_to_unique_cross_crate_type_unstamped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("crates/spur-acp/src")).expect("mkdir spur-acp src");
+        fs::create_dir_all(root.join("crates/spur-core/src")).expect("mkdir spur-core src");
+        fs::write(root.join("crates/spur-acp/src/lib.rs"), "pub mod types;\n")
+            .expect("write spur-acp lib.rs");
+        fs::write(
+            root.join("crates/spur-acp/src/types.rs"),
+            "pub struct SessionId;\n",
+        )
+        .expect("write spur-acp types.rs");
+        fs::write(
+            root.join("crates/spur-core/src/lib.rs"),
+            r#"
+use spur_acp::types::SessionId;
+
+pub fn attach(_session: SessionId) {}
+"#,
+        )
+        .expect("write spur-core lib.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Struct && node.label == "SessionId")
+            .expect("SessionId struct");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("SessionId")
+                    && edge.import_path.as_deref() == Some("spur_acp::types::SessionId")
+            })
+            .expect("SessionId import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn import_path_empty_workspace_match_rejects_fallback_variant_candidate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod shadow;
+
+use std::path::Path;
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(
+            root.join("src/shadow.rs"),
+            r#"
+pub enum Shadow {
+    Path,
+}
+"#,
+        )
+        .expect("write shadow.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Path")
+                    && edge.import_path.as_deref() == Some("std::path::Path")
+            })
+            .expect("Path import edge");
+
+        assert_eq!(edge.target_node_id, None);
+        assert_eq!(edge.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn import_path_fallback_rejects_cross_language_type_candidate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub struct Widget;\n").expect("write lib.rs");
+        fs::write(
+            root.join("consumer.py"),
+            "from external.widget import Widget\n",
+        )
+        .expect("write consumer.py");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Widget")
+                    && edge.import_path.as_deref() == Some("external.widget")
+            })
+            .expect("Widget import edge");
+
+        assert_eq!(edge.target_node_id, None);
+        assert_eq!(edge.bind_method.as_deref(), None);
     }
 
     #[test]
