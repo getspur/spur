@@ -93,10 +93,16 @@ export type NotebookCellState = {
   lastEditedBy?: string;
   datasourceSetup?: boolean;
   dagMetadata?: CellDagMetadata;
+  frontendMetadata?: CellFrontendMetadata;
   codeType?: CodeType;
   juteDeckMetadata?: JuteDeckCellMetadata;
   cellMetadataOther?: Record<string, unknown>;
   result?: CellResult;
+};
+
+export type CellFrontendMetadata = Record<string, unknown> & {
+  binds?: string[];
+  emits?: string[];
 };
 
 export type NotebookViewMode = "cells" | "dag";
@@ -668,6 +674,58 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function normalizeStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const strings = Array.from(
+    new Set(
+      value.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+      ),
+    ),
+  );
+  return strings.length > 0 ? strings : undefined;
+}
+
+function normalizeFrontendMetadata(
+  value: unknown,
+): CellFrontendMetadata | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const metadata: CellFrontendMetadata = { ...value };
+  const binds = normalizeStringList(value.binds);
+  const emits = normalizeStringList(value.emits);
+  if (binds) {
+    metadata.binds = binds;
+  } else {
+    delete metadata.binds;
+  }
+  if (emits) {
+    metadata.emits = emits;
+  } else {
+    delete metadata.emits;
+  }
+
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function frontendMetadataFromSpur(
+  spur: CellMetadata["spur"] | undefined,
+): CellFrontendMetadata | undefined {
+  return normalizeFrontendMetadata(
+    (spur as (Record<string, unknown> & { frontend?: unknown }) | undefined)
+      ?.frontend,
+  );
+}
+
+function frontendMetadataFromDaemonCell(
+  cell: DaemonCell,
+): CellFrontendMetadata | undefined {
+  const spur = cell.metadataOther?.spur;
+  if (!isRecord(spur)) return undefined;
+  return normalizeFrontendMetadata(spur.frontend);
+}
+
 function loadNotebookRootDraft(
   state: WritableDraft<NotebookServerState>,
   notebook: NotebookRoot,
@@ -694,6 +752,7 @@ function loadNotebookRootDraft(
         lastEditedBy: spur?.last_edited_by,
         datasourceSetup: spur?.datasource_setup,
         dagMetadata: spur?.dag,
+        frontendMetadata: frontendMetadataFromSpur(spur),
         codeType: spur?.code_type,
         juteDeckMetadata: jute_deck,
         cellMetadataOther:
@@ -740,6 +799,7 @@ function applyDaemonCellSnapshotDraft(
     if (!state.cellIds.includes(cell.id)) {
       state.cellIds.splice(insertAt, 0, cell.id);
     }
+    const frontendMetadata = frontendMetadataFromDaemonCell(cell);
     state.cells[cell.id] = {
       type,
       initialText: cell.source,
@@ -748,6 +808,7 @@ function applyDaemonCellSnapshotDraft(
       lastEditedBy: cell.lastEditedBy ?? undefined,
       datasourceSetup: cell.datasourceSetup ?? undefined,
       dagMetadata: cell.dagMetadata,
+      frontendMetadata,
       codeType: cell.codeType,
       juteDeckMetadata: cell.juteDeckMetadata,
       cellMetadataOther: cell.metadataOther,
@@ -761,6 +822,8 @@ function applyDaemonCellSnapshotDraft(
   existing.lastEditedBy = cell.lastEditedBy ?? undefined;
   existing.datasourceSetup = cell.datasourceSetup ?? undefined;
   existing.dagMetadata = cell.dagMetadata;
+  existing.frontendMetadata =
+    frontendMetadataFromDaemonCell(cell) ?? existing.frontendMetadata;
   existing.codeType = cell.codeType;
   existing.juteDeckMetadata = cell.juteDeckMetadata;
   existing.cellMetadataOther = cell.metadataOther;
@@ -1260,6 +1323,7 @@ export class Notebook {
             cell.lastEditedBy,
             cell.datasourceSetup,
             cell.dagMetadata,
+            cell.frontendMetadata,
             cell.codeType,
             cell.juteDeckMetadata,
             cell.cellMetadataOther,
@@ -1275,6 +1339,7 @@ export class Notebook {
             cell.lastEditedBy,
             cell.datasourceSetup,
             cell.dagMetadata,
+            cell.frontendMetadata,
             cell.codeType,
             cell.juteDeckMetadata,
             cell.cellMetadataOther,
@@ -1438,6 +1503,7 @@ export class Notebook {
         cell.lastEditedBy,
         cell.datasourceSetup,
         cell.dagMetadata,
+        cell.frontendMetadata,
         cell.codeType,
         cell.juteDeckMetadata,
         cell.cellMetadataOther,
@@ -1451,6 +1517,7 @@ export class Notebook {
       spur?: {
         datasource_setup?: boolean;
         dag?: CellDagMetadata;
+        frontend?: CellFrontendMetadata;
         code_type?: CodeType;
       };
     },
@@ -1474,6 +1541,10 @@ export class Notebook {
     const datasourceSetup =
       patch.spur?.datasource_setup ?? cell.datasourceSetup;
     const dagMetadata = patch.spur?.dag ?? cell.dagMetadata;
+    const frontendMetadata =
+      patch.spur && Object.hasOwn(patch.spur, "frontend")
+        ? normalizeFrontendMetadata(patch.spur.frontend)
+        : cell.frontendMetadata;
     const codeType = patch.spur?.code_type ?? cell.codeType;
 
     const nextVersion = cell.version + 1;
@@ -1482,6 +1553,7 @@ export class Notebook {
       juteDeckMetadata: merged,
       datasourceSetup,
       dagMetadata,
+      frontendMetadata,
       codeType,
       version: nextVersion,
       lastEditedBy: "brain",
@@ -1861,19 +1933,22 @@ function cellMetadata(
   lastEditedBy?: string,
   datasourceSetup?: boolean,
   dagMetadata?: CellDagMetadata,
+  frontendMetadata?: CellFrontendMetadata,
   codeType?: CodeType,
   juteDeckMetadata?: JuteDeckCellMetadata,
   other?: Record<string, unknown>,
 ): CellMetadata {
+  const spur: CellMetadata["spur"] & { frontend?: CellFrontendMetadata } = {
+    version,
+    last_edited_by: lastEditedBy,
+    datasource_setup: datasourceSetup,
+    dag: dagMetadata,
+    frontend: frontendMetadata,
+    code_type: codeType,
+  };
   const metadata: CellMetadata = {
     ...(other ?? {}),
-    spur: {
-      version,
-      last_edited_by: lastEditedBy,
-      datasource_setup: datasourceSetup,
-      dag: dagMetadata,
-      code_type: codeType,
-    },
+    spur,
   };
   if (juteDeckMetadata !== undefined) {
     metadata.jute_deck = juteDeckMetadata;

@@ -3,11 +3,26 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import {
   get as getWidgetModel,
   on as onWidgetModel,
+  set as setWidgetModel,
 } from "@/stores/widgetRegistry";
 
 import { htmlOutputSandbox } from "./rendering";
 
 export const WIDGET_VIEW_MIME = "application/vnd.jupyter.widget-view+json";
+export const JUTE_PORT_BINDINGS_STATE_KEY = "__jute_port_bindings";
+
+export type AfmBoundPortState = {
+  currentVersion?: number;
+  executionCount?: number;
+  ranVersion?: number;
+  state?: string;
+};
+
+export type AfmPortBindingSnapshot = {
+  cellId: string;
+  binds: string[];
+  ports: Record<string, AfmBoundPortState>;
+};
 
 type AnywidgetView = {
   modelId: string;
@@ -18,6 +33,7 @@ type AnywidgetView = {
 type Props = {
   modelId: string;
   widgetView?: AnywidgetView;
+  portBindings?: AfmPortBindingSnapshot;
 };
 
 type AfmDocument = {
@@ -41,12 +57,16 @@ export function anywidgetViewFromData(value: unknown): AnywidgetView | null {
   };
 }
 
-export default function AfmView({ modelId, widgetView }: Props) {
+export default function AfmView({ modelId, widgetView, portBindings }: Props) {
   const revision = useWidgetModelRevision(modelId);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const model = getWidgetModel(modelId);
   const modelCss = model?.css;
   const modelEsm = model?.esm;
+  const portBindingsKey = useMemo(
+    () => stableJson(portBindings),
+    [portBindings],
+  );
 
   const srcDoc = useMemo(() => {
     if (!model || typeof modelEsm !== "string" || modelEsm.trim() === "") {
@@ -81,6 +101,19 @@ export default function AfmView({ modelId, widgetView }: Props) {
   useEffect(() => {
     postModelUpdate();
   }, [postModelUpdate, revision]);
+
+  useEffect(() => {
+    if (!portBindings || portBindings.binds.length === 0) return;
+    const model = getWidgetModel(modelId);
+    if (!model) return;
+
+    setWidgetModel(modelId, {
+      state: {
+        ...model.state,
+        [JUTE_PORT_BINDINGS_STATE_KEY]: portBindings,
+      },
+    });
+  }, [modelId, portBindings, portBindingsKey]);
 
   useEffect(() => {
     return onWidgetModel(modelId, "msg:custom", (content, buffers) => {
@@ -425,4 +458,12 @@ function numberValue(value: unknown): number | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stableJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
 }
