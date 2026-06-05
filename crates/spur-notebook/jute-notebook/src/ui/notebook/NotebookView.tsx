@@ -5,6 +5,7 @@ import { useNotebook } from "@/stores/notebook";
 import DagView from "@/ui/dag/DagView";
 import { UnhandledError } from "@/ui/shared/UnhandledError";
 
+import AppMode from "./AppMode";
 import NotebookCells from "./NotebookCells";
 import NotebookLocation from "./NotebookLocation";
 import NotebookSidebar from "./sidebar/NotebookSidebar";
@@ -31,7 +32,7 @@ export default function NotebookView() {
   }
 
   return (
-    <div className="grid h-full grid-rows-1 grid-cols-[minmax(0,1fr),auto] overflow-hidden">
+    <div className="grid h-full grid-cols-[minmax(0,1fr),auto] grid-rows-1 overflow-hidden">
       <div className="min-h-0 min-w-0 overflow-y-auto py-16">
         <NotebookLocation directory={directory} filename={filename} />
 
@@ -40,6 +41,8 @@ export default function NotebookView() {
           <UnhandledError error={loadError} />
         ) : viewMode === "dag" ? (
           <DagView />
+        ) : viewMode === "app" ? (
+          <AppMode />
         ) : (
           <NotebookCells />
         )}

@@ -279,7 +279,13 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
   );
 }
 
-function CellOutput({ cellId }: { cellId: string }) {
+export function CellOutput({
+  cellId,
+  chromeless = false,
+}: {
+  cellId: string;
+  chromeless?: boolean;
+}) {
   const notebook = useNotebook();
   const output = useStore(
     notebook.store,
@@ -294,7 +300,13 @@ function CellOutput({ cellId }: { cellId: string }) {
   );
 
   if (!output) return null;
-  return <OutputView value={output} afmPortBindings={afmPortBindings} />;
+  return (
+    <OutputView
+      value={output}
+      chromeless={chromeless}
+      afmPortBindings={afmPortBindings}
+    />
+  );
 }
 
 function selectAfmPortBindingsKey(
