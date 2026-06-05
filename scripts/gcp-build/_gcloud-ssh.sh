@@ -26,6 +26,23 @@ host="${host##*@}"
 # UNSET var (standalone invocation) defaults to the safe IAP path.
 IAP_FLAG="${SPUR_SSH_IAP_FLAG---tunnel-through-iap}"
 
+if [[ -z "$IAP_FLAG" ]]; then
+    DIRECT_SSH_PORT="${SPUR_DIRECT_SSH_PORT:-22}"
+    if [[ ! "$DIRECT_SSH_PORT" =~ ^[0-9]+$ ]]; then
+        echo "Invalid SPUR_DIRECT_SSH_PORT=$DIRECT_SSH_PORT" >&2
+        exit 2
+    fi
+    if [[ "$DIRECT_SSH_PORT" != "22" ]]; then
+        exec gcloud compute ssh \
+            --project="$GCP_PROJECT" \
+            --zone="$GCP_ZONE" \
+            --ssh-flag="-p $DIRECT_SSH_PORT" \
+            --quiet \
+            "$host" \
+            -- "$@"
+    fi
+fi
+
 # $IAP_FLAG is intentionally unquoted: empty -> no arg (direct), else one flag.
 exec gcloud compute ssh \
     --project="$GCP_PROJECT" \
