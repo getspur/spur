@@ -43,6 +43,7 @@ esac
 
 log "Creating spot VM $VM_NAME ($VM_MACHINE_TYPE) in $GCP_ZONE..."
 gcloud compute instances create "$VM_NAME" \
+    --project="$GCP_PROJECT" \
     --zone="$GCP_ZONE" \
     --machine-type="$VM_MACHINE_TYPE" \
     --provisioning-model=SPOT \
@@ -59,7 +60,7 @@ gcloud compute instances create "$VM_NAME" \
 
 log "Waiting for SSH..."
 for _ in $(seq 1 30); do
-    if gcloud compute ssh "$VM_NAME" --zone="$GCP_ZONE" --tunnel-through-iap \
+    if gcloud compute ssh "$VM_NAME" --project="$GCP_PROJECT" --zone="$GCP_ZONE" --tunnel-through-iap \
             --command='echo ready' >/dev/null 2>&1; then
         log "SSH ready."
         break
@@ -68,7 +69,7 @@ for _ in $(seq 1 30); do
 done
 
 log "Waiting for startup-script to finish (rustup + sccache install)..."
-gcloud compute ssh "$VM_NAME" --zone="$GCP_ZONE" --tunnel-through-iap --command='
+gcloud compute ssh "$VM_NAME" --project="$GCP_PROJECT" --zone="$GCP_ZONE" --tunnel-through-iap --command='
     set -e
     for i in $(seq 1 120); do
         if grep -q "startup done" /var/log/spur-startup.log 2>/dev/null; then
@@ -81,7 +82,7 @@ gcloud compute ssh "$VM_NAME" --zone="$GCP_ZONE" --tunnel-through-iap --command=
 '
 
 log "Installing rustup as the SSH user (one-time per VM)..."
-gcloud compute ssh "$VM_NAME" --zone="$GCP_ZONE" --tunnel-through-iap --command='
+gcloud compute ssh "$VM_NAME" --project="$GCP_PROJECT" --zone="$GCP_ZONE" --tunnel-through-iap --command='
     set -e
     source /etc/profile.d/spur-build.sh
     if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
