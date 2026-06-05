@@ -26,7 +26,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v7";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-05-per-language-builtins-v10";
+pub const RESOLVER_VERSION: &str = "2026-06-05-constructs-type-singleton-v11";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1034,6 +1034,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                         | "singleton"
                         | "macro_body_singleton"
                         | "relational"
+                        | "constructs_type_singleton"
                         | "method_crate_singleton"
                 )
             );

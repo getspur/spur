@@ -630,7 +630,10 @@ impl<'a> FactBuilder<'a> {
                         );
                     }
                 }
-            } else if edge.relation == RelationKind::Imports {
+            } else if matches!(
+                edge.relation,
+                RelationKind::Imports | RelationKind::Constructs
+            ) {
                 resolve_bare_pending_edge(
                     self,
                     &edge,
@@ -775,6 +778,38 @@ fn resolve_bare_pending_edge(
                 return;
             }
             _ => {}
+        }
+    }
+
+    if edge.relation == RelationKind::Constructs {
+        let candidates = constructs_symbol_candidates(builder, edge, indexes);
+        match candidates.as_slice() {
+            [target] => {
+                if constructs_language_family_allows(builder, edge, *target, indexes) {
+                    builder.add_pending_edge_with_bind_method(
+                        edge,
+                        Some(*target),
+                        Some("constructs_type_singleton"),
+                    );
+                } else {
+                    builder.add_pending_edge(edge, None);
+                }
+                return;
+            }
+            candidates if candidates.len() > 1 => {
+                *ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = %edge.target_name,
+                    candidates = candidates.len(),
+                    "spur-graph: ambiguous constructs pending edge target; leaving unresolved"
+                );
+                builder.add_pending_edge(edge, None);
+                return;
+            }
+            _ => {
+                builder.add_pending_edge(edge, None);
+                return;
+            }
         }
     }
 
@@ -988,6 +1023,40 @@ fn relational_target_kinds(relation: RelationKind) -> Option<&'static [NodeKind]
     }
 }
 
+fn constructs_target_kinds() -> &'static [NodeKind] {
+    &[
+        NodeKind::Struct,
+        NodeKind::Enum,
+        NodeKind::EnumVariant,
+        NodeKind::Class,
+    ]
+}
+
+fn constructs_symbol_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let allowed = constructs_target_kinds();
+    let mut candidates = builder
+        .symbol_index
+        .get(&edge.target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| *target != edge.source)
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(|kind| allowed.contains(&kind))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
 fn relational_symbol_candidates(
     builder: &FactBuilder<'_>,
     edge: &PendingEdge,
@@ -1031,6 +1100,52 @@ impl FactBuilder<'_> {
             self.add_pending_edge_with_bind_method(edge, Some(target), Some("relational"));
         }
     }
+}
+
+fn constructs_language_family_allows(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    target: NodeId,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> bool {
+    let Some(src_file) = file_path_for_node(builder, edge.source, indexes) else {
+        return false;
+    };
+    let Some(tgt_file) = file_path_for_node(builder, target, indexes) else {
+        return false;
+    };
+    if src_file == tgt_file {
+        return true;
+    }
+    matches!(
+        (language_family(&src_file), language_family(&tgt_file)),
+        (Some(src_family), Some(tgt_family)) if src_family == tgt_family
+    )
+}
+
+fn file_path_for_node(
+    builder: &FactBuilder<'_>,
+    node_id: NodeId,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Option<String> {
+    indexes
+        .file_by_id
+        .get(&node_id)
+        .map(|path| (*path).to_owned())
+        .or_else(|| {
+            let file_id = builder
+                .facts
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_id)?
+                .file_id?;
+            builder
+                .facts
+                .nodes
+                .iter()
+                .find(|node| node.kind == NodeKind::File && node.file_id == Some(file_id))
+                .map(|node| node.label.clone())
+        })
 }
 
 fn should_reclassify_python_extends_as_implements(
@@ -2365,6 +2480,284 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         assert_eq!(edge.target_node_id, Some(function));
         assert_eq!(edge.target_label.as_deref(), Some("helper"));
         assert_eq!(edge.bind_method.as_deref(), Some("singleton"));
+    }
+
+    #[test]
+    fn constructs_type_singleton_binds_unique_type() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "fn caller() { let _ = Widget { value: 1 }; }\nstruct Widget { value: i32 }\nfn Widget() {}\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let file_id = FileId(builder.next_file_id());
+        let file = builder.add_file_node("src/lib.rs", file_id, root_node);
+        let source = builder.add_node(
+            "src/lib.rs",
+            "caller".to_owned(),
+            "caller".to_owned(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        let target = builder.add_node(
+            "src/lib.rs",
+            "Widget".to_owned(),
+            "Widget".to_owned(),
+            NodeKind::Struct,
+            file_id,
+            root_node,
+        );
+        builder.add_node(
+            "src/lib.rs",
+            "Widget".to_owned(),
+            "Widget".to_owned(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        builder.add_edge(file, Some(source), RelationKind::Contains, None);
+        builder.add_edge(file, Some(target), RelationKind::Contains, None);
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "Widget".to_owned(),
+            relation: RelationKind::Constructs,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        let edge = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Constructs
+                    && edge.target_label.as_deref() == Some("Widget")
+            })
+            .expect("constructs edge");
+        assert_eq!(edge.source_node_id, source);
+        assert_eq!(edge.target_node_id, Some(target));
+        assert_eq!(
+            edge.bind_method.as_deref(),
+            Some("constructs_type_singleton")
+        );
+    }
+
+    #[test]
+    fn constructs_type_singleton_ambiguous_multi_type_unresolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "fn caller() { let _ = Widget { value: 1 }; }\nstruct Widget { value: i32 }\nenum Widget { Value }\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let file_id = FileId(builder.next_file_id());
+        let file = builder.add_file_node("src/lib.rs", file_id, root_node);
+        let source = builder.add_node(
+            "src/lib.rs",
+            "caller".to_owned(),
+            "caller".to_owned(),
+            NodeKind::Function,
+            file_id,
+            root_node,
+        );
+        let first = builder.add_node(
+            "src/lib.rs",
+            "Widget".to_owned(),
+            "Widget".to_owned(),
+            NodeKind::Struct,
+            file_id,
+            root_node,
+        );
+        let second = builder.add_node(
+            "src/lib.rs",
+            "Widget".to_owned(),
+            "Widget".to_owned(),
+            NodeKind::Enum,
+            file_id,
+            root_node,
+        );
+        builder.add_edge(file, Some(source), RelationKind::Contains, None);
+        builder.add_edge(file, Some(first), RelationKind::Contains, None);
+        builder.add_edge(file, Some(second), RelationKind::Contains, None);
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "Widget".to_owned(),
+            relation: RelationKind::Constructs,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        let edge = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Constructs
+                    && edge.target_label.as_deref() == Some("Widget")
+            })
+            .expect("constructs edge");
+        assert_eq!(edge.source_node_id, source);
+        assert_eq!(edge.target_node_id, None);
+        assert_eq!(edge.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn constructs_type_singleton_blocks_cross_language() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse("fn caller() {}\nstruct Widget;\n", None)
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let ts_file_id = FileId(builder.next_file_id());
+        let rs_file_id = FileId(builder.next_file_id());
+        let ts_file = builder.add_file_node("crates/mixed/web/app.ts", ts_file_id, root_node);
+        let rs_file = builder.add_file_node("crates/mixed/src/lib.rs", rs_file_id, root_node);
+        let source = builder.add_node(
+            "crates/mixed/web/app.ts",
+            "caller".to_owned(),
+            "caller".to_owned(),
+            NodeKind::Function,
+            ts_file_id,
+            root_node,
+        );
+        let target = builder.add_node(
+            "crates/mixed/src/lib.rs",
+            "Widget".to_owned(),
+            "Widget".to_owned(),
+            NodeKind::Struct,
+            rs_file_id,
+            root_node,
+        );
+        builder.add_edge(ts_file, Some(source), RelationKind::Contains, None);
+        builder.add_edge(rs_file, Some(target), RelationKind::Contains, None);
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "Widget".to_owned(),
+            relation: RelationKind::Constructs,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        let edge = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Constructs
+                    && edge.target_label.as_deref() == Some("Widget")
+            })
+            .expect("constructs edge");
+        assert_eq!(edge.source_node_id, source);
+        assert_eq!(edge.target_node_id, None);
+        assert_eq!(edge.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn constructs_type_singleton_behavior_recovers_type_non_type_collision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "fn make_widget() {}\nstruct Widget { value: i32 }\nfn Widget() {}\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let source_file_id = FileId(builder.next_file_id());
+        let target_file_id = FileId(builder.next_file_id());
+        let source_file = builder.add_file_node("crates/app/src/lib.rs", source_file_id, root_node);
+        let target_file =
+            builder.add_file_node("crates/types/src/lib.rs", target_file_id, root_node);
+        let source = builder.add_node(
+            "crates/app/src/lib.rs",
+            "make_widget".to_owned(),
+            "make_widget".to_owned(),
+            NodeKind::Function,
+            source_file_id,
+            root_node,
+        );
+        let target = builder.add_node(
+            "crates/types/src/lib.rs",
+            "Widget".to_owned(),
+            "Widget".to_owned(),
+            NodeKind::Struct,
+            target_file_id,
+            root_node,
+        );
+        let non_type = builder.add_node(
+            "crates/types/src/lib.rs",
+            "Widget".to_owned(),
+            "Widget".to_owned(),
+            NodeKind::Function,
+            target_file_id,
+            root_node,
+        );
+        builder.add_edge(source_file, Some(source), RelationKind::Contains, None);
+        builder.add_edge(target_file, Some(target), RelationKind::Contains, None);
+        builder.add_edge(target_file, Some(non_type), RelationKind::Contains, None);
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "Widget".to_owned(),
+            relation: RelationKind::Constructs,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        let edge = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.source_node_id == source
+                    && edge.relation == RelationKind::Constructs
+                    && edge.target_label.as_deref() == Some("Widget")
+            })
+            .expect("Widget constructs edge");
+        assert_eq!(edge.target_node_id, Some(target));
+        assert_eq!(
+            edge.bind_method.as_deref(),
+            Some("constructs_type_singleton")
+        );
     }
 
     #[test]
