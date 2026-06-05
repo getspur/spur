@@ -14,6 +14,18 @@
   source: (string
     (string_fragment) @import.path)) @import
 
+(export_statement
+  (export_clause
+    (export_specifier
+      name: (identifier) @reexport.name))
+  source: (string
+    (string_fragment) @reexport.path)) @reexport
+
+(export_statement
+  "*" @reexport.name
+  source: (string
+    (string_fragment) @reexport.path)) @reexport
+
 (call_expression
   function: [
     (identifier) @call.name
