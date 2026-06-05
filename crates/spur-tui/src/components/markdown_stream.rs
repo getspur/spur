@@ -701,6 +701,96 @@ fn truncate_to_width(value: &str, max_width: usize) -> String {
     out
 }
 
+/// Minimum content width a column may be shrunk to when budgeting a grid to a
+/// terminal width. Below this, the records layout is used instead.
+#[allow(dead_code)]
+const MIN_COL_WIDTH: usize = 4;
+
+/// Wrap `cell` into physical lines each no wider than `width` display columns.
+/// Breaks on ASCII spaces first; a single token wider than `width` is hard-split
+/// on char boundaries by display width (never mid-emoji, never mid-wide-char).
+#[allow(dead_code)]
+fn wrap_cell_to_width(cell: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    if display_width(cell) <= width {
+        return vec![cell.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for word in cell.split(' ') {
+        let word_w = display_width(word);
+        let sep = usize::from(!current.is_empty());
+        if current_w + sep + word_w <= width {
+            if sep == 1 {
+                current.push(' ');
+                current_w += 1;
+            }
+            current.push_str(word);
+            current_w += word_w;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        if word_w <= width {
+            current.push_str(word);
+            current_w = word_w;
+        } else {
+            for ch in word.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_w + cw > width && !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    current_w = 0;
+                }
+                current.push(ch);
+                current_w += cw;
+            }
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Shrink column widths so the rendered grid fits within `render_width` display
+/// columns, reducing the widest column first down to `MIN_COL_WIDTH`. Returns
+/// `None` when even a floor-width grid cannot fit — the caller should then use
+/// the records layout.
+#[allow(dead_code)]
+fn budget_column_widths(widths: &[usize], render_width: usize) -> Option<Vec<usize>> {
+    let col_count = widths.len();
+    if col_count == 0 {
+        return Some(Vec::new());
+    }
+    let chrome = col_count * 3 + 1;
+    let avail = render_width.checked_sub(chrome)?;
+    if avail < col_count * MIN_COL_WIDTH {
+        return None;
+    }
+    let mut out = widths.to_vec();
+    let mut total: usize = out.iter().sum();
+    while total > avail {
+        // Reduce the widest column (ties → lowest index) by one column.
+        let (idx, w) = out
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|(ai, aw), (bi, bw)| aw.cmp(bw).then(bi.cmp(ai)))
+            .expect("col_count > 0");
+        if w <= MIN_COL_WIDTH {
+            break; // avail >= col_count*MIN_COL_WIDTH guarantees we already fit
+        }
+        out[idx] = w - 1;
+        total -= 1;
+    }
+    Some(out)
+}
+
 /// Accumulated-text markdown renderer.
 #[derive(Debug, Clone)]
 pub struct MarkdownStream {
@@ -1579,6 +1669,75 @@ mod stream_item_tests {
     }
 
     // ── Table-wrapping tests ────────────────────────────────────────────
+
+    #[test]
+    fn wrap_cell_to_width_breaks_on_spaces() {
+        // "much longer value" wrapped to width 10 → ["much", "longer", "value"]
+        let lines = wrap_cell_to_width("much longer value", 10);
+        assert_eq!(lines, vec!["much", "longer", "value"]);
+    }
+
+    #[test]
+    fn wrap_cell_to_width_packs_multiple_words_per_line() {
+        // width 12 fits "much longer" (11) then "value"
+        let lines = wrap_cell_to_width("much longer value", 12);
+        assert_eq!(lines, vec!["much longer", "value"]);
+    }
+
+    #[test]
+    fn wrap_cell_to_width_hard_splits_overlong_token() {
+        // A single unbreakable token longer than width is split by display width.
+        let lines = wrap_cell_to_width("add_pending_edge(&edge)", 8);
+        assert!(lines.len() >= 3, "got: {lines:?}");
+        assert!(
+            lines.iter().all(|l| display_width(l) <= 8),
+            "got: {lines:?}"
+        );
+        assert_eq!(lines.concat(), "add_pending_edge(&edge)");
+    }
+
+    #[test]
+    fn wrap_cell_to_width_is_unicode_width_aware() {
+        // ✅ is display width 2; width 2 budget holds exactly one per line.
+        let lines = wrap_cell_to_width("✅✅✅", 2);
+        assert_eq!(lines, vec!["✅", "✅", "✅"]);
+    }
+
+    #[test]
+    fn wrap_cell_to_width_short_value_is_single_line() {
+        assert_eq!(wrap_cell_to_width("short", 20), vec!["short"]);
+    }
+
+    #[test]
+    fn budget_column_widths_noop_when_under_budget() {
+        // Two columns of content width 5 + chrome (2*3+1=7) = 17 ≤ 40 → unchanged.
+        let widths = vec![5usize, 5];
+        assert_eq!(budget_column_widths(&widths, 40), Some(vec![5, 5]));
+    }
+
+    #[test]
+    fn budget_column_widths_shrinks_widest_first() {
+        // widths [30, 5], render_width 20 → chrome 7, avail 13.
+        // Widest (col 0) shrinks until total ≤ 13: [8, 5].
+        let widths = vec![30usize, 5];
+        let out = budget_column_widths(&widths, 20).expect("fits at floor");
+        assert_eq!(out.iter().sum::<usize>(), 13);
+        assert!(
+            out[0] >= MIN_COL_WIDTH && out[1] >= MIN_COL_WIDTH,
+            "got: {out:?}"
+        );
+        assert!(
+            out[1] == 5,
+            "narrow column should not shrink below its content: {out:?}"
+        );
+    }
+
+    #[test]
+    fn budget_column_widths_returns_none_when_floor_cannot_fit() {
+        // 3 columns need 3*MIN_COL_WIDTH + chrome(10) at minimum; width 12 is too small.
+        let widths = vec![10usize, 10, 10];
+        assert_eq!(budget_column_widths(&widths, 12), None);
+    }
 
     #[test]
     fn gfm_table_is_wrapped_and_preserves_line_boundaries() {
