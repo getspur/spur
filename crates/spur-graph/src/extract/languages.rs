@@ -13,6 +13,7 @@ pub(crate) struct LanguageConfig {
     pub(crate) queries: &'static [(&'static str, &'static str)],
     pub(crate) definition_kind_map: &'static [(&'static str, NodeKind)],
     pub(crate) relation_kind_map: Option<&'static [(&'static str, RelationKind)]>,
+    pub(crate) preserve_bare_import_path: bool,
     pub(crate) is_method: Option<fn(Node<'_>) -> bool>,
 }
 
@@ -352,6 +353,7 @@ pub(crate) fn rust_config() -> LanguageConfig {
             ("definition.macro", NodeKind::Macro),
         ],
         relation_kind_map: None,
+        preserve_bare_import_path: false,
         is_method: Some(has_impl_ancestor),
     }
 }
@@ -373,6 +375,7 @@ pub(crate) fn python_config() -> LanguageConfig {
             ("definition.constant", NodeKind::Constant),
         ],
         relation_kind_map: None,
+        preserve_bare_import_path: true,
         is_method: Some(has_class_definition_ancestor),
     }
 }
@@ -425,6 +428,7 @@ fn typescript_config_for(
         queries,
         definition_kind_map: TYPESCRIPT_DEFINITION_KIND_MAP,
         relation_kind_map: None,
+        preserve_bare_import_path: false,
         is_method: None,
     }
 }
@@ -469,6 +473,7 @@ pub(crate) fn cpp_config() -> LanguageConfig {
             ("definition.constant", NodeKind::Constant),
         ],
         relation_kind_map: None,
+        preserve_bare_import_path: false,
         is_method: Some(has_cpp_class_ancestor),
     }
 }
@@ -490,6 +495,7 @@ pub(crate) fn markdown_config() -> LanguageConfig {
         ],
         definition_kind_map: &[("definition.section", NodeKind::Section)],
         relation_kind_map: Some(&[("import", RelationKind::Links)]),
+        preserve_bare_import_path: false,
         is_method: None,
     }
 }
@@ -722,8 +728,31 @@ pub(crate) fn emit_edges(
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: imported,
-                        import_path: import_path_for_edge(&import_paths),
+                        import_path: import_path_for_edge(
+                            &import_paths,
+                            config.preserve_bare_import_path,
+                        ),
                         relation,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
+                    });
+                }
+            }
+            "reexport" => {
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                let import_paths =
+                    contained_capture_text(capture, source, captures, "reexport.path");
+                for imported in contained_capture_text(capture, source, captures, "reexport.name") {
+                    builder.reexport_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: imported,
+                        import_path: import_path_for_edge(
+                            &import_paths,
+                            config.preserve_bare_import_path,
+                        ),
+                        relation: RelationKind::Imports,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: None,
@@ -1931,16 +1960,16 @@ fn contained_capture_text(
         .collect()
 }
 
-fn import_path_for_edge(import_paths: &[String]) -> Option<String> {
+fn import_path_for_edge(import_paths: &[String], preserve_bare: bool) -> Option<String> {
     import_paths
         .iter()
-        .filter_map(|path| normalize_import_path(path))
+        .filter_map(|path| normalize_import_path(path, preserve_bare))
         .next()
 }
 
-fn normalize_import_path(path: &str) -> Option<String> {
+fn normalize_import_path(path: &str, preserve_bare: bool) -> Option<String> {
     let path = path.trim();
-    if path.is_empty() || is_bare_single_segment_import(path) {
+    if path.is_empty() || (!preserve_bare && is_bare_single_segment_import(path)) {
         return None;
     }
     Some(path.to_owned())
