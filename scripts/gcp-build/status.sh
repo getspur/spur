@@ -9,11 +9,11 @@ source "$SCRIPT_DIR/config.env"
 echo "== Project: $GCP_PROJECT  Zone: $GCP_ZONE =="
 echo
 echo "-- VM --"
-gcloud compute instances list --filter="name=$VM_NAME" \
+gcloud compute instances list --project="$GCP_PROJECT" --filter="name=$VM_NAME" \
     --format='table(name,zone.basename(),status,machineType.basename(),scheduling.provisioningModel)' 2>/dev/null || true
 echo
 echo "-- Cache disk --"
-gcloud compute disks list --filter="name=$CACHE_DISK" \
+gcloud compute disks list --project="$GCP_PROJECT" --filter="name=$CACHE_DISK" \
     --format='table(name,zone.basename(),sizeGb,status,users)' 2>/dev/null || true
 echo
 echo "-- sccache bucket --"
