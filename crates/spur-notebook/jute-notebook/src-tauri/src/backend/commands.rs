@@ -1,13 +1,13 @@
 //! High-level APIs for doing operations over [`KernelConnection`] objects.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
     wire_protocol::{
-        ClearOutput, DisplayData, ErrorReply, ExecuteReply, ExecuteRequest, ExecuteResult,
-        InterruptReply, InterruptRequest, KernelInfoReply, KernelInfoRequest, KernelMessage,
-        KernelMessageType, KernelStatus, Reply, Status, Stream,
+        ClearOutput, CommMessage, CommOpen, DisplayData, ErrorReply, ExecuteReply, ExecuteRequest,
+        ExecuteResult, InterruptReply, InterruptRequest, KernelInfoReply, KernelInfoRequest,
+        KernelMessage, KernelMessageType, KernelStatus, Reply, Status, Stream,
     },
     KernelConnection,
 };
@@ -29,7 +29,7 @@ pub async fn kernel_info(conn: &KernelConnection) -> Result<KernelInfoReply, Err
 }
 
 /// Events that can be received while running a cell.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case", tag = "event", content = "data")]
 pub enum RunCellEvent {
     /// Cell execution was submitted to the kernel.
@@ -61,6 +61,15 @@ pub enum RunCellEvent {
     /// Clear the output of a cell.
     ClearOutput(ClearOutput),
 
+    /// Open a comm to the frontend for interactive widgets.
+    CommOpen(CommOpen),
+
+    /// Send a one-way comm message to the frontend.
+    CommMsg(CommMessage),
+
+    /// Close a frontend comm.
+    CommClose(CommMessage),
+
     /// Error if the cell raised an exception.
     Error(ErrorReply),
 
@@ -77,7 +86,7 @@ pub enum RunCellEvent {
 }
 
 /// Coarse compile/run phase for compiled notebook cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum CompilePhase {
@@ -202,6 +211,34 @@ async fn send_compile_progress(
     }
 }
 
+fn kernel_buffers_to_wire(buffers: Vec<bytes::Bytes>) -> Vec<Vec<u8>> {
+    buffers.into_iter().map(|buffer| buffer.to_vec()).collect()
+}
+
+fn comm_run_cell_event_from_message(msg: KernelMessage) -> Result<Option<RunCellEvent>, Error> {
+    match msg.header.msg_type {
+        KernelMessageType::CommOpen => {
+            let msg = msg.into_typed::<CommOpen>()?;
+            let mut content = msg.content;
+            content.buffers = kernel_buffers_to_wire(msg.buffers);
+            Ok(Some(RunCellEvent::CommOpen(content)))
+        }
+        KernelMessageType::CommMsg => {
+            let msg = msg.into_typed::<CommMessage>()?;
+            let mut content = msg.content;
+            content.buffers = kernel_buffers_to_wire(msg.buffers);
+            Ok(Some(RunCellEvent::CommMsg(content)))
+        }
+        KernelMessageType::CommClose => {
+            let msg = msg.into_typed::<CommMessage>()?;
+            let mut content = msg.content;
+            content.buffers = kernel_buffers_to_wire(msg.buffers);
+            Ok(Some(RunCellEvent::CommClose(content)))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Run a code cell, returning the events received in the meantime.
 pub async fn run_cell(
     conn: &KernelConnection,
@@ -322,6 +359,13 @@ pub async fn run_cell_with_mode(
                     let msg = msg.into_typed::<ClearOutput>()?;
                     _ = tx.send(RunCellEvent::ClearOutput(msg.content)).await;
                 }
+                KernelMessageType::CommOpen
+                | KernelMessageType::CommMsg
+                | KernelMessageType::CommClose => {
+                    if let Some(event) = comm_run_cell_event_from_message(msg)? {
+                        _ = tx.send(event).await;
+                    }
+                }
                 KernelMessageType::Error => {
                     let msg = msg.into_typed::<ErrorReply>()?;
                     _ = tx.send(RunCellEvent::Error(msg.content)).await;
@@ -368,6 +412,7 @@ pub async fn interrupt(conn: &KernelConnection) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn compile_phase_tracker_emits_compiling_once_for_compile_modes() {
@@ -451,5 +496,50 @@ mod tests {
     fn on_compile_unit_suppressed_for_none_mode() {
         let mut tracker = CompilePhaseTracker::new(CompileProgressMode::None);
         assert!(tracker.on_compile_unit("smawk".to_string()).is_none());
+    }
+
+    #[test]
+    fn comm_open_message_dispatches_run_cell_event_with_buffers() {
+        let mut message = KernelMessage::new(
+            KernelMessageType::CommOpen,
+            json!({
+                "comm_id": "comm-1",
+                "target_name": "jupyter.widget",
+                "data": { "state": { "value": 42 } }
+            }),
+        )
+        .into_json();
+        message.buffers = vec![
+            bytes::Bytes::from_static(b"first-buffer"),
+            bytes::Bytes::from(vec![0, 1, 2, 3]),
+        ];
+
+        let event = comm_run_cell_event_from_message(message)
+            .expect("comm_open should deserialize")
+            .expect("comm_open should produce an event");
+
+        match event {
+            RunCellEvent::CommOpen(open) => {
+                assert_eq!(open.comm_id, "comm-1");
+                assert_eq!(open.target_name, "jupyter.widget");
+                assert_eq!(open.data, json!({ "state": { "value": 42 } }));
+                assert_eq!(
+                    open.buffers,
+                    vec![b"first-buffer".to_vec(), vec![0, 1, 2, 3]]
+                );
+            }
+            other => panic!("expected CommOpen event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_comm_message_does_not_dispatch_comm_event() {
+        let message = KernelMessage::new(
+            KernelMessageType::Stream,
+            json!({ "name": "stdout", "text": "hello\n" }),
+        )
+        .into_json();
+
+        assert!(comm_run_cell_event_from_message(message).unwrap().is_none());
     }
 }

@@ -1706,6 +1706,7 @@ async fn drain_port_bootstrap_events(
             | RunCellEvent::DisplayData(_)
             | RunCellEvent::UpdateDisplayData(_)
             | RunCellEvent::ClearOutput(_) => {}
+            RunCellEvent::CommOpen(_) | RunCellEvent::CommMsg(_) | RunCellEvent::CommClose(_) => {}
         }
     }
 
