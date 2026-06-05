@@ -26,7 +26,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v7";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-05-singleton-crate-safety-v6";
+pub const RESOLVER_VERSION: &str = "2026-06-05-references-crate-safety-v7";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1073,7 +1073,8 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                     "spur-graph: ambiguous cross-file target_label; leaving unresolved"
                 );
                 edge.target_stable_symbol_id = None;
-            } else if edge.relation == RelationKind::Calls
+            } else if (edge.relation == RelationKind::Calls
+                || edge.relation == RelationKind::References)
                 && ((resolved.symbol_kind == "method"
                     && !same_directory_path(&resolved.file_path, source_file_path))
                     || (resolved.symbol_kind == "function"
