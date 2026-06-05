@@ -51,11 +51,11 @@ gcloud compute instances create "$VM_NAME" \
     --image-family="$VM_IMAGE_FAMILY" \
     --image-project="$VM_IMAGE_PROJECT" \
     --boot-disk-size="${VM_BOOT_DISK_SIZE_GB}GB" \
-    --boot-disk-type=pd-balanced \
+    --boot-disk-type="$VM_BOOT_DISK_TYPE" \
     --disk="name=$CACHE_DISK,device-name=cargo-cache,mode=rw,boot=no,auto-delete=no" \
     --service-account="$BUILD_SA_EMAIL" \
     --scopes=cloud-platform \
-    --metadata="sccache-bucket=$SCCACHE_BUCKET,enable-oslogin=TRUE" \
+    --metadata="sccache-bucket=$SCCACHE_BUCKET,enable-oslogin=TRUE,direct-ssh-port=$SPUR_DIRECT_SSH_PORT" \
     --metadata-from-file="startup-script=$SCRIPT_DIR/startup.sh"
 
 log "Waiting for SSH..."
