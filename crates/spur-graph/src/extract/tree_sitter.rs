@@ -1245,7 +1245,31 @@ pub(crate) fn function_singleton_safe(src_file: &str, tgt_file: &str) -> bool {
     }
     let src_crate = path_scope(src_file);
     let tgt_crate = path_scope(tgt_file);
-    src_crate.is_some() && src_crate == tgt_crate
+    if src_crate.is_none() || src_crate != tgt_crate {
+        return false;
+    }
+    // Same crate scope is not enough: one crates/<name> tree can hold multiple
+    // languages (spur-notebook = Rust rest-table-gateway + TS jute-notebook).
+    // A call never crosses a language boundary, so require the same family.
+    matches!(
+        (language_family(src_file), language_family(tgt_file)),
+        (Some(a), Some(b)) if a == b
+    )
+}
+
+fn language_family(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit('.').next()?;
+    if ext == path {
+        return None;
+    }
+    Some(match ext {
+        "rs" => "rust",
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
+        "py" | "pyi" => "python",
+        "cpp" | "cc" | "cxx" | "c" | "h" | "hpp" | "hxx" => "cpp",
+        "md" | "markdown" => "markdown",
+        _ => return None,
+    })
 }
 
 fn path_crate(path: &str) -> Option<&str> {
@@ -2020,6 +2044,22 @@ mod tests {
     }
 
     #[test]
+    fn function_singleton_safe_cross_language_blocks() {
+        assert!(!function_singleton_safe(
+            "crates/spur-notebook/jute-notebook/x.ts",
+            "crates/spur-notebook/rest-table-gateway/y.rs"
+        ));
+    }
+
+    #[test]
+    fn function_singleton_safe_same_language_family_allows() {
+        assert!(function_singleton_safe(
+            "crates/foo/src/a.ts",
+            "crates/foo/web/b.tsx"
+        ));
+    }
+
+    #[test]
     fn singleton_function_call_respects_crate_safety() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(dir.path().join("crates/source/src")).expect("source crate dir");
@@ -2139,6 +2179,40 @@ impl ExternalPanel {
         let std_named = call("clone");
         assert_eq!(std_named.target_node_id, None);
         assert_eq!(std_named.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn singleton_function_call_blocks_cross_language_same_crate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/mixed/web")).expect("mixed web dir");
+        std::fs::create_dir_all(dir.path().join("crates/mixed/src")).expect("mixed src dir");
+        std::fs::write(
+            dir.path().join("crates/mixed/web/app.ts"),
+            r#"
+export function caller() {
+    rust_only_helper();
+}
+"#,
+        )
+        .expect("write mixed ts");
+        std::fs::write(
+            dir.path().join("crates/mixed/src/lib.rs"),
+            "pub fn rust_only_helper() {}\n",
+        )
+        .expect("write mixed rust");
+
+        let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+        let call = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Calls
+                    && edge.target_label.as_deref() == Some("rust_only_helper")
+            })
+            .expect("missing call edge for rust_only_helper");
+
+        assert_eq!(call.target_node_id, None);
+        assert_eq!(call.bind_method.as_deref(), None);
     }
 
     #[test]
