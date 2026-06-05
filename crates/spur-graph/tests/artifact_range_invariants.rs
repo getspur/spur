@@ -112,3 +112,39 @@ pub fn caller() {
     assert_eq!(edge.target_stable_symbol_id, None);
     assert_eq!(edge.bind_method.as_deref(), None);
 }
+
+#[test]
+fn artifact_rebind_preserves_cross_crate_singleton_reference_unresolved() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("crates/source/src")).expect("source crate dir");
+    std::fs::create_dir_all(dir.path().join("crates/callee/src")).expect("callee crate dir");
+    std::fs::write(
+        dir.path().join("crates/source/src/lib.rs"),
+        r#"
+pub fn caller(items: Vec<i32>) {
+    let _ = items.iter().copied().map(cross_crate_mapper).collect::<Vec<_>>();
+}
+"#,
+    )
+    .expect("write source lib");
+    std::fs::write(
+        dir.path().join("crates/callee/src/lib.rs"),
+        "pub fn cross_crate_mapper(value: i32) -> i32 { value }\n",
+    )
+    .expect("write callee lib");
+
+    let facts = build_facts(dir.path(), None).expect("build facts").0;
+    let artifact = artifact_from_facts(&facts, dir.path()).expect("assemble artifact");
+
+    let edge = artifact
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == RelationKind::References
+                && edge.target_label.as_deref() == Some("cross_crate_mapper")
+        })
+        .expect("cross-crate reference edge");
+
+    assert_eq!(edge.target_stable_symbol_id, None);
+    assert_eq!(edge.bind_method.as_deref(), None);
+}
