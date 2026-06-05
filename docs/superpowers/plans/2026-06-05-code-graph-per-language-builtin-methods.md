@@ -29,11 +29,21 @@ that language's list. The generic resolver keeps **zero** hardcoded language voc
 (Tier-1 T1.d.2; Rust seed machinery `typed_bindings_by_scope`/`receiver_type_scope_text` already
 exists) and external-symbol modeling (Tier-2) — is explicitly **out of scope** here.
 
-📌 **Golden artifacts may change — drops-only.** The cpp/python/typescript corpora carry v8
-`method_crate_singleton` binds. Adding each language's builtin list may now **exclude** a corpus bind
-whose method name is a builtin (a v8 over-bind — dropping it is a *correctness gain*). Any golden
-change MUST be **drops-only on `calls` edges** (resolved target → null, `bind_method` removed); if
-anything else changes, STOP and emit `risk`. (The Rust corpus is unaffected — same list as v8.)
+📌 **Golden artifacts: expect ZERO change** (audited). The only `method_crate_singleton` binds in the
+non-rust corpora are `normalized` (python), `boot` (ts), `Initialize` (cpp) — none are builtins in
+their language, so all stay bound. The one name that would otherwise flip is python `send` (in the
+Rust list, called as `client.send()` in python_corpus) — **kept excluded by adding `send`/`recv` to
+the Python list**, so it stays rebind-resolved exactly as today. With those two names present, the
+re-bless produces **no fixture diff at all**. If ANY golden changes, STOP and emit `risk` — it means
+a language list is still missing a name in the Rust set (re-run the cross-list audit). (Rust corpus
+unaffected — same list as v8.)
+
+> **Why the first attempt escalated (read this):** the prior worker correctly self-escalated a
+> `risk` signal because, without `send` in the Python list, the python_corpus `send` edge gained a
+> `method_crate_singleton` stamp — a non-drops-only golden delta. That was the plan's gap, not the
+> worker's error. The fix is the `send`/`recv` additions above; everything else in the prior diff
+> (the 4 consts, the `Language::builtin_method_names` accessor, the resolver swap, the two tests,
+> the v10 bump) was correct and should be reproduced.
 
 ⚠️ **`tests/incremental_ingest.rs` is FLAKY** — do NOT run it, do NOT fix it.
 
@@ -70,7 +80,10 @@ anything else changes, STOP and emit `risk`. (The Rust corpus is unaffected — 
   - `PYTHON_BUILTIN_METHODS` — e.g. `append, extend, insert, remove, pop, index, count, sort,
     reverse, copy, clear, keys, values, items, get, update, setdefault, popitem, add, discard,
     union, intersection, join, split, rsplit, strip, lstrip, rstrip, replace, format, encode,
-    decode, startswith, endswith, find, lower, upper, read, write, close` (finalize + sort)
+    decode, startswith, endswith, find, lower, upper, read, write, close, send, recv` (finalize +
+    sort). **`send`/`recv` are required** — they are in the Rust list and are genuine Python
+    generator/coroutine/socket methods; omitting them un-protects the python_corpus `client.send()`
+    call (a known builtin name) and breaks the zero-golden-change expectation below.
   - `CPP_BUILTIN_METHODS` — e.g. `size, length, begin, end, cbegin, cend, rbegin, rend, push_back,
     pop_back, emplace_back, front, back, at, data, c_str, empty, clear, insert, erase, find, count,
     contains, reserve, resize, capacity, assign, swap, first, second, str, substr, append, compare`
@@ -94,9 +107,9 @@ anything else changes, STOP and emit `risk`. (The Rust corpus is unaffected — 
       → still resolves with `bind_method="method_crate_singleton"`. (Use `crates/foo/web/*.ts` paths.)
 - [ ] The existing v8 test `method_crate_singleton_recovers_cross_module_same_crate` (Rust, `clone`
       negative) still passes unchanged.
-- [ ] Goldens re-blessed if changed; diff is **drops-only on `calls` edges** (target→null,
-      `bind_method` removed) in python/typescript/cpp corpora; rust corpus unchanged; if anything else
-      changes → STOP and emit `risk`.
+- [ ] Goldens: **expect zero fixture diff** after re-bless (with `send`/`recv` in the Python list, per
+      the audit above). If ANY golden changes → STOP and emit `risk` (a language list is missing a
+      Rust-set name; re-run the cross-list audit before proceeding).
 - [ ] `RESOLVER_VERSION` bumped to `"2026-06-05-per-language-builtins-v10"`.
 - [ ] Full `-p spur-graph` suite green except flaky `incremental_ingest`; clippy `-D warnings` clean.
 - [ ] **Report:** which goldens changed (and that each change is a drops-only builtin exclusion), the
