@@ -25,6 +25,26 @@ mountpoint -q "$CACHE_MNT" || mount "$CACHE_DEV" "$CACHE_MNT"
 # Pull bucket name from instance metadata.
 SCCACHE_GCS_BUCKET=$(curl -fsS -H "Metadata-Flavor: Google" \
     http://metadata.google.internal/computeMetadata/v1/instance/attributes/sccache-bucket 2>/dev/null || echo "")
+DIRECT_SSH_PORT=$(curl -fsS -H "Metadata-Flavor: Google" \
+    http://metadata.google.internal/computeMetadata/v1/instance/attributes/direct-ssh-port 2>/dev/null || echo "")
+[[ -z "$DIRECT_SSH_PORT" ]] && DIRECT_SSH_PORT=443
+if [[ ! "$DIRECT_SSH_PORT" =~ ^[0-9]+$ ]]; then
+    echo "Invalid direct-ssh-port metadata: $DIRECT_SSH_PORT" >&2
+    exit 1
+fi
+
+# Keep GCE/IAP-compatible sshd on tcp:22, and add a direct-sync port that is
+# less likely to be blocked by workstation networks. This is idempotent across
+# spot reboots and recreate cycles.
+if [[ "$DIRECT_SSH_PORT" != "22" ]]; then
+    mkdir -p /etc/ssh/sshd_config.d
+    cat >/etc/ssh/sshd_config.d/99-spur-direct-ssh.conf <<EOF
+Port 22
+Port $DIRECT_SSH_PORT
+EOF
+    sshd -t
+    systemctl reload ssh || systemctl restart ssh
+fi
 
 # System deps.
 export DEBIAN_FRONTEND=noninteractive
