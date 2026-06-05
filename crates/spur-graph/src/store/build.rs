@@ -26,7 +26,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v8";
 pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-05-import-path-resolver-v14";
+pub const RESOLVER_VERSION: &str = "2026-06-05-reexport-following-v15";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {

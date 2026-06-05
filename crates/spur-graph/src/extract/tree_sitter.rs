@@ -51,6 +51,7 @@ pub(crate) struct FactBuilder<'a> {
     next_file: u64,
     next_span: u64,
     pub(crate) pending_edges: Vec<PendingEdge>,
+    pub(crate) reexport_edges: Vec<PendingEdge>,
     symbol_index: BTreeMap<String, Vec<NodeId>>,
     edge_index: HashSet<EdgeDedupKey>,
     qualified_symbol_index: BTreeMap<String, Vec<NodeId>>,
@@ -130,11 +131,15 @@ struct PendingResolutionIndexes<'a> {
     singleton_symbols_by_label: &'a HashMap<String, NodeId>,
     ambiguous_symbols_by_label: &'a HashMap<String, usize>,
     files_by_label: &'a HashMap<String, NodeId>,
+    pending_imports_by_source: &'a HashMap<NodeId, Vec<PendingEdge>>,
     file_by_id: &'a HashMap<NodeId, &'a str>,
     node_kind_by_id: &'a HashMap<NodeId, NodeKind>,
     enclosing_scope_by_id: &'a HashMap<NodeId, String>,
     qualified_name_by_id: &'a HashMap<NodeId, String>,
 }
+
+/// Maximum import re-export hops followed before leaving the edge unresolved.
+const MAX_REEXPORT_FOLLOW_DEPTH: usize = 8;
 
 #[derive(Debug, Error)]
 pub enum ExtractError {
@@ -262,6 +267,7 @@ impl<'a> FactBuilder<'a> {
             next_file: 1,
             next_span: 1,
             pending_edges: Vec::new(),
+            reexport_edges: Vec::new(),
             symbol_index: BTreeMap::new(),
             edge_index: HashSet::new(),
             qualified_symbol_index: BTreeMap::new(),
@@ -523,10 +529,21 @@ impl<'a> FactBuilder<'a> {
         };
         let qualified_name_by_id = qualified_name_by_id_from_index(&qualified_symbols_by_name);
         let pending = std::mem::take(&mut self.pending_edges);
+        let reexports = std::mem::take(&mut self.reexport_edges);
+        let mut pending_imports_by_source: HashMap<NodeId, Vec<PendingEdge>> = HashMap::new();
+        for edge in pending.iter().chain(reexports.iter()) {
+            if edge.relation == RelationKind::Imports {
+                pending_imports_by_source
+                    .entry(edge.source)
+                    .or_default()
+                    .push(edge.clone());
+            }
+        }
         let indexes = PendingResolutionIndexes {
             singleton_symbols_by_label: &singleton_symbols_by_label,
             ambiguous_symbols_by_label: &ambiguous_symbols_by_label,
             files_by_label: &files_by_label,
+            pending_imports_by_source: &pending_imports_by_source,
             file_by_id: &file_by_id,
             node_kind_by_id: &node_kind_by_id,
             enclosing_scope_by_id: &enclosing_scope_by_id,
@@ -768,36 +785,100 @@ fn resolve_bare_pending_edge(
     }
 
     if edge.relation == RelationKind::Imports {
-        let path_candidates = module_path_resolution_candidates(builder, edge, indexes);
-        match path_candidates.as_slice() {
-            [target] if *target != edge.source => {
-                builder.add_pending_edge_with_bind_method(edge, Some(*target), Some("import_path"));
-                return;
+        let python_bare_import_path = is_python_bare_import_path(edge, indexes);
+        if !python_bare_import_path {
+            let path_candidates = module_path_resolution_candidates(builder, edge, indexes);
+            match path_candidates.as_slice() {
+                [target] if *target != edge.source => {
+                    builder.add_pending_edge_with_bind_method(
+                        edge,
+                        Some(*target),
+                        Some("import_path"),
+                    );
+                    return;
+                }
+                candidates if candidates.len() > 1 => {
+                    *ambiguous_unresolved += 1;
+                    tracing::debug!(
+                        target_label = %edge.target_name,
+                        import_path = ?edge.import_path,
+                        candidates = candidates.len(),
+                        "spur-graph: ambiguous module-path import target; leaving unresolved"
+                    );
+                    builder.add_pending_edge(edge, None);
+                    return;
+                }
+                _ => {}
             }
-            candidates if candidates.len() > 1 => {
-                *ambiguous_unresolved += 1;
-                tracing::debug!(
-                    target_label = %edge.target_name,
-                    import_path = ?edge.import_path,
-                    candidates = candidates.len(),
-                    "spur-graph: ambiguous module-path import target; leaving unresolved"
-                );
-                builder.add_pending_edge(edge, None);
+        }
+
+        let fallback_edge;
+        let resolution_edge = if python_bare_import_path {
+            fallback_edge = Some(edge_without_import_path(edge));
+            fallback_edge.as_ref().expect("fallback edge")
+        } else {
+            edge
+        };
+        let candidates = if edge.import_path.is_some() && !python_bare_import_path {
+            type_like_import_resolution_candidates(builder, edge, indexes)
+        } else {
+            import_resolution_candidates(builder, resolution_edge, indexes)
+        };
+        match candidates.as_slice() {
+            [target] if *target != edge.source => {
+                builder.add_pending_edge(resolution_edge, Some(*target));
                 return;
             }
             _ => {}
         }
 
-        let candidates = if edge.import_path.is_some() {
-            type_like_import_resolution_candidates(builder, edge, indexes)
-        } else {
-            import_resolution_candidates(builder, edge, indexes)
-        };
-        match candidates.as_slice() {
-            [target] if *target != edge.source => {
-                builder.add_pending_edge(edge, Some(*target));
+        match reexport_resolution_candidates(builder, edge, indexes) {
+            ReexportFollowResult::Resolved(candidates) => match candidates.as_slice() {
+                [target] if *target != edge.source => {
+                    builder.add_pending_edge_with_bind_method(
+                        edge,
+                        Some(*target),
+                        Some("import_path"),
+                    );
+                    return;
+                }
+                candidates if candidates.len() > 1 => {
+                    *ambiguous_unresolved += 1;
+                    tracing::debug!(
+                        target_label = %edge.target_name,
+                        import_path = ?edge.import_path,
+                        candidates = candidates.len(),
+                        "spur-graph: ambiguous re-export import target; leaving unresolved"
+                    );
+                    add_pending_import_without_python_bare_path(
+                        builder,
+                        edge,
+                        None,
+                        python_bare_import_path,
+                    );
+                    return;
+                }
+                _ => {}
+            },
+            ReexportFollowResult::Blocked => {
+                *ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = %edge.target_name,
+                    import_path = ?edge.import_path,
+                    "spur-graph: blocked re-export import target; leaving unresolved"
+                );
+                add_pending_import_without_python_bare_path(
+                    builder,
+                    edge,
+                    None,
+                    python_bare_import_path,
+                );
                 return;
             }
+            ReexportFollowResult::NoMatch => {}
+        }
+
+        match candidates.as_slice() {
             candidates if candidates.len() > 1 => {
                 *ambiguous_unresolved += 1;
                 tracing::debug!(
@@ -805,11 +886,11 @@ fn resolve_bare_pending_edge(
                     candidates = candidates.len(),
                     "spur-graph: ambiguous import pending edge target; leaving unresolved"
                 );
-                builder.add_pending_edge(edge, None);
+                builder.add_pending_edge(resolution_edge, None);
                 return;
             }
             _ => {
-                builder.add_pending_edge(edge, None);
+                builder.add_pending_edge(resolution_edge, None);
                 return;
             }
         }
@@ -1382,6 +1463,456 @@ fn narrow_import_candidates(
     candidates.sort_by_key(|id| id.get());
     candidates.dedup();
     candidates
+}
+
+fn is_python_bare_import_path(edge: &PendingEdge, indexes: &PendingResolutionIndexes<'_>) -> bool {
+    let Some(import_path) = edge.import_path.as_deref() else {
+        return false;
+    };
+    if !is_bare_single_segment_import_path(import_path) {
+        return false;
+    }
+    indexes
+        .file_by_id
+        .get(&edge.source)
+        .and_then(|source_file| import_language_family(source_file))
+        == Some(ImportLanguageFamily::Python)
+}
+
+fn is_bare_single_segment_import_path(path: &str) -> bool {
+    let path = path.trim();
+    !path.is_empty()
+        && !path.starts_with('.')
+        && !path.contains("::")
+        && !path.contains('.')
+        && !path.contains('/')
+        && !path.contains('\\')
+        && !path.contains('{')
+}
+
+fn add_pending_import_without_python_bare_path(
+    builder: &mut FactBuilder<'_>,
+    edge: &PendingEdge,
+    target: Option<NodeId>,
+    scrub_import_path: bool,
+) {
+    if scrub_import_path {
+        let fallback_edge = edge_without_import_path(edge);
+        builder.add_pending_edge(&fallback_edge, target);
+    } else {
+        builder.add_pending_edge(edge, target);
+    }
+}
+
+fn edge_without_import_path(edge: &PendingEdge) -> PendingEdge {
+    let mut edge = edge.clone();
+    edge.import_path = None;
+    edge
+}
+
+enum ReexportFollowResult {
+    NoMatch,
+    Resolved(Vec<NodeId>),
+    Blocked,
+}
+
+fn reexport_resolution_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> ReexportFollowResult {
+    let mut visited = HashSet::new();
+    reexport_resolution_candidates_at_depth(builder, edge, indexes, 0, &mut visited)
+}
+
+fn reexport_resolution_candidates_at_depth(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+    depth: usize,
+    visited: &mut HashSet<(NodeId, String)>,
+) -> ReexportFollowResult {
+    if depth > MAX_REEXPORT_FOLLOW_DEPTH {
+        return ReexportFollowResult::Blocked;
+    }
+    if edge
+        .import_path
+        .as_deref()
+        .is_none_or(|path| path.trim().is_empty())
+    {
+        return ReexportFollowResult::NoMatch;
+    }
+    let sources = reexport_source_candidates(builder, edge, indexes);
+    follow_reexport_sources(
+        builder,
+        &sources,
+        &edge.target_name,
+        indexes,
+        depth,
+        visited,
+    )
+}
+
+fn follow_reexport_sources(
+    builder: &FactBuilder<'_>,
+    sources: &[NodeId],
+    target_name: &str,
+    indexes: &PendingResolutionIndexes<'_>,
+    depth: usize,
+    visited: &mut HashSet<(NodeId, String)>,
+) -> ReexportFollowResult {
+    if sources.is_empty() {
+        return ReexportFollowResult::NoMatch;
+    }
+
+    let mut candidates = Vec::new();
+    let mut matched = false;
+    for source in sources {
+        match follow_reexported_name(builder, *source, target_name, indexes, depth, visited) {
+            ReexportFollowResult::NoMatch => {}
+            ReexportFollowResult::Resolved(mut resolved) => {
+                matched = true;
+                candidates.append(&mut resolved);
+            }
+            ReexportFollowResult::Blocked => return ReexportFollowResult::Blocked,
+        }
+    }
+
+    if !matched {
+        return ReexportFollowResult::NoMatch;
+    }
+    finalize_reexport_candidates(candidates)
+}
+
+fn follow_reexported_name(
+    builder: &FactBuilder<'_>,
+    source: NodeId,
+    target_name: &str,
+    indexes: &PendingResolutionIndexes<'_>,
+    depth: usize,
+    visited: &mut HashSet<(NodeId, String)>,
+) -> ReexportFollowResult {
+    if depth > MAX_REEXPORT_FOLLOW_DEPTH {
+        return ReexportFollowResult::Blocked;
+    }
+    let key = (source, target_name.to_owned());
+    if !visited.insert(key.clone()) {
+        return ReexportFollowResult::Blocked;
+    }
+
+    let result =
+        follow_reexported_name_inner(builder, source, target_name, indexes, depth, visited);
+    visited.remove(&key);
+    result
+}
+
+fn follow_reexported_name_inner(
+    builder: &FactBuilder<'_>,
+    source: NodeId,
+    target_name: &str,
+    indexes: &PendingResolutionIndexes<'_>,
+    depth: usize,
+    visited: &mut HashSet<(NodeId, String)>,
+) -> ReexportFollowResult {
+    let Some(imports) = indexes.pending_imports_by_source.get(&source) else {
+        return ReexportFollowResult::NoMatch;
+    };
+
+    let mut candidates = Vec::new();
+    let mut matched = false;
+    for import in imports {
+        let result = if import.target_name == target_name {
+            resolve_reexport_edge_target(builder, import, indexes, depth + 1, visited)
+        } else if is_glob_reexport(import) {
+            resolve_glob_reexport_targets(builder, import, target_name, indexes, depth + 1, visited)
+        } else {
+            ReexportFollowResult::NoMatch
+        };
+
+        match result {
+            ReexportFollowResult::NoMatch => {}
+            ReexportFollowResult::Resolved(mut resolved) => {
+                matched = true;
+                candidates.append(&mut resolved);
+            }
+            ReexportFollowResult::Blocked => return ReexportFollowResult::Blocked,
+        }
+    }
+
+    if !matched {
+        return ReexportFollowResult::NoMatch;
+    }
+    finalize_reexport_candidates(candidates)
+}
+
+fn resolve_reexport_edge_target(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+    depth: usize,
+    visited: &mut HashSet<(NodeId, String)>,
+) -> ReexportFollowResult {
+    if depth > MAX_REEXPORT_FOLLOW_DEPTH {
+        return ReexportFollowResult::Blocked;
+    }
+
+    let candidates = module_path_resolution_candidates(builder, edge, indexes);
+    match candidates.as_slice() {
+        [_] => ReexportFollowResult::Resolved(candidates),
+        candidates if candidates.len() > 1 => ReexportFollowResult::Blocked,
+        _ => reexport_resolution_candidates_at_depth(builder, edge, indexes, depth, visited),
+    }
+}
+
+fn resolve_glob_reexport_targets(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    target_name: &str,
+    indexes: &PendingResolutionIndexes<'_>,
+    depth: usize,
+    visited: &mut HashSet<(NodeId, String)>,
+) -> ReexportFollowResult {
+    if depth > MAX_REEXPORT_FOLLOW_DEPTH {
+        return ReexportFollowResult::Blocked;
+    }
+
+    let sources = reexport_source_candidates(builder, edge, indexes);
+    if sources.is_empty() {
+        return ReexportFollowResult::NoMatch;
+    }
+
+    let mut candidates =
+        direct_reexported_symbol_candidates(builder, target_name, &sources, indexes);
+    let mut matched = !candidates.is_empty();
+    for source in sources {
+        match follow_reexported_name(builder, source, target_name, indexes, depth, visited) {
+            ReexportFollowResult::NoMatch => {}
+            ReexportFollowResult::Resolved(mut resolved) => {
+                matched = true;
+                candidates.append(&mut resolved);
+            }
+            ReexportFollowResult::Blocked => return ReexportFollowResult::Blocked,
+        }
+    }
+
+    if !matched {
+        return ReexportFollowResult::NoMatch;
+    }
+    finalize_reexport_candidates(candidates)
+}
+
+fn finalize_reexport_candidates(mut candidates: Vec<NodeId>) -> ReexportFollowResult {
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    match candidates.len() {
+        0 => ReexportFollowResult::NoMatch,
+        1 => ReexportFollowResult::Resolved(candidates),
+        _ => ReexportFollowResult::Blocked,
+    }
+}
+
+fn is_glob_reexport(edge: &PendingEdge) -> bool {
+    edge.target_name == "*"
+        || edge.import_path.as_deref().is_some_and(|path| {
+            let path = path.trim();
+            path.ends_with("::*") || path.ends_with(".*")
+        })
+}
+
+fn reexport_source_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let Some(import_path) = edge.import_path.as_deref().map(str::trim) else {
+        return Vec::new();
+    };
+    if import_path.is_empty() {
+        return Vec::new();
+    }
+    let Some(source_file) = indexes.file_by_id.get(&edge.source).copied() else {
+        return Vec::new();
+    };
+
+    let mut candidates = match import_language_family(source_file) {
+        Some(ImportLanguageFamily::Rust) => {
+            rust_reexport_source_candidates(builder, edge, import_path, source_file, indexes)
+        }
+        Some(ImportLanguageFamily::Python) => {
+            python_reexport_source_candidates(builder, edge, import_path, source_file)
+        }
+        Some(ImportLanguageFamily::Javascript) => {
+            javascript_reexport_source_candidates(builder, import_path, source_file)
+        }
+        None => Vec::new(),
+    };
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+fn rust_reexport_source_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    import_path: &str,
+    source_file: &str,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let Some(segments) =
+        rust_absolute_import_segments(import_path, &edge.target_name, edge, source_file, indexes)
+    else {
+        return Vec::new();
+    };
+    let module_segments = reexport_module_segments(&segments, &edge.target_name);
+    rust_source_candidates_for_module_segments(builder, source_file, &module_segments, indexes)
+}
+
+fn reexport_module_segments(segments: &[String], target_name: &str) -> Vec<String> {
+    let mut module_segments = segments.to_vec();
+    if module_segments
+        .last()
+        .is_some_and(|segment| segment == target_name || segment == "*")
+    {
+        module_segments.pop();
+    }
+    module_segments
+}
+
+fn rust_source_candidates_for_module_segments(
+    builder: &FactBuilder<'_>,
+    source_file: &str,
+    module_segments: &[String],
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let qualified_module = module_segments.join("::");
+    builder
+        .facts
+        .nodes
+        .iter()
+        .filter_map(|node| match node.kind {
+            NodeKind::File
+                if path_scope(source_file) == path_scope(&node.label)
+                    && rust_module_file_matches(source_file, &node.label, module_segments) =>
+            {
+                Some(node.node_id)
+            }
+            NodeKind::Module
+                if indexes
+                    .qualified_name_by_id
+                    .get(&node.node_id)
+                    .is_some_and(|qualified_name| qualified_name == &qualified_module)
+                    && indexes.file_by_id.get(&node.node_id).copied().is_some_and(
+                        |module_file| path_scope(source_file) == path_scope(module_file),
+                    ) =>
+            {
+                Some(node.node_id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn python_reexport_source_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    import_path: &str,
+    source_file: &str,
+) -> Vec<NodeId> {
+    let module_candidates =
+        python_import_module_candidates(import_path, &edge.target_name, source_file);
+    builder
+        .facts
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| {
+            module_candidates
+                .iter()
+                .any(|candidate| candidate.matches_python_file(&node.label))
+        })
+        .map(|node| node.node_id)
+        .collect()
+}
+
+fn javascript_reexport_source_candidates(
+    builder: &FactBuilder<'_>,
+    import_path: &str,
+    source_file: &str,
+) -> Vec<NodeId> {
+    let module_candidates = javascript_import_module_candidates(import_path, source_file);
+    builder
+        .facts
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| {
+            module_candidates
+                .iter()
+                .any(|candidate| candidate.matches_javascript_file(&node.label))
+        })
+        .map(|node| node.node_id)
+        .collect()
+}
+
+fn direct_reexported_symbol_candidates(
+    builder: &FactBuilder<'_>,
+    target_name: &str,
+    sources: &[NodeId],
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let raw_candidates = builder
+        .symbol_index
+        .get(target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(is_import_resolution_candidate_kind)
+        })
+        .filter(|target| {
+            sources
+                .iter()
+                .any(|source| target_belongs_to_reexport_source(*source, *target, indexes))
+        })
+        .collect::<Vec<_>>();
+
+    narrow_import_candidates(raw_candidates, indexes, true)
+}
+
+fn target_belongs_to_reexport_source(
+    source: NodeId,
+    target: NodeId,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> bool {
+    match indexes.node_kind_by_id.get(&source).copied() {
+        Some(NodeKind::File) => indexes.file_by_id.get(&source) == indexes.file_by_id.get(&target),
+        Some(NodeKind::Module) => {
+            let Some(source_file) = indexes.file_by_id.get(&source) else {
+                return false;
+            };
+            let Some(target_file) = indexes.file_by_id.get(&target) else {
+                return false;
+            };
+            if source_file != target_file {
+                return false;
+            }
+            let Some(source_qualified_name) = indexes.qualified_name_by_id.get(&source) else {
+                return false;
+            };
+            indexes
+                .qualified_name_by_id
+                .get(&target)
+                .is_some_and(|target_qualified_name| {
+                    target_qualified_name
+                        .strip_prefix(source_qualified_name)
+                        .is_some_and(|suffix| suffix.starts_with("::"))
+                })
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3383,6 +3914,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         let singleton_symbols_by_label = HashMap::<String, NodeId>::new();
         let ambiguous_symbols_by_label = HashMap::<String, usize>::new();
         let files_by_label = HashMap::<String, NodeId>::new();
+        let pending_imports_by_source = HashMap::<NodeId, Vec<PendingEdge>>::new();
         let file_by_id = HashMap::from([
             (source, "pkg/widgets.py"),
             (py_base, "pkg/base.py"),
@@ -3399,6 +3931,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
             singleton_symbols_by_label: &singleton_symbols_by_label,
             ambiguous_symbols_by_label: &ambiguous_symbols_by_label,
             files_by_label: &files_by_label,
+            pending_imports_by_source: &pending_imports_by_source,
             file_by_id: &file_by_id,
             node_kind_by_id: &node_kind_by_id,
             enclosing_scope_by_id: &enclosing_scope_by_id,
@@ -3778,6 +4311,437 @@ pub fn consume(_value: Dup) {}
 
         assert_eq!(edge.target_node_id, Some(target.node_id));
         assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_follows_single_reexport_to_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod other;
+mod prelude;
+mod real;
+
+use crate::prelude::Foo;
+
+pub fn consume(_foo: Foo) {}
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(root.join("src/other.rs"), "pub struct Foo;\n").expect("write other.rs");
+        fs::write(root.join("src/prelude.rs"), "pub use crate::real::Foo;\n")
+            .expect("write prelude.rs");
+        fs::write(root.join("src/real.rs"), "pub struct Foo;\n").expect("write real.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let real_file_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "src/real.rs")
+            .and_then(|node| node.file_id)
+            .expect("real file id");
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Struct
+                    && node.label == "Foo"
+                    && node.file_id == Some(real_file_id)
+            })
+            .expect("real Foo struct");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+                    && edge.import_path.as_deref() == Some("crate::prelude::Foo")
+            })
+            .expect("prelude Foo import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_follows_two_hop_reexport_chain_to_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod first;
+mod other;
+mod real;
+mod second;
+
+use crate::first::Foo;
+
+pub fn consume(_foo: Foo) {}
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(root.join("src/first.rs"), "pub use crate::second::Foo;\n")
+            .expect("write first.rs");
+        fs::write(root.join("src/other.rs"), "pub struct Foo;\n").expect("write other.rs");
+        fs::write(root.join("src/real.rs"), "pub struct Foo;\n").expect("write real.rs");
+        fs::write(root.join("src/second.rs"), "pub use crate::real::Foo;\n")
+            .expect("write second.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let real_file_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "src/real.rs")
+            .and_then(|node| node.file_id)
+            .expect("real file id");
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Struct
+                    && node.label == "Foo"
+                    && node.file_id == Some(real_file_id)
+            })
+            .expect("real Foo struct");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+                    && edge.import_path.as_deref() == Some("crate::first::Foo")
+            })
+            .expect("first Foo import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_follows_rust_glob_reexport_to_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod other;
+mod prelude;
+mod real;
+
+use crate::prelude::Foo;
+
+pub fn consume(_foo: Foo) {}
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(root.join("src/other.rs"), "pub struct Foo;\n").expect("write other.rs");
+        fs::write(root.join("src/prelude.rs"), "pub use crate::real::*;\n")
+            .expect("write prelude.rs");
+        fs::write(root.join("src/real.rs"), "pub struct Foo;\n").expect("write real.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let real_file_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "src/real.rs")
+            .and_then(|node| node.file_id)
+            .expect("real file id");
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Struct
+                    && node.label == "Foo"
+                    && node.file_id == Some(real_file_id)
+            })
+            .expect("real Foo struct");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+                    && edge.import_path.as_deref() == Some("crate::prelude::Foo")
+            })
+            .expect("prelude Foo import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_follows_typescript_reexport_to_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/index.ts"),
+            r#"
+import { Foo } from "./prelude";
+
+export function consume(foo: Foo) {
+  return foo;
+}
+"#,
+        )
+        .expect("write index.ts");
+        fs::write(root.join("src/other.ts"), "export class Foo {}\n").expect("write other.ts");
+        fs::write(
+            root.join("src/prelude.ts"),
+            "export { Foo } from \"./real\";\n",
+        )
+        .expect("write prelude.ts");
+        fs::write(root.join("src/real.ts"), "export class Foo {}\n").expect("write real.ts");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let real_file_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "src/real.ts")
+            .and_then(|node| node.file_id)
+            .expect("real file id");
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Class
+                    && node.label == "Foo"
+                    && node.file_id == Some(real_file_id)
+            })
+            .expect("real Foo class");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+                    && edge.import_path.as_deref() == Some("./prelude")
+            })
+            .expect("prelude Foo import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_follows_typescript_glob_reexport_to_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/index.ts"),
+            r#"
+import { Foo } from "./prelude";
+
+export function consume(foo: Foo) {
+  return foo;
+}
+"#,
+        )
+        .expect("write index.ts");
+        fs::write(root.join("src/other.ts"), "export class Foo {}\n").expect("write other.ts");
+        fs::write(root.join("src/prelude.ts"), "export * from \"./real\";\n")
+            .expect("write prelude.ts");
+        fs::write(root.join("src/real.ts"), "export class Foo {}\n").expect("write real.ts");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let real_file_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "src/real.ts")
+            .and_then(|node| node.file_id)
+            .expect("real file id");
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Class
+                    && node.label == "Foo"
+                    && node.file_id == Some(real_file_id)
+            })
+            .expect("real Foo class");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+                    && edge.import_path.as_deref() == Some("./prelude")
+            })
+            .expect("prelude Foo import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_follows_python_init_reexport_to_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("pkg")).expect("mkdir pkg");
+        fs::write(root.join("app.py"), "from pkg import Foo\n").expect("write app.py");
+        fs::write(root.join("pkg/__init__.py"), "from .real import Foo\n")
+            .expect("write __init__.py");
+        fs::write(root.join("pkg/other.py"), "class Foo:\n    pass\n").expect("write other.py");
+        fs::write(root.join("pkg/real.py"), "class Foo:\n    pass\n").expect("write real.py");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let real_file_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "pkg/real.py")
+            .and_then(|node| node.file_id)
+            .expect("real file id");
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Class
+                    && node.label == "Foo"
+                    && node.file_id == Some(real_file_id)
+            })
+            .expect("real Foo class");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+                    && edge.import_path.as_deref() == Some("pkg")
+            })
+            .expect("pkg Foo import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("import_path"));
+    }
+
+    #[test]
+    fn import_path_reexport_cycle_stays_unresolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod a;
+mod b;
+mod left;
+mod right;
+
+use crate::a::Foo;
+
+pub fn consume(_foo: Foo) {}
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(root.join("src/a.rs"), "pub use crate::b::Foo;\n").expect("write a.rs");
+        fs::write(root.join("src/b.rs"), "pub use crate::a::Foo;\n").expect("write b.rs");
+        fs::write(root.join("src/left.rs"), "pub struct Foo;\n").expect("write left.rs");
+        fs::write(root.join("src/right.rs"), "pub struct Foo;\n").expect("write right.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+                    && edge.import_path.as_deref() == Some("crate::a::Foo")
+            })
+            .expect("cyclic Foo import edge");
+
+        assert_eq!(edge.target_node_id, None);
+        assert_eq!(edge.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn ambiguous_glob_reexport_stays_unresolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse("pub use crate::left::*;\nuse crate::prelude::Foo;\n", None)
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let lib_file_id = FileId(builder.next_file_id());
+        let left_file_id = FileId(builder.next_file_id());
+        let right_file_id = FileId(builder.next_file_id());
+        let prelude_file_id = FileId(builder.next_file_id());
+        let source = builder.add_file_node("src/lib.rs", lib_file_id, root_node);
+        let left_file = builder.add_file_node("src/left.rs", left_file_id, root_node);
+        let right_file = builder.add_file_node("src/right.rs", right_file_id, root_node);
+        let prelude_file = builder.add_file_node("src/prelude.rs", prelude_file_id, root_node);
+        let left_foo = builder.add_node(
+            "src/left.rs",
+            "Foo".to_owned(),
+            "Foo".to_owned(),
+            NodeKind::Struct,
+            left_file_id,
+            root_node,
+        );
+        let right_foo = builder.add_node(
+            "src/right.rs",
+            "Foo".to_owned(),
+            "Foo".to_owned(),
+            NodeKind::Struct,
+            right_file_id,
+            root_node,
+        );
+        builder.add_edge(left_file, Some(left_foo), RelationKind::Contains, None);
+        builder.add_edge(right_file, Some(right_foo), RelationKind::Contains, None);
+        builder.pending_edges.push(PendingEdge {
+            source: prelude_file,
+            target_name: "*".to_owned(),
+            import_path: Some("crate::left::*".to_owned()),
+            relation: RelationKind::Imports,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+        builder.pending_edges.push(PendingEdge {
+            source: prelude_file,
+            target_name: "*".to_owned(),
+            import_path: Some("crate::right::*".to_owned()),
+            relation: RelationKind::Imports,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "Foo".to_owned(),
+            import_path: Some("crate::prelude::Foo".to_owned()),
+            relation: RelationKind::Imports,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        let edge = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.source_node_id == source
+                    && edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+            })
+            .expect("Foo import edge");
+        assert_eq!(edge.target_node_id, None);
     }
 
     #[test]
