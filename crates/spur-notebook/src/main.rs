@@ -14,8 +14,6 @@ use std::{
 use anyhow::Context as _;
 use jute::state::State;
 use spur_core::notebook::notebook_binary_path;
-#[cfg(target_os = "macos")]
-use spur_notebook::mcp::NotebookDaemonControl;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -292,9 +290,9 @@ fn main() {
     let state = Arc::new(State::new());
     let state_for_manage = Arc::clone(&state);
     let state_for_setup = Arc::clone(&state);
-    #[cfg(target_os = "macos")]
-    let daemon_control = Arc::new(tokio::sync::Mutex::new(None::<Arc<NotebookDaemonControl>>));
-    #[cfg(target_os = "macos")]
+    let daemon_control: spur_notebook::commands::NotebookDaemonControlSlot =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let daemon_control_for_manage = Arc::clone(&daemon_control);
     let daemon_control_for_setup = Arc::clone(&daemon_control);
     #[cfg(target_os = "macos")]
     let daemon_control_for_run = Arc::clone(&daemon_control);
@@ -306,6 +304,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(state_for_manage)
+        .manage(daemon_control_for_manage)
         .manage(bridge_for_state)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -333,6 +332,7 @@ fn main() {
             spur_notebook::commands::notebook_dag_status,
             spur_notebook::commands::notebook_run_cascade,
             spur_notebook::commands::notebook_run_cell,
+            spur_notebook::commands::anywidget_command,
             spur_notebook::mcp::bridge::bridge_ready,
             spur_notebook::mcp::bridge::notebook_active_changed,
             spur_notebook::mcp::bridge::agent_response,
@@ -373,7 +373,6 @@ fn main() {
                     "could not resolve tauri resource dir for extension install"
                 ),
             }
-            #[cfg(target_os = "macos")]
             let daemon_control = Arc::clone(&daemon_control_for_setup);
             tauri::async_runtime::spawn(async move {
                 match mcp::start_daemon_server(
@@ -385,13 +384,9 @@ fn main() {
                 .await
                 {
                     Ok((handle, control)) => {
-                        #[cfg(target_os = "macos")]
-                        {
-                            let mut slot = daemon_control.lock().await;
-                            *slot = Some(Arc::new(control));
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        let _control = control;
+                        let mut slot = daemon_control.lock().await;
+                        *slot = Some(Arc::new(control));
+                        drop(slot);
 
                         let keep_alive = handle;
                         std::future::pending::<()>().await;
