@@ -630,10 +630,12 @@ impl<'a> FactBuilder<'a> {
                         );
                     }
                 }
-            } else if matches!(
-                edge.relation,
-                RelationKind::Imports | RelationKind::Constructs
-            ) {
+            } else if relational_target_kinds(edge.relation).is_some()
+                || matches!(
+                    edge.relation,
+                    RelationKind::Imports | RelationKind::Constructs
+                )
+            {
                 resolve_bare_pending_edge(
                     self,
                     &edge,
@@ -1063,6 +1065,8 @@ fn relational_symbol_candidates(
     indexes: &PendingResolutionIndexes<'_>,
     allowed: &[NodeKind],
 ) -> Vec<NodeId> {
+    let source_language_family =
+        file_path_for_node(builder, edge.source, indexes).and_then(|path| language_family(&path));
     let mut candidates = builder
         .symbol_index
         .get(&edge.target_name)
@@ -1075,6 +1079,15 @@ fn relational_symbol_candidates(
                 .get(target)
                 .copied()
                 .is_some_and(|kind| allowed.contains(&kind))
+        })
+        .filter(|target| match source_language_family {
+            None => true,
+            Some(source_family) => {
+                file_path_for_node(builder, *target, indexes)
+                    .as_deref()
+                    .and_then(language_family)
+                    == Some(source_family)
+            }
         })
         .collect::<Vec<_>>();
     candidates.sort_by_key(|id| id.get());
@@ -2682,6 +2695,161 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         assert_eq!(edge.source_node_id, source);
         assert_eq!(edge.target_node_id, None);
         assert_eq!(edge.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn relational_candidates_excludes_cross_language() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse("class Child(Base): pass\ninterface Base {}\n", None)
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let py_source_file_id = FileId(builder.next_file_id());
+        let py_target_file_id = FileId(builder.next_file_id());
+        let ts_file_id = FileId(builder.next_file_id());
+        builder.add_file_node("pkg/widgets.py", py_source_file_id, root_node);
+        builder.add_file_node("pkg/base.py", py_target_file_id, root_node);
+        builder.add_file_node("pkg/types.ts", ts_file_id, root_node);
+        let source = builder.add_node(
+            "pkg/widgets.py",
+            "Child".to_owned(),
+            "Child".to_owned(),
+            NodeKind::Class,
+            py_source_file_id,
+            root_node,
+        );
+        let py_base = builder.add_node(
+            "pkg/base.py",
+            "Base".to_owned(),
+            "Base".to_owned(),
+            NodeKind::Class,
+            py_target_file_id,
+            root_node,
+        );
+        let ts_base = builder.add_node(
+            "pkg/types.ts",
+            "Base".to_owned(),
+            "Base".to_owned(),
+            NodeKind::Interface,
+            ts_file_id,
+            root_node,
+        );
+        let edge = PendingEdge {
+            source,
+            target_name: "Base".to_owned(),
+            relation: RelationKind::Extends,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        };
+        let singleton_symbols_by_label = HashMap::<String, NodeId>::new();
+        let ambiguous_symbols_by_label = HashMap::<String, usize>::new();
+        let files_by_label = HashMap::<String, NodeId>::new();
+        let file_by_id = HashMap::from([
+            (source, "pkg/widgets.py"),
+            (py_base, "pkg/base.py"),
+            (ts_base, "pkg/types.ts"),
+        ]);
+        let node_kind_by_id = HashMap::from([
+            (source, NodeKind::Class),
+            (py_base, NodeKind::Class),
+            (ts_base, NodeKind::Interface),
+        ]);
+        let enclosing_scope_by_id = HashMap::<NodeId, String>::new();
+        let qualified_name_by_id = HashMap::<NodeId, String>::new();
+        let indexes = PendingResolutionIndexes {
+            singleton_symbols_by_label: &singleton_symbols_by_label,
+            ambiguous_symbols_by_label: &ambiguous_symbols_by_label,
+            files_by_label: &files_by_label,
+            file_by_id: &file_by_id,
+            node_kind_by_id: &node_kind_by_id,
+            enclosing_scope_by_id: &enclosing_scope_by_id,
+            qualified_name_by_id: &qualified_name_by_id,
+        };
+
+        let candidates = relational_symbol_candidates(
+            &builder,
+            &edge,
+            &indexes,
+            relational_target_kinds(edge.relation).expect("relational target kinds"),
+        );
+
+        assert_eq!(candidates, vec![py_base]);
+    }
+
+    #[test]
+    fn relational_language_gate_resolves_in_repo_base_class() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("pkg")).expect("mkdir pkg");
+        fs::write(
+            root.join("pkg/widget.py"),
+            r#"
+class Child(Base):
+    pass
+"#,
+        )
+        .expect("write widget.py");
+        fs::write(
+            root.join("pkg/base.py"),
+            r#"
+class Base:
+    pass
+"#,
+        )
+        .expect("write base.py");
+        fs::write(
+            root.join("pkg/types.ts"),
+            r#"
+export interface Base {}
+"#,
+        )
+        .expect("write types.ts");
+
+        let facts = build_facts_for_paths(
+            root,
+            &[
+                PathBuf::from("pkg/widget.py"),
+                PathBuf::from("pkg/base.py"),
+                PathBuf::from("pkg/types.ts"),
+            ],
+        )
+        .expect("build facts");
+        let child = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Class && node.label == "Child")
+            .expect("Child class");
+        let py_base = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Class && node.label == "Base")
+            .expect("Python Base class");
+        let ts_base = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Interface && node.label == "Base")
+            .expect("TypeScript Base interface");
+
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.source_node_id == child.node_id
+                    && edge.relation == RelationKind::Extends
+                    && edge.target_label.as_deref() == Some("Base")
+            })
+            .expect("Child extends Base edge");
+
+        assert_eq!(edge.target_node_id, Some(py_base.node_id));
+        assert_ne!(edge.target_node_id, Some(ts_base.node_id));
+        assert_eq!(edge.bind_method.as_deref(), Some("relational"));
     }
 
     #[test]
