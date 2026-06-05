@@ -481,11 +481,16 @@ fn render_markdown_table(table: &MarkdownTable, render_width: Option<u16>) -> Ve
         .map(|row| normalized_row(row, col_count))
         .collect();
     let widths = table_column_widths(&header, &rows, col_count);
-    let grid_width = table_grid_width(&widths);
 
     if let Some(max_width) = render_width.map(usize::from).filter(|width| *width > 0) {
-        if grid_width > max_width && !rows.is_empty() {
-            return render_table_records(&header, &rows, max_width);
+        if table_grid_width(&widths) > max_width {
+            if let Some(budgeted) = budget_column_widths(&widths, max_width) {
+                return render_table_grid(&header, &rows, &budgeted, &table.alignments);
+            }
+            // Even a floor-width grid cannot fit → records layout (data rows only).
+            if !rows.is_empty() {
+                return render_table_records(&header, &rows, max_width);
+            }
         }
     }
 
@@ -519,10 +524,14 @@ fn render_table_grid(
 ) -> Vec<Line<'static>> {
     let mut out = Vec::with_capacity(rows.len() + 4);
     out.push(table_line(top_border(widths)));
-    out.push(table_line(format_table_row(header, widths, alignments)));
+    for line in format_table_row_wrapped(header, widths, alignments) {
+        out.push(table_line(line));
+    }
     out.push(table_line(header_border(widths)));
     for row in rows {
-        out.push(table_line(format_table_row(row, widths, alignments)));
+        for line in format_table_row_wrapped(row, widths, alignments) {
+            out.push(table_line(line));
+        }
     }
     out.push(table_line(bottom_border(widths)));
     out
@@ -576,18 +585,38 @@ fn table_grid_width(widths: &[usize]) -> usize {
     widths.iter().sum::<usize>() + widths.len() * 3 + 1
 }
 
-fn format_table_row(cells: &[String], widths: &[usize], alignments: &[Alignment]) -> String {
-    let mut out = String::new();
-    out.push('│');
-    for (idx, cell) in cells.iter().enumerate() {
-        out.push(' ');
-        out.push_str(&pad_cell(
-            cell,
-            widths[idx],
-            alignments.get(idx).copied().unwrap_or(Alignment::None),
-        ));
-        out.push(' ');
-        out.push('│');
+/// Render one logical row as one-or-more physical grid lines, wrapping each
+/// cell to its column width. Every physical line carries full borders; cells
+/// with fewer wrapped lines are blank-padded. When every cell fits on one line
+/// this is byte-identical to `format_table_row`.
+fn format_table_row_wrapped(
+    cells: &[String],
+    widths: &[usize],
+    alignments: &[Alignment],
+) -> Vec<String> {
+    let wrapped: Vec<Vec<String>> = (0..widths.len())
+        .map(|idx| {
+            let cell = cells.get(idx).map(String::as_str).unwrap_or("");
+            wrap_cell_to_width(cell, widths[idx])
+        })
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let mut out = Vec::with_capacity(height);
+    for line_idx in 0..height {
+        let mut s = String::new();
+        s.push('│');
+        for (idx, cell_lines) in wrapped.iter().enumerate() {
+            let piece = cell_lines.get(line_idx).map(String::as_str).unwrap_or("");
+            s.push(' ');
+            s.push_str(&pad_cell(
+                piece,
+                widths[idx],
+                alignments.get(idx).copied().unwrap_or(Alignment::None),
+            ));
+            s.push(' ');
+            s.push('│');
+        }
+        out.push(s);
     }
     out
 }
@@ -699,6 +728,96 @@ fn truncate_to_width(value: &str, max_width: usize) -> String {
         width += ch_width;
     }
     out
+}
+
+/// Minimum content width a column may be shrunk to when budgeting a grid to a
+/// terminal width. Below this, the records layout is used instead.
+#[allow(dead_code)]
+const MIN_COL_WIDTH: usize = 4;
+
+/// Wrap `cell` into physical lines each no wider than `width` display columns.
+/// Breaks on ASCII spaces first; a single token wider than `width` is hard-split
+/// on char boundaries by display width (never mid-emoji, never mid-wide-char).
+#[allow(dead_code)]
+fn wrap_cell_to_width(cell: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    if display_width(cell) <= width {
+        return vec![cell.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for word in cell.split(' ') {
+        let word_w = display_width(word);
+        let sep = usize::from(!current.is_empty());
+        if current_w + sep + word_w <= width {
+            if sep == 1 {
+                current.push(' ');
+                current_w += 1;
+            }
+            current.push_str(word);
+            current_w += word_w;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        if word_w <= width {
+            current.push_str(word);
+            current_w = word_w;
+        } else {
+            for ch in word.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_w + cw > width && !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    current_w = 0;
+                }
+                current.push(ch);
+                current_w += cw;
+            }
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Shrink column widths so the rendered grid fits within `render_width` display
+/// columns, reducing the widest column first down to `MIN_COL_WIDTH`. Returns
+/// `None` when even a floor-width grid cannot fit — the caller should then use
+/// the records layout.
+#[allow(dead_code)]
+fn budget_column_widths(widths: &[usize], render_width: usize) -> Option<Vec<usize>> {
+    let col_count = widths.len();
+    if col_count == 0 {
+        return Some(Vec::new());
+    }
+    let chrome = col_count * 3 + 1;
+    let avail = render_width.checked_sub(chrome)?;
+    if avail < col_count * MIN_COL_WIDTH {
+        return None;
+    }
+    let mut out = widths.to_vec();
+    let mut total: usize = out.iter().sum();
+    while total > avail {
+        // Reduce the widest column (ties → lowest index) by one column.
+        let (idx, w) = out
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|(ai, aw), (bi, bw)| aw.cmp(bw).then(bi.cmp(ai)))
+            .expect("col_count > 0");
+        if w <= MIN_COL_WIDTH {
+            break; // avail >= col_count*MIN_COL_WIDTH guarantees we already fit
+        }
+        out[idx] = w - 1;
+        total -= 1;
+    }
+    Some(out)
 }
 
 /// Accumulated-text markdown renderer.
@@ -1579,6 +1698,117 @@ mod stream_item_tests {
     }
 
     // ── Table-wrapping tests ────────────────────────────────────────────
+
+    #[test]
+    fn wrap_cell_to_width_breaks_on_spaces() {
+        // "much longer value" wrapped to width 10 → ["much", "longer", "value"]
+        let lines = wrap_cell_to_width("much longer value", 10);
+        assert_eq!(lines, vec!["much", "longer", "value"]);
+    }
+
+    #[test]
+    fn wrap_cell_to_width_packs_multiple_words_per_line() {
+        // width 12 fits "much longer" (11) then "value"
+        let lines = wrap_cell_to_width("much longer value", 12);
+        assert_eq!(lines, vec!["much longer", "value"]);
+    }
+
+    #[test]
+    fn wrap_cell_to_width_hard_splits_overlong_token() {
+        // A single unbreakable token longer than width is split by display width.
+        let lines = wrap_cell_to_width("add_pending_edge(&edge)", 8);
+        assert!(lines.len() >= 3, "got: {lines:?}");
+        assert!(
+            lines.iter().all(|l| display_width(l) <= 8),
+            "got: {lines:?}"
+        );
+        assert_eq!(lines.concat(), "add_pending_edge(&edge)");
+    }
+
+    #[test]
+    fn wrap_cell_to_width_is_unicode_width_aware() {
+        // ✅ is display width 2; width 2 budget holds exactly one per line.
+        let lines = wrap_cell_to_width("✅✅✅", 2);
+        assert_eq!(lines, vec!["✅", "✅", "✅"]);
+    }
+
+    #[test]
+    fn wrap_cell_to_width_short_value_is_single_line() {
+        assert_eq!(wrap_cell_to_width("short", 20), vec!["short"]);
+    }
+
+    #[test]
+    fn budget_column_widths_noop_when_under_budget() {
+        // Two columns of content width 5 + chrome (2*3+1=7) = 17 ≤ 40 → unchanged.
+        let widths = vec![5usize, 5];
+        assert_eq!(budget_column_widths(&widths, 40), Some(vec![5, 5]));
+    }
+
+    #[test]
+    fn budget_column_widths_shrinks_widest_first() {
+        // widths [30, 5], render_width 20 → chrome 7, avail 13.
+        // Widest (col 0) shrinks until total ≤ 13: [8, 5].
+        let widths = vec![30usize, 5];
+        let out = budget_column_widths(&widths, 20).expect("fits at floor");
+        assert_eq!(out.iter().sum::<usize>(), 13);
+        assert!(
+            out[0] >= MIN_COL_WIDTH && out[1] >= MIN_COL_WIDTH,
+            "got: {out:?}"
+        );
+        assert!(
+            out[1] == 5,
+            "narrow column should not shrink below its content: {out:?}"
+        );
+    }
+
+    #[test]
+    fn budget_column_widths_returns_none_when_floor_cannot_fit() {
+        // 3 columns need 3*MIN_COL_WIDTH + chrome(10) at minimum; width 12 is too small.
+        let widths = vec![10usize, 10, 10];
+        assert_eq!(budget_column_widths(&widths, 12), None);
+    }
+
+    #[test]
+    fn over_budget_table_wraps_cells_within_grid() {
+        // A two-column table whose grid is far wider than the render width must
+        // wrap the long cell across multiple physical lines WITHOUT any grid line
+        // exceeding the budget, and without falling back to the "Header: value"
+        // records layout.
+        let table = MarkdownTable {
+            alignments: vec![Alignment::None, Alignment::None],
+            header: vec!["Criterion".to_string(), "Verdict".to_string()],
+            rows: vec![vec![
+                "Resolver References arm gates on function_singleton_safe".to_string(),
+                "exact match".to_string(),
+            ]],
+        };
+        let width: u16 = 32;
+        let lines = render_markdown_table(&table, Some(width));
+        let rendered: Vec<String> = lines.iter().map(line_plain_text).collect();
+
+        // Still a grid (top border present), not records ("Criterion: ..." prose).
+        assert!(
+            rendered[0].starts_with('┌'),
+            "want grid top border:\n{rendered:#?}"
+        );
+        assert!(
+            !rendered.iter().any(|l| l.starts_with("Criterion:")),
+            "must not use records fallback:\n{rendered:#?}"
+        );
+        // No physical line exceeds the budget.
+        for l in &rendered {
+            assert!(
+                display_width(l) <= width as usize,
+                "line over budget: {l:?}"
+            );
+        }
+        // The long criterion text wrapped onto more than one body line.
+        let body_lines = rendered.iter().filter(|l| l.starts_with('│')).count();
+        assert!(
+            body_lines >= 3,
+            "expected wrapped multi-line row:\n{rendered:#?}"
+        );
+    }
 
     #[test]
     fn gfm_table_is_wrapped_and_preserves_line_boundaries() {
