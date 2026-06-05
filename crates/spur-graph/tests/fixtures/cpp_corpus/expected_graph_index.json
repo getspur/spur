@@ -968,12 +968,13 @@
     },
     {
       "source_stable_symbol_id": "e9ff854ca03c4ddd",
-      "target_stable_symbol_id": null,
+      "target_stable_symbol_id": "7313b528a6d66299",
       "target_label": "Initialize",
       "relation": "calls",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
-      "edge_kind": "calls"
+      "edge_kind": "calls",
+      "bind_method": "method_crate_singleton"
     }
   ],
   "tombstones": []

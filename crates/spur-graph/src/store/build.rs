@@ -26,7 +26,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v7";
 pub const EXTRACTOR_VERSION: &str = "2026-05-21-mcp-tool-registrations-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-05-references-crate-safety-v7";
+pub const RESOLVER_VERSION: &str = "2026-06-05-method-crate-singleton-recall-v8";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1028,7 +1028,14 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             };
             let resolution_is_stamped = matches!(
                 edge.bind_method.as_deref(),
-                Some("fqn" | "scope_match" | "singleton" | "macro_body_singleton" | "relational")
+                Some(
+                    "fqn"
+                        | "scope_match"
+                        | "singleton"
+                        | "macro_body_singleton"
+                        | "relational"
+                        | "method_crate_singleton"
+                )
             );
             let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
                 || target_label.contains("::")
