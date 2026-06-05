@@ -23,8 +23,8 @@ use crate::{
     GraphSymbolArtifact, GraphTombstoneEntry, NodeId, NodeKind, RelationKind, SourceSpan,
 };
 
-pub const SCHEMA_VERSION: &str = "spur-graph-schema-v7";
-pub const EXTRACTOR_VERSION: &str = "2026-06-05-javascript-extraction-v2";
+pub const SCHEMA_VERSION: &str = "spur-graph-schema-v8";
+pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
 pub const RESOLVER_VERSION: &str = "2026-06-05-import-candidate-hygiene-v13";
 
@@ -673,6 +673,7 @@ fn buckets_from_facts(
             source_stable_symbol_id: source_node.stable_key.clone(),
             target_stable_symbol_id,
             target_label: edge.target_label.clone(),
+            import_path: edge.import_path.clone(),
             relation: edge.relation,
             confidence: edge.confidence,
             confidence_score: edge.confidence_score,
@@ -2324,6 +2325,7 @@ fn submit_plan_def() -> ToolDefinition {
             source_stable_symbol_id: source_stable_symbol_id.to_owned(),
             target_stable_symbol_id: target_stable_symbol_id.map(str::to_string),
             target_label: None,
+            import_path: None,
             relation,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,

@@ -175,6 +175,8 @@ pub struct GraphEdgeArtifact {
     pub source_stable_symbol_id: String,
     pub target_stable_symbol_id: Option<String>,
     pub target_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_path: Option<String>,
     pub relation: RelationKind,
     pub confidence: Confidence,
     pub confidence_score: f32,
@@ -206,6 +208,8 @@ pub struct GraphEdge {
     pub target_node_id: Option<NodeId>,
     pub relation: RelationKind,
     pub target_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_path: Option<String>,
     pub confidence: Confidence,
     pub confidence_score: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

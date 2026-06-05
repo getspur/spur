@@ -10,18 +10,18 @@
 
 (use_declaration
   argument: (scoped_identifier
-    name: (identifier) @import.name)) @import
+    name: (identifier) @import.name) @import.path) @import
 
 (use_declaration
   argument: (scoped_use_list
     list: (use_list
-      (identifier) @import.name))) @import
+      (identifier) @import.name)) @import.path) @import
 
 (use_declaration
   argument: (scoped_use_list
     list: (use_list
       (scoped_identifier
-        name: (identifier) @import.name)))) @import
+        name: (identifier) @import.name))) @import.path) @import
 
 ; `impl Trait for Type` emits an implements edge to the trait. Inherent impls
 ; have no `trait:` field, so they do not match these patterns.
