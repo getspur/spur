@@ -14,4 +14,8 @@ export type CommMessage = {
    * The data to be sent to the frontend.
    */
   data: JsonValue;
+  /**
+   * Binary buffers attached to the kernel message envelope.
+   */
+  buffers: Array<Array<number>>;
 };

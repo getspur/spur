@@ -21,6 +21,7 @@ fn run_cell_event_comm_open_roundtrips() {
                 "value": 42
             }
         }),
+        buffers: vec![vec![1, 2, 3]],
     };
     let event = RunCellEvent::CommOpen(payload.clone());
 
@@ -42,6 +43,7 @@ fn run_cell_event_comm_msg_roundtrips() {
                 "value": 43
             }
         }),
+        buffers: vec![vec![4, 5, 6]],
     };
     let event = RunCellEvent::CommMsg(payload.clone());
 
@@ -60,6 +62,7 @@ fn run_cell_event_comm_close_roundtrips() {
         data: json!({
             "reason": "frontend closed"
         }),
+        buffers: vec![vec![7, 8, 9]],
     };
     let event = RunCellEvent::CommClose(payload.clone());
 
