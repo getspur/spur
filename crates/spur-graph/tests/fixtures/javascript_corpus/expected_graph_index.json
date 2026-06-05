@@ -350,7 +350,8 @@
       "relation": "imports",
       "confidence": "heuristic",
       "confidence_score": 0.8,
-      "edge_kind": "references_other"
+      "edge_kind": "references_other",
+      "bind_method": "import_path"
     },
     {
       "source_stable_symbol_id": "73295e90e7dc5f72",
@@ -360,7 +361,8 @@
       "relation": "imports",
       "confidence": "heuristic",
       "confidence_score": 0.8,
-      "edge_kind": "references_other"
+      "edge_kind": "references_other",
+      "bind_method": "import_path"
     },
     {
       "source_stable_symbol_id": "73295e90e7dc5f72",
@@ -398,7 +400,8 @@
       "relation": "imports",
       "confidence": "heuristic",
       "confidence_score": 0.8,
-      "edge_kind": "references_other"
+      "edge_kind": "references_other",
+      "bind_method": "import_path"
     },
     {
       "source_stable_symbol_id": "7cf131a41e53f73f",
