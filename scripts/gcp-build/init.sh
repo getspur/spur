@@ -61,7 +61,23 @@ if ! gcloud compute disks describe "$CACHE_DISK" --zone="$GCP_ZONE" >/dev/null 2
         --size="${CACHE_DISK_SIZE_GB}GB" \
         --type="$CACHE_DISK_TYPE"
 else
-    log "  exists"
+    read -r actual_size actual_type < <(
+        gcloud compute disks describe "$CACHE_DISK" \
+            --zone="$GCP_ZONE" \
+            --format='value(sizeGb,type.basename())'
+    )
+    if [[ "$actual_type" != "$CACHE_DISK_TYPE" ]]; then
+        log "  exists, but type is $actual_type; expected $CACHE_DISK_TYPE"
+        log "  disk type is immutable for this workflow. Replace the disk or use CACHE_DISK=<new-name>."
+        exit 1
+    fi
+    if (( actual_size < CACHE_DISK_SIZE_GB )); then
+        log "  exists, but size is ${actual_size}GB; expected at least ${CACHE_DISK_SIZE_GB}GB"
+        log "  resize with: gcloud compute disks resize $CACHE_DISK --size=$CACHE_DISK_SIZE_GB --zone=$GCP_ZONE"
+        log "  then on the VM run: sudo resize2fs /dev/sdb"
+        exit 1
+    fi
+    log "  exists ($actual_size GB, $actual_type)"
 fi
 
 log "Done. Next: ./spin.sh"

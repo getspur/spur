@@ -14,7 +14,7 @@ gcloud compute instances list --project="$GCP_PROJECT" --filter="name=$VM_NAME" 
 echo
 echo "-- Cache disk --"
 gcloud compute disks list --project="$GCP_PROJECT" --filter="name=$CACHE_DISK" \
-    --format='table(name,zone.basename(),sizeGb,status,users)' 2>/dev/null || true
+    --format='table(name,zone.basename(),sizeGb,type.basename(),provisionedIops,provisionedThroughputGbps,status,users)' 2>/dev/null || true
 echo
 echo "-- sccache bucket --"
 gcloud storage buckets describe "gs://$SCCACHE_BUCKET" --format='value(name,location,storageClass)' 2>/dev/null || echo "(not created)"
