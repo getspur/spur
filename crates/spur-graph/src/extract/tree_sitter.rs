@@ -573,15 +573,17 @@ impl<'a> FactBuilder<'a> {
                             Some(NodeKind::Function | NodeKind::Method)
                         )
                     {
-                        if let (Some(src_file), Some(tgt_file)) = (
-                            file_by_id.get(&edge.source).copied(),
-                            file_by_id.get(&target).copied(),
-                        ) {
-                            if !function_singleton_safe(src_file, tgt_file) {
-                                phantom_blocked_references += 1;
-                            }
+                        let provably_unsafe = matches!(
+                            (file_by_id.get(&edge.source).copied(), file_by_id.get(&target).copied()),
+                            (Some(src_file), Some(tgt_file))
+                                if !function_singleton_safe(src_file, tgt_file)
+                        );
+                        if provably_unsafe {
+                            phantom_blocked_references += 1;
+                            self.add_pending_edge(&edge, None);
+                        } else {
+                            self.add_pending_edge(&edge, Some(target));
                         }
-                        self.add_pending_edge(&edge, Some(target));
                     }
                 }
             } else if edge.relation == RelationKind::Calls {
@@ -1951,6 +1953,57 @@ pub fn same_file_helper() {}
         let same_file = call("same_file_helper");
         assert!(same_file.target_node_id.is_some());
         assert_eq!(same_file.bind_method.as_deref(), Some("singleton"));
+    }
+
+    #[test]
+    fn singleton_hof_reference_respects_crate_safety() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/source/src")).expect("source crate dir");
+        std::fs::create_dir_all(dir.path().join("crates/callee/src")).expect("callee crate dir");
+        std::fs::write(
+            dir.path().join("crates/source/src/lib.rs"),
+            r#"
+pub fn caller(items: Vec<i32>) {
+    let _ = items.iter().copied().map(cross_crate_mapper).collect::<Vec<_>>();
+    let _ = items.iter().copied().map(same_crate_mapper).collect::<Vec<_>>();
+    let _ = items.iter().copied().map(same_file_mapper).collect::<Vec<_>>();
+}
+
+pub fn same_file_mapper(value: i32) -> i32 { value }
+"#,
+        )
+        .expect("write source lib");
+        std::fs::write(
+            dir.path().join("crates/source/src/helpers.rs"),
+            "pub fn same_crate_mapper(value: i32) -> i32 { value }\n",
+        )
+        .expect("write source helper");
+        std::fs::write(
+            dir.path().join("crates/callee/src/lib.rs"),
+            "pub fn cross_crate_mapper(value: i32) -> i32 { value }\n",
+        )
+        .expect("write callee lib");
+
+        let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+        let reference = |label: &str| {
+            facts
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::References
+                        && edge.target_label.as_deref() == Some(label)
+                })
+                .unwrap_or_else(|| panic!("missing reference edge for {label}"))
+        };
+
+        let cross_crate = reference("cross_crate_mapper");
+        assert_eq!(cross_crate.target_node_id, None);
+
+        let same_crate = reference("same_crate_mapper");
+        assert!(same_crate.target_node_id.is_some());
+
+        let same_file = reference("same_file_mapper");
+        assert!(same_file.target_node_id.is_some());
     }
 
     #[test]
