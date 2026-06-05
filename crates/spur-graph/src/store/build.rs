@@ -26,7 +26,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v8";
 pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-05-import-candidate-hygiene-v13";
+pub const RESOLVER_VERSION: &str = "2026-06-05-import-path-resolver-v14";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1037,6 +1037,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                         | "relational"
                         | "constructs_type_singleton"
                         | "method_crate_singleton"
+                        | "import_path"
                 )
             );
             let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
@@ -1053,7 +1054,9 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 continue;
             };
             let matches = match edge.relation {
-                RelationKind::Imports => import_rebind_candidates(matches),
+                RelationKind::Imports => {
+                    import_rebind_candidates(matches, source_file_path, edge.import_path.is_some())
+                }
                 relation => {
                     if let Some(allowed) = rebind_candidate_kinds(relation) {
                         matches
@@ -1104,11 +1107,23 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
     }
 }
 
-fn import_rebind_candidates(matches: &[RebindTarget]) -> Vec<&RebindTarget> {
+fn import_rebind_candidates<'a>(
+    matches: &'a [RebindTarget],
+    source_file_path: &str,
+    import_path_present: bool,
+) -> Vec<&'a RebindTarget> {
     let raw_candidates = matches
         .iter()
         .filter(|target| is_import_rebind_candidate_kind(&target.symbol_kind))
         .collect::<Vec<_>>();
+
+    if import_path_present {
+        return raw_candidates
+            .into_iter()
+            .filter(|target| is_import_rebind_type_like_candidate_kind(&target.symbol_kind))
+            .filter(|target| same_import_rebind_language(source_file_path, &target.file_path))
+            .collect();
+    }
 
     let mut candidates = raw_candidates
         .iter()
@@ -1157,6 +1172,27 @@ fn is_import_rebind_type_like_candidate_kind(kind: &str) -> bool {
 
 fn is_import_rebind_fallback_candidate_kind(kind: &str) -> bool {
     matches!(kind, "enum_variant" | "constant")
+}
+
+fn same_import_rebind_language(source_file_path: &str, target_file_path: &str) -> bool {
+    let Some(source_language) = import_rebind_language(source_file_path) else {
+        return false;
+    };
+    import_rebind_language(target_file_path) == Some(source_language)
+}
+
+fn import_rebind_language(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("rs") => Some("rust"),
+        Some("py") => Some("python"),
+        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") => Some("javascript"),
+        _ => None,
+    }
 }
 
 fn same_directory_path(left: &str, right: &str) -> bool {
@@ -1765,6 +1801,84 @@ mod tests {
             resolved_edge.target_stable_symbol_id.as_deref(),
             Some("sym:variant")
         );
+    }
+
+    #[test]
+    fn rebind_import_path_keeps_cross_crate_type_fallback_unstamped() {
+        let mut def_bucket = empty_bucket("crates/spur-acp/src/types.rs", "oid-def");
+        let mut session_symbol = symbol("sym:session", "crates/spur-acp/src/types.rs");
+        session_symbol.entity_name = "SessionId".to_owned();
+        session_symbol.symbol_kind = "struct".to_owned();
+        def_bucket.symbols.push(session_symbol);
+
+        let mut use_bucket = empty_bucket("crates/spur-core/src/lib.rs", "oid-use");
+        let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
+        import_edge.target_label = Some("SessionId".to_owned());
+        import_edge.import_path = Some("spur_acp::types::SessionId".to_owned());
+        use_bucket.edges.push(import_edge);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("crates/spur-acp/src/types.rs".to_owned(), def_bucket);
+        buckets.insert("crates/spur-core/src/lib.rs".to_owned(), use_bucket);
+
+        rebind_cross_file_edges(&mut buckets);
+
+        let resolved_edge = &buckets["crates/spur-core/src/lib.rs"].edges[0];
+        assert_eq!(
+            resolved_edge.target_stable_symbol_id.as_deref(),
+            Some("sym:session")
+        );
+        assert_eq!(resolved_edge.bind_method, None);
+    }
+
+    #[test]
+    fn rebind_import_path_rejects_cross_language_type_fallback() {
+        let mut def_bucket = empty_bucket("src/lib.rs", "oid-def");
+        let mut widget_symbol = symbol("sym:widget", "src/lib.rs");
+        widget_symbol.entity_name = "Widget".to_owned();
+        widget_symbol.symbol_kind = "struct".to_owned();
+        def_bucket.symbols.push(widget_symbol);
+
+        let mut use_bucket = empty_bucket("consumer.py", "oid-use");
+        let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
+        import_edge.target_label = Some("Widget".to_owned());
+        import_edge.import_path = Some("external.widget".to_owned());
+        use_bucket.edges.push(import_edge);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("src/lib.rs".to_owned(), def_bucket);
+        buckets.insert("consumer.py".to_owned(), use_bucket);
+
+        rebind_cross_file_edges(&mut buckets);
+
+        let resolved_edge = &buckets["consumer.py"].edges[0];
+        assert_eq!(resolved_edge.target_stable_symbol_id, None);
+        assert_eq!(resolved_edge.bind_method, None);
+    }
+
+    #[test]
+    fn rebind_import_path_rejects_enum_variant_fallback_candidate() {
+        let mut def_bucket = empty_bucket("src/shadow.rs", "oid-def");
+        let mut variant_symbol = symbol("sym:path", "src/shadow.rs");
+        variant_symbol.entity_name = "Path".to_owned();
+        variant_symbol.symbol_kind = "enum_variant".to_owned();
+        def_bucket.symbols.push(variant_symbol);
+
+        let mut use_bucket = empty_bucket("src/lib.rs", "oid-use");
+        let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
+        import_edge.target_label = Some("Path".to_owned());
+        import_edge.import_path = Some("std::path::Path".to_owned());
+        use_bucket.edges.push(import_edge);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("src/shadow.rs".to_owned(), def_bucket);
+        buckets.insert("src/lib.rs".to_owned(), use_bucket);
+
+        rebind_cross_file_edges(&mut buckets);
+
+        let resolved_edge = &buckets["src/lib.rs"].edges[0];
+        assert_eq!(resolved_edge.target_stable_symbol_id, None);
+        assert_eq!(resolved_edge.bind_method, None);
     }
 
     #[test]
