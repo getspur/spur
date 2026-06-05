@@ -123,91 +123,6 @@ struct EdgeMetadata {
     bind_method: Option<&'static str>,
 }
 
-/// Precision heuristic for common std/core/trait methods, not an exhaustive std method list.
-const STD_PRELUDE_METHOD_NAMES: &[&str] = &[
-    "and_then",
-    "as_bytes",
-    "as_mut",
-    "as_path",
-    "as_ref",
-    "as_str",
-    "borrow",
-    "borrow_mut",
-    "build",
-    "bytes",
-    "chars",
-    "clear",
-    "clone",
-    "cmp",
-    "collect",
-    "contains",
-    "contains_key",
-    "count",
-    "dedup",
-    "default",
-    "deref",
-    "drain",
-    "ends_with",
-    "entry",
-    "eq",
-    "expect",
-    "extend",
-    "filter",
-    "find",
-    "first",
-    "flush",
-    "fmt",
-    "from",
-    "get",
-    "get_mut",
-    "insert",
-    "into",
-    "into_iter",
-    "is_empty",
-    "iter",
-    "iter_mut",
-    "join",
-    "keys",
-    "last",
-    "len",
-    "lines",
-    "lock",
-    "map",
-    "max",
-    "min",
-    "next",
-    "nth",
-    "ok_or",
-    "or_default",
-    "or_insert",
-    "parse",
-    "pop",
-    "push",
-    "push_str",
-    "read",
-    "recv",
-    "remove",
-    "replace",
-    "retain",
-    "send",
-    "sort",
-    "split",
-    "starts_with",
-    "take",
-    "to_lowercase",
-    "to_owned",
-    "to_path_buf",
-    "to_string",
-    "to_uppercase",
-    "to_vec",
-    "trim",
-    "truncate",
-    "unwrap",
-    "unwrap_or",
-    "values",
-    "write",
-];
-
 struct PendingResolutionIndexes<'a> {
     singleton_symbols_by_label: &'a HashMap<String, NodeId>,
     ambiguous_symbols_by_label: &'a HashMap<String, usize>,
@@ -963,10 +878,18 @@ fn resolve_singleton_bare_target(
                     (file_for_node(edge.source), file_for_node(target)),
                     (Some(src_file), Some(tgt_file)) if function_singleton_safe(src_file, tgt_file)
                 );
-                let std_prelude_method = STD_PRELUDE_METHOD_NAMES
-                    .binary_search(&edge.target_name.as_str())
-                    .is_ok();
-                if same_crate_safe && !std_prelude_method {
+                let builtin_method = file_for_node(edge.source)
+                    .and_then(|src_file| {
+                        crate::extract::languages::Language::from_path(std::path::Path::new(
+                            src_file,
+                        ))
+                    })
+                    .is_some_and(|lang| {
+                        lang.builtin_method_names()
+                            .binary_search(&edge.target_name.as_str())
+                            .is_ok()
+                    });
+                if same_crate_safe && !builtin_method {
                     builder.add_pending_edge_with_bind_method(
                         edge,
                         Some(target),
@@ -2179,6 +2102,55 @@ impl ExternalPanel {
         let std_named = call("clone");
         assert_eq!(std_named.target_node_id, None);
         assert_eq!(std_named.bind_method.as_deref(), None);
+    }
+
+    #[test]
+    fn method_crate_singleton_does_not_capture_ts_builtin_methods() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/foo/web")).expect("foo web dir");
+        std::fs::write(
+            dir.path().join("crates/foo/web/grid.ts"),
+            r#"
+export class GridApi {
+    forEach(callback: (value: number) => void) {}
+    setCellType(kind: string) {}
+}
+"#,
+        )
+        .expect("write grid ts");
+        std::fs::write(
+            dir.path().join("crates/foo/web/app.ts"),
+            r#"
+export function caller(values: number[], grid: GridApi) {
+    values.forEach((value) => value);
+    grid.setCellType("text");
+}
+"#,
+        )
+        .expect("write app ts");
+
+        let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+        let call = |label: &str| {
+            facts
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.relation == RelationKind::Calls
+                        && edge.target_label.as_deref() == Some(label)
+                })
+                .unwrap_or_else(|| panic!("missing call edge for {label}"))
+        };
+
+        let builtin_named = call("forEach");
+        assert_eq!(builtin_named.target_node_id, None);
+        assert_eq!(builtin_named.bind_method.as_deref(), None);
+
+        let domain_named = call("setCellType");
+        assert!(domain_named.target_node_id.is_some());
+        assert_eq!(
+            domain_named.bind_method.as_deref(),
+            Some("method_crate_singleton")
+        );
     }
 
     #[test]
