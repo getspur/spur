@@ -11,6 +11,7 @@ import AfmView, {
   anywidgetViewFromData,
 } from "./JuteAppOutput";
 import MarkdownRenderer from "./MarkdownRenderer";
+import { installAfmHostTransport } from "./afmHost";
 import {
   compilePhasePresentation,
   compileProgressMessage,
@@ -30,6 +31,8 @@ export default function OutputView({ value, chromeless = false }: Props) {
   const outputs = value?.outputs ?? [];
   const showCompileRail = Boolean(compile && outputs.length === 0);
   const now = useCompileNow(showCompileRail, compile?.startedAt);
+
+  useEffect(() => installAfmHostTransport(), []);
 
   if (!value) {
     return null;
