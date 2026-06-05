@@ -228,6 +228,9 @@ async fn drain_run_cell_events(
             // Ephemeral compile-progress signal (Phase-1/2 compile ticker):
             // surfaced via the per-event progress report above, not a cell output.
             RunCellEvent::CompileProgress { .. } => {}
+            // Widget comm events update frontend/notebook state; they are not
+            // notebook output records in the MCP summary.
+            RunCellEvent::CommOpen(_) | RunCellEvent::CommMsg(_) | RunCellEvent::CommClose(_) => {}
             RunCellEvent::Disconnect(message) => {
                 status = format!("disconnect: {message}");
             }

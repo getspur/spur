@@ -380,6 +380,9 @@ async fn run_raw_kernel_cell(
             } => status = Some(finished_status),
             RunCellEvent::Started
             | RunCellEvent::CompileProgress { .. }
+            | RunCellEvent::CommOpen(_)
+            | RunCellEvent::CommMsg(_)
+            | RunCellEvent::CommClose(_)
             | RunCellEvent::ExecuteResult(_)
             | RunCellEvent::DisplayData(_)
             | RunCellEvent::UpdateDisplayData(_)
