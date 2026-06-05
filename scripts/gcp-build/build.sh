@@ -174,11 +174,9 @@ ensure_vm_up() {
 # Direct SSH connects to the VM's external IP and skips the IAP tunnel, which
 # roughly doubles upload throughput when the uplink has headroom (measured
 # ~1 MB/s over IAP vs ~2.5 MB/s direct from Vietnam->asia-southeast1). It uses
-# SPUR_DIRECT_SSH_PORT (default: 443) because some workstation networks drop
-# outbound tcp:22 even when the GCP firewall allows it; IAP does not need this
-# port and stays on its normal tunnel path. We probe the preferred transport
-# with a cheap `true` (bounded by ConnectTimeout so a filtered port fails fast)
-# and fall back in order:
+# SPUR_DIRECT_SSH_PORT (default: 22) and falls back to IAP if direct public SSH
+# is not reachable. We probe the preferred transport with a cheap `true`
+# (bounded by ConnectTimeout so a filtered port fails fast) and fall back in order:
 #   direct -> IAP -> exit INFRA_UNAVAILABLE (caller spur-cargo builds locally)
 #
 # Both modes run through `gcloud compute ssh`, so OS Login, key management, and
