@@ -89,6 +89,7 @@ if [[ "$GIT_TOPLEVEL" == *"/.spur/worktrees/"* ]]; then
 else
     WORKTREE_KEY="main"
 fi
+WORKTREE_FILE_KEY="${WORKTREE_KEY//\//_}"
 REMOTE_DIR="spur/$WORKTREE_KEY"                       # e.g. spur/worktrees/UUID
 REMOTE_TARGET="/mnt/cargo/targets/$WORKTREE_KEY"
 REMOTE_PNPM_NODE_MODULES="/mnt/cargo/pnpm-nm/$WORKTREE_KEY"
@@ -183,16 +184,17 @@ ensure_vm_up() {
 # pass --tunnel-through-iap). Set SPUR_DIRECT_SSH=0 to force IAP-only.
 probe_transport() {
     # $1: transport flag ("" for direct, "--tunnel-through-iap" for IAP).
+    local connect_timeout="${SPUR_SSH_CONNECT_TIMEOUT:-3}"
     if [[ -n "$1" ]]; then
         gcloud compute ssh "$VM_NAME" \
             --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
             "$1" --quiet --command='true' \
-            -- -o ConnectTimeout=10 >/dev/null 2>&1
+            -- -o ConnectTimeout="$connect_timeout" >/dev/null 2>&1
     else
         gcloud compute ssh "$VM_NAME" \
             --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
             --quiet --command='true' \
-            -- -o ConnectTimeout=10 >/dev/null 2>&1
+            -- -o ConnectTimeout="$connect_timeout" >/dev/null 2>&1
     fi
 }
 
@@ -254,12 +256,18 @@ sync_workspace() {
     remote_ssh \
         --command="mkdir -p ~/$REMOTE_DIR $REMOTE_TARGET /mnt/cargo/cargo-home /mnt/cargo/rustup && link=\"\$HOME/$REMOTE_DIR/target\" && if [ \"\$(readlink \"\$link\" 2>/dev/null)\" != \"$REMOTE_TARGET\" ]; then rm -rf \"\$link\"; ln -s \"$REMOTE_TARGET\" \"\$link\"; fi" >/dev/null || return $?
 
-    local remote_xfer_list="/tmp/spur-sync-xfer.${WORKTREE_KEY//\//_}"
+    local remote_xfer_list="/tmp/spur-sync-xfer.$WORKTREE_FILE_KEY"
+    SYNC_TRANSFER_COUNT=0
     log "Syncing to $VM_NAME:~/$REMOTE_DIR ..."
-    # Capture the exact set of files rsync transfers. --out-format='%n' emits one
-    # path per created/updated entry and nothing for unchanged files, so $XFER_LIST
-    # is precisely the delta we need to re-stamp below.
-    rsync -az --delete -0 --files-from="$FILE_LIST" --out-format='%n' \
+    # Capture the exact set of files rsync transfers. --checksum is intentional:
+    # the VM-side restamp below makes changed sources newer than any cached cargo
+    # artifact, but it also means remote mtimes no longer match local mtimes. If
+    # rsync used its default size+mtime quick-check, every warm run would treat
+    # restamped files as changed, re-transfer thousands of paths, restamp them
+    # again, and force cargo to rebuild workspace crates. Checksum mode makes the
+    # delta content-based, and --omit-dir-times keeps directory metadata churn out
+    # of $XFER_LIST so only content changes are restamped.
+    rsync -azcO --delete -0 --files-from="$FILE_LIST" --out-format='%n' \
         -e "$TRANSPORT" \
         "$GIT_TOPLEVEL/" "$VM_NAME:$REMOTE_DIR/" >"$XFER_LIST" || return $?
 
@@ -277,7 +285,8 @@ sync_workspace() {
     # longer exists (e.g. directory entries that were pruned).
     # See: docs/rca/2026-05-31-remote-cargo-stale-fingerprint.md
     if [[ -s "$XFER_LIST" ]]; then
-        log "Re-stamping $(wc -l <"$XFER_LIST" | tr -d ' ') synced path(s) to VM clock..."
+        SYNC_TRANSFER_COUNT=$(wc -l <"$XFER_LIST" | tr -d ' ')
+        log "Re-stamping $SYNC_TRANSFER_COUNT synced path(s) to VM clock..."
         rsync -az -e "$TRANSPORT" "$XFER_LIST" "$VM_NAME:$remote_xfer_list" || return $?
         remote_ssh \
             --command="cd \"\$HOME/$REMOTE_DIR\" && while IFS= read -r f; do [ -n \"\$f\" ] && touch -c -- \"\$f\"; done < \"$remote_xfer_list\"" || return $?
@@ -293,7 +302,7 @@ sync_workspace() {
     # now gone, never VM-generated artifacts (node_modules/, dist/, target/) which
     # were never in any manifest. The baseline manifest persists on the cache disk
     # (/mnt/cargo) keyed by worktree, so it survives across builds and VM restarts.
-    local remote_manifest_cur="/tmp/spur-sync-manifest.${WORKTREE_KEY//\//_}"
+    local remote_manifest_cur="/tmp/spur-sync-manifest.$WORKTREE_FILE_KEY"
     local stored_manifest="/mnt/cargo/sync-manifests/$WORKTREE_KEY.manifest"
     log "Reconciling remote workspace (pruning locally-deleted files)..."
     rsync -az -e "$TRANSPORT" "$FILE_LIST" "$VM_NAME:$remote_manifest_cur" || return $?
@@ -427,6 +436,11 @@ run_payload() {
         notebook_production_build=1
         log "Notebook production build detected; will run frontend build on VM first."
     fi
+    local capture_cargo_output=0
+    if [[ "${SPUR_CAPTURE_FRESH_CARGO_OUTPUT:-1}" != "0" && "${SYNC_TRANSFER_COUNT:-0}" == "0" ]]; then
+        capture_cargo_output=1
+        log "No source content delta; capturing cargo output on VM (set SPUR_CAPTURE_FRESH_CARGO_OUTPUT=0 to stream)."
+    fi
     remote_ssh \
         --command="bash -lc '
             set -e
@@ -452,10 +466,24 @@ run_payload() {
                 echo \"[build] Building notebook frontend: $NOTEBOOK_FRONTEND_DIR\"
                 (cd $NOTEBOOK_FRONTEND_DIR && $NOTEBOOK_FRONTEND_INSTALL_CMD && $NOTEBOOK_FRONTEND_BUILD_CMD)
             fi
-            cargo $CARGO_ARGS
+            cargo_log=/tmp/spur-cargo-output.$WORKTREE_FILE_KEY.log
+            if [[ $capture_cargo_output -eq 1 ]]; then
+                set +e
+                cargo $CARGO_ARGS >\"\$cargo_log\" 2>&1
+                cargo_rc=\$?
+                set -e
+                if [[ \$cargo_rc -ne 0 ]]; then
+                    cat \"\$cargo_log\"
+                    exit \$cargo_rc
+                fi
+                tail -30 \"\$cargo_log\"
+            else
+                cargo $CARGO_ARGS
+            fi
             echo
             echo \"--- sccache stats ($WORKTREE_KEY) ---\"
-            sccache --show-stats | head -20
+            sccache --show-stats > /tmp/spur-sccache-stats.$WORKTREE_FILE_KEY
+            sed -n '1,20p' /tmp/spur-sccache-stats.$WORKTREE_FILE_KEY
         '" || return $?
 
     log "Done. target lives at $VM_NAME:$REMOTE_TARGET — use scripts/gcp-build/fetch.sh to pull artifacts."
