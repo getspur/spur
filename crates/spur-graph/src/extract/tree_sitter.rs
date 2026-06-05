@@ -588,8 +588,9 @@ impl<'a> FactBuilder<'a> {
                 let candidates = qualified_edge_candidates(&edge, &qualified_symbols_by_name);
                 match candidates.as_slice() {
                     [target] if *target != edge.source => {
+                        let kind = node_kind_by_id.get(target).copied();
                         if matches!(
-                            node_kind_by_id.get(target).copied(),
+                            kind,
                             Some(NodeKind::Struct | NodeKind::EnumVariant | NodeKind::Class)
                         ) {
                             self.add_pending_edge_as(
@@ -598,12 +599,14 @@ impl<'a> FactBuilder<'a> {
                                 RelationKind::Constructs,
                                 None,
                             );
-                        } else {
+                        } else if matches!(kind, Some(NodeKind::Function | NodeKind::Method)) {
                             self.add_pending_edge_with_bind_method(
                                 &edge,
                                 Some(*target),
                                 Some("fqn"),
                             );
+                        } else {
+                            self.add_pending_edge(&edge, None);
                         }
                     }
                     candidates if candidates.len() > 1 => {
