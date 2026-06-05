@@ -173,15 +173,26 @@ ensure_vm_up() {
 # ---- choose SSH transport: direct (default) -> IAP -> local ----------------
 # Direct SSH connects to the VM's external IP and skips the IAP tunnel, which
 # roughly doubles upload throughput when the uplink has headroom (measured
-# ~1 MB/s over IAP vs ~2.5 MB/s direct from Vietnam->asia-southeast1). It does
-# depend on the firewall keeping tcp:22 reachable; IAP does not. We probe the
-# preferred transport with a cheap `true` (bounded by ConnectTimeout so a
-# filtered :22 fails fast) and fall back in order:
+# ~1 MB/s over IAP vs ~2.5 MB/s direct from Vietnam->asia-southeast1). It uses
+# SPUR_DIRECT_SSH_PORT (default: 443) because some workstation networks drop
+# outbound tcp:22 even when the GCP firewall allows it; IAP does not need this
+# port and stays on its normal tunnel path. We probe the preferred transport
+# with a cheap `true` (bounded by ConnectTimeout so a filtered port fails fast)
+# and fall back in order:
 #   direct -> IAP -> exit INFRA_UNAVAILABLE (caller spur-cargo builds locally)
 #
 # Both modes run through `gcloud compute ssh`, so OS Login, key management, and
 # host-key validation are identical — only the transport path differs (omit vs
 # pass --tunnel-through-iap). Set SPUR_DIRECT_SSH=0 to force IAP-only.
+DIRECT_SSH_PORT_EFFECTIVE=""
+direct_ssh_port() {
+    DIRECT_SSH_PORT_EFFECTIVE="${SPUR_DIRECT_SSH_PORT:-22}"
+    if [[ ! "$DIRECT_SSH_PORT_EFFECTIVE" =~ ^[0-9]+$ ]]; then
+        log "Invalid SPUR_DIRECT_SSH_PORT=$DIRECT_SSH_PORT_EFFECTIVE"
+        exit $INFRA_UNAVAILABLE
+    fi
+}
+
 probe_transport() {
     # $1: transport flag ("" for direct, "--tunnel-through-iap" for IAP).
     local connect_timeout="${SPUR_SSH_CONNECT_TIMEOUT:-3}"
@@ -191,10 +202,19 @@ probe_transport() {
             "$1" --quiet --command='true' \
             -- -o ConnectTimeout="$connect_timeout" >/dev/null 2>&1
     else
-        gcloud compute ssh "$VM_NAME" \
-            --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-            --quiet --command='true' \
-            -- -o ConnectTimeout="$connect_timeout" >/dev/null 2>&1
+        direct_ssh_port
+        if [[ "$DIRECT_SSH_PORT_EFFECTIVE" != "22" ]]; then
+            gcloud compute ssh "$VM_NAME" \
+                --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+                --ssh-flag="-p $DIRECT_SSH_PORT_EFFECTIVE" \
+                --quiet --command='true' \
+                -- -o ConnectTimeout="$connect_timeout" >/dev/null 2>&1
+        else
+            gcloud compute ssh "$VM_NAME" \
+                --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+                --quiet --command='true' \
+                -- -o ConnectTimeout="$connect_timeout" >/dev/null 2>&1
+        fi
     fi
 }
 
@@ -205,7 +225,7 @@ probe_transport() {
 choose_transport() {
     local direct="${SPUR_DIRECT_SSH:-1}"
     if [[ "$direct" != "0" ]] && probe_transport ""; then
-        IAP_FLAG=""; TRANSPORT_MODE="direct (external IP)"
+        IAP_FLAG=""; TRANSPORT_MODE="direct (external IP:${SPUR_DIRECT_SSH_PORT:-22})"
     elif probe_transport "--tunnel-through-iap"; then
         IAP_FLAG="--tunnel-through-iap"; TRANSPORT_MODE="IAP tunnel"
     else
@@ -217,15 +237,29 @@ choose_transport() {
     TRANSPORT="$SCRIPT_DIR/_gcloud-ssh.sh"
     export GCP_PROJECT GCP_ZONE
     # _gcloud-ssh.sh (the rsync transport) reads this to match the chosen mode.
-    export SPUR_SSH_IAP_FLAG="$IAP_FLAG"
+    export SPUR_SSH_IAP_FLAG="$IAP_FLAG" SPUR_DIRECT_SSH_PORT
 }
 
 # Every remote command goes through here so it uses the chosen transport.
 # $IAP_FLAG is intentionally unquoted: empty -> no arg (direct), else one flag.
 remote_ssh() {
-    gcloud compute ssh "$VM_NAME" \
-        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-        $IAP_FLAG --quiet "$@"
+    if [[ -z "${IAP_FLAG:-}" ]]; then
+        direct_ssh_port
+        if [[ "$DIRECT_SSH_PORT_EFFECTIVE" != "22" ]]; then
+            gcloud compute ssh "$VM_NAME" \
+                --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+                --ssh-flag="-p $DIRECT_SSH_PORT_EFFECTIVE" \
+                --quiet "$@"
+        else
+            gcloud compute ssh "$VM_NAME" \
+                --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+                --quiet "$@"
+        fi
+    else
+        gcloud compute ssh "$VM_NAME" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+            $IAP_FLAG --quiet "$@"
+    fi
 }
 
 # ---- sync the worktree to the VM -------------------------------------------
