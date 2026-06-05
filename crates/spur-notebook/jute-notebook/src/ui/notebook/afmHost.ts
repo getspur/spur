@@ -28,7 +28,7 @@ type AnywidgetCommandContent = Record<string, unknown> & {
 };
 
 type AnywidgetCommandIntent = AnywidgetCommandContent & {
-  buffers: unknown[];
+  buffers: number[][];
 };
 
 type AnywidgetCommandResponse = {
@@ -116,13 +116,21 @@ function afmMessageFromEventData(data: unknown): AfmWindowMessage | null {
 function intentFromMessage(
   message: AfmWindowMessage,
 ): AnywidgetCommandIntent | null {
-  const buffers = Array.isArray(message.buffers) ? message.buffers : [];
+  const buffers = buffersFromMessage(message.buffers);
   const content = commandContent(message.content);
   if (content) {
     return { ...content, buffers };
   }
 
-  if (message.type !== "save_changes" || !isRecord(message.state)) {
+  if (message.type === "send") {
+    console.warn("[jute-afm] dropping unsupported custom message", {
+      type: message.type,
+      modelId: message.modelId,
+    });
+    return null;
+  }
+
+  if (!isRecord(message.state)) {
     return null;
   }
 
@@ -147,6 +155,31 @@ function commandContent(content: unknown): AnywidgetCommandContent | null {
   }
 
   return content as AnywidgetCommandContent;
+}
+
+function buffersFromMessage(buffers: unknown): number[][] {
+  if (!Array.isArray(buffers)) {
+    return [];
+  }
+  return buffers.map(normalizeBuffer);
+}
+
+function normalizeBuffer(buffer: unknown): number[] {
+  if (isNumberArray(buffer)) {
+    return buffer;
+  }
+
+  if (buffer instanceof ArrayBuffer) {
+    return Array.from(new Uint8Array(buffer));
+  }
+
+  if (ArrayBuffer.isView(buffer)) {
+    return Array.from(
+      new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+    );
+  }
+
+  return [];
 }
 
 function applyModelStateResponse(
@@ -216,4 +249,8 @@ function stableJson(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNumberArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "number");
 }

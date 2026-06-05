@@ -79,6 +79,39 @@ describe("AFM host transport", () => {
     expect(customListener).toHaveBeenCalledWith(response, []);
   });
 
+  test("normalizes binary send buffers to byte arrays", async () => {
+    const modelId = track("afm-binary-send-model");
+    const content = {
+      id: "cmd-binary",
+      kind: "anywidget-command",
+      name: "source.push",
+      msg: { port: "binary", payload: [] },
+    };
+    const viewBacking = new ArrayBuffer(6);
+    new Uint8Array(viewBacking).set([0, 9, 8, 7, 6, 0]);
+    const dataView = new DataView(viewBacking, 1, 4);
+    const arrayBuffer = new Uint8Array([1, 2, 255]).buffer;
+    invokeMock.mockResolvedValueOnce({
+      id: "cmd-binary",
+      kind: "anywidget-command-response",
+      response: { accepted: true },
+    });
+
+    installTransport();
+    postAfmMessage({
+      source: "jute-afm",
+      type: "send",
+      modelId,
+      content,
+      buffers: [dataView, arrayBuffer],
+    });
+    await nextTick();
+
+    expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
+      intent: { ...content, buffers: [[9, 8, 7, 6], [1, 2, 255]] },
+    });
+  });
+
   test("deduplicates repeated AFM command messages by model and command id", async () => {
     const modelId = track("afm-dedup-model");
     const content = {
@@ -204,5 +237,63 @@ describe("AFM host transport", () => {
       preserved: "yes",
     });
     expect(customListener).toHaveBeenCalledTimes(1);
+  });
+
+  test("normalizes save_changes buffers to byte arrays", async () => {
+    const modelId = track("afm-save-binary-model");
+    const typedArray = new Uint8Array([4, 5, 6]);
+    const alreadyBytes = [10, 11, 12];
+    invokeMock.mockImplementationOnce(async (_command, args) => {
+      const intent = (args as { intent: { id: string } }).intent;
+      return {
+        id: intent.id,
+        kind: "anywidget-command-response",
+        response: {
+          method: "update",
+          state: { value: 4 },
+        },
+      };
+    });
+
+    installTransport();
+    postAfmMessage({
+      source: "jute-afm",
+      type: "save_changes",
+      modelId,
+      state: { value: 4 },
+      buffers: [typedArray, alreadyBytes],
+    });
+    await nextTick();
+
+    expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
+      intent: expect.objectContaining({
+        name: "model-state.update",
+        buffers: [[4, 5, 6], [10, 11, 12]],
+      }),
+    });
+  });
+
+  test("warns when dropping unsupported custom send messages", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const modelId = track("afm-unsupported-send-model");
+
+    installTransport();
+    postAfmMessage({
+      source: "jute-afm",
+      type: "send",
+      modelId,
+      content: { arbitrary: true },
+    });
+    await nextTick();
+
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[jute-afm] dropping unsupported custom message",
+      {
+        type: "send",
+        modelId,
+      },
+    );
+    warnSpy.mockRestore();
   });
 });
