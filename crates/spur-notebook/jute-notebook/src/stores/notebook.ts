@@ -110,6 +110,7 @@ export type DagPortManifest = Record<string, number>;
 
 type DagStatusChangedDelta = {
   version: number;
+  path?: string;
   kind: {
     type: "dagStatusChanged";
     snapshot: DagStatusSnapshot;
@@ -1005,12 +1006,7 @@ export async function reconcileNotebookDelta(
   notebook: Notebook,
   delta: AuthoritativeNotebookDelta,
 ) {
-  if (
-    !notebookDeltaIsForPath(
-      notebook.state.viewState.path,
-      (delta as { path?: string | null }).path,
-    )
-  ) {
+  if (!notebookDeltaIsForPath(notebook.state.viewState.path, delta.path)) {
     // Delta belongs to a different open notebook window; ignore it.
     return;
   }
