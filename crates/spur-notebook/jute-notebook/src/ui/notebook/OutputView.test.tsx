@@ -2,12 +2,34 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
 
+import { dispose, set } from "@/stores/widgetRegistry";
+
 import OutputView from "./OutputView";
 
 const WIDGET_VIEW_MIME = "application/vnd.jupyter.widget-view+json";
-const JUTE_APP_MIME = "application/vnd.jute.app+json";
+const AFM_MODEL_ID = "jute-afm-model";
 
-function outputValue(appPayload: unknown) {
+const DENO_STYLE_ESM = `
+const format = (value) => value.toUpperCase();
+export default {
+  initialize({ model, signal, experimental }) {
+    model.on("msg:custom", () => {});
+    return { ready: !signal.aborted, invoke: experimental.invoke };
+  },
+  render({ model, el, signal, host, experimental }) {
+    el.className = "deno-widget";
+    el.textContent = format(model.get("letters"));
+    model.on("change:letters", () => {
+      el.textContent = format(model.get("letters"));
+    });
+    return () => {
+      el.dataset.cleaned = String(signal.aborted && Boolean(host) && Boolean(experimental));
+    };
+  },
+};
+`;
+
+function outputValue(modelId = AFM_MODEL_ID) {
   return {
     status: "success",
     outputs: [
@@ -17,10 +39,9 @@ function outputValue(appPayload: unknown) {
           [WIDGET_VIEW_MIME]: {
             version_major: 2,
             version_minor: 1,
-            model_id: "jute-app-model",
+            model_id: modelId,
           },
-          [JUTE_APP_MIME]: appPayload,
-          "text/plain": "jute app",
+          "text/plain": "anywidget view",
         },
         metadata: {},
       },
@@ -28,103 +49,73 @@ function outputValue(appPayload: unknown) {
   } as any;
 }
 
-describe("OutputView Jute app rendering", () => {
-  afterEach(() => cleanup());
+describe("OutputView AFM widget rendering", () => {
+  afterEach(() => {
+    cleanup();
+    dispose(AFM_MODEL_ID);
+    dispose("model-only");
+  });
 
-  test("renders a standard anywidget placeholder when Jute app payload is not available", () => {
-    render(
-      <OutputView
-        value={
-          {
-            status: "success",
-            outputs: [
-              {
-                output_type: "display_data",
-                data: {
-                  [WIDGET_VIEW_MIME]: {
-                    version_major: 2,
-                    version_minor: 1,
-                    model_id: "model-only",
-                  },
-                },
-                metadata: {},
-              },
-            ],
-          } as any
-        }
-      />,
-    );
+  test("renders a standard anywidget placeholder when registry assets are not available", () => {
+    render(<OutputView value={outputValue("model-only")} />);
 
     expect(screen.getByText("anywidget model")).toBeInTheDocument();
     expect(screen.getByText("model-only")).toBeInTheDocument();
     expect(
-      screen.getByText("waiting for Jute app payload"),
+      screen.getByText("waiting for widget model assets"),
     ).toBeInTheDocument();
   });
 
-  test("renders a Jute cell app iframe from the app payload", () => {
-    render(
-      <OutputView
-        value={outputValue({
-          appId: "cloud-controller",
-          title: "Cloud Controller",
-          height: 280,
-          state: { serverStatus: "Stopped", cpuUsage: 0 },
-          esm: `
-            export function render({ model, el }) {
-              el.innerHTML = "<strong>" + model.get("serverStatus") + "</strong>";
-            }
-          `,
-        })}
-      />,
-    );
+  test("renders an AFM iframe from the widget registry model", () => {
+    set(AFM_MODEL_ID, {
+      state: { letters: "abcd" },
+      esm: DENO_STYLE_ESM,
+      css: ".deno-widget { color: green; }",
+    });
 
-    const iframe = screen.getByTitle("Cloud Controller");
+    render(<OutputView value={outputValue()} />);
+
+    const iframe = screen.getByTitle(`anywidget ${AFM_MODEL_ID}`);
     expect(iframe).toHaveAttribute(
       "sandbox",
       expect.stringContaining("allow-scripts"),
     );
+    expect(iframe.getAttribute("sandbox")).not.toContain("allow-same-origin");
     expect(iframe).toHaveAttribute(
       "srcdoc",
-      expect.stringContaining("cloud-controller"),
+      expect.stringContaining('"letters":"abcd"'),
     );
     expect(iframe).toHaveAttribute(
       "srcdoc",
-      expect.stringContaining("serverStatus"),
+      expect.stringContaining(".deno-widget { color: green; }"),
     );
   });
 
-  test("updates the hosted app document when display data changes", () => {
-    const { rerender } = render(
-      <OutputView
-        value={outputValue({
-          appId: "cloud-controller",
-          title: "Cloud Controller",
-          state: { serverStatus: "Stopped" },
-          esm: "export function render({ model, el }) { el.textContent = model.get('serverStatus'); }",
-        })}
-      />,
-    );
+  test("AFM iframe runtime follows the anywidget ABI", () => {
+    set(AFM_MODEL_ID, {
+      state: { letters: "abcd" },
+      esm: DENO_STYLE_ESM,
+      css: ".deno-widget { color: green; }",
+    });
 
-    expect(screen.getByTitle("Cloud Controller")).toHaveAttribute(
-      "srcdoc",
-      expect.stringContaining('"serverStatus":"Stopped"'),
-    );
+    render(<OutputView value={outputValue()} />);
 
-    rerender(
-      <OutputView
-        value={outputValue({
-          appId: "cloud-controller",
-          title: "Cloud Controller",
-          state: { serverStatus: "Running" },
-          esm: "export function render({ model, el }) { el.textContent = model.get('serverStatus'); }",
-        })}
-      />,
-    );
+    const iframe = screen.getByTitle(`anywidget ${AFM_MODEL_ID}`);
+    const srcDoc = iframe.getAttribute("srcdoc") ?? "";
 
-    expect(screen.getByTitle("Cloud Controller")).toHaveAttribute(
-      "srcdoc",
-      expect.stringContaining('"serverStatus":"Running"'),
+    expect(srcDoc).toContain(
+      "initialize?.({ model, signal: initializeController.signal, experimental })",
     );
+    expect(srcDoc).toContain(
+      "render?.({ model, el: root, signal: viewController.signal, host, experimental })",
+    );
+    expect(srcDoc).toContain("widget_manager");
+    expect(srcDoc).toContain("anywidget-command");
+    expect(srcDoc).toContain("anywidget-command-response");
+    expect(srcDoc).toContain("renderCleanup");
+    expect(srcDoc).toContain("jute-afm-model-update");
+    expect(srcDoc).toContain("jute-afm-custom-message");
+    expect(srcDoc).not.toContain("signal: undefined");
+    expect(srcDoc).not.toContain("exports");
   });
 });
