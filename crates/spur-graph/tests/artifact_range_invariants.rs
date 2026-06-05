@@ -1,0 +1,78 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use spur_graph::build_facts;
+use spur_graph::store::build::artifact_from_facts;
+use spur_graph::RelationKind;
+
+fn corpus_root(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+/// Allowed resolved-target `symbol_kind`s per guarded relation. Mirrors the resolver +
+/// `rebind_cross_file_edges` union kind-sets. `None` = relation not range-checked here.
+fn allowed_target_kinds(relation: RelationKind) -> Option<&'static [&'static str]> {
+    match relation {
+        RelationKind::Extends => Some(&["trait", "interface", "class"]),
+        RelationKind::Implements => Some(&["trait", "interface"]),
+        RelationKind::Calls => Some(&["function", "method"]),
+        _ => None,
+    }
+}
+
+#[test]
+fn assembled_artifact_has_no_out_of_range_resolved_edges() {
+    // (corpus dir, language label for diagnostics)
+    let corpora = [
+        ("sample_corpus", "rust"),
+        ("python_corpus", "python"),
+        ("typescript_corpus", "typescript"),
+        ("cpp_corpus", "cpp"),
+    ];
+
+    let mut violations: Vec<String> = Vec::new();
+
+    for (dir, lang) in corpora {
+        let root = corpus_root(dir);
+        let facts = build_facts(&root, None)
+            .unwrap_or_else(|e| panic!("extract {lang} corpus: {e:?}"))
+            .0;
+        // artifact_from_facts runs rebind_cross_file_edges internally — this is the
+        // assembled (post-rebind) artifact the CLI actually persists.
+        let artifact = artifact_from_facts(&facts, &root)
+            .unwrap_or_else(|e| panic!("assemble {lang} artifact: {e:?}"));
+
+        let kind_by_id: HashMap<&str, &str> = artifact
+            .symbols
+            .iter()
+            .map(|s| (s.stable_symbol_id.as_str(), s.symbol_kind.as_str()))
+            .collect();
+
+        for edge in &artifact.edges {
+            let Some(allowed) = allowed_target_kinds(edge.relation) else {
+                continue;
+            };
+            let Some(target_id) = edge.target_stable_symbol_id.as_deref() else {
+                continue; // unresolved edges are correct; skip
+            };
+            let Some(target_kind) = kind_by_id.get(target_id).copied() else {
+                continue; // dangling id (shouldn't happen); not this test's concern
+            };
+            if !allowed.contains(&target_kind) {
+                violations.push(format!(
+                    "[{lang}] {:?} edge resolves to out-of-range kind {target_kind:?} \
+                     (target_label={:?}, allowed={allowed:?})",
+                    edge.relation, edge.target_label
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "assembled artifact contains out-of-range resolved edges:\n{}",
+        violations.join("\n")
+    );
+}
