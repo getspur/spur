@@ -26,6 +26,13 @@ import {
   snapshotFromDaemonControlResponse,
 } from "@/daemon/control";
 
+import {
+  dispose as disposeWidgetModel,
+  emit as emitWidgetModel,
+  get as getWidgetModel,
+  set as setWidgetModel,
+} from "./widgetRegistry";
+
 type NotebookStore = NotebookStoreState & NotebookStoreActions;
 
 /** Actions are kept private, only to be used from the `Notebook` class. */
@@ -870,6 +877,155 @@ function dismissesCompileProgress(message: RunCellEvent): boolean {
   );
 }
 
+type JsonRecord = Record<string, unknown>;
+type BufferPathSegment = string | number;
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneJsonValue(item));
+  }
+  if (isJsonRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
+    );
+  }
+  return value;
+}
+
+function cloneJsonRecord(value: unknown): JsonRecord {
+  if (!isJsonRecord(value)) return {};
+  return cloneJsonValue(value) as JsonRecord;
+}
+
+function bufferPathsFrom(value: unknown): BufferPathSegment[][] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (path): path is BufferPathSegment[] =>
+      Array.isArray(path) &&
+      path.every(
+        (segment) => typeof segment === "string" || typeof segment === "number",
+      ),
+  );
+}
+
+function assignBufferAtPath(
+  state: JsonRecord,
+  path: BufferPathSegment[],
+  buffer: number[],
+) {
+  if (path.length === 0) return;
+
+  let cursor: JsonRecord | unknown[] = state;
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const segment = path[i];
+    const nextSegment = path[i + 1];
+    const key = String(segment);
+    const nextValue: unknown = Array.isArray(cursor)
+      ? cursor[Number(segment)]
+      : cursor[key];
+
+    if (isJsonRecord(nextValue) || Array.isArray(nextValue)) {
+      cursor = nextValue;
+      continue;
+    }
+
+    const replacement: JsonRecord | unknown[] =
+      typeof nextSegment === "number" ? [] : {};
+    if (Array.isArray(cursor)) {
+      cursor[Number(segment)] = replacement;
+    } else {
+      cursor[key] = replacement;
+    }
+    cursor = replacement;
+  }
+
+  const lastSegment = path[path.length - 1];
+  if (Array.isArray(cursor)) {
+    cursor[Number(lastSegment)] = buffer.slice();
+  } else {
+    cursor[String(lastSegment)] = buffer.slice();
+  }
+}
+
+function stateWithBuffers(data: JsonRecord, buffers: number[][]): JsonRecord {
+  const state = cloneJsonRecord(data.state);
+  const bufferPaths = bufferPathsFrom(data.buffer_paths);
+  for (let i = 0; i < bufferPaths.length && i < buffers.length; i += 1) {
+    assignBufferAtPath(state, bufferPaths[i], buffers[i]);
+  }
+  return state;
+}
+
+function splitWidgetAssets(
+  state: JsonRecord,
+  fallbackData?: JsonRecord,
+): {
+  state: JsonRecord;
+  esm?: string;
+  css?: string;
+} {
+  const nextState = { ...state };
+  const stateEsm = nextState._esm;
+  const stateCss = nextState._css;
+  delete nextState._esm;
+  delete nextState._css;
+
+  return {
+    state: nextState,
+    esm:
+      typeof stateEsm === "string"
+        ? stateEsm
+        : typeof fallbackData?._esm === "string"
+          ? fallbackData._esm
+          : undefined,
+    css:
+      typeof stateCss === "string"
+        ? stateCss
+        : typeof fallbackData?._css === "string"
+          ? fallbackData._css
+          : undefined,
+  };
+}
+
+function widgetUpdateFromCommData(data: unknown, buffers: number[][]) {
+  const record = isJsonRecord(data) ? data : {};
+  return splitWidgetAssets(stateWithBuffers(record, buffers), record);
+}
+
+function applyCommOpen(message: Extract<RunCellEvent, { event: "comm_open" }>) {
+  if (message.data.target_name !== "jupyter.widget") return;
+
+  setWidgetModel(
+    message.data.comm_id,
+    widgetUpdateFromCommData(message.data.data, message.data.buffers),
+  );
+}
+
+function applyCommMsg(message: Extract<RunCellEvent, { event: "comm_msg" }>) {
+  const data = isJsonRecord(message.data.data) ? message.data.data : {};
+  if (data.method === "update") {
+    const update = widgetUpdateFromCommData(data, message.data.buffers);
+    setWidgetModel(message.data.comm_id, {
+      ...update,
+      state: {
+        ...(getWidgetModel(message.data.comm_id)?.state ?? {}),
+        ...update.state,
+      },
+    });
+  } else if (data.method === "custom") {
+    emitWidgetModel(
+      message.data.comm_id,
+      "msg:custom",
+      data.content,
+      message.data.buffers,
+    );
+  }
+}
+
 export function applyRunCellEvent(
   state: WritableDraft<NotebookServerState>,
   cellId: string,
@@ -948,6 +1104,12 @@ export function applyRunCellEvent(
       startedAt: nextRunState.compile?.startedAt ?? Date.now(),
     };
     updateRunCellResultDraft(state, cellId, nextRunState);
+  } else if (message.event === "comm_open") {
+    applyCommOpen(message);
+  } else if (message.event === "comm_msg") {
+    applyCommMsg(message);
+  } else if (message.event === "comm_close") {
+    disposeWidgetModel(message.data.comm_id);
   } else if (message.event === "started") {
     nextRunState.status = "running";
     delete nextRunState.compile;
