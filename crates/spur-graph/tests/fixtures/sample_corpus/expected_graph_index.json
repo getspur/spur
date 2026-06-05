@@ -452,15 +452,6 @@
     },
     {
       "source_stable_symbol_id": "b4bf8362c80d42ea",
-      "target_stable_symbol_id": null,
-      "target_label": "Helper",
-      "relation": "imports",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "b4bf8362c80d42ea",
       "target_stable_symbol_id": "66bf26d3c5059ec8",
       "target_label": null,
       "relation": "contains",
@@ -472,6 +463,15 @@
       "source_stable_symbol_id": "b4bf8362c80d42ea",
       "target_stable_symbol_id": "6a2e722ded1d0d94",
       "target_label": "helper",
+      "relation": "imports",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "b4bf8362c80d42ea",
+      "target_stable_symbol_id": "8adf4fe25a85c876",
+      "target_label": "Helper",
       "relation": "imports",
       "confidence": "heuristic",
       "confidence_score": 0.8,
