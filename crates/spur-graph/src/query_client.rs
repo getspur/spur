@@ -624,6 +624,7 @@ struct EdgeDedupeKey {
     source_stable_symbol_id: String,
     target_stable_symbol_id: Option<String>,
     target_label: Option<String>,
+    import_path: Option<String>,
     relation: RelationKind,
     edge_kind: Option<crate::GraphEdgeKind>,
     bind_method: Option<String>,
@@ -709,6 +710,7 @@ fn edge_key(edge: &GraphEdgeArtifact) -> EdgeDedupeKey {
         source_stable_symbol_id: edge.source_stable_symbol_id.clone(),
         target_stable_symbol_id: edge.target_stable_symbol_id.clone(),
         target_label: edge.target_label.clone(),
+        import_path: edge.import_path.clone(),
         relation: edge.relation,
         edge_kind: edge.edge_kind,
         bind_method: edge.bind_method.clone(),
@@ -1830,6 +1832,7 @@ fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdg
     let confidence_score = f32_array_by_name(batch, "confidence_score")?;
     let edge_kind = string_array_by_name(batch, "edge_kind")?;
     let bind_method = string_array_by_name(batch, "bind_method")?;
+    let import_path = optional_string_array_by_name(batch, "import_path")?;
 
     let mut edges = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -1844,6 +1847,7 @@ fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdg
                 required_string_value(target_stable_id, row, "target_stable_id")?.to_owned(),
             ),
             target_label: optional_string_value(target_label, row),
+            import_path: import_path.and_then(|values| optional_string_value(values, row)),
             relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
             confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
             confidence_score: confidence_score.value(row),
@@ -1865,6 +1869,7 @@ fn unresolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphE
     let confidence_score = f32_array_by_name(batch, "confidence_score")?;
     let edge_kind = string_array_by_name(batch, "edge_kind")?;
     let bind_method = string_array_by_name(batch, "bind_method")?;
+    let import_path = optional_string_array_by_name(batch, "import_path")?;
 
     let mut edges = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -1877,6 +1882,7 @@ fn unresolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphE
             .to_owned(),
             target_stable_symbol_id: None,
             target_label: optional_string_value(target_label, row),
+            import_path: import_path.and_then(|values| optional_string_value(values, row)),
             relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
             confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
             confidence_score: confidence_score.value(row),
@@ -1899,6 +1905,21 @@ fn string_array_by_name<'a>(
         .column(index)
         .as_any()
         .downcast_ref::<StringArray>()
+        .ok_or_else(|| ArrowError::CastError(format!("expected string column `{name}`")))
+}
+
+fn optional_string_array_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<Option<&'a StringArray>, ArrowError> {
+    let Ok(index) = batch.schema().index_of(name) else {
+        return Ok(None);
+    };
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .map(Some)
         .ok_or_else(|| ArrowError::CastError(format!("expected string column `{name}`")))
 }
 

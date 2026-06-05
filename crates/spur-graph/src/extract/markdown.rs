@@ -194,6 +194,7 @@ fn emit_markdown_links(
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name,
+                        import_path: None,
                         relation,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -238,6 +239,7 @@ fn emit_markdown_block_links(
                 builder.pending_edges.push(PendingEdge {
                     source: source_id,
                     target_name,
+                    import_path: None,
                     relation,
                     edge_kind: None,
                     origin: crate::extract::tree_sitter::CallOrigin::Expression,

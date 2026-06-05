@@ -717,10 +717,12 @@ pub(crate) fn emit_edges(
             "import" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
                 let relation = relation_kind_for_capture(config, "import", RelationKind::Imports);
+                let import_paths = contained_capture_text(capture, source, captures, "import.path");
                 for imported in contained_capture_text(capture, source, captures, "import.name") {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: imported,
+                        import_path: import_path_for_edge(&import_paths),
                         relation,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -737,6 +739,7 @@ pub(crate) fn emit_edges(
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: trait_name,
+                        import_path: None,
                         relation: RelationKind::Implements,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -752,6 +755,7 @@ pub(crate) fn emit_edges(
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: super_name,
+                        import_path: None,
                         relation: RelationKind::Extends,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -777,6 +781,7 @@ pub(crate) fn emit_edges(
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: callee,
+                        import_path: None,
                         relation: RelationKind::Calls,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -798,6 +803,7 @@ pub(crate) fn emit_edges(
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: callee,
+                        import_path: None,
                         relation: RelationKind::Calls,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -812,6 +818,7 @@ pub(crate) fn emit_edges(
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: callee,
+                        import_path: None,
                         relation: RelationKind::Calls,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::MacroBody,
@@ -828,6 +835,7 @@ pub(crate) fn emit_edges(
                 builder.pending_edges.push(PendingEdge {
                     source: source_id,
                     target_name: target_name.to_owned(),
+                    import_path: None,
                     relation: RelationKind::References,
                     edge_kind: Some(GraphEdgeKind::ReferencesHof),
                     origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -958,6 +966,7 @@ pub(crate) fn emit_rust_dyn_trait_edges(
         builder.pending_edges.push(PendingEdge {
             source: source_id,
             target_name: format!("{trait_name}::{method}"),
+            import_path: None,
             relation: RelationKind::Calls,
             edge_kind: Some(GraphEdgeKind::CallsDyn),
             origin: crate::extract::tree_sitter::CallOrigin::Expression,
@@ -1920,6 +1929,30 @@ fn contained_capture_text(
         .map(|capture| child_text(capture.node, source).trim().to_owned())
         .filter(|text| !text.is_empty())
         .collect()
+}
+
+fn import_path_for_edge(import_paths: &[String]) -> Option<String> {
+    import_paths
+        .iter()
+        .filter_map(|path| normalize_import_path(path))
+        .next()
+}
+
+fn normalize_import_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() || is_bare_single_segment_import(path) {
+        return None;
+    }
+    Some(path.to_owned())
+}
+
+fn is_bare_single_segment_import(path: &str) -> bool {
+    !path.starts_with('.')
+        && !path.contains("::")
+        && !path.contains('.')
+        && !path.contains('/')
+        && !path.contains('\\')
+        && !path.contains('{')
 }
 
 fn child_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {

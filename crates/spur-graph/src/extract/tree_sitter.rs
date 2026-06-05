@@ -26,6 +26,7 @@ use crate::{
 pub(crate) struct PendingEdge {
     pub(crate) source: NodeId,
     pub(crate) target_name: String,
+    pub(crate) import_path: Option<String>,
     pub(crate) relation: RelationKind,
     pub(crate) edge_kind: Option<GraphEdgeKind>,
     pub(crate) origin: CallOrigin,
@@ -117,10 +118,11 @@ type EdgeDedupKey = (
     Option<GraphEdgeKind>,
 );
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct EdgeMetadata {
     confidence: Confidence,
     confidence_score: f32,
+    import_path: Option<String>,
     bind_method: Option<&'static str>,
 }
 
@@ -386,6 +388,7 @@ impl<'a> FactBuilder<'a> {
             EdgeMetadata {
                 confidence,
                 confidence_score,
+                import_path: None,
                 bind_method: None,
             },
         );
@@ -453,6 +456,7 @@ impl<'a> FactBuilder<'a> {
             target_node_id: target,
             relation,
             target_label,
+            import_path: metadata.import_path,
             confidence: metadata.confidence,
             confidence_score: metadata.confidence_score,
             edge_kind,
@@ -1557,6 +1561,7 @@ fn metadata_for_pending_edge(
         return EdgeMetadata {
             confidence: Confidence::Heuristic,
             confidence_score: 0.8,
+            import_path: edge.import_path.clone(),
             bind_method: Some("macro_body_singleton"),
         };
     }
@@ -1565,6 +1570,7 @@ fn metadata_for_pending_edge(
     EdgeMetadata {
         confidence,
         confidence_score,
+        import_path: edge.import_path.clone(),
         bind_method,
     }
 }
@@ -2450,6 +2456,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "flush".to_owned(),
+            import_path: None,
             relation: RelationKind::Calls,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -2509,6 +2516,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "helper".to_owned(),
+            import_path: None,
             relation: RelationKind::Calls,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -2572,6 +2580,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "Widget".to_owned(),
+            import_path: None,
             relation: RelationKind::Constructs,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -2645,6 +2654,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "Widget".to_owned(),
+            import_path: None,
             relation: RelationKind::Constructs,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -2705,6 +2715,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "Widget".to_owned(),
+            import_path: None,
             relation: RelationKind::Constructs,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -2773,6 +2784,7 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
         let edge = PendingEdge {
             source,
             target_name: "Base".to_owned(),
+            import_path: None,
             relation: RelationKind::Extends,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -2933,6 +2945,7 @@ export interface Base {}
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "Widget".to_owned(),
+            import_path: None,
             relation: RelationKind::Constructs,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -3002,6 +3015,7 @@ export interface Base {}
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "helper".to_owned(),
+            import_path: None,
             relation: RelationKind::Imports,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -3058,6 +3072,7 @@ export interface Base {}
         builder.pending_edges.push(PendingEdge {
             source: source_file,
             target_name: "SessionId".to_owned(),
+            import_path: None,
             relation: RelationKind::Imports,
             edge_kind: None,
             origin: CallOrigin::Expression,
@@ -3326,6 +3341,7 @@ pub fn caller() {
         builder.pending_edges.push(PendingEdge {
             source,
             target_name: "helper".to_owned(),
+            import_path: None,
             relation: RelationKind::Calls,
             edge_kind: None,
             origin: CallOrigin::MacroBody,

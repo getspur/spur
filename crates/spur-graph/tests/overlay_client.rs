@@ -579,6 +579,7 @@ fn edge(
         source_stable_symbol_id: source_stable_symbol_id.to_owned(),
         target_stable_symbol_id: target_stable_symbol_id.map(str::to_owned),
         target_label: target_label.map(str::to_owned),
+        import_path: None,
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
