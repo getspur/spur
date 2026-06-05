@@ -23,6 +23,10 @@
       (scoped_identifier
         name: (identifier) @import.name))) @import.path) @import
 
+(use_declaration
+  argument: (use_wildcard
+    "*" @reexport.name) @reexport.path) @reexport
+
 ; `impl Trait for Type` emits an implements edge to the trait. Inherent impls
 ; have no `trait:` field, so they do not match these patterns.
 (impl_item
