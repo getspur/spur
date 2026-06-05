@@ -4,10 +4,15 @@
 
 (import_statement
   source: (string
-    (string_fragment) @import.name) @import)
+    (string_fragment) @import.name @import.path) @import)
 
-(import_specifier
-  name: (identifier) @import.name) @import
+(import_statement
+  (import_clause
+    (named_imports
+      (import_specifier
+        name: (identifier) @import.name)))
+  source: (string
+    (string_fragment) @import.path)) @import
 
 (call_expression
   function: [

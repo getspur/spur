@@ -145,10 +145,10 @@ fn find_symbol_json<'a>(
 }
 
 #[test]
-fn graph_store_schema_version_is_v7() {
+fn graph_store_schema_version_is_v8() {
     assert_eq!(
         spur_graph::store::build::SCHEMA_VERSION,
-        "spur-graph-schema-v7"
+        "spur-graph-schema-v8"
     );
 }
 
@@ -1179,6 +1179,55 @@ fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
     assert_eq!(imports_edge.confidence_score, 0.8);
     assert_eq!(calls_edge.confidence, Confidence::SyntaxExact);
     assert_eq!(calls_edge.confidence_score, 1.0);
+}
+
+#[test]
+fn import_path_capture_records_full_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src/a")).expect("mkdir python package");
+    fs::write(
+        root.join("src/lib.rs"),
+        "mod a { pub mod b { pub struct C; } }\nuse a::b::C;\nfn make() { let _ = C; }\n",
+    )
+    .expect("write rust source");
+    fs::write(root.join("src/a/b.py"), "class C:\n    pass\n").expect("write python module");
+    fs::write(root.join("src/main.py"), "from a.b import C\n").expect("write python source");
+    fs::write(root.join("src/m.ts"), "export class C {}\n").expect("write ts module");
+    fs::write(
+        root.join("src/app.ts"),
+        "import { C } from \"./m\";\nexport class App extends C {}\n",
+    )
+    .expect("write ts source");
+
+    let facts = build_facts(root, None).expect("extract fixture").0;
+
+    let import_path_for = |file_label: &str, target_label: &str| {
+        let file_node_id = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == file_label)
+            .unwrap_or_else(|| panic!("missing file node `{file_label}`"))
+            .node_id;
+        facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.source_node_id == file_node_id
+                    && edge.target_label.as_deref() == Some(target_label)
+            })
+            .unwrap_or_else(|| {
+                panic!("missing import edge in `{file_label}` targeting `{target_label}`")
+            })
+            .import_path
+            .as_deref()
+    };
+
+    assert_eq!(import_path_for("src/lib.rs", "C"), Some("a::b::C"));
+    assert_eq!(import_path_for("src/main.py", "C"), Some("a.b"));
+    assert_eq!(import_path_for("src/app.ts", "C"), Some("./m"));
 }
 
 #[test]
