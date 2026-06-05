@@ -1191,7 +1191,7 @@ fn import_resolution_candidates(
     edge: &PendingEdge,
     indexes: &PendingResolutionIndexes<'_>,
 ) -> Vec<NodeId> {
-    let mut candidates = builder
+    let raw_candidates = builder
         .symbol_index
         .get(&edge.target_name)
         .into_iter()
@@ -1205,6 +1205,31 @@ fn import_resolution_candidates(
                 .is_some_and(is_import_resolution_candidate_kind)
         })
         .collect::<Vec<_>>();
+
+    let mut candidates = raw_candidates
+        .iter()
+        .copied()
+        .filter(|target| {
+            indexes
+                .node_kind_by_id
+                .get(target)
+                .copied()
+                .is_some_and(is_import_resolution_type_like_candidate_kind)
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        candidates = raw_candidates
+            .into_iter()
+            .filter(|target| {
+                indexes
+                    .node_kind_by_id
+                    .get(target)
+                    .copied()
+                    .is_some_and(is_import_resolution_fallback_candidate_kind)
+            })
+            .collect();
+    }
+
     candidates.sort_by_key(|id| id.get());
     candidates.dedup();
     candidates
@@ -1223,9 +1248,13 @@ fn is_callable_target_kind(kind: NodeKind) -> bool {
 }
 
 fn is_import_resolution_candidate_kind(kind: NodeKind) -> bool {
-    // Keep impls in the ambiguity set for historical Rust type imports
-    // (`struct Helper` plus `impl Helper`); this filter exists to keep member
-    // symbols such as fields and methods from shadowing imports.
+    is_import_resolution_type_like_candidate_kind(kind)
+        || is_import_resolution_fallback_candidate_kind(kind)
+}
+
+fn is_import_resolution_type_like_candidate_kind(kind: NodeKind) -> bool {
+    // Impl blocks share the type's import surface; they are containers, not
+    // independently importable definitions.
     matches!(
         kind,
         NodeKind::Module
@@ -1233,14 +1262,15 @@ fn is_import_resolution_candidate_kind(kind: NodeKind) -> bool {
             | NodeKind::Class
             | NodeKind::Interface
             | NodeKind::Struct
-            | NodeKind::Impl
             | NodeKind::Enum
-            | NodeKind::EnumVariant
             | NodeKind::Trait
             | NodeKind::TypeAlias
             | NodeKind::Macro
-            | NodeKind::Constant
     )
+}
+
+fn is_import_resolution_fallback_candidate_kind(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::EnumVariant | NodeKind::Constant)
 }
 
 fn same_file_duplicate_function_candidate(
@@ -2986,6 +3016,156 @@ export interface Base {}
         assert_eq!(edge.source_node_id, source);
         assert_eq!(edge.target_node_id, Some(function));
         assert_eq!(edge.target_label.as_deref(), Some("helper"));
+    }
+
+    #[test]
+    fn import_candidate_hygiene_collapses_impl_shadow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse(
+                "use crate::model::SessionId;\npub struct SessionId;\nimpl SessionId {}\n",
+                None,
+            )
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let source_file_id = FileId(builder.next_file_id());
+        let target_file_id = FileId(builder.next_file_id());
+        let source_file = builder.add_file_node("src/lib.rs", source_file_id, root_node);
+        let target_file = builder.add_file_node("src/model.rs", target_file_id, root_node);
+        let target = builder.add_node(
+            "src/model.rs",
+            "SessionId".to_owned(),
+            "SessionId".to_owned(),
+            NodeKind::Struct,
+            target_file_id,
+            root_node,
+        );
+        let impl_shadow = builder.add_node(
+            "src/model.rs",
+            "SessionId".to_owned(),
+            "impl SessionId".to_owned(),
+            NodeKind::Impl,
+            target_file_id,
+            root_node,
+        );
+        builder.add_edge(target_file, Some(target), RelationKind::Contains, None);
+        builder.add_edge(target_file, Some(impl_shadow), RelationKind::Contains, None);
+        builder.pending_edges.push(PendingEdge {
+            source: source_file,
+            target_name: "SessionId".to_owned(),
+            relation: RelationKind::Imports,
+            edge_kind: None,
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        let edge = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("SessionId")
+            })
+            .expect("SessionId import edge");
+        assert_eq!(edge.source_node_id, source_file);
+        assert_eq!(edge.target_node_id, Some(target));
+    }
+
+    #[test]
+    fn import_resolves_unique_type_despite_enum_variant_shadow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod model;
+mod shadow;
+
+use crate::model::Foo;
+
+pub fn consume(_foo: Foo) {}
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(root.join("src/model.rs"), "pub struct Foo;\n").expect("write model.rs");
+        fs::write(
+            root.join("src/shadow.rs"),
+            r#"
+pub enum SomeEnum {
+    Foo,
+}
+"#,
+        )
+        .expect("write shadow.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Struct && node.label == "Foo")
+            .expect("Foo struct");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Foo")
+            })
+            .expect("Foo import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
+    }
+
+    #[test]
+    fn import_keeps_enum_variant_candidate_when_no_type_like_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod shadow;
+
+use crate::shadow::Variant;
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(
+            root.join("src/shadow.rs"),
+            r#"
+pub enum SomeEnum {
+    Variant,
+}
+"#,
+        )
+        .expect("write shadow.rs");
+
+        let facts = crate::build_facts(root, None).expect("extract").0;
+        let target = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::EnumVariant && node.label == "Variant")
+            .expect("Variant enum variant");
+        let edge = facts
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.target_label.as_deref() == Some("Variant")
+            })
+            .expect("Variant import edge");
+
+        assert_eq!(edge.target_node_id, Some(target.node_id));
     }
 
     #[test]
