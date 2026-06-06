@@ -189,6 +189,26 @@ impl<T> KernelMessage<T> {
     }
 }
 
+/// Build a Jupyter `comm_msg` message for the shell channel.
+///
+/// Widget protocol payloads carry `comm_id` and JSON `data` in message content,
+/// while binary buffers travel on the kernel message envelope.
+pub fn build_comm_msg(
+    comm_id: &str,
+    data: serde_json::Value,
+    buffers: Vec<Vec<u8>>,
+) -> KernelMessage {
+    let mut message = KernelMessage::new(
+        KernelMessageType::CommMsg,
+        serde_json::json!({
+            "comm_id": comm_id,
+            "data": data,
+        }),
+    );
+    message.buffers = buffers.into_iter().map(Bytes::from).collect();
+    message
+}
+
 impl<T: Serialize> KernelMessage<T> {
     /// Produce a variant of the message as a serialized JSON type.
     pub fn into_json(self) -> KernelMessage {
@@ -768,6 +788,58 @@ mod tests {
 
         assert_eq!(compile_progress.recv().await.unwrap(), line);
         assert_eq!(other.recv().await.unwrap(), line);
+    }
+
+    #[test]
+    fn build_comm_msg_sets_wire_type_content_and_buffers() {
+        let data = json!({
+            "method": "update",
+            "state": {
+                "value": 42
+            }
+        });
+        let buffers = vec![b"first-buffer".to_vec(), vec![0, 1, 2, 3]];
+
+        let message = build_comm_msg("comm-1", data.clone(), buffers.clone());
+
+        assert_eq!(message.header.msg_type, KernelMessageType::CommMsg);
+        assert_eq!(
+            message.content,
+            json!({
+                "comm_id": "comm-1",
+                "data": data
+            })
+        );
+        let attached_buffers = message
+            .buffers
+            .iter()
+            .map(|buffer| buffer.to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(attached_buffers, buffers);
+
+        let typed = message
+            .into_typed::<CommMessage>()
+            .expect("comm_msg content should deserialize");
+        assert_eq!(typed.content.comm_id, "comm-1");
+        assert_eq!(
+            typed.content.data,
+            json!({
+                "method": "update",
+                "state": {
+                    "value": 42
+                }
+            })
+        );
+        assert!(typed.content.buffers.is_empty());
+        let typed_buffers = typed
+            .buffers
+            .iter()
+            .map(|buffer| buffer.to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            typed_buffers,
+            vec![b"first-buffer".to_vec(), vec![0, 1, 2, 3]]
+        );
     }
 
     #[test]

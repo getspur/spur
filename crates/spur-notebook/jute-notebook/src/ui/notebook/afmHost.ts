@@ -9,6 +9,7 @@ import {
 const AFM_SOURCE = "jute-afm";
 const ANYWIDGET_COMMAND_KIND = "anywidget-command";
 const MODEL_STATE_UPDATE = "model-state.update";
+const MODEL_STATE_CUSTOM = "model-state.custom";
 const MAX_DEDUP_KEYS = 512;
 
 type AfmWindowMessage = {
@@ -28,6 +29,7 @@ type AnywidgetCommandContent = Record<string, unknown> & {
 };
 
 type AnywidgetCommandIntent = AnywidgetCommandContent & {
+  commId: string;
   buffers: number[][];
 };
 
@@ -43,6 +45,7 @@ let installCount = 0;
 let removeWindowListener: (() => void) | null = null;
 const deliveredKeys = new Set<string>();
 const deliveredKeyOrder: string[] = [];
+let customSendSequence = 0;
 
 export function installAfmHostTransport(): () => void {
   installCount += 1;
@@ -119,18 +122,33 @@ function intentFromMessage(
   const buffers = buffersFromMessage(message.buffers);
   const content = commandContent(message.content);
   if (content) {
-    return { ...content, buffers };
+    return { ...content, commId: message.modelId, buffers };
   }
 
   if (message.type === "send") {
-    console.warn("[jute-afm] dropping unsupported custom message", {
-      type: message.type,
-      modelId: message.modelId,
-    });
-    return null;
+    if (!Object.hasOwn(message, "content") || message.content === undefined) {
+      console.warn("[jute-afm] ignoring malformed custom send message", {
+        type: message.type,
+        modelId: message.modelId,
+      });
+      return null;
+    }
+
+    return {
+      id: `send:${message.modelId}:${customSendSequence++}`,
+      kind: ANYWIDGET_COMMAND_KIND,
+      name: MODEL_STATE_CUSTOM,
+      commId: message.modelId,
+      msg: { content: message.content },
+      buffers,
+    };
   }
 
   if (!isRecord(message.state)) {
+    console.warn("[jute-afm] ignoring malformed save_changes message", {
+      type: message.type,
+      modelId: message.modelId,
+    });
     return null;
   }
 
@@ -138,6 +156,7 @@ function intentFromMessage(
     id: `save_changes:${message.modelId}:${stableJson(message.state)}`,
     kind: ANYWIDGET_COMMAND_KIND,
     name: MODEL_STATE_UPDATE,
+    commId: message.modelId,
     msg: { state: { ...message.state } },
     buffers,
   };

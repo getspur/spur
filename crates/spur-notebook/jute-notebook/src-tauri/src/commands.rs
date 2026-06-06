@@ -25,14 +25,15 @@ use crate::{
         notebook::{
             code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType, NotebookRoot,
         },
+        wire_protocol::build_comm_msg,
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
     ports::{
         go_bootstrap, javascript_bootstrap, notebook_port_root, python_bootstrap, rust_bootstrap,
     },
     state::{
-        notebook_path_from_slot_id, notebook_slot_id, slot_id_for, window_slot_id, KernelSlot,
-        State,
+        clear_comm_owners_for_slot, notebook_path_from_slot_id, notebook_slot_id, record_comm_open,
+        remove_comm_owner, slot_id_for, window_slot_id, KernelSlot, State,
     },
     Error,
 };
@@ -1531,6 +1532,7 @@ pub async fn start_kernel(
             restore_kernel_to_slot(&state, &slot_id, kernel);
             return Err(error);
         }
+        clear_comm_owners_for_slot(&state, &slot_id);
     }
 
     crate::kernel_provision::ensure_python3_kernelspec(&app).await?;
@@ -1565,6 +1567,7 @@ pub async fn restart_kernel(
         restore_kernel_to_slot(&state, slot_id, kernel);
         return Err(error);
     }
+    clear_comm_owners_for_slot(&state, slot_id);
 
     let mut kernel = start_local_kernel(&next_spec_name, port_root.as_deref()).await?;
     if let Err(error) = inject_port_bootstrap(kernel.conn(), &next_spec_name).await {
@@ -1587,6 +1590,7 @@ pub async fn stop_kernel(kernel_id: &str, state: tauri::State<'_, State>) -> Res
         restore_kernel_to_slot(&state, kernel_id, kernel);
         return Err(error);
     }
+    clear_comm_owners_for_slot(&state, kernel_id);
     Ok(())
 }
 
@@ -1620,26 +1624,42 @@ pub async fn run_cell_events(
     notebook_path: &str,
     kernel_id: Option<&str>,
     cell_id: &str,
-    state: &State,
+    state: Arc<State>,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
-    let dispatch = resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, state)?;
+    let dispatch = resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, &state)?;
     ensure_kernel_slot_live(
-        state,
+        &state,
         notebook_path,
         &dispatch.slot_id,
         &dispatch.spec_name,
         dispatch.code_type,
     )
     .await?;
-    let conn = kernel_connection_for_slot(state, &dispatch.slot_id)?;
-    let spec_name = spec_name_for_slot(state, &dispatch.slot_id)?;
+    let conn = kernel_connection_for_slot(&state, &dispatch.slot_id)?;
+    let spec_name = spec_name_for_slot(&state, &dispatch.slot_id)?;
     enforce_dispatch_spec(&dispatch.slot_id, &spec_name, dispatch.code_type)?;
-    commands::run_cell_with_mode(
+    let rx = commands::run_cell_with_mode(
         &conn,
         &dispatch.wrapped_code,
         compile_progress_mode_for_spec(&spec_name),
     )
-    .await
+    .await?;
+    Ok(track_comm_owner_for_slot(state, dispatch.slot_id, rx))
+}
+
+/// Send a Jupyter `comm_msg` to a live kernel slot over the shell channel.
+pub async fn send_comm_msg(
+    state: &State,
+    slot_id: &str,
+    comm_id: &str,
+    data: serde_json::Value,
+    buffers: Vec<Vec<u8>>,
+) -> Result<(), Error> {
+    let conn = kernel_connection_for_slot(state, slot_id)?;
+    let _pending = conn
+        .call_shell(build_comm_msg(comm_id, data, buffers))
+        .await?;
+    Ok(())
 }
 
 fn compile_progress_mode_for_spec(spec_name: &str) -> CompileProgressMode {
@@ -1647,6 +1667,31 @@ fn compile_progress_mode_for_spec(spec_name: &str) -> CompileProgressMode {
         "evcxr" => CompileProgressMode::Cargo,
         "gonb" => CompileProgressMode::GoBuild,
         _ => CompileProgressMode::None,
+    }
+}
+
+fn track_comm_owner_for_slot(
+    state: Arc<State>,
+    slot_id: String,
+    rx: async_channel::Receiver<RunCellEvent>,
+) -> async_channel::Receiver<RunCellEvent> {
+    let (tx, tracked_rx) = async_channel::unbounded();
+    tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            update_comm_owner_for_event(&state, &slot_id, &event);
+            if tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+    tracked_rx
+}
+
+fn update_comm_owner_for_event(state: &State, slot_id: &str, event: &RunCellEvent) {
+    match event {
+        RunCellEvent::CommOpen(open) => record_comm_open(state, slot_id, &open.comm_id),
+        RunCellEvent::CommClose(close) => remove_comm_owner(state, &close.comm_id),
+        _ => {}
     }
 }
 
@@ -1924,7 +1969,13 @@ pub async fn run_cell(
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
-    let rx = run_cell_events(notebook_path, kernel_id.as_deref(), cell_id, &state).await?;
+    let rx = run_cell_events(
+        notebook_path,
+        kernel_id.as_deref(),
+        cell_id,
+        Arc::clone(state.inner()),
+    )
+    .await?;
     while let Ok(event) = rx.recv().await {
         if on_event.send(event).is_err() {
             break;
@@ -1961,7 +2012,9 @@ mod tests {
         Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource, MultilineString,
         NotebookMetadata, PortSpec, SpurCellMetadata,
     };
+    use crate::backend::wire_protocol::{CommMessage, CommOpen};
     use crate::notebook_store::DeltaKind;
+    use crate::state::slot_for_comm;
 
     fn notebook_with_source(source: &str, version: u64) -> NotebookRoot {
         NotebookRoot {
@@ -2229,6 +2282,41 @@ mod tests {
         assert_eq!(dispatch.wrapped_code, "spur.put('sales', [1])");
         assert!(!dispatch.wrapped_code.contains("class _Spur"));
         assert!(!dispatch.wrapped_code.contains("globalThis.spur"));
+    }
+
+    #[tokio::test]
+    async fn comm_owner_updates_from_run_cell_event_stream() {
+        let state = Arc::new(State::new());
+        let slot_id = "slot-a".to_string();
+        let (tx, rx) = async_channel::unbounded();
+        let tracked_rx = track_comm_owner_for_slot(Arc::clone(&state), slot_id, rx);
+
+        tx.send(RunCellEvent::CommOpen(CommOpen {
+            comm_id: "comm-1".to_string(),
+            target_name: "jupyter.widget".to_string(),
+            data: serde_json::json!({}),
+            buffers: Vec::new(),
+        }))
+        .await
+        .unwrap();
+        assert!(matches!(
+            tracked_rx.recv().await.unwrap(),
+            RunCellEvent::CommOpen(_)
+        ));
+        assert_eq!(slot_for_comm(&state, "comm-1").as_deref(), Some("slot-a"));
+
+        tx.send(RunCellEvent::CommClose(CommMessage {
+            comm_id: "comm-1".to_string(),
+            data: serde_json::json!({}),
+            buffers: Vec::new(),
+        }))
+        .await
+        .unwrap();
+        assert!(matches!(
+            tracked_rx.recv().await.unwrap(),
+            RunCellEvent::CommClose(_)
+        ));
+        assert_eq!(slot_for_comm(&state, "comm-1"), None);
     }
 
     #[tokio::test]
