@@ -1862,6 +1862,12 @@ enum RebuildStatus {
     StaleRebuildFailed,
 }
 
+impl RebuildStatus {
+    fn is_compact_actionable(self) -> bool {
+        matches!(self, Self::StaleBudgetExceeded | Self::StaleRebuildFailed)
+    }
+}
+
 #[derive(Debug)]
 struct GraphResponseAnalysis {
     metadata: GraphResponseMetadata,
@@ -2034,22 +2040,53 @@ impl GraphResponseMetadata {
         })
     }
 
+    fn into_compact_value(self) -> Value {
+        let mut metadata = serde_json::Map::new();
+        if self.worktree_dirty == Some(true) {
+            metadata.insert("worktree_dirty".into(), Value::Bool(true));
+            if let (Some(indexed_head_oid), Some(worktree_head_oid)) =
+                (self.indexed_head_oid, self.worktree_head_oid)
+            {
+                if indexed_head_oid != worktree_head_oid {
+                    metadata.insert("indexed_head_oid".into(), Value::String(indexed_head_oid));
+                    metadata.insert("worktree_head_oid".into(), Value::String(worktree_head_oid));
+                }
+            }
+        }
+        if self.response_file_oids_match == Some(false) {
+            metadata.insert("response_file_oids_match".into(), Value::Bool(false));
+        }
+        if self.rebuild_status.is_compact_actionable() {
+            metadata.insert("rebuild_status".into(), json!(self.rebuild_status));
+        }
+        Value::Object(metadata)
+    }
+
     fn insert_into(self, body: &mut Value) {
         self.insert_into_for_format(body, ResponseFormat::Full);
     }
 
     fn insert_into_for_format(self, body: &mut Value, response_format: ResponseFormat) {
         match response_format {
-            ResponseFormat::Full
-            | ResponseFormat::Compact
-            | ResponseFormat::Table
-            | ResponseFormat::Source => self.insert_full_into(body),
+            ResponseFormat::Full | ResponseFormat::Table | ResponseFormat::Source => {
+                self.insert_full_into(body)
+            }
+            ResponseFormat::Compact => self.insert_compact_into(body),
         }
     }
 
     fn insert_full_into(self, body: &mut Value) {
         if let Value::Object(map) = body {
             let Value::Object(metadata) = self.into_value() else {
+                return;
+            };
+            map.extend(metadata);
+        }
+    }
+
+    fn insert_compact_into(self, body: &mut Value) {
+        if let Value::Object(map) = body {
+            let Value::Object(metadata) = self.into_compact_value() else {
                 return;
             };
             map.extend(metadata);
