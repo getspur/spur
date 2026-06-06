@@ -481,6 +481,7 @@ pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError>
 }
 
 pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
+    let response_format = ResponseFormat::parse(args)?;
     let backend = open_code_search_backend_for_request(None).await?;
     let search = code_search_body_for_client(args, backend.client())?;
     let files = backend.search_response_file_set(&search)?;
@@ -488,7 +489,7 @@ pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> 
     let mut body = search.body;
     GraphResponseMetadata::from_source_inner(source, Some(&files))
         .await
-        .insert_into(&mut body);
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -496,6 +497,7 @@ async fn code_search_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
         .await
         .map_err(CodeGraphError::without_metadata)?;
@@ -514,6 +516,7 @@ async fn code_search_response(
             &rebuild_candidate,
             source.clone(),
             args,
+            response_format,
             |args, client| code_search_with_artifact(args, client).map_err(CodeGraphError::from),
         )
         .await
@@ -556,7 +559,7 @@ async fn code_search_response(
                     .await
                     .metadata
                     .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into(&mut fresh_body);
+                    .insert_into_for_format(&mut fresh_body, response_format);
                 return Ok(fresh_body);
             }
             RebuildAttempt::StaleBudgetExceeded => {
@@ -573,7 +576,9 @@ async fn code_search_response(
     }
 
     let mut body = search.body;
-    analysis.metadata.insert_into(&mut body);
+    analysis
+        .metadata
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -588,12 +593,29 @@ async fn code_graph_backend_value(
     args: &Value,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<Value, McpHandlerError> {
+    let response_format = ResponseFormat::parse(args)?;
+    code_graph_backend_value_with_format(args, response_format, handler).await
+}
+
+async fn code_graph_backend_value_allowing_source(
+    args: &Value,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> Result<Value, McpHandlerError> {
+    let response_format = ResponseFormat::parse_allowing_source(args)?;
+    code_graph_backend_value_with_format(args, response_format, handler).await
+}
+
+async fn code_graph_backend_value_with_format(
+    args: &Value,
+    response_format: ResponseFormat,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> Result<Value, McpHandlerError> {
     let backend = open_code_search_backend_for_request(None).await?;
     let mut body = handler(args, backend.client()).map_err(CodeGraphError::into_handler_error)?;
     let files = backend.response_file_set_from_body(&body)?;
     GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
         .await
-        .insert_into(&mut body);
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -602,6 +624,7 @@ async fn code_graph_backend_response(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
         .await
         .map_err(CodeGraphError::without_metadata)?;
@@ -624,6 +647,7 @@ async fn code_graph_backend_response(
             &rebuild_candidate,
             source.clone(),
             args,
+            response_format,
             &handler,
         )
         .await
@@ -665,7 +689,7 @@ async fn code_graph_backend_response(
                     .await
                     .metadata
                     .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into(&mut fresh_body);
+                    .insert_into_for_format(&mut fresh_body, response_format);
                 return Ok(fresh_body);
             }
             RebuildAttempt::StaleBudgetExceeded => {
@@ -681,7 +705,9 @@ async fn code_graph_backend_response(
         }
     }
 
-    analysis.metadata.insert_into(&mut body);
+    analysis
+        .metadata
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -690,6 +716,7 @@ async fn overlay_response_for_backend(
     rebuild_candidate: &RebuildCandidate,
     source: GraphMetadataSource,
     args: &Value,
+    response_format: ResponseFormat,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
     let (mut fresh_body, fresh_files) = {
@@ -706,7 +733,7 @@ async fn overlay_response_for_backend(
         .await
         .metadata
         .with_rebuild_status(RebuildStatus::Fresh)
-        .insert_into(&mut fresh_body);
+        .insert_into_for_format(&mut fresh_body, response_format);
     Ok(fresh_body)
 }
 
@@ -728,6 +755,8 @@ async fn code_graph_backend_response_without_rebuild(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
+    let response_format =
+        ResponseFormat::parse_allowing_source(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(rebuild_coordinator))
         .await
         .map_err(CodeGraphError::without_metadata)?;
@@ -744,7 +773,7 @@ async fn code_graph_backend_response_without_rebuild(
     GraphResponseMetadata::analyze_source_inner(source, Some(&files))
         .await
         .metadata
-        .insert_into(&mut body);
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -752,6 +781,47 @@ struct CodeSearchBody {
     body: Value,
     result: SearchResult,
     options: SearchOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseFormat {
+    Full,
+    Compact,
+    Table,
+    Source,
+}
+
+impl ResponseFormat {
+    fn parse(args: &Value) -> Result<Self, McpHandlerError> {
+        Self::parse_inner(args, false)
+    }
+
+    fn parse_allowing_source(args: &Value) -> Result<Self, McpHandlerError> {
+        Self::parse_inner(args, true)
+    }
+
+    fn parse_inner(args: &Value, allow_source: bool) -> Result<Self, McpHandlerError> {
+        let Some(value) = args.get("response_format") else {
+            return Ok(Self::Full);
+        };
+        let expected = if allow_source {
+            "`full`, `compact`, `table`, or `source`"
+        } else {
+            "`full`, `compact`, or `table`"
+        };
+        match value.as_str() {
+            Some("full") => Ok(Self::Full),
+            Some("compact") => Ok(Self::Compact),
+            Some("table") => Ok(Self::Table),
+            Some("source") if allow_source => Ok(Self::Source),
+            Some(other) => Err(McpHandlerError::InvalidParams(format!(
+                "invalid response_format `{other}`; expected {expected}"
+            ))),
+            None => Err(McpHandlerError::InvalidParams(format!(
+                "field 'response_format' must be a string; expected {expected}"
+            ))),
+        }
+    }
 }
 
 enum CodeSearchBackend {
@@ -1138,6 +1208,7 @@ async fn code_file_symbols_response(
 }
 
 fn code_file_symbols_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let file = file_arg(args)?;
     let file = validate_file_path_arg(file)?;
     if !client.file_exists(&file).map_err(graph_query_error)? {
@@ -1148,11 +1219,17 @@ fn code_file_symbols_with_client(args: &Value, client: &dyn GraphQueryClient) ->
     }
 
     let file_symbols = client.symbols_by_file(&file).map_err(graph_query_error)?;
-    let symbols = candidate_rows_for_symbols(file_symbols.iter())
+    let candidates = candidate_rows_for_symbols(file_symbols.iter());
+    if response_format == ResponseFormat::Table {
+        let mut files = TableFileInterner::default();
+        let symbols = candidate_table(candidates, &mut files);
+        return Ok(table_response(json!({ "symbols": symbols }), files));
+    }
+
+    let symbols = candidates
         .into_iter()
         .map(candidate_row)
         .collect::<Vec<_>>();
-
     Ok(json!({ "symbols": symbols }))
 }
 
@@ -1180,7 +1257,7 @@ fn code_symbol_info_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
 }
 
 pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerError> {
-    code_graph_backend_value(args, code_read_symbol_with_client).await
+    code_graph_backend_value_allowing_source(args, code_read_symbol_with_client).await
 }
 
 async fn code_read_symbol_response(
@@ -1196,10 +1273,14 @@ async fn code_read_symbol_response(
 }
 
 fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse_allowing_source(args)?;
     let symbol = match code_read_symbol_target(args, client)? {
         CodeReadSymbolTarget::Resolved(symbol) => symbol,
         CodeReadSymbolTarget::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(candidates));
+            return Ok(match response_format {
+                ResponseFormat::Source => source_ambiguous_response(candidates),
+                _ => ambiguous_response(candidates),
+            });
         }
     };
     if is_external_symbol_kind(&symbol.symbol_kind) {
@@ -1224,18 +1305,29 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
     let worktree = current_worktree_root().ok_or_else(|| {
         McpHandlerError::Internal("failed to resolve current worktree root".into())
     })?;
-    let indexed_bytes =
-        read_indexed_file_bytes(&worktree, &symbol.file_path, &manifest.content_oid)?;
+    let file_oid = manifest.content_oid.clone();
+    let indexed_bytes = read_indexed_file_bytes(&worktree, &symbol.file_path, &file_oid)?;
     let indexed_source = String::from_utf8(indexed_bytes).map_err(|error| {
         McpHandlerError::Internal(format!(
             "indexed blob `{}` for `{}` is not UTF-8: {error}",
-            manifest.content_oid, symbol.file_path
+            file_oid, symbol.file_path
         ))
     })?;
     let source_range = source_range_with_context(&indexed_source, &symbol, context_lines.value);
     let source = source_for_line_range(&indexed_source, source_range);
     let current_oid = current_file_oid(&worktree, &symbol.file_path)?;
-    let stale = current_oid.as_deref() != Some(manifest.content_oid.as_str());
+    let stale = current_oid.as_deref() != Some(file_oid.as_str());
+
+    if response_format == ResponseFormat::Source {
+        return Ok(source_symbol_response(
+            &symbol,
+            source,
+            source_range,
+            file_oid,
+            &context_lines,
+            stale,
+        ));
+    }
 
     let mut body = json!({
         "symbol": symbol_info_row(&symbol),
@@ -1244,7 +1336,7 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
             "start": source_range[0],
             "end": source_range[1],
         },
-        "file_oid": manifest.content_oid,
+        "file_oid": file_oid,
         "context_lines": context_lines.value,
     });
     if let Some(requested_context_lines) = context_lines.requested_value {
@@ -1269,6 +1361,7 @@ async fn code_callers_response(
 }
 
 fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector_with_client(args, client)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
@@ -1284,6 +1377,22 @@ fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
     let callers = records
         .into_iter()
         .filter(|record| request.include_unresolved || record.is_resolved())
+        .collect::<Vec<_>>();
+    if response_format == ResponseFormat::Table {
+        let mut files = TableFileInterner::default();
+        let callers = owned_caller_table(callers, &mut files);
+        return Ok(table_response(
+            json!({
+                "callers": callers,
+                "include_unresolved": request.include_unresolved,
+                "counts_by_kind": summary.counts_by_kind,
+                "unresolved_sample": summary.unresolved_sample,
+            }),
+            files,
+        ));
+    }
+    let callers = callers
+        .into_iter()
         .map(owned_caller_row)
         .collect::<Vec<_>>();
     Ok(json!({
@@ -1306,6 +1415,7 @@ async fn code_callees_response(
 }
 
 fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector_with_client(args, client)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
@@ -1321,6 +1431,22 @@ fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
     let callees = records
         .into_iter()
         .filter(|record| request.include_unresolved || record.is_resolved())
+        .collect::<Vec<_>>();
+    if response_format == ResponseFormat::Table {
+        let mut files = TableFileInterner::default();
+        let callees = owned_callee_table(callees, &mut files);
+        return Ok(table_response(
+            json!({
+                "callees": callees,
+                "include_unresolved": request.include_unresolved,
+                "counts_by_kind": summary.counts_by_kind,
+                "unresolved_sample": summary.unresolved_sample,
+            }),
+            files,
+        ));
+    }
+    let callees = callees
+        .into_iter()
         .map(owned_callee_row)
         .collect::<Vec<_>>();
     Ok(json!({
@@ -1343,6 +1469,7 @@ async fn code_subgraph_response(
 }
 
 fn code_subgraph_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let root_ids = match code_subgraph_root_ids_with_client(args, client)? {
         CodeSubgraphRoots::RootIds(root_ids) => root_ids,
@@ -1383,6 +1510,21 @@ fn code_subgraph_with_client(args: &Value, client: &dyn GraphQueryClient) -> Cod
             let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
+            }
+            if response_format == ResponseFormat::Table {
+                let mut files = TableFileInterner::default();
+                let nodes = symbol_table(view.nodes.iter(), &mut files);
+                let edges = edge_table(view.edges.iter());
+                return Ok(table_response(
+                    json!({
+                        "nodes": nodes,
+                        "edges": edges,
+                        "truncated_frontier": view.truncated_frontier,
+                        "include_unresolved": request.include_unresolved,
+                        "metadata": metadata,
+                    }),
+                    files,
+                ));
             }
             Ok(json!({
                 "nodes": view.nodes.iter().map(symbol_row).collect::<Vec<_>>(),
@@ -1432,6 +1574,7 @@ fn code_subgraph_with_artifact_and_temporal(
     artifact: &GraphIndexArtifact,
     temporal_index: Option<Arc<TemporalIndex>>,
 ) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let root_ids = match code_subgraph_root_ids(args, artifact, temporal_index)? {
         CodeSubgraphRoots::RootIds(root_ids) => root_ids,
@@ -1472,6 +1615,21 @@ fn code_subgraph_with_artifact_and_temporal(
             let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
+            }
+            if response_format == ResponseFormat::Table {
+                let mut files = TableFileInterner::default();
+                let nodes = symbol_table(view.nodes.iter().copied(), &mut files);
+                let edges = edge_table(view.edges.iter().copied());
+                return Ok(table_response(
+                    json!({
+                        "nodes": nodes,
+                        "edges": edges,
+                        "truncated_frontier": view.truncated_frontier,
+                        "include_unresolved": request.include_unresolved,
+                        "metadata": metadata,
+                    }),
+                    files,
+                ));
             }
             Ok(json!({
                 "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
@@ -1824,6 +1982,12 @@ enum RebuildStatus {
     StaleRebuildFailed,
 }
 
+impl RebuildStatus {
+    fn is_compact_actionable(self) -> bool {
+        matches!(self, Self::StaleBudgetExceeded | Self::StaleRebuildFailed)
+    }
+}
+
 #[derive(Debug)]
 struct GraphResponseAnalysis {
     metadata: GraphResponseMetadata,
@@ -1996,9 +2160,52 @@ impl GraphResponseMetadata {
         })
     }
 
+    fn into_compact_value(self) -> Value {
+        let mut metadata = serde_json::Map::new();
+        if self.worktree_dirty == Some(true) {
+            metadata.insert("worktree_dirty".into(), Value::Bool(true));
+            if let (Some(indexed_head_oid), Some(worktree_head_oid)) =
+                (self.indexed_head_oid, self.worktree_head_oid)
+            {
+                if indexed_head_oid != worktree_head_oid {
+                    metadata.insert("indexed_head_oid".into(), Value::String(indexed_head_oid));
+                    metadata.insert("worktree_head_oid".into(), Value::String(worktree_head_oid));
+                }
+            }
+        }
+        if self.response_file_oids_match == Some(false) {
+            metadata.insert("response_file_oids_match".into(), Value::Bool(false));
+        }
+        if self.rebuild_status.is_compact_actionable() {
+            metadata.insert("rebuild_status".into(), json!(self.rebuild_status));
+        }
+        Value::Object(metadata)
+    }
+
     fn insert_into(self, body: &mut Value) {
+        self.insert_into_for_format(body, ResponseFormat::Full);
+    }
+
+    fn insert_into_for_format(self, body: &mut Value, response_format: ResponseFormat) {
+        match response_format {
+            ResponseFormat::Full => self.insert_full_into(body),
+            ResponseFormat::Compact | ResponseFormat::Table => self.insert_compact_into(body),
+            ResponseFormat::Source => {}
+        }
+    }
+
+    fn insert_full_into(self, body: &mut Value) {
         if let Value::Object(map) = body {
             let Value::Object(metadata) = self.into_value() else {
+                return;
+            };
+            map.extend(metadata);
+        }
+    }
+
+    fn insert_compact_into(self, body: &mut Value) {
+        if let Value::Object(map) = body {
+            let Value::Object(metadata) = self.into_compact_value() else {
                 return;
             };
             map.extend(metadata);
@@ -4014,6 +4221,13 @@ fn ambiguous_response(candidates: Vec<CandidateRow>) -> Value {
     })
 }
 
+fn source_ambiguous_response(candidates: Vec<CandidateRow>) -> Value {
+    json!({
+        "ambiguous": true,
+        "candidates": candidates.into_iter().map(source_candidate_row).collect::<Vec<_>>(),
+    })
+}
+
 #[allow(dead_code)]
 async fn with_graph_metadata(artifact: &GraphIndexArtifact, mut body: Value) -> Value {
     let files = response_file_set_from_body(artifact, &body);
@@ -4168,6 +4382,9 @@ fn collect_response_file_paths<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
         Value::Object(map) => {
             if let Some(file_path) = map.get("file_path").and_then(Value::as_str) {
                 paths.push(file_path);
+            }
+            if let Some(files) = map.get("files").and_then(Value::as_array) {
+                paths.extend(files.iter().filter_map(Value::as_str));
             }
             for value in map.values() {
                 collect_response_file_paths(value, paths);
@@ -4452,6 +4669,51 @@ fn candidate_row(candidate: CandidateRow) -> Value {
     row
 }
 
+fn source_candidate_row(candidate: CandidateRow) -> Value {
+    json!({
+        "id": candidate.id,
+        "name": candidate.qualified_name,
+        "file": candidate.file_path,
+        "range": {
+            "start": candidate.line_range[0],
+            "end": candidate.line_range[1],
+        },
+        "kind": candidate.symbol_kind,
+        "scope": candidate.enclosing_scope,
+    })
+}
+
+fn source_symbol_response(
+    symbol: &GraphSymbolArtifact,
+    source: String,
+    source_range: [usize; 2],
+    file_oid: String,
+    context_lines: &ClampedUsizeArg,
+    stale: bool,
+) -> Value {
+    let mut body = json!({
+        "id": symbol.stable_symbol_id,
+        "name": symbol.qualified_name,
+        "file": symbol.file_path,
+        "range": {
+            "start": source_range[0],
+            "end": source_range[1],
+        },
+        "source": source,
+        "file_oid": file_oid,
+    });
+    if context_lines.value != 0 {
+        body["context_lines"] = json!(context_lines.value);
+    }
+    if let Some(requested_context_lines) = &context_lines.requested_value {
+        body["requested_context_lines"] = requested_context_lines.clone();
+    }
+    if stale {
+        body["stale"] = Value::Bool(true);
+    }
+    body
+}
+
 fn symbol_info_row(symbol: &GraphSymbolArtifact) -> Value {
     json!({
         "qualified_name": symbol.qualified_name,
@@ -4512,6 +4774,250 @@ fn symbol_row(symbol: &GraphSymbolArtifact) -> Value {
         "file_path": symbol.file_path,
         "line_range": symbol.line_range,
         "symbol_kind": symbol.symbol_kind,
+    })
+}
+
+#[derive(Default)]
+struct TableFileInterner {
+    files: Vec<String>,
+    indexes: HashMap<String, usize>,
+}
+
+impl TableFileInterner {
+    fn intern(&mut self, file_path: &str) -> usize {
+        if let Some(index) = self.indexes.get(file_path) {
+            return *index;
+        }
+        let index = self.files.len();
+        self.files.push(file_path.to_string());
+        self.indexes.insert(file_path.to_string(), index);
+        index
+    }
+
+    fn into_files(self) -> Vec<String> {
+        self.files
+    }
+}
+
+fn table_response(mut body: Value, files: TableFileInterner) -> Value {
+    body["response_format"] = json!("table");
+    body["files"] = json!(files.into_files());
+    body
+}
+
+fn candidate_table(candidates: Vec<CandidateRow>, files: &mut TableFileInterner) -> Value {
+    let rows = candidates
+        .into_iter()
+        .map(|candidate| {
+            let file_index = files.intern(&candidate.file_path);
+            json!([
+                candidate.id,
+                candidate.entity_name,
+                candidate.qualified_name,
+                file_index,
+                candidate.line_range[0],
+                candidate.line_range[1],
+                candidate.symbol_kind,
+                candidate.enclosing_scope,
+            ])
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "cols": [
+            "id",
+            "entity_name",
+            "qualified_name",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+            "enclosing_scope",
+        ],
+        "rows": rows,
+    })
+}
+
+fn symbol_table<'a>(
+    symbols: impl IntoIterator<Item = &'a GraphSymbolArtifact>,
+    files: &mut TableFileInterner,
+) -> Value {
+    let rows = symbols
+        .into_iter()
+        .map(|symbol| {
+            let file_index = files.intern(&symbol.file_path);
+            json!([
+                symbol.stable_symbol_id,
+                symbol.entity_name,
+                symbol.enclosing_scope,
+                file_index,
+                symbol.line_range[0],
+                symbol.line_range[1],
+                symbol.symbol_kind,
+            ])
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "cols": [
+            "id",
+            "entity_name",
+            "enclosing_scope",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+        ],
+        "rows": rows,
+    })
+}
+
+fn owned_caller_table(callers: Vec<OwnedCallerRecord>, files: &mut TableFileInterner) -> Value {
+    traversal_table(
+        callers
+            .into_iter()
+            .map(|caller| owned_caller_table_row(caller, files)),
+    )
+}
+
+fn owned_callee_table(callees: Vec<OwnedCalleeRecord>, files: &mut TableFileInterner) -> Value {
+    traversal_table(
+        callees
+            .into_iter()
+            .map(|callee| owned_callee_table_row(callee, files)),
+    )
+}
+
+fn traversal_table(rows: impl IntoIterator<Item = Value>) -> Value {
+    json!({
+        "cols": [
+            "symbol_id",
+            "entity_name",
+            "enclosing_scope",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+            "resolved",
+            "target_label",
+            "edge_kind",
+            "confidence",
+            "bind_method",
+        ],
+        "rows": rows.into_iter().collect::<Vec<_>>(),
+    })
+}
+
+fn owned_caller_table_row(caller: OwnedCallerRecord, files: &mut TableFileInterner) -> Value {
+    match caller {
+        OwnedCallerRecord::Resolved { caller, edge } => {
+            symbol_traversal_table_row(&caller, &edge, true, None, files)
+        }
+        OwnedCallerRecord::Unresolved {
+            caller,
+            edge,
+            target_label,
+        } => symbol_traversal_table_row(&caller, &edge, false, Some(target_label), files),
+    }
+}
+
+fn owned_callee_table_row(callee: OwnedCalleeRecord, files: &mut TableFileInterner) -> Value {
+    match callee {
+        OwnedCalleeRecord::Resolved { symbol, edge } => {
+            symbol_traversal_table_row(&symbol, &edge, true, None, files)
+        }
+        OwnedCalleeRecord::Unresolved { edge, target_label } => {
+            unresolved_traversal_table_row(&edge, target_label)
+        }
+    }
+}
+
+fn symbol_traversal_table_row(
+    symbol: &GraphSymbolArtifact,
+    edge: &GraphEdgeArtifact,
+    resolved: bool,
+    target_label: Option<String>,
+    files: &mut TableFileInterner,
+) -> Value {
+    let file_index = files.intern(&symbol.file_path);
+    let (confidence, bind_method) = compact_traversal_edge_values(edge);
+    json!([
+        symbol.stable_symbol_id,
+        symbol.entity_name,
+        symbol.enclosing_scope,
+        file_index,
+        symbol.line_range[0],
+        symbol.line_range[1],
+        symbol.symbol_kind,
+        resolved,
+        target_label,
+        edge_kind_str(edge_kind(edge)),
+        confidence,
+        bind_method,
+    ])
+}
+
+fn unresolved_traversal_table_row(edge: &GraphEdgeArtifact, target_label: String) -> Value {
+    let entity_name = target_label.clone();
+    let (confidence, bind_method) = compact_traversal_edge_values(edge);
+    json!([
+        null,
+        entity_name,
+        null,
+        null,
+        null,
+        null,
+        null,
+        false,
+        target_label,
+        edge_kind_str(edge_kind(edge)),
+        confidence,
+        bind_method,
+    ])
+}
+
+fn compact_traversal_edge_values(edge: &GraphEdgeArtifact) -> (Value, Value) {
+    let confidence = if edge.bind_method.is_some() || edge_kind(edge) == GraphEdgeKind::CallsDyn {
+        json!(edge.confidence)
+    } else {
+        Value::Null
+    };
+    let bind_method = edge
+        .bind_method
+        .as_ref()
+        .map(|value| json!(value))
+        .unwrap_or(Value::Null);
+    (confidence, bind_method)
+}
+
+fn edge_table<'a>(edges: impl IntoIterator<Item = &'a GraphEdgeArtifact>) -> Value {
+    let rows = edges
+        .into_iter()
+        .map(|edge| {
+            json!([
+                edge.source_stable_symbol_id,
+                edge.target_stable_symbol_id,
+                edge.target_label,
+                edge.target_stable_symbol_id.is_some(),
+                edge.relation,
+                edge_kind_str(edge_kind(edge)),
+                edge.confidence,
+                edge.confidence_score,
+                edge.bind_method,
+            ])
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "cols": [
+            "source_id",
+            "target_id",
+            "target_label",
+            "resolved",
+            "relation",
+            "edge_kind",
+            "confidence",
+            "confidence_score",
+            "bind_method",
+        ],
+        "rows": rows,
     })
 }
 
@@ -4994,6 +5500,7 @@ mod tests {
                 source_stable_symbol_id: "parquet-root".to_string(),
                 target_stable_symbol_id: Some("parquet-child".to_string()),
                 target_label: Some("parquet_child".to_string()),
+                import_path: None,
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 1.0,
