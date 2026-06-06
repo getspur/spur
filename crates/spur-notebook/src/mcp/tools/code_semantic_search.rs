@@ -29,7 +29,7 @@ const MAX_LIMIT: usize = 50;
 #[derive(Debug, Deserialize)]
 struct Params {
     query: String,
-    /// "all" (docs + code), "docs", or "code". Defaults to "all".
+    /// "all" (docs + code), "docs", "code", or "graph". Defaults to "all".
     #[serde(default)]
     scope: Option<String>,
     #[serde(default)]
@@ -48,7 +48,7 @@ pub fn tool() -> Tool {
             "required": ["query"],
             "properties": {
                 "query": { "type": "string", "minLength": 1 },
-                "scope": { "type": "string", "enum": ["all", "docs", "code"], "default": "all" },
+                "scope": { "type": "string", "enum": ["all", "docs", "code", "graph"], "default": "all" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT },
                 "db_path": { "type": "string", "description": "Optional path to analyst.duckdb; discovered from cwd upward by default." }
             },
@@ -74,9 +74,9 @@ pub async fn call(
         ));
     }
     let scope = params.scope.as_deref().unwrap_or("all");
-    if !matches!(scope, "all" | "docs" | "code") {
+    if !matches!(scope, "all" | "docs" | "code" | "graph") {
         return Err(McpError::invalid_params(
-            format!("{METHOD} scope must be one of all|docs|code"),
+            format!("{METHOD} scope must be one of all|docs|code|graph"),
             Some(json!({ "scope": scope })),
         ));
     }
@@ -150,6 +150,11 @@ fn search_rows(
              round(bm25, 3) AS score, posture AS signal \
              FROM search_code('{q}') LIMIT {limit}"
         ),
+        "graph" => format!(
+            "SELECT kind, title, file, round(score, 3) AS score, signal, \
+             neighbor_kind, edge_bind_method \
+             FROM search_graph('{q}') LIMIT {limit}"
+        ),
         _ => format!(
             "SELECT kind, title, file, round(score, 3) AS score, signal \
              FROM search('{q}') LIMIT {limit}"
@@ -161,13 +166,18 @@ fn search_rows(
         .map_err(|e| internal("failed to prepare search query", &e))?;
     let rows = stmt
         .query_map([], |row| {
-            Ok(json!({
+            let mut obj = json!({
                 "kind": row.get::<_, String>(0)?,
                 "title": row.get::<_, String>(1)?,
                 "file": row.get::<_, String>(2)?,
                 "score": row.get::<_, f64>(3)?,
                 "signal": row.get::<_, Option<String>>(4)?,
-            }))
+            });
+            if scope == "graph" {
+                obj["neighbor_kind"] = json!(row.get::<_, Option<String>>(5)?);
+                obj["edge_bind_method"] = json!(row.get::<_, Option<String>>(6)?);
+            }
+            Ok(obj)
         })
         .map_err(|e| internal("failed to run search query", &e))?;
     let results: Vec<Value> = rows
@@ -365,6 +375,14 @@ mod tests {
                 posture VARCHAR,
                 component_size BIGINT
             );
+            CREATE VIEW v_symbol_inbound AS
+                SELECT stable_symbol_id, 0 AS callers FROM nodes;
+            CREATE TABLE edges(
+                source_stable_id VARCHAR,
+                target_stable_id VARCHAR,
+                relation VARCHAR,
+                bind_method VARCHAR
+            );
             "#,
         )?;
         let sections_fts =
@@ -476,6 +494,151 @@ mod tests {
         // run() wraps the same rows into a CallToolResult without error.
         run("oauth token refresh", "docs", 10, db.to_str()).expect("run wraps result");
         Ok(())
+    }
+
+    #[test]
+    fn search_graph_scope_returns_neighbor_kind_rows() {
+        // Build a minimal fixture with FTS + scorecard + edges so search_graph can run.
+        // Uses an in-memory DB with the same macro structure as the real analyst.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+
+        conn.execute_batch(
+            "
+            INSTALL fts; LOAD fts; LOAD icu;
+
+            -- Minimal nodes + symbol_text + scorecard + inbound + edges
+            CREATE TABLE nodes (stable_symbol_id VARCHAR, node_id BIGINT,
+              entity_name VARCHAR, qualified_name VARCHAR,
+              file_path VARCHAR, symbol_kind VARCHAR,
+              line_start INT, line_end INT);
+            CREATE TABLE symbol_text (stable_symbol_id VARCHAR, entity_name VARCHAR,
+              qualified_name VARCHAR, file_path VARCHAR, symbol_kind VARCHAR,
+              doc_text VARCHAR);
+
+            INSERT INTO nodes VALUES
+              ('aa01', 1, 'handle_query', 'handle_query',
+               'crates/spur-mcp/src/server.rs', 'function', 1, 20),
+              ('aa02', 2, 'run_bm25_search', 'run_bm25_search',
+               'crates/spur-mcp/src/search.rs', 'function', 1, 10);
+            INSERT INTO symbol_text VALUES
+              ('aa01', 'handle_query', 'handle_query',
+               'crates/spur-mcp/src/server.rs', 'function',
+               'handle_query search bm25 graph query'),
+              ('aa02', 'run_bm25_search', 'run_bm25_search',
+               'crates/spur-mcp/src/search.rs', 'function',
+               'run_bm25_search search fts fulltext');
+        ",
+        )
+        .unwrap();
+
+        conn.execute_batch(
+            "PRAGMA create_fts_index('symbol_text','stable_symbol_id','doc_text',overwrite=1);",
+        )
+        .unwrap();
+
+        conn.execute_batch(
+            "
+            -- Minimal scorecard view
+            CREATE VIEW v_symbol_scorecard AS
+            SELECT stable_symbol_id,
+                   0.001 AS pagerank, 0 AS churn_90d,
+                   'leaf' AS posture, 1 AS component_size
+            FROM nodes;
+
+            -- Minimal inbound view (0 callers = safe to expand)
+            CREATE VIEW v_symbol_inbound AS
+            SELECT stable_symbol_id, 0 AS callers, 0 AS importers,
+                   0 AS containers, 0 AS inbound_total
+            FROM nodes;
+
+            -- One call edge: aa01 calls aa02
+            CREATE TABLE edges (source_stable_id VARCHAR, target_stable_id VARCHAR,
+              relation VARCHAR, bind_method VARCHAR, edge_kind VARCHAR,
+              src_id BIGINT, dst_id BIGINT, target_label VARCHAR,
+              confidence VARCHAR, confidence_score DOUBLE);
+            INSERT INTO edges VALUES
+              ('aa01','aa02','calls','singleton','calls',1,2,'run_bm25_search','high',0.9);
+
+            -- FTS macro (simplified version of real search_graph)
+            CREATE OR REPLACE MACRO search_graph(q) AS TABLE
+              SELECT kind, title, file, score, signal, neighbor_kind, edge_bind_method
+              FROM (
+                WITH base AS (
+                  SELECT st.stable_symbol_id, st.entity_name AS symbol, st.symbol_kind,
+                         st.file_path,
+                         fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) AS bm25_raw,
+                         sc.pagerank, sc.churn_90d, sc.posture,
+                         COALESCE(vi.callers, 0) AS caller_count
+                  FROM symbol_text st
+                  JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+                  LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
+                  WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+                  ORDER BY bm25_raw DESC LIMIT 5
+                ),
+                gated AS (
+                  SELECT * FROM base
+                  WHERE posture != 'load-bearing wall' OR caller_count <= 30
+                ),
+                primary_rows AS (
+                  SELECT 'code' AS kind, symbol AS title,
+                         regexp_replace(file_path,'^crates/','') AS file,
+                         round(bm25_raw, 3) AS score,
+                         posture AS signal, 'primary' AS neighbor_kind,
+                         CAST(NULL AS VARCHAR) AS edge_bind_method
+                  FROM base
+                ),
+                callee_rows AS (
+                  SELECT 'code', ndst.entity_name,
+                         regexp_replace(ndst.file_path,'^crates/',''),
+                         0.0, 'leaf · callee of ' || g.symbol,
+                         'callee', e.bind_method
+                  FROM gated g
+                  JOIN edges e ON e.source_stable_id = g.stable_symbol_id
+                    AND e.relation = 'calls'
+                  JOIN nodes ndst ON ndst.stable_symbol_id = e.target_stable_id
+                  WHERE ndst.file_path NOT LIKE '.%'
+                )
+                SELECT * FROM primary_rows
+                UNION ALL SELECT * FROM callee_rows
+              )
+              ORDER BY CASE neighbor_kind WHEN 'primary' THEN 0 ELSE 1 END, score DESC
+              LIMIT 20;
+
+            CREATE TABLE _meta (graph_content_hash VARCHAR);
+            INSERT INTO _meta VALUES ('test-hash');
+        ",
+        )
+        .unwrap();
+        drop(conn);
+
+        let (_, rows, _) = search_rows(
+            "search bm25 graph",
+            "graph",
+            20,
+            Some(db_path.to_str().unwrap()),
+        )
+        .unwrap();
+
+        // Must have at least one primary and one callee row
+        let has_primary = rows
+            .iter()
+            .any(|r| r["neighbor_kind"].as_str() == Some("primary"));
+        let has_callee = rows
+            .iter()
+            .any(|r| r["neighbor_kind"].as_str() == Some("callee"));
+
+        assert!(has_primary, "graph scope must return primary hits");
+        assert!(has_callee, "graph scope must return callee neighbors");
+
+        // All rows must have edge_bind_method field (may be null for primary)
+        for row in &rows {
+            assert!(
+                row.get("edge_bind_method").is_some(),
+                "every graph row must carry edge_bind_method key"
+            );
+        }
     }
 
     // Regression: the `code` scope reads `search_code`, which fuses the
