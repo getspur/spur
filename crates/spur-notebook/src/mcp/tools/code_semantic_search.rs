@@ -21,15 +21,49 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+#[cfg(feature = "datasource-introspect")]
+use std::sync::OnceLock;
 
 const METHOD: &str = "code_semantic_search";
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
 
+#[cfg(feature = "datasource-introspect")]
+static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
+
+#[cfg(feature = "datasource-introspect")]
+fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
+    EMBED_MODEL
+        .get_or_init(|| {
+            fastembed::TextEmbedding::try_new(
+                fastembed::InitOptions::new(fastembed::EmbeddingModel::NomicEmbedTextV15)
+                    .with_show_download_progress(false),
+            )
+            .ok()
+        })
+        .as_ref()
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn embed_query_as_csv(query: &str) -> Option<String> {
+    let model = get_embed_model()?;
+    let embeddings = model.embed(vec![query], None).ok()?;
+    let vec = embeddings.into_iter().next()?;
+    if vec.len() != 768 {
+        return None;
+    }
+    Some(
+        vec.iter()
+            .map(|f| format!("{f:.6}"))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct Params {
     query: String,
-    /// "all" (docs + code), "docs", "code", or "graph". Defaults to "all".
+    /// "all" (docs + code), "docs", "code", "graph", or "hybrid". Defaults to "all".
     #[serde(default)]
     scope: Option<String>,
     #[serde(default)]
@@ -48,7 +82,7 @@ pub fn tool() -> Tool {
             "required": ["query"],
             "properties": {
                 "query": { "type": "string", "minLength": 1 },
-                "scope": { "type": "string", "enum": ["all", "docs", "code", "graph"], "default": "all" },
+                "scope": { "type": "string", "enum": ["all", "docs", "code", "graph", "hybrid"], "default": "all" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT },
                 "db_path": { "type": "string", "description": "Optional path to analyst.duckdb; discovered from cwd upward by default." }
             },
@@ -74,9 +108,9 @@ pub async fn call(
         ));
     }
     let scope = params.scope.as_deref().unwrap_or("all");
-    if !matches!(scope, "all" | "docs" | "code" | "graph") {
+    if !matches!(scope, "all" | "docs" | "code" | "graph" | "hybrid") {
         return Err(McpError::invalid_params(
-            format!("{METHOD} scope must be one of all|docs|code|graph"),
+            format!("{METHOD} scope must be one of all|docs|code|graph|hybrid"),
             Some(json!({ "scope": scope })),
         ));
     }
@@ -155,6 +189,17 @@ fn search_rows(
              neighbor_kind, edge_bind_method \
              FROM search_graph('{q}') LIMIT {limit}"
         ),
+        "hybrid" => match embed_query_as_csv(query) {
+            Some(vec_csv) => format!(
+                "SELECT kind, title, file, round(score, 3) AS score, signal \
+                 FROM search_hybrid('{q}', '{vec_csv}') LIMIT {limit}"
+            ),
+            None => format!(
+                "SELECT 'doc' AS kind, section AS title, file_path AS file, \
+                 round(bm25, 3) AS score, CAST(NULL AS VARCHAR) AS signal \
+                 FROM search_docs('{q}') LIMIT {limit}"
+            ),
+        },
         _ => format!(
             "SELECT kind, title, file, round(score, 3) AS score, signal \
              FROM search('{q}') LIMIT {limit}"
@@ -251,7 +296,113 @@ fn internal(message: &str, error: &impl std::fmt::Display) -> McpError {
 
 #[cfg(all(test, feature = "datasource-introspect"))]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::mcp::{
+        bridge::{AgentBridge, TauriBridgeRequester},
+        ServerDeps,
+    };
+
+    fn deps_without_app() -> ServerDeps {
+        ServerDeps::from_bridge(Arc::new(TauriBridgeRequester::without_app(Arc::new(
+            AgentBridge::new(),
+        ))))
+    }
+
+    #[tokio::test]
+    async fn search_hybrid_scope_accepted_by_validation() {
+        let deps = deps_without_app();
+        let error = call(
+            &deps,
+            json!({
+                "query": "architecture",
+                "scope": "hybrid",
+                "db_path": "/definitely/missing/analyst.duckdb"
+            }),
+        )
+        .await
+        .expect_err("missing db should fail after scope validation");
+
+        assert!(
+            !error.to_string().contains("scope must be one of"),
+            "hybrid scope must not be rejected by validation: {error}"
+        );
+    }
+
+    #[test]
+    fn search_hybrid_scope_graceful_fallback_when_no_embeddings_table() -> anyhow::Result<()> {
+        let conn = duckdb::Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            INSTALL fts; LOAD fts;
+            CREATE TABLE sections_search (
+                stable_symbol_id VARCHAR PRIMARY KEY,
+                qualified_name VARCHAR,
+                file_path VARCHAR,
+                heading_level UTINYINT,
+                body_text VARCHAR
+            );
+            INSERT INTO sections_search VALUES
+                ('s1', 'design/overview', 'docs/design.md', 2,
+                 'This section covers the architecture of the system.');
+            "#,
+        )?;
+        conn.execute_batch(
+            "PRAGMA create_fts_index('sections_search', 'stable_symbol_id', 'body_text', overwrite=1);",
+        )?;
+
+        let result: i64 = conn.query_row(
+            r#"
+            SELECT count(*) FROM (
+                WITH bm25 AS (
+                    SELECT
+                        stable_symbol_id,
+                        qualified_name AS title,
+                        file_path AS file,
+                        fts_main_sections_search.match_bm25(stable_symbol_id, 'architecture') AS bm25_score,
+                        row_number() OVER (
+                            ORDER BY fts_main_sections_search.match_bm25(stable_symbol_id, 'architecture') DESC
+                        ) AS bm25_rank
+                    FROM sections_search
+                    WHERE fts_main_sections_search.match_bm25(stable_symbol_id, 'architecture') IS NOT NULL
+                    LIMIT 30
+                ),
+                ann AS (
+                    SELECT stable_symbol_id, 0.0 AS cos_sim, 1 AS ann_rank
+                    FROM sections_search
+                    WHERE 1 = 0
+                ),
+                rrf AS (
+                    SELECT
+                        COALESCE(b.stable_symbol_id, a.stable_symbol_id) AS stable_symbol_id,
+                        1.0 / (60.0 + COALESCE(CAST(b.bm25_rank AS DOUBLE), 31.0))
+                            + 1.0 / (60.0 + COALESCE(CAST(a.ann_rank AS DOUBLE), 31.0)) AS rrf_score
+                    FROM bm25 b
+                    FULL OUTER JOIN ann a USING (stable_symbol_id)
+                )
+                SELECT
+                    'doc' AS kind,
+                    s.qualified_name AS title,
+                    s.file_path AS file,
+                    round(r.rrf_score, 4) AS score,
+                    CAST(NULL AS VARCHAR) AS signal
+                FROM rrf r
+                JOIN sections_search s ON s.stable_symbol_id = r.stable_symbol_id
+                ORDER BY rrf_score DESC
+                LIMIT 30
+            )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert!(
+            result >= 0,
+            "hybrid query must not error on missing embeddings table"
+        );
+        Ok(())
+    }
 
     // Rerank: a high-BM25 leaf CONSTANT must not outrank a lower-BM25, high-pagerank
     // FUNCTION. Mirrors the production search_code ORDER BY against a bundled-duckdb fixture

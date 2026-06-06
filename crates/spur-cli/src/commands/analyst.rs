@@ -798,6 +798,42 @@ mod tests {
     }
 
     #[test]
+    fn init_search_sql_sections_embeddings_materialized() {
+        assert!(
+            INIT_SEARCH_SQL.contains("CREATE OR REPLACE TABLE sections_embeddings"),
+            "init_search.sql must materialize sections_embeddings"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("FROM lance_ns.section_bodies"),
+            "sections_embeddings must read from lance section_bodies"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("heading_level >= 2"),
+            "sections_embeddings must skip document roots"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("vector IS NOT NULL"),
+            "sections_embeddings must keep only embedded sections"
+        );
+    }
+
+    #[test]
+    fn init_search_sql_hybrid_macro_present() {
+        assert!(
+            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_hybrid(q, vec)"),
+            "init_search.sql must define search_hybrid"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("list_cosine_similarity"),
+            "search_hybrid must use vector cosine similarity"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("1.0 / (60.0 + "),
+            "search_hybrid must use reciprocal rank fusion"
+        );
+    }
+
+    #[test]
     fn duckdb_cli_present_returns_some_when_on_path() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();
