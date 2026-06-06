@@ -77,6 +77,7 @@ pub async fn create_zeromq_connection(
     let (iopub_tx, _) = broadcast::channel(1024);
     let reply_tx_map = Arc::new(DashMap::new());
     let signal = CancellationToken::new();
+    let liveness = CancellationToken::new();
 
     let conn = KernelConnection {
         shell_tx,
@@ -85,6 +86,7 @@ pub async fn create_zeromq_connection(
         process_stderr_tx,
         reply_tx_map: reply_tx_map.clone(),
         signal: signal.clone(),
+        liveness,
         _drop_guard: Arc::new(signal.clone().drop_guard()),
     };
 
@@ -110,7 +112,50 @@ pub async fn create_zeromq_connection(
         .connect(&format!("tcp://127.0.0.1:{heartbeat_port}"))
         .await?;
 
-    let _ = (stdin, heartbeat); // Not supported yet.
+    let _ = stdin; // stdin replies not supported yet.
+
+    // Heartbeat liveness probe: Jupyter HB is a strict REQ/REP echo. On a missed
+    // echo we recreate the REQ socket (a timed-out REQ is left in a bad send state),
+    // and after HEARTBEAT_MISS_THRESHOLD consecutive misses we declare the kernel dead.
+    let hb_signal = signal.clone();
+    let hb_liveness = conn.liveness_token();
+    debug_assert!(conn.is_alive(), "new kernel connection should start alive");
+    let hb_addr = format!("tcp://127.0.0.1:{heartbeat_port}");
+    tokio::spawn(async move {
+        let mut sock = heartbeat;
+        let mut misses: u32 = 0;
+        loop {
+            tokio::select! {
+                () = hb_signal.cancelled() => break,
+                () = tokio::time::sleep(super::HEARTBEAT_INTERVAL) => {}
+            }
+
+            let ping = ZmqMessage::from(b"ping".to_vec());
+            let ok = match sock.send(ping).await {
+                Ok(()) => matches!(
+                    tokio::time::timeout(super::HEARTBEAT_RECV_TIMEOUT, sock.recv()).await,
+                    Ok(Ok(_))
+                ),
+                Err(_) => false,
+            };
+
+            if ok {
+                misses = 0;
+            } else {
+                misses = misses.saturating_add(1);
+                // Recreate the REQ socket after a failed exchange.
+                let mut fresh = zeromq::ReqSocket::new();
+                if fresh.connect(&hb_addr).await.is_ok() {
+                    sock = fresh;
+                }
+                if super::heartbeat_declares_dead(misses, super::HEARTBEAT_MISS_THRESHOLD) {
+                    warn!("kernel heartbeat lost; declaring dead");
+                    hb_liveness.cancel();
+                    break;
+                }
+            }
+        }
+    });
 
     let key = signing_key.to_string();
     let tx_map = reply_tx_map.clone();
