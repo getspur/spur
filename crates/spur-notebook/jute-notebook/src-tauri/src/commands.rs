@@ -1220,6 +1220,63 @@ pub fn install_kernel_in_slot(
     }
 }
 
+/// Await a kernel's death signal, then invoke `restart` exactly once.
+pub(crate) async fn supervise_until_dead<F, Fut>(
+    liveness: tokio_util::sync::CancellationToken,
+    restart: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), Error>>,
+{
+    liveness.cancelled().await;
+    if let Err(error) = restart().await {
+        tracing::error!(?error, "kernel supervisor restart failed");
+    }
+}
+
+fn spawn_kernel_supervisor(
+    state: &Arc<State>,
+    slot_id: &str,
+    spec_name: &str,
+    liveness: tokio_util::sync::CancellationToken,
+) {
+    let sup_state = Arc::clone(state);
+    let sup_slot = slot_id.to_string();
+    let sup_spec = spec_name.to_string();
+    tokio::spawn(async move {
+        supervise_until_dead(liveness, || async move {
+            restart_kernel_in_slot(&sup_state, &sup_slot, &sup_spec)
+                .await
+                .map(|_| ())
+        })
+        .await;
+    });
+}
+
+/// Restart the kernel bound to `slot_id`: kill the prior process, start a fresh
+/// kernel, re-inject the port bootstrap, and install it into the slot. Returns
+/// the new slot generation.
+pub async fn restart_kernel_in_slot(
+    state: &Arc<State>,
+    slot_id: &str,
+    spec_name: &str,
+) -> Result<u64, Error> {
+    let mut prior = take_kernel_from_slot(state, slot_id)?;
+    prior.kill().await?;
+
+    let port_root = notebook_path_from_slot_id(slot_id, spec_name).map(notebook_port_root);
+    let mut kernel = start_local_kernel(spec_name, port_root.as_deref()).await?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(error);
+    }
+    let liveness = kernel.conn().liveness_token();
+    let (generation, _previous) =
+        install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
+    spawn_kernel_supervisor(state, slot_id, spec_name, liveness);
+    Ok(generation)
+}
+
 /// Delegate AI work to a SPUR worker.
 ///
 /// The jute shell exposes this command name so frontend deck commands fail with
@@ -1541,8 +1598,10 @@ pub async fn start_kernel(
         let _ = kernel.kill().await;
         return Err(error);
     }
+    let liveness = kernel.conn().liveness_token();
     let (generation, _previous_kernel) =
         install_kernel_in_slot(&state, &slot_id, spec_name.to_string(), kernel);
+    spawn_kernel_supervisor(state.inner(), &slot_id, spec_name, liveness);
     info!(slot_id = %slot_id, generation, "started jute kernel slot");
 
     Ok(slot_id)
@@ -1574,8 +1633,10 @@ pub async fn restart_kernel(
         let _ = kernel.kill().await;
         return Err(error);
     }
+    let liveness = kernel.conn().liveness_token();
     let (generation, _previous_kernel) =
-        install_kernel_in_slot(&state, slot_id, next_spec_name, kernel);
+        install_kernel_in_slot(&state, slot_id, next_spec_name.clone(), kernel);
+    spawn_kernel_supervisor(state.inner(), slot_id, &next_spec_name, liveness);
     info!(slot_id = %slot_id, generation, "restarted jute kernel slot");
 
     Ok(slot_id.to_string())
@@ -1908,7 +1969,7 @@ fn kernel_slot_status(
 }
 
 async fn ensure_kernel_slot_live(
-    state: &State,
+    state: &Arc<State>,
     notebook_path: &str,
     slot_id: &str,
     spec_name: &str,
@@ -1941,7 +2002,9 @@ async fn ensure_kernel_slot_live(
                 let _ = kernel.kill().await;
                 return Err(error);
             }
+            let liveness = kernel.conn().liveness_token();
             install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
+            spawn_kernel_supervisor(state, slot_id, spec_name, liveness);
             Ok(())
         }
     }
@@ -2009,7 +2072,7 @@ mod tests {
         ffi::OsString,
         path::PathBuf,
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU32, AtomicUsize, Ordering},
             Arc, Mutex as StdMutex,
         },
     };
@@ -2226,6 +2289,28 @@ mod tests {
             compile_progress_mode_for_spec("python3"),
             crate::backend::commands::CompileProgressMode::None
         );
+    }
+
+    #[tokio::test]
+    async fn supervisor_restarts_once_when_liveness_cancelled() {
+        use tokio_util::sync::CancellationToken;
+
+        let liveness = CancellationToken::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_in = calls.clone();
+
+        let token = liveness.clone();
+        let handle = tokio::spawn(async move {
+            supervise_until_dead(token, || {
+                calls_in.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<(), Error>(()) }
+            })
+            .await;
+        });
+
+        liveness.cancel();
+        handle.await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
