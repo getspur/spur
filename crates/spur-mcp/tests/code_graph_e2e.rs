@@ -1695,6 +1695,98 @@ async fn code_graph_response_format_omitted_keeps_full_metadata() {
 }
 
 #[tokio::test]
+async fn code_graph_compact_metadata_omits_healthy_defaults() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_callees",
+            json!({ "symbol": root_id, "response_format": "compact" }),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        entity_names(body["callees"].as_array().expect("callees")),
+        BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+    for key in [
+        "graph_content_hash",
+        "graph_index_version",
+        "graph_built_at",
+        "indexed_head_oid",
+        "worktree_head_oid",
+        "worktree_dirty",
+        "response_file_oids_match",
+        "rebuild_status",
+    ] {
+        assert!(
+            body.get(key).is_none(),
+            "compact response should omit healthy metadata key {key}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn code_graph_compact_metadata_preserves_stale_dirty_status() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let expected_source = source_for_range(
+        worktree.path(),
+        &root.file_path,
+        root.line_range[0],
+        root.line_range[1],
+    );
+    std::fs::write(
+        worktree.path().join("src/lib.rs"),
+        "pub fn edited_after_index() -> bool {\n    false\n}\n",
+    )
+    .expect("edit fixture after graph build");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({ "stable_symbol_id": root.stable_symbol_id, "response_format": "compact" }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["stale"], true);
+    assert_eq!(body["symbol"]["id"], root.stable_symbol_id);
+    assert_eq!(body["source"], expected_source);
+    assert_eq!(body["worktree_dirty"], true);
+    assert_eq!(body["response_file_oids_match"], false);
+    for key in [
+        "graph_content_hash",
+        "graph_index_version",
+        "graph_built_at",
+        "indexed_head_oid",
+        "worktree_head_oid",
+        "rebuild_status",
+    ] {
+        assert!(
+            body.get(key).is_none(),
+            "compact response should omit non-actionable metadata key {key}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn code_graph_response_format_invalid_returns_invalid_params() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
