@@ -5507,7 +5507,6 @@ mod tests {
                 change_kind: None,
                 edge_kind: Some(GraphEdgeKind::Calls),
                 bind_method: None,
-                import_path: None,
             }],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
