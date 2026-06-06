@@ -722,6 +722,22 @@ mod tests {
     }
 
     #[test]
+    fn init_sql_defines_cross_crate_call_surface() {
+        assert!(
+            INIT_SQL.contains("CREATE OR REPLACE VIEW v_cross_crate_calls"),
+            "init.sql must define v_cross_crate_calls in the structural analyst layer"
+        );
+        assert!(
+            INIT_SQL.contains("bind_method"),
+            "cross-crate call surface must expose bind_method provenance"
+        );
+        assert!(
+            INIT_SQL.contains("CREATE OR REPLACE VIEW v_import_licensed_precision_gate"),
+            "init.sql must define the import_licensed precision gate query"
+        );
+    }
+
+    #[test]
     fn duckdb_cli_present_returns_some_when_on_path() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();

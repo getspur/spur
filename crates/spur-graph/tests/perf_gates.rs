@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, read_artifact_parquet,
-    write_artifact_parquet, GraphEdgeKind, GraphIndexArtifact, WriteOptions,
+    write_artifact_parquet, GraphEdgeKind, GraphIndexArtifact, RelationKind, WriteOptions,
 };
 use tempfile::TempDir;
 
@@ -273,6 +273,61 @@ fn gate_t5_git_path_as_ref_inbound_calls_under_20() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "perf-gates"), ignore)]
+fn gate_import_licensed_edges_are_witness_backed_on_spur_graph() {
+    let _guard = perf_gate_guard();
+    let repo_root = precision_root();
+    let (facts, _counts) = build_facts(&repo_root, None).unwrap_or_else(|err| {
+        panic!(
+            "failed to build facts for `{}`: {err:#}",
+            repo_root.display()
+        )
+    });
+    let artifact = artifact_from_facts(&facts, &repo_root).unwrap_or_else(|err| {
+        panic!(
+            "failed to build artifact for `{}`: {err:#}",
+            repo_root.display()
+        )
+    });
+
+    let report = import_licensed_precision_report(&artifact);
+    eprintln!(
+        "SPUR_GRAPH_IMPORT_LICENSED_GATE import_licensed_edges={} non_call={} calls_dyn={} missing_target={} non_function_target={} cross_language={} missing_witness={} all_resolved_call_cross_language={} all_resolved_call_cross_language_examples={:?}",
+        report.import_licensed_edges,
+        report.non_call,
+        report.calls_dyn,
+        report.missing_target,
+        report.non_function_target,
+        report.cross_language,
+        report.missing_witness,
+        report.all_resolved_call_cross_language,
+        report.all_resolved_call_cross_language_examples
+    );
+
+    assert_eq!(report.non_call, 0, "import_licensed must only stamp calls");
+    assert_eq!(
+        report.calls_dyn, 0,
+        "import_licensed must never stamp CallsDyn edges"
+    );
+    assert_eq!(
+        report.missing_target, 0,
+        "import_licensed calls must resolve to a workspace target"
+    );
+    assert_eq!(
+        report.non_function_target, 0,
+        "import_licensed targets must be functions"
+    );
+    assert_eq!(
+        report.cross_language, 0,
+        "import_licensed calls must stay within one language family"
+    );
+    assert_eq!(
+        report.missing_witness, 0,
+        "import_licensed calls must have a same-file workspace import witness"
+    );
+}
+
+#[test]
 #[ignore]
 fn perf_helper_sample() {
     let Some(mode) = env::var_os(HELPER_ENV) else {
@@ -395,6 +450,176 @@ fn workspace_root() -> PathBuf {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .expect("crate should live under <workspace>/crates/spur-graph")
+}
+
+fn precision_root() -> PathBuf {
+    env::var_os("SPUR_GRAPH_PRECISION_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(workspace_root)
+}
+
+#[derive(Default)]
+struct ImportLicensedPrecisionReport {
+    import_licensed_edges: usize,
+    non_call: usize,
+    calls_dyn: usize,
+    missing_target: usize,
+    non_function_target: usize,
+    cross_language: usize,
+    missing_witness: usize,
+    all_resolved_call_cross_language: usize,
+    all_resolved_call_cross_language_examples: Vec<String>,
+}
+
+fn import_licensed_precision_report(
+    artifact: &GraphIndexArtifact,
+) -> ImportLicensedPrecisionReport {
+    let symbols_by_id = artifact
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.stable_symbol_id.as_str(), symbol))
+        .collect::<std::collections::HashMap<_, _>>();
+    let files_by_id = artifact
+        .files
+        .iter()
+        .map(|file| (file.stable_file_id.as_str(), file.file_path.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut report = ImportLicensedPrecisionReport::default();
+
+    for edge in artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls)
+        .filter(|edge| edge.edge_kind == Some(GraphEdgeKind::Calls))
+        .filter(|edge| edge.target_stable_symbol_id.is_some())
+    {
+        let Some(source_file) = edge_source_file(
+            edge.source_stable_symbol_id.as_str(),
+            &symbols_by_id,
+            &files_by_id,
+        ) else {
+            continue;
+        };
+        let Some(target) = edge
+            .target_stable_symbol_id
+            .as_deref()
+            .and_then(|target_id| symbols_by_id.get(target_id))
+        else {
+            continue;
+        };
+        if language_family(source_file)
+            .zip(language_family(target.file_path.as_str()))
+            .is_some_and(|(source, target)| source != target)
+        {
+            report.all_resolved_call_cross_language += 1;
+            if report.all_resolved_call_cross_language_examples.len() < 8 {
+                report
+                    .all_resolved_call_cross_language_examples
+                    .push(format!(
+                        "{}:{} -> {}:{} label={:?} bind={:?}",
+                        source_file,
+                        edge.source_stable_symbol_id,
+                        target.file_path,
+                        target.qualified_name,
+                        edge.target_label,
+                        edge.bind_method
+                    ));
+            }
+        }
+    }
+
+    for edge in artifact
+        .edges
+        .iter()
+        .filter(|edge| edge.bind_method.as_deref() == Some("import_licensed"))
+    {
+        report.import_licensed_edges += 1;
+        if edge.relation != RelationKind::Calls {
+            report.non_call += 1;
+        }
+        if edge.edge_kind == Some(GraphEdgeKind::CallsDyn) {
+            report.calls_dyn += 1;
+        }
+
+        let Some(source_file) = edge_source_file(
+            edge.source_stable_symbol_id.as_str(),
+            &symbols_by_id,
+            &files_by_id,
+        ) else {
+            report.missing_witness += 1;
+            continue;
+        };
+        let Some(target) = edge
+            .target_stable_symbol_id
+            .as_deref()
+            .and_then(|target_id| symbols_by_id.get(target_id))
+        else {
+            report.missing_target += 1;
+            continue;
+        };
+
+        if target.symbol_kind != "function" {
+            report.non_function_target += 1;
+        }
+        if language_family(source_file)
+            .zip(language_family(target.file_path.as_str()))
+            .is_some_and(|(source, target)| source != target)
+        {
+            report.cross_language += 1;
+        }
+        if !has_import_license_witness(artifact, &symbols_by_id, &files_by_id, source_file, target)
+        {
+            report.missing_witness += 1;
+        }
+    }
+
+    report
+}
+
+fn has_import_license_witness(
+    artifact: &GraphIndexArtifact,
+    symbols_by_id: &std::collections::HashMap<&str, &spur_graph::GraphSymbolArtifact>,
+    files_by_id: &std::collections::HashMap<&str, &str>,
+    source_file: &str,
+    target: &spur_graph::GraphSymbolArtifact,
+) -> bool {
+    artifact.edges.iter().any(|edge| {
+        edge.relation == RelationKind::Imports
+            && edge.bind_method.as_deref() != Some("external")
+            && edge.target_stable_symbol_id.as_deref() == Some(target.stable_symbol_id.as_str())
+            && edge.target_label.as_deref() == Some(target.entity_name.as_str())
+            && edge_source_file(
+                edge.source_stable_symbol_id.as_str(),
+                symbols_by_id,
+                files_by_id,
+            ) == Some(source_file)
+    })
+}
+
+fn edge_source_file<'a>(
+    source_stable_id: &str,
+    symbols_by_id: &std::collections::HashMap<&str, &'a spur_graph::GraphSymbolArtifact>,
+    files_by_id: &'a std::collections::HashMap<&str, &'a str>,
+) -> Option<&'a str> {
+    symbols_by_id
+        .get(source_stable_id)
+        .map(|symbol| symbol.file_path.as_str())
+        .or_else(|| files_by_id.get(source_stable_id).copied())
+}
+
+fn language_family(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("rs") => Some("rust"),
+        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") => Some("javascript"),
+        Some("py" | "pyi") => Some("python"),
+        Some("cpp" | "cc" | "cxx" | "c" | "h" | "hpp" | "hxx") => Some("cpp"),
+        _ => None,
+    }
 }
 
 fn helper_samples(mode: &str, parquet_dir: &Path) -> Vec<HelperSample> {
