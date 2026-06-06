@@ -591,7 +591,6 @@ fn graph_edge(source: &str, target: &str) -> GraphEdgeArtifact {
         change_kind: None,
         edge_kind: None,
         bind_method: None,
-        import_path: None,
     }
 }
 
