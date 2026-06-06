@@ -164,6 +164,31 @@ impl App {
             }
         }
 
+        if let spur_acp::domain::events::SpurEventBody::WorkerReportProgress {
+            delegation_id,
+            message,
+            percent,
+        } = &event.body
+        {
+            let delegation = spur_acp::domain::delegation::DelegationId(delegation_id.clone());
+            if let Some(executor_id) = self.lineage.executor_id_for_delegation(&delegation) {
+                if let Some(node) = self.lineage.node(&executor_id) {
+                    let agent_name = node.agent.clone();
+                    self.worker_streams.route_progress(
+                        &executor_id.0,
+                        &agent_name,
+                        message,
+                        *percent,
+                    );
+                }
+            } else {
+                tracing::trace!(
+                    delegation_id = %delegation_id,
+                    "dropping WorkerReportProgress for unknown delegation"
+                );
+            }
+        }
+
         // Seed the per-executor trace from its stream_buffer on spawn.
         // For a fresh live ExecutorSpawned the buffer is empty (harmless no-op).
         // On replay the buffer may already be populated from subsequent replayed
@@ -489,6 +514,7 @@ impl App {
             | SpurEventBody::DelegationDispatched { .. }
             | SpurEventBody::WorkerSpawned { .. }
             | SpurEventBody::WorkerNotification { .. }
+            | SpurEventBody::WorkerReportProgress { .. }
             | SpurEventBody::WorkerProgress { .. }
             | SpurEventBody::WorkerFileTouched { .. }
             | SpurEventBody::WorkerHeartbeat { .. }
