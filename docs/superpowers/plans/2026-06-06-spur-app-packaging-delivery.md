@@ -10,6 +10,8 @@
 
 **Architecture:** SpurApp is a SPUR-branded application artifact; Jute remains the current Tauri runtime shell. The implementation adds a crate-local `spur_app` module in `spur-notebook` that owns `.spurapp` archive semantics and keeps `spur-app.json` as packaging metadata while `app.ipynb` remains the source-of-truth notebook. MCP and file-association entry points call this module rather than duplicating archive logic.
 
+**Delivery Contract:** A user can develop a SpurApp locally from a notebook, export it as a `.spurapp` package, send that package to a teammate who already has Jute notebook installed, and the teammate can open the package as an app. The opened app must use the embedded `app.ipynb`, bundled widget assets, copied dependency lock metadata, and included port snapshots so it runs equivalently to the original on a compatible Jute/runtime environment. Import preflight must report missing local dependencies or unsupported optional state instead of silently producing a degraded app.
+
 **Tech Stack:** Rust 2021, `serde`, `serde_json`, `blake3`, `zip`, existing Jute notebook model types, notebook MCP tools, Tauri file associations. Build and test through `scripts/spur-cargo`.
 
 ---
@@ -280,6 +282,7 @@ git commit -m "feat(spur-notebook): SPURAPP add archive schema"
 **Acceptance Criteria:**
 - [ ] `export_spur_app` writes a `.spurapp` archive containing `spur-app.json` and `app.ipynb`.
 - [ ] `import_spur_app` safely extracts into a caller-provided cache root and returns the embedded notebook path.
+- [ ] A package exported on one machine can be imported from only the `.spurapp` file on another machine with Jute installed.
 - [ ] Optional asset files are copied under `widgets/sha256-<hash>.<ext>` and listed in the manifest.
 - [ ] Optional dependency lock files are copied under `env/` when present.
 - [ ] Import preflight reports missing dependency locks without failing the import.
@@ -560,6 +563,7 @@ git commit -m "feat(spur-notebook): SPURAPP add MCP tools"
 **Acceptance Criteria:**
 - [ ] Tauri declares `.spurapp` as a file association.
 - [ ] Launching the runtime with a `.spurapp` argument imports the archive into the local cache and opens the embedded `app.ipynb`.
+- [ ] A teammate with Jute installed can open a received `.spurapp` package without manually extracting it or finding the original source notebook.
 - [ ] Launching with `.ipynb` keeps current behavior.
 - [ ] Mixed launch arguments preserve order after resolving `.spurapp` into embedded notebook paths.
 - [ ] `scripts/spur-cargo test -p spur-notebook file_association -- --nocapture` passes.
@@ -687,6 +691,7 @@ git commit -m "feat(spur-notebook): SPURAPP open spurapp packages"
 - [ ] No implementation/docs use legacy package artifact spelling for the new package artifact.
 - [ ] `SpurApp`, `.spurapp`, and `spur-app.json` are used consistently.
 - [ ] Research notebook still explains that Jute is the runtime shell and SpurApp is the package artifact.
+- [ ] Final verification covers the handoff flow: export local notebook to `.spurapp`, import/open only that package, and confirm the embedded notebook path plus manifest/preflight are returned.
 - [ ] Focused archive/MCP/file-association tests pass.
 - [ ] `scripts/spur-cargo test -p spur-notebook spur_app -- --nocapture` passes.
 - [ ] `scripts/spur-cargo test -p spur-notebook spur_app_mcp -- --nocapture` passes.
@@ -744,7 +749,7 @@ git commit -m "docs(spur-notebook): SPURAPP document packaging delivery"
 
 ## Self-Review
 
-**Spec coverage:** The plan covers `.spurapp` archive schema, `spur-app.json`, AFM asset packaging as content-hashed files, dependency lock collection/preflight, optional port snapshots, MCP import/export, file association, and naming cleanup. It intentionally defers per-app Tauri installer generation and full frontend widget-loader changes because those are later delivery tiers in the research notebook.
+**Spec coverage:** The plan covers the package handoff contract: local notebook development, `.spurapp` export, teammate import/open through an installed Jute runtime, embedded notebook launch, AFM asset packaging as content-hashed files, dependency lock collection/preflight, optional port snapshots, MCP import/export, file association, and naming cleanup. It intentionally defers per-app Tauri installer generation and full frontend widget-loader changes because those are later delivery tiers in the research notebook.
 
 **Placeholder scan:** No `TBD`, `TODO`, or unspecified implementation steps remain. The one flexible point is the exact helper function name in file association, but the required behavior and tests are explicit.
 
