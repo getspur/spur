@@ -688,7 +688,7 @@ mod tests {
         // Verify known aliases are present
         let map: std::collections::HashMap<_, _> = aliases.iter().cloned().collect();
         assert!(map.contains_key("claude-opus"));
-        assert_eq!(map.get("claude-opus").unwrap(), "claude-opus-4");
+        assert_eq!(&map["claude-opus"], "claude-opus-4");
     }
 
     #[test]
