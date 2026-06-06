@@ -80,7 +80,7 @@ cross-crate **function**-call binds + the cross-crate-call query layer."
 
 ### Task P3.0 — File-scoped resolved-import index + two-phase resolver split (no recall change)
 
-**Task ID:** `task-p3-import-index-two-phase`
+**Task ID:** `task-p3-import-index`
 
 **The change:** split `rebind_cross_file_edges` into Phase 1 (resolve imports as today, **and** record a
 `FileImportIndex`) then Phase 2 (resolve calls/references), with **no graph-behavior change yet** — the
@@ -117,7 +117,7 @@ bumps, query surface (P3.3), `.scm`, other crates.
 
 ### Task P3.1 — Cross-crate import resolution (workspace crate-name normalization) — depends on P3.0
 
-**Task ID:** `task-p3-cross-crate-import-supply`
+**Task ID:** `task-p3-xcrate-import-supply`
 
 **The change:** resolve `use <workspace_crate>::path::Sym` imports to their workspace target by mapping the
 leading path segment to the crate directory (underscore↔hyphen normalization), stamping them
@@ -134,7 +134,7 @@ from weak unstamped provenance to precise `import_path` — the provenance the l
 - (No `SCHEMA_VERSION` bump — no parquet column. `RESOLVER_VERSION` bump deferred to P3.2 so a single
   re-derive covers both resolver changes; P3.1 + P3.2 land as one semantic resolver delta.)
 
-**Depends on:** `task-p3-import-index-two-phase`
+**Depends on:** `task-p3-import-index`
 
 **Acceptance Criteria:**
 - [ ] `use spur_graph::build_facts` (or equivalent fixture) **resolves cross-crate** to the workspace
@@ -159,7 +159,7 @@ classification (P2, do not touch), query surface (P3.3), non-import relations.
 
 ### Task P3.2 — The `import_licensed` cross-crate call arm (the recall mover) — depends on P3.1
 
-**Task ID:** `task-p3-import-licensed-arm`
+**Task ID:** `task-p3-licensed-arm`
 
 **The change:** consume the `FileImportIndex` at the two refusal points to bind cross-crate **function**
 calls the closed-world resolver refused — justified by an explicit import, never a guess. This is the only
@@ -183,7 +183,7 @@ recall-moving task.
 - Regenerate (bless — expect newly-resolved cross-crate call edges only):
   `crates/spur-graph/tests/fixtures/*/expected_graph_index.json`.
 
-**Depends on:** `task-p3-cross-crate-import-supply`
+**Depends on:** `task-p3-xcrate-import-supply`
 
 **Acceptance Criteria:**
 - [ ] **Additivity invariant (headline gate):** every call edge resolved before P3.2 keeps its exact target
@@ -211,7 +211,7 @@ skip-set entry + tests + bless. OUT: the index plumbing (P3.0), import resolutio
 
 ### Task P3.3 — Cross-crate-call query surface + precision gate — depends on P3.2
 
-**Task ID:** `task-p3-cross-crate-query-surface`
+**Task ID:** `task-p3-xcrate-query`
 
 **The change:** make the cross-crate call graph observable (the spec §4 payoff question) and lock the
 precision gate as a standing assertion.
@@ -229,7 +229,7 @@ precision gate as a standing assertion.
   `import_licensed` (the Pillar 3 arm).
 - (No graph `RESOLVER_VERSION`/`SCHEMA_VERSION` bump — read-side + view-only + doc.)
 
-**Depends on:** `task-p3-import-licensed-arm`
+**Depends on:** `task-p3-licensed-arm`
 
 **Acceptance Criteria:**
 - [ ] `v_cross_crate_calls` exists, builds during `analyst build`, and returns sane rows on SPUR (e.g.
