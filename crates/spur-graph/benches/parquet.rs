@@ -502,8 +502,9 @@ fn temporal_rename(from: SnapshotKey, to: SnapshotKey) -> TemporalEdgeArtifact {
 fn edge(source: &str, target: Option<&str>, target_label: Option<&str>) -> GraphEdgeArtifact {
     GraphEdgeArtifact {
         source_stable_symbol_id: source.to_owned(),
-        target_stable_symbol_id: target.map(str::to_string),
-        target_label: target_label.map(str::to_string),
+        target_stable_symbol_id: target.map(str::to_owned),
+        target_label: target_label.map(str::to_owned),
+        import_path: None,
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
