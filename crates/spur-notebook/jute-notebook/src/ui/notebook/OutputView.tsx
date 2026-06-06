@@ -61,11 +61,13 @@ export default function OutputView({
           ) : output.output_type === "display_data" ? (
             <OutputViewDisplayData
               output={output}
+              chromeless={chromeless}
               afmPortBindings={afmPortBindings}
             />
           ) : output.output_type === "execute_result" ? (
             <OutputViewDisplayData
               output={output}
+              chromeless={chromeless}
               afmPortBindings={afmPortBindings}
             />
           ) : output.output_type === "error" ? (
@@ -178,9 +180,11 @@ const IFRAME_HEIGHT_MESSAGE = "jute-iframe-height";
 const OutputViewDisplayData = memo(
   ({
     output,
+    chromeless,
     afmPortBindings,
   }: {
     output: OutputDisplayData;
+    chromeless?: boolean;
     afmPortBindings?: AfmPortBindingSnapshot;
   }) => {
     const widgetView = anywidgetViewFromData(output.data[WIDGET_VIEW_MIME]);
@@ -190,6 +194,7 @@ const OutputViewDisplayData = memo(
           key={widgetView.modelId}
           modelId={widgetView.modelId}
           widgetView={widgetView}
+          chromeless={chromeless}
           portBindings={afmPortBindings}
         />
       );

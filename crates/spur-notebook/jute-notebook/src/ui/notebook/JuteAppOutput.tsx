@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import clsx from "clsx";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 
 import {
   get as getWidgetModel,
@@ -33,6 +41,7 @@ type AnywidgetView = {
 type Props = {
   modelId: string;
   widgetView?: AnywidgetView;
+  chromeless?: boolean;
   portBindings?: AfmPortBindingSnapshot;
 };
 
@@ -44,6 +53,7 @@ type AfmDocument = {
 };
 
 const AFM_MIN_HEIGHT = 160;
+const AFM_HEIGHT_MESSAGE = "jute-afm-height";
 
 export function anywidgetViewFromData(value: unknown): AnywidgetView | null {
   if (!isRecord(value) || typeof value.model_id !== "string") {
@@ -57,9 +67,15 @@ export function anywidgetViewFromData(value: unknown): AnywidgetView | null {
   };
 }
 
-export default function AfmView({ modelId, widgetView, portBindings }: Props) {
+export default function AfmView({
+  modelId,
+  widgetView,
+  chromeless = false,
+  portBindings,
+}: Props) {
   const revision = useWidgetModelRevision(modelId);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState(AFM_MIN_HEIGHT);
   const model = getWidgetModel(modelId);
   const modelCss = model?.css;
   const modelEsm = model?.esm;
@@ -103,6 +119,31 @@ export default function AfmView({ modelId, widgetView, portBindings }: Props) {
   }, [postModelUpdate, revision]);
 
   useEffect(() => {
+    setHeight(AFM_MIN_HEIGHT);
+  }, [srcDoc]);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.source !== iframeRef.current?.contentWindow) {
+        return;
+      }
+      if (
+        typeof event.data !== "object" ||
+        event.data === null ||
+        event.data.type !== AFM_HEIGHT_MESSAGE ||
+        typeof event.data.height !== "number" ||
+        !Number.isFinite(event.data.height)
+      ) {
+        return;
+      }
+      setHeight(Math.max(AFM_MIN_HEIGHT, Math.ceil(event.data.height)));
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, []);
+
+  useEffect(() => {
     if (!portBindings || portBindings.binds.length === 0) return;
     const model = getWidgetModel(modelId);
     if (!model) return;
@@ -144,8 +185,11 @@ export default function AfmView({ modelId, widgetView, portBindings }: Props) {
       srcDoc={srcDoc}
       sandbox={htmlOutputSandbox(true)}
       onLoad={postModelUpdate}
-      style={{ minHeight: AFM_MIN_HEIGHT }}
-      className="block w-full rounded border border-slate-200 bg-white"
+      style={{ height, minHeight: AFM_MIN_HEIGHT }}
+      className={clsx(
+        "block w-full bg-white",
+        chromeless ? "border-0" : "rounded border border-slate-200",
+      )}
     />
   );
 }
@@ -205,6 +249,26 @@ let cssText = ${jsonForScript(document.css ?? "")};
 const source = ${jsonForScript(document.esm)};
 const root = document.getElementById("jute-afm-root");
 const listeners = new Map();
+
+function postHeight() {
+  window.parent.postMessage({
+    type: "${AFM_HEIGHT_MESSAGE}",
+    height: Math.max(
+      document.body.scrollHeight,
+      document.documentElement.scrollHeight,
+      root?.scrollHeight ?? 0,
+    ),
+  }, "*");
+}
+
+window.addEventListener("load", postHeight);
+if ("ResizeObserver" in window) {
+  const heightObserver = new ResizeObserver(postHeight);
+  heightObserver.observe(document.body);
+  if (root) heightObserver.observe(root);
+}
+requestAnimationFrame(postHeight);
+postHeight();
 
 function cloneRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
