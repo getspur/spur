@@ -1027,6 +1027,8 @@ struct RebindTarget {
     symbol_kind: String,
 }
 
+type FileImportIndex = BTreeMap<String, BTreeMap<String, Vec<RebindTarget>>>;
+
 struct ExternalImportEntry {
     symbol: GraphSymbolArtifact,
     node_id: Option<NodeId>,
@@ -1133,6 +1135,33 @@ impl ExternalImportRegistry {
 fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
     let workspace_index = import_workspace_index_from_buckets(buckets);
     let mut external_imports = ExternalImportRegistry::from_buckets(buckets);
+    let symbols_by_entity_name = symbols_by_entity_name_from_buckets(buckets);
+    let (file_import_index, import_ambiguous_unresolved) = rebind_import_edges(
+        buckets,
+        &workspace_index,
+        &symbols_by_entity_name,
+        &mut external_imports,
+    );
+    let remaining_ambiguous_unresolved = rebind_remaining_edges(
+        buckets,
+        &workspace_index,
+        &symbols_by_entity_name,
+        &file_import_index,
+        &mut external_imports,
+    );
+    external_imports.write_to_buckets(buckets);
+    let ambiguous_unresolved = import_ambiguous_unresolved + remaining_ambiguous_unresolved;
+    if ambiguous_unresolved > 0 {
+        tracing::info!(
+            ambiguous_unresolved,
+            "spur-graph: left ambiguous cross-file edges unresolved"
+        );
+    }
+}
+
+fn symbols_by_entity_name_from_buckets(
+    buckets: &BTreeMap<String, FileBucket>,
+) -> BTreeMap<String, Vec<RebindTarget>> {
     let mut symbols_by_entity_name: BTreeMap<String, Vec<RebindTarget>> = BTreeMap::new();
     for bucket in buckets.values() {
         for symbol in &bucket.symbols {
@@ -1149,28 +1178,29 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 });
         }
     }
+    symbols_by_entity_name
+}
 
+fn rebind_import_edges(
+    buckets: &mut BTreeMap<String, FileBucket>,
+    workspace_index: &ImportWorkspaceIndex,
+    symbols_by_entity_name: &BTreeMap<String, Vec<RebindTarget>>,
+    external_imports: &mut ExternalImportRegistry,
+) -> (FileImportIndex, usize) {
+    let workspace_targets_by_stable_id = workspace_targets_by_stable_id(symbols_by_entity_name);
+    let mut file_import_index = FileImportIndex::new();
     let mut ambiguous_unresolved = 0usize;
+
     for bucket in buckets.values_mut() {
         let source_file_path = bucket.file.file_path.as_str();
         for edge in &mut bucket.edges {
+            if edge.relation != RelationKind::Imports {
+                continue;
+            }
             let Some(target_label) = edge.target_label.clone() else {
                 continue;
             };
-            let resolution_is_stamped = matches!(
-                edge.bind_method.as_deref(),
-                Some(
-                    "fqn"
-                        | "scope_match"
-                        | "singleton"
-                        | "macro_body_singleton"
-                        | "relational"
-                        | "constructs_type_singleton"
-                        | "method_crate_singleton"
-                        | "import_path"
-                        | "external"
-                )
-            );
+            let resolution_is_stamped = resolution_is_stamped(edge);
             let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
                 || target_label.contains("::")
                 || resolution_is_stamped;
@@ -1184,50 +1214,41 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                     bind_external_import_edge(
                         edge,
                         source_file_path,
-                        &workspace_index,
-                        &mut external_imports,
+                        workspace_index,
+                        external_imports,
                     );
                 }
-                continue;
-            }
-            if edge.relation == RelationKind::Links {
+                record_resolved_workspace_import(
+                    &mut file_import_index,
+                    source_file_path,
+                    &target_label,
+                    edge,
+                    &workspace_targets_by_stable_id,
+                );
                 continue;
             }
             let Some(matches) = symbols_by_entity_name.get(target_label.as_str()) else {
                 if bind_external_import_edge(
                     edge,
                     source_file_path,
-                    &workspace_index,
-                    &mut external_imports,
+                    workspace_index,
+                    external_imports,
                 ) {
                     continue;
                 }
                 edge.target_stable_symbol_id = None;
                 continue;
             };
-            let matches = match edge.relation {
-                RelationKind::Imports => {
-                    import_rebind_candidates(matches, source_file_path, edge.import_path.is_some())
-                }
-                relation => {
-                    if let Some(allowed) = rebind_candidate_kinds(relation) {
-                        matches
-                            .iter()
-                            .filter(|target| allowed.contains(&target.symbol_kind.as_str()))
-                            .collect::<Vec<_>>()
-                    } else {
-                        matches.iter().collect::<Vec<_>>()
-                    }
-                }
-            };
+            let matches =
+                import_rebind_candidates(matches, source_file_path, edge.import_path.is_some());
             // Candidate filtering above can remove every match, so the
             // bucket lookup being non-empty does not guarantee `matches` is.
             let Some(resolved) = matches.first() else {
                 if bind_external_import_edge(
                     edge,
                     source_file_path,
-                    &workspace_index,
-                    &mut external_imports,
+                    workspace_index,
+                    external_imports,
                 ) {
                     continue;
                 }
@@ -1238,11 +1259,95 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                 if bind_external_import_edge(
                     edge,
                     source_file_path,
-                    &workspace_index,
-                    &mut external_imports,
+                    workspace_index,
+                    external_imports,
                 ) {
                     continue;
                 }
+                ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = target_label.as_str(),
+                    candidates = matches.len(),
+                    "spur-graph: ambiguous cross-file target_label; leaving unresolved"
+                );
+                edge.target_stable_symbol_id = None;
+            } else {
+                edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+            }
+            record_resolved_workspace_import(
+                &mut file_import_index,
+                source_file_path,
+                &target_label,
+                edge,
+                &workspace_targets_by_stable_id,
+            );
+        }
+    }
+
+    sort_file_import_index(&mut file_import_index);
+    (file_import_index, ambiguous_unresolved)
+}
+
+fn rebind_remaining_edges(
+    buckets: &mut BTreeMap<String, FileBucket>,
+    workspace_index: &ImportWorkspaceIndex,
+    symbols_by_entity_name: &BTreeMap<String, Vec<RebindTarget>>,
+    _file_import_index: &FileImportIndex,
+    external_imports: &mut ExternalImportRegistry,
+) -> usize {
+    let mut ambiguous_unresolved = 0usize;
+
+    for bucket in buckets.values_mut() {
+        let source_file_path = bucket.file.file_path.as_str();
+        for edge in &mut bucket.edges {
+            if edge.relation == RelationKind::Imports {
+                continue;
+            }
+            let Some(target_label) = edge.target_label.clone() else {
+                continue;
+            };
+            let resolution_is_stamped = resolution_is_stamped(edge);
+            let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
+                || target_label.contains("::")
+                || resolution_is_stamped;
+            if edge.target_stable_symbol_id.is_some() && skip_rebind {
+                if edge.bind_method.as_deref() == Some("external")
+                    && !edge
+                        .target_stable_symbol_id
+                        .as_deref()
+                        .is_some_and(|id| external_imports.mark_stable_id_used(id))
+                {
+                    bind_external_import_edge(
+                        edge,
+                        source_file_path,
+                        workspace_index,
+                        external_imports,
+                    );
+                }
+                continue;
+            }
+            if edge.relation == RelationKind::Links {
+                continue;
+            }
+            let Some(matches) = symbols_by_entity_name.get(target_label.as_str()) else {
+                edge.target_stable_symbol_id = None;
+                continue;
+            };
+            let matches = if let Some(allowed) = rebind_candidate_kinds(edge.relation) {
+                matches
+                    .iter()
+                    .filter(|target| allowed.contains(&target.symbol_kind.as_str()))
+                    .collect::<Vec<_>>()
+            } else {
+                matches.iter().collect::<Vec<_>>()
+            };
+            // Candidate filtering above can remove every match, so the
+            // bucket lookup being non-empty does not guarantee `matches` is.
+            let Some(resolved) = matches.first() else {
+                edge.target_stable_symbol_id = None;
+                continue;
+            };
+            if matches.len() > 1 {
                 ambiguous_unresolved += 1;
                 tracing::debug!(
                     target_label = target_label.as_str(),
@@ -1267,12 +1372,74 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             }
         }
     }
-    external_imports.write_to_buckets(buckets);
-    if ambiguous_unresolved > 0 {
-        tracing::info!(
-            ambiguous_unresolved,
-            "spur-graph: left ambiguous cross-file edges unresolved"
-        );
+    ambiguous_unresolved
+}
+
+fn resolution_is_stamped(edge: &GraphEdgeArtifact) -> bool {
+    matches!(
+        edge.bind_method.as_deref(),
+        Some(
+            "fqn"
+                | "scope_match"
+                | "singleton"
+                | "macro_body_singleton"
+                | "relational"
+                | "constructs_type_singleton"
+                | "method_crate_singleton"
+                | "import_path"
+                | "external"
+        )
+    )
+}
+
+fn workspace_targets_by_stable_id(
+    symbols_by_entity_name: &BTreeMap<String, Vec<RebindTarget>>,
+) -> BTreeMap<&str, &RebindTarget> {
+    symbols_by_entity_name
+        .values()
+        .flat_map(|targets| targets.iter())
+        .map(|target| (target.stable_symbol_id.as_str(), target))
+        .collect()
+}
+
+fn record_resolved_workspace_import(
+    file_import_index: &mut FileImportIndex,
+    source_file_path: &str,
+    imported_entity_name: &str,
+    edge: &GraphEdgeArtifact,
+    workspace_targets_by_stable_id: &BTreeMap<&str, &RebindTarget>,
+) {
+    let Some(target_stable_symbol_id) = edge.target_stable_symbol_id.as_deref() else {
+        return;
+    };
+    let Some(target) = workspace_targets_by_stable_id.get(target_stable_symbol_id) else {
+        return;
+    };
+    let targets = file_import_index
+        .entry(source_file_path.to_owned())
+        .or_default()
+        .entry(imported_entity_name.to_owned())
+        .or_default();
+    if targets
+        .iter()
+        .any(|existing| existing.stable_symbol_id == target.stable_symbol_id)
+    {
+        return;
+    }
+    targets.push((*target).clone());
+}
+
+fn sort_file_import_index(file_import_index: &mut FileImportIndex) {
+    for targets in file_import_index
+        .values_mut()
+        .flat_map(|imports| imports.values_mut())
+    {
+        targets.sort_by(|left, right| {
+            left.stable_symbol_id
+                .cmp(&right.stable_symbol_id)
+                .then_with(|| left.file_path.cmp(&right.file_path))
+                .then_with(|| left.symbol_kind.cmp(&right.symbol_kind))
+        });
     }
 }
 
@@ -1866,8 +2033,10 @@ mod tests {
 
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
-        compose_artifact, empty_bucket, manifest_version_from_query_bytes, rebind_cross_file_edges,
-        BuildMode, CurrentFileEntry, ManifestQueryBytes, GRAPH_INDEX_VERSION_TEMPORAL,
+        compose_artifact, empty_bucket, import_workspace_index_from_buckets,
+        manifest_version_from_query_bytes, rebind_cross_file_edges, rebind_import_edges,
+        symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry, ExternalImportRegistry,
+        ManifestQueryBytes, GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
@@ -2254,6 +2423,61 @@ mod tests {
         assert!(external_symbols.iter().all(
             |symbol| symbol.file_path == EXTERNAL_FILE_PATH && symbol.symbol_kind == "external"
         ));
+    }
+
+    #[test]
+    fn import_phase_builds_workspace_only_file_import_index() {
+        let mut def_bucket = empty_bucket("crates/crate-b/src/lib.rs", "oid-def");
+        let mut foo_symbol = symbol("sym:crate-b-foo", "crates/crate-b/src/lib.rs");
+        foo_symbol.entity_name = "foo".to_owned();
+        foo_symbol.qualified_name = "crate_b::foo".to_owned();
+        foo_symbol.symbol_kind = "function".to_owned();
+        def_bucket.symbols.push(foo_symbol);
+
+        let mut use_bucket = empty_bucket("crates/crate-a/src/lib.rs", "oid-use");
+        let mut workspace_import = edge("sym:importer", None, RelationKind::Imports);
+        workspace_import.target_label = Some("foo".to_owned());
+        workspace_import.import_path = Some("crate_b::foo".to_owned());
+        use_bucket.edges.push(workspace_import);
+
+        let mut external_import = edge("sym:importer", None, RelationKind::Imports);
+        external_import.target_label = Some("Deserialize".to_owned());
+        external_import.import_path = Some("serde::Deserialize".to_owned());
+        use_bucket.edges.push(external_import);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("crates/crate-a/src/lib.rs".to_owned(), use_bucket);
+        buckets.insert("crates/crate-b/src/lib.rs".to_owned(), def_bucket);
+
+        let workspace_index = import_workspace_index_from_buckets(&buckets);
+        let symbols_by_entity_name = symbols_by_entity_name_from_buckets(&buckets);
+        let mut external_imports = ExternalImportRegistry::from_buckets(&buckets);
+
+        let (file_import_index, ambiguous_unresolved) = rebind_import_edges(
+            &mut buckets,
+            &workspace_index,
+            &symbols_by_entity_name,
+            &mut external_imports,
+        );
+
+        assert_eq!(ambiguous_unresolved, 0);
+        let imports = file_import_index
+            .get("crates/crate-a/src/lib.rs")
+            .expect("crate-a imports");
+        assert_eq!(
+            imports.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["foo"]
+        );
+
+        let foo_targets = imports.get("foo").expect("foo import target");
+        assert_eq!(foo_targets.len(), 1);
+        assert_eq!(foo_targets[0].stable_symbol_id, "sym:crate-b-foo");
+        assert_eq!(foo_targets[0].file_path, "crates/crate-b/src/lib.rs");
+        assert_eq!(foo_targets[0].symbol_kind, "function");
+        assert!(
+            !imports.contains_key("Deserialize"),
+            "external imports must not be indexed as workspace licenses"
+        );
     }
 
     #[test]
