@@ -21,9 +21,10 @@ WHERE body_text IS NOT NULL AND length(body_text) > 0;
 
 -- Deduped search corpus. Skills are installed into ~6 agent dirs
 -- (.claude/.codex/.kiro/.gemini/.kimi/.opencode), so a skill's sections appear
--- 6-10x by identical body — FTS over the raw table returns the same section many
--- times. Keep `sections` FULL (v_doc_tree needs the whole forest), but index a
--- deduped copy: one row per distinct SECTION (same heading-path + same body),
+-- 6-10x by identical body — except for the SPUR-MANAGED header injected per
+-- vendored copy. FTS over the raw table returns the same section many times.
+-- Keep `sections` FULL (v_doc_tree needs the whole forest), but index a deduped
+-- copy: one row per distinct SECTION (same heading-path + normalized body),
 -- preferring the canonical (non-dot-dir) path.
 --
 -- Dedup on the SECTION BODY, NOT `content_hash`: content_hash is the *whole-file*
@@ -35,7 +36,8 @@ CREATE OR REPLACE TABLE sections_search AS
 SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
 FROM sections
 QUALIFY row_number() OVER (
-  PARTITION BY COALESCE(qualified_name, ''), body_text
+  PARTITION BY COALESCE(qualified_name, ''),
+               regexp_replace(body_text, '<!-- SPUR-MANAGED[^>]*-->\n?', '')
   ORDER BY (file_path LIKE '.%')::INT, length(file_path), file_path
 ) = 1;
 
@@ -87,30 +89,41 @@ CREATE OR REPLACE MACRO search_docs(q) AS TABLE
          round(fts_main_sections_search.match_bm25(s.stable_symbol_id, q), 3) AS bm25
   FROM sections_search s
   WHERE fts_main_sections_search.match_bm25(s.stable_symbol_id, q) IS NOT NULL
+  QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY bm25 DESC) <= 2
   ORDER BY bm25 DESC NULLS LAST
   LIMIT 25;
 
 -- Code-only: BM25 over symbol token text, FUSED with the scorecard so each hit
 -- carries its centrality / churn / posture / component — high-value by default.
 CREATE OR REPLACE MACRO search_code(q) AS TABLE
-  SELECT st.entity_name AS symbol, st.symbol_kind, st.file_path,
-         round(fts_main_symbol_text.match_bm25(st.stable_symbol_id, q), 3) AS bm25,
-         round(sc.pagerank * 1e4, 2) AS pagerank_x1e4,
-         sc.churn_90d, sc.posture, sc.component_size
-  FROM symbol_text st
-  JOIN v_symbol_scorecard sc USING (stable_symbol_id)
-  WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
-  ORDER BY bm25 DESC NULLS LAST
+  SELECT symbol, symbol_kind, file_path,
+         round(bm25_raw, 3) AS bm25,
+         round(pagerank * 1e4, 2) AS pagerank_x1e4,
+         churn_90d, posture, component_size
+  FROM (
+    SELECT st.entity_name AS symbol, st.symbol_kind, st.file_path,
+           fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) AS bm25_raw,
+           sc.pagerank, sc.churn_90d, sc.posture, sc.component_size
+    FROM symbol_text st
+    JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+    WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+  )
+  ORDER BY bm25_raw
+    * CASE WHEN file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+    * CASE WHEN symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
+           WHEN symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+    * (1 + 0.15 * ln(1 + pagerank * 1e4)) DESC NULLS LAST
   LIMIT 25;
 
 -- Unified: docs + code in one ranked result set with high-value detail inline.
 CREATE OR REPLACE MACRO search(q) AS TABLE
-  SELECT * FROM (
+  SELECT kind, title, file, score, signal FROM (
     SELECT 'doc' AS kind,
            s.qualified_name AS title,
            regexp_replace(s.file_path, '^(crates|docs|\.claude|\.spur|\.codex|\.kiro|\.gemini)/', '') AS file,
            round(fts_main_sections_search.match_bm25(s.stable_symbol_id, q), 3) AS score,
-           CAST(NULL AS VARCHAR) AS signal
+           CAST(NULL AS VARCHAR) AS signal,
+           fts_main_sections_search.match_bm25(s.stable_symbol_id, q) AS rank
     FROM sections_search s
     WHERE fts_main_sections_search.match_bm25(s.stable_symbol_id, q) IS NOT NULL
     UNION ALL
@@ -118,11 +131,17 @@ CREATE OR REPLACE MACRO search(q) AS TABLE
            st.entity_name,
            regexp_replace(st.file_path, '^crates/', ''),
            round(fts_main_symbol_text.match_bm25(st.stable_symbol_id, q), 3),
-           sc.posture || ' · pr=' || round(sc.pagerank * 1e4, 1) || ' · churn=' || sc.churn_90d
+           sc.posture || ' · pr=' || round(sc.pagerank * 1e4, 1) || ' · churn=' || sc.churn_90d,
+           fts_main_symbol_text.match_bm25(st.stable_symbol_id, q)
+             * CASE WHEN st.file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+             * CASE WHEN st.symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
+                    WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+             * (1 + 0.15 * ln(1 + sc.pagerank * 1e4))
     FROM symbol_text st
     JOIN v_symbol_scorecard sc USING (stable_symbol_id)
     WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
   )
   WHERE score IS NOT NULL
-  ORDER BY score DESC
+  QUALIFY row_number() OVER (PARTITION BY file ORDER BY rank DESC) <= 2
+  ORDER BY rank DESC NULLS LAST
   LIMIT 30;
