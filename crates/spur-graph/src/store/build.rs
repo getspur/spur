@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -12,9 +12,14 @@ use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
 use crate::discovery::discover_files;
 use crate::extract::GraphFacts;
 use crate::extract::{
-    build_facts_for_paths, languages::all_supported_extensions,
-    tree_sitter::function_singleton_safe,
+    build_facts_for_paths,
+    languages::all_supported_extensions,
+    tree_sitter::{
+        classify_import_origin, function_singleton_safe, ImportOriginClassification,
+        ImportWorkspaceIndex,
+    },
 };
+use crate::identity::{stable_symbol_id_for_external_path, EXTERNAL_FILE_PATH};
 use crate::schema::GRAPH_INDEX_VERSION_TEMPORAL;
 use crate::validation::compute_anchor_hash;
 use crate::{
@@ -26,7 +31,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v8";
 pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-05-reexport-following-v15";
+pub const RESOLVER_VERSION: &str = "2026-06-06-external-symbol-modeling-v16";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -924,6 +929,19 @@ fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, File
             },
         );
     }
+    if let Some(symbols) = symbols_by_path.get(EXTERNAL_FILE_PATH) {
+        let mut bucket = empty_bucket(EXTERNAL_FILE_PATH, "");
+        bucket.symbols = symbols.iter().copied().cloned().collect();
+        bucket.symbol_node_ids = symbols
+            .iter()
+            .filter_map(|symbol| {
+                symbol_node_id_by_stable_id
+                    .get(symbol.stable_symbol_id.as_str())
+                    .copied()
+            })
+            .collect();
+        buckets.insert(EXTERNAL_FILE_PATH.to_owned(), bucket);
+    }
     buckets
 }
 
@@ -1009,10 +1027,118 @@ struct RebindTarget {
     symbol_kind: String,
 }
 
+struct ExternalImportEntry {
+    symbol: GraphSymbolArtifact,
+    node_id: Option<NodeId>,
+}
+
+struct ExternalImportRegistry {
+    entries_by_path: BTreeMap<String, ExternalImportEntry>,
+    path_by_stable_id: HashMap<String, String>,
+    used_paths: BTreeSet<String>,
+    next_node_id: u64,
+}
+
+impl ExternalImportRegistry {
+    fn from_buckets(buckets: &BTreeMap<String, FileBucket>) -> Self {
+        let mut entries_by_path = BTreeMap::new();
+        let mut path_by_stable_id = HashMap::new();
+
+        for bucket in buckets.values() {
+            let node_ids_are_aligned = bucket.symbol_node_ids.len() == bucket.symbols.len();
+            for (index, symbol) in bucket.symbols.iter().enumerate() {
+                if symbol.symbol_kind != "external" {
+                    continue;
+                }
+                let path = external_symbol_path(symbol);
+                let node_id = node_ids_are_aligned.then(|| bucket.symbol_node_ids[index]);
+                path_by_stable_id.insert(symbol.stable_symbol_id.clone(), path.clone());
+                entries_by_path
+                    .entry(path)
+                    .or_insert_with(|| ExternalImportEntry {
+                        symbol: symbol.clone(),
+                        node_id,
+                    });
+            }
+        }
+
+        Self {
+            entries_by_path,
+            path_by_stable_id,
+            used_paths: BTreeSet::new(),
+            next_node_id: max_existing_bucket_node_id(buckets)
+                .and_then(|id| id.checked_add(1))
+                .unwrap_or(1),
+        }
+    }
+
+    fn bind_external(&mut self, path: String, name: String) -> String {
+        let stable_symbol_id = stable_symbol_id_for_external_path(&path);
+        self.used_paths.insert(path.clone());
+        self.path_by_stable_id
+            .insert(stable_symbol_id.clone(), path.clone());
+        self.entries_by_path
+            .entry(path.clone())
+            .or_insert_with(|| ExternalImportEntry {
+                symbol: GraphSymbolArtifact {
+                    stable_symbol_id: stable_symbol_id.clone(),
+                    file_path: EXTERNAL_FILE_PATH.to_owned(),
+                    byte_range: [0, 0],
+                    line_range: [0, 0],
+                    entity_name: name,
+                    qualified_name: path,
+                    symbol_kind: "external".to_owned(),
+                    anchor_hash: String::new(),
+                    enclosing_scope: None,
+                },
+                node_id: None,
+            });
+        stable_symbol_id
+    }
+
+    fn mark_stable_id_used(&mut self, stable_symbol_id: &str) -> bool {
+        let Some(path) = self.path_by_stable_id.get(stable_symbol_id).cloned() else {
+            return false;
+        };
+        self.used_paths.insert(path);
+        true
+    }
+
+    fn write_to_buckets(mut self, buckets: &mut BTreeMap<String, FileBucket>) {
+        if self.used_paths.is_empty() {
+            buckets.remove(EXTERNAL_FILE_PATH);
+            return;
+        }
+
+        let mut bucket = empty_bucket(EXTERNAL_FILE_PATH, "");
+        for path in self.used_paths.clone() {
+            let Some(entry) = self.entries_by_path.remove(&path) else {
+                continue;
+            };
+            let node_id = entry.node_id.unwrap_or_else(|| {
+                let node_id = NodeId(self.next_node_id);
+                self.next_node_id = self
+                    .next_node_id
+                    .checked_add(1)
+                    .expect("exhausted synthetic external NodeId space");
+                node_id
+            });
+            bucket.symbols.push(entry.symbol);
+            bucket.symbol_node_ids.push(node_id);
+        }
+        buckets.insert(EXTERNAL_FILE_PATH.to_owned(), bucket);
+    }
+}
+
 fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
+    let workspace_index = import_workspace_index_from_buckets(buckets);
+    let mut external_imports = ExternalImportRegistry::from_buckets(buckets);
     let mut symbols_by_entity_name: BTreeMap<String, Vec<RebindTarget>> = BTreeMap::new();
     for bucket in buckets.values() {
         for symbol in &bucket.symbols {
+            if symbol.symbol_kind == "external" {
+                continue;
+            }
             symbols_by_entity_name
                 .entry(symbol.entity_name.clone())
                 .or_default()
@@ -1028,7 +1154,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
     for bucket in buckets.values_mut() {
         let source_file_path = bucket.file.file_path.as_str();
         for edge in &mut bucket.edges {
-            let Some(target_label) = edge.target_label.as_deref() else {
+            let Some(target_label) = edge.target_label.clone() else {
                 continue;
             };
             let resolution_is_stamped = matches!(
@@ -1042,18 +1168,40 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
                         | "constructs_type_singleton"
                         | "method_crate_singleton"
                         | "import_path"
+                        | "external"
                 )
             );
             let skip_rebind = edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
                 || target_label.contains("::")
                 || resolution_is_stamped;
             if edge.target_stable_symbol_id.is_some() && skip_rebind {
+                if edge.bind_method.as_deref() == Some("external")
+                    && !edge
+                        .target_stable_symbol_id
+                        .as_deref()
+                        .is_some_and(|id| external_imports.mark_stable_id_used(id))
+                {
+                    bind_external_import_edge(
+                        edge,
+                        source_file_path,
+                        &workspace_index,
+                        &mut external_imports,
+                    );
+                }
                 continue;
             }
             if edge.relation == RelationKind::Links {
                 continue;
             }
-            let Some(matches) = symbols_by_entity_name.get(target_label) else {
+            let Some(matches) = symbols_by_entity_name.get(target_label.as_str()) else {
+                if bind_external_import_edge(
+                    edge,
+                    source_file_path,
+                    &workspace_index,
+                    &mut external_imports,
+                ) {
+                    continue;
+                }
                 edge.target_stable_symbol_id = None;
                 continue;
             };
@@ -1075,13 +1223,29 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             // Candidate filtering above can remove every match, so the
             // bucket lookup being non-empty does not guarantee `matches` is.
             let Some(resolved) = matches.first() else {
+                if bind_external_import_edge(
+                    edge,
+                    source_file_path,
+                    &workspace_index,
+                    &mut external_imports,
+                ) {
+                    continue;
+                }
                 edge.target_stable_symbol_id = None;
                 continue;
             };
             if matches.len() > 1 {
+                if bind_external_import_edge(
+                    edge,
+                    source_file_path,
+                    &workspace_index,
+                    &mut external_imports,
+                ) {
+                    continue;
+                }
                 ambiguous_unresolved += 1;
                 tracing::debug!(
-                    target_label = target_label,
+                    target_label = target_label.as_str(),
                     candidates = matches.len(),
                     "spur-graph: ambiguous cross-file target_label; leaving unresolved"
                 );
@@ -1103,6 +1267,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             }
         }
     }
+    external_imports.write_to_buckets(buckets);
     if ambiguous_unresolved > 0 {
         tracing::info!(
             ambiguous_unresolved,
@@ -1141,6 +1306,128 @@ fn import_rebind_candidates<'a>(
             .collect();
     }
     candidates
+}
+
+fn bind_external_import_edge(
+    edge: &mut GraphEdgeArtifact,
+    source_file_path: &str,
+    workspace_index: &ImportWorkspaceIndex,
+    external_imports: &mut ExternalImportRegistry,
+) -> bool {
+    if edge.relation != RelationKind::Imports {
+        return false;
+    }
+    let Some(import_path) = edge.import_path.as_deref() else {
+        return false;
+    };
+    let ImportOriginClassification::External { path, name, .. } =
+        classify_import_origin(import_path, source_file_path, workspace_index)
+    else {
+        return false;
+    };
+
+    edge.target_stable_symbol_id = Some(external_imports.bind_external(path, name));
+    edge.bind_method = Some("external".to_owned());
+    true
+}
+
+fn import_workspace_index_from_buckets(
+    buckets: &BTreeMap<String, FileBucket>,
+) -> ImportWorkspaceIndex {
+    let mut index = ImportWorkspaceIndex::default();
+    for path in buckets.keys().map(String::as_str) {
+        if path == EXTERNAL_FILE_PATH {
+            continue;
+        }
+        add_rust_workspace_crate(path, &mut index);
+        add_python_workspace_modules(path, &mut index);
+        add_javascript_workspace_roots(path, &mut index);
+    }
+    index
+}
+
+fn add_rust_workspace_crate(path: &str, index: &mut ImportWorkspaceIndex) {
+    if import_rebind_language(path) != Some("rust") {
+        return;
+    }
+    let segments = path.split('/').collect::<Vec<_>>();
+    let Some(crates_index) = segments.iter().position(|segment| *segment == "crates") else {
+        return;
+    };
+    let Some(crate_name) = segments.get(crates_index + 1) else {
+        return;
+    };
+    if crate_name.is_empty() || *crate_name == "src" {
+        return;
+    }
+    index.rust_crates.insert(crate_name.replace('-', "_"));
+}
+
+fn add_python_workspace_modules(path: &str, index: &mut ImportWorkspaceIndex) {
+    if !path.ends_with(".py") {
+        return;
+    }
+    let mut module_path = path.trim_end_matches(".py");
+    if let Some(stripped) = module_path.strip_suffix("/__init__") {
+        module_path = stripped;
+    }
+    let segments = module_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    add_python_module_segments(&segments, index);
+    if matches!(segments.first().copied(), Some("src" | "lib" | "python")) {
+        add_python_module_segments(&segments[1..], index);
+    }
+}
+
+fn add_python_module_segments(segments: &[&str], index: &mut ImportWorkspaceIndex) {
+    let mut module = String::new();
+    for segment in segments {
+        if module.is_empty() {
+            module.push_str(segment);
+        } else {
+            module.push('.');
+            module.push_str(segment);
+        }
+        index.python_modules.insert(module.clone());
+    }
+}
+
+fn add_javascript_workspace_roots(path: &str, index: &mut ImportWorkspaceIndex) {
+    if import_rebind_language(path) != Some("javascript") {
+        return;
+    }
+    let dirs = path.rsplit_once('/').map(|(dirs, _)| dirs).unwrap_or("");
+    let segments = dirs
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let mut prefix = String::new();
+    for segment in &segments {
+        if prefix.is_empty() {
+            prefix.push_str(segment);
+        } else {
+            prefix.push('/');
+            prefix.push_str(segment);
+        }
+        index.javascript_workspace_roots.insert(prefix.clone());
+    }
+    for (idx, segment) in segments.iter().enumerate() {
+        if *segment == "src" {
+            index.javascript_workspace_roots.insert("src".to_owned());
+        } else if *segment == "packages" {
+            if let Some(package) = segments.get(idx + 1) {
+                index
+                    .javascript_workspace_roots
+                    .insert(format!("packages/{package}"));
+            }
+        }
+    }
+    if !segments.is_empty() {
+        index.javascript_path_aliases.insert("@/".to_owned());
+        index.javascript_path_aliases.insert("@/*".to_owned());
+    }
 }
 
 fn rebind_candidate_kinds(relation: RelationKind) -> Option<&'static [&'static str]> {
@@ -1209,6 +1496,31 @@ fn parent_path(path: &str) -> &str {
         .unwrap_or("")
 }
 
+fn external_symbol_path(symbol: &GraphSymbolArtifact) -> String {
+    if symbol.qualified_name.is_empty() {
+        symbol.entity_name.clone()
+    } else {
+        symbol.qualified_name.clone()
+    }
+}
+
+fn max_existing_bucket_node_id(buckets: &BTreeMap<String, FileBucket>) -> Option<u64> {
+    buckets
+        .values()
+        .filter_map(|bucket| bucket.file_node_id.map(NodeId::get))
+        .chain(
+            buckets
+                .values()
+                .flat_map(|bucket| bucket.symbol_node_ids.iter().map(|id| id.get())),
+        )
+        .chain(
+            buckets
+                .values()
+                .flat_map(|bucket| bucket.manifest.node_ids.iter().map(|id| id.get())),
+        )
+        .max()
+}
+
 fn rebuild_from_buckets(
     mut buckets: BTreeMap<String, FileBucket>,
     manifest_version: String,
@@ -1228,6 +1540,20 @@ fn rebuild_from_buckets(
         bucket
             .edges
             .sort_by(|a, b| edge_sort_key(a).cmp(&edge_sort_key(b)));
+        if bucket.file.file_path == EXTERNAL_FILE_PATH {
+            if bucket.symbol_node_ids.len() == bucket.symbols.len() {
+                symbols.extend(
+                    bucket
+                        .symbols
+                        .iter()
+                        .cloned()
+                        .zip(bucket.symbol_node_ids.iter().copied().map(Some)),
+                );
+            } else {
+                symbols.extend(bucket.symbols.iter().cloned().map(|symbol| (symbol, None)));
+            }
+            continue;
+        }
         files.push((bucket.file.clone(), bucket.file_node_id));
         if bucket.symbol_node_ids.len() == bucket.symbols.len() {
             symbols.extend(
@@ -1545,6 +1871,7 @@ mod tests {
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
+    use crate::identity::{stable_symbol_id_for_external_path, EXTERNAL_FILE_PATH};
     use crate::{
         graph_edge_kind_or_default, Confidence, FileId, GraphEdgeArtifact, GraphFileArtifact,
         GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
@@ -1836,7 +2163,7 @@ mod tests {
     }
 
     #[test]
-    fn rebind_import_path_rejects_cross_language_type_fallback() {
+    fn rebind_import_path_rejects_cross_language_type_fallback_to_external() {
         let mut def_bucket = empty_bucket("src/lib.rs", "oid-def");
         let mut widget_symbol = symbol("sym:widget", "src/lib.rs");
         widget_symbol.entity_name = "Widget".to_owned();
@@ -1856,23 +2183,51 @@ mod tests {
         rebind_cross_file_edges(&mut buckets);
 
         let resolved_edge = &buckets["consumer.py"].edges[0];
-        assert_eq!(resolved_edge.target_stable_symbol_id, None);
-        assert_eq!(resolved_edge.bind_method, None);
+        assert_ne!(
+            resolved_edge.target_stable_symbol_id.as_deref(),
+            Some("sym:widget")
+        );
+        assert_eq!(resolved_edge.bind_method.as_deref(), Some("external"));
+        let external_symbols = &buckets[EXTERNAL_FILE_PATH].symbols;
+        assert_eq!(external_symbols.len(), 1);
+        assert_eq!(external_symbols[0].qualified_name, "external.widget");
+        assert_eq!(external_symbols[0].entity_name, "widget");
     }
 
     #[test]
-    fn rebind_import_path_rejects_enum_variant_fallback_candidate() {
+    fn rebind_import_path_binds_std_collision_traps_to_external() {
         let mut def_bucket = empty_bucket("src/shadow.rs", "oid-def");
         let mut variant_symbol = symbol("sym:path", "src/shadow.rs");
         variant_symbol.entity_name = "Path".to_owned();
         variant_symbol.symbol_kind = "enum_variant".to_owned();
-        def_bucket.symbols.push(variant_symbol);
+        let mut command_symbol = symbol("sym:command", "src/shadow.rs");
+        command_symbol.entity_name = "Command".to_owned();
+        command_symbol.symbol_kind = "constant".to_owned();
+        let mut ordering_symbol = symbol("sym:ordering", "src/shadow.rs");
+        ordering_symbol.entity_name = "Ordering".to_owned();
+        ordering_symbol.symbol_kind = "enum_variant".to_owned();
+        let mut write_symbol = symbol("sym:write", "src/shadow.rs");
+        write_symbol.entity_name = "Write".to_owned();
+        write_symbol.symbol_kind = "section".to_owned();
+        def_bucket.symbols.extend([
+            variant_symbol,
+            command_symbol,
+            ordering_symbol,
+            write_symbol,
+        ]);
 
         let mut use_bucket = empty_bucket("src/lib.rs", "oid-use");
-        let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
-        import_edge.target_label = Some("Path".to_owned());
-        import_edge.import_path = Some("std::path::Path".to_owned());
-        use_bucket.edges.push(import_edge);
+        for (label, import_path) in [
+            ("Path", "std::path::Path"),
+            ("Command", "std::process::Command"),
+            ("Ordering", "std::cmp::Ordering"),
+            ("Write", "std::io::Write"),
+        ] {
+            let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
+            import_edge.target_label = Some(label.to_owned());
+            import_edge.import_path = Some(import_path.to_owned());
+            use_bucket.edges.push(import_edge);
+        }
 
         let mut buckets = BTreeMap::new();
         buckets.insert("src/shadow.rs".to_owned(), def_bucket);
@@ -1880,9 +2235,209 @@ mod tests {
 
         rebind_cross_file_edges(&mut buckets);
 
-        let resolved_edge = &buckets["src/lib.rs"].edges[0];
-        assert_eq!(resolved_edge.target_stable_symbol_id, None);
-        assert_eq!(resolved_edge.bind_method, None);
+        let edges = &buckets["src/lib.rs"].edges;
+        for (edge, import_path) in edges.iter().zip([
+            "std::path::Path",
+            "std::process::Command",
+            "std::cmp::Ordering",
+            "std::io::Write",
+        ]) {
+            let expected = stable_symbol_id_for_external_path(import_path);
+            assert_eq!(
+                edge.target_stable_symbol_id.as_deref(),
+                Some(expected.as_str())
+            );
+            assert_eq!(edge.bind_method.as_deref(), Some("external"));
+        }
+        let external_symbols = &buckets[EXTERNAL_FILE_PATH].symbols;
+        assert_eq!(external_symbols.len(), 4);
+        assert!(external_symbols.iter().all(
+            |symbol| symbol.file_path == EXTERNAL_FILE_PATH && symbol.symbol_kind == "external"
+        ));
+    }
+
+    #[test]
+    fn compose_artifact_dedupes_external_imports_and_keeps_workspace_imports() {
+        let mut local_bucket = empty_bucket("src/local.rs", "oid-local");
+        let mut local_symbol = symbol("sym:local", "src/local.rs");
+        local_symbol.entity_name = "Local".to_owned();
+        local_symbol.qualified_name = "local::Local".to_owned();
+        local_symbol.symbol_kind = "struct".to_owned();
+        local_bucket.symbols.push(local_symbol);
+        local_bucket.symbol_node_ids.push(NodeId(10));
+
+        let mut shadow_bucket = empty_bucket("src/shadow.rs", "oid-shadow");
+        for (stable_symbol_id, node_id) in [("sym:shadow-a", 11), ("sym:shadow-b", 12)] {
+            let mut shadow_symbol = symbol(stable_symbol_id, "src/shadow.rs");
+            shadow_symbol.entity_name = "Deserialize".to_owned();
+            shadow_symbol.qualified_name = format!("shadow::{stable_symbol_id}");
+            shadow_symbol.symbol_kind = "struct".to_owned();
+            shadow_bucket.symbols.push(shadow_symbol);
+            shadow_bucket.symbol_node_ids.push(NodeId(node_id));
+        }
+
+        let mut a_bucket = empty_bucket("src/a.rs", "oid-a");
+        a_bucket.symbols.push(symbol("sym:a", "src/a.rs"));
+        a_bucket.symbol_node_ids.push(NodeId(20));
+        let mut a_external = edge("sym:a", None, RelationKind::Imports);
+        a_external.target_label = Some("Deserialize".to_owned());
+        a_external.import_path = Some("serde::Deserialize".to_owned());
+        a_bucket.edges.push(a_external);
+        let mut a_workspace = edge("sym:a", None, RelationKind::Imports);
+        a_workspace.target_label = Some("Local".to_owned());
+        a_workspace.import_path = Some("crate::local::Local".to_owned());
+        a_bucket.edges.push(a_workspace);
+
+        let mut b_bucket = empty_bucket("src/b.rs", "oid-b");
+        b_bucket.symbols.push(symbol("sym:b", "src/b.rs"));
+        b_bucket.symbol_node_ids.push(NodeId(30));
+        let mut b_external = edge("sym:b", None, RelationKind::Imports);
+        b_external.target_label = Some("Deserialize".to_owned());
+        b_external.import_path = Some("serde::Deserialize".to_owned());
+        b_bucket.edges.push(b_external);
+
+        let buckets = BTreeMap::from([
+            ("src/a.rs".to_owned(), a_bucket),
+            ("src/b.rs".to_owned(), b_bucket),
+            ("src/local.rs".to_owned(), local_bucket),
+            ("src/shadow.rs".to_owned(), shadow_bucket),
+        ]);
+        let current_entries = current_entries([
+            ("src/a.rs", "oid-a"),
+            ("src/b.rs", "oid-b"),
+            ("src/local.rs", "oid-local"),
+            ("src/shadow.rs", "oid-shadow"),
+        ]);
+
+        let artifact = compose_artifact(
+            buckets,
+            &current_entries,
+            "test-manifest".to_owned(),
+            Vec::new(),
+        );
+
+        let external_id = stable_symbol_id_for_external_path("serde::Deserialize");
+        let external_symbols = artifact
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.symbol_kind == "external")
+            .collect::<Vec<_>>();
+        assert_eq!(external_symbols.len(), 1);
+        assert_eq!(external_symbols[0].stable_symbol_id, external_id);
+        assert_eq!(external_symbols[0].file_path, EXTERNAL_FILE_PATH);
+        assert_eq!(external_symbols[0].qualified_name, "serde::Deserialize");
+        assert_eq!(external_symbols[0].entity_name, "Deserialize");
+
+        let external_symbol_index = artifact
+            .symbols
+            .iter()
+            .position(|symbol| symbol.stable_symbol_id == external_id)
+            .expect("external symbol");
+        let external_node_id = artifact.symbol_node_ids[external_symbol_index];
+        assert!(!artifact
+            .file_manifests
+            .iter()
+            .any(|manifest| manifest.node_ids.contains(&external_node_id)));
+        assert!(artifact.symbol_snapshots.is_empty());
+        assert!(artifact.temporal_edges.is_empty());
+
+        let external_import_edges = artifact
+            .edges
+            .iter()
+            .filter(|edge| edge.import_path.as_deref() == Some("serde::Deserialize"))
+            .collect::<Vec<_>>();
+        assert_eq!(external_import_edges.len(), 2);
+        assert!(external_import_edges.iter().all(|edge| {
+            edge.target_stable_symbol_id.as_deref() == Some(external_id.as_str())
+                && edge.bind_method.as_deref() == Some("external")
+        }));
+
+        let workspace_import = artifact
+            .edges
+            .iter()
+            .find(|edge| edge.import_path.as_deref() == Some("crate::local::Local"))
+            .expect("workspace import");
+        assert_eq!(
+            workspace_import.target_stable_symbol_id.as_deref(),
+            Some("sym:local")
+        );
+        assert_ne!(workspace_import.bind_method.as_deref(), Some("external"));
+    }
+
+    #[test]
+    fn build_facts_external_imports_share_one_synthetic_external_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+mod a;
+mod b;
+mod local;
+"#,
+        )
+        .expect("write lib.rs");
+        fs::write(
+            root.join("src/a.rs"),
+            r#"
+use serde::Deserialize;
+use crate::local::Local;
+
+pub fn consume_a(_local: Local) {}
+"#,
+        )
+        .expect("write a.rs");
+        fs::write(
+            root.join("src/b.rs"),
+            r#"
+use serde::Deserialize;
+
+pub fn consume_b() {}
+"#,
+        )
+        .expect("write b.rs");
+        fs::write(root.join("src/local.rs"), "pub struct Local;\n").expect("write local.rs");
+
+        let facts = build_facts(root, None).expect("extract").0;
+        let artifact = artifact_from_facts(&facts, root).expect("artifact");
+
+        let external_id = stable_symbol_id_for_external_path("serde::Deserialize");
+        let external_symbols = artifact
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.symbol_kind == "external")
+            .collect::<Vec<_>>();
+        assert_eq!(external_symbols.len(), 1);
+        assert_eq!(external_symbols[0].stable_symbol_id, external_id);
+
+        let inbound_external_edges = artifact
+            .edges
+            .iter()
+            .filter(|edge| edge.target_stable_symbol_id.as_deref() == Some(external_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(inbound_external_edges.len(), 2);
+        assert!(inbound_external_edges.iter().all(|edge| {
+            edge.relation == RelationKind::Imports
+                && edge.bind_method.as_deref() == Some("external")
+                && edge.import_path.as_deref() == Some("serde::Deserialize")
+        }));
+
+        let local_symbol = artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.entity_name == "Local" && symbol.symbol_kind == "struct")
+            .expect("Local struct");
+        let local_import = artifact
+            .edges
+            .iter()
+            .find(|edge| edge.import_path.as_deref() == Some("crate::local::Local"))
+            .expect("Local import");
+        assert_eq!(
+            local_import.target_stable_symbol_id.as_deref(),
+            Some(local_symbol.stable_symbol_id.as_str())
+        );
+        assert_ne!(local_import.bind_method.as_deref(), Some("external"));
     }
 
     #[test]
@@ -2451,6 +3006,24 @@ fn submit_plan_def() -> ToolDefinition {
             edge_kind: Some(graph_edge_kind_or_default(relation, None)),
             bind_method: None,
         }
+    }
+
+    fn current_entries<const N: usize>(
+        entries: [(&str, &str); N],
+    ) -> BTreeMap<String, CurrentFileEntry> {
+        entries
+            .into_iter()
+            .map(|(path, content_oid)| {
+                (
+                    path.to_owned(),
+                    CurrentFileEntry {
+                        path: path.to_owned(),
+                        content_oid: content_oid.to_owned(),
+                        extractable: true,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn init_repo(root: &Path) {
