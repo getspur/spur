@@ -594,6 +594,22 @@ async fn code_graph_backend_value(
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<Value, McpHandlerError> {
     let response_format = ResponseFormat::parse(args)?;
+    code_graph_backend_value_with_format(args, response_format, handler).await
+}
+
+async fn code_graph_backend_value_allowing_source(
+    args: &Value,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> Result<Value, McpHandlerError> {
+    let response_format = ResponseFormat::parse_allowing_source(args)?;
+    code_graph_backend_value_with_format(args, response_format, handler).await
+}
+
+async fn code_graph_backend_value_with_format(
+    args: &Value,
+    response_format: ResponseFormat,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
+) -> Result<Value, McpHandlerError> {
     let backend = open_code_search_backend_for_request(None).await?;
     let mut body = handler(args, backend.client()).map_err(CodeGraphError::into_handler_error)?;
     let files = backend.response_file_set_from_body(&body)?;
@@ -739,7 +755,8 @@ async fn code_graph_backend_response_without_rebuild(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
-    let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
+    let response_format =
+        ResponseFormat::parse_allowing_source(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(rebuild_coordinator))
         .await
         .map_err(CodeGraphError::without_metadata)?;
@@ -776,21 +793,33 @@ enum ResponseFormat {
 
 impl ResponseFormat {
     fn parse(args: &Value) -> Result<Self, McpHandlerError> {
+        Self::parse_inner(args, false)
+    }
+
+    fn parse_allowing_source(args: &Value) -> Result<Self, McpHandlerError> {
+        Self::parse_inner(args, true)
+    }
+
+    fn parse_inner(args: &Value, allow_source: bool) -> Result<Self, McpHandlerError> {
         let Some(value) = args.get("response_format") else {
             return Ok(Self::Full);
+        };
+        let expected = if allow_source {
+            "`full`, `compact`, `table`, or `source`"
+        } else {
+            "`full`, `compact`, or `table`"
         };
         match value.as_str() {
             Some("full") => Ok(Self::Full),
             Some("compact") => Ok(Self::Compact),
             Some("table") => Ok(Self::Table),
-            Some("source") => Ok(Self::Source),
+            Some("source") if allow_source => Ok(Self::Source),
             Some(other) => Err(McpHandlerError::InvalidParams(format!(
-                "invalid response_format `{other}`; expected `full`, `compact`, `table`, or `source`"
+                "invalid response_format `{other}`; expected {expected}"
             ))),
-            None => Err(McpHandlerError::InvalidParams(
-                "field 'response_format' must be a string; expected `full`, `compact`, `table`, or `source`"
-                    .into(),
-            )),
+            None => Err(McpHandlerError::InvalidParams(format!(
+                "field 'response_format' must be a string; expected {expected}"
+            ))),
         }
     }
 }
@@ -1228,7 +1257,7 @@ fn code_symbol_info_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
 }
 
 pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerError> {
-    code_graph_backend_value(args, code_read_symbol_with_client).await
+    code_graph_backend_value_allowing_source(args, code_read_symbol_with_client).await
 }
 
 async fn code_read_symbol_response(
@@ -1244,10 +1273,14 @@ async fn code_read_symbol_response(
 }
 
 fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse_allowing_source(args)?;
     let symbol = match code_read_symbol_target(args, client)? {
         CodeReadSymbolTarget::Resolved(symbol) => symbol,
         CodeReadSymbolTarget::Ambiguous(candidates) => {
-            return Ok(ambiguous_response(candidates));
+            return Ok(match response_format {
+                ResponseFormat::Source => source_ambiguous_response(candidates),
+                _ => ambiguous_response(candidates),
+            });
         }
     };
     let context_lines = clamped_usize_arg(
@@ -1269,18 +1302,29 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
     let worktree = current_worktree_root().ok_or_else(|| {
         McpHandlerError::Internal("failed to resolve current worktree root".into())
     })?;
-    let indexed_bytes =
-        read_indexed_file_bytes(&worktree, &symbol.file_path, &manifest.content_oid)?;
+    let file_oid = manifest.content_oid.clone();
+    let indexed_bytes = read_indexed_file_bytes(&worktree, &symbol.file_path, &file_oid)?;
     let indexed_source = String::from_utf8(indexed_bytes).map_err(|error| {
         McpHandlerError::Internal(format!(
             "indexed blob `{}` for `{}` is not UTF-8: {error}",
-            manifest.content_oid, symbol.file_path
+            file_oid, symbol.file_path
         ))
     })?;
     let source_range = source_range_with_context(&indexed_source, &symbol, context_lines.value);
     let source = source_for_line_range(&indexed_source, source_range);
     let current_oid = current_file_oid(&worktree, &symbol.file_path)?;
-    let stale = current_oid.as_deref() != Some(manifest.content_oid.as_str());
+    let stale = current_oid.as_deref() != Some(file_oid.as_str());
+
+    if response_format == ResponseFormat::Source {
+        return Ok(source_symbol_response(
+            &symbol,
+            source,
+            source_range,
+            file_oid,
+            &context_lines,
+            stale,
+        ));
+    }
 
     let mut body = json!({
         "symbol": symbol_info_row(&symbol),
@@ -1289,7 +1333,7 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
             "start": source_range[0],
             "end": source_range[1],
         },
-        "file_oid": manifest.content_oid,
+        "file_oid": file_oid,
         "context_lines": context_lines.value,
     });
     if let Some(requested_context_lines) = context_lines.requested_value {
@@ -2141,8 +2185,9 @@ impl GraphResponseMetadata {
 
     fn insert_into_for_format(self, body: &mut Value, response_format: ResponseFormat) {
         match response_format {
-            ResponseFormat::Full | ResponseFormat::Source => self.insert_full_into(body),
+            ResponseFormat::Full => self.insert_full_into(body),
             ResponseFormat::Compact | ResponseFormat::Table => self.insert_compact_into(body),
+            ResponseFormat::Source => {}
         }
     }
 
@@ -4171,6 +4216,13 @@ fn ambiguous_response(candidates: Vec<CandidateRow>) -> Value {
     })
 }
 
+fn source_ambiguous_response(candidates: Vec<CandidateRow>) -> Value {
+    json!({
+        "ambiguous": true,
+        "candidates": candidates.into_iter().map(source_candidate_row).collect::<Vec<_>>(),
+    })
+}
+
 #[allow(dead_code)]
 async fn with_graph_metadata(artifact: &GraphIndexArtifact, mut body: Value) -> Value {
     let files = response_file_set_from_body(artifact, &body);
@@ -4602,6 +4654,51 @@ fn candidate_row(candidate: CandidateRow) -> Value {
         "symbol_kind": candidate.symbol_kind,
         "enclosing_scope": candidate.enclosing_scope,
     })
+}
+
+fn source_candidate_row(candidate: CandidateRow) -> Value {
+    json!({
+        "id": candidate.id,
+        "name": candidate.qualified_name,
+        "file": candidate.file_path,
+        "range": {
+            "start": candidate.line_range[0],
+            "end": candidate.line_range[1],
+        },
+        "kind": candidate.symbol_kind,
+        "scope": candidate.enclosing_scope,
+    })
+}
+
+fn source_symbol_response(
+    symbol: &GraphSymbolArtifact,
+    source: String,
+    source_range: [usize; 2],
+    file_oid: String,
+    context_lines: &ClampedUsizeArg,
+    stale: bool,
+) -> Value {
+    let mut body = json!({
+        "id": symbol.stable_symbol_id,
+        "name": symbol.qualified_name,
+        "file": symbol.file_path,
+        "range": {
+            "start": source_range[0],
+            "end": source_range[1],
+        },
+        "source": source,
+        "file_oid": file_oid,
+    });
+    if context_lines.value != 0 {
+        body["context_lines"] = json!(context_lines.value);
+    }
+    if let Some(requested_context_lines) = &context_lines.requested_value {
+        body["requested_context_lines"] = requested_context_lines.clone();
+    }
+    if stale {
+        body["stale"] = Value::Bool(true);
+    }
+    body
 }
 
 fn symbol_info_row(symbol: &GraphSymbolArtifact) -> Value {
