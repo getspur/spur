@@ -1243,6 +1243,7 @@ impl WorkerToolHandler {
 fn structured_only_result(value: Value) -> CallToolResult {
     let mut result = CallToolResult::success(Vec::new());
     result.structured_content = Some(value);
+    result.is_error = Some(false);
     result
 }
 
