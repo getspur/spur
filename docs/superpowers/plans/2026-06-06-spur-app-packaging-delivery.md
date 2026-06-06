@@ -710,10 +710,12 @@ git commit -m "feat(spur-notebook): SPURAPP open spurapp packages"
 Run:
 
 ```bash
-rg -n "jute""app|jute-app[.]json|[.]jute""app" crates/spur-notebook docs/superpowers/specs/2026-06-06-spur-app-packaging-delivery-research.ipynb
+legacy_stem="jute""-app"
+legacy_extension="[.]jute""app"
+rg -n -i "${legacy_stem}|${legacy_stem}[.]json|${legacy_extension}" crates/spur-notebook docs/superpowers/specs/2026-06-06-spur-app-packaging-delivery-research.ipynb
 ```
 
-Expected: no matches referring to the new package artifact. Existing `Jute-App` mentions in the original source spec are allowed only when explicitly referring to the older design notebook title.
+Expected: no matches referring to the new package artifact. Older source design notebook title/path references are allowed only when explicitly identified as historical source context.
 
 - [ ] **Step 2: Verify focused tests**
 
