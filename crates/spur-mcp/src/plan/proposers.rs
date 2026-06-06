@@ -207,7 +207,7 @@ impl MutationScorer for TrivialScorer {
 // Test helper — counts ops without needing a real PlanState.
 #[cfg(test)]
 impl TrivialScorer {
-    async fn score_len(&self, batch: &MutationBatch) -> usize {
+    fn score_len(&self, batch: &MutationBatch) -> usize {
         batch.ops.len()
     }
 }
@@ -274,7 +274,7 @@ mod tests {
             }],
         };
         // Placeholder state — TrivialScorer ignores it
-        assert_eq!(scorer.score_len(&batch).await, 1);
+        assert_eq!(scorer.score_len(&batch), 1);
     }
 
     // bd-2m2u Phase 2e — RetryExhaustedProposer (v0 deterministic).
