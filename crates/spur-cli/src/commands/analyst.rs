@@ -759,14 +759,41 @@ mod tests {
 
     #[test]
     fn init_search_sql_dedups_and_diversifies() {
+        let sections_search_sql = INIT_SEARCH_SQL
+            .split("CREATE OR REPLACE TABLE sections_search AS")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("PRAGMA create_fts_index('sections_search'")
+                    .next()
+            })
+            .expect("sections_search table should be present");
         assert!(
-            INIT_SEARCH_SQL.contains("SPUR-MANAGED[^>]*-->"),
-            "sections_search must dedup on body with the SPUR-MANAGED header stripped"
+            sections_search_sql.contains(
+                "PARTITION BY heading_level,\n               regexp_replace(COALESCE(body_text, ''), '<!-- SPUR-MANAGED[^>]*-->\\n?', '')",
+            ) && !sections_search_sql.contains("COALESCE(qualified_name"),
+            "sections_search must dedup on heading level plus full normalized body"
         );
         assert!(
             INIT_SEARCH_SQL.contains("PARTITION BY file ORDER BY rank DESC) <= 2")
                 && INIT_SEARCH_SQL.contains("PARTITION BY s.file_path ORDER BY bm25 DESC) <= 2"),
             "search/search_docs must cap results at 2 per document"
+        );
+    }
+
+    #[test]
+    fn init_search_sql_graph_macro_has_gate_and_neighbor_kind() {
+        assert!(
+            INIT_SEARCH_SQL.contains("posture != 'load-bearing wall' OR"),
+            "search_graph macro must contain the sink-bailout gate"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("neighbor_kind")
+                && INIT_SEARCH_SQL.contains("edge_bind_method"),
+            "search_graph macro must project neighbor_kind and edge_bind_method"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_graph(q)"),
+            "search_graph macro must be defined"
         );
     }
 
