@@ -68,3 +68,6 @@ spur.log.*
 
 # growth-loop artifacts
 /resource/growth-loop/
+
+# local pnpm store (created when spur-pnpm falls back to local mode; use the VM store)
+/.pnpm-store/
