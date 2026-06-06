@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::{Read, Seek, Write};
+use std::path::Path;
 
 use thiserror::Error;
 use zip::result::ZipError;
@@ -73,6 +75,33 @@ where
 {
     let contents = read_entry(reader, SPUR_APP_MANIFEST)?;
     serde_json::from_slice(&contents).map_err(SpurAppArchiveError::InvalidManifestJson)
+}
+
+pub fn extract_to_dir<R>(reader: R, destination: &Path) -> Result<(), SpurAppArchiveError>
+where
+    R: Read + Seek,
+{
+    let mut archive = ZipArchive::new(reader)?;
+    validate_archive_entry_names(&mut archive)?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let output_path = destination.join(entry.name());
+
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path)?;
+            continue;
+        }
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut output = fs::File::create(output_path)?;
+        std::io::copy(&mut entry, &mut output)?;
+    }
+
+    Ok(())
 }
 
 fn validate_archive_entry_names<R>(archive: &mut ZipArchive<R>) -> Result<(), SpurAppArchiveError>
