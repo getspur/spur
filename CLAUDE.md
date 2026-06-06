@@ -11,6 +11,12 @@ SPUR is a Rust workspace with eight crates under `crates/`. Keep changes scoped 
 
 Source lives in each crate’s `src/`. Integration tests are primarily in `crates/spur-acp/tests`, `crates/spur-core/tests`, `crates/spur-tui/tests`, and `crates/spur-cli/tests`. Specs and implementation plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
+## Code Retrieval & Exploration
+
+Treat the repository code graph as the first-class retrieval layer for code work. For code discovery, symbol lookup, reading symbol bodies, caller/callee impact analysis, and semantic searches over code or docs, use the available `code_*` tools first whenever they can answer the question.
+
+Fall back to native tools such as `rg`, `sed`, `cat`, or direct file reads only when the graph tools do not expose the needed shape of data (for example, full raw markdown/shell-file reads), the graph is unavailable or stale for the file in question, or you need exact working-tree bytes/diffs. When falling back, keep the search scoped and note the reason.
+
 ## Build, Test, and Development Commands
 
 **Always build and test through `scripts/spur-cargo`, never plain `cargo`.** For any compile-heavy work — `build`, `check`, `test` (including end-to-end suites), `clippy`, `doc`, `clean` — `spur-cargo` is the required entry point. Agents frequently default to bare `cargo` out of habit; do not. Bare `cargo` compiles into the local `target/`, which under the agent sandbox routinely fails (EPERM writing build artifacts on provenance-tagged files, and limited local disk that can't fit heavy C/C++ deps like `duckdb`). `spur-cargo` sidesteps both.
