@@ -1179,6 +1179,7 @@ async fn code_file_symbols_response(
 }
 
 fn code_file_symbols_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let file = file_arg(args)?;
     let file = validate_file_path_arg(file)?;
     if !client.file_exists(&file).map_err(graph_query_error)? {
@@ -1189,11 +1190,17 @@ fn code_file_symbols_with_client(args: &Value, client: &dyn GraphQueryClient) ->
     }
 
     let file_symbols = client.symbols_by_file(&file).map_err(graph_query_error)?;
-    let symbols = candidate_rows_for_symbols(file_symbols.iter())
+    let candidates = candidate_rows_for_symbols(file_symbols.iter());
+    if response_format == ResponseFormat::Table {
+        let mut files = TableFileInterner::default();
+        let symbols = candidate_table(candidates, &mut files);
+        return Ok(table_response(json!({ "symbols": symbols }), files));
+    }
+
+    let symbols = candidates
         .into_iter()
         .map(candidate_row)
         .collect::<Vec<_>>();
-
     Ok(json!({ "symbols": symbols }))
 }
 
@@ -1307,6 +1314,7 @@ async fn code_callers_response(
 }
 
 fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector_with_client(args, client)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
@@ -1322,6 +1330,22 @@ fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
     let callers = records
         .into_iter()
         .filter(|record| request.include_unresolved || record.is_resolved())
+        .collect::<Vec<_>>();
+    if response_format == ResponseFormat::Table {
+        let mut files = TableFileInterner::default();
+        let callers = owned_caller_table(callers, &mut files);
+        return Ok(table_response(
+            json!({
+                "callers": callers,
+                "include_unresolved": request.include_unresolved,
+                "counts_by_kind": summary.counts_by_kind,
+                "unresolved_sample": summary.unresolved_sample,
+            }),
+            files,
+        ));
+    }
+    let callers = callers
+        .into_iter()
         .map(owned_caller_row)
         .collect::<Vec<_>>();
     Ok(json!({
@@ -1344,6 +1368,7 @@ async fn code_callees_response(
 }
 
 fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let symbol_id = match resolve_code_selector_with_client(args, client)? {
         CodeSelectorResolution::Resolved(symbol_id) => symbol_id,
@@ -1359,6 +1384,22 @@ fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
     let callees = records
         .into_iter()
         .filter(|record| request.include_unresolved || record.is_resolved())
+        .collect::<Vec<_>>();
+    if response_format == ResponseFormat::Table {
+        let mut files = TableFileInterner::default();
+        let callees = owned_callee_table(callees, &mut files);
+        return Ok(table_response(
+            json!({
+                "callees": callees,
+                "include_unresolved": request.include_unresolved,
+                "counts_by_kind": summary.counts_by_kind,
+                "unresolved_sample": summary.unresolved_sample,
+            }),
+            files,
+        ));
+    }
+    let callees = callees
+        .into_iter()
         .map(owned_callee_row)
         .collect::<Vec<_>>();
     Ok(json!({
@@ -1381,6 +1422,7 @@ async fn code_subgraph_response(
 }
 
 fn code_subgraph_with_client(args: &Value, client: &dyn GraphQueryClient) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let root_ids = match code_subgraph_root_ids_with_client(args, client)? {
         CodeSubgraphRoots::RootIds(root_ids) => root_ids,
@@ -1421,6 +1463,21 @@ fn code_subgraph_with_client(args: &Value, client: &dyn GraphQueryClient) -> Cod
             let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
+            }
+            if response_format == ResponseFormat::Table {
+                let mut files = TableFileInterner::default();
+                let nodes = symbol_table(view.nodes.iter(), &mut files);
+                let edges = edge_table(view.edges.iter());
+                return Ok(table_response(
+                    json!({
+                        "nodes": nodes,
+                        "edges": edges,
+                        "truncated_frontier": view.truncated_frontier,
+                        "include_unresolved": request.include_unresolved,
+                        "metadata": metadata,
+                    }),
+                    files,
+                ));
             }
             Ok(json!({
                 "nodes": view.nodes.iter().map(symbol_row).collect::<Vec<_>>(),
@@ -1470,6 +1527,7 @@ fn code_subgraph_with_artifact_and_temporal(
     artifact: &GraphIndexArtifact,
     temporal_index: Option<Arc<TemporalIndex>>,
 ) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args)?;
     let request = code_traversal_request(args)?;
     let root_ids = match code_subgraph_root_ids(args, artifact, temporal_index)? {
         CodeSubgraphRoots::RootIds(root_ids) => root_ids,
@@ -1510,6 +1568,21 @@ fn code_subgraph_with_artifact_and_temporal(
             let mut metadata = code_subgraph_metadata(radius, view.truncated, &budget);
             if let Some(warning) = warning {
                 metadata["warning"] = Value::String(warning);
+            }
+            if response_format == ResponseFormat::Table {
+                let mut files = TableFileInterner::default();
+                let nodes = symbol_table(view.nodes.iter().copied(), &mut files);
+                let edges = edge_table(view.edges.iter().copied());
+                return Ok(table_response(
+                    json!({
+                        "nodes": nodes,
+                        "edges": edges,
+                        "truncated_frontier": view.truncated_frontier,
+                        "include_unresolved": request.include_unresolved,
+                        "metadata": metadata,
+                    }),
+                    files,
+                ));
             }
             Ok(json!({
                 "nodes": view.nodes.into_iter().map(symbol_row).collect::<Vec<_>>(),
@@ -2068,10 +2141,8 @@ impl GraphResponseMetadata {
 
     fn insert_into_for_format(self, body: &mut Value, response_format: ResponseFormat) {
         match response_format {
-            ResponseFormat::Full | ResponseFormat::Table | ResponseFormat::Source => {
-                self.insert_full_into(body)
-            }
-            ResponseFormat::Compact => self.insert_compact_into(body),
+            ResponseFormat::Full | ResponseFormat::Source => self.insert_full_into(body),
+            ResponseFormat::Compact | ResponseFormat::Table => self.insert_compact_into(body),
         }
     }
 
@@ -4255,6 +4326,9 @@ fn collect_response_file_paths<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
             if let Some(file_path) = map.get("file_path").and_then(Value::as_str) {
                 paths.push(file_path);
             }
+            if let Some(files) = map.get("files").and_then(Value::as_array) {
+                paths.extend(files.iter().filter_map(Value::as_str));
+            }
             for value in map.values() {
                 collect_response_file_paths(value, paths);
             }
@@ -4551,6 +4625,250 @@ fn symbol_row(symbol: &GraphSymbolArtifact) -> Value {
         "file_path": symbol.file_path,
         "line_range": symbol.line_range,
         "symbol_kind": symbol.symbol_kind,
+    })
+}
+
+#[derive(Default)]
+struct TableFileInterner {
+    files: Vec<String>,
+    indexes: HashMap<String, usize>,
+}
+
+impl TableFileInterner {
+    fn intern(&mut self, file_path: &str) -> usize {
+        if let Some(index) = self.indexes.get(file_path) {
+            return *index;
+        }
+        let index = self.files.len();
+        self.files.push(file_path.to_string());
+        self.indexes.insert(file_path.to_string(), index);
+        index
+    }
+
+    fn into_files(self) -> Vec<String> {
+        self.files
+    }
+}
+
+fn table_response(mut body: Value, files: TableFileInterner) -> Value {
+    body["response_format"] = json!("table");
+    body["files"] = json!(files.into_files());
+    body
+}
+
+fn candidate_table(candidates: Vec<CandidateRow>, files: &mut TableFileInterner) -> Value {
+    let rows = candidates
+        .into_iter()
+        .map(|candidate| {
+            let file_index = files.intern(&candidate.file_path);
+            json!([
+                candidate.id,
+                candidate.entity_name,
+                candidate.qualified_name,
+                file_index,
+                candidate.line_range[0],
+                candidate.line_range[1],
+                candidate.symbol_kind,
+                candidate.enclosing_scope,
+            ])
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "cols": [
+            "id",
+            "entity_name",
+            "qualified_name",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+            "enclosing_scope",
+        ],
+        "rows": rows,
+    })
+}
+
+fn symbol_table<'a>(
+    symbols: impl IntoIterator<Item = &'a GraphSymbolArtifact>,
+    files: &mut TableFileInterner,
+) -> Value {
+    let rows = symbols
+        .into_iter()
+        .map(|symbol| {
+            let file_index = files.intern(&symbol.file_path);
+            json!([
+                symbol.stable_symbol_id,
+                symbol.entity_name,
+                symbol.enclosing_scope,
+                file_index,
+                symbol.line_range[0],
+                symbol.line_range[1],
+                symbol.symbol_kind,
+            ])
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "cols": [
+            "id",
+            "entity_name",
+            "enclosing_scope",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+        ],
+        "rows": rows,
+    })
+}
+
+fn owned_caller_table(callers: Vec<OwnedCallerRecord>, files: &mut TableFileInterner) -> Value {
+    traversal_table(
+        callers
+            .into_iter()
+            .map(|caller| owned_caller_table_row(caller, files)),
+    )
+}
+
+fn owned_callee_table(callees: Vec<OwnedCalleeRecord>, files: &mut TableFileInterner) -> Value {
+    traversal_table(
+        callees
+            .into_iter()
+            .map(|callee| owned_callee_table_row(callee, files)),
+    )
+}
+
+fn traversal_table(rows: impl IntoIterator<Item = Value>) -> Value {
+    json!({
+        "cols": [
+            "symbol_id",
+            "entity_name",
+            "enclosing_scope",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+            "resolved",
+            "target_label",
+            "edge_kind",
+            "confidence",
+            "bind_method",
+        ],
+        "rows": rows.into_iter().collect::<Vec<_>>(),
+    })
+}
+
+fn owned_caller_table_row(caller: OwnedCallerRecord, files: &mut TableFileInterner) -> Value {
+    match caller {
+        OwnedCallerRecord::Resolved { caller, edge } => {
+            symbol_traversal_table_row(&caller, &edge, true, None, files)
+        }
+        OwnedCallerRecord::Unresolved {
+            caller,
+            edge,
+            target_label,
+        } => symbol_traversal_table_row(&caller, &edge, false, Some(target_label), files),
+    }
+}
+
+fn owned_callee_table_row(callee: OwnedCalleeRecord, files: &mut TableFileInterner) -> Value {
+    match callee {
+        OwnedCalleeRecord::Resolved { symbol, edge } => {
+            symbol_traversal_table_row(&symbol, &edge, true, None, files)
+        }
+        OwnedCalleeRecord::Unresolved { edge, target_label } => {
+            unresolved_traversal_table_row(&edge, target_label)
+        }
+    }
+}
+
+fn symbol_traversal_table_row(
+    symbol: &GraphSymbolArtifact,
+    edge: &GraphEdgeArtifact,
+    resolved: bool,
+    target_label: Option<String>,
+    files: &mut TableFileInterner,
+) -> Value {
+    let file_index = files.intern(&symbol.file_path);
+    let (confidence, bind_method) = compact_traversal_edge_values(edge);
+    json!([
+        symbol.stable_symbol_id,
+        symbol.entity_name,
+        symbol.enclosing_scope,
+        file_index,
+        symbol.line_range[0],
+        symbol.line_range[1],
+        symbol.symbol_kind,
+        resolved,
+        target_label,
+        edge_kind_str(edge_kind(edge)),
+        confidence,
+        bind_method,
+    ])
+}
+
+fn unresolved_traversal_table_row(edge: &GraphEdgeArtifact, target_label: String) -> Value {
+    let entity_name = target_label.clone();
+    let (confidence, bind_method) = compact_traversal_edge_values(edge);
+    json!([
+        null,
+        entity_name,
+        null,
+        null,
+        null,
+        null,
+        null,
+        false,
+        target_label,
+        edge_kind_str(edge_kind(edge)),
+        confidence,
+        bind_method,
+    ])
+}
+
+fn compact_traversal_edge_values(edge: &GraphEdgeArtifact) -> (Value, Value) {
+    let confidence = if edge.bind_method.is_some() || edge_kind(edge) == GraphEdgeKind::CallsDyn {
+        json!(edge.confidence)
+    } else {
+        Value::Null
+    };
+    let bind_method = edge
+        .bind_method
+        .as_ref()
+        .map(|value| json!(value))
+        .unwrap_or(Value::Null);
+    (confidence, bind_method)
+}
+
+fn edge_table<'a>(edges: impl IntoIterator<Item = &'a GraphEdgeArtifact>) -> Value {
+    let rows = edges
+        .into_iter()
+        .map(|edge| {
+            json!([
+                edge.source_stable_symbol_id,
+                edge.target_stable_symbol_id,
+                edge.target_label,
+                edge.target_stable_symbol_id.is_some(),
+                edge.relation,
+                edge_kind_str(edge_kind(edge)),
+                edge.confidence,
+                edge.confidence_score,
+                edge.bind_method,
+            ])
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "cols": [
+            "source_id",
+            "target_id",
+            "target_label",
+            "resolved",
+            "relation",
+            "edge_kind",
+            "confidence",
+            "confidence_score",
+            "bind_method",
+        ],
+        "rows": rows,
     })
 }
 
