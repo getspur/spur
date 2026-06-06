@@ -120,6 +120,77 @@ fn analyst_build_skips_temporal_and_diagnostics_views_without_optional_parquets(
 }
 
 #[test]
+fn analyst_build_emits_external_dependency_surface_views() {
+    if !duckdb_cli_present() {
+        eprintln!("skipping: duckdb CLI not on PATH");
+        return;
+    }
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = external_dependency_artifact("analyst-external-dependencies");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    if !build_analyst_or_skip(tempdir.path(), &artifact_dir, &db_path) {
+        return;
+    }
+
+    let dependency_views = query_csv(
+        &db_path,
+        "SELECT view_name
+         FROM duckdb_views()
+         WHERE view_name IN ('external_nodes', 'v_dependency_surface')
+         ORDER BY view_name;",
+    );
+    assert_eq!(
+        dependency_views.trim(),
+        "external_nodes\nv_dependency_surface"
+    );
+
+    let origins = query_csv(
+        &db_path,
+        "SELECT qualified_name, origin
+         FROM external_nodes
+         ORDER BY qualified_name;",
+    );
+    assert_eq!(
+        origins.trim(),
+        "alloc::vec::Vec,std\ncore::fmt::Formatter,std\nserde::Serialize,serde\nstd::fmt::Debug,std"
+    );
+
+    let surface = query_csv(
+        &db_path,
+        "SELECT crate_name, file_path, external_origin, external_symbol, inbound_import_count
+         FROM v_dependency_surface
+         ORDER BY external_origin, external_symbol;",
+    );
+    assert_eq!(
+        surface.trim(),
+        "spur-core,crates/spur-core/src/lib.rs,serde,serde::Serialize,2\nspur-core,crates/spur-core/src/lib.rs,std,alloc::vec::Vec,1\nspur-core,crates/spur-core/src/lib.rs,std,core::fmt::Formatter,1\nspur-core,crates/spur-core/src/lib.rs,std,std::fmt::Debug,1"
+    );
+
+    let pgq_imports = query_csv(
+        &db_path,
+        "FROM GRAPH_TABLE (code
+           MATCH (s:duckpgq_nodes)-[i:imports]->(e:External)
+           WHERE s.file_path = 'crates/spur-core/src/lib.rs'
+           COLUMNS (e.qualified_name AS external_symbol)
+         )
+         ORDER BY external_symbol;",
+    );
+    assert_eq!(
+        pgq_imports.trim(),
+        "alloc::vec::Vec\ncore::fmt::Formatter\nserde::Serialize\nstd::fmt::Debug"
+    );
+}
+
+#[test]
 fn analyst_build_rejects_low_direct_symbol_snapshot_coverage() {
     if !duckdb_cli_present() {
         eprintln!("skipping: duckdb CLI not on PATH");
@@ -255,6 +326,92 @@ fn temporal_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
     artifact
 }
 
+fn external_dependency_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
+    let mut artifact = structural_artifact(graph_content_hash);
+    artifact.files = vec![GraphFileArtifact {
+        stable_file_id: "file-spur-core-lib".to_string(),
+        file_path: "crates/spur-core/src/lib.rs".to_string(),
+    }];
+    artifact.file_node_ids = vec![NodeId(1)];
+    artifact.symbols = vec![
+        GraphSymbolArtifact {
+            stable_symbol_id: "spur-core-main".to_string(),
+            file_path: "crates/spur-core/src/lib.rs".to_string(),
+            byte_range: [0, 20],
+            line_range: [1, 2],
+            entity_name: "main".to_string(),
+            qualified_name: "main".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-main".to_string(),
+            enclosing_scope: None,
+        },
+        GraphSymbolArtifact {
+            stable_symbol_id: "spur-core-helper".to_string(),
+            file_path: "crates/spur-core/src/lib.rs".to_string(),
+            byte_range: [30, 50],
+            line_range: [4, 5],
+            entity_name: "helper".to_string(),
+            qualified_name: "helper".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-helper".to_string(),
+            enclosing_scope: None,
+        },
+        external_symbol("external-serde-serialize", "serde::Serialize"),
+        external_symbol("external-std-debug", "std::fmt::Debug"),
+        external_symbol("external-core-formatter", "core::fmt::Formatter"),
+        external_symbol("external-alloc-vec", "alloc::vec::Vec"),
+    ];
+    artifact.symbol_node_ids = vec![
+        NodeId(2),
+        NodeId(3),
+        NodeId(4),
+        NodeId(5),
+        NodeId(6),
+        NodeId(7),
+    ];
+    artifact.edges = vec![
+        import_edge("spur-core-main", "external-serde-serialize"),
+        import_edge("spur-core-helper", "external-serde-serialize"),
+        import_edge("spur-core-main", "external-std-debug"),
+        import_edge("spur-core-main", "external-core-formatter"),
+        import_edge("spur-core-helper", "external-alloc-vec"),
+    ];
+    artifact
+}
+
+fn external_symbol(stable_symbol_id: &str, qualified_name: &str) -> GraphSymbolArtifact {
+    GraphSymbolArtifact {
+        stable_symbol_id: stable_symbol_id.to_string(),
+        file_path: qualified_name.to_string(),
+        byte_range: [0, 0],
+        line_range: [0, 0],
+        entity_name: qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(qualified_name)
+            .to_string(),
+        qualified_name: qualified_name.to_string(),
+        symbol_kind: "external".to_string(),
+        anchor_hash: format!("anchor-{stable_symbol_id}"),
+        enclosing_scope: None,
+    }
+}
+
+fn import_edge(source: &str, target: &str) -> GraphEdgeArtifact {
+    GraphEdgeArtifact {
+        source_stable_symbol_id: source.to_string(),
+        target_stable_symbol_id: Some(target.to_string()),
+        target_label: None,
+        relation: RelationKind::Imports,
+        confidence: Confidence::SyntaxExact,
+        confidence_score: 1.0,
+        change_kind: None,
+        edge_kind: Some(GraphEdgeKind::ReferencesOther),
+        bind_method: Some("external_import".to_string()),
+        import_path: None,
+    }
+}
+
 fn direct_symbol_id_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
     let mut artifact = structural_artifact(graph_content_hash);
     artifact.symbols = vec![
@@ -292,6 +449,7 @@ fn direct_symbol_id_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         change_kind: None,
         edge_kind: Some(GraphEdgeKind::Calls),
         bind_method: None,
+        import_path: None,
     });
 
     artifact.commits.push(CommitArtifact {

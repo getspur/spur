@@ -702,6 +702,26 @@ mod tests {
     }
 
     #[test]
+    fn init_sql_defines_external_dependency_surface() {
+        assert!(
+            INIT_SQL.contains("CREATE OR REPLACE VIEW external_nodes"),
+            "init.sql must define external_nodes in the structural analyst layer"
+        );
+        assert!(
+            INIT_SQL.contains("CREATE OR REPLACE VIEW v_dependency_surface"),
+            "init.sql must define v_dependency_surface in the structural analyst layer"
+        );
+        assert!(
+            INIT_SQL.contains("LABEL External"),
+            "DuckPGQ graph must expose External-labeled vertices"
+        );
+        assert!(
+            INIT_SQL.contains("LABEL imports"),
+            "DuckPGQ graph must expose imports-labeled edges"
+        );
+    }
+
+    #[test]
     fn duckdb_cli_present_returns_some_when_on_path() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();
