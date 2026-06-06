@@ -141,7 +141,10 @@ pub async fn anywidget_command(
     Ok(handle_anywidget_command_intent(&state, engine, intent).await)
 }
 
-async fn handle_anywidget_command_intent(
+/// Core handler for an anywidget command intent, defaulting to the real
+/// [`JuteModelStateCommGateway`]. Public so integration tests can drive the
+/// real gateway path without a Tauri `State` wrapper.
+pub async fn handle_anywidget_command_intent(
     state: &jute::state::State,
     engine: Option<ReactiveEngineClient>,
     intent: AnyWidgetCommandIntent,
