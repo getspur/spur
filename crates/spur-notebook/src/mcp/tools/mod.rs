@@ -15,7 +15,9 @@ pub mod daemon_files;
 pub mod daemon_lifecycle;
 pub mod daemon_recents;
 pub mod delete_cell;
+pub mod export_spur_app;
 pub mod get_notebook;
+pub mod import_spur_app;
 pub mod insert_cell;
 pub mod interrupt;
 pub mod kernel_info;
@@ -58,6 +60,8 @@ pub fn tools() -> Vec<Tool> {
         api_connection::add_api_connection_tool(),
         api_connection::list_api_connections_tool(),
         api_connection::api_connection_status_tool(),
+        export_spur_app::tool(),
+        import_spur_app::tool(),
         notebook_push_source::tool(),
         notebook_dag_status::tool(),
         notebook_run_cell::tool(),
@@ -151,10 +155,13 @@ pub(super) fn validate_notebook_path(method: &str, raw: &str) -> Result<PathBuf,
         return Err(invalid_path(method, "path must not contain '..'"));
     }
 
-    if requires_ipynb_extension(method)
-        && path.extension().and_then(|extension| extension.to_str()) != Some("ipynb")
-    {
-        return Err(invalid_path(method, "path must have .ipynb extension"));
+    if let Some(required_extension) = required_extension_for_method(method) {
+        if path.extension().and_then(|extension| extension.to_str()) != Some(required_extension) {
+            return Err(invalid_path(
+                method,
+                &format!("path must have .{required_extension} extension"),
+            ));
+        }
     }
 
     if path.is_absolute() {
@@ -163,6 +170,17 @@ pub(super) fn validate_notebook_path(method: &str, raw: &str) -> Result<PathBuf,
         Ok(std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path))
+    }
+}
+
+fn required_extension_for_method(method: &str) -> Option<&'static str> {
+    match method {
+        "notebook_export_spur_app.source" => Some("ipynb"),
+        "notebook_export_spur_app.output" => Some("spurapp"),
+        "notebook_export_spur_app.widget_asset" => None,
+        "notebook_import_spur_app" => Some("spurapp"),
+        method if requires_ipynb_extension(method) => Some("ipynb"),
+        _ => None,
     }
 }
 
@@ -181,6 +199,13 @@ fn invalid_path(method: &str, reason: &str) -> McpError {
             "reason": reason
         })),
     )
+}
+
+pub(super) fn spur_app_preflight_json(preflight: &crate::spur_app::SpurAppPreflight) -> Value {
+    json!({
+        "missing_dependency_locks": &preflight.missing_dependency_locks,
+        "warnings": &preflight.warnings
+    })
 }
 
 pub(super) fn check_response(
