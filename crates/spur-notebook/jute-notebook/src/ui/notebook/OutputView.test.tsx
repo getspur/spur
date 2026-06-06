@@ -98,6 +98,45 @@ describe("OutputView AFM widget rendering", () => {
     );
   });
 
+  test("resizes AFM iframe when the runtime reports content height", async () => {
+    set(AFM_MODEL_ID, {
+      state: { letters: "abcd" },
+      esm: DENO_STYLE_ESM,
+      css: ".deno-widget { color: green; }",
+    });
+
+    render(<OutputView value={outputValue()} />);
+
+    const iframe = screen.getByTitle(
+      `anywidget ${AFM_MODEL_ID}`,
+    ) as HTMLIFrameElement;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: iframe.contentWindow,
+        data: {
+          type: "jute-afm-height",
+          height: 720,
+        },
+      }),
+    );
+
+    await waitFor(() => expect(iframe).toHaveStyle({ height: "720px" }));
+  });
+
+  test("renders chromeless AFM iframe without notebook output frame", () => {
+    set(AFM_MODEL_ID, {
+      state: { letters: "abcd" },
+      esm: DENO_STYLE_ESM,
+      css: ".deno-widget { color: green; }",
+    });
+
+    render(<OutputView value={outputValue()} chromeless />);
+
+    const iframe = screen.getByTitle(`anywidget ${AFM_MODEL_ID}`);
+    expect(iframe).toHaveClass("border-0");
+    expect(iframe).not.toHaveClass("rounded", "border", "border-slate-200");
+  });
+
   test("AFM iframe runtime follows the anywidget ABI", () => {
     set(AFM_MODEL_ID, {
       state: { letters: "abcd" },
