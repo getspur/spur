@@ -5,10 +5,13 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use arrow_array::{
-    LargeStringArray, RecordBatch, StringArray, UInt32Array, UInt64Array, UInt8Array,
+    FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch, StringArray, UInt32Array,
+    UInt64Array, UInt8Array,
 };
+use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
-use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexType};
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use lancedb::index::{scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Index, IndexType};
 
 use crate::content_hash::blake3_hex;
 use crate::{
@@ -18,6 +21,8 @@ use crate::{
 
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
+const SECTION_VECTOR_DIMENSIONS: usize = 768;
+const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 
 #[derive(Debug)]
 struct SectionRow {
@@ -31,6 +36,7 @@ struct SectionRow {
     child_count: u32,
     parent_stable_id: Option<String>,
     content_hash: String,
+    vector: Option<Vec<f32>>,
 }
 
 pub fn write_sections_dataset(
@@ -77,6 +83,16 @@ async fn write_sections_dataset_async(
     artifact_dir: &Path,
 ) -> Result<()> {
     let rows = section_rows(artifact, worktree_root)?;
+    let vectors = embed_eligible_rows(&rows);
+    let rows: Vec<SectionRow> = rows
+        .into_iter()
+        .zip(vectors)
+        .map(|(mut row, vector)| {
+            row.vector = vector;
+            row
+        })
+        .collect();
+
     fs::create_dir_all(artifact_dir)
         .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
     let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
@@ -114,6 +130,7 @@ async fn write_sections_dataset_async(
 
     if dataset_changed {
         ensure_body_text_fts_index(&table).await?;
+        ensure_vector_index(&table).await?;
     }
 
     Ok(())
@@ -137,6 +154,51 @@ async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<()> {
         .execute()
         .await
         .context("failed to create LanceDB body_text FTS index")
+}
+
+async fn ensure_vector_index(table: &lancedb::Table) -> Result<()> {
+    let vector_rows = table
+        .count_rows(Some("vector IS NOT NULL".to_owned()))
+        .await
+        .context("failed to count LanceDB section vector rows")?;
+
+    if vector_rows == 0 {
+        return Ok(());
+    }
+
+    if table
+        .list_indices()
+        .await
+        .context("failed to list LanceDB section indices")?
+        .iter()
+        .any(|index| {
+            is_vector_index_type(&index.index_type) && index.columns.as_slice() == ["vector"]
+        })
+    {
+        return Ok(());
+    }
+
+    table
+        .create_index(
+            &["vector"],
+            Index::IvfHnswSq(IvfHnswSqIndexBuilder::default()),
+        )
+        .execute()
+        .await
+        .context("failed to create LanceDB vector HNSW index")
+}
+
+fn is_vector_index_type(index_type: &IndexType) -> bool {
+    matches!(
+        index_type,
+        IndexType::IvfFlat
+            | IndexType::IvfSq
+            | IndexType::IvfPq
+            | IndexType::IvfRq
+            | IndexType::IvfHnswPq
+            | IndexType::IvfHnswSq
+            | IndexType::IvfHnswFlat
+    )
 }
 
 async fn filter_rows_for_new_file_versions(
@@ -257,6 +319,7 @@ fn section_rows(artifact: &GraphIndexArtifact, worktree_root: &Path) -> Result<V
             child_count: 0,
             parent_stable_id: None,
             content_hash,
+            vector: None,
         });
     }
 
@@ -303,7 +366,66 @@ fn section_row(
             .get(section.stable_symbol_id.as_str())
             .cloned(),
         content_hash: content_hash.to_owned(),
+        vector: None,
     })
+}
+
+fn embed_eligible_rows(rows: &[SectionRow]) -> Vec<Option<Vec<f32>>> {
+    let eligible: Vec<(usize, &str)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.heading_level >= 2 && row.body_text.len() <= SECTION_EMBED_MAX_BODY_BYTES
+        })
+        .map(|(index, row)| (index, row.body_text.as_str()))
+        .collect();
+
+    let mut result = vec![None; rows.len()];
+    if eligible.is_empty() {
+        return result;
+    }
+
+    let model = match TextEmbedding::try_new(
+        InitOptions::new(EmbeddingModel::NomicEmbedTextV15).with_show_download_progress(false),
+    ) {
+        Ok(model) => model,
+        Err(error) => {
+            tracing::warn!(error = %error, "fastembed model unavailable; skipping section embeddings");
+            return result;
+        }
+    };
+
+    let texts: Vec<&str> = eligible.iter().map(|(_, text)| *text).collect();
+    let embeddings = match model.embed(texts, None) {
+        Ok(embeddings) => embeddings,
+        Err(error) => {
+            tracing::warn!(error = %error, "fastembed encode failed; skipping section embeddings");
+            return result;
+        }
+    };
+
+    if embeddings.len() != eligible.len() {
+        tracing::warn!(
+            expected = eligible.len(),
+            actual = embeddings.len(),
+            "fastembed returned unexpected section embedding count"
+        );
+        return result;
+    }
+
+    for ((index, _), embedding) in eligible.into_iter().zip(embeddings) {
+        if embedding.len() == SECTION_VECTOR_DIMENSIONS {
+            result[index] = Some(embedding);
+        } else {
+            tracing::warn!(
+                stable_symbol_id = %rows[index].stable_symbol_id,
+                dimensions = embedding.len(),
+                "fastembed returned unexpected section embedding dimensions"
+            );
+        }
+    }
+
+    result
 }
 
 fn child_count_by_parent<'a>(
@@ -362,6 +484,8 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
     let mut child_counts = Vec::with_capacity(rows.len());
     let mut parent_stable_ids = Vec::with_capacity(rows.len());
     let mut content_hashes = Vec::with_capacity(rows.len());
+    let mut flat_vectors = Vec::with_capacity(rows.len() * SECTION_VECTOR_DIMENSIONS);
+    let mut vector_validity = Vec::with_capacity(rows.len());
 
     for row in rows {
         stable_symbol_ids.push(row.stable_symbol_id);
@@ -374,7 +498,25 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
         child_counts.push(row.child_count);
         parent_stable_ids.push(row.parent_stable_id);
         content_hashes.push(row.content_hash);
+        if let Some(vector) = row
+            .vector
+            .filter(|vector| vector.len() == SECTION_VECTOR_DIMENSIONS)
+        {
+            flat_vectors.extend(vector);
+            vector_validity.push(true);
+        } else {
+            flat_vectors.extend(std::iter::repeat_n(0.0f32, SECTION_VECTOR_DIMENSIONS));
+            vector_validity.push(false);
+        }
     }
+
+    let vector_array = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Float32, true)),
+        SECTION_VECTOR_DIMENSIONS as i32,
+        Arc::new(Float32Array::from(flat_vectors)),
+        Some(NullBuffer::from(vector_validity)),
+    )
+    .context("failed to build LanceDB section vector array")?;
 
     RecordBatch::try_new(
         schema,
@@ -389,6 +531,7 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
             Arc::new(UInt32Array::from(child_counts)),
             Arc::new(StringArray::from(parent_stable_ids)),
             Arc::new(StringArray::from(content_hashes)),
+            Arc::new(vector_array),
         ],
     )
     .context("failed to build LanceDB sections batch")
@@ -406,6 +549,14 @@ fn sections_schema() -> Arc<Schema> {
         Field::new("child_count", DataType::UInt32, false),
         Field::new("parent_stable_id", DataType::Utf8, true),
         Field::new("content_hash", DataType::Utf8, false),
+        Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                SECTION_VECTOR_DIMENSIONS as i32,
+            ),
+            true,
+        ),
     ]))
 }
 
@@ -435,4 +586,51 @@ fn is_markdown_path(path: &str) -> bool {
 
 fn sql_string_literal(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section_row_fixture(heading_level: u8, body_text: String) -> SectionRow {
+        SectionRow {
+            stable_symbol_id: "symbol".to_owned(),
+            file_path: "docs/example.md".to_owned(),
+            qualified_name: "docs/example.md::Section".to_owned(),
+            heading_level,
+            body_text,
+            body_byte_start: 0,
+            body_byte_end: 0,
+            child_count: 0,
+            parent_stable_id: None,
+            content_hash: "hash".to_owned(),
+            vector: None,
+        }
+    }
+
+    #[test]
+    fn sections_schema_includes_nullable_vector_column() {
+        let schema = sections_schema();
+        let field = schema.field_with_name("vector").expect("vector field");
+
+        assert!(field.is_nullable());
+        match field.data_type() {
+            DataType::FixedSizeList(item, 768) => {
+                assert_eq!(item.name(), "item");
+                assert_eq!(item.data_type(), &DataType::Float32);
+                assert!(item.is_nullable());
+            }
+            data_type => panic!("expected FixedSizeList<Float32, 768>, got {data_type:?}"),
+        }
+    }
+
+    #[test]
+    fn embed_eligible_rows_returns_none_for_h1_and_oversized() {
+        let rows = vec![
+            section_row_fixture(1, "# Title\n\nBody".to_owned()),
+            section_row_fixture(2, format!("## Heading\n\n{}", "x".repeat(4097))),
+        ];
+
+        assert_eq!(embed_eligible_rows(&rows), vec![None, None]);
+    }
 }
