@@ -16,7 +16,7 @@
 
 ### Task 1: Backend Tauri Publish Command
 
-**Task ID:** `task-1-backend-tauri-publish-command`
+**Task ID:** `t1-backend-publish`
 
 **Files:**
 - Modify: `crates/spur-notebook/src/commands.rs`
@@ -203,14 +203,14 @@ git commit -m "feat(spur-notebook): add spur app publish command"
 
 ### Task 2: Frontend Command Palette Publish Flow
 
-**Task ID:** `task-2-command-palette-publish-flow`
+**Task ID:** `t2-palette-publish`
 
 **Files:**
 - Create: `crates/spur-notebook/jute-notebook/src/ui/notebook/publishSpurApp.ts`
 - Create: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCommandMenu.test.tsx`
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCommandMenu.tsx`
 
-**Depends on:** `task-1-backend-tauri-publish-command`
+**Depends on:** `t1-backend-publish`
 
 **Acceptance Criteria:**
 - [ ] The command palette exposes `Publish Spur App...` in the Notebook group and disables it when the notebook has no saved path.
@@ -409,12 +409,12 @@ git commit -m "feat(spur-notebook): add publish command palette action"
 
 ### Task 3: End-to-End Verification Pass
 
-**Task ID:** `task-3-publish-flow-verification`
+**Task ID:** `t3-verify`
 
 **Files:**
 - Modify: `docs/superpowers/plans/2026-06-06-spur-app-command-palette-publish.md`
 
-**Depends on:** `task-1-backend-tauri-publish-command`, `task-2-command-palette-publish-flow`
+**Depends on:** `t1-backend-publish`, `t2-palette-publish`
 
 **Acceptance Criteria:**
 - [ ] Focused backend and frontend verification commands pass against the integrated plan base.
@@ -469,12 +469,12 @@ git commit -m "docs(spur-notebook): record publish command verification"
 ## DAG
 
 ```text
-task-1-backend-tauri-publish-command
-  -> task-2-command-palette-publish-flow
-task-1-backend-tauri-publish-command
-  -> task-3-publish-flow-verification
-task-2-command-palette-publish-flow
-  -> task-3-publish-flow-verification
+t1-backend-publish
+  -> t2-palette-publish
+t1-backend-publish
+  -> t3-verify
+t2-palette-publish
+  -> t3-verify
 ```
 
 ## Self-Review
