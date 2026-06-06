@@ -481,6 +481,7 @@ pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError>
 }
 
 pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
+    let response_format = ResponseFormat::parse(args)?;
     let backend = open_code_search_backend_for_request(None).await?;
     let search = code_search_body_for_client(args, backend.client())?;
     let files = backend.search_response_file_set(&search)?;
@@ -488,7 +489,7 @@ pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> 
     let mut body = search.body;
     GraphResponseMetadata::from_source_inner(source, Some(&files))
         .await
-        .insert_into(&mut body);
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -496,6 +497,7 @@ async fn code_search_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
         .await
         .map_err(CodeGraphError::without_metadata)?;
@@ -514,6 +516,7 @@ async fn code_search_response(
             &rebuild_candidate,
             source.clone(),
             args,
+            response_format,
             |args, client| code_search_with_artifact(args, client).map_err(CodeGraphError::from),
         )
         .await
@@ -556,7 +559,7 @@ async fn code_search_response(
                     .await
                     .metadata
                     .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into(&mut fresh_body);
+                    .insert_into_for_format(&mut fresh_body, response_format);
                 return Ok(fresh_body);
             }
             RebuildAttempt::StaleBudgetExceeded => {
@@ -573,7 +576,9 @@ async fn code_search_response(
     }
 
     let mut body = search.body;
-    analysis.metadata.insert_into(&mut body);
+    analysis
+        .metadata
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -588,12 +593,13 @@ async fn code_graph_backend_value(
     args: &Value,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> Result<Value, McpHandlerError> {
+    let response_format = ResponseFormat::parse(args)?;
     let backend = open_code_search_backend_for_request(None).await?;
     let mut body = handler(args, backend.client()).map_err(CodeGraphError::into_handler_error)?;
     let files = backend.response_file_set_from_body(&body)?;
     GraphResponseMetadata::from_source_inner(backend.metadata_source(), Some(&files))
         .await
-        .insert_into(&mut body);
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -602,6 +608,7 @@ async fn code_graph_backend_response(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
         .await
         .map_err(CodeGraphError::without_metadata)?;
@@ -624,6 +631,7 @@ async fn code_graph_backend_response(
             &rebuild_candidate,
             source.clone(),
             args,
+            response_format,
             &handler,
         )
         .await
@@ -665,7 +673,7 @@ async fn code_graph_backend_response(
                     .await
                     .metadata
                     .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into(&mut fresh_body);
+                    .insert_into_for_format(&mut fresh_body, response_format);
                 return Ok(fresh_body);
             }
             RebuildAttempt::StaleBudgetExceeded => {
@@ -681,7 +689,9 @@ async fn code_graph_backend_response(
         }
     }
 
-    analysis.metadata.insert_into(&mut body);
+    analysis
+        .metadata
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -690,6 +700,7 @@ async fn overlay_response_for_backend(
     rebuild_candidate: &RebuildCandidate,
     source: GraphMetadataSource,
     args: &Value,
+    response_format: ResponseFormat,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
     let (mut fresh_body, fresh_files) = {
@@ -706,7 +717,7 @@ async fn overlay_response_for_backend(
         .await
         .metadata
         .with_rebuild_status(RebuildStatus::Fresh)
-        .insert_into(&mut fresh_body);
+        .insert_into_for_format(&mut fresh_body, response_format);
     Ok(fresh_body)
 }
 
@@ -728,6 +739,7 @@ async fn code_graph_backend_response_without_rebuild(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
 ) -> CodeGraphResult {
+    let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(rebuild_coordinator))
         .await
         .map_err(CodeGraphError::without_metadata)?;
@@ -744,7 +756,7 @@ async fn code_graph_backend_response_without_rebuild(
     GraphResponseMetadata::analyze_source_inner(source, Some(&files))
         .await
         .metadata
-        .insert_into(&mut body);
+        .insert_into_for_format(&mut body, response_format);
     Ok(body)
 }
 
@@ -752,6 +764,35 @@ struct CodeSearchBody {
     body: Value,
     result: SearchResult,
     options: SearchOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseFormat {
+    Full,
+    Compact,
+    Table,
+    Source,
+}
+
+impl ResponseFormat {
+    fn parse(args: &Value) -> Result<Self, McpHandlerError> {
+        let Some(value) = args.get("response_format") else {
+            return Ok(Self::Full);
+        };
+        match value.as_str() {
+            Some("full") => Ok(Self::Full),
+            Some("compact") => Ok(Self::Compact),
+            Some("table") => Ok(Self::Table),
+            Some("source") => Ok(Self::Source),
+            Some(other) => Err(McpHandlerError::InvalidParams(format!(
+                "invalid response_format `{other}`; expected `full`, `compact`, `table`, or `source`"
+            ))),
+            None => Err(McpHandlerError::InvalidParams(
+                "field 'response_format' must be a string; expected `full`, `compact`, `table`, or `source`"
+                    .into(),
+            )),
+        }
+    }
 }
 
 enum CodeSearchBackend {
@@ -1994,6 +2035,19 @@ impl GraphResponseMetadata {
     }
 
     fn insert_into(self, body: &mut Value) {
+        self.insert_into_for_format(body, ResponseFormat::Full);
+    }
+
+    fn insert_into_for_format(self, body: &mut Value, response_format: ResponseFormat) {
+        match response_format {
+            ResponseFormat::Full
+            | ResponseFormat::Compact
+            | ResponseFormat::Table
+            | ResponseFormat::Source => self.insert_full_into(body),
+        }
+    }
+
+    fn insert_full_into(self, body: &mut Value) {
         if let Value::Object(map) = body {
             let Value::Object(metadata) = self.into_value() else {
                 return;
@@ -4941,6 +4995,7 @@ mod tests {
                 source_stable_symbol_id: "parquet-root".to_string(),
                 target_stable_symbol_id: Some("parquet-child".to_string()),
                 target_label: Some("parquet_child".to_string()),
+                import_path: None,
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 1.0,
