@@ -1220,6 +1220,28 @@ pub fn install_kernel_in_slot(
     }
 }
 
+/// Restart the kernel bound to `slot_id`: kill the prior process, start a fresh
+/// kernel, re-inject the port bootstrap, and install it into the slot. Returns
+/// the new slot generation.
+pub async fn restart_kernel_in_slot(
+    state: &Arc<State>,
+    slot_id: &str,
+    spec_name: &str,
+) -> Result<u64, Error> {
+    let mut prior = take_kernel_from_slot(state, slot_id)?;
+    prior.kill().await?;
+
+    let port_root = notebook_path_from_slot_id(slot_id, spec_name).map(notebook_port_root);
+    let mut kernel = start_local_kernel(spec_name, port_root.as_deref()).await?;
+    if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
+        let _ = kernel.kill().await;
+        return Err(error);
+    }
+    let (generation, _previous) =
+        install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
+    Ok(generation)
+}
+
 /// Delegate AI work to a SPUR worker.
 ///
 /// The jute shell exposes this command name so frontend deck commands fail with
