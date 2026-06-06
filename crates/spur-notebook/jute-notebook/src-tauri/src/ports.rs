@@ -78,6 +78,18 @@ mod tests {
     }
 
     #[test]
+    fn javascript_bootstrap_exposes_local_anywidget_helper() {
+        let bootstrap = javascript_bootstrap();
+
+        assert!(bootstrap.contains("async anywidget()"));
+        assert!(bootstrap.contains("function _spurAnywidgetWidget"));
+        assert!(bootstrap.contains("application/vnd.jupyter.widget-view+json"));
+        assert!(!bootstrap.contains("jsr:@anywidget/deno"));
+        assert!(!bootstrap.contains("npm:@anywidget/deno"));
+        assert!(!bootstrap.contains("esm.sh/jsr/@anywidget/deno"));
+    }
+
+    #[test]
     fn rust_bootstrap_pins_arrow_and_reads_root_from_env() {
         let bootstrap = rust_bootstrap();
         let arrow_dep = format!(

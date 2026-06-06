@@ -22,6 +22,7 @@ blake3 = "1"
 chrono.workspace = true
 directories.workspace = true
 duckdb = { workspace = true, optional = true, features = ["bundled"] }
+fastembed = { version = "4", default-features = false }
 fs4 = "0.13"
 futures = { workspace = true }
 jute = { path = "jute-notebook/src-tauri" }
@@ -74,7 +75,12 @@ custom-protocol = ["tauri/custom-protocol"]
 # both DuckDB and SQLite (the latter via DuckDB's runtime sqlite_scanner).
 # Default-ON since Scope B shipped; accepts the ~4-min cold bundled-libduckdb
 # build. Tests/cheap builds opt out with `--no-default-features`.
-datasource-introspect = ["dep:duckdb", "dep:spur-rest-table-gateway"]
+datasource-introspect = [
+    "dep:duckdb",
+    "dep:spur-rest-table-gateway",
+    "fastembed/hf-hub-native-tls",
+    "fastembed/ort-download-binaries",
+]
 
 [lints]
 workspace = true

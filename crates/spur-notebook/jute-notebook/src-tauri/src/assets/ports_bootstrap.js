@@ -67,6 +67,206 @@ const _spurDenoRuntime = {
   },
 };
 
+// Local Deno anywidget backend adapted from @anywidget/deno 0.2.3.
+// MIT License
+// Copyright (c) 2022-2024 Trevor Manz
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+const _SPUR_ANYWIDGET_SEMVER_VERSION = "~0.9.*";
+const _SPUR_ANYWIDGET_INIT_PROMISE_SYMBOL = Symbol("init_promise");
+const _spurAnywidgetComms = new WeakMap();
+let _spurAnywidgetBroadcast = (() => {
+  try {
+    return Deno.jupyter.broadcast.bind(Deno.jupyter);
+  } catch {
+    return async () => {};
+  }
+})();
+
+function _spurAnywidgetRemoveBuffers(state) {
+  const buffers = [];
+  const bufferPaths = [];
+  const output = {};
+  for (const key in state) {
+    if (state[key] instanceof Uint8Array) {
+      output[key] = null;
+      buffers.push(state[key]);
+      bufferPaths.push([key]);
+    } else {
+      output[key] = state[key];
+    }
+  }
+  return { state: output, buffers, bufferPaths };
+}
+
+class _SpurAnywidgetComm {
+  #id;
+  #anywidgetVersion;
+  #protocolVersionMajor;
+  #protocolVersionMinor;
+
+  constructor({ anywidgetVersion } = {}) {
+    this.#id = crypto.randomUUID();
+    this.#anywidgetVersion = anywidgetVersion ?? _SPUR_ANYWIDGET_SEMVER_VERSION;
+    this.#protocolVersionMajor = 2;
+    this.#protocolVersionMinor = 1;
+  }
+
+  get id() {
+    return this.#id;
+  }
+
+  init(data = {}) {
+    const { state, buffers, bufferPaths } = _spurAnywidgetRemoveBuffers(data);
+    return _spurAnywidgetBroadcast(
+      "comm_open",
+      {
+        comm_id: this.id,
+        target_name: "jupyter.widget",
+        data: {
+          state: {
+            _model_module: "anywidget",
+            _model_name: "AnyModel",
+            _model_module_version: this.#anywidgetVersion,
+            _view_module: "anywidget",
+            _view_name: "AnyView",
+            _view_module_version: this.#anywidgetVersion,
+            _view_count: null,
+            ...state,
+          },
+          buffer_paths: bufferPaths,
+        },
+      },
+      {
+        buffers,
+        metadata: {
+          version: `${this.#protocolVersionMajor}.${this.#protocolVersionMinor}.0`,
+        },
+      },
+    );
+  }
+
+  sendState(data) {
+    const { state, buffers, bufferPaths } = _spurAnywidgetRemoveBuffers(data);
+    return _spurAnywidgetBroadcast(
+      "comm_msg",
+      {
+        comm_id: this.id,
+        data: {
+          method: "update",
+          state,
+          buffer_paths: bufferPaths,
+        },
+      },
+      { buffers },
+    );
+  }
+
+  mimebundle() {
+    return {
+      "application/vnd.jupyter.widget-view+json": {
+        version_major: this.#protocolVersionMajor,
+        version_minor: this.#protocolVersionMinor,
+        model_id: this.id,
+      },
+    };
+  }
+}
+
+class _SpurAnywidgetModel {
+  constructor(state) {
+    this._state = state;
+    this._target = new EventTarget();
+  }
+
+  get(key) {
+    return this._state[key];
+  }
+
+  set(key, value) {
+    this._state[key] = value;
+    this._target.dispatchEvent(new CustomEvent(`change:${key}`, { detail: value }));
+  }
+
+  on(name, callback) {
+    this._target.addEventListener(name, callback);
+  }
+}
+
+function _spurAnywidgetToEsm({ imports = "", render }) {
+  return `${imports}\nexport default { render: ${render.toString()} }`;
+}
+
+function _spurAnywidgetWidget(options) {
+  const { state, render, imports, version } = options;
+  const comm = new _SpurAnywidgetComm({ anywidgetVersion: version });
+  const initPromise = comm.init({ ...state, _esm: _spurAnywidgetToEsm({ imports, render }) });
+  const model = new _SpurAnywidgetModel(state);
+  for (const key in state) {
+    model.on(`change:${key}`, () => {
+      comm.sendState({ [key]: model.get(key) });
+    });
+  }
+  const proxy = new Proxy(model, {
+    get(target, prop, receiver) {
+      if (prop === _SPUR_ANYWIDGET_INIT_PROMISE_SYMBOL) {
+        return initPromise;
+      }
+      if (prop === Symbol.for("Jupyter.display")) {
+        return async () => {
+          await initPromise;
+          return comm.mimebundle();
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (prop === Symbol.for("Jupyter.display")) {
+        return true;
+      }
+      return Reflect.has(target, prop);
+    },
+  });
+  _spurAnywidgetComms.set(proxy, comm);
+  return proxy;
+}
+
+const _spurAnywidgetModule = Object.freeze({
+  widget: _spurAnywidgetWidget,
+  Model: _SpurAnywidgetModel,
+  _internals: Object.freeze({
+    get version() {
+      return _SPUR_ANYWIDGET_SEMVER_VERSION;
+    },
+    getComm(model) {
+      const comm = _spurAnywidgetComms.get(model);
+      if (!comm) {
+        throw new Error("No comm found for model");
+      }
+      return comm;
+    },
+    getInitPromise(model) {
+      return model[_SPUR_ANYWIDGET_INIT_PROMISE_SYMBOL];
+    },
+  }),
+});
+
 class _Spur {
   constructor({ root, portsDir, manifestPath, mime, runtime }) {
     this._root = this._expandHome(root, runtime);
@@ -75,6 +275,10 @@ class _Spur {
     this._mime = mime;
     this._runtime = runtime;
     this._runtime.fs.mkdirp(this._portsDir);
+  }
+
+  async anywidget() {
+    return _spurAnywidgetModule;
   }
 
   get(port) {
