@@ -73,7 +73,7 @@ describe("AFM host transport", () => {
 
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
-      intent: { ...content, buffers: [[7, 8, 9]] },
+      intent: { ...content, commId: modelId, buffers: [[7, 8, 9]] },
     });
     expect(customListener).toHaveBeenCalledTimes(1);
     expect(customListener).toHaveBeenCalledWith(response, []);
@@ -108,7 +108,11 @@ describe("AFM host transport", () => {
     await nextTick();
 
     expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
-      intent: { ...content, buffers: [[9, 8, 7, 6], [1, 2, 255]] },
+      intent: {
+        ...content,
+        commId: modelId,
+        buffers: [[9, 8, 7, 6], [1, 2, 255]],
+      },
     });
   });
 
@@ -228,6 +232,7 @@ describe("AFM host transport", () => {
         id: expect.stringContaining(`save_changes:${modelId}:`),
         kind: "anywidget-command",
         name: "model-state.update",
+        commId: modelId,
         msg: { state: { value: 3 } },
         buffers: [],
       }),
@@ -268,27 +273,67 @@ describe("AFM host transport", () => {
     expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
       intent: expect.objectContaining({
         name: "model-state.update",
+        commId: modelId,
         buffers: [[4, 5, 6], [10, 11, 12]],
       }),
     });
   });
 
-  test("warns when dropping unsupported custom send messages", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const modelId = track("afm-unsupported-send-model");
+  test("routes generic widget send messages as custom comm commands", async () => {
+    const modelId = track("afm-custom-send-model");
+    const content = { arbitrary: true, count: 2 };
+    const customListener = vi.fn();
+    on(modelId, "msg:custom", customListener);
+    invokeMock.mockImplementationOnce(async (_command, args) => {
+      const intent = (args as { intent: { id: string } }).intent;
+      return {
+        id: intent.id,
+        kind: "anywidget-command-response",
+        response: {
+          method: "custom",
+          kernelDelivery: { status: "sent" },
+        },
+      };
+    });
 
     installTransport();
     postAfmMessage({
       source: "jute-afm",
       type: "send",
       modelId,
-      content: { arbitrary: true },
+      content,
+      buffers: [new Uint8Array([9, 8, 7])],
+    });
+    await nextTick();
+
+    expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
+      intent: expect.objectContaining({
+        id: expect.stringMatching(/^send:afm-custom-send-model:\d+$/),
+        kind: "anywidget-command",
+        name: "model-state.custom",
+        commId: modelId,
+        msg: { content },
+        buffers: [[9, 8, 7]],
+      }),
+    });
+    expect(customListener).toHaveBeenCalledTimes(1);
+  });
+
+  test("warns for malformed custom send messages without content", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const modelId = track("afm-malformed-send-model");
+
+    installTransport();
+    postAfmMessage({
+      source: "jute-afm",
+      type: "send",
+      modelId,
     });
     await nextTick();
 
     expect(invokeMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(
-      "[jute-afm] dropping unsupported custom message",
+      "[jute-afm] ignoring malformed custom send message",
       {
         type: "send",
         modelId,

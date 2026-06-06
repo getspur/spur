@@ -333,6 +333,9 @@ pub struct State {
     /// Current kernel slots in the application, keyed by stable slot ID.
     pub kernels: DashMap<String, KernelSlot>,
 
+    /// Owning kernel slot for each open frontend comm, keyed by comm ID.
+    comm_owner: DashMap<String, String>,
+
     /// Coordinator for debounced notebook saves.
     pub save_coordinator: SaveCoordinator,
 
@@ -355,6 +358,7 @@ impl Default for State {
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             kernels: DashMap::new(),
+            comm_owner: DashMap::new(),
             save_coordinator: SaveCoordinator::with_before_save(
                 move |path, contents: &mut NotebookRoot| {
                     catalog_for_save
@@ -375,6 +379,28 @@ impl Default for State {
             notebook,
         }
     }
+}
+
+pub(crate) fn record_comm_open(state: &State, slot_id: &str, comm_id: &str) {
+    state
+        .comm_owner
+        .insert(comm_id.to_owned(), slot_id.to_owned());
+}
+
+pub(crate) fn remove_comm_owner(state: &State, comm_id: &str) {
+    state.comm_owner.remove(comm_id);
+}
+
+pub(crate) fn clear_comm_owners_for_slot(state: &State, slot_id: &str) {
+    state.comm_owner.retain(|_, owner| owner != slot_id);
+}
+
+/// Return the kernel slot that owns an open comm ID.
+pub fn slot_for_comm(state: &State, comm_id: &str) -> Option<String> {
+    state
+        .comm_owner
+        .get(comm_id)
+        .map(|owner| owner.value().clone())
 }
 
 impl State {
@@ -527,6 +553,30 @@ mod tests {
         let second = state.get_notebook();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn comm_owner_records_resolves_removes_and_clears_slot_entries() {
+        let state = State::new();
+
+        record_comm_open(&state, "slot-a", "comm-1");
+        assert_eq!(slot_for_comm(&state, "comm-1").as_deref(), Some("slot-a"));
+
+        record_comm_open(&state, "slot-b", "comm-1");
+        assert_eq!(slot_for_comm(&state, "comm-1").as_deref(), Some("slot-b"));
+
+        remove_comm_owner(&state, "comm-1");
+        assert_eq!(slot_for_comm(&state, "comm-1"), None);
+
+        record_comm_open(&state, "slot-a", "comm-2");
+        record_comm_open(&state, "slot-a", "comm-3");
+        record_comm_open(&state, "slot-b", "comm-4");
+
+        clear_comm_owners_for_slot(&state, "slot-a");
+
+        assert_eq!(slot_for_comm(&state, "comm-2"), None);
+        assert_eq!(slot_for_comm(&state, "comm-3"), None);
+        assert_eq!(slot_for_comm(&state, "comm-4").as_deref(), Some("slot-b"));
     }
 
     #[test]

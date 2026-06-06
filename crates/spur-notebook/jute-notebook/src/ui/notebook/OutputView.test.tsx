@@ -161,7 +161,7 @@ describe("OutputView AFM widget rendering", () => {
 
     await waitFor(() => expect(customListener).toHaveBeenCalledTimes(1));
     expect(invokeMock).toHaveBeenCalledWith("anywidget_command", {
-      intent: { ...content, buffers: [[1, 2, 3]] },
+      intent: { ...content, commId: AFM_MODEL_ID, buffers: [[1, 2, 3]] },
     });
     expect(customListener).toHaveBeenCalledWith(response, []);
   });

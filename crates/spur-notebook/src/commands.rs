@@ -18,6 +18,7 @@ const ANYWIDGET_COMMAND_KIND: &str = "anywidget-command";
 const ANYWIDGET_COMMAND_RESPONSE_KIND: &str = "anywidget-command-response";
 const INTENT_SOURCE_PUSH: &str = "source.push";
 const INTENT_MODEL_STATE_UPDATE: &str = "model-state.update";
+const INTENT_MODEL_STATE_CUSTOM: &str = "model-state.custom";
 
 /// Shared Tauri state slot for the notebook daemon control plane.
 pub type NotebookDaemonControlSlot =
@@ -33,6 +34,9 @@ pub struct AnyWidgetCommandIntent {
     pub kind: String,
     /// Allowlisted intent name.
     pub name: String,
+    /// Widget model/comm ID that should receive kernel comm messages.
+    #[serde(default)]
+    pub comm_id: Option<String>,
     /// Intent-specific JSON payload.
     pub msg: Value,
     /// Binary buffers attached to the anywidget custom message.
@@ -63,6 +67,48 @@ struct SourcePushIntentMsg {
 #[serde(deny_unknown_fields)]
 struct ModelStateUpdateIntentMsg {
     state: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelStateCustomIntentMsg {
+    content: Value,
+}
+
+#[async_trait::async_trait]
+trait ModelStateCommGateway: Sync {
+    fn slot_for_comm(&self, state: &jute::state::State, comm_id: &str) -> Option<String>;
+
+    async fn send_comm_msg(
+        &self,
+        state: &jute::state::State,
+        slot_id: &str,
+        comm_id: &str,
+        data: Value,
+        buffers: Vec<Vec<u8>>,
+    ) -> Result<(), String>;
+}
+
+struct JuteModelStateCommGateway;
+
+#[async_trait::async_trait]
+impl ModelStateCommGateway for JuteModelStateCommGateway {
+    fn slot_for_comm(&self, state: &jute::state::State, comm_id: &str) -> Option<String> {
+        jute::state::slot_for_comm(state, comm_id)
+    }
+
+    async fn send_comm_msg(
+        &self,
+        state: &jute::state::State,
+        slot_id: &str,
+        comm_id: &str,
+        data: Value,
+        buffers: Vec<Vec<u8>>,
+    ) -> Result<(), String> {
+        jute::commands::send_comm_msg(state, slot_id, comm_id, data, buffers)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Debug)]
@@ -100,6 +146,16 @@ async fn handle_anywidget_command_intent(
     engine: Option<ReactiveEngineClient>,
     intent: AnyWidgetCommandIntent,
 ) -> AnyWidgetCommandResponse {
+    handle_anywidget_command_intent_with_gateway(state, engine, intent, &JuteModelStateCommGateway)
+        .await
+}
+
+async fn handle_anywidget_command_intent_with_gateway(
+    state: &jute::state::State,
+    engine: Option<ReactiveEngineClient>,
+    intent: AnyWidgetCommandIntent,
+    gateway: &dyn ModelStateCommGateway,
+) -> AnyWidgetCommandResponse {
     let response = if intent.kind != ANYWIDGET_COMMAND_KIND {
         Err(audit_rejected_intent(
             &intent,
@@ -109,7 +165,12 @@ async fn handle_anywidget_command_intent(
     } else {
         match intent.name.as_str() {
             INTENT_SOURCE_PUSH => handle_source_push_intent(state, engine, &intent).await,
-            INTENT_MODEL_STATE_UPDATE => handle_model_state_update_intent(&intent),
+            INTENT_MODEL_STATE_UPDATE => {
+                handle_model_state_update_intent_with_gateway(state, &intent, gateway).await
+            }
+            INTENT_MODEL_STATE_CUSTOM => {
+                handle_model_state_custom_intent_with_gateway(state, &intent, gateway).await
+            }
             _ => Err(audit_rejected_intent(
                 &intent,
                 "intent_not_allowlisted",
@@ -169,15 +230,11 @@ async fn handle_source_push_intent(
     }))
 }
 
-/// Handles `model-state.update` as a deliberate frontend-only echo.
-///
-/// This updates the host-side widget registry mirror by returning
-/// `{ method: "update", state }` to the AFM iframe runtime only. It does not
-/// send a `comm_msg` to the Python kernel, so Python-side traitlet `@observe`
-/// handlers will not fire from frontend `model.save_changes()`. Kernel-side
-/// reactivity is driven exclusively by the port-based `source.push` contract.
-fn handle_model_state_update_intent(
+/// Handles `model-state.update` by echoing and best-effort queueing a `comm_msg`.
+async fn handle_model_state_update_intent_with_gateway(
+    state: &jute::state::State,
     intent: &AnyWidgetCommandIntent,
+    gateway: &dyn ModelStateCommGateway,
 ) -> Result<Value, AnyWidgetIntentError> {
     let msg: ModelStateUpdateIntentMsg =
         serde_json::from_value(intent.msg.clone()).map_err(|error| {
@@ -195,10 +252,113 @@ fn handle_model_state_update_intent(
         ));
     }
 
+    let model_state = msg.state;
+    let kernel_delivery = model_state_kernel_delivery(
+        state,
+        intent,
+        json!({
+            "method": "update",
+            "state": model_state.clone(),
+        }),
+        gateway,
+        "model-state.update",
+    )
+    .await;
+
     Ok(json!({
         "method": "update",
-        "state": msg.state,
+        "state": model_state,
+        "kernelDelivery": kernel_delivery,
     }))
+}
+
+async fn handle_model_state_custom_intent_with_gateway(
+    state: &jute::state::State,
+    intent: &AnyWidgetCommandIntent,
+    gateway: &dyn ModelStateCommGateway,
+) -> Result<Value, AnyWidgetIntentError> {
+    let msg: ModelStateCustomIntentMsg =
+        serde_json::from_value(intent.msg.clone()).map_err(|error| {
+            audit_rejected_intent(
+                intent,
+                "invalid_model_state_custom_intent",
+                format!("model-state.custom requires {{ content }}: {error}"),
+            )
+        })?;
+
+    let content = msg.content;
+    let kernel_delivery = model_state_kernel_delivery(
+        state,
+        intent,
+        json!({
+            "method": "custom",
+            "content": content.clone(),
+        }),
+        gateway,
+        "model-state.custom",
+    )
+    .await;
+
+    Ok(json!({
+        "method": "custom",
+        "content": content,
+        "kernelDelivery": kernel_delivery,
+    }))
+}
+
+async fn model_state_kernel_delivery(
+    state: &jute::state::State,
+    intent: &AnyWidgetCommandIntent,
+    data: Value,
+    gateway: &dyn ModelStateCommGateway,
+    intent_name: &'static str,
+) -> Value {
+    let Some(comm_id) = intent
+        .comm_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|comm_id| !comm_id.is_empty())
+    else {
+        return json!({
+            "status": "skipped",
+            "reason": "missing_comm_id",
+        });
+    };
+
+    let Some(slot_id) = gateway.slot_for_comm(state, comm_id) else {
+        return json!({
+            "status": "skipped",
+            "commId": comm_id,
+            "reason": "comm_not_open",
+        });
+    };
+
+    match gateway
+        .send_comm_msg(state, &slot_id, comm_id, data, intent.buffers.clone())
+        .await
+    {
+        Ok(()) => json!({
+            "status": "sent",
+            "commId": comm_id,
+            "slotId": slot_id,
+        }),
+        Err(error) => {
+            warn!(
+                command_id = %intent.id,
+                intent_name,
+                comm_id,
+                slot_id,
+                %error,
+                "failed to send anywidget comm_msg"
+            );
+            json!({
+                "status": "failed",
+                "commId": comm_id,
+                "slotId": slot_id,
+                "error": error,
+            })
+        }
+    }
 }
 
 fn source_push_ipc_bytes(
@@ -734,6 +894,7 @@ mod tests {
                 id: "cmd-1".to_owned(),
                 kind: "anywidget-command".to_owned(),
                 name: "source.push".to_owned(),
+                comm_id: None,
                 msg: json!({ "port": "horizon", "payload": [1, 2, 3] }),
                 buffers: Vec::new(),
             },
@@ -761,6 +922,7 @@ mod tests {
                 id: "cmd-2".to_owned(),
                 kind: "anywidget-command".to_owned(),
                 name: "model-state.update".to_owned(),
+                comm_id: Some("comm-2".to_owned()),
                 msg: json!({ "state": { "status": "Idle", "lastError": "" } }),
                 buffers: Vec::new(),
             },
@@ -771,7 +933,197 @@ mod tests {
         assert_eq!(response.id, "cmd-2");
         assert_eq!(response.response["method"], "update");
         assert_eq!(response.response["state"]["status"], "Idle");
+        assert_eq!(response.response["kernelDelivery"]["status"], "skipped");
+        assert_eq!(
+            response.response["kernelDelivery"]["reason"],
+            "comm_not_open"
+        );
         assert!(source_rx.try_recv().is_err());
+    }
+
+    #[derive(Default)]
+    struct RecordingCommGateway {
+        slot_id: Mutex<Option<String>>,
+        error: Mutex<Option<String>>,
+        sent: Mutex<Vec<RecordedCommSend>>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct RecordedCommSend {
+        slot_id: String,
+        comm_id: String,
+        data: Value,
+        buffers: Vec<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelStateCommGateway for RecordingCommGateway {
+        fn slot_for_comm(&self, _state: &jute::state::State, _comm_id: &str) -> Option<String> {
+            self.slot_id.lock().expect("slot id").clone()
+        }
+
+        async fn send_comm_msg(
+            &self,
+            _state: &jute::state::State,
+            slot_id: &str,
+            comm_id: &str,
+            data: Value,
+            buffers: Vec<Vec<u8>>,
+        ) -> Result<(), String> {
+            self.sent
+                .lock()
+                .expect("sent comms")
+                .push(RecordedCommSend {
+                    slot_id: slot_id.to_owned(),
+                    comm_id: comm_id.to_owned(),
+                    data,
+                    buffers,
+                });
+            match self.error.lock().expect("error").clone() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn model_state_update_sends_comm_msg_for_known_comm_slot_and_still_echoes() {
+        let state = jute::state::State::new();
+        let gateway = RecordingCommGateway {
+            slot_id: Mutex::new(Some("slot-python".to_owned())),
+            error: Mutex::new(None),
+            sent: Mutex::new(Vec::new()),
+        };
+        let intent = AnyWidgetCommandIntent {
+            id: "cmd-known".to_owned(),
+            kind: "anywidget-command".to_owned(),
+            name: "model-state.update".to_owned(),
+            comm_id: Some("comm-known".to_owned()),
+            msg: json!({ "state": { "status": "Running" } }),
+            buffers: vec![vec![1, 2, 3]],
+        };
+
+        let response = handle_model_state_update_intent_with_gateway(&state, &intent, &gateway)
+            .await
+            .expect("model-state.update response");
+
+        assert_eq!(response["method"], "update");
+        assert_eq!(response["state"]["status"], "Running");
+        assert_eq!(response["kernelDelivery"]["status"], "sent");
+        assert_eq!(response["kernelDelivery"]["commId"], "comm-known");
+        assert_eq!(response["kernelDelivery"]["slotId"], "slot-python");
+        assert_eq!(
+            *gateway.sent.lock().expect("sent comms"),
+            vec![RecordedCommSend {
+                slot_id: "slot-python".to_owned(),
+                comm_id: "comm-known".to_owned(),
+                data: json!({
+                    "method": "update",
+                    "state": { "status": "Running" },
+                }),
+                buffers: vec![vec![1, 2, 3]],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn anywidget_model_state_custom_intent_sends_custom_comm_msg_for_known_comm_slot() {
+        let state = jute::state::State::new();
+        let gateway = RecordingCommGateway {
+            slot_id: Mutex::new(Some("slot-python".to_owned())),
+            error: Mutex::new(None),
+            sent: Mutex::new(Vec::new()),
+        };
+
+        let response = handle_anywidget_command_intent_with_gateway(
+            &state,
+            None,
+            AnyWidgetCommandIntent {
+                id: "cmd-custom".to_owned(),
+                kind: "anywidget-command".to_owned(),
+                name: "model-state.custom".to_owned(),
+                comm_id: Some("comm-custom".to_owned()),
+                msg: json!({ "content": { "event": "clicked", "count": 2 } }),
+                buffers: vec![vec![9, 8, 7]],
+            },
+            &gateway,
+        )
+        .await;
+
+        assert_eq!(response.kind, "anywidget-command-response");
+        assert_eq!(response.id, "cmd-custom");
+        assert_eq!(response.response["method"], "custom");
+        assert_eq!(response.response["content"]["event"], "clicked");
+        assert_eq!(response.response["kernelDelivery"]["status"], "sent");
+        assert_eq!(response.response["kernelDelivery"]["commId"], "comm-custom");
+        assert_eq!(response.response["kernelDelivery"]["slotId"], "slot-python");
+        assert_eq!(
+            *gateway.sent.lock().expect("sent comms"),
+            vec![RecordedCommSend {
+                slot_id: "slot-python".to_owned(),
+                comm_id: "comm-custom".to_owned(),
+                data: json!({
+                    "method": "custom",
+                    "content": { "event": "clicked", "count": 2 },
+                }),
+                buffers: vec![vec![9, 8, 7]],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_state_update_reports_failed_comm_send_without_rejecting_echo() {
+        let state = jute::state::State::new();
+        let gateway = RecordingCommGateway {
+            slot_id: Mutex::new(Some("slot-python".to_owned())),
+            error: Mutex::new(Some("kernel disconnected".to_owned())),
+            sent: Mutex::new(Vec::new()),
+        };
+        let intent = AnyWidgetCommandIntent {
+            id: "cmd-fail".to_owned(),
+            kind: "anywidget-command".to_owned(),
+            name: "model-state.update".to_owned(),
+            comm_id: Some("comm-fail".to_owned()),
+            msg: json!({ "state": { "status": "Busy" } }),
+            buffers: Vec::new(),
+        };
+
+        let response = handle_model_state_update_intent_with_gateway(&state, &intent, &gateway)
+            .await
+            .expect("model-state.update response");
+
+        assert_eq!(response["method"], "update");
+        assert_eq!(response["state"]["status"], "Busy");
+        assert_eq!(response["kernelDelivery"]["status"], "failed");
+        assert_eq!(response["kernelDelivery"]["commId"], "comm-fail");
+        assert_eq!(response["kernelDelivery"]["slotId"], "slot-python");
+        assert_eq!(response["kernelDelivery"]["error"], "kernel disconnected");
+        assert_eq!(gateway.sent.lock().expect("sent comms").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn model_state_update_degrades_gracefully_for_unknown_comm_slot() {
+        let state = jute::state::State::new();
+        let gateway = RecordingCommGateway::default();
+        let intent = AnyWidgetCommandIntent {
+            id: "cmd-unknown".to_owned(),
+            kind: "anywidget-command".to_owned(),
+            name: "model-state.update".to_owned(),
+            comm_id: Some("comm-missing".to_owned()),
+            msg: json!({ "state": { "status": "Idle" } }),
+            buffers: Vec::new(),
+        };
+
+        let response = handle_model_state_update_intent_with_gateway(&state, &intent, &gateway)
+            .await
+            .expect("model-state.update response");
+
+        assert_eq!(response["method"], "update");
+        assert_eq!(response["state"]["status"], "Idle");
+        assert_eq!(response["kernelDelivery"]["status"], "skipped");
+        assert_eq!(response["kernelDelivery"]["commId"], "comm-missing");
+        assert_eq!(response["kernelDelivery"]["reason"], "comm_not_open");
+        assert!(gateway.sent.lock().expect("sent comms").is_empty());
     }
 
     #[tokio::test]
@@ -786,6 +1138,7 @@ mod tests {
                 id: "cmd-3".to_owned(),
                 kind: "anywidget-command".to_owned(),
                 name: "shell.run".to_owned(),
+                comm_id: None,
                 msg: json!({ "command": "gcloud", "args": ["projects", "list"] }),
                 buffers: Vec::new(),
             },

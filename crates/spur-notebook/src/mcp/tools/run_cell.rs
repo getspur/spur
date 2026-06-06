@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use jute::{
     backend::{commands::RunCellEvent, notebook::Cell},
     commands::run_cell_events,
@@ -83,7 +85,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         &params.notebook_path,
         Some(&kernel_id),
         &params.cell_id,
-        state,
+        Arc::clone(state),
     )
     .await
     .map_err(|error| {
