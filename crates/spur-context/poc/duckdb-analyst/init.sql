@@ -153,6 +153,40 @@ SELECT '__SPUR_GRAPH_ARTIFACT_DIR__'        AS artifact_dir,
 FROM manifest
 CROSS JOIN manifest_json;
 
+CREATE OR REPLACE VIEW external_nodes AS
+SELECT
+  n.*,
+  CASE
+    WHEN regexp_extract(n.qualified_name, '^[^:./]+', 0) IN ('std', 'core', 'alloc') THEN 'std'
+    ELSE regexp_extract(n.qualified_name, '^[^:./]+', 0)
+  END AS origin
+FROM nodes n
+WHERE n.symbol_kind = 'external';
+
+CREATE OR REPLACE VIEW v_dependency_surface AS
+SELECT
+  CASE
+    WHEN s.file_path LIKE 'crates/%' THEN regexp_extract(s.file_path, '^crates/([^/]+)', 1)
+    ELSE regexp_extract(s.file_path, '^[^/]+', 0)
+  END AS crate_name,
+  s.file_path,
+  ext.origin AS external_origin,
+  ext.qualified_name AS external_symbol,
+  ext.stable_symbol_id AS external_stable_symbol_id,
+  count(*) AS inbound_import_count
+FROM edges e
+JOIN nodes s
+  ON s.stable_symbol_id = e.source_stable_id
+JOIN external_nodes ext
+  ON ext.stable_symbol_id = e.target_stable_id
+WHERE e.relation = 'imports'
+GROUP BY
+  crate_name,
+  s.file_path,
+  ext.origin,
+  ext.qualified_name,
+  ext.stable_symbol_id;
+
 -- DuckPGQ currently rejects property graphs over views, so keep a small
 -- compatibility surface sourced from the Parquet views. Analytical SQL and
 -- Onager paths use the views directly.
@@ -165,6 +199,16 @@ SELECT stable_symbol_id,
        file_path
 FROM nodes;
 
+CREATE OR REPLACE TABLE duckpgq_external_nodes AS
+SELECT stable_symbol_id,
+       node_id,
+       qualified_name,
+       entity_name,
+       symbol_kind,
+       file_path
+FROM duckpgq_nodes
+WHERE symbol_kind = 'external';
+
 CREATE OR REPLACE TABLE duckpgq_edges AS
 SELECT source_stable_id,
        target_stable_id,
@@ -172,6 +216,13 @@ SELECT source_stable_id,
        relation,
        confidence
 FROM edges;
+
+CREATE OR REPLACE TABLE duckpgq_import_edges AS
+SELECT e.*
+FROM duckpgq_edges e
+JOIN duckpgq_external_nodes n
+  ON n.stable_symbol_id = e.target_stable_id
+WHERE e.relation = 'imports';
 
 CREATE OR REPLACE VIEW onager_edges AS
 SELECT src_id AS src, dst_id AS dst
@@ -182,10 +233,17 @@ CREATE OR REPLACE PROPERTY GRAPH code
   VERTEX TABLES (
     duckpgq_nodes PROPERTIES (
       stable_symbol_id, node_id, qualified_name, entity_name, symbol_kind, file_path
-    )
+    ),
+    duckpgq_external_nodes PROPERTIES (
+      stable_symbol_id, node_id, qualified_name, entity_name, symbol_kind, file_path
+    ) LABEL External
   )
   EDGE TABLES (
     duckpgq_edges SOURCE      KEY (source_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
                  DESTINATION KEY (target_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
-                 PROPERTIES  (edge_kind, relation, confidence)
+                 PROPERTIES  (edge_kind, relation, confidence),
+    duckpgq_import_edges SOURCE      KEY (source_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
+                         DESTINATION KEY (target_stable_id) REFERENCES duckpgq_external_nodes (stable_symbol_id)
+                         PROPERTIES  (edge_kind, relation, confidence)
+                         LABEL imports
   );
