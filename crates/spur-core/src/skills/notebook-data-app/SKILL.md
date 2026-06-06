@@ -1,6 +1,6 @@
 ---
 name: notebook-data-app
-description: "Use when the user asks to turn live data — a datasource catalog table, a REST/API table, read_json_auto/read_csv_auto over HTTP, or a file — into a working dashboard, monitor, or display app inside a Jute notebook. Establishes the reactive-DAG data pipeline (source cells → produces/consumes ports → a text/html artifact cell), single-kernel or cross-kernel (Python → Deno) via Arrow ports. Pairs with open-design for the visual layer."
+description: "Use when the user asks to turn live data — a datasource catalog table, a REST/API table, read_json_auto/read_csv_auto over HTTP, or a file — into a working dashboard, monitor, or display app inside a Jute notebook, OR to build an interactive Spur App / Jute-App: a notebook that runs like an application, with frontend control cells (sliders, inputs) that recompute and re-render live in App mode. Covers the reactive-DAG data pipeline (source cells → produces/consumes ports → a text/html artifact), frontend cells, and the control→source.push→cascade loop, single-kernel or cross-kernel (Python → Deno) via Arrow ports. Pairs with open-design for the visual layer."
 role: brain
 ---
 <!-- SPUR-MANAGED v=1 skill=notebook-data-app sha256=0000000000000000000000000000000000000000000000000000000000000000 -->
@@ -13,13 +13,24 @@ renders as a `text/html` output. The notebook IS the app — pipeline and UI in 
 document. This is the **data plane**; `open-design` is the **visual craft**. Use
 both: this skill to make the data flow, `open-design` to make it look designed.
 
+Two altitudes:
+1. **Display app** (steps 1–5 below) — sources → ports → one `text/html` artifact.
+   A read-only dashboard/monitor. Start here; it is the foundation.
+2. **Interactive Spur App** (the *“Make it an app”* section) — add **frontend
+   cells**: view cells re-render when a port bumps, control cells push user input
+   back into the DAG. Flip to **App mode** and the document behaves like a deployed
+   app. Build the display app first, then promote it.
+
 <HARD-GATE>
 Operate the notebook ONLY through the `notebook_*` MCP tools (`notebook_insert_cell`,
 `notebook_write_cell`, `notebook_read_cell`, `notebook_set_cell_metadata`,
 `notebook_set_dag_metadata`, `notebook_set_cell_code_type`, `notebook_run_cell`,
 `notebook_run_cascade`, `notebook_dag_status`, `notebook_push_source`,
 `notebook_list_datasources`). Never ask the user to paste code or open files. The
-final artifact MUST be a cell whose output carries `text/html`.
+final artifact MUST be a cell whose output carries `text/html`. Frontend-cell
+declaration (Spur App) is `cell.metadata.spur.frontend`, set with
+`notebook_set_cell_metadata` — NOT `notebook_set_dag_metadata` (that is `produces`/
+`consumes` only).
 </HARD-GATE>
 
 ## The loop
@@ -107,6 +118,61 @@ transport. Data moves only when a cell calls `spur.put`/`spur.get`. See
 `references/ports-and-kernels.md` for the on-disk port layout, the `spur` API, and
 Deno kernel/slot mechanics.
 
+## Make it an app — frontend cells, controls & App mode
+
+A **Spur App** is the display app above plus **frontend cells** and **App mode**.
+The DAG/ports pipeline is unchanged; you add two-way reactivity on top of it.
+
+### Declare a frontend cell
+
+A cell becomes a frontend cell when it carries `cell.metadata.spur.frontend`
+(set with `notebook_set_cell_metadata`, with `expected_version`):
+```jsonc
+{ "spur": { "frontend": {
+  "kind": "chart",          // chart | table | slider | form | html | custom (advisory)
+  "binds": ["forecast"],    // input ports → render; re-renders on port bump
+  "emits": ["horizon"],     // user actions → source.push to these ports
+  "props": { "x": "month", "y": "revenue" }
+} } }
+```
+Two flavors (the normalizer keeps only `binds`/`emits` as string lists):
+- **View cell** — `binds`, no `emits`. Pure output (chart/table/KPI). Re-renders
+  when a bound port's manifest version changes; needs no kernel to re-render.
+- **Control cell** — `emits`. A slider/input/button. User action → `source.push`
+  to the named port → the engine cascades downstream → bound view cells re-render.
+  **That closed loop is what makes it an app.**
+
+### The reactive loop (control → cascade → re-render)
+
+```
+user input → AFM widget model.save_changes()/model.send()
+  → host maps it to a source.push on the declared `emits` port (allowlisted)
+  → ReactiveEngine cascades stale downstream cells in topological order
+  → produced ports bump in manifest.json
+  → bound view cells re-render
+```
+Author a control as a **Deno cell** with `@anywidget/deno`’s
+`widget({ state, render })`; the frontend owns the widget, the kernel just declares
+the binding and initial state. The widget changing model state is what emits the
+intent; only intents that map to a **declared `emits` source port** are turned into
+a `source.push` (others are rejected unless backend-allowlisted).
+
+### App mode
+
+Title-bar segmented toggle **`Notebook | DAG | App`**. **App** hides code and shows
+**only frontend cells**, *chromeless* (output only — no code, run buttons, or DAG
+badges), as a **vertical stack in document order**, under a counts-only status strip
+(`App · N frontend cells · running/failed/stale`). Marking a cell `spur.frontend`
+is all it takes to make it appear there.
+
+### Reality check — do NOT overclaim
+
+The loop runs over the **in-process** comm/Tauri path. As built today there is:
+**no `ipc://` cell bus, no multi-client, no headless runner, no grid layout**
+(document-order stack only; `props.layout` is not honored). A dead kernel **is**
+auto-restarted (heartbeat supervisor) and view cells rehydrate last values from the
+manifest — but don’t promise bus/remote/multi-window behavior the code doesn’t have.
+
 ## Common mistakes
 
 | Symptom | Cause → Fix |
@@ -116,8 +182,12 @@ Deno kernel/slot mechanics.
 | `read_json_auto` 429 / "unexpected end of data" | Endpoint rate-limits by IP or chunks the body. Use `urllib`+`json`, or route through a relay/proxy. |
 | Artifact renders but values are stale/blank | It read globals, not ports, across a kernel boundary — or you never called `spur.put`. Wire via `spur.get`/`spur.put`. |
 | `port_manifest` empty though cells "produce" | `produces` is only scheduling metadata; you must actually `spur.put`. |
+| Frontend cell doesn't show in App mode | Missing `cell.metadata.spur.frontend`. Set it with `notebook_set_cell_metadata` (not `set_dag_metadata`). |
+| Control moves but nothing recomputes | The control's `emits` port isn't declared, the AFM intent doesn't map to a declared source port, or there's no consumer wired to that port. Declare `emits:[port]` and `consumes:[port]` downstream. |
+| Privileged action (shell/secret) wired to a control | Frontend emits **intent only**; privileged actions must be backend-allowlisted and confirmed. Never let a control run shell or receive raw secrets. |
 
 ## Reference
 - `references/ports-and-kernels.md` — PortStore layout, `spur.put/get` contract, Deno slot + `code_type` routing, the parallel-edge invariant.
+- `docs/superpowers/specs/2026-06-01-jute-app-notebook-as-application-container-design.ipynb` — the Jute-App architecture (three layers, frontend cells, reactive loop, App mode, supervision §8). Read for the *why* behind the `spur.frontend` contract; mind the §5–§9 migration status (the `ipc://` bus is designed but not built).
 - **open-design** `references/artifact-tracks.md` — Track A/B build pipeline, the Plot-vs-Perspective chart decision, and the self-contained gate. The artifact track for any data app.
 - **open-design** — visual direction, palette/font binding, surface specialism, five-dimensional + anti-slop critique for the artifact.
