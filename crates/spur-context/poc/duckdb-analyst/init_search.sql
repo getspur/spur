@@ -24,7 +24,7 @@ WHERE body_text IS NOT NULL AND length(body_text) > 0;
 -- 6-10x by identical body — except for the SPUR-MANAGED header injected per
 -- vendored copy. FTS over the raw table returns the same section many times.
 -- Keep `sections` FULL (v_doc_tree needs the whole forest), but index a deduped
--- copy: one row per distinct SECTION (same heading-path + normalized body),
+-- copy: one row per distinct SECTION (same heading level + normalized body),
 -- preferring the canonical (non-dot-dir) path.
 --
 -- Dedup on the SECTION BODY, NOT `content_hash`: content_hash is the *whole-file*
@@ -32,12 +32,16 @@ WHERE body_text IS NOT NULL AND length(body_text) > 0;
 -- partitioning by it would keep only ONE section per document — collapsing 19.7k
 -- rows to ~990 and destroying ~17k distinct bodies. Genuine cross-copy
 -- duplication is only ~8% (19.7k -> ~18.2k); the rest is unique prose.
+--
+-- Do NOT partition by `qualified_name` for markdown sections: Lance populates it
+-- from the file path for top-level skill files, so each vendored agent directory
+-- gets a different value and duplicate skill bodies never group.
 CREATE OR REPLACE TABLE sections_search AS
 SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
 FROM sections
 QUALIFY row_number() OVER (
-  PARTITION BY COALESCE(qualified_name, ''),
-               regexp_replace(body_text, '<!-- SPUR-MANAGED[^>]*-->\n?', '')
+  PARTITION BY heading_level,
+               regexp_replace(COALESCE(body_text, ''), '<!-- SPUR-MANAGED[^>]*-->\n?', '')
   ORDER BY (file_path LIKE '.%')::INT, length(file_path), file_path
 ) = 1;
 
@@ -145,3 +149,99 @@ CREATE OR REPLACE MACRO search(q) AS TABLE
   QUALIFY row_number() OVER (PARTITION BY file ORDER BY rank DESC) <= 2
   ORDER BY rank DESC NULLS LAST
   LIMIT 30;
+
+-- Graph-augmented: BM25 top-k hits + selective 1-hop call-graph expansion.
+-- Gate: symbols with posture = 'load-bearing wall' AND callers > 30 are popular
+-- sinks — expanding them would flood results with noise. All other hits expand.
+CREATE OR REPLACE MACRO search_graph(q) AS TABLE
+  SELECT kind, title, file, score, signal, neighbor_kind, edge_bind_method
+  FROM (
+    WITH base AS (
+      SELECT
+        st.stable_symbol_id,
+        st.entity_name AS symbol,
+        st.symbol_kind,
+        st.file_path,
+        fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) AS bm25_raw,
+        fts_main_symbol_text.match_bm25(st.stable_symbol_id, q)
+          * CASE WHEN st.file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+          * CASE WHEN st.symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
+                 WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+          * (1 + 0.15 * ln(1 + sc.pagerank * 1e4)) AS fused_rank,
+        sc.pagerank,
+        sc.churn_90d,
+        sc.posture,
+        sc.component_size,
+        COALESCE(vi.callers, 0) AS caller_count
+      FROM symbol_text st
+      JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+      LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
+      WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+      ORDER BY fused_rank DESC NULLS LAST
+      LIMIT 5
+    ),
+    -- Selective gate: expand only non-sink symbols.
+    gated AS (
+      SELECT * FROM base
+      WHERE posture != 'load-bearing wall' OR caller_count <= 30
+    ),
+    primary_rows AS (
+      SELECT
+        'code' AS kind,
+        symbol AS title,
+        regexp_replace(file_path, '^crates/', '') AS file,
+        round(fused_rank, 3) AS score,
+        posture || ' · pr=' || round(pagerank * 1e4, 1) || ' · churn=' || churn_90d AS signal,
+        'primary' AS neighbor_kind,
+        CAST(NULL AS VARCHAR) AS edge_bind_method
+      FROM base
+    ),
+    neighbor_rows AS (
+      SELECT *
+      FROM (
+        SELECT
+          'code' AS kind,
+          nsrc.entity_name AS title,
+          regexp_replace(nsrc.file_path, '^crates/', '') AS file,
+          round(COALESCE(sc2.pagerank, 0) * 1e4, 3) AS score,
+          COALESCE(sc2.posture, 'unknown') || ' · caller of ' || g.symbol AS signal,
+          'caller' AS neighbor_kind,
+          e.bind_method AS edge_bind_method
+        FROM gated g
+        LEFT JOIN edges e
+          ON e.target_stable_id = g.stable_symbol_id AND e.relation = 'calls'
+        LEFT JOIN nodes nsrc
+          ON nsrc.stable_symbol_id = e.source_stable_id
+        LEFT JOIN v_symbol_scorecard sc2
+          ON sc2.stable_symbol_id = nsrc.stable_symbol_id
+        WHERE nsrc.file_path NOT LIKE '.%'
+          AND nsrc.file_path NOT LIKE '%/tests/%'
+        UNION ALL
+        SELECT
+          'code' AS kind,
+          ndst.entity_name AS title,
+          regexp_replace(ndst.file_path, '^crates/', '') AS file,
+          round(COALESCE(sc3.pagerank, 0) * 1e4, 3) AS score,
+          COALESCE(sc3.posture, 'unknown') || ' · callee of ' || g.symbol AS signal,
+          'callee' AS neighbor_kind,
+          e.bind_method AS edge_bind_method
+        FROM gated g
+        LEFT JOIN edges e
+          ON e.source_stable_id = g.stable_symbol_id AND e.relation = 'calls'
+        LEFT JOIN nodes ndst
+          ON ndst.stable_symbol_id = e.target_stable_id
+        LEFT JOIN v_symbol_scorecard sc3
+          ON sc3.stable_symbol_id = ndst.stable_symbol_id
+        WHERE ndst.file_path NOT LIKE '.%'
+          AND ndst.file_path NOT LIKE '%/tests/%'
+      )
+      QUALIFY row_number() OVER (PARTITION BY file, title ORDER BY score DESC) <= 2
+    )
+    SELECT * FROM primary_rows
+    UNION ALL
+    SELECT * FROM neighbor_rows
+  )
+  ORDER BY
+    CASE neighbor_kind WHEN 'primary' THEN 0 WHEN 'caller' THEN 1 ELSE 2 END,
+    score DESC NULLS LAST
+  LIMIT 40;
