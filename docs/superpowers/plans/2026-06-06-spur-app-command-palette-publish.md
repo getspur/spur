@@ -483,3 +483,17 @@ t2-palette-publish
 - Placeholder scan: No TBD/TODO implementation placeholders remain in task instructions.
 - Type consistency: Frontend invoke keys use camelCase arguments (`notebookPath`, `outputPath`, `includePortSnapshots`) matching Tauri's argument conversion for the Rust `publish_spur_app` parameters.
 - DAG validation: Task 1 provides the backend command; Task 2 depends on that command contract; Task 3 depends on both for integrated verification.
+
+---
+
+## Verification
+
+Integrated verification was attempted after Tasks 1 and 2 were approved. The
+Rust Spur App packaging checks passed; the exact frontend remote-default checks
+failed for known shared frontend/VM environment reasons outside this packaging
+feature and are accepted residual verification caveats for this plan.
+
+- `scripts/spur-cargo test -p spur-notebook --test spur_app_publish_command -- --nocapture` - passed.
+- `scripts/spur-cargo test -p spur-notebook spur_app -- --nocapture` - passed.
+- `scripts/spur-pnpm test -- src/ui/notebook/NotebookCommandMenu.test.tsx` - failed before Vitest collected tests because the remote `/mnt/cargo/pnpm-nm` dependency resolution environment could not resolve `@testing-library/jest-dom/vitest`; this happened before or outside the task-specific publish-flow code.
+- `scripts/spur-pnpm run typecheck` - failed with broad existing frontend TypeScript errors unrelated to this diff.
