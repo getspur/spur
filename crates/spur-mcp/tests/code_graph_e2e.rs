@@ -2864,7 +2864,7 @@ async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
     );
     let callee_names = entity_names(callees["callees"].as_array().expect("callees"));
     assert!(callee_names.contains("submit_plan_def"));
-    assert!(callee_names.contains("code_search_def"));
+    assert!(callee_names.contains("code_symbol_search_def"));
 
     let search = tool_body(
         call_tool(
