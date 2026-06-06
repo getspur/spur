@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::Context as _;
+use directories::BaseDirs;
 use jute::state::State;
 use spur_core::notebook::notebook_binary_path;
 use spur_notebook::mcp::{self, bridge::AgentBridge};
@@ -26,10 +27,55 @@ fn handle_file_associations(
     app: &AppHandle,
     files: &[PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for file in files {
+    let targets = resolve_file_association_targets(files)?;
+    for file in &targets {
         jute::window::open_notebook_path(app, file)?;
     }
     Ok(())
+}
+
+fn resolve_file_association_targets(files: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
+    if !files.iter().any(|file| is_spur_app_path(file)) {
+        return Ok(files.to_vec());
+    }
+
+    let cache_root = default_spur_app_import_cache_root()?;
+    resolve_file_association_targets_with_cache_root(files, &cache_root)
+}
+
+fn resolve_file_association_targets_with_cache_root(
+    files: &[PathBuf],
+    cache_root: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    files
+        .iter()
+        .map(|file| {
+            if is_spur_app_path(file) {
+                let imported = spur_notebook::spur_app::import_spur_app(file, cache_root)
+                    .with_context(|| format!("failed to import {}", file.display()))?;
+                Ok(imported.notebook_path)
+            } else {
+                Ok(file.clone())
+            }
+        })
+        .collect()
+}
+
+fn is_spur_app_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some(extension)
+            if extension.eq_ignore_ascii_case(spur_notebook::spur_app::SPUR_APP_EXTENSION)
+    )
+}
+
+fn default_spur_app_import_cache_root() -> anyhow::Result<PathBuf> {
+    let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
+    Ok(base_dirs
+        .home_dir()
+        .join(".spur")
+        .join("spurapps")
+        .join("cache"))
 }
 
 enum Mode {
@@ -518,6 +564,75 @@ mod tests {
 
         assert_eq!(socket, None);
         assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
+    }
+
+    #[test]
+    fn file_association_app_mode_collects_spurapp_file_args() {
+        let Mode::App { files, socket } = parse_mode_from([
+            "--socket".to_string(),
+            "/tmp/notebook-session.sock".to_string(),
+            "forecast.spurapp".to_string(),
+            "notes.ipynb".to_string(),
+        ]) else {
+            panic!("expected app mode");
+        };
+
+        assert_eq!(socket, Some(PathBuf::from("/tmp/notebook-session.sock")));
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("forecast.spurapp"),
+                PathBuf::from("notes.ipynb")
+            ]
+        );
+    }
+
+    #[test]
+    fn file_association_resolve_keeps_ipynb_and_imports_spurapp() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_notebook = temp.path().join("source.ipynb");
+        let package = temp.path().join("forecast.spurapp");
+        let cache_root = temp.path().join("cache");
+        let notes = temp.path().join("notes.ipynb");
+
+        std::fs::write(
+            &source_notebook,
+            r#"{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}"#,
+        )
+        .expect("seed source notebook");
+        std::fs::write(
+            &notes,
+            r#"{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}"#,
+        )
+        .expect("seed notes notebook");
+
+        spur_notebook::spur_app::export_spur_app(spur_notebook::spur_app::SpurAppExportOptions {
+            notebook_path: source_notebook.clone(),
+            output_path: package.clone(),
+            name: Some("Forecast Dashboard".to_string()),
+            widget_assets: Vec::new(),
+            include_port_snapshots: false,
+            dependency_roots: vec![temp.path().to_path_buf()],
+        })
+        .expect("export spurapp");
+
+        let resolved = resolve_file_association_targets_with_cache_root(
+            &[notes.clone(), package.clone()],
+            &cache_root,
+        )
+        .expect("resolve file associations");
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0], notes);
+        assert_eq!(
+            resolved[1].file_name().and_then(|name| name.to_str()),
+            Some(spur_notebook::spur_app::SPUR_APP_ENTRY_NOTEBOOK)
+        );
+        assert!(resolved[1].starts_with(&cache_root));
+        assert_eq!(
+            std::fs::read_to_string(&resolved[1]).expect("read imported notebook"),
+            std::fs::read_to_string(&source_notebook).expect("read source notebook")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
