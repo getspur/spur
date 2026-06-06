@@ -441,17 +441,11 @@ mod tests {
         let grouped = group_by_day(vec![e1, e2, e3]);
         assert_eq!(grouped.len(), 2);
         assert_eq!(
-            grouped
-                .get(&NaiveDate::from_ymd_opt(2026, 4, 20).unwrap())
-                .unwrap()
-                .len(),
+            grouped[&NaiveDate::from_ymd_opt(2026, 4, 20).unwrap()].len(),
             2
         );
         assert_eq!(
-            grouped
-                .get(&NaiveDate::from_ymd_opt(2026, 4, 21).unwrap())
-                .unwrap()
-                .len(),
+            grouped[&NaiveDate::from_ymd_opt(2026, 4, 21).unwrap()].len(),
             1
         );
     }
@@ -468,17 +462,11 @@ mod tests {
         let grouped = group_by_week(vec![e1, e2, e3]);
         assert_eq!(grouped.len(), 2);
         assert_eq!(
-            grouped
-                .get(&NaiveDate::from_ymd_opt(2026, 4, 20).unwrap())
-                .unwrap()
-                .len(),
+            grouped[&NaiveDate::from_ymd_opt(2026, 4, 20).unwrap()].len(),
             2
         );
         assert_eq!(
-            grouped
-                .get(&NaiveDate::from_ymd_opt(2026, 4, 27).unwrap())
-                .unwrap()
-                .len(),
+            grouped[&NaiveDate::from_ymd_opt(2026, 4, 27).unwrap()].len(),
             1
         );
     }
@@ -494,7 +482,7 @@ mod tests {
 
         let grouped = group_by_month(vec![e1, e2, e3]);
         assert_eq!(grouped.len(), 2);
-        assert_eq!(grouped.get("2026-04").unwrap().len(), 2);
-        assert_eq!(grouped.get("2026-05").unwrap().len(), 1);
+        assert_eq!(grouped["2026-04"].len(), 2);
+        assert_eq!(grouped["2026-05"].len(), 1);
     }
 }
