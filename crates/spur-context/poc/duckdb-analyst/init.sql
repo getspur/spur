@@ -16,6 +16,9 @@
 --   files                      — view over files.parquet
 --   file_manifests             — view over file_manifests.parquet
 --   tombstones                 — view over tombstones.parquet
+--   v_cross_crate_calls        — resolved static calls crossing crate/package boundaries
+--   v_import_licensed_precision_gate
+--                              — zero-row-on-pass witness/language gate for import_licensed calls
 --   _meta                      — manifest metadata and row counts
 --   PROPERTY GRAPH code        — DuckPGQ surface
 --   onager_edges(src, dst)     — Onager surface (BIGINT-keyed, globally unique)
@@ -187,6 +190,130 @@ GROUP BY
   ext.qualified_name,
   ext.stable_symbol_id;
 
+CREATE OR REPLACE VIEW v_cross_crate_calls AS
+WITH resolved_calls AS (
+  SELECT
+    e.source_stable_id AS source_stable_symbol_id,
+    e.target_stable_id AS target_stable_symbol_id,
+    e.target_label,
+    COALESCE(e.edge_kind, 'calls') AS edge_kind,
+    e.relation,
+    e.confidence,
+    e.confidence_score,
+    e.bind_method,
+    CASE
+      WHEN s.file_path LIKE 'crates/%' THEN regexp_extract(s.file_path, '^crates/([^/]+)', 1)
+      ELSE regexp_extract(s.file_path, '^[^/]+', 0)
+    END AS source_crate,
+    s.file_path AS source_file_path,
+    s.entity_name AS source_symbol,
+    s.qualified_name AS source_qualified_symbol,
+    s.symbol_kind AS source_symbol_kind,
+    CASE
+      WHEN t.file_path LIKE 'crates/%' THEN regexp_extract(t.file_path, '^crates/([^/]+)', 1)
+      ELSE regexp_extract(t.file_path, '^[^/]+', 0)
+    END AS target_crate,
+    t.file_path AS target_file_path,
+    t.entity_name AS target_symbol,
+    t.qualified_name AS target_qualified_symbol,
+    t.symbol_kind AS target_symbol_kind
+  FROM edges e
+  JOIN nodes s
+    ON s.stable_symbol_id = e.source_stable_id
+  JOIN nodes t
+    ON t.stable_symbol_id = e.target_stable_id
+  WHERE e.relation = 'calls'
+    AND COALESCE(e.edge_kind, 'calls') = 'calls'
+    AND t.symbol_kind <> 'external'
+)
+SELECT *
+FROM resolved_calls
+WHERE source_crate <> target_crate;
+
+-- Standing precision gate for the P3 import_licensed arm. The view returns
+-- violations, so the expected count is 0 on each checked corpus.
+CREATE OR REPLACE VIEW v_import_licensed_precision_gate AS
+WITH licensed_calls AS (
+  SELECT
+    e.source_stable_id AS source_stable_symbol_id,
+    e.target_stable_id AS target_stable_symbol_id,
+    e.target_label,
+    s.file_path AS source_file_path,
+    s.entity_name AS source_symbol,
+    s.qualified_name AS source_qualified_symbol,
+    t.file_path AS target_file_path,
+    t.entity_name AS target_symbol,
+    t.qualified_name AS target_qualified_symbol,
+    CASE
+      WHEN lower(s.file_path) LIKE '%.rs' THEN 'rust'
+      WHEN lower(s.file_path) LIKE '%.py' THEN 'python'
+      WHEN lower(s.file_path) LIKE '%.js'
+        OR lower(s.file_path) LIKE '%.jsx'
+        OR lower(s.file_path) LIKE '%.ts'
+        OR lower(s.file_path) LIKE '%.tsx' THEN 'javascript'
+      ELSE 'unknown'
+    END AS source_language_family,
+    CASE
+      WHEN lower(t.file_path) LIKE '%.rs' THEN 'rust'
+      WHEN lower(t.file_path) LIKE '%.py' THEN 'python'
+      WHEN lower(t.file_path) LIKE '%.js'
+        OR lower(t.file_path) LIKE '%.jsx'
+        OR lower(t.file_path) LIKE '%.ts'
+        OR lower(t.file_path) LIKE '%.tsx' THEN 'javascript'
+      ELSE 'unknown'
+    END AS target_language_family
+  FROM edges e
+  JOIN nodes s
+    ON s.stable_symbol_id = e.source_stable_id
+  JOIN nodes t
+    ON t.stable_symbol_id = e.target_stable_id
+  WHERE e.relation = 'calls'
+    AND COALESCE(e.edge_kind, 'calls') = 'calls'
+    AND e.bind_method = 'import_licensed'
+    AND t.symbol_kind <> 'external'
+),
+checked AS (
+  SELECT
+    l.*,
+    EXISTS (
+      SELECT 1
+      FROM edges witness
+      JOIN nodes witness_source
+        ON witness_source.stable_symbol_id = witness.source_stable_id
+      WHERE witness.relation = 'imports'
+        AND witness.target_stable_id = l.target_stable_symbol_id
+        AND witness_source.file_path = l.source_file_path
+        AND (
+          witness.target_label = l.target_symbol
+          OR witness.import_path = l.target_symbol
+          OR witness.import_path LIKE '%::' || l.target_symbol
+        )
+    ) AS witness_backed,
+    source_language_family <> 'unknown'
+      AND target_language_family <> 'unknown'
+      AND source_language_family <> target_language_family AS cross_language
+  FROM licensed_calls l
+)
+SELECT
+  CASE
+    WHEN NOT witness_backed THEN 'missing_witness'
+    ELSE 'cross_language'
+  END AS violation_kind,
+  source_stable_symbol_id,
+  target_stable_symbol_id,
+  target_label,
+  source_file_path,
+  source_symbol,
+  source_qualified_symbol,
+  target_file_path,
+  target_symbol,
+  target_qualified_symbol,
+  source_language_family,
+  target_language_family
+FROM checked
+WHERE NOT witness_backed
+   OR cross_language;
+
 -- DuckPGQ currently rejects property graphs over views, so keep a small
 -- compatibility surface sourced from the Parquet views. Analytical SQL and
 -- Onager paths use the views directly.
@@ -214,7 +341,8 @@ SELECT source_stable_id,
        target_stable_id,
        edge_kind,
        relation,
-       confidence
+       confidence,
+       bind_method
 FROM edges;
 
 CREATE OR REPLACE TABLE duckpgq_import_edges AS
@@ -223,6 +351,15 @@ FROM duckpgq_edges e
 JOIN duckpgq_external_nodes n
   ON n.stable_symbol_id = e.target_stable_id
 WHERE e.relation = 'imports';
+
+CREATE OR REPLACE TABLE duckpgq_cross_crate_call_edges AS
+SELECT DISTINCT e.*
+FROM duckpgq_edges e
+JOIN v_cross_crate_calls c
+  ON c.source_stable_symbol_id = e.source_stable_id
+ AND c.target_stable_symbol_id = e.target_stable_id
+ AND c.relation = e.relation
+ AND c.edge_kind = COALESCE(e.edge_kind, 'calls');
 
 CREATE OR REPLACE VIEW onager_edges AS
 SELECT src_id AS src, dst_id AS dst
@@ -241,9 +378,13 @@ CREATE OR REPLACE PROPERTY GRAPH code
   EDGE TABLES (
     duckpgq_edges SOURCE      KEY (source_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
                  DESTINATION KEY (target_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
-                 PROPERTIES  (edge_kind, relation, confidence),
+                 PROPERTIES  (edge_kind, relation, confidence, bind_method),
     duckpgq_import_edges SOURCE      KEY (source_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
                          DESTINATION KEY (target_stable_id) REFERENCES duckpgq_external_nodes (stable_symbol_id)
-                         PROPERTIES  (edge_kind, relation, confidence)
-                         LABEL imports
+                         PROPERTIES  (edge_kind, relation, confidence, bind_method)
+                         LABEL imports,
+    duckpgq_cross_crate_call_edges SOURCE      KEY (source_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
+                                  DESTINATION KEY (target_stable_id) REFERENCES duckpgq_nodes (stable_symbol_id)
+                                  PROPERTIES  (edge_kind, relation, confidence, bind_method)
+                                  LABEL cross_crate_calls
   );

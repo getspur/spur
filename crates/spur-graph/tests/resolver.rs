@@ -223,6 +223,137 @@ fn helper() {}
     assert_eq!(edge.bind_method.as_deref(), Some("singleton"));
 }
 
+#[test]
+fn import_licensed_disambiguates_ambiguous_cross_crate_callable_call() {
+    let artifact = artifact_from_sources(&[
+        (
+            "crates/crate-a/src/with_import.rs",
+            r"
+use crate_b::foo;
+
+pub fn caller_with_import() {
+    foo();
+}
+",
+        ),
+        (
+            "crates/crate-a/src/without_import.rs",
+            r"
+pub fn caller_without_import() {
+    foo();
+}
+",
+        ),
+        (
+            "crates/crate-b/src/lib.rs",
+            r"
+pub fn foo() {}
+",
+        ),
+        (
+            "crates/crate-c/src/lib.rs",
+            r"
+pub struct Other;
+
+impl Other {
+    pub fn foo(&self) {}
+}
+",
+        ),
+    ]);
+    let caller_with_import = symbol_in_file(
+        &artifact,
+        "crates/crate-a/src/with_import.rs",
+        "caller_with_import",
+        "function",
+    );
+    let caller_without_import = symbol_in_file(
+        &artifact,
+        "crates/crate-a/src/without_import.rs",
+        "caller_without_import",
+        "function",
+    );
+    let crate_b_foo = symbol_in_file(&artifact, "crates/crate-b/src/lib.rs", "foo", "function");
+
+    let imported_call = call_edge(&artifact, caller_with_import, "foo");
+    assert_eq!(
+        imported_call.target_stable_symbol_id.as_deref(),
+        Some(crate_b_foo.stable_symbol_id.as_str())
+    );
+    assert_eq!(
+        imported_call.bind_method.as_deref(),
+        Some("import_licensed")
+    );
+
+    let unlicensed_call = call_edge(&artifact, caller_without_import, "foo");
+    assert_eq!(unlicensed_call.target_stable_symbol_id, None);
+    assert_eq!(unlicensed_call.bind_method, None);
+}
+
+#[test]
+fn import_licensed_binds_single_cross_crate_function_refused_by_singleton_guard() {
+    let artifact = artifact_from_sources(&[
+        (
+            "crates/crate-a/src/lib.rs",
+            r"
+use crate_b::only;
+
+pub fn caller() {
+    only();
+}
+",
+        ),
+        (
+            "crates/crate-b/src/lib.rs",
+            r"
+pub fn only() {}
+",
+        ),
+    ]);
+    let caller = symbol_in_file(&artifact, "crates/crate-a/src/lib.rs", "caller", "function");
+    let only = symbol_in_file(&artifact, "crates/crate-b/src/lib.rs", "only", "function");
+
+    let edge = call_edge(&artifact, caller, "only");
+
+    assert_eq!(
+        edge.target_stable_symbol_id.as_deref(),
+        Some(only.stable_symbol_id.as_str())
+    );
+    assert_eq!(edge.bind_method.as_deref(), Some("import_licensed"));
+}
+
+#[test]
+fn imported_type_does_not_license_cross_crate_method_call() {
+    let artifact = artifact_from_sources(&[
+        (
+            "crates/crate-a/src/lib.rs",
+            r"
+use crate_b::Type;
+
+pub fn caller(value: Unknown) {
+    value.method();
+}
+",
+        ),
+        (
+            "crates/crate-b/src/lib.rs",
+            r"
+pub struct Type;
+
+impl Type {
+    pub fn method(&self) {}
+}
+",
+        ),
+    ]);
+    let caller = symbol_in_file(&artifact, "crates/crate-a/src/lib.rs", "caller", "function");
+
+    let edge = call_edge(&artifact, caller, "method");
+
+    assert_eq!(edge.target_stable_symbol_id, None);
+    assert_eq!(edge.bind_method, None);
+}
+
 impl ResolverCase {
     fn new(explicit_override: bool, current: bool, pointer: bool) -> Self {
         Self {
@@ -392,6 +523,37 @@ fn symbol<'a>(artifact: &'a GraphIndexArtifact, qualified_name: &str) -> &'a Gra
                 .map(|symbol| symbol.qualified_name.as_str())
                 .collect::<Vec<_>>();
             panic!("missing symbol `{qualified_name}` in {names:?}");
+        })
+}
+
+fn symbol_in_file<'a>(
+    artifact: &'a GraphIndexArtifact,
+    file_path: &str,
+    entity_name: &str,
+    symbol_kind: &str,
+) -> &'a GraphSymbolArtifact {
+    artifact
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.file_path == file_path
+                && symbol.entity_name == entity_name
+                && symbol.symbol_kind == symbol_kind
+        })
+        .unwrap_or_else(|| {
+            let symbols = artifact
+                .symbols
+                .iter()
+                .map(|symbol| {
+                    (
+                        symbol.file_path.as_str(),
+                        symbol.entity_name.as_str(),
+                        symbol.symbol_kind.as_str(),
+                        symbol.qualified_name.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!("missing {symbol_kind} `{entity_name}` in `{file_path}` from {symbols:?}");
         })
 }
 

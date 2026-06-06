@@ -31,7 +31,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v8";
 pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-06-external-symbol-modeling-v16";
+pub const RESOLVER_VERSION: &str = "2026-06-06-import-licensed-cross-crate-v17";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1292,7 +1292,7 @@ fn rebind_remaining_edges(
     buckets: &mut BTreeMap<String, FileBucket>,
     workspace_index: &ImportWorkspaceIndex,
     symbols_by_entity_name: &BTreeMap<String, Vec<RebindTarget>>,
-    _file_import_index: &FileImportIndex,
+    file_import_index: &FileImportIndex,
     external_imports: &mut ExternalImportRegistry,
 ) -> usize {
     let mut ambiguous_unresolved = 0usize;
@@ -1348,21 +1348,47 @@ fn rebind_remaining_edges(
                 continue;
             };
             if matches.len() > 1 {
-                ambiguous_unresolved += 1;
-                tracing::debug!(
-                    target_label = target_label.as_str(),
-                    candidates = matches.len(),
-                    "spur-graph: ambiguous cross-file target_label; leaving unresolved"
-                );
+                if let Some(resolved) = import_licensed_call_target(
+                    edge,
+                    source_file_path,
+                    &target_label,
+                    &matches,
+                    file_import_index,
+                ) {
+                    edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+                    edge.bind_method = Some("import_licensed".to_owned());
+                } else {
+                    ambiguous_unresolved += 1;
+                    tracing::debug!(
+                        target_label = target_label.as_str(),
+                        candidates = matches.len(),
+                        "spur-graph: ambiguous cross-file target_label; leaving unresolved"
+                    );
+                    edge.target_stable_symbol_id = None;
+                }
+            } else if (edge.relation == RelationKind::Calls
+                || edge.relation == RelationKind::References)
+                && resolved.symbol_kind == "method"
+                && !same_directory_path(&resolved.file_path, source_file_path)
+            {
                 edge.target_stable_symbol_id = None;
             } else if (edge.relation == RelationKind::Calls
                 || edge.relation == RelationKind::References)
-                && ((resolved.symbol_kind == "method"
-                    && !same_directory_path(&resolved.file_path, source_file_path))
-                    || (resolved.symbol_kind == "function"
-                        && !function_singleton_safe(source_file_path, &resolved.file_path)))
+                && resolved.symbol_kind == "function"
+                && !function_singleton_safe(source_file_path, &resolved.file_path)
             {
-                edge.target_stable_symbol_id = None;
+                if let Some(resolved) = import_licensed_call_target(
+                    edge,
+                    source_file_path,
+                    &target_label,
+                    &matches,
+                    file_import_index,
+                ) {
+                    edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+                    edge.bind_method = Some("import_licensed".to_owned());
+                } else {
+                    edge.target_stable_symbol_id = None;
+                }
             } else {
                 edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
                 if edge.relation == RelationKind::Calls && resolved.symbol_kind == "function" {
@@ -1373,6 +1399,48 @@ fn rebind_remaining_edges(
         }
     }
     ambiguous_unresolved
+}
+
+fn import_licensed_call_target<'a>(
+    edge: &GraphEdgeArtifact,
+    source_file_path: &str,
+    target_label: &str,
+    matches: &[&'a RebindTarget],
+    file_import_index: &FileImportIndex,
+) -> Option<&'a RebindTarget> {
+    if edge.relation != RelationKind::Calls
+        || edge.edge_kind == Some(GraphEdgeKind::CallsDyn)
+        || edge.target_stable_symbol_id.is_some()
+    {
+        return None;
+    }
+    let imported_targets = file_import_index.get(source_file_path)?.get(target_label)?;
+    let [imported_target] = imported_targets.as_slice() else {
+        return None;
+    };
+    let mut licensed_matches = matches
+        .iter()
+        .copied()
+        .filter(|target| target.stable_symbol_id == imported_target.stable_symbol_id);
+    let resolved = licensed_matches.next()?;
+    if licensed_matches.next().is_some() {
+        return None;
+    }
+    if resolved.symbol_kind != "function" {
+        return None;
+    }
+    debug_assert_eq!(resolved.symbol_kind, "function");
+    if !same_import_rebind_language(source_file_path, &resolved.file_path) {
+        return None;
+    }
+    debug_assert!(same_import_rebind_language(
+        source_file_path,
+        &resolved.file_path
+    ));
+    if function_singleton_safe(source_file_path, &resolved.file_path) {
+        return None;
+    }
+    Some(resolved)
 }
 
 fn resolution_is_stamped(edge: &GraphEdgeArtifact) -> bool {
@@ -1387,6 +1455,7 @@ fn resolution_is_stamped(edge: &GraphEdgeArtifact) -> bool {
                 | "constructs_type_singleton"
                 | "method_crate_singleton"
                 | "import_path"
+                | "import_licensed"
                 | "external"
         )
     )
@@ -2035,8 +2104,9 @@ mod tests {
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
         compose_artifact, empty_bucket, import_workspace_index_from_buckets,
         manifest_version_from_query_bytes, rebind_cross_file_edges, rebind_import_edges,
-        symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry, ExternalImportRegistry,
-        ManifestQueryBytes, GRAPH_INDEX_VERSION_TEMPORAL,
+        rebind_remaining_edges, symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry,
+        ExternalImportRegistry, FileImportIndex, ManifestQueryBytes, RebindTarget,
+        GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
@@ -2478,6 +2548,146 @@ mod tests {
             !imports.contains_key("Deserialize"),
             "external imports must not be indexed as workspace licenses"
         );
+    }
+
+    #[test]
+    fn remaining_phase_licenses_ambiguous_function_call_from_import_index() {
+        let mut crate_b_bucket = empty_bucket("crates/crate-b/src/lib.rs", "oid-crate-b");
+        let mut crate_b_foo = symbol("sym:crate-b-foo", "crates/crate-b/src/lib.rs");
+        crate_b_foo.entity_name = "foo".to_owned();
+        crate_b_foo.symbol_kind = "function".to_owned();
+        crate_b_bucket.symbols.push(crate_b_foo);
+
+        let mut crate_c_bucket = empty_bucket("crates/crate-c/src/lib.rs", "oid-crate-c");
+        let mut crate_c_foo = symbol("sym:crate-c-foo", "crates/crate-c/src/lib.rs");
+        crate_c_foo.entity_name = "foo".to_owned();
+        crate_c_foo.symbol_kind = "function".to_owned();
+        crate_c_bucket.symbols.push(crate_c_foo);
+
+        let mut use_bucket = empty_bucket("crates/crate-a/src/lib.rs", "oid-use");
+        use_bucket
+            .symbols
+            .push(symbol("sym:caller", "crates/crate-a/src/lib.rs"));
+        let mut call_edge = edge("sym:caller", None, RelationKind::Calls);
+        call_edge.target_label = Some("foo".to_owned());
+        use_bucket.edges.push(call_edge);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("crates/crate-a/src/lib.rs".to_owned(), use_bucket);
+        buckets.insert("crates/crate-b/src/lib.rs".to_owned(), crate_b_bucket);
+        buckets.insert("crates/crate-c/src/lib.rs".to_owned(), crate_c_bucket);
+
+        let workspace_index = import_workspace_index_from_buckets(&buckets);
+        let symbols_by_entity_name = symbols_by_entity_name_from_buckets(&buckets);
+        let mut external_imports = ExternalImportRegistry::from_buckets(&buckets);
+        let file_import_index = FileImportIndex::from([(
+            "crates/crate-a/src/lib.rs".to_owned(),
+            BTreeMap::from([(
+                "foo".to_owned(),
+                vec![RebindTarget {
+                    stable_symbol_id: "sym:crate-b-foo".to_owned(),
+                    file_path: "crates/crate-b/src/lib.rs".to_owned(),
+                    symbol_kind: "function".to_owned(),
+                }],
+            )]),
+        )]);
+
+        let ambiguous_unresolved = rebind_remaining_edges(
+            &mut buckets,
+            &workspace_index,
+            &symbols_by_entity_name,
+            &file_import_index,
+            &mut external_imports,
+        );
+
+        assert_eq!(ambiguous_unresolved, 0);
+        let resolved_edge = &buckets["crates/crate-a/src/lib.rs"].edges[0];
+        assert_eq!(
+            resolved_edge.target_stable_symbol_id.as_deref(),
+            Some("sym:crate-b-foo")
+        );
+        assert_eq!(
+            resolved_edge.bind_method.as_deref(),
+            Some("import_licensed")
+        );
+    }
+
+    #[test]
+    fn remaining_phase_preserves_stamped_call_targets_before_import_licensing() {
+        let mut crate_b_bucket = empty_bucket("crates/crate-b/src/lib.rs", "oid-crate-b");
+        let mut crate_b_foo = symbol("sym:crate-b-foo", "crates/crate-b/src/lib.rs");
+        crate_b_foo.entity_name = "foo".to_owned();
+        crate_b_foo.symbol_kind = "function".to_owned();
+        crate_b_bucket.symbols.push(crate_b_foo);
+
+        let mut crate_c_bucket = empty_bucket("crates/crate-c/src/lib.rs", "oid-crate-c");
+        let mut crate_c_foo = symbol("sym:crate-c-foo", "crates/crate-c/src/lib.rs");
+        crate_c_foo.entity_name = "foo".to_owned();
+        crate_c_foo.symbol_kind = "function".to_owned();
+        crate_c_bucket.symbols.push(crate_c_foo);
+
+        let mut use_bucket = empty_bucket("crates/crate-a/src/lib.rs", "oid-use");
+        use_bucket.symbols.extend([
+            symbol("sym:singleton-caller", "crates/crate-a/src/lib.rs"),
+            symbol("sym:licensed-caller", "crates/crate-a/src/lib.rs"),
+        ]);
+        let mut singleton_edge = edge(
+            "sym:singleton-caller",
+            Some("sym:crate-c-foo"),
+            RelationKind::Calls,
+        );
+        singleton_edge.target_label = Some("foo".to_owned());
+        singleton_edge.bind_method = Some("singleton".to_owned());
+        use_bucket.edges.push(singleton_edge);
+
+        let mut licensed_edge = edge(
+            "sym:licensed-caller",
+            Some("sym:crate-b-foo"),
+            RelationKind::Calls,
+        );
+        licensed_edge.target_label = Some("foo".to_owned());
+        licensed_edge.bind_method = Some("import_licensed".to_owned());
+        use_bucket.edges.push(licensed_edge);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("crates/crate-a/src/lib.rs".to_owned(), use_bucket);
+        buckets.insert("crates/crate-b/src/lib.rs".to_owned(), crate_b_bucket);
+        buckets.insert("crates/crate-c/src/lib.rs".to_owned(), crate_c_bucket);
+
+        let workspace_index = import_workspace_index_from_buckets(&buckets);
+        let symbols_by_entity_name = symbols_by_entity_name_from_buckets(&buckets);
+        let mut external_imports = ExternalImportRegistry::from_buckets(&buckets);
+        let file_import_index = FileImportIndex::from([(
+            "crates/crate-a/src/lib.rs".to_owned(),
+            BTreeMap::from([(
+                "foo".to_owned(),
+                vec![RebindTarget {
+                    stable_symbol_id: "sym:crate-b-foo".to_owned(),
+                    file_path: "crates/crate-b/src/lib.rs".to_owned(),
+                    symbol_kind: "function".to_owned(),
+                }],
+            )]),
+        )]);
+
+        rebind_remaining_edges(
+            &mut buckets,
+            &workspace_index,
+            &symbols_by_entity_name,
+            &file_import_index,
+            &mut external_imports,
+        );
+
+        let edges = &buckets["crates/crate-a/src/lib.rs"].edges;
+        assert_eq!(
+            edges[0].target_stable_symbol_id.as_deref(),
+            Some("sym:crate-c-foo")
+        );
+        assert_eq!(edges[0].bind_method.as_deref(), Some("singleton"));
+        assert_eq!(
+            edges[1].target_stable_symbol_id.as_deref(),
+            Some("sym:crate-b-foo")
+        );
+        assert_eq!(edges[1].bind_method.as_deref(), Some("import_licensed"));
     }
 
     #[test]
