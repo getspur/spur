@@ -31,7 +31,7 @@ use crate::{
 pub const SCHEMA_VERSION: &str = "spur-graph-schema-v8";
 pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
-pub const RESOLVER_VERSION: &str = "2026-06-06-import-licensed-cross-crate-v17";
+pub const RESOLVER_VERSION: &str = "2026-06-06-import-licensed-xcrate-supply-v18";
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestQueryBytes<'a> {
@@ -1024,6 +1024,8 @@ fn compose_artifact(
 struct RebindTarget {
     stable_symbol_id: String,
     file_path: String,
+    entity_name: String,
+    qualified_name: String,
     symbol_kind: String,
 }
 
@@ -1174,6 +1176,8 @@ fn symbols_by_entity_name_from_buckets(
                 .push(RebindTarget {
                     stable_symbol_id: symbol.stable_symbol_id.clone(),
                     file_path: symbol.file_path.clone(),
+                    entity_name: symbol.entity_name.clone(),
+                    qualified_name: symbol.qualified_name.clone(),
                     symbol_kind: symbol.symbol_kind.clone(),
                 });
         }
@@ -1239,8 +1243,13 @@ fn rebind_import_edges(
                 edge.target_stable_symbol_id = None;
                 continue;
             };
-            let matches =
-                import_rebind_candidates(matches, source_file_path, edge.import_path.is_some());
+            let (matches, bind_method) = import_rebind_candidates(
+                matches,
+                source_file_path,
+                &target_label,
+                edge.import_path.as_deref(),
+                workspace_index,
+            );
             // Candidate filtering above can remove every match, so the
             // bucket lookup being non-empty does not guarantee `matches` is.
             let Some(resolved) = matches.first() else {
@@ -1273,6 +1282,9 @@ fn rebind_import_edges(
                 edge.target_stable_symbol_id = None;
             } else {
                 edge.target_stable_symbol_id = Some(resolved.stable_symbol_id.clone());
+                if let Some(bind_method) = bind_method {
+                    edge.bind_method = Some(bind_method.to_owned());
+                }
             }
             record_resolved_workspace_import(
                 &mut file_import_index,
@@ -1507,6 +1519,8 @@ fn sort_file_import_index(file_import_index: &mut FileImportIndex) {
             left.stable_symbol_id
                 .cmp(&right.stable_symbol_id)
                 .then_with(|| left.file_path.cmp(&right.file_path))
+                .then_with(|| left.entity_name.cmp(&right.entity_name))
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
                 .then_with(|| left.symbol_kind.cmp(&right.symbol_kind))
         });
     }
@@ -1515,19 +1529,60 @@ fn sort_file_import_index(file_import_index: &mut FileImportIndex) {
 fn import_rebind_candidates<'a>(
     matches: &'a [RebindTarget],
     source_file_path: &str,
-    import_path_present: bool,
-) -> Vec<&'a RebindTarget> {
+    target_label: &str,
+    import_path: Option<&str>,
+    workspace_index: &ImportWorkspaceIndex,
+) -> (Vec<&'a RebindTarget>, Option<&'static str>) {
     let raw_candidates = matches
         .iter()
         .filter(|target| is_import_rebind_candidate_kind(&target.symbol_kind))
         .collect::<Vec<_>>();
 
-    if import_path_present {
-        return raw_candidates
-            .into_iter()
-            .filter(|target| is_import_rebind_type_like_candidate_kind(&target.symbol_kind))
-            .filter(|target| same_import_rebind_language(source_file_path, &target.file_path))
-            .collect();
+    if let Some(import_path) = import_path {
+        match rust_workspace_import_path(
+            import_path,
+            target_label,
+            source_file_path,
+            workspace_index,
+        ) {
+            Some(RustWorkspaceImportPath::WorkspaceCrate {
+                crate_name,
+                remaining_segments,
+            }) => {
+                return (
+                    raw_candidates
+                        .into_iter()
+                        .filter(|target| {
+                            is_import_rebind_type_like_candidate_kind(&target.symbol_kind)
+                        })
+                        .filter(|target| {
+                            same_import_rebind_language(source_file_path, &target.file_path)
+                        })
+                        .filter(|target| {
+                            rust_workspace_import_matches_target(
+                                target,
+                                &crate_name,
+                                &remaining_segments,
+                            )
+                        })
+                        .collect(),
+                    Some("import_path"),
+                );
+            }
+            Some(RustWorkspaceImportPath::External) => {
+                return (Vec::new(), None);
+            }
+            None => {}
+        }
+
+        return (
+            raw_candidates
+                .into_iter()
+                .filter(|target| is_import_rebind_type_like_candidate_kind(&target.symbol_kind))
+                .filter(|target| same_import_rebind_language(source_file_path, &target.file_path))
+                .collect(),
+            None,
+        );
     }
 
     let mut candidates = raw_candidates
@@ -1541,7 +1596,170 @@ fn import_rebind_candidates<'a>(
             .filter(|target| is_import_rebind_fallback_candidate_kind(&target.symbol_kind))
             .collect();
     }
-    candidates
+    (candidates, None)
+}
+
+enum RustWorkspaceImportPath {
+    WorkspaceCrate {
+        crate_name: String,
+        remaining_segments: Vec<String>,
+    },
+    External,
+}
+
+fn rust_workspace_import_path(
+    import_path: &str,
+    target_label: &str,
+    source_file_path: &str,
+    workspace_index: &ImportWorkspaceIndex,
+) -> Option<RustWorkspaceImportPath> {
+    if import_rebind_language(source_file_path) != Some("rust") {
+        return None;
+    }
+    let segments = rust_import_path_segments(import_path, target_label);
+    let (first, rest) = segments.split_first()?;
+    if matches!(first.as_str(), "crate" | "self" | "super" | "$crate") {
+        return None;
+    }
+    let crate_name = normalize_rust_crate_name(first);
+    if rust_workspace_crate_name_from_path(source_file_path).as_deref() == Some(crate_name.as_str())
+    {
+        return None;
+    }
+    if workspace_index.rust_crates.contains(&crate_name) {
+        return Some(RustWorkspaceImportPath::WorkspaceCrate {
+            crate_name,
+            remaining_segments: rest.to_vec(),
+        });
+    }
+    Some(RustWorkspaceImportPath::External)
+}
+
+fn rust_import_path_segments(import_path: &str, target_label: &str) -> Vec<String> {
+    let mut path = import_path.trim();
+    if let Some((prefix, _)) = path.split_once('{') {
+        path = prefix.trim_end_matches(':').trim();
+    }
+    let mut segments = path
+        .split("::")
+        .map(clean_rust_path_segment)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let target_label = clean_rust_path_segment(target_label);
+    if !target_label.is_empty()
+        && segments
+            .last()
+            .is_none_or(|segment| segment != &target_label)
+    {
+        segments.push(target_label);
+    }
+    segments
+}
+
+fn rust_workspace_import_matches_target(
+    target: &RebindTarget,
+    crate_name: &str,
+    remaining_segments: &[String],
+) -> bool {
+    if remaining_segments.is_empty() {
+        return false;
+    }
+    if rust_workspace_crate_name_from_path(&target.file_path).as_deref() != Some(crate_name) {
+        return false;
+    }
+    let remaining_path = remaining_segments.join("::");
+    if remaining_segments.len() == 1
+        && (clean_rust_path_segment(&target.entity_name) == remaining_path
+            || clean_rust_qualified_name(&target.qualified_name) == remaining_path)
+    {
+        return true;
+    }
+    rust_workspace_target_import_paths(target).contains(&remaining_path)
+}
+
+fn rust_workspace_target_import_paths(target: &RebindTarget) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    let qualified_name = clean_rust_qualified_name(&target.qualified_name);
+    let entity_name = clean_rust_path_segment(&target.entity_name);
+    let module_segments = rust_file_module_segments(&target.file_path);
+
+    if module_segments.is_empty() {
+        insert_non_empty(&mut paths, qualified_name);
+        insert_non_empty(&mut paths, entity_name);
+        return paths;
+    }
+
+    let module_path = module_segments.join("::");
+    if qualified_name == module_path || qualified_name.starts_with(&format!("{module_path}::")) {
+        insert_non_empty(&mut paths, qualified_name);
+    } else {
+        insert_qualified_under_module(&mut paths, &module_path, &qualified_name);
+    }
+    insert_qualified_under_module(&mut paths, &module_path, &entity_name);
+    paths
+}
+
+fn insert_qualified_under_module(paths: &mut BTreeSet<String>, module_path: &str, name: &str) {
+    if name.is_empty() {
+        return;
+    }
+    paths.insert(format!("{module_path}::{name}"));
+}
+
+fn insert_non_empty(paths: &mut BTreeSet<String>, value: String) {
+    if !value.is_empty() {
+        paths.insert(value);
+    }
+}
+
+fn clean_rust_qualified_name(qualified_name: &str) -> String {
+    qualified_name
+        .split("::")
+        .map(clean_rust_path_segment)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn clean_rust_path_segment(segment: &str) -> String {
+    segment.trim().trim_start_matches("r#").to_owned()
+}
+
+fn rust_workspace_crate_name_from_path(path: &str) -> Option<String> {
+    let segments = path.split('/').collect::<Vec<_>>();
+    let crates_index = segments.iter().position(|segment| *segment == "crates")?;
+    let crate_name = segments.get(crates_index + 1)?;
+    if crate_name.is_empty() || *crate_name == "src" {
+        return None;
+    }
+    Some(normalize_rust_crate_name(crate_name))
+}
+
+fn normalize_rust_crate_name(crate_name: &str) -> String {
+    clean_rust_path_segment(crate_name).replace('-', "_")
+}
+
+fn rust_file_module_segments(path: &str) -> Vec<String> {
+    let Some(src_relative) = rust_src_relative_path(path) else {
+        return Vec::new();
+    };
+    if matches!(src_relative, "lib.rs" | "main.rs") {
+        return Vec::new();
+    }
+    let module_path = src_relative
+        .strip_suffix("/mod.rs")
+        .or_else(|| src_relative.strip_suffix(".rs"))
+        .unwrap_or(src_relative);
+    module_path
+        .split('/')
+        .map(clean_rust_path_segment)
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn rust_src_relative_path(path: &str) -> Option<&str> {
+    path.strip_prefix("src/")
+        .or_else(|| path.split_once("/src/").map(|(_, path)| path))
 }
 
 fn bind_external_import_edge(
@@ -1596,7 +1814,9 @@ fn add_rust_workspace_crate(path: &str, index: &mut ImportWorkspaceIndex) {
     if crate_name.is_empty() || *crate_name == "src" {
         return;
     }
-    index.rust_crates.insert(crate_name.replace('-', "_"));
+    index
+        .rust_crates
+        .insert(normalize_rust_crate_name(crate_name));
 }
 
 fn add_python_workspace_modules(path: &str, index: &mut ImportWorkspaceIndex) {
@@ -2374,31 +2594,79 @@ mod tests {
     }
 
     #[test]
-    fn rebind_import_path_keeps_cross_crate_type_fallback_unstamped() {
+    fn rebind_import_path_stamps_cross_crate_workspace_path() {
         let mut def_bucket = empty_bucket("crates/spur-acp/src/types.rs", "oid-def");
         let mut session_symbol = symbol("sym:session", "crates/spur-acp/src/types.rs");
         session_symbol.entity_name = "SessionId".to_owned();
+        session_symbol.qualified_name = "SessionId".to_owned();
         session_symbol.symbol_kind = "struct".to_owned();
         def_bucket.symbols.push(session_symbol);
+
+        let mut shadow_bucket = empty_bucket("crates/spur-worktree/src/types.rs", "oid-shadow");
+        let mut shadow_symbol = symbol("sym:shadow-session", "crates/spur-worktree/src/types.rs");
+        shadow_symbol.entity_name = "SessionId".to_owned();
+        shadow_symbol.qualified_name = "SessionId".to_owned();
+        shadow_symbol.symbol_kind = "struct".to_owned();
+        shadow_bucket.symbols.push(shadow_symbol);
 
         let mut use_bucket = empty_bucket("crates/spur-core/src/lib.rs", "oid-use");
         let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
         import_edge.target_label = Some("SessionId".to_owned());
         import_edge.import_path = Some("spur_acp::types::SessionId".to_owned());
         use_bucket.edges.push(import_edge);
+        let mut root_import_edge = edge("sym:importer", None, RelationKind::Imports);
+        root_import_edge.target_label = Some("SessionId".to_owned());
+        root_import_edge.import_path = Some("spur_acp::SessionId".to_owned());
+        use_bucket.edges.push(root_import_edge);
 
         let mut buckets = BTreeMap::new();
         buckets.insert("crates/spur-acp/src/types.rs".to_owned(), def_bucket);
         buckets.insert("crates/spur-core/src/lib.rs".to_owned(), use_bucket);
+        buckets.insert(
+            "crates/spur-worktree/src/types.rs".to_owned(),
+            shadow_bucket,
+        );
 
         rebind_cross_file_edges(&mut buckets);
 
-        let resolved_edge = &buckets["crates/spur-core/src/lib.rs"].edges[0];
+        let edges = &buckets["crates/spur-core/src/lib.rs"].edges;
+        for resolved_edge in edges {
+            assert_eq!(
+                resolved_edge.target_stable_symbol_id.as_deref(),
+                Some("sym:session")
+            );
+            assert_eq!(resolved_edge.bind_method.as_deref(), Some("import_path"));
+        }
+    }
+
+    #[test]
+    fn rebind_import_path_keeps_non_workspace_rust_import_external() {
+        let mut shadow_bucket = empty_bucket("src/shadow.rs", "oid-shadow");
+        let mut shadow_symbol = symbol("sym:deserialize", "src/shadow.rs");
+        shadow_symbol.entity_name = "Deserialize".to_owned();
+        shadow_symbol.qualified_name = "Deserialize".to_owned();
+        shadow_symbol.symbol_kind = "struct".to_owned();
+        shadow_bucket.symbols.push(shadow_symbol);
+
+        let mut use_bucket = empty_bucket("src/lib.rs", "oid-use");
+        let mut import_edge = edge("sym:importer", None, RelationKind::Imports);
+        import_edge.target_label = Some("Deserialize".to_owned());
+        import_edge.import_path = Some("serde::Deserialize".to_owned());
+        use_bucket.edges.push(import_edge);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("src/lib.rs".to_owned(), use_bucket);
+        buckets.insert("src/shadow.rs".to_owned(), shadow_bucket);
+
+        rebind_cross_file_edges(&mut buckets);
+
+        let resolved_edge = &buckets["src/lib.rs"].edges[0];
+        let expected = stable_symbol_id_for_external_path("serde::Deserialize");
         assert_eq!(
             resolved_edge.target_stable_symbol_id.as_deref(),
-            Some("sym:session")
+            Some(expected.as_str())
         );
-        assert_eq!(resolved_edge.bind_method, None);
+        assert_eq!(resolved_edge.bind_method.as_deref(), Some("external"));
     }
 
     #[test]
@@ -2500,7 +2768,7 @@ mod tests {
         let mut def_bucket = empty_bucket("crates/crate-b/src/lib.rs", "oid-def");
         let mut foo_symbol = symbol("sym:crate-b-foo", "crates/crate-b/src/lib.rs");
         foo_symbol.entity_name = "foo".to_owned();
-        foo_symbol.qualified_name = "crate_b::foo".to_owned();
+        foo_symbol.qualified_name = "foo".to_owned();
         foo_symbol.symbol_kind = "function".to_owned();
         def_bucket.symbols.push(foo_symbol);
 
@@ -2531,6 +2799,20 @@ mod tests {
         );
 
         assert_eq!(ambiguous_unresolved, 0);
+        let workspace_import_edge = buckets["crates/crate-a/src/lib.rs"]
+            .edges
+            .iter()
+            .find(|edge| edge.import_path.as_deref() == Some("crate_b::foo"))
+            .expect("workspace import edge");
+        assert_eq!(
+            workspace_import_edge.target_stable_symbol_id.as_deref(),
+            Some("sym:crate-b-foo")
+        );
+        assert_eq!(
+            workspace_import_edge.bind_method.as_deref(),
+            Some("import_path")
+        );
+
         let imports = file_import_index
             .get("crates/crate-a/src/lib.rs")
             .expect("crate-a imports");
@@ -2543,6 +2825,8 @@ mod tests {
         assert_eq!(foo_targets.len(), 1);
         assert_eq!(foo_targets[0].stable_symbol_id, "sym:crate-b-foo");
         assert_eq!(foo_targets[0].file_path, "crates/crate-b/src/lib.rs");
+        assert_eq!(foo_targets[0].entity_name, "foo");
+        assert_eq!(foo_targets[0].qualified_name, "foo");
         assert_eq!(foo_targets[0].symbol_kind, "function");
         assert!(
             !imports.contains_key("Deserialize"),
@@ -2587,6 +2871,8 @@ mod tests {
                 vec![RebindTarget {
                     stable_symbol_id: "sym:crate-b-foo".to_owned(),
                     file_path: "crates/crate-b/src/lib.rs".to_owned(),
+                    entity_name: "foo".to_owned(),
+                    qualified_name: "foo".to_owned(),
                     symbol_kind: "function".to_owned(),
                 }],
             )]),
@@ -2664,6 +2950,8 @@ mod tests {
                 vec![RebindTarget {
                     stable_symbol_id: "sym:crate-b-foo".to_owned(),
                     file_path: "crates/crate-b/src/lib.rs".to_owned(),
+                    entity_name: "foo".to_owned(),
+                    qualified_name: "foo".to_owned(),
                     symbol_kind: "function".to_owned(),
                 }],
             )]),
@@ -2796,6 +3084,50 @@ mod tests {
             Some("sym:local")
         );
         assert_ne!(workspace_import.bind_method.as_deref(), Some("external"));
+    }
+
+    #[test]
+    fn build_facts_resolves_cross_crate_workspace_import_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("crates/spur-graph/src")).expect("mkdir spur-graph");
+        fs::create_dir_all(root.join("crates/spur-core/src")).expect("mkdir spur-core");
+        fs::write(
+            root.join("crates/spur-graph/src/lib.rs"),
+            "pub fn build_facts() {}\n",
+        )
+        .expect("write spur-graph lib.rs");
+        fs::write(
+            root.join("crates/spur-core/src/lib.rs"),
+            "use spur_graph::build_facts;\npub fn run() { build_facts(); }\n",
+        )
+        .expect("write spur-core lib.rs");
+
+        let facts = build_facts(root, None).expect("extract").0;
+        let artifact = artifact_from_facts(&facts, root).expect("artifact");
+        let target = artifact
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.file_path == "crates/spur-graph/src/lib.rs"
+                    && symbol.entity_name == "build_facts"
+                    && symbol.symbol_kind == "function"
+            })
+            .expect("spur_graph::build_facts symbol");
+        let import_edge = artifact
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == RelationKind::Imports
+                    && edge.import_path.as_deref() == Some("spur_graph::build_facts")
+            })
+            .expect("spur_graph::build_facts import");
+
+        assert_eq!(
+            import_edge.target_stable_symbol_id.as_deref(),
+            Some(target.stable_symbol_id.as_str())
+        );
+        assert_eq!(import_edge.bind_method.as_deref(), Some("import_path"));
     }
 
     #[test]
