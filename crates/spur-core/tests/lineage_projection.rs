@@ -74,6 +74,47 @@ fn worker_spawned_drains_child_orphan_buffer() {
 }
 
 #[test]
+fn worker_report_progress_updates_node_by_delegation_id() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "brain".into(),
+        session: SessionId("brain-1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "codex".into(),
+        session: SessionId("worker-1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+        from: SessionId("brain-1".into()),
+        to_agent: "codex".into(),
+        task: "implement progress display".into(),
+        request_id: "deleg-1".into(),
+        delegation_plan: None,
+        issue_id: None,
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+        from: SessionId("brain-1".into()),
+        request_id: "deleg-1".into(),
+        executor_id: "worker-1".into(),
+    }));
+
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerReportProgress {
+        delegation_id: "deleg-1".into(),
+        message: "Red test committed; implementing display".into(),
+        percent: Some(45.0),
+    }));
+
+    let worker = l.node(&ExecutorId::new("worker-1")).unwrap();
+    assert_eq!(
+        worker.latest_progress_message.as_deref(),
+        Some("Red test committed; implementing display")
+    );
+    assert_eq!(worker.latest_progress_percent, Some(45.0));
+    assert!(worker.last_event_at.is_some());
+}
+
+#[test]
 fn lineage_peer_message_accepted_creates_edge_on_source_node() {
     let mut l = ExecutorLineage::new();
     l.apply(&spawn("src", None));

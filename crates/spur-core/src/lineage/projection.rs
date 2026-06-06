@@ -123,6 +123,8 @@ impl ExecutorLineage {
                     last_event_at: None,
                     tool_call_count: 0,
                     latest_tool_call: None,
+                    latest_progress_message: None,
+                    latest_progress_percent: None,
                     files_touched_count: 0,
                     latest_diff_summary: None,
                     latest_diff_text: None,
@@ -317,6 +319,19 @@ impl ExecutorLineage {
                         Some(p) => format!("{} ({}%)", name, p),
                         None => name.clone(),
                     });
+                    node.last_event_at = Some(event.occurred_at);
+                }
+            }
+
+            SpurEventBody::WorkerReportProgress {
+                delegation_id,
+                message,
+                percent,
+            } => {
+                let did = DelegationId(delegation_id.clone());
+                if let Some(node) = self.find_node_mut_by_delegation(&did) {
+                    node.latest_progress_message = Some(message.clone());
+                    node.latest_progress_percent = *percent;
                     node.last_event_at = Some(event.occurred_at);
                 }
             }

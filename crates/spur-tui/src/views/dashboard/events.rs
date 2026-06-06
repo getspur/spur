@@ -169,6 +169,23 @@ impl DashboardView {
                 });
             }
 
+            SpurEventBody::WorkerReportProgress {
+                delegation_id,
+                message,
+                percent,
+            } => {
+                let msg = match percent {
+                    Some(p) => format!("{} ({}%)", message, p),
+                    None => message.clone(),
+                };
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: format!("[delegation:{}]", truncate_display(delegation_id, 12)),
+                    message: msg,
+                    kind: LogEntryKind::Info,
+                });
+            }
+
             SpurEventBody::WorkerFileTouched {
                 executor_id,
                 path,

@@ -132,6 +132,14 @@ pub struct ExecutorNode {
     pub tool_call_count: usize,
     /// Most recent tool call name, if any. Scope-limited: always None in v1.
     pub latest_tool_call: Option<String>,
+    /// Most recent free-form progress message reported by this worker via
+    /// `report_progress`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_progress_message: Option<String>,
+    /// Most recent free-form progress percentage reported by this worker via
+    /// `report_progress`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_progress_percent: Option<f64>,
     /// Files changed in the latest `Artifact::Diff` observed for this
     /// executor (snapshot of the most recent diff, not a cumulative
     /// total). `0` until the first Diff artifact arrives.
@@ -297,6 +305,8 @@ mod attempt_elapsed_tests {
             last_event_at: None,
             tool_call_count: 0,
             latest_tool_call: None,
+            latest_progress_message: None,
+            latest_progress_percent: None,
             files_touched_count: 0,
             latest_diff_summary: None,
             latest_diff_text: None,
@@ -353,6 +363,8 @@ mod attempt_elapsed_tests {
             last_event_at: None,
             tool_call_count: 0,
             latest_tool_call: None,
+            latest_progress_message: None,
+            latest_progress_percent: None,
             files_touched_count: 0,
             latest_diff_summary: None,
             latest_diff_text: None,
