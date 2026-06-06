@@ -379,6 +379,7 @@ fn main() {
             spur_notebook::commands::notebook_run_cascade,
             spur_notebook::commands::notebook_run_cell,
             spur_notebook::commands::anywidget_command,
+            spur_notebook::commands::publish_spur_app,
             spur_notebook::mcp::bridge::bridge_ready,
             spur_notebook::mcp::bridge::notebook_active_changed,
             spur_notebook::mcp::bridge::agent_response,
