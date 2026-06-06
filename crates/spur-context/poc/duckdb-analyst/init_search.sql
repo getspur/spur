@@ -245,3 +245,58 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
     CASE neighbor_kind WHEN 'primary' THEN 0 WHEN 'caller' THEN 1 ELSE 2 END,
     score DESC NULLS LAST
   LIMIT 40;
+
+CREATE OR REPLACE TABLE sections_embeddings AS
+SELECT stable_symbol_id, vector::FLOAT[768] AS vector
+FROM lance_ns.section_bodies
+WHERE vector IS NOT NULL AND heading_level >= 2 AND length(body_text) <= 4096;
+
+CREATE OR REPLACE MACRO search_hybrid(q, vec) AS TABLE
+  WITH bm25 AS (
+    SELECT
+      stable_symbol_id,
+      bm25,
+      row_number() OVER (ORDER BY bm25 DESC NULLS LAST) AS bm25_rank
+    FROM (
+      SELECT
+        s.stable_symbol_id,
+        fts_main_sections_search.match_bm25(s.stable_symbol_id, q) AS bm25
+      FROM sections_search s
+      WHERE fts_main_sections_search.match_bm25(s.stable_symbol_id, q) IS NOT NULL
+      QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY bm25 DESC) <= 2
+      ORDER BY bm25 DESC NULLS LAST
+      LIMIT 30
+    )
+  ),
+  ann AS (
+    SELECT
+      stable_symbol_id,
+      cosine,
+      row_number() OVER (ORDER BY cosine DESC NULLS LAST) AS ann_rank
+    FROM (
+      SELECT
+        stable_symbol_id,
+        list_cosine_similarity(vector, CAST('[' || vec || ']' AS FLOAT[768])) AS cosine
+      FROM sections_embeddings
+      ORDER BY cosine DESC NULLS LAST
+      LIMIT 30
+    )
+  ),
+  rrf AS (
+    SELECT
+      COALESCE(bm25.stable_symbol_id, ann.stable_symbol_id) AS stable_symbol_id,
+      COALESCE(1.0 / (60.0 + bm25.bm25_rank), 0.0)
+        + COALESCE(1.0 / (60.0 + ann.ann_rank), 0.0) AS rrf_score
+    FROM bm25
+    FULL OUTER JOIN ann USING (stable_symbol_id)
+  )
+  SELECT
+    'doc' AS kind,
+    s.qualified_name AS title,
+    regexp_replace(s.file_path, '^(crates|docs|\.claude|\.spur|\.codex|\.kiro|\.gemini)/', '') AS file,
+    round(rrf.rrf_score, 4) AS score,
+    CAST(NULL AS VARCHAR) AS signal
+  FROM rrf
+  JOIN sections_search s USING (stable_symbol_id)
+  ORDER BY rrf.rrf_score DESC NULLS LAST
+  LIMIT 30;
