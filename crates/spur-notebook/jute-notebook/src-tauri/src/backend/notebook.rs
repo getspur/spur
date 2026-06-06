@@ -242,6 +242,32 @@ pub struct SpurCellMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub code_type: Option<CodeType>,
+
+    /// Frontend-cell declaration used by App mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub frontend: Option<FrontendCellMetadata>,
+}
+
+/// App-mode frontend declaration persisted under `cell.metadata.spur.frontend`.
+///
+/// Advisory props are intentionally not persisted; App mode keeps the durable
+/// declaration to `kind`, `binds`, and `emits`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct FrontendCellMetadata {
+    /// Frontend renderer kind, such as `html`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<String>,
+
+    /// DAG ports this frontend cell reads.
+    #[serde(default)]
+    pub binds: Vec<String>,
+
+    /// DAG ports this frontend cell emits.
+    #[serde(default)]
+    pub emits: Vec<String>,
 }
 
 /// Per-cell code language label persisted under `cell.metadata.spur.code_type`.

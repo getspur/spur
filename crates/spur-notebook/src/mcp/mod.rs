@@ -187,6 +187,9 @@ impl ServerHandler for NotebookMcpServer {
             "notebook_set_dag_metadata" => {
                 tools::notebook_set_dag_metadata::call(&self.deps, arguments).await
             }
+            "notebook.set_cell_metadata" => {
+                tools::set_cell_metadata::call(&self.deps, arguments).await
+            }
             "open_design_search" => tools::open_design_search::call(&self.deps, arguments).await,
             "open_design_get" => tools::open_design_get::call(&self.deps, arguments).await,
             "code_semantic_search" => {
@@ -5853,6 +5856,58 @@ paths:
         let message = error.to_string();
         assert!(
             message.contains("daemon control plane"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("unknown notebook tool"),
+            "tool fell through dispatch: {message}"
+        );
+
+        client.cancel().await.expect("client closes");
+    }
+
+    #[tokio::test]
+    async fn set_cell_metadata_tool_dispatch_reaches_bridge_requirement() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-set-cell-metadata-mcp-")
+            .tempdir()
+            .expect("temp dir");
+        let socket_path = temp_dir.path().join("notebook.sock");
+        let _server = start_server(&socket_path).await.expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+        let arguments = json!({
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "patch": {
+                "spur": {
+                    "frontend": {
+                        "kind": "html",
+                        "binds": ["overview", "crates"],
+                        "emits": []
+                    }
+                }
+            },
+            "expected_version": 1
+        })
+        .as_object()
+        .cloned()
+        .expect("arguments are an object");
+
+        let error = client
+            .call_tool(
+                CallToolRequestParams::new("notebook.set_cell_metadata").with_arguments(arguments),
+            )
+            .await
+            .expect_err("tool routes but cannot run without notebook");
+        let message = error.to_string();
+        assert!(
+            message.contains("no notebook is loaded"),
             "unexpected error: {message}"
         );
         assert!(

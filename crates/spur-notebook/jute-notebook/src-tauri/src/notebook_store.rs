@@ -22,9 +22,10 @@ use crate::{
     backend::{
         commands::RunCellEvent,
         notebook::{
-            Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, JuteDeckCellMetadata,
-            MarkdownCell, MultilineString, NotebookMetadata, NotebookRoot, Output,
-            OutputDisplayData, OutputError, OutputExecuteResult, OutputStream, RawCell,
+            Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, FrontendCellMetadata,
+            JuteDeckCellMetadata, MarkdownCell, MultilineString, NotebookMetadata, NotebookRoot,
+            Output, OutputDisplayData, OutputError, OutputExecuteResult, OutputStream, RawCell,
+            SpurCellMetadata,
         },
     },
     commands::SaveCoordinator,
@@ -118,6 +119,15 @@ pub enum NotebookOp {
         id: String,
         /// Code type metadata patch.
         code_type: CodeType,
+        /// Expected cell version for optimistic concurrency.
+        expected_version: u64,
+    },
+    /// Set SPUR frontend-cell metadata for an existing cell after checking cell version.
+    SetSpurFrontendMetadata {
+        /// Cell identifier.
+        id: String,
+        /// Frontend-cell metadata patch.
+        patch: FrontendCellMetadata,
         /// Expected cell version for optimistic concurrency.
         expected_version: u64,
     },
@@ -217,6 +227,9 @@ pub struct DaemonCell {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub code_type: Option<CodeType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub frontend_metadata: Option<FrontendCellMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub jute_deck_metadata: Option<JuteDeckCellMetadata>,
@@ -434,7 +447,7 @@ impl NotebookStore {
                 let mut merged = metadata.jute_deck.clone().unwrap_or_default();
                 merge_jute_deck_metadata(&mut merged, patch);
                 metadata.jute_deck = Some(merged);
-                let metadata_update = Some((id.clone(), Some("brain".to_string())));
+                let metadata_update = Some((id.clone(), Some("brain".to_owned())));
                 (PendingDelta::CellWritten { id }, metadata_update)
             }
             NotebookOp::SetSpurDagMetadata {
@@ -446,17 +459,9 @@ impl NotebookStore {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
-                let spur = metadata.spur.get_or_insert_with(|| {
-                    crate::backend::notebook::SpurCellMetadata {
-                        version: 0,
-                        last_edited_by: None,
-                        datasource_setup: None,
-                        dag: None,
-                        code_type: None,
-                    }
-                });
+                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
                 spur.dag = Some(patch);
-                let metadata_update = Some((id.clone(), Some("brain".to_string())));
+                let metadata_update = Some((id.clone(), Some("brain".to_owned())));
                 (PendingDelta::CellWritten { id }, metadata_update)
             }
             NotebookOp::SetSpurCodeTypeMetadata {
@@ -468,17 +473,23 @@ impl NotebookStore {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
-                let spur = metadata.spur.get_or_insert_with(|| {
-                    crate::backend::notebook::SpurCellMetadata {
-                        version: 0,
-                        last_edited_by: None,
-                        datasource_setup: None,
-                        dag: None,
-                        code_type: None,
-                    }
-                });
+                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
                 spur.code_type = Some(code_type);
-                let metadata_update = Some((id.clone(), Some("brain".to_string())));
+                let metadata_update = Some((id.clone(), Some("brain".to_owned())));
+                (PendingDelta::CellWritten { id }, metadata_update)
+            }
+            NotebookOp::SetSpurFrontendMetadata {
+                id,
+                patch,
+                expected_version,
+            } => {
+                self.ensure_cell_version(&root, &id, expected_version)?;
+                let cell = find_cell_mut(&mut root, &id)
+                    .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
+                let metadata = cell_metadata_mut(cell);
+                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
+                spur.frontend = Some(patch);
+                let metadata_update = Some((id.clone(), Some("brain".to_owned())));
                 (PendingDelta::CellWritten { id }, metadata_update)
             }
             NotebookOp::ApplyEdit { id, source } => {
@@ -496,15 +507,7 @@ impl NotebookStore {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
-                let spur = metadata.spur.get_or_insert_with(|| {
-                    crate::backend::notebook::SpurCellMetadata {
-                        version: 0,
-                        last_edited_by: None,
-                        datasource_setup: None,
-                        dag: None,
-                        code_type: None,
-                    }
-                });
+                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
                 spur.datasource_setup = Some(true);
                 let metadata_update = Some((id.clone(), None));
                 (PendingDelta::CellWritten { id }, metadata_update)
@@ -731,28 +734,36 @@ fn make_cell(kind: CellKind, id: String, source: String, code_type: Option<CodeT
     }
 }
 
+fn empty_cell_metadata() -> CellMetadata {
+    CellMetadata {
+        spur: None,
+        jute_deck: None,
+        other: Map::new(),
+    }
+}
+
 fn cell_metadata_with_code_type(code_type: Option<CodeType>) -> CellMetadata {
     let Some(code_type) = code_type else {
         return empty_cell_metadata();
     };
     CellMetadata {
-        spur: Some(crate::backend::notebook::SpurCellMetadata {
-            version: 0,
-            last_edited_by: None,
-            datasource_setup: None,
-            dag: None,
+        spur: Some(SpurCellMetadata {
             code_type: Some(code_type),
+            ..empty_spur_cell_metadata()
         }),
         jute_deck: None,
         other: Map::new(),
     }
 }
 
-fn empty_cell_metadata() -> CellMetadata {
-    CellMetadata {
-        spur: None,
-        jute_deck: None,
-        other: Map::new(),
+fn empty_spur_cell_metadata() -> SpurCellMetadata {
+    SpurCellMetadata {
+        version: 0,
+        last_edited_by: None,
+        datasource_setup: None,
+        dag: None,
+        code_type: None,
+        frontend: None,
     }
 }
 
@@ -802,6 +813,7 @@ pub(crate) fn daemon_cell(root: &NotebookRoot, id: &str) -> Option<DaemonCell> {
         datasource_setup: spur.and_then(|spur| spur.datasource_setup),
         dag_metadata: spur.and_then(|spur| spur.dag.clone()),
         code_type: spur.and_then(|spur| spur.code_type),
+        frontend_metadata: spur.and_then(|spur| spur.frontend.clone()),
         jute_deck_metadata: metadata.jute_deck.clone(),
         metadata_other: metadata.other.clone(),
         source,
@@ -837,6 +849,7 @@ pub(crate) fn merge_authoritative_spur_metadata_for_save(
                 datasource_setup: authoritative_spur.datasource_setup,
                 dag: None,
                 code_type: authoritative_spur.code_type,
+                frontend: authoritative_spur.frontend.clone(),
             }
         });
 
@@ -848,6 +861,9 @@ pub(crate) fn merge_authoritative_spur_metadata_for_save(
         }
         if let Some(code_type) = authoritative_spur.code_type {
             target_spur.code_type = Some(code_type);
+        }
+        if let Some(frontend) = authoritative_spur.frontend.clone() {
+            target_spur.frontend = Some(frontend);
         }
         if target_spur.last_edited_by.is_none() {
             target_spur.last_edited_by = authoritative_spur.last_edited_by.clone();
@@ -946,12 +962,17 @@ fn set_cell_spur_metadata(cell: &mut Cell, version: u64, last_edited_by: Option<
         .and_then(|spur| spur.datasource_setup);
     let previous_dag = metadata.spur.as_ref().and_then(|spur| spur.dag.clone());
     let previous_code_type = metadata.spur.as_ref().and_then(|spur| spur.code_type);
+    let previous_frontend = metadata
+        .spur
+        .as_ref()
+        .and_then(|spur| spur.frontend.clone());
     metadata.spur = Some(crate::backend::notebook::SpurCellMetadata {
         version,
         last_edited_by: last_edited_by.or(previous_last_edited_by),
         datasource_setup: previous_datasource_setup,
         dag: previous_dag,
         code_type: previous_code_type,
+        frontend: previous_frontend,
     });
 }
 
@@ -1053,6 +1074,7 @@ mod tests {
                     datasource_setup: None,
                     dag: None,
                     code_type: None,
+                    frontend: None,
                 }),
                 jute_deck: None,
                 other: Map::new(),

@@ -36,6 +36,7 @@ export * from "./DaemonControlCommand";
 export * from "./CompilePhase";
 export * from "./PortSpec";
 export * from "./Author";
+export * from "./FrontendCellMetadata";
 export * from "./DisplayData";
 export * from "./DaemonRecentEntry";
 export * from "./RecentNotebookEntry";

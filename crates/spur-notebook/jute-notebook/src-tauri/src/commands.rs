@@ -23,7 +23,8 @@ use crate::{
         commands::{self, CompileProgressMode, RunCellEvent},
         local::{environment, KernelUsageInfo, LocalKernel},
         notebook::{
-            code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType, NotebookRoot,
+            code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType,
+            FrontendCellMetadata, NotebookRoot,
         },
         wire_protocol::{build_comm_msg, KernelConnection},
     },
@@ -975,6 +976,23 @@ async fn handle_daemon_control_inner(
                     .apply(NotebookOp::SetSpurCodeTypeMetadata {
                         id,
                         code_type,
+                        expected_version,
+                    })
+                    .map(DaemonControlResult::Delta)
+                    .map_err(store_error_response);
+            }
+            if let Some(frontend) = patch.get("spur").and_then(|spur| spur.get("frontend")) {
+                let frontend = serde_json::from_value::<FrontendCellMetadata>(frontend.clone())
+                    .map_err(|error| {
+                        DaemonControlResponse::failure(
+                            "invalid_params",
+                            format!("invalid spur frontend metadata patch: {error}"),
+                        )
+                    })?;
+                return notebook
+                    .apply(NotebookOp::SetSpurFrontendMetadata {
+                        id,
+                        patch: frontend,
                         expected_version,
                     })
                     .map(DaemonControlResult::Delta)
@@ -2112,6 +2130,7 @@ mod tests {
                         datasource_setup: None,
                         dag: None,
                         code_type: None,
+                        frontend: None,
                     }),
                     jute_deck: None,
                     other: Default::default(),
@@ -2876,6 +2895,62 @@ mod tests {
             })
         );
         assert_eq!(cell.metadata.spur.as_ref().unwrap().version, 2);
+    }
+
+    #[tokio::test]
+    async fn daemon_set_cell_metadata_spur_frontend_patch_sets_metadata() {
+        let state = Arc::new(State::new());
+        state
+            .get_notebook()
+            .load("/tmp/test.ipynb", notebook_with_source("initial", 1));
+        let frontend = serde_json::json!({
+            "kind": "html",
+            "binds": ["overview", "crates", "hotspots", "hubs", "coupling", "churn"],
+            "emits": []
+        });
+        let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "set_cell_metadata",
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "patch": {
+                "spur": {
+                    "frontend": frontend
+                }
+            },
+            "expected_version": 1
+        }))
+        .unwrap();
+
+        let response = handle_daemon_control_request(request, &state).await;
+        let result = response.into_result().unwrap();
+        let DaemonControlResult::Delta(NotebookDelta {
+            kind: DeltaKind::CellWritten { cell },
+            version,
+            ..
+        }) = result
+        else {
+            panic!("expected cellWritten delta");
+        };
+        assert_eq!(cell.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(version, 2);
+        assert_eq!(
+            serde_json::to_value(&cell)
+                .unwrap()
+                .get("frontendMetadata")
+                .cloned(),
+            Some(frontend.clone())
+        );
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        let spur = cell.metadata.spur.as_ref().expect("spur metadata present");
+        assert_eq!(spur.version, version);
+        assert_eq!(
+            serde_json::to_value(spur).unwrap().get("frontend").cloned(),
+            Some(frontend)
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ import type {
   CodeType,
   CompilePhase,
   DaemonCell,
+  FrontendCellMetadata,
   JuteDeckCellMetadata,
   NotebookDelta,
   NotebookMetadata,
@@ -539,6 +540,8 @@ function applyNotebookDeltaDraft(
       application.runState,
       application.options,
     );
+  } else if (kind.type === "dagStatusChanged") {
+    // DAG status lives outside the server-state slice and is applied by Notebook.
   } else if (kind.type === "localCellSnapshot") {
     const afterIndex = kind.after_id
       ? state.cellIds.indexOf(kind.after_id)
@@ -711,6 +714,19 @@ function normalizeFrontendMetadata(
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
+function frontendCellMetadataForExport(
+  value: CellFrontendMetadata | undefined,
+): FrontendCellMetadata | undefined {
+  const metadata = normalizeFrontendMetadata(value);
+  if (!metadata) return undefined;
+
+  return {
+    kind: typeof metadata.kind === "string" ? metadata.kind : undefined,
+    binds: metadata.binds ?? [],
+    emits: metadata.emits ?? [],
+  };
+}
+
 function frontendMetadataFromSpur(
   spur: CellMetadata["spur"] | undefined,
 ): CellFrontendMetadata | undefined {
@@ -723,9 +739,22 @@ function frontendMetadataFromSpur(
 function frontendMetadataFromDaemonCell(
   cell: DaemonCell,
 ): CellFrontendMetadata | undefined {
-  const spur = cell.metadataOther?.spur;
+  const typed = normalizeFrontendMetadata(cell.frontendMetadata);
+  if (typed) return typed;
+
+  const metadataOther = (
+    cell as DaemonCell & { metadataOther?: Record<string, unknown> }
+  ).metadataOther;
+  const spur = metadataOther?.spur;
   if (!isRecord(spur)) return undefined;
   return normalizeFrontendMetadata(spur.frontend);
+}
+
+function daemonCellMetadataOther(
+  cell: DaemonCell,
+): Record<string, unknown> | undefined {
+  return (cell as DaemonCell & { metadataOther?: Record<string, unknown> })
+    .metadataOther;
 }
 
 function loadNotebookRootDraft(
@@ -813,7 +842,7 @@ function applyDaemonCellSnapshotDraft(
       frontendMetadata,
       codeType: cell.codeType,
       juteDeckMetadata: cell.juteDeckMetadata,
-      cellMetadataOther: cell.metadataOther,
+      cellMetadataOther: daemonCellMetadataOther(cell),
     };
     return;
   }
@@ -828,7 +857,7 @@ function applyDaemonCellSnapshotDraft(
     frontendMetadataFromDaemonCell(cell) ?? existing.frontendMetadata;
   existing.codeType = cell.codeType;
   existing.juteDeckMetadata = cell.juteDeckMetadata;
-  existing.cellMetadataOther = cell.metadataOther;
+  existing.cellMetadataOther = daemonCellMetadataOther(cell);
 }
 
 function updateResultDraft(
@@ -1565,7 +1594,7 @@ export class Notebook {
 
   applyNotebookDelta(delta: AuthoritativeNotebookDelta) {
     if (delta.kind.type === "dagStatusChanged") {
-      this.applyDagStatusSnapshot(delta.kind.snapshot);
+      this.applyDagStatusSnapshot(delta.kind.snapshot as DagStatusSnapshot);
       return;
     }
 
@@ -1590,6 +1619,8 @@ export class Notebook {
       this.state.editBufferActions.clearCell(kind.id);
     } else if (kind.type === "runCellEvent") {
       this.handleRunCellEvent(kind.cell_id, kind.event, notebookDelta.version);
+    } else if (kind.type === "dagStatusChanged") {
+      this.applyDagStatusSnapshot(kind.snapshot as DagStatusSnapshot);
     } else {
       assertNever(kind);
     }
@@ -1940,12 +1971,13 @@ function cellMetadata(
   juteDeckMetadata?: JuteDeckCellMetadata,
   other?: Record<string, unknown>,
 ): CellMetadata {
-  const spur: CellMetadata["spur"] & { frontend?: CellFrontendMetadata } = {
+  const frontend = frontendCellMetadataForExport(frontendMetadata);
+  const spur: CellMetadata["spur"] = {
     version,
     last_edited_by: lastEditedBy,
     datasource_setup: datasourceSetup,
     dag: dagMetadata,
-    frontend: frontendMetadata,
+    frontend,
     code_type: codeType,
   };
   const metadata: CellMetadata = {

@@ -236,6 +236,7 @@ fn code_cell(id: &str, source: &str, version: u64, dag: CellDagMetadata) -> Cell
                 datasource_setup: None,
                 dag: Some(dag),
                 code_type: None,
+                frontend: None,
             }),
             jute_deck: None,
             other: Map::new(),

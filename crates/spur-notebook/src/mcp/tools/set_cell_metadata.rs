@@ -26,8 +26,9 @@ struct SetCellMetadataResult {
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Atomically merge a JuteDeckCellMetadata patch into cell.metadata.jute_deck. \
-         Requires expected_version. Follows the same optimistic-concurrency protocol as write_cell.",
+        "Atomically update supported cell metadata patches: cell.metadata.jute_deck \
+         plus cell.metadata.spur datasource_setup, dag, code_type, and frontend. \
+         Requires expected_version and follows the same optimistic-concurrency protocol as write_cell.",
         rmcp_object(json!({
             "type": "object",
             "required": ["id", "patch", "expected_version"],
