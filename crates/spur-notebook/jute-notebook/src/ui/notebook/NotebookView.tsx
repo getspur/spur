@@ -1,3 +1,4 @@
+import clsx from "clsx";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
@@ -31,11 +32,24 @@ export default function NotebookView() {
     filename = path.slice(idx + 1);
   }
 
-  return (
-    <div className="grid h-full grid-cols-[minmax(0,1fr),auto] grid-rows-1 overflow-hidden">
-      <div className="min-h-0 min-w-0 overflow-y-auto py-16">
-        <NotebookLocation directory={directory} filename={filename} />
+  const appMode = viewMode === "app";
 
+  return (
+    <div
+      className={clsx(
+        "grid h-full grid-rows-1 overflow-hidden",
+        appMode ? "grid-cols-1" : "grid-cols-[minmax(0,1fr),auto]",
+      )}
+    >
+      <div
+        className={clsx(
+          "min-h-0 min-w-0",
+          appMode ? "overflow-hidden" : "overflow-y-auto py-16",
+        )}
+      >
+        {!appMode && (
+          <NotebookLocation directory={directory} filename={filename} />
+        )}
         {/* TODO: Handle these errors gracefully. */}
         {loadError ? (
           <UnhandledError error={loadError} />
@@ -47,7 +61,7 @@ export default function NotebookView() {
           <NotebookCells />
         )}
       </div>
-      <NotebookSidebar />
+      {!appMode && <NotebookSidebar />}
     </div>
   );
 }

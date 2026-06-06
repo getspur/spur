@@ -1,5 +1,12 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { type StoreApi, createStore } from "zustand/vanilla";
 
@@ -50,7 +57,7 @@ function widgetResult(modelId: string) {
 }
 
 function createAppModeStore() {
-  return createStore<any>()(() => ({
+  return createStore<any>()((set) => ({
     serverState: {
       lastAppliedVersion: 0,
       notebookMetadata: {},
@@ -89,6 +96,13 @@ function createAppModeStore() {
       isLoading: false,
       viewMode: "app",
     },
+    viewStateActions: {
+      setViewMode: (viewMode: "cells" | "dag" | "app") =>
+        set((state: any) => ({
+          ...state,
+          viewState: { ...state.viewState, viewMode },
+        })),
+    },
     editBuffer: {
       cellSources: {},
     },
@@ -125,7 +139,14 @@ describe("AppMode", () => {
       store: createAppModeStore(),
     };
 
-    render(<AppMode />);
+    const { container } = render(<AppMode />);
+
+    expect(container.firstElementChild).toHaveClass(
+      "h-full",
+      "w-full",
+      "overflow-hidden",
+      "pt-16",
+    );
 
     expect(
       screen.getByRole("status", { name: "App mode status" }),
@@ -143,6 +164,9 @@ describe("AppMode", () => {
       "Frontend cell frontend-second",
       "Frontend cell frontend-first",
     ]);
+    expect(
+      screen.getAllByRole("region", { name: /Frontend cell/ })[0],
+    ).not.toHaveClass("border-b");
     expect(screen.getByTitle(`anywidget ${AFM_MODEL_ID}`)).toBeInTheDocument();
     expect(screen.getByText("frontend-first-model")).toBeInTheDocument();
 
@@ -176,5 +200,8 @@ describe("AppMode", () => {
       }),
     );
     expect(getWidgetModel(AFM_MODEL_ID)?.state.preserved).toBe(true);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(mocks.notebook.store.getState().viewState.viewMode).toBe("cells");
   });
 });
