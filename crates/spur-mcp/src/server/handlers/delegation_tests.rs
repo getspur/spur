@@ -743,14 +743,14 @@ mod fetch_outcome_artifact_tests {
         }
     }
 
-    async fn build_test_server(repo_root: &Path, session_id: &str) -> McpCallbackServer {
+    fn build_test_server(repo_root: &Path, session_id: &str) -> McpCallbackServer {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-        build_test_server_with_store(repo_root, brain_session, outcome_store).await
+        build_test_server_with_store(repo_root, brain_session, outcome_store)
     }
 
-    async fn build_test_server_with_store(
+    fn build_test_server_with_store(
         repo_root: &Path,
         brain_session: BrainSessionId,
         outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
@@ -841,8 +841,7 @@ mod fetch_outcome_artifact_tests {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-        let server =
-            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+        let server = build_test_server_with_store(td.path(), brain_session.clone(), store.clone());
 
         let delegation_id: DelegationId = "deadbeef-1111-2222-3333-444455556666".into();
         let result = success_result("ok", "line one\nline two\n", 0.0);
@@ -873,8 +872,7 @@ mod fetch_outcome_artifact_tests {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-        let server =
-            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+        let server = build_test_server_with_store(td.path(), brain_session.clone(), store.clone());
 
         let delegation_id: DelegationId = "deadbeef-status-only".into();
         let result = success_result("summary must stay out", "diff must stay out", 1.25);
@@ -911,8 +909,7 @@ mod fetch_outcome_artifact_tests {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-        let server =
-            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+        let server = build_test_server_with_store(td.path(), brain_session.clone(), store.clone());
 
         let delegation_id: DelegationId = "deadbeef-summary".into();
         let result = success_result("summary included", "diff must stay out", 0.5);
@@ -949,8 +946,7 @@ mod fetch_outcome_artifact_tests {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-        let server =
-            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+        let server = build_test_server_with_store(td.path(), brain_session.clone(), store.clone());
 
         let delegation_id: DelegationId = "deadbeef-diff-only".into();
         let result = success_result("summary must stay out", "diff included", 0.25);
@@ -987,8 +983,7 @@ mod fetch_outcome_artifact_tests {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-        let server =
-            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+        let server = build_test_server_with_store(td.path(), brain_session.clone(), store.clone());
 
         let delegation_id: DelegationId = "deadbeef-attempts".into();
         server
@@ -1053,7 +1048,7 @@ mod fetch_outcome_artifact_tests {
         let td = TempDir::new().unwrap();
         init_git_repo(td.path()).await;
 
-        let server = build_test_server(td.path(), "any-session").await;
+        let server = build_test_server(td.path(), "any-session");
 
         for invalid in [json!(-1), json!("two"), json!(0), json!(false)] {
             let response = server
@@ -1089,8 +1084,7 @@ mod fetch_outcome_artifact_tests {
         let brain_session = BrainSessionId::new(SessionId(session_id.into()));
         let store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
-        let server =
-            build_test_server_with_store(td.path(), brain_session.clone(), store.clone()).await;
+        let server = build_test_server_with_store(td.path(), brain_session.clone(), store.clone());
 
         // Seed the store with bytes that ARE valid UTF-8 but NOT a valid
         // DelegationResult — exercises ProjectionError::InvalidResult on
@@ -1136,7 +1130,7 @@ mod fetch_outcome_artifact_tests {
         let td = TempDir::new().unwrap();
         init_git_repo(td.path()).await;
 
-        let server = build_test_server(td.path(), "any-session").await;
+        let server = build_test_server(td.path(), "any-session");
 
         let response = server
             .handle_tool_call(
@@ -1164,7 +1158,7 @@ mod fetch_outcome_artifact_tests {
         let td = TempDir::new().unwrap();
         init_git_repo(td.path()).await;
 
-        let server = build_test_server(td.path(), "any-session").await;
+        let server = build_test_server(td.path(), "any-session");
 
         let response = server
             .handle_tool_call(
@@ -1197,7 +1191,7 @@ mod fetch_outcome_artifact_tests {
         let td = TempDir::new().unwrap();
         init_git_repo(td.path()).await;
 
-        let server = build_test_server(td.path(), "any-session").await;
+        let server = build_test_server(td.path(), "any-session");
 
         let response = server
             .handle_tool_call(
@@ -1225,10 +1219,12 @@ mod fetch_outcome_artifact_tests {
         let store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
 
-        let server_a =
-            build_test_server_with_store(td.path(), brain_session_a.clone(), store.clone()).await;
-        let server_b =
-            build_test_server_with_store(td.path(), brain_session_b, store.clone()).await;
+        let server_a = build_test_server_with_store(
+            td.path(),
+            brain_session_a.clone(),
+            store.clone(),
+        );
+        let server_b = build_test_server_with_store(td.path(), brain_session_b, store.clone());
 
         let delegation_a: DelegationId = "delegation-belonging-to-a".into();
         let result_a = success_result("secret stdout for session A", "secret diff", 0.0);
