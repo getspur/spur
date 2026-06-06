@@ -5,7 +5,14 @@
 //! lexically; this one ranks *content* (section bodies + symbol token text) by
 //! relevance, and — for code hits — fuses the scorecard signal (centrality /
 //! churn / posture). Reads `.spur/analyst.duckdb` read-only via the bundled
-//! libduckdb; only the `fts` core extension is needed (it autoloads), so the
+//! libduckdb. Two bundled extensions are needed at query time: `fts` (autoloads
+//! for `match_bm25`) and `icu`. The temporal views behind the code scorecard
+//! (`v_symbol_churn_90d` → `posture`) filter on `now() - INTERVAL '90 day'`
+//! against a TIMESTAMP WITH TIME ZONE column; that `-(TIMESTAMPTZ, INTERVAL)`
+//! overload lives in `icu`, NOT core, and is not autoloaded — so the `code`/`all`
+//! scopes fail to bind read-only ("No function matches ... -(TIMESTAMP WITH TIME
+//! ZONE, INTERVAL)") unless we `LOAD icu` first. icu is statically linked into
+//! libduckdb-sys, so a plain `LOAD` (no network install) suffices. Other
 //! community extensions used to BUILD the DB are irrelevant to the read path.
 
 use rmcp::{
@@ -119,6 +126,16 @@ fn search_rows(
         )
     })?;
 
+    // The temporal views behind the code scorecard (v_symbol_churn_90d → posture)
+    // filter on `now() - INTERVAL '90 day'` over a TIMESTAMPTZ column; that
+    // `-(TIMESTAMPTZ, INTERVAL)` overload lives in icu, not core, and is not
+    // autoloaded — so binding `search_code`/`search` read-only fails without it.
+    // icu is statically bundled, so LOAD (no network install) is enough.
+    // Best-effort: the `docs` scope never touches the temporal views, and if icu
+    // were genuinely unavailable the `code`/`all` prepare below still surfaces the
+    // precise binder error — so a load failure here must not break `docs`.
+    let _ = conn.execute_batch("LOAD icu;");
+
     // The macro arg flows into FTS match_bm25, which wants a constant — inline the
     // query as an escaped string literal rather than a bind parameter.
     let q = query.replace('\'', "''");
@@ -226,6 +243,185 @@ fn internal(message: &str, error: &impl std::fmt::Display) -> McpError {
 mod tests {
     use super::*;
 
+    // Rerank: a high-BM25 leaf CONSTANT must not outrank a lower-BM25, high-pagerank
+    // FUNCTION. Mirrors the production search_code ORDER BY against a bundled-duckdb fixture
+    // (the WORKTREE_CORE_ORPHAN_CLEANUP-over-cleanup_orphans inversion from the live eval).
+    #[test]
+    fn search_code_rerank_floats_impl_over_leaf_constant() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("a.duckdb");
+        let conn = duckdb::Connection::open(&db)?;
+        conn.execute_batch("INSTALL fts; LOAD fts;")?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE symbol_text(stable_symbol_id VARCHAR, entity_name VARCHAR,
+                symbol_kind VARCHAR, file_path VARCHAR, doc_text VARCHAR);
+            INSERT INTO symbol_text VALUES
+              ('c1','WORKTREE_CORE_ORPHAN_CLEANUP','constant',
+               'crates/spur-license/src/policy/feature_key.rs',
+               'worktree orphan cleanup worktree orphan cleanup'),
+              ('f1','cleanup_orphans','function',
+               'crates/spur-worktree/src/manager.rs',
+               'worktree orphan cleanup sweep');
+            -- scorecard: the function is a load-bearing wall (high pagerank), constant is a leaf.
+            CREATE TABLE v_symbol_scorecard(stable_symbol_id VARCHAR, pagerank DOUBLE,
+                churn_90d BIGINT, posture VARCHAR, component_size BIGINT);
+            INSERT INTO v_symbol_scorecard VALUES
+              ('c1', 0.0, 0, 'leaf', 1),
+              ('f1', 0.02, 3, 'load-bearing wall', 50);
+            "#,
+        )?;
+        conn.execute_batch(
+            "PRAGMA create_fts_index('symbol_text','stable_symbol_id','doc_text', overwrite=1);",
+        )?;
+        // The PRODUCTION search_code ORDER BY (kept in sync with init_search.sql).
+        conn.execute_batch(
+            r#"
+            CREATE OR REPLACE MACRO search_code(q) AS TABLE
+              SELECT * FROM (
+                SELECT st.entity_name AS symbol, st.symbol_kind, st.file_path,
+                       fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) AS bm25_raw,
+                       sc.pagerank
+                FROM symbol_text st
+                JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+                WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+              )
+              ORDER BY bm25_raw
+                * CASE WHEN file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+                * CASE WHEN symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
+                       WHEN symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+                * (1 + 0.15 * ln(1 + pagerank * 1e4)) DESC NULLS LAST
+              LIMIT 25;
+            "#,
+        )?;
+        let first: String = conn.query_row(
+            "SELECT symbol FROM search_code('worktree orphan cleanup') LIMIT 1",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            first, "cleanup_orphans",
+            "the load-bearing function must outrank the leaf constant after rerank"
+        );
+        Ok(())
+    }
+
+    // Diversity + dedup: vendored copies collapse to one, and one document cannot occupy
+    // more than 2 of the top result slots.
+    #[test]
+    fn search_dedups_vendored_copies_and_caps_per_document() -> anyhow::Result<()> {
+        const INIT_SEARCH_SQL: &str =
+            include_str!("../../../../spur-context/poc/duckdb-analyst/init_search.sql");
+
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("a.duckdb");
+        let conn = duckdb::Connection::open(&db)?;
+        conn.execute_batch("INSTALL fts; LOAD fts;")?;
+        // sections raw: same skill body vendored 3x (differ only by SPUR-MANAGED header +
+        // dot-dir path) plus one 3-section plan document.
+        conn.execute_batch(
+            r#"
+            CREATE SCHEMA lance_ns;
+            CREATE TABLE lance_ns.section_bodies(
+                stable_symbol_id VARCHAR,
+                parent_stable_id VARCHAR,
+                qualified_name VARCHAR,
+                file_path VARCHAR,
+                heading_level BIGINT,
+                child_count BIGINT,
+                content_hash VARCHAR,
+                body_byte_start BIGINT,
+                body_text VARCHAR
+            );
+            INSERT INTO lance_ns.section_bodies VALUES
+              ('a',NULL,'Brain Review Gate','.claude/skills/brain-review-gate/SKILL.md',
+               1,0,'ha',0,
+               '<!-- SPUR-MANAGED v=1 sha256=aaa -->\napprove or reject worker output gate'),
+              ('b',NULL,'Brain Review Gate','.codex/skills/brain-review-gate/SKILL.md',
+               1,0,'hb',0,
+               '<!-- SPUR-MANAGED v=1 sha256=bbb -->\napprove or reject worker output gate'),
+              ('c',NULL,'Brain Review Gate','crates/spur-core/src/skills/brain-review-gate/SKILL.md',
+               1,0,'hc',0,
+               '<!-- SPUR-MANAGED v=1 sha256=ccc -->\napprove or reject worker output gate'),
+              ('p1',NULL,'Plan::S1','docs/superpowers/plans/p.md',
+               2,0,'hp',0,'worker output review section one'),
+              ('p2',NULL,'Plan::S2','docs/superpowers/plans/p.md',
+               2,0,'hp',42,'worker output review section two'),
+              ('p3',NULL,'Plan::S3','docs/superpowers/plans/p.md',
+               2,0,'hp',84,'worker output review section three');
+
+            CREATE TABLE nodes(
+                stable_symbol_id VARCHAR,
+                entity_name VARCHAR,
+                qualified_name VARCHAR,
+                file_path VARCHAR,
+                symbol_kind VARCHAR
+            );
+            CREATE TABLE symbol_snapshots(stable_symbol_id VARCHAR, tokens VARCHAR[]);
+            CREATE TABLE v_symbol_scorecard(
+                stable_symbol_id VARCHAR,
+                pagerank DOUBLE,
+                churn_90d BIGINT,
+                posture VARCHAR,
+                component_size BIGINT
+            );
+            "#,
+        )?;
+        let sections_fts =
+            "PRAGMA create_fts_index('sections_search', 'stable_symbol_id', 'body_text', overwrite=1, stemmer='porter');";
+        let symbol_fts =
+            "PRAGMA create_fts_index('symbol_text', 'stable_symbol_id', 'doc_text', overwrite=1);";
+        let (before_sections_fts, after_sections_fts) = INIT_SEARCH_SQL
+            .split_once(sections_fts)
+            .expect("init_search.sql should create the sections_search FTS index");
+        let (before_symbol_fts, after_symbol_fts) = after_sections_fts
+            .split_once(symbol_fts)
+            .expect("init_search.sql should create the symbol_text FTS index");
+
+        // create_fts_index starts its own internal transaction in bundled DuckDB,
+        // so table creation must be committed before each PRAGMA runs.
+        conn.execute_batch(before_sections_fts)?;
+        conn.execute_batch(sections_fts)?;
+        conn.execute_batch(before_symbol_fts)?;
+        conn.execute_batch(symbol_fts)?;
+        conn.execute_batch(after_symbol_fts)?;
+
+        // 3 vendored copies must collapse to exactly 1.
+        let copies: i64 = conn.query_row(
+            "SELECT count(*) FROM sections_search WHERE qualified_name='Brain Review Gate'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            copies, 1,
+            "vendored skill copies must dedup to one canonical row"
+        );
+
+        // Per-document cap: the 3-section plan must contribute at most 2 rows.
+        let docs_plan_rows: i64 = conn.query_row(
+            "SELECT count(*) FROM search_docs('worker output review') \
+             WHERE file_path='docs/superpowers/plans/p.md'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(
+            docs_plan_rows <= 2,
+            "one document must not exceed 2 search_docs rows"
+        );
+
+        let unified_plan_rows: i64 = conn.query_row(
+            "SELECT count(*) FROM search('worker output review') \
+             WHERE kind='doc' AND file='superpowers/plans/p.md'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(
+            unified_plan_rows <= 2,
+            "one document must not exceed 2 unified search rows"
+        );
+        Ok(())
+    }
+
     // Builds a tiny analyst-shaped DB with the BUNDLED duckdb (same lib the tool
     // reads with), creates the FTS index + search macro, and asserts the tool's
     // query path returns ranked rows. Proves fts + create_fts_index + the search
@@ -279,6 +475,96 @@ mod tests {
         assert_eq!(results[0]["title"], "OAuth refresh");
         // run() wraps the same rows into a CallToolResult without error.
         run("oauth token refresh", "docs", 10, db.to_str()).expect("run wraps result");
+        Ok(())
+    }
+
+    // Regression: the `code` scope reads `search_code`, which fuses the
+    // `v_symbol_scorecard.posture` signal, which depends on v_symbol_churn_90d's
+    // 90-day window — `now() - INTERVAL '90 day'` over a TIMESTAMP WITH TIME ZONE
+    // column. That `-(TIMESTAMPTZ, INTERVAL)` overload lives in icu, which the
+    // read path does not autoload, so without a `LOAD icu` the query fails to
+    // prepare ("No function matches ... -(TIMESTAMP WITH TIME ZONE, INTERVAL)").
+    // This fixture mirrors the production view chain with the real timestamptz
+    // boundary and proves the `code` scope binds + returns the posture signal,
+    // under the bundled libduckdb (fts + the statically-linked icu).
+    #[test]
+    fn search_code_scope_binds_temporal_views_via_icu() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("analyst.duckdb");
+        {
+            // The build connection mirrors the real build path (the `duckdb` CLI),
+            // which has icu — needed to CREATE the aggregating timestamptz view.
+            // The read path's icu load is exercised separately by search_rows below.
+            let conn = duckdb::Connection::open(&db)?;
+            conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu;")?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE commits(sha VARCHAR, author_ts TIMESTAMP WITH TIME ZONE);
+                INSERT INTO commits VALUES ('rec', now()), ('old', to_timestamp(0));
+                CREATE TABLE temporal_edges(
+                  target_stable_symbol_id VARCHAR, source_commit VARCHAR, change_kind VARCHAR);
+                INSERT INTO temporal_edges VALUES
+                  ('s1','rec','modified'), ('s1','rec','modified');
+                CREATE TABLE symbol_text(
+                  stable_symbol_id VARCHAR, entity_name VARCHAR, symbol_kind VARCHAR,
+                  file_path VARCHAR, tokens VARCHAR);
+                INSERT INTO symbol_text VALUES
+                  ('s1','compress_response','function','crates/x.rs',
+                   'code graph mcp response metadata compression payload'),
+                  ('s2','unrelated','function','crates/y.rs','kernel notebook cells');
+                CREATE TABLE _meta(graph_content_hash VARCHAR);
+                INSERT INTO _meta VALUES ('cafebabe');
+                "#,
+            )?;
+            // Production-shaped temporal chain — the churn boundary uses the exact
+            // TIMESTAMPTZ `now() - INTERVAL` form from init_views.sql.
+            conn.execute_batch(
+                r#"
+                CREATE VIEW v_symbol_churn_90d AS
+                  SELECT t.target_stable_symbol_id AS stable_symbol_id, count(*) AS events
+                  FROM temporal_edges t JOIN commits c ON c.sha = t.source_commit
+                  WHERE c.author_ts > (now() - INTERVAL '90 day')
+                  GROUP BY t.target_stable_symbol_id;
+                CREATE VIEW v_symbol_scorecard AS
+                  SELECT st.stable_symbol_id,
+                         CASE
+                           WHEN COALESCE(ch.events, 0) = 0 THEN 'load-bearing wall'
+                           WHEN ch.events >= 10 THEN 'hot-central'
+                           ELSE 'active'
+                         END AS posture
+                  FROM symbol_text st
+                  LEFT JOIN v_symbol_churn_90d ch USING (stable_symbol_id);
+                "#,
+            )?;
+            conn.execute_batch(
+                "PRAGMA create_fts_index('symbol_text','stable_symbol_id','tokens', overwrite=1);",
+            )?;
+            conn.execute_batch(
+                r#"
+                CREATE OR REPLACE MACRO search_code(q) AS TABLE
+                  SELECT st.entity_name AS symbol, st.symbol_kind, st.file_path,
+                         round(fts_main_symbol_text.match_bm25(st.stable_symbol_id, q), 3) AS bm25,
+                         sc.posture
+                  FROM symbol_text st
+                  JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+                  WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+                  ORDER BY bm25 DESC;
+                "#,
+            )?;
+            conn.execute_batch("CHECKPOINT;")?;
+        }
+
+        // search_rows reopens read-only and must LOAD icu so the TIMESTAMPTZ churn
+        // boundary binds. Without that load this errors with the production
+        // `-(TIMESTAMP WITH TIME ZONE, INTERVAL)` binder error.
+        let (_path, results, graph_hash) =
+            search_rows("response metadata compression", "code", 10, db.to_str())
+                .expect("code-scope search must bind temporal views via icu");
+        assert_eq!(graph_hash.as_deref(), Some("cafebabe"));
+        assert!(!results.is_empty(), "expected at least one ranked code hit");
+        assert_eq!(results[0]["title"], "compress_response");
+        // posture flowed through as the `signal` column (active: churn==2, <10).
+        assert_eq!(results[0]["signal"], "active");
         Ok(())
     }
 }
