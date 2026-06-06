@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useSearch } from "wouter";
+import { useStore } from "zustand";
 
 import { setActiveAgentNotebook } from "@/agent/bridge";
 import { listenForNotebookEvents } from "@/agent/events";
@@ -15,6 +16,11 @@ export default function NotebookPage() {
 
   // Singleton notebook object used for the lifetime of this component.
   const notebook = useMemo(() => new Notebook(), []);
+  const viewMode = useStore(
+    notebook.store,
+    (state) => state.viewState.viewMode,
+  );
+  const appMode = viewMode === "app";
 
   useEffect(() => listenForNotebookEvents(notebook), [notebook]);
 
@@ -48,10 +54,10 @@ export default function NotebookPage() {
     <main className="h-screen bg-white">
       <NotebookContext.Provider value={notebook}>
         <NotebookHeader kernelName="Local Kernel (Python 3.11.7)" />
-        <HtmlScriptsNotice />
+        {!appMode && <HtmlScriptsNotice />}
         <NotebookView />
-        <NotebookFooter />
-        <NotebookCommandMenu />
+        {!appMode && <NotebookFooter />}
+        {!appMode && <NotebookCommandMenu />}
       </NotebookContext.Provider>
     </main>
   );
