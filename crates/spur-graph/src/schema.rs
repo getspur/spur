@@ -184,6 +184,12 @@ pub struct GraphEdgeArtifact {
     pub change_kind: Option<ChangeKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_kind: Option<GraphEdgeKind>,
+    /// Provenance for resolved edge targets.
+    ///
+    /// Current resolver stamps include `fqn`, `scope_match`, `singleton`,
+    /// `macro_body_singleton`, `relational`, `constructs_type_singleton`,
+    /// `method_crate_singleton`, `import_path`, `import_licensed`, and
+    /// `external`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_method: Option<String>,
 }
@@ -214,6 +220,7 @@ pub struct GraphEdge {
     pub confidence_score: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_kind: Option<GraphEdgeKind>,
+    /// Provenance for resolved edge targets. See `GraphEdgeArtifact::bind_method`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_method: Option<String>,
     pub evidence_id: EvidenceId,

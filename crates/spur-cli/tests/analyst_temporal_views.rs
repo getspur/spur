@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use spur_cli::commands::analyst::{self, AnalystBuildOptions};
 use spur_graph::{
@@ -8,6 +9,8 @@ use spur_graph::{
     RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
     WriteOptions,
 };
+
+const INIT_SQL: &str = include_str!("../../spur-context/poc/duckdb-analyst/init.sql");
 
 fn duckdb_cli_present() -> bool {
     std::env::var_os("PATH")
@@ -28,6 +31,58 @@ fn query_csv(db_path: &Path, sql: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("duckdb stdout utf8")
+}
+
+fn run_duckdb_sql(db_path: &Path, sql: &str) {
+    let mut child = Command::new("duckdb")
+        .arg(db_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn duckdb");
+    child
+        .stdin
+        .as_mut()
+        .expect("duckdb stdin")
+        .write_all(sql.as_bytes())
+        .expect("write duckdb sql");
+
+    let output = child.wait_with_output().expect("duckdb wait");
+    assert!(
+        output.status.success(),
+        "duckdb init SQL failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn structural_init_sql_for_test(artifact_dir: &Path) -> String {
+    let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
+    let sql = INIT_SQL
+        .replace("__SPUR_GRAPH_ARTIFACT_DIR__", &artifact_dir_sql)
+        .replace("__SPUR_LANCE_ATTACH_SQL__", "");
+
+    let mut filtered = String::new();
+    let mut skip_property_graph = false;
+    for line in sql.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("INSTALL ") || trimmed.starts_with("LOAD ") {
+            continue;
+        }
+        if trimmed.starts_with("CREATE OR REPLACE PROPERTY GRAPH code") {
+            skip_property_graph = true;
+            continue;
+        }
+        if skip_property_graph {
+            if trimmed == ");" {
+                skip_property_graph = false;
+            }
+            continue;
+        }
+        filtered.push_str(line);
+        filtered.push('\n');
+    }
+    filtered
 }
 
 fn build_analyst_or_skip(root: &Path, artifact_dir: &Path, db_path: &Path) -> bool {
@@ -188,6 +243,65 @@ fn analyst_build_emits_external_dependency_surface_views() {
         pgq_imports.trim(),
         "alloc::vec::Vec\ncore::fmt::Formatter\nserde::Serialize\nstd::fmt::Debug"
     );
+}
+
+#[test]
+fn analyst_build_emits_cross_crate_call_surface_views() {
+    if !duckdb_cli_present() {
+        eprintln!("skipping: duckdb CLI not on PATH");
+        return;
+    }
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = cross_crate_call_artifact("analyst-cross-crate-calls");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    run_duckdb_sql(&db_path, &structural_init_sql_for_test(&artifact_dir));
+
+    let cross_crate_views = query_csv(
+        &db_path,
+        "SELECT view_name
+         FROM duckdb_views()
+         WHERE view_name IN ('v_cross_crate_calls', 'v_import_licensed_precision_gate')
+         ORDER BY view_name;",
+    );
+    assert_eq!(
+        cross_crate_views.trim(),
+        "v_cross_crate_calls\nv_import_licensed_precision_gate"
+    );
+
+    let calls = query_csv(
+        &db_path,
+        "SELECT source_crate, target_crate, source_symbol, target_symbol, bind_method
+         FROM v_cross_crate_calls
+         ORDER BY source_crate, target_crate, target_symbol;",
+    );
+    assert_eq!(
+        calls.trim(),
+        "spur-mcp,spur-graph,handle_submit,build_facts,import_licensed"
+    );
+
+    let import_only_not_counted = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM v_cross_crate_calls
+         WHERE target_symbol = 'import_only';",
+    );
+    assert_eq!(import_only_not_counted.trim(), "0");
+
+    let gate_violations = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM v_import_licensed_precision_gate;",
+    );
+    assert_eq!(gate_violations.trim(), "0");
 }
 
 #[test]
@@ -409,6 +523,104 @@ fn import_edge(source: &str, target: &str) -> GraphEdgeArtifact {
         edge_kind: Some(GraphEdgeKind::ReferencesOther),
         bind_method: Some("external_import".to_string()),
         import_path: None,
+    }
+}
+
+fn cross_crate_call_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
+    let mut artifact = structural_artifact(graph_content_hash);
+    artifact.files = vec![
+        GraphFileArtifact {
+            stable_file_id: "file-spur-mcp-server".to_string(),
+            file_path: "crates/spur-mcp/src/server.rs".to_string(),
+        },
+        GraphFileArtifact {
+            stable_file_id: "file-spur-graph-lib".to_string(),
+            file_path: "crates/spur-graph/src/lib.rs".to_string(),
+        },
+    ];
+    artifact.file_node_ids = vec![NodeId(1), NodeId(2)];
+    artifact.symbols = vec![
+        GraphSymbolArtifact {
+            stable_symbol_id: "spur-mcp-handle-submit".to_string(),
+            file_path: "crates/spur-mcp/src/server.rs".to_string(),
+            byte_range: [0, 20],
+            line_range: [1, 2],
+            entity_name: "handle_submit".to_string(),
+            qualified_name: "spur_mcp::server::handle_submit".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-handle-submit".to_string(),
+            enclosing_scope: None,
+        },
+        GraphSymbolArtifact {
+            stable_symbol_id: "spur-graph-build-facts".to_string(),
+            file_path: "crates/spur-graph/src/lib.rs".to_string(),
+            byte_range: [40, 60],
+            line_range: [5, 7],
+            entity_name: "build_facts".to_string(),
+            qualified_name: "spur_graph::build_facts".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-build-facts".to_string(),
+            enclosing_scope: None,
+        },
+        GraphSymbolArtifact {
+            stable_symbol_id: "spur-graph-import-only".to_string(),
+            file_path: "crates/spur-graph/src/lib.rs".to_string(),
+            byte_range: [80, 100],
+            line_range: [10, 12],
+            entity_name: "import_only".to_string(),
+            qualified_name: "spur_graph::import_only".to_string(),
+            symbol_kind: "function".to_string(),
+            anchor_hash: "anchor-import-only".to_string(),
+            enclosing_scope: None,
+        },
+    ];
+    artifact.symbol_node_ids = vec![NodeId(3), NodeId(4), NodeId(5)];
+    artifact.edges = vec![
+        workspace_import_edge(
+            "spur-mcp-handle-submit",
+            "spur-graph-build-facts",
+            "build_facts",
+            "spur_graph::build_facts",
+        ),
+        workspace_import_edge(
+            "spur-mcp-handle-submit",
+            "spur-graph-import-only",
+            "import_only",
+            "spur_graph::import_only",
+        ),
+        GraphEdgeArtifact {
+            source_stable_symbol_id: "spur-mcp-handle-submit".to_string(),
+            target_stable_symbol_id: Some("spur-graph-build-facts".to_string()),
+            target_label: Some("build_facts".to_string()),
+            relation: RelationKind::Calls,
+            confidence: Confidence::SyntaxExact,
+            confidence_score: 1.0,
+            change_kind: None,
+            edge_kind: Some(GraphEdgeKind::Calls),
+            bind_method: Some("import_licensed".to_string()),
+            import_path: None,
+        },
+    ];
+    artifact
+}
+
+fn workspace_import_edge(
+    source: &str,
+    target: &str,
+    target_label: &str,
+    import_path: &str,
+) -> GraphEdgeArtifact {
+    GraphEdgeArtifact {
+        source_stable_symbol_id: source.to_string(),
+        target_stable_symbol_id: Some(target.to_string()),
+        target_label: Some(target_label.to_string()),
+        relation: RelationKind::Imports,
+        confidence: Confidence::SyntaxExact,
+        confidence_score: 1.0,
+        change_kind: None,
+        edge_kind: Some(GraphEdgeKind::ReferencesOther),
+        bind_method: Some("import_path".to_string()),
+        import_path: Some(import_path.to_string()),
     }
 }
 
