@@ -584,6 +584,7 @@ fn graph_edge(source: &str, target: &str) -> GraphEdgeArtifact {
         source_stable_symbol_id: source.to_string(),
         target_stable_symbol_id: Some(target.to_string()),
         target_label: None,
+        import_path: None,
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
@@ -917,6 +918,44 @@ fn qualified_names(rows: &[Value]) -> BTreeSet<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn table_col_index(table: &Value, col: &str) -> usize {
+    table["cols"]
+        .as_array()
+        .unwrap_or_else(|| panic!("table has cols array: {table}"))
+        .iter()
+        .position(|value| value == col)
+        .unwrap_or_else(|| panic!("table has column `{col}`: {table}"))
+}
+
+fn assert_omits_full_graph_identity_metadata(body: &Value) {
+    for key in [
+        "graph_content_hash",
+        "graph_index_version",
+        "graph_built_at",
+    ] {
+        assert!(
+            body.get(key).is_none(),
+            "table response should omit full graph metadata key {key}: {body}"
+        );
+    }
+}
+
+fn assert_omits_full_metadata_defaults(body: &Value) {
+    assert_omits_full_graph_identity_metadata(body);
+    for key in [
+        "indexed_head_oid",
+        "worktree_head_oid",
+        "worktree_dirty",
+        "response_file_oids_match",
+        "rebuild_status",
+    ] {
+        assert!(
+            body.get(key).is_none(),
+            "table response should omit full metadata key {key}: {body}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1330,7 +1369,7 @@ async fn worker_code_search_freshness_uses_registered_worktree_root() {
     let body = call_worker_tool(
         &server,
         &token,
-        "code_search",
+        "code_symbol_search",
         json!({
             "query": ROOT_SYMBOL,
             "mode": "exact",
@@ -1341,7 +1380,7 @@ async fn worker_code_search_freshness_uses_registered_worktree_root() {
 
     assert!(
         body.get("error").is_none(),
-        "worker code_search should succeed: {body}"
+        "worker code_symbol_search should succeed: {body}"
     );
     assert!(candidate_entity_names(&body).contains(ROOT_SYMBOL));
     assert_eq!(
@@ -1378,7 +1417,7 @@ async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search
     let search = call_worker_tool(
         &server,
         &token,
-        "code_search",
+        "code_symbol_search",
         json!({
             "query": ROOT_SYMBOL,
             "mode": "exact",
@@ -1388,7 +1427,7 @@ async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search
     .await;
     assert!(
         search.get("error").is_none(),
-        "worker code_search should overlay root graph, got: {search}"
+        "worker code_symbol_search should overlay root graph, got: {search}"
     );
     assert!(candidate_entity_names(&search).contains(ROOT_SYMBOL));
 
@@ -1657,6 +1696,465 @@ async fn code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id() {
     assert_eq!(
         callees["graph_index_version"],
         artifact.header.graph_index_version
+    );
+}
+
+#[tokio::test]
+async fn code_graph_response_format_omitted_keeps_full_metadata() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(call_tool(&server, "code_callees", json!({ "symbol": root_id })).await);
+
+    assert_eq!(
+        entity_names(body["callees"].as_array().expect("callees")),
+        BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+    assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+    assert_eq!(
+        body["graph_index_version"],
+        artifact.header.graph_index_version
+    );
+    for key in [
+        "graph_built_at",
+        "indexed_head_oid",
+        "worktree_head_oid",
+        "worktree_dirty",
+        "response_file_oids_match",
+        "rebuild_status",
+    ] {
+        assert!(body.get(key).is_some(), "missing full metadata key {key}");
+    }
+    assert!(body.get("response_format").is_none());
+}
+
+#[tokio::test]
+async fn code_graph_compact_metadata_omits_healthy_defaults() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_callees",
+            json!({ "symbol": root_id, "response_format": "compact" }),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        entity_names(body["callees"].as_array().expect("callees")),
+        BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+    for key in [
+        "graph_content_hash",
+        "graph_index_version",
+        "graph_built_at",
+        "indexed_head_oid",
+        "worktree_head_oid",
+        "worktree_dirty",
+        "response_file_oids_match",
+        "rebuild_status",
+    ] {
+        assert!(
+            body.get(key).is_none(),
+            "compact response should omit healthy metadata key {key}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn code_graph_compact_metadata_preserves_stale_dirty_status() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let expected_source = source_for_range(
+        worktree.path(),
+        &root.file_path,
+        root.line_range[0],
+        root.line_range[1],
+    );
+    std::fs::write(
+        worktree.path().join("src/lib.rs"),
+        "pub fn edited_after_index() -> bool {\n    false\n}\n",
+    )
+    .expect("edit fixture after graph build");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({ "stable_symbol_id": root.stable_symbol_id, "response_format": "compact" }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["stale"], true);
+    assert_eq!(body["symbol"]["id"], root.stable_symbol_id);
+    assert_eq!(body["source"], expected_source);
+    assert_eq!(body["worktree_dirty"], true);
+    assert_eq!(body["response_file_oids_match"], false);
+    for key in [
+        "graph_content_hash",
+        "graph_index_version",
+        "graph_built_at",
+        "indexed_head_oid",
+        "worktree_head_oid",
+        "rebuild_status",
+    ] {
+        assert!(
+            body.get(key).is_none(),
+            "compact response should omit non-actionable metadata key {key}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn code_file_symbols_table_format_interns_file_paths_and_reduces_size() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let full = tool_body(
+        call_tool(
+            &server,
+            "code_file_symbols",
+            json!({ "file": "src/lib.rs" }),
+        )
+        .await,
+    );
+    let table = tool_body(
+        call_tool(
+            &server,
+            "code_file_symbols",
+            json!({ "file": "src/lib.rs", "response_format": "table" }),
+        )
+        .await,
+    );
+
+    assert_eq!(table["response_format"], "table");
+    assert_omits_full_metadata_defaults(&table);
+    assert_eq!(table["files"], json!(["src/lib.rs"]));
+    let symbols = &table["symbols"];
+    assert_eq!(
+        symbols["cols"],
+        json!([
+            "id",
+            "entity_name",
+            "qualified_name",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+            "enclosing_scope"
+        ])
+    );
+    let rows = symbols["rows"].as_array().expect("symbol table rows");
+    assert_eq!(rows.len(), 5);
+    let file_col = table_col_index(symbols, "file");
+    assert!(rows.iter().all(|row| row[file_col] == 0));
+
+    let rows_text = serde_json::to_string(rows).expect("serialize table rows");
+    assert!(!rows_text.contains("src/lib.rs"));
+    assert!(!rows_text.contains("graph://symbol/"));
+    assert!(
+        serde_json::to_string(&table)
+            .expect("serialize table")
+            .len()
+            < serde_json::to_string(&full).expect("serialize full").len()
+    );
+}
+
+#[tokio::test]
+async fn code_callers_and_callees_table_format_returns_rows_and_counts() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let launch_id = symbol_id(&artifact, "launch_order");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let callers = tool_body(
+        call_tool(
+            &server,
+            "code_callers",
+            json!({ "symbol": root_id.clone(), "response_format": "table" }),
+        )
+        .await,
+    );
+    assert_eq!(callers["response_format"], "table");
+    assert_omits_full_metadata_defaults(&callers);
+    assert_eq!(callers["include_unresolved"], false);
+    assert_eq!(callers["counts_by_kind"]["calls"], 1);
+    assert_eq!(callers["unresolved_sample"], json!([]));
+    assert_eq!(callers["files"], json!(["src/lib.rs"]));
+    let caller_table = &callers["callers"];
+    assert_eq!(
+        caller_table["cols"],
+        json!([
+            "symbol_id",
+            "entity_name",
+            "enclosing_scope",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+            "resolved",
+            "target_label",
+            "edge_kind",
+            "confidence",
+            "bind_method"
+        ])
+    );
+    let caller_rows = caller_table["rows"].as_array().expect("caller rows");
+    assert_eq!(caller_rows.len(), 1);
+    assert_eq!(
+        caller_rows[0][table_col_index(caller_table, "symbol_id")],
+        launch_id
+    );
+    assert_eq!(
+        caller_rows[0][table_col_index(caller_table, "entity_name")],
+        "launch_order"
+    );
+    assert_eq!(
+        caller_rows[0][table_col_index(caller_table, "resolved")],
+        true
+    );
+
+    let callees = tool_body(
+        call_tool(
+            &server,
+            "code_callees",
+            json!({ "symbol": root_id, "response_format": "table" }),
+        )
+        .await,
+    );
+    assert_eq!(callees["response_format"], "table");
+    assert_omits_full_metadata_defaults(&callees);
+    assert_eq!(callees["include_unresolved"], false);
+    assert_eq!(callees["counts_by_kind"]["calls"], 2);
+    let callee_table = &callees["callees"];
+    let name_col = table_col_index(callee_table, "entity_name");
+    let names = callee_table["rows"]
+        .as_array()
+        .expect("callee rows")
+        .iter()
+        .map(|row| row[name_col].as_str().expect("callee entity").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        names,
+        BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+    let callee_rows_text =
+        serde_json::to_string(&callee_table["rows"]).expect("serialize callee rows");
+    assert!(!callee_rows_text.contains("graph://symbol/"));
+    assert!(!callee_rows_text.contains("src/lib.rs"));
+}
+
+#[tokio::test]
+async fn code_subgraph_table_format_returns_node_edge_tables_and_unresolved_edges() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    std::fs::create_dir_all(worktree.path().join(".git")).expect("create git marker");
+    let mut unresolved = graph_edge("root", "missing-target");
+    unresolved.target_stable_symbol_id = None;
+    unresolved.target_label = Some("external_charge".to_string());
+    let artifact = GraphIndexArtifact {
+        header: GraphIndexHeader {
+            graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
+            content_hash_blake3: None,
+        },
+        manifest_version: "table-unresolved-fixture".to_string(),
+        graph_content_hash: "table-unresolved-fixture".to_string(),
+        file_manifests: Vec::new(),
+        files: Vec::new(),
+        file_node_ids: Vec::new(),
+        symbols: vec![
+            graph_symbol("root", "root_node"),
+            graph_symbol("caller", "caller_node"),
+        ],
+        symbol_node_ids: node_ids(2),
+        edges: vec![graph_edge("caller", "root"), unresolved],
+        tombstones: Vec::new(),
+        diagnostics: Vec::new(),
+        commits: Vec::new(),
+        symbol_snapshots: Vec::new(),
+        temporal_edges: Vec::new(),
+    };
+    write_graph_artifact(worktree.path(), &artifact);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let full = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({ "symbol": "graph://symbol/root", "radius": 1, "include_unresolved": true }),
+        )
+        .await,
+    );
+    let table = tool_body(
+        call_tool(
+            &server,
+            "code_subgraph",
+            json!({
+                "symbol": "graph://symbol/root",
+                "radius": 1,
+                "include_unresolved": true,
+                "response_format": "table"
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(table["response_format"], "table");
+    assert_omits_full_graph_identity_metadata(&table);
+    assert_eq!(table["include_unresolved"], true);
+    assert_eq!(table["truncated_frontier"], json!([]));
+    assert_eq!(table["metadata"]["radius"], 1);
+    assert_eq!(
+        table["files"],
+        json!(["src/root_node.rs", "src/caller_node.rs"])
+    );
+    assert_eq!(
+        table["nodes"]["cols"],
+        json!([
+            "id",
+            "entity_name",
+            "enclosing_scope",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind"
+        ])
+    );
+    assert_eq!(
+        table["edges"]["cols"],
+        json!([
+            "source_id",
+            "target_id",
+            "target_label",
+            "resolved",
+            "relation",
+            "edge_kind",
+            "confidence",
+            "confidence_score",
+            "bind_method"
+        ])
+    );
+    let edge_table = &table["edges"];
+    let target_label_col = table_col_index(edge_table, "target_label");
+    let unresolved_row = edge_table["rows"]
+        .as_array()
+        .expect("edge rows")
+        .iter()
+        .find(|row| row[target_label_col] == "external_charge")
+        .expect("unresolved edge row");
+    assert_eq!(
+        unresolved_row[table_col_index(edge_table, "target_id")],
+        Value::Null
+    );
+    assert_eq!(
+        unresolved_row[table_col_index(edge_table, "resolved")],
+        false
+    );
+
+    let rows_text = serde_json::to_string(&table["edges"]["rows"]).expect("serialize edge rows");
+    assert!(!rows_text.contains("graph://symbol/"));
+    assert!(
+        serde_json::to_string(&table)
+            .expect("serialize table")
+            .len()
+            < serde_json::to_string(&full).expect("serialize full").len()
+    );
+}
+
+#[tokio::test]
+async fn code_graph_response_format_invalid_returns_invalid_params() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let invalid = call_tool(
+        &server,
+        "code_callees",
+        json!({ "symbol": root_id, "response_format": "dense" }),
+    )
+    .await;
+
+    assert_eq!(invalid["error"]["code"], -32602);
+    let message = invalid["error"]["message"]
+        .as_str()
+        .expect("invalid params message");
+    assert!(
+        message.contains("invalid response_format `dense`"),
+        "unexpected invalid response_format message: {message}"
+    );
+    assert!(
+        message.contains("full") && message.contains("compact") && message.contains("table"),
+        "invalid response_format message should list accepted formats: {message}"
+    );
+    assert!(
+        !message.contains("source"),
+        "non-source tools should not advertise source response_format: {message}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_source_format_is_invalid_for_non_read_symbol_tools() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let invalid = call_tool(
+        &server,
+        "code_callees",
+        json!({ "symbol": root_id, "response_format": "source" }),
+    )
+    .await;
+
+    assert_eq!(invalid["error"]["code"], -32602);
+    let message = invalid["error"]["message"]
+        .as_str()
+        .expect("invalid params message");
+    assert!(
+        message.contains("invalid response_format `source`"),
+        "unexpected invalid response_format message: {message}"
+    );
+    assert!(
+        message.contains("full") && message.contains("compact") && message.contains("table"),
+        "invalid response_format message should list accepted formats: {message}"
     );
 }
 
@@ -2050,6 +2548,197 @@ async fn code_read_symbol_reads_source_by_path_name_tuple() {
 }
 
 #[tokio::test]
+async fn code_read_symbol_source_format_by_stable_symbol_id_is_source_first() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let expected_source = source_for_range(
+        worktree.path(),
+        &root.file_path,
+        root.line_range[0],
+        root.line_range[1],
+    );
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({
+                "stable_symbol_id": root.stable_symbol_id,
+                "response_format": "source"
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        body,
+        json!({
+            "id": root.stable_symbol_id,
+            "name": root.qualified_name,
+            "file": root.file_path,
+            "range": { "start": root.line_range[0], "end": root.line_range[1] },
+            "source": expected_source,
+            "file_oid": file_oid(&artifact, &root.file_path),
+        })
+    );
+}
+
+#[tokio::test]
+async fn code_read_symbol_source_format_by_path_name_tuple_preserves_context_indicator() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let total_lines = total_lines(worktree.path(), &root.file_path);
+    let start = root.line_range[0].saturating_sub(1).max(1);
+    let end = (root.line_range[1] + 1).min(total_lines);
+    let expected_source = source_for_range(worktree.path(), &root.file_path, start, end);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({
+                "path": root.file_path,
+                "name": ROOT_SYMBOL,
+                "context_lines": 1,
+                "response_format": "source"
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        body,
+        json!({
+            "id": root.stable_symbol_id,
+            "name": root.qualified_name,
+            "file": root.file_path,
+            "range": { "start": start, "end": end },
+            "source": expected_source,
+            "file_oid": file_oid(&artifact, &root.file_path),
+            "context_lines": 1,
+        })
+    );
+}
+
+#[tokio::test]
+async fn code_read_symbol_source_format_preserves_stale_indexed_source_signal() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    let expected_source = source_for_range(
+        worktree.path(),
+        &root.file_path,
+        root.line_range[0],
+        root.line_range[1],
+    );
+    std::fs::write(
+        worktree.path().join("src/lib.rs"),
+        "pub fn edited_after_index() -> bool {\n    false\n}\n",
+    )
+    .expect("edit fixture after graph build");
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({
+                "stable_symbol_id": root.stable_symbol_id,
+                "response_format": "source"
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        body,
+        json!({
+            "id": root.stable_symbol_id,
+            "name": root.qualified_name,
+            "file": root.file_path,
+            "range": { "start": root.line_range[0], "end": root.line_range[1] },
+            "source": expected_source,
+            "file_oid": file_oid(&artifact, &root.file_path),
+            "stale": true,
+        })
+    );
+}
+
+#[tokio::test]
+async fn code_read_symbol_source_format_ambiguous_request_returns_compact_candidates() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    write_ambiguous_symbol_fixture(worktree.path());
+    commit_fixture(worktree.path());
+    build_graph_artifact(worktree.path());
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({
+                "path": "src/lib.rs",
+                "name": "run",
+                "response_format": "source"
+            }),
+        )
+        .await,
+    );
+    let candidates = body["candidates"].as_array().expect("candidates");
+
+    assert_eq!(body["ambiguous"], true);
+    assert_eq!(candidates.len(), 2);
+    assert!(body.get("graph_content_hash").is_none());
+    assert!(body.get("graph_index_version").is_none());
+    for candidate in candidates {
+        for key in ["id", "name", "file", "range", "kind", "scope"] {
+            assert!(
+                candidate.get(key).is_some(),
+                "source candidate should include {key}: {candidate}"
+            );
+        }
+        for key in [
+            "entity_name",
+            "qualified_name",
+            "file_path",
+            "line_range",
+            "symbol_kind",
+            "enclosing_scope",
+            "uri",
+        ] {
+            assert!(
+                candidate.get(key).is_none(),
+                "source candidate should omit full candidate key {key}: {candidate}"
+            );
+        }
+        assert_eq!(candidate["file"], "src/lib.rs");
+        assert_eq!(candidate["kind"], "method");
+        assert!(candidate["name"]
+            .as_str()
+            .expect("candidate name")
+            .ends_with("::run"));
+    }
+}
+
+#[tokio::test]
 async fn code_read_symbol_returns_candidates_for_ambiguous_path_name_tuple() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
@@ -2176,7 +2865,7 @@ async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
     );
     let callee_names = entity_names(callees["callees"].as_array().expect("callees"));
     assert!(callee_names.contains("submit_plan_def"));
-    assert!(callee_names.contains("code_search_def"));
+    assert!(callee_names.contains("code_symbol_search_def"));
 
     let search = tool_body(
         call_tool(
