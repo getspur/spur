@@ -623,6 +623,10 @@ fn buckets_from_facts(
                 // Commit nodes belong in artifact.commits, not artifact.symbols.
                 continue;
             }
+            NodeKind::External => {
+                // External nodes are introduced as a bodyless class before any extractor emits them.
+                continue;
+            }
         }
     }
 

@@ -116,6 +116,7 @@ fn graph_id_newtypes_are_not_interchangeable_at_runtime() {
 #[test]
 fn node_kind_discriminators_are_stable_contracts() {
     assert_eq!(NodeKind::File.discriminator(), "file");
+    assert_eq!(NodeKind::External.discriminator(), "external");
     assert_eq!(NodeKind::Module.discriminator(), "module");
     assert_eq!(NodeKind::Function.discriminator(), "function");
     assert_eq!(NodeKind::Class.discriminator(), "class");
@@ -131,6 +132,17 @@ fn node_kind_discriminators_are_stable_contracts() {
     assert_eq!(NodeKind::TypeAlias.discriminator(), "type_alias");
     assert_eq!(NodeKind::Macro.discriminator(), "macro");
     assert_eq!(NodeKind::Commit.discriminator(), "commit");
+}
+
+#[test]
+fn node_kind_external_round_trips_as_snake_case_json() {
+    let encoded = serde_json::to_string(&NodeKind::External).unwrap();
+
+    assert_eq!(encoded, "\"external\"");
+    assert_eq!(
+        serde_json::from_str::<NodeKind>(&encoded).unwrap(),
+        NodeKind::External
+    );
 }
 
 #[test]
