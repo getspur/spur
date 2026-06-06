@@ -35,6 +35,8 @@ fn node_with_task_lines(count: usize) -> ExecutorNode {
         last_event_at: None,
         tool_call_count: 0,
         latest_tool_call: None,
+        latest_progress_message: None,
+        latest_progress_percent: None,
         files_touched_count: 0,
         latest_diff_summary: None,
         latest_diff_text: None,

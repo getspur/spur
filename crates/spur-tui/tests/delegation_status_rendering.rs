@@ -22,6 +22,36 @@ fn delegation_completed(status: DelegationStatus) -> SpurEvent {
 }
 
 #[test]
+fn dashboard_worker_report_progress_renders_message_and_percent() {
+    let mut dash = DashboardView::new();
+    dash.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::WorkerReportProgress {
+            delegation_id: "deleg-progress-123456".to_string(),
+            message: "Red test committed; implementing display".to_string(),
+            percent: Some(45.0),
+        }),
+        &test_ctx(),
+    );
+
+    let entries = dash.activity_log().entries();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert!(
+        entry
+            .message
+            .contains("Red test committed; implementing display"),
+        "progress log must include the report message, got: {:?}",
+        entry.message,
+    );
+    assert!(
+        entry.message.contains("45%"),
+        "progress log must include the percent, got: {:?}",
+        entry.message,
+    );
+    assert_eq!(entry.kind, spur_tui::components::LogEntryKind::Info);
+}
+
+#[test]
 fn dashboard_modified_status_renders_as_complete_not_failed() {
     let mut dash = DashboardView::new();
     dash.handle_spur_event(

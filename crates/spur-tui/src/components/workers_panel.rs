@@ -161,7 +161,22 @@ fn worker_row(id: &str, node: &ExecutorNode) -> Line<'static> {
         ));
     }
 
+    if let Some(progress) = progress_summary(node) {
+        spans.push(Span::styled(
+            format!("  {}", progress),
+            Style::default().fg(Color::LightGreen),
+        ));
+    }
+
     Line::from(spans)
+}
+
+fn progress_summary(node: &ExecutorNode) -> Option<String> {
+    let message = node.latest_progress_message.as_deref()?;
+    match node.latest_progress_percent {
+        Some(percent) => Some(format!("{}% {}", percent, message)),
+        None => Some(message.to_string()),
+    }
 }
 
 fn phase_label(phase: LifecycleState) -> &'static str {
@@ -198,4 +213,79 @@ fn collapsed_line(nodes: &[(&str, &ExecutorNode)], focused: bool) -> Line<'stati
     ));
 
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+    use spur_acp::{SessionId, SpurEvent, SpurEventBody};
+    use std::path::PathBuf;
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn worker_row_renders_latest_progress_percent_and_message() {
+        let mut lineage = ExecutorLineage::new();
+        lineage.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "brain".into(),
+            session: SessionId("brain-1".into()),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+            agent: "codex".into(),
+            session: SessionId("worker-1".into()),
+            worktree: PathBuf::from("/tmp/wt"),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationRequested {
+            from: SessionId("brain-1".into()),
+            to_agent: "codex".into(),
+            task: "task".into(),
+            request_id: "deleg-1".into(),
+            delegation_plan: None,
+            issue_id: None,
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::DelegationDispatched {
+            from: SessionId("brain-1".into()),
+            request_id: "deleg-1".into(),
+            executor_id: "worker-1".into(),
+        }));
+        lineage.apply(&SpurEvent::now(SpurEventBody::WorkerReportProgress {
+            delegation_id: "deleg-1".into(),
+            message: "Running targeted verification".into(),
+            percent: Some(67.5),
+        }));
+
+        let mut terminal = Terminal::new(TestBackend::new(96, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_focused(
+                    frame,
+                    Rect::new(0, 0, 96, 4),
+                    &lineage,
+                    &["worker-1".to_string()],
+                    false,
+                    false,
+                );
+            })
+            .unwrap();
+
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(
+            rendered.contains("67.5%"),
+            "progress percent missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Running targeted verification"),
+            "progress message missing:\n{rendered}"
+        );
+    }
 }
