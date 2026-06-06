@@ -22,6 +22,12 @@
         "mimeType": "application/x-ipynb+json",
         "name": "Jupyter Notebook",
         "description": "Jupyter Notebook"
+      },
+      {
+        "ext": ["spurapp"],
+        "mimeType": "application/x-spurapp+zip",
+        "name": "SpurApp Package",
+        "description": "SPUR notebook application package"
       }
     ]
   },
