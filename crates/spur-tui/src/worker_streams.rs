@@ -56,6 +56,30 @@ impl WorkerStreams {
         dispatch_session_update(trace, update, &mut ctx);
     }
 
+    /// Route a delegation-scoped free-form progress report into the executor's
+    /// activity stream.
+    pub fn route_progress(
+        &mut self,
+        executor_id: &str,
+        agent_name: &str,
+        message: &str,
+        percent: Option<f64>,
+    ) {
+        let kind = AgentKind::from_name(agent_name);
+        self.kinds.insert(executor_id.to_string(), kind);
+        let trace = self
+            .traces
+            .entry(executor_id.to_string())
+            .or_insert_with(|| ReactTrace::with_kind(kind));
+        trace.push(TraceEntry {
+            kind: TraceKind::Observe { payload: None },
+            text: format_progress_report(message, percent),
+            timestamp: now_stamp_hhmm(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+    }
+
     /// Advance the spinner frame on all live traces. Called from App's
     /// tick loop (Task 1.6) so Act entries with `Pending` / `InProgress`
     /// status animate consistently with the brain view.
@@ -175,6 +199,13 @@ fn format_system_time(t: &std::time::SystemTime) -> String {
     format!("{:02}:{:02}", h, m)
 }
 
+fn format_progress_report(message: &str, percent: Option<f64>) -> String {
+    match percent {
+        Some(percent) => format!("progress {}%: {}", percent, message),
+        None => format!("progress: {}", message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +223,23 @@ mod tests {
         ws.route("exec-1", "claude", &msg("hi"));
         assert!(ws.get("exec-1").is_some());
         assert_eq!(ws.get("exec-1").unwrap().entry_count(), 1);
+    }
+
+    #[test]
+    fn route_progress_appends_observe_entry_with_percent() {
+        let mut ws = WorkerStreams::new();
+        ws.route_progress(
+            "exec-1",
+            "codex",
+            "Running targeted verification",
+            Some(67.5),
+        );
+
+        let trace = ws.get("exec-1").expect("trace");
+        assert_eq!(trace.entry_count(), 1);
+        let entry = &trace.entries()[0];
+        assert!(matches!(entry.kind, TraceKind::Observe { .. }));
+        assert_eq!(entry.text, "progress 67.5%: Running targeted verification");
     }
 
     #[test]
