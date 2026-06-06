@@ -15,7 +15,7 @@
 #   ./build.sh                              # cargo build --release --workspace
 #   ./build.sh -- check                     # cargo check
 #   ./build.sh --auto-spin -- test ...      # auto-create VM if missing
-#   SPUR_BUILD_JOBS=22 ./build.sh -- build  # override default -j 8
+#   SPUR_BUILD_JOBS=22 ./build.sh -- build  # override default -j 12
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -93,7 +93,7 @@ WORKTREE_FILE_KEY="${WORKTREE_KEY//\//_}"
 REMOTE_DIR="spur/$WORKTREE_KEY"                       # e.g. spur/worktrees/UUID
 REMOTE_TARGET="/mnt/cargo/targets/$WORKTREE_KEY"
 REMOTE_PNPM_NODE_MODULES="/mnt/cargo/pnpm-nm/$WORKTREE_KEY"
-JOBS="${SPUR_BUILD_JOBS:-8}"
+JOBS="${SPUR_BUILD_JOBS:-12}"
 NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=0
 if [[ -f "$GIT_TOPLEVEL/$NOTEBOOK_FRONTEND_DIR/pnpm-lock.yaml" ]]; then
     NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=1
