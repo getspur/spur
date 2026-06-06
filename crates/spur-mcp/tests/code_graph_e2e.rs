@@ -584,6 +584,7 @@ fn graph_edge(source: &str, target: &str) -> GraphEdgeArtifact {
         source_stable_symbol_id: source.to_string(),
         target_stable_symbol_id: Some(target.to_string()),
         target_label: None,
+        import_path: None,
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
@@ -1656,6 +1657,74 @@ async fn code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id() {
     assert_eq!(
         callees["graph_index_version"],
         artifact.header.graph_index_version
+    );
+}
+
+#[tokio::test]
+async fn code_graph_response_format_omitted_keeps_full_metadata() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(call_tool(&server, "code_callees", json!({ "symbol": root_id })).await);
+
+    assert_eq!(
+        entity_names(body["callees"].as_array().expect("callees")),
+        BTreeSet::from(["charge_order".to_string(), "parse_order".to_string()])
+    );
+    assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+    assert_eq!(
+        body["graph_index_version"],
+        artifact.header.graph_index_version
+    );
+    for key in [
+        "graph_built_at",
+        "indexed_head_oid",
+        "worktree_head_oid",
+        "worktree_dirty",
+        "response_file_oids_match",
+        "rebuild_status",
+    ] {
+        assert!(body.get(key).is_some(), "missing full metadata key {key}");
+    }
+    assert!(body.get("response_format").is_none());
+}
+
+#[tokio::test]
+async fn code_graph_response_format_invalid_returns_invalid_params() {
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root_id = symbol_id(&artifact, ROOT_SYMBOL);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let invalid = call_tool(
+        &server,
+        "code_callees",
+        json!({ "symbol": root_id, "response_format": "dense" }),
+    )
+    .await;
+
+    assert_eq!(invalid["error"]["code"], -32602);
+    let message = invalid["error"]["message"]
+        .as_str()
+        .expect("invalid params message");
+    assert!(
+        message.contains("invalid response_format `dense`"),
+        "unexpected invalid response_format message: {message}"
+    );
+    assert!(
+        message.contains("full")
+            && message.contains("compact")
+            && message.contains("table")
+            && message.contains("source"),
+        "invalid response_format message should list accepted formats: {message}"
     );
 }
 
