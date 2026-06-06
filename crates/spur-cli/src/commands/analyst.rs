@@ -738,6 +738,39 @@ mod tests {
     }
 
     #[test]
+    fn init_search_sql_ranks_code_with_graph_signals() {
+        // search_code/search must fold centrality + kind/test weighting into the ORDER BY,
+        // not order by bare bm25 (which let a leaf constant outrank a load-bearing impl).
+        let search_code_sql = INIT_SEARCH_SQL
+            .split("CREATE OR REPLACE MACRO search_code(q) AS TABLE")
+            .nth(1)
+            .and_then(|rest| rest.split("-- Unified:").next())
+            .expect("search_code macro should be present");
+        assert!(
+            !search_code_sql.contains("ORDER BY bm25 DESC NULLS LAST\n  LIMIT 25"),
+            "search_code must not order by bare bm25"
+        );
+        assert!(
+            search_code_sql.contains("ln(1 + pagerank * 1e4)")
+                && search_code_sql.contains("'%/tests/%'"),
+            "code ranking must boost by pagerank and penalize test paths"
+        );
+    }
+
+    #[test]
+    fn init_search_sql_dedups_and_diversifies() {
+        assert!(
+            INIT_SEARCH_SQL.contains("SPUR-MANAGED[^>]*-->"),
+            "sections_search must dedup on body with the SPUR-MANAGED header stripped"
+        );
+        assert!(
+            INIT_SEARCH_SQL.contains("PARTITION BY file ORDER BY rank DESC) <= 2")
+                && INIT_SEARCH_SQL.contains("PARTITION BY s.file_path ORDER BY bm25 DESC) <= 2"),
+            "search/search_docs must cap results at 2 per document"
+        );
+    }
+
+    #[test]
     fn duckdb_cli_present_returns_some_when_on_path() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();
