@@ -1874,6 +1874,7 @@ impl View for DashboardView {
             SpurEventBody::BrainReconnected { .. } => self.on_brain_event(body),
             SpurEventBody::BrainReconnectFailed { .. } => self.on_brain_event(body),
             SpurEventBody::WorkerProgress { .. } => self.on_worker_event(body),
+            SpurEventBody::WorkerReportProgress { .. } => self.on_worker_event(body),
             SpurEventBody::WorkerFileTouched { .. } => self.on_worker_event(body),
             SpurEventBody::GraphAlertsSummary { .. } => self.on_plan_event(body),
             SpurEventBody::PlanTaskReviewed { .. } => self.on_plan_event(body),
