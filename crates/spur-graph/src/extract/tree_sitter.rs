@@ -138,6 +138,26 @@ struct PendingResolutionIndexes<'a> {
     qualified_name_by_id: &'a HashMap<NodeId, String>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImportOriginClassification {
+    Internal,
+    External {
+        origin: String,
+        path: String,
+        name: String,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ImportWorkspaceIndex {
+    pub(crate) rust_crates: HashSet<String>,
+    pub(crate) javascript_path_aliases: HashSet<String>,
+    pub(crate) javascript_workspace_roots: HashSet<String>,
+    pub(crate) python_modules: HashSet<String>,
+}
+
 /// Maximum import re-export hops followed before leaving the edge unresolved.
 const MAX_REEXPORT_FOLLOW_DEPTH: usize = 8;
 
@@ -1943,6 +1963,167 @@ fn import_language_family(path: &str) -> Option<ImportLanguageFamily> {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn classify_import_origin(
+    import_path: &str,
+    source_file: &str,
+    workspace_index: &ImportWorkspaceIndex,
+) -> ImportOriginClassification {
+    let import_path = import_path.trim();
+    match import_language_family(source_file) {
+        Some(ImportLanguageFamily::Rust) => {
+            classify_rust_import_origin(import_path, workspace_index)
+        }
+        Some(ImportLanguageFamily::Python) => {
+            classify_python_import_origin(import_path, workspace_index)
+        }
+        Some(ImportLanguageFamily::Javascript) => {
+            classify_javascript_import_origin(import_path, workspace_index)
+        }
+        None => external_import_origin(import_path, import_path, import_path),
+    }
+}
+
+fn classify_rust_import_origin(
+    import_path: &str,
+    workspace_index: &ImportWorkspaceIndex,
+) -> ImportOriginClassification {
+    let segments = rust_import_path_origin_segments(import_path);
+    let Some(first) = segments.first() else {
+        return external_import_origin("", import_path, "");
+    };
+    if matches!(first.as_str(), "crate" | "self" | "super" | "$crate")
+        || workspace_index.rust_crates.contains(first)
+    {
+        return ImportOriginClassification::Internal;
+    }
+
+    let origin = if matches!(first.as_str(), "std" | "core" | "alloc") {
+        "std"
+    } else {
+        first
+    };
+    let name = segments.last().map_or(first.as_str(), String::as_str);
+    external_import_origin(origin, &segments.join("::"), name)
+}
+
+fn rust_import_path_origin_segments(import_path: &str) -> Vec<String> {
+    let mut path = import_path.trim();
+    if let Some((prefix, _)) = path.split_once('{') {
+        path = prefix.trim_end_matches(':').trim();
+    }
+    path.split("::")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.trim_start_matches("r#").to_owned())
+        .collect()
+}
+
+fn classify_javascript_import_origin(
+    import_path: &str,
+    workspace_index: &ImportWorkspaceIndex,
+) -> ImportOriginClassification {
+    if import_path.starts_with("./")
+        || import_path.starts_with("../")
+        || import_path.starts_with('/')
+    {
+        return ImportOriginClassification::Internal;
+    }
+    if workspace_index
+        .javascript_path_aliases
+        .iter()
+        .any(|alias| javascript_path_alias_matches(import_path, alias))
+        || workspace_index
+            .javascript_workspace_roots
+            .iter()
+            .any(|root| path_has_segment_prefix(import_path, root, '/'))
+    {
+        return ImportOriginClassification::Internal;
+    }
+
+    let (origin, name) = javascript_external_identity(import_path);
+    external_import_origin(&origin, import_path, &name)
+}
+
+fn javascript_path_alias_matches(import_path: &str, alias: &str) -> bool {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return false;
+    }
+    let prefix = alias.strip_suffix('*').unwrap_or(alias);
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return false;
+    }
+    import_path == prefix || import_path.starts_with(&format!("{prefix}/"))
+}
+
+fn javascript_external_identity(import_path: &str) -> (String, String) {
+    let segments = split_path_like_segments(import_path);
+    if import_path.starts_with('@') && segments.len() >= 2 {
+        return (
+            format!("{}/{}", segments[0], segments[1]),
+            segments
+                .last()
+                .cloned()
+                .unwrap_or_else(|| import_path.to_owned()),
+        );
+    }
+    let origin = segments
+        .first()
+        .cloned()
+        .unwrap_or_else(|| import_path.to_owned());
+    let name = segments.last().cloned().unwrap_or_else(|| origin.clone());
+    (origin, name)
+}
+
+fn classify_python_import_origin(
+    import_path: &str,
+    workspace_index: &ImportWorkspaceIndex,
+) -> ImportOriginClassification {
+    if import_path.starts_with('.') || python_import_matches_workspace(import_path, workspace_index)
+    {
+        return ImportOriginClassification::Internal;
+    }
+
+    let segments = split_module_path(import_path, '.');
+    let origin = segments
+        .first()
+        .cloned()
+        .unwrap_or_else(|| import_path.to_owned());
+    let name = segments.last().cloned().unwrap_or_else(|| origin.clone());
+    external_import_origin(&origin, import_path, &name)
+}
+
+fn python_import_matches_workspace(
+    import_path: &str,
+    workspace_index: &ImportWorkspaceIndex,
+) -> bool {
+    workspace_index
+        .python_modules
+        .iter()
+        .any(|module| path_has_segment_prefix(import_path, module, '.'))
+}
+
+fn path_has_segment_prefix(path: &str, prefix: &str, separator: char) -> bool {
+    let prefix = prefix.trim().trim_matches(separator);
+    if prefix.is_empty() {
+        return false;
+    }
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with(separator))
+}
+
+fn external_import_origin(origin: &str, path: &str, name: &str) -> ImportOriginClassification {
+    ImportOriginClassification::External {
+        origin: origin.to_owned(),
+        path: path.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
 fn import_path_matches_target(
     import_path: &str,
     edge: &PendingEdge,
@@ -3190,6 +3371,194 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn import_workspace_index(
+        rust_crates: &[&str],
+        javascript_path_aliases: &[&str],
+        javascript_workspace_roots: &[&str],
+        python_modules: &[&str],
+    ) -> ImportWorkspaceIndex {
+        ImportWorkspaceIndex {
+            rust_crates: rust_crates
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            javascript_path_aliases: javascript_path_aliases
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            javascript_workspace_roots: javascript_workspace_roots
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            python_modules: python_modules
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+        }
+    }
+
+    fn external_import(origin: &str, path: &str, name: &str) -> ImportOriginClassification {
+        ImportOriginClassification::External {
+            origin: origin.to_owned(),
+            path: path.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn classify_import_origin_rust_uses_path_not_collision_label() {
+        let workspace_index = import_workspace_index(
+            &["spur_core", "workspace_dep"],
+            &["std/"],
+            &["Path", "Command", "Terminal", "Ordering", "Write"],
+            &["std", "Path", "Command", "Terminal", "Ordering", "Write"],
+        );
+
+        for import_path in [
+            "crate::model::Foo",
+            "self::local::Foo",
+            "super::parent::Foo",
+            "$crate::macros::Foo",
+            "workspace_dep::api::Foo",
+        ] {
+            assert_eq!(
+                classify_import_origin(
+                    import_path,
+                    "crates/spur-core/src/session.rs",
+                    &workspace_index
+                ),
+                ImportOriginClassification::Internal,
+                "{import_path} should classify as workspace-internal"
+            );
+        }
+
+        for (import_path, origin, name) in [
+            ("std::path::Path", "std", "Path"),
+            ("std::process::Command", "std", "Command"),
+            ("ratatui::Terminal", "ratatui", "Terminal"),
+            ("std::cmp::Ordering", "std", "Ordering"),
+            ("std::io::Write", "std", "Write"),
+            ("core::fmt::Debug", "std", "Debug"),
+            ("alloc::vec::Vec", "std", "Vec"),
+            ("serde_json::Value", "serde_json", "Value"),
+        ] {
+            assert_eq!(
+                classify_import_origin(
+                    import_path,
+                    "crates/spur-core/src/session.rs",
+                    &workspace_index
+                ),
+                external_import(origin, import_path, name),
+                "{import_path} should classify as external by import path"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_import_origin_javascript_respects_relative_alias_and_bare_specifiers() {
+        let workspace_index = import_workspace_index(
+            &["react"],
+            &["@/", "@app/*"],
+            &["src", "packages/ui"],
+            &["react"],
+        );
+
+        for import_path in [
+            "./button",
+            "../utils/theme",
+            "/src/app",
+            "@/components/Button",
+            "@app/components/Button",
+            "src/local/module",
+            "packages/ui/Button",
+        ] {
+            assert_eq!(
+                classify_import_origin(
+                    import_path,
+                    "crates/spur-notebook/jute-notebook/src/App.tsx",
+                    &workspace_index
+                ),
+                ImportOriginClassification::Internal,
+                "{import_path} should classify as workspace-internal"
+            );
+        }
+
+        for (import_path, origin, name) in [
+            ("react", "react", "react"),
+            ("react/jsx-runtime", "react", "jsx-runtime"),
+            ("@scope/pkg", "@scope/pkg", "pkg"),
+            ("@scope/pkg/subpath", "@scope/pkg", "subpath"),
+        ] {
+            assert_eq!(
+                classify_import_origin(
+                    import_path,
+                    "crates/spur-notebook/jute-notebook/src/App.tsx",
+                    &workspace_index
+                ),
+                external_import(origin, import_path, name),
+                "{import_path} should classify as external"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_import_origin_python_reconciles_bare_imports_with_workspace_modules() {
+        let workspace_index = import_workspace_index(
+            &["numpy"],
+            &["@/"],
+            &["pkg"],
+            &["pkg", "pkg.widgets", "anywidget", "anywidget._descriptor"],
+        );
+
+        for import_path in [
+            ".local",
+            "..shared",
+            "pkg",
+            "pkg.widgets",
+            "anywidget._descriptor",
+        ] {
+            assert_eq!(
+                classify_import_origin(import_path, "pkg/app.py", &workspace_index),
+                ImportOriginClassification::Internal,
+                "{import_path} should classify as workspace-internal"
+            );
+        }
+
+        for (import_path, origin, name) in [
+            ("numpy", "numpy", "numpy"),
+            ("click.core", "click", "core"),
+            ("IPython.display", "IPython", "display"),
+        ] {
+            assert_eq!(
+                classify_import_origin(import_path, "pkg/app.py", &workspace_index),
+                external_import(origin, import_path, name),
+                "{import_path} should classify as external"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_import_origin_does_not_leak_rules_between_language_families() {
+        let workspace_index =
+            import_workspace_index(&["numpy", "react"], &["crate/"], &["std"], &["std"]);
+
+        assert_eq!(
+            classify_import_origin("numpy", "pkg/app.py", &workspace_index),
+            external_import("numpy", "numpy", "numpy"),
+            "Rust crate names must not make Python imports internal"
+        );
+        assert_eq!(
+            classify_import_origin("react", "web/App.tsx", &workspace_index),
+            external_import("react", "react", "react"),
+            "Python modules and Rust crates must not make JS bare specifiers internal"
+        );
+        assert_eq!(
+            classify_import_origin("std::path::Path", "web/App.tsx", &workspace_index),
+            external_import("std::path::Path", "std::path::Path", "std::path::Path"),
+            "Rust path rules must not apply to JS/TS files"
+        );
+    }
 
     #[test]
     fn symbol_query_policy_documents_shared_and_dedicated_sources() {
