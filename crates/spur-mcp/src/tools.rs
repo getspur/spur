@@ -773,6 +773,11 @@ fn code_file_symbols_def() -> ToolDefinition {
                 "file": {
                     "type": "string",
                     "description": "Worktree-relative file path, e.g. crates/spur-mcp/src/tools.rs"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default object-row response; compact omits healthy metadata defaults; table returns symbols as cols/rows with repeated file paths interned in a top-level files array."
                 }
             },
             "required": ["file"]
@@ -855,6 +860,11 @@ fn code_callers_def() -> ToolDefinition {
                     "type": "boolean",
                     "default": false,
                     "description": "When true, include unresolved caller rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default object-row response; compact omits healthy metadata defaults; table returns callers as cols/rows with repeated file paths interned in a top-level files array."
                 }
             }
         }),
@@ -889,6 +899,11 @@ fn code_callees_def() -> ToolDefinition {
                 "as_of": {
                     "type": "string",
                     "description": "Optional git commit SHA for point-in-time symbol resolution"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default object-row response; compact omits healthy metadata defaults; table returns callees as cols/rows with repeated file paths interned in a top-level files array."
                 }
             }
         }),
@@ -1004,6 +1019,11 @@ fn code_subgraph_def() -> ToolDefinition {
                 "as_of": {
                     "type": "string",
                     "description": "Optional git commit SHA for point-in-time symbol resolution"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default JSON nodes/edges response; compact omits healthy metadata defaults; table returns nodes and edges as cols/rows with node file paths interned in a top-level files array. Applies to format=json."
                 }
             }
         }),
