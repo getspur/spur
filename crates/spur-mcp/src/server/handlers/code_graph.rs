@@ -1202,6 +1202,9 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
             return Ok(ambiguous_response(candidates));
         }
     };
+    if is_external_symbol_kind(&symbol.symbol_kind) {
+        return Ok(bodyless_external_symbol_response(&symbol));
+    }
     let context_lines = clamped_usize_arg(
         args,
         "context_lines",
@@ -3962,11 +3965,12 @@ fn candidate_rows_for_symbols<'a>(
 
 fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
     let uri = format!("{CODE_SYMBOL_URI_PREFIX}{}", symbol.stable_symbol_id);
-    let selector = if symbol.qualified_name.is_empty() {
-        uri.clone()
-    } else {
-        format!("{}::{}", symbol.file_path, symbol.qualified_name)
-    };
+    let selector = selector_for_symbol_row(
+        &uri,
+        &symbol.file_path,
+        &symbol.qualified_name,
+        &symbol.symbol_kind,
+    );
 
     CandidateRow {
         selector,
@@ -3983,11 +3987,12 @@ fn candidate_row_for_symbol(symbol: &GraphSymbolArtifact) -> CandidateRow {
 
 fn candidate_row_for_search_symbol(symbol: &SearchSymbol) -> CandidateRow {
     let uri = format!("{CODE_SYMBOL_URI_PREFIX}{}", symbol.stable_symbol_id);
-    let selector = if symbol.qualified_name.is_empty() {
-        uri.clone()
-    } else {
-        format!("{}::{}", symbol.file_path, symbol.qualified_name)
-    };
+    let selector = selector_for_symbol_row(
+        &uri,
+        &symbol.file_path,
+        &symbol.qualified_name,
+        &symbol.symbol_kind,
+    );
 
     CandidateRow {
         selector,
@@ -4426,7 +4431,9 @@ fn compute_worktree_dirty(
 }
 
 fn candidate_row(candidate: CandidateRow) -> Value {
-    json!({
+    let external_origin = is_external_symbol_kind(&candidate.symbol_kind)
+        .then(|| external_origin_for_qualified_name(&candidate.qualified_name));
+    let mut row = json!({
         "selector": candidate.selector,
         "uri": candidate.uri,
         "id": candidate.id,
@@ -4436,7 +4443,13 @@ fn candidate_row(candidate: CandidateRow) -> Value {
         "line_range": candidate.line_range,
         "symbol_kind": candidate.symbol_kind,
         "enclosing_scope": candidate.enclosing_scope,
-    })
+    });
+    if let Some(origin) = external_origin {
+        row["origin"] = Value::String(origin);
+        row["external"] = Value::Bool(true);
+        row["workspace_symbol"] = Value::Bool(false);
+    }
+    row
 }
 
 fn symbol_info_row(symbol: &GraphSymbolArtifact) -> Value {
@@ -4450,6 +4463,45 @@ fn symbol_info_row(symbol: &GraphSymbolArtifact) -> Value {
         "uri": symbol_uri(&symbol.stable_symbol_id),
         "id": symbol.stable_symbol_id,
     })
+}
+
+fn is_external_symbol_kind(symbol_kind: &str) -> bool {
+    symbol_kind == "external"
+}
+
+fn selector_for_symbol_row(
+    uri: &str,
+    file_path: &str,
+    qualified_name: &str,
+    symbol_kind: &str,
+) -> String {
+    if qualified_name.is_empty() || is_external_symbol_kind(symbol_kind) {
+        uri.to_owned()
+    } else {
+        format!("{file_path}::{qualified_name}")
+    }
+}
+
+fn bodyless_external_symbol_response(symbol: &GraphSymbolArtifact) -> Value {
+    json!({
+        "symbol": symbol_info_row(symbol),
+        "origin": external_origin_for_qualified_name(&symbol.qualified_name),
+        "path": symbol.qualified_name,
+        "kind": symbol.symbol_kind,
+        "body_status": "no indexed body - Tier-3",
+        "bodyless": true,
+    })
+}
+
+fn external_origin_for_qualified_name(qualified_name: &str) -> String {
+    let origin = qualified_name
+        .split([':', '.', '/'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(qualified_name);
+    match origin {
+        "std" | "core" | "alloc" => "std".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 fn symbol_row(symbol: &GraphSymbolArtifact) -> Value {
@@ -4777,7 +4829,8 @@ mod tests {
                     symbol("other-run", "crates/other", [40, 42], "run", "Other::run"),
                     symbol("search-submit", "src/search.rs", [70, 72], "submit", "submit"),
                     symbol("search-submit-plan", "src/search.rs", [80, 82], "submit_plan", "submit_plan"),
-                    symbol_kind("search-submit-tool", "src/search.rs", [84, 84], "submit_plan", "submit_plan", "mcp_tool")
+                    symbol_kind("search-submit-tool", "src/search.rs", [84, 84], "submit_plan", "submit_plan", "mcp_tool"),
+                    symbol_kind("external-serde-serialize", "serde::Serialize", [0, 0], "Serialize", "serde::Serialize", "external")
                 ],
                 "edges": [
                     edge("caller", "root"),
@@ -4947,6 +5000,7 @@ mod tests {
                 change_kind: None,
                 edge_kind: Some(GraphEdgeKind::Calls),
                 bind_method: None,
+                import_path: None,
             }],
             tombstones: Vec::new(),
             diagnostics: Vec::new(),
@@ -5831,6 +5885,68 @@ mod tests {
         assert_eq!(body["graph_content_hash"], "parquet-handler-test");
         assert_eq!(body["graph_index_version"], "parquet-test");
         assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_read_symbol_short_circuits_external_without_file_manifest() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_read_symbol(
+                Value::from(1),
+                json!({ "stable_symbol_id": "graph://symbol/external-serde-serialize" }),
+            )
+            .await;
+        let body = response_json(response);
+
+        assert_eq!(
+            body["symbol"]["uri"],
+            "graph://symbol/external-serde-serialize"
+        );
+        assert_eq!(body["symbol"]["symbol_kind"], "external");
+        assert_eq!(body["origin"], "serde");
+        assert_eq!(body["path"], "serde::Serialize");
+        assert_eq!(body["kind"], "external");
+        assert_eq!(body["body_status"], "no indexed body - Tier-3");
+        assert_eq!(body.get("source"), None);
+        assert_eq!(body.get("file_oid"), None);
+        assert_eq!(body["graph_content_hash"], "test");
+        assert_unavailable_freshness_metadata(&body);
+    }
+
+    #[tokio::test]
+    async fn code_search_tags_external_candidates() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        write_fixture_artifact(&dir);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let response = server
+            .handle_code_search(
+                Value::from(1),
+                json!({
+                    "query": "Serialize",
+                    "mode": "substring",
+                    "symbol_kind": "external"
+                }),
+            )
+            .await;
+        let body = response_json(response);
+        let candidates = body["candidates"].as_array().expect("candidates");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0]["uri"],
+            "graph://symbol/external-serde-serialize"
+        );
+        assert_eq!(candidates[0]["symbol_kind"], "external");
+        assert_eq!(candidates[0]["origin"], "serde");
+        assert_eq!(candidates[0]["workspace_symbol"], false);
     }
 
     #[tokio::test]
