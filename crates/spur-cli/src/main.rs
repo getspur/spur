@@ -5,6 +5,7 @@ pub mod upgrade_check;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::fmt;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -611,12 +612,43 @@ fn main() -> ExitCode {
     runtime.block_on(async {
         match run().await {
             Ok(()) => ExitCode::SUCCESS,
+            Err(err) if err.is::<RequestedExitCode>() => {
+                let exit = err
+                    .downcast_ref::<RequestedExitCode>()
+                    .expect("type checked by is::<RequestedExitCode>()");
+                ExitCode::from(exit.code)
+            }
             Err(err) => {
                 render_top_level_error(&err);
                 ExitCode::FAILURE
             }
         }
     })
+}
+
+#[derive(Debug)]
+struct RequestedExitCode {
+    code: u8,
+}
+
+impl RequestedExitCode {
+    fn new(code: i32) -> Self {
+        Self {
+            code: u8::try_from(code).unwrap_or(1),
+        }
+    }
+}
+
+impl fmt::Display for RequestedExitCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "requested exit code {}", self.code)
+    }
+}
+
+impl std::error::Error for RequestedExitCode {}
+
+fn requested_exit(code: i32) -> Result<()> {
+    Err(RequestedExitCode::new(code).into())
 }
 
 /// Render the top-level error. If stderr is a TTY (or
@@ -881,7 +913,7 @@ async fn run() -> Result<()> {
                     );
                         eprintln!("Note: the DuckDB engine rescans all agent JSONL on every");
                         eprintln!("      invocation until Phase 2.5 (persistent cache) ships.");
-                        std::process::exit(2);
+                        return requested_exit(2);
                     }
                     run_cost_duckdb(today, week, range.as_deref(), export.as_deref())
                 }
@@ -890,7 +922,7 @@ async fn run() -> Result<()> {
                         "Error: unknown --engine '{}'. Expected 'sqlite' or 'duckdb'.",
                         other
                     );
-                    std::process::exit(2);
+                    requested_exit(2)
                 }
             }
         }
@@ -912,7 +944,7 @@ async fn run() -> Result<()> {
         Commands::Auth { command } => commands::auth::run(command).await,
         Commands::Upgrade { check, force } => {
             let exit = cmd::upgrade::run(cmd::upgrade::UpgradeArgs { check, force }).await?;
-            std::process::exit(exit);
+            requested_exit(exit)
         }
         Commands::Workflow { command } => {
             match command {
@@ -928,7 +960,7 @@ async fn run() -> Result<()> {
         Commands::Config { command } => match command {
             ConfigCommands::Check => {
                 let exit = commands::config_check::run(&repo_root)?;
-                std::process::exit(exit);
+                requested_exit(exit)
             }
             ConfigCommands::Set { key, value, global } => {
                 commands::config_set::run(&repo_root, &key, &value, global)?;
@@ -1036,7 +1068,7 @@ async fn run() -> Result<()> {
                             json,
                         };
                         let code = commands::pm_ingest::run(&repo_root, args).await?;
-                        std::process::exit(code);
+                        requested_exit(code)
                     }
                 }
             }
@@ -2041,7 +2073,7 @@ fn run_cost_duckdb(
 ) -> Result<()> {
     eprintln!("Error: DuckDB support is not compiled into this build.");
     eprintln!("       Rebuild with --features duckdb or use the default features.");
-    std::process::exit(2);
+    requested_exit(2)
 }
 
 #[cfg(feature = "duckdb")]

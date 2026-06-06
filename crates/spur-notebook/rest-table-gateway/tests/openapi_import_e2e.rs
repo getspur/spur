@@ -116,8 +116,7 @@ auth = {{ scheme = "none" }}
 
 #[test]
 fn openapi_import_cli_appends_tables_to_connection_stub() {
-    let bin = option_env!("CARGO_BIN_EXE_openapi-import")
-        .expect("openapi-import binary should be built for integration tests");
+    let bin = env!("CARGO_BIN_EXE_openapi-import");
     let temp = unique_temp_dir("cli-into");
     let spec_path = temp.join("scores.yaml");
     let out_dir = temp.join("tables");
