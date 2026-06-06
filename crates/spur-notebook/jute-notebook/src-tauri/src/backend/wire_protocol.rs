@@ -23,6 +23,19 @@ use crate::Error;
 mod driver_websocket;
 mod driver_zeromq;
 
+/// Consecutive heartbeat misses before a kernel is declared dead.
+pub(crate) const HEARTBEAT_MISS_THRESHOLD: u32 = 3;
+/// Interval between heartbeat pings.
+pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+/// Per-ping timeout waiting for the kernel's echo.
+pub(crate) const HEARTBEAT_RECV_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(1000);
+
+/// Pure decision: has the kernel missed enough consecutive heartbeats to be dead?
+pub(crate) fn heartbeat_declares_dead(consecutive_misses: u32, threshold: u32) -> bool {
+    consecutive_misses >= threshold
+}
+
 /// Type of a kernel wire protocol message, either request or reply.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
@@ -588,7 +601,7 @@ pub struct CommMessage {
 /// - Stdin: Requests from the kernel to the client for standard input.
 /// - Control: Just like Shell, but separated to avoid queueing.
 /// - Heartbeat: Periodic ping/pong to ensure the connection is alive. This
-///   appears to only be supported by ZeroMQ, so we don't implement it here.
+///   appears to only be supported by ZeroMQ.
 ///
 /// The specific details of which messages are sent on which channels are left
 /// to the user. Functions will block if disconnected or return an error after
@@ -601,10 +614,21 @@ pub struct KernelConnection {
     process_stderr_tx: broadcast::Sender<String>,
     reply_tx_map: Arc<DashMap<String, oneshot::Sender<KernelMessage>>>,
     signal: CancellationToken,
+    /// Fired by the heartbeat probe when the kernel stops echoing. Distinct from
+    /// `signal` (which is the shutdown/drop guard for the whole connection).
+    pub(crate) liveness: CancellationToken,
     _drop_guard: Arc<DropGuard>,
 }
 
 impl KernelConnection {
+    pub(crate) fn liveness_token(&self) -> CancellationToken {
+        self.liveness.clone()
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        !self.liveness.is_cancelled()
+    }
+
     /// Send a message to the kernel over the shell channel.
     ///
     /// On success, return a receiver for the reply from the kernel on the same
@@ -714,6 +738,7 @@ impl KernelConnection {
         let (iopub_tx, _iopub_rx) = broadcast::channel(16);
         let (process_stderr_tx, _stderr_rx) = broadcast::channel(16);
         let signal = CancellationToken::new();
+        let liveness = CancellationToken::new();
         let conn = Self {
             shell_tx,
             control_tx,
@@ -721,6 +746,7 @@ impl KernelConnection {
             process_stderr_tx,
             reply_tx_map: Arc::new(DashMap::new()),
             signal: signal.clone(),
+            liveness,
             _drop_guard: Arc::new(signal.drop_guard()),
         };
         (conn, shell_rx)
@@ -733,6 +759,14 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+
+    #[test]
+    fn heartbeat_declares_dead_only_at_or_above_threshold() {
+        assert!(!heartbeat_declares_dead(0, 3));
+        assert!(!heartbeat_declares_dead(2, 3));
+        assert!(heartbeat_declares_dead(3, 3));
+        assert!(heartbeat_declares_dead(5, 3));
+    }
 
     struct InProcessKernelHarness {
         iopub_tx: broadcast::Sender<KernelMessage>,
@@ -762,6 +796,7 @@ mod tests {
             let (iopub_tx, _) = broadcast::channel(64);
             let (process_stderr_tx, _) = broadcast::channel(64);
             let signal = CancellationToken::new();
+            let liveness = CancellationToken::new();
             let conn = Self {
                 shell_tx,
                 control_tx,
@@ -769,6 +804,7 @@ mod tests {
                 process_stderr_tx: process_stderr_tx.clone(),
                 reply_tx_map: Arc::new(DashMap::new()),
                 signal: signal.clone(),
+                liveness,
                 _drop_guard: Arc::new(signal.drop_guard()),
             };
             (

@@ -129,6 +129,7 @@ pub async fn create_websocket_connection(
     let (process_stderr_tx, _) = broadcast::channel::<String>(16);
     let reply_tx_map = Arc::new(DashMap::new());
     let signal = CancellationToken::new();
+    let liveness = CancellationToken::new();
 
     let conn = KernelConnection {
         shell_tx,
@@ -137,6 +138,7 @@ pub async fn create_websocket_connection(
         process_stderr_tx,
         reply_tx_map: reply_tx_map.clone(),
         signal: signal.clone(),
+        liveness,
         _drop_guard: Arc::new(signal.clone().drop_guard()),
     };
 
