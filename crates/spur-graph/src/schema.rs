@@ -246,6 +246,7 @@ pub enum NodeKind {
     Enum,
     EnumVariant,
     File,
+    External,
     Method,
     Field,
     Constant,
@@ -260,6 +261,7 @@ impl NodeKind {
     pub fn discriminator(&self) -> &'static str {
         match self {
             Self::File => "file",
+            Self::External => "external",
             Self::Module => "module",
             Self::Function => "function",
             Self::Class => "class",
