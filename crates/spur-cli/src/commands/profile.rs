@@ -285,8 +285,17 @@ async fn run_monitor(interval: u64, pid: Option<u32>) -> Result<()> {
     println!("[spur profile] Press Ctrl+C to stop");
     println!();
 
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            result = &mut ctrl_c => {
+                result.context("Failed to listen for Ctrl+C")?;
+                break;
+            }
+            _ = ticker.tick() => {}
+        }
 
         let mem = memory_usage(pid)
             .await
@@ -301,6 +310,8 @@ async fn run_monitor(interval: u64, pid: Option<u32>) -> Result<()> {
             timestamp, pid, mem, cpu
         );
     }
+
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
