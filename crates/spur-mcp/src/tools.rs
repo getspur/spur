@@ -766,13 +766,18 @@ fn code_resolve_def() -> ToolDefinition {
 fn code_file_symbols_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_file_symbols".into(),
-        description: "List code symbols declared in one worktree-relative file from the current graph artifact. Rejects absolute paths and paths containing '..'.".into(),
+        description: "List code symbols declared in one worktree-relative file from the current graph artifact. Rejects absolute paths and paths containing '..'. Supports response_format=full|compact|table.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "file": {
                     "type": "string",
                     "description": "Worktree-relative file path, e.g. crates/spur-mcp/src/tools.rs"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default object-row response; compact omits healthy metadata defaults; table returns symbols as cols/rows with repeated file paths interned in a top-level files array."
                 }
             },
             "required": ["file"]
@@ -803,7 +808,7 @@ fn code_symbol_info_def() -> ToolDefinition {
 fn code_read_symbol_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_read_symbol".into(),
-        description: "Read the indexed source for one code symbol from the current graph artifact. Select by stable_symbol_id, or by the exact worktree-relative path plus symbol name. Source bytes are resolved through the artifact file content_oid; stale=true means the current worktree file differs but the returned source still matches the indexed graph.".into(),
+        description: "Read the indexed source for one code symbol from the current graph artifact. Select by stable_symbol_id, or by the exact worktree-relative path plus symbol name. Supports response_format=full|compact|source.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -825,6 +830,11 @@ fn code_read_symbol_def() -> ToolDefinition {
                     "maximum": 50,
                     "default": 0,
                     "description": "Lines of context to include before and after the symbol. Values outside 0..50 are clamped and echoed as requested_context_lines."
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "source"],
+                    "description": "Output shape. full is the default source-plus-metadata response; compact omits healthy metadata defaults; source returns only id, name, file, range, source, file_oid, and actionable source signals."
                 }
             }
         }),
@@ -834,7 +844,7 @@ fn code_read_symbol_def() -> ToolDefinition {
 fn code_callers_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callers".into(),
-        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
+        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Supports response_format=full|compact|table.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -855,6 +865,11 @@ fn code_callers_def() -> ToolDefinition {
                     "type": "boolean",
                     "default": false,
                     "description": "When true, include unresolved caller rows. Default false filters resolved=false rows while counts_by_kind/unresolved_sample still summarize them."
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default object-row response; compact omits healthy metadata defaults; table returns callers as cols/rows with repeated file paths interned in a top-level files array."
                 }
             }
         }),
@@ -864,7 +879,7 @@ fn code_callers_def() -> ToolDefinition {
 fn code_callees_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callees".into(),
-        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred.".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Supports response_format=full|compact|table.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -889,6 +904,11 @@ fn code_callees_def() -> ToolDefinition {
                 "as_of": {
                     "type": "string",
                     "description": "Optional git commit SHA for point-in-time symbol resolution"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default object-row response; compact omits healthy metadata defaults; table returns callees as cols/rows with repeated file paths interned in a top-level files array."
                 }
             }
         }),
@@ -943,7 +963,7 @@ fn code_symbol_search_def() -> ToolDefinition {
 fn code_subgraph_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_subgraph".into(),
-        description: "Get a budgeted code-symbol subgraph from the current worktree graph artifact. Traversal is deterministic BFS for a given artifact: seed with selector (or start_nodes order for continuation), then expand each node by graph artifact edge order. JSON edge rows include edge_kind (calls, calls_dyn, references_hof, references_other). Responses cap output with max_nodes (default 40, range 1..400) and max_edges (default 120, range 1..1200); out-of-range budgets are clamped and echoed in metadata. When truncated, truncated_frontier lists next-hop node ids reachable through excluded nodes/edges; call again with start_nodes=truncated_frontier to resume statelessly. For continuations from radius > 1 traversals, use radius one less than the original radius so frontier nodes expand the remaining hop budget. Unresolved edges are hidden by default (include_unresolved=false); when include_unresolved=true, unresolved edges count toward max_edges. Dynamic trait fallback is limited to explicit receiver types (&dyn Trait, &mut dyn Trait, Box/Arc/Rc<dyn Trait>); Self::foo(), chained receivers, and generic-bound calls are not inferred. Returns JSON nodes/edges by default, or Mermaid when format=mermaid.".into(),
+        description: "Get a budgeted code-symbol subgraph from the current worktree graph artifact. Traversal is deterministic BFS; responses cap output with max_nodes/max_edges and report truncated_frontier for continuation. Returns JSON nodes/edges by default, or Mermaid when format=mermaid. Supports response_format=full|compact|table for JSON output.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -1004,6 +1024,11 @@ fn code_subgraph_def() -> ToolDefinition {
                 "as_of": {
                     "type": "string",
                     "description": "Optional git commit SHA for point-in-time symbol resolution"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default JSON nodes/edges response; compact omits healthy metadata defaults; table returns nodes and edges as cols/rows with node file paths interned in a top-level files array. Applies to format=json."
                 }
             }
         }),
