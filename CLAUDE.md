@@ -57,6 +57,8 @@ Example: `fix(spur-tui): S1.c cap per-frame event drain at 8`
 
 Valid types include `feat`, `fix`, `test`, `docs`, `refactor`, and `chore`. Keep subjects under 72 characters. PRs should explain the problem, summarize the change, link the plan or issue when applicable, and note any user-visible TUI behavior changes with screenshots or terminal captures.
 
+Whenever you add, change, or delete code or documentation, commit the finished change with a meaningful message that describes the intent.
+
 ## Plan-Driven Workflow
 Non-trivial work should flow from spec to plan to implementation. Before executing an older plan, verify it against current code and pay attention to established invariants around broadcast sizing, TUI event draining, ACP sequencing, and notification grace windows.
 
