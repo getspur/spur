@@ -13,19 +13,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rmcp::{
-    model::CallToolRequestParams,
+    model::{CallToolRequestParams, CallToolResult},
     service::ServiceError,
     transport::{
         streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
     },
     ServiceExt,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use spur_acp::SpurEventBody;
 use spur_graph::{
-    write_artifact_parquet, write_current_pointer, GraphFileArtifact, GraphFileManifestEntry,
-    GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId, WriteOptions,
-    GRAPH_INDEX_VERSION_TEMPORAL,
+    git_blob_oid, write_artifact_parquet, write_current_pointer, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId,
+    WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 use spur_license::policy::PolicyResolver;
 use spur_license::FeatureGate;
@@ -42,6 +42,8 @@ mod common;
 struct CwdGuard {
     original: std::path::PathBuf,
 }
+
+static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl CwdGuard {
     fn enter(path: &Path) -> Self {
@@ -257,6 +259,39 @@ async fn call_jsonrpc(
     response
 }
 
+async fn call_tool_raw(
+    server: &Arc<WorkerMcpServer>,
+    token: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> CallToolResult {
+    let config =
+        StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(token.to_string());
+    let client =
+        ().serve(StreamableHttpClientTransport::from_config(config))
+            .await
+            .expect("rmcp client initialize");
+
+    let mut request = CallToolRequestParams::new(tool_name.to_string());
+    request.arguments = arguments.as_object().cloned();
+    let result = client.call_tool(request).await.expect("tool call succeeds");
+    drop(client);
+    result
+}
+
+fn structured_only(result: &CallToolResult) -> &Value {
+    assert!(
+        result.content.is_empty(),
+        "worker tool results should not duplicate structured JSON in text content: {:?}",
+        result.content
+    );
+    assert_eq!(result.is_error, Some(false));
+    result
+        .structured_content
+        .as_ref()
+        .expect("structured content present")
+}
+
 fn service_error_response(error: ServiceError) -> Value {
     let (code, message) = match &error {
         ServiceError::McpError(mcp_error) => {
@@ -317,7 +352,86 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
 }
 
 #[tokio::test]
+async fn tools_list_advertises_response_format_for_worker_code_graph_tools() {
+    let (_dir, server) = test_server_with_real_pm().await;
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let body = call_jsonrpc(&server, &token, "tools/list", json!({})).await;
+    let tools = body["result"]["tools"]
+        .as_array()
+        .expect("tools array present");
+
+    for tool_name in [
+        "code_file_symbols",
+        "code_callers",
+        "code_callees",
+        "code_subgraph",
+    ] {
+        assert_worker_response_format_enum(tools, tool_name, &["full", "compact", "table"]);
+    }
+    assert_worker_response_format_enum(tools, "code_read_symbol", &["full", "compact", "source"]);
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+fn assert_worker_response_format_enum(tools: &[Value], tool_name: &str, expected: &[&str]) {
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == tool_name)
+        .unwrap_or_else(|| panic!("worker tools/list missing {tool_name}"));
+    let schema = &tool["inputSchema"]["properties"]["response_format"];
+    assert!(
+        schema.is_object(),
+        "{tool_name} must define response_format in worker tools/list inputSchema: {tool}"
+    );
+    let schema = resolve_worker_schema(&tool["inputSchema"], schema);
+    assert_eq!(
+        schema["type"], "string",
+        "{tool_name}.response_format must be a string schema"
+    );
+    let actual = schema["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{tool_name}.response_format must define enum values"))
+        .iter()
+        .map(|value| value.as_str().expect("enum entries are strings"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "{tool_name}.response_format enum drift in worker tools/list"
+    );
+}
+
+fn resolve_worker_schema<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return schema_ref_target(root, reference);
+    }
+
+    for key in ["anyOf", "oneOf"] {
+        if let Some(options) = schema.get(key).and_then(Value::as_array) {
+            if let Some(option) = options
+                .iter()
+                .find(|option| option.get("type").and_then(Value::as_str) != Some("null"))
+            {
+                return resolve_worker_schema(root, option);
+            }
+        }
+    }
+
+    schema
+}
+
+fn schema_ref_target<'a>(root: &'a Value, reference: &str) -> &'a Value {
+    let Some(def_name) = reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+    else {
+        panic!("unsupported schema ref: {reference}");
+    };
+    &root["$defs"][def_name]
+}
+
+#[tokio::test]
 async fn tools_call_code_graph_metadata_tools_are_reachable() {
+    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
     let (dir, server) = test_server_with_real_pm().await;
     write_worker_graph_fixture(dir.path());
     let _cwd = CwdGuard::enter(dir.path());
@@ -356,7 +470,142 @@ async fn tools_call_code_graph_metadata_tools_are_reachable() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-fn write_worker_graph_fixture(worktree: &Path) {
+#[tokio::test]
+async fn tools_call_code_file_symbols_omitted_response_format_stays_full() {
+    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
+    let (dir, server) = test_server_with_real_pm().await;
+    write_worker_graph_fixture(dir.path());
+    let _cwd = CwdGuard::enter(dir.path());
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+
+    let result = call_tool_raw(
+        &server,
+        &token,
+        "code_file_symbols",
+        json!({ "file": "src/lib.rs" }),
+    )
+    .await;
+    let body = structured_only(&result);
+
+    assert!(body.get("response_format").is_none());
+    assert!(
+        body.get("files").is_none(),
+        "full response is not table-shaped"
+    );
+    assert!(
+        body.get("graph_content_hash").is_some(),
+        "omitted response_format must keep full metadata: {body}"
+    );
+    let symbol = &body["symbols"][0];
+    assert_eq!(symbol["id"], "symbol-launch");
+    assert_eq!(symbol["file_path"], "src/lib.rs");
+    assert_eq!(symbol["uri"], "graph://symbol/symbol-launch");
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn tools_call_code_file_symbols_compact_and_table_formats_are_structured_only() {
+    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
+    let (dir, server) = test_server_with_real_pm().await;
+    write_worker_graph_fixture(dir.path());
+    let _cwd = CwdGuard::enter(dir.path());
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+
+    let compact = call_tool_raw(
+        &server,
+        &token,
+        "code_file_symbols",
+        json!({ "file": "src/lib.rs", "response_format": "compact" }),
+    )
+    .await;
+    let compact = structured_only(&compact);
+    assert!(compact.get("response_format").is_none());
+    assert!(
+        compact.get("graph_content_hash").is_none(),
+        "compact response should omit full metadata defaults: {compact}"
+    );
+    assert_eq!(compact["symbols"][0]["id"], "symbol-launch");
+    assert_eq!(compact["symbols"][0]["file_path"], "src/lib.rs");
+
+    let table = call_tool_raw(
+        &server,
+        &token,
+        "code_file_symbols",
+        json!({ "file": "src/lib.rs", "response_format": "table" }),
+    )
+    .await;
+    let table = structured_only(&table);
+    assert_eq!(table["response_format"], "table");
+    assert!(
+        table.get("graph_content_hash").is_none(),
+        "table response should omit full metadata defaults: {table}"
+    );
+    assert_eq!(table["files"], json!(["src/lib.rs"]));
+    assert_eq!(
+        table["symbols"]["cols"],
+        json!([
+            "id",
+            "entity_name",
+            "qualified_name",
+            "file",
+            "line_start",
+            "line_end",
+            "symbol_kind",
+            "enclosing_scope"
+        ])
+    );
+    assert_eq!(table["symbols"]["rows"][0][0], "symbol-launch");
+    assert_eq!(table["symbols"]["rows"][0][3], 0);
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn tools_call_code_read_symbol_source_format_is_structured_only() {
+    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
+    let (dir, server) = test_server_with_real_pm().await;
+    let content_oid = write_worker_graph_fixture(dir.path());
+    let _cwd = CwdGuard::enter(dir.path());
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+
+    let result = call_tool_raw(
+        &server,
+        &token,
+        "code_read_symbol",
+        json!({
+            "stable_symbol_id": "symbol-launch",
+            "response_format": "source"
+        }),
+    )
+    .await;
+    let body = structured_only(&result);
+
+    assert_eq!(
+        body,
+        &json!({
+            "id": "symbol-launch",
+            "name": "launch_order",
+            "file": "src/lib.rs",
+            "range": { "start": 1, "end": 3 },
+            "source": WORKER_LAUNCH_SOURCE,
+            "file_oid": content_oid,
+        })
+    );
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+const WORKER_LAUNCH_SOURCE: &str = "pub fn launch_order() {\n    parse_order();\n}\n";
+const WORKER_GRAPH_SOURCE: &str =
+    "pub fn launch_order() {\n    parse_order();\n}\n\npub fn parse_order() {}\n";
+
+fn write_worker_graph_fixture(worktree: &Path) -> String {
+    let source_path = worktree.join("src/lib.rs");
+    std::fs::create_dir_all(source_path.parent().expect("source parent"))
+        .expect("create fixture source dir");
+    std::fs::write(&source_path, WORKER_GRAPH_SOURCE).expect("write fixture source");
+    let content_oid = git_blob_oid(WORKER_GRAPH_SOURCE.as_bytes());
     let artifact = GraphIndexArtifact {
         header: GraphIndexHeader {
             graph_index_version: GRAPH_INDEX_VERSION_TEMPORAL.to_string(),
@@ -367,7 +616,7 @@ fn write_worker_graph_fixture(worktree: &Path) {
         file_manifests: vec![GraphFileManifestEntry {
             stable_file_id: "file-src-lib".to_string(),
             path: "src/lib.rs".to_string(),
-            content_oid: "0000000000000000000000000000000000000000".to_string(),
+            content_oid: content_oid.clone(),
             node_ids: Vec::new(),
         }],
         files: vec![GraphFileArtifact {
@@ -403,6 +652,7 @@ fn write_worker_graph_fixture(worktree: &Path) {
     )
     .expect("write parquet artifact");
     write_current_pointer(worktree, &written).expect("write CURRENT pointer");
+    content_oid
 }
 
 // ─── T23: per-delegation summary event emission ───────────────────────────
