@@ -407,6 +407,7 @@ fn notebook_with_code_cells(cells: &[(&str, CodeType)]) -> NotebookRoot {
                             datasource_setup: None,
                             dag: None,
                             code_type: Some(*code_type),
+                            frontend: None,
                         }),
                         jute_deck: None,
                         other: Default::default(),

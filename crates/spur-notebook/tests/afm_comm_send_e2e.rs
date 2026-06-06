@@ -348,6 +348,7 @@ fn python_notebook(cells: &[(&str, &str)]) -> NotebookRoot {
                             datasource_setup: None,
                             dag: None,
                             code_type: Some(CodeType::Python),
+                            frontend: None,
                         }),
                         jute_deck: None,
                         other: Default::default(),

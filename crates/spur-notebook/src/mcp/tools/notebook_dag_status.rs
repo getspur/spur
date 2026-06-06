@@ -248,6 +248,7 @@ mod tests {
                         source,
                     }),
                     code_type: None,
+                    frontend: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),

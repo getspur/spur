@@ -1990,6 +1990,7 @@ mod tests {
                     datasource_setup: None,
                     dag: Some(dag),
                     code_type: None,
+                    frontend: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),
