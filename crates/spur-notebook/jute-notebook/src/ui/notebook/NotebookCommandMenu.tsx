@@ -6,6 +6,7 @@ import {
   ListRestartIcon,
   ListVideoIcon,
   MessageSquareIcon,
+  PackageIcon,
   PaletteIcon,
   PauseIcon,
   PencilIcon,
@@ -19,6 +20,8 @@ import { useStore } from "zustand";
 
 import { dispatchDeckCommand } from "@/agent/deck";
 import { useNotebook } from "@/stores/notebook";
+
+import { publishSpurApp } from "./publishSpurApp";
 
 type DeckPromptKind = "draft" | "restructure" | "polish" | "notes";
 
@@ -58,6 +61,15 @@ export default function NotebookCommandMenu() {
       );
     });
   }, [closeAndRun, notebookPath]);
+
+  const publishCurrentNotebook = useCallback(() => {
+    if (!notebookPath) return;
+    closeAndRun(() => {
+      void publishSpurApp(notebook, notebookPath).catch((error) => {
+        console.error("Failed to publish Spur App", error);
+      });
+    });
+  }, [closeAndRun, notebook, notebookPath]);
 
   const openDeckPrompt = useCallback(
     (kind: DeckPromptKind, placeholder: string) => {
@@ -175,6 +187,13 @@ export default function NotebookCommandMenu() {
         </Command.Group>
 
         <Command.Group heading="Notebook">
+          <Command.Item
+            disabled={!notebookPath}
+            onSelect={publishCurrentNotebook}
+          >
+            <PackageIcon />
+            Publish Spur App...
+          </Command.Item>
           {/* TODO: Wire when the notebook store exposes cell reordering. */}
           <Command.Item disabled>
             <ArrowUpIcon />

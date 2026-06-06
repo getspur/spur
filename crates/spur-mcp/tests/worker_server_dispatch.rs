@@ -373,6 +373,35 @@ async fn tools_list_advertises_response_format_for_worker_code_graph_tools() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
+#[tokio::test]
+async fn code_graph_worker_tools_do_not_duplicate_structured_payload_as_text_content() {
+    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
+    let (dir, server) = test_server_with_real_pm().await;
+    write_worker_graph_fixture(dir.path());
+    server.register_delegation_worktree_root("d-no-duplicate".into(), dir.path().to_path_buf());
+    let token = server.issue_token("d-no-duplicate", Duration::from_secs(60));
+
+    let result = call_tool_raw(
+        &server,
+        &token,
+        "code_file_symbols",
+        serde_json::json!({ "file": "src/lib.rs" }),
+    )
+    .await;
+
+    assert!(
+        result.structured_content.is_some(),
+        "worker code tools should keep machine-readable structured content"
+    );
+    assert!(
+        result.content.is_empty(),
+        "worker code tools should not duplicate structured JSON into text content: {result:?}"
+    );
+    assert_eq!(result.is_error, Some(false));
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
 fn assert_worker_response_format_enum(tools: &[Value], tool_name: &str, expected: &[&str]) {
     let tool = tools
         .iter()
