@@ -725,9 +725,9 @@ mod tests {
     fn cargo_build_command_includes_requested_features() {
         let root = PathBuf::from("/workspace");
         let extra = vec![
-            "--locked".to_string(),
-            "--debug".to_string(),
-            "--remote".to_string(),
+            "--locked".to_owned(),
+            "--debug".to_owned(),
+            "--remote".to_owned(),
         ];
 
         let command = cargo_build_command(
@@ -741,12 +741,12 @@ mod tests {
         assert_eq!(
             command_args(&command),
             vec![
-                "build".to_string(),
-                "-p".to_string(),
-                "spur-notebook".to_string(),
-                "--features".to_string(),
-                "spur-notebook/custom-protocol".to_string(),
-                "--locked".to_string(),
+                "build".to_owned(),
+                "-p".to_owned(),
+                "spur-notebook".to_owned(),
+                "--features".to_owned(),
+                "spur-notebook/custom-protocol".to_owned(),
+                "--locked".to_owned(),
             ]
         );
         assert_eq!(command.get_current_dir(), Some(root.as_path()));
@@ -765,17 +765,17 @@ mod tests {
         assert_eq!(
             command_args(&command),
             vec![
-                "--auto-spin".to_string(),
-                "--".to_string(),
-                "build".to_string(),
-                "--release".to_string(),
-                "-p".to_string(),
-                "spur-cli".to_string(),
-                "-p".to_string(),
-                "spur-notebook".to_string(),
-                "--features".to_string(),
-                "spur-notebook/custom-protocol,spur-notebook/datasource-introspect".to_string(),
-                "--locked".to_string(),
+                "--auto-spin".to_owned(),
+                "--".to_owned(),
+                "build".to_owned(),
+                "--release".to_owned(),
+                "-p".to_owned(),
+                "spur-cli".to_owned(),
+                "-p".to_owned(),
+                "spur-notebook".to_owned(),
+                "--features".to_owned(),
+                "spur-notebook/custom-protocol,spur-notebook/datasource-introspect".to_owned(),
+                "--locked".to_owned(),
             ]
         );
         assert_eq!(command.get_current_dir(), Some(root.as_path()));
@@ -795,8 +795,8 @@ mod tests {
         assert_eq!(
             command_args(&command),
             vec![
-                "--bins".to_string(),
-                "--to".to_string(),
+                "--bins".to_owned(),
+                "--to".to_owned(),
                 dest.to_string_lossy().into_owned(),
             ]
         );
@@ -841,22 +841,22 @@ mod tests {
     #[test]
     fn linux_install_build_command_builds_cli_and_notebook_together() {
         let root = PathBuf::from("/workspace");
-        let extra = vec!["--locked".to_string()];
+        let extra = vec!["--locked".to_owned()];
 
         let command = linux_install_build_command(&root, false, &extra);
 
         assert_eq!(
             command_args(&command),
             vec![
-                "build".to_string(),
-                "--release".to_string(),
-                "-p".to_string(),
-                "spur-cli".to_string(),
-                "-p".to_string(),
-                "spur-notebook".to_string(),
-                "--features".to_string(),
-                "spur-notebook/custom-protocol,spur-notebook/datasource-introspect".to_string(),
-                "--locked".to_string(),
+                "build".to_owned(),
+                "--release".to_owned(),
+                "-p".to_owned(),
+                "spur-cli".to_owned(),
+                "-p".to_owned(),
+                "spur-notebook".to_owned(),
+                "--features".to_owned(),
+                "spur-notebook/custom-protocol,spur-notebook/datasource-introspect".to_owned(),
+                "--locked".to_owned(),
             ]
         );
         assert_eq!(command.get_current_dir(), Some(root.as_path()));
@@ -878,12 +878,12 @@ mod tests {
         assert_eq!(
             command_args(&command),
             vec![
-                "build".to_string(),
-                "--bundles".to_string(),
-                "app".to_string(),
-                "--features".to_string(),
-                "datasource-introspect".to_string(),
-                "--config".to_string(),
+                "build".to_owned(),
+                "--bundles".to_owned(),
+                "app".to_owned(),
+                "--features".to_owned(),
+                "datasource-introspect".to_owned(),
+                "--config".to_owned(),
                 format!("{{\"bundle\":{{\"resources\":[\"{resource}\"]}}}}"),
             ]
         );
@@ -905,7 +905,7 @@ mod tests {
         let command = duckdb_extension_build_command(&ext_dir);
 
         assert_eq!(command.get_program(), OsStr::new("bash"));
-        assert_eq!(command_args(&command), vec!["scripts/build.sh".to_string()]);
+        assert_eq!(command_args(&command), vec!["scripts/build.sh".to_owned()]);
         assert_eq!(command.get_current_dir(), Some(ext_dir.as_path()));
     }
 
@@ -916,7 +916,7 @@ mod tests {
 
         ensure_jute_frontend_deps_with_runner(&jute_dir, |command, label| {
             commands.push((
-                label.to_string(),
+                label.to_owned(),
                 command.get_program().to_string_lossy().into_owned(),
                 command_args(command),
             ));
@@ -927,9 +927,9 @@ mod tests {
         assert_eq!(
             commands,
             vec![(
-                "npm install".to_string(),
-                "npm".to_string(),
-                vec!["install".to_string()]
+                "npm install".to_owned(),
+                "npm".to_owned(),
+                vec!["install".to_owned()]
             )]
         );
     }
