@@ -4,7 +4,7 @@ use std::{
     fmt,
 };
 
-use jute::backend::notebook::{CellDagMetadata, DagSource};
+use jute::backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -59,6 +59,42 @@ impl fmt::Display for DagError {
 }
 
 impl Error for DagError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourcePortError {
+    NotDeclared { port: String },
+    Ambiguous { port: String },
+}
+
+pub(crate) fn resolve_source_for_port(
+    root: &NotebookRoot,
+    port: &str,
+) -> Result<DagSource, SourcePortError> {
+    let mut matches = root
+        .cells
+        .iter()
+        .filter_map(cell_dag_source)
+        .filter(|source| source.port == port);
+    let Some(source) = matches.next().cloned() else {
+        return Err(SourcePortError::NotDeclared {
+            port: port.to_owned(),
+        });
+    };
+    if matches.any(|other| other.kind != source.kind) {
+        return Err(SourcePortError::Ambiguous {
+            port: port.to_owned(),
+        });
+    }
+    Ok(source)
+}
+
+fn cell_dag_source(cell: &Cell) -> Option<&DagSource> {
+    match cell {
+        Cell::Raw(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
+        Cell::Markdown(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
+        Cell::Code(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SourceKey {
@@ -286,9 +322,12 @@ impl NotebookDag {
 mod tests {
     use std::collections::BTreeMap;
 
-    use jute::backend::notebook::{CellDagMetadata, DagSource, PortSpec};
+    use jute::backend::notebook::{
+        Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
+        NotebookMetadata, NotebookRoot, PortSpec, SpurCellMetadata,
+    };
 
-    use super::{DagEdge, DagError, NotebookDag};
+    use super::{resolve_source_for_port, DagEdge, DagError, NotebookDag, SourcePortError};
 
     fn port(name: &str) -> PortSpec {
         PortSpec {
@@ -301,6 +340,13 @@ mod tests {
     fn source(port: &str) -> DagSource {
         DagSource {
             kind: "datasource".to_string(),
+            port: port.to_string(),
+        }
+    }
+
+    fn source_with_kind(kind: &str, port: &str) -> DagSource {
+        DagSource {
+            kind: kind.to_string(),
             port: port.to_string(),
         }
     }
@@ -325,6 +371,88 @@ mod tests {
                 .collect::<BTreeMap<_, _>>(),
         )
         .expect("graph builds")
+    }
+
+    fn notebook(cells: Vec<Cell>) -> NotebookRoot {
+        NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                jute_deck: None,
+                other: Default::default(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells,
+        }
+    }
+
+    fn source_cell(id: &str, source: DagSource) -> Cell {
+        Cell::Code(CodeCell {
+            id: Some(id.to_string()),
+            metadata: CellMetadata {
+                spur: Some(SpurCellMetadata {
+                    version: 1,
+                    last_edited_by: None,
+                    datasource_setup: None,
+                    dag: Some(CellDagMetadata {
+                        produces: Vec::new(),
+                        consumes: Vec::new(),
+                        source: Some(source),
+                    }),
+                    code_type: None,
+                }),
+                jute_deck: None,
+                other: Default::default(),
+            },
+            source: MultilineString::Single("print('ok')".to_string()),
+            execution_count: None,
+            outputs: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn resolve_source_for_port_rejects_undeclared_port() {
+        let error = resolve_source_for_port(&notebook(Vec::new()), "sales")
+            .expect_err("missing source port is rejected");
+
+        assert_eq!(
+            error,
+            SourcePortError::NotDeclared {
+                port: "sales".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_source_for_port_returns_single_matching_source() {
+        let expected = source("sales");
+        let root = notebook(vec![source_cell("source", expected.clone())]);
+
+        let resolved = resolve_source_for_port(&root, "sales").expect("source resolves");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_source_for_port_rejects_ambiguous_source_kinds() {
+        let root = notebook(vec![
+            source_cell("source-a", source_with_kind("datasource", "sales")),
+            source_cell("source-b", source_with_kind("stream", "sales")),
+        ]);
+
+        let error =
+            resolve_source_for_port(&root, "sales").expect_err("ambiguous source port is rejected");
+
+        assert_eq!(
+            error,
+            SourcePortError::Ambiguous {
+                port: "sales".to_string()
+            }
+        );
     }
 
     #[test]

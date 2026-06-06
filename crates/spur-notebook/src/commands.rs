@@ -8,6 +8,7 @@ use tracing::warn;
 use crate::{
     dag::{
         engine::{ReactiveEngineClient, SourcePush},
+        graph::{resolve_source_for_port, SourcePortError},
         notebook_port_root, notebook_run_context, NotebookDag, PortStore,
     },
     mcp::bridge::{AgentBridge, TauriBridgeRequester},
@@ -168,6 +169,13 @@ async fn handle_source_push_intent(
     }))
 }
 
+/// Handles `model-state.update` as a deliberate frontend-only echo.
+///
+/// This updates the host-side widget registry mirror by returning
+/// `{ method: "update", state }` to the AFM iframe runtime only. It does not
+/// send a `comm_msg` to the Python kernel, so Python-side traitlet `@observe`
+/// handlers will not fire from frontend `model.save_changes()`. Kernel-side
+/// reactivity is driven exclusively by the port-based `source.push` contract.
 fn handle_model_state_update_intent(
     intent: &AnyWidgetCommandIntent,
 ) -> Result<Value, AnyWidgetIntentError> {
@@ -224,32 +232,16 @@ fn source_push_ipc_bytes(
 }
 
 fn source_for_port(root: &NotebookRoot, port: &str) -> Result<DagSource, AnyWidgetIntentError> {
-    let mut matches = root
-        .cells
-        .iter()
-        .filter_map(cell_dag_source)
-        .filter(|source| source.port == port);
-    let Some(source) = matches.next().cloned() else {
-        return Err(AnyWidgetIntentError::new(
+    resolve_source_for_port(root, port).map_err(|error| match error {
+        SourcePortError::NotDeclared { port } => AnyWidgetIntentError::new(
             "source_port_not_declared",
             format!("source.push port is not declared: {port}"),
-        ));
-    };
-    if matches.any(|other| other.kind != source.kind) {
-        return Err(AnyWidgetIntentError::new(
+        ),
+        SourcePortError::Ambiguous { port } => AnyWidgetIntentError::new(
             "ambiguous_source_port",
             format!("source.push port is ambiguous: {port}"),
-        ));
-    }
-    Ok(source)
-}
-
-fn cell_dag_source(cell: &Cell) -> Option<&DagSource> {
-    match cell {
-        Cell::Raw(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
-        Cell::Markdown(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
-        Cell::Code(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
-    }
+        ),
+    })
 }
 
 fn audit_rejected_intent(

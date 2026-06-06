@@ -1,4 +1,4 @@
-use jute::backend::notebook::{Cell, DagSource, NotebookRoot};
+use jute::backend::notebook::{DagSource, NotebookRoot};
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -7,7 +7,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    dag::SourcePush,
+    dag::{
+        graph::{resolve_source_for_port, SourcePortError},
+        SourcePush,
+    },
     mcp::{tools::parse_byte_payload, ServerDeps},
 };
 
@@ -93,32 +96,16 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
 }
 
 fn source_for_port(root: &NotebookRoot, port: &str) -> Result<DagSource, McpError> {
-    let mut matches = root
-        .cells
-        .iter()
-        .filter_map(cell_dag_source)
-        .filter(|source| source.port == port);
-    let Some(source) = matches.next().cloned() else {
-        return Err(McpError::invalid_params(
+    resolve_source_for_port(root, port).map_err(|error| match error {
+        SourcePortError::NotDeclared { port } => McpError::invalid_params(
             "notebook_push_source source port is not declared",
             Some(json!({ "port": port, "code": "source_port_not_declared" })),
-        ));
-    };
-    if matches.any(|other| other.kind != source.kind) {
-        return Err(McpError::invalid_params(
+        ),
+        SourcePortError::Ambiguous { port } => McpError::invalid_params(
             "notebook_push_source source port is ambiguous",
             Some(json!({ "port": port, "code": "ambiguous_source_port" })),
-        ));
-    }
-    Ok(source)
-}
-
-fn cell_dag_source(cell: &Cell) -> Option<&DagSource> {
-    match cell {
-        Cell::Raw(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
-        Cell::Markdown(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
-        Cell::Code(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
-    }
+        ),
+    })
 }
 
 #[cfg(test)]
