@@ -1368,7 +1368,7 @@ async fn worker_code_search_freshness_uses_registered_worktree_root() {
     let body = call_worker_tool(
         &server,
         &token,
-        "code_search",
+        "code_symbol_search",
         json!({
             "query": ROOT_SYMBOL,
             "mode": "exact",
@@ -1379,7 +1379,7 @@ async fn worker_code_search_freshness_uses_registered_worktree_root() {
 
     assert!(
         body.get("error").is_none(),
-        "worker code_search should succeed: {body}"
+        "worker code_symbol_search should succeed: {body}"
     );
     assert!(candidate_entity_names(&body).contains(ROOT_SYMBOL));
     assert_eq!(
@@ -1416,7 +1416,7 @@ async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search
     let search = call_worker_tool(
         &server,
         &token,
-        "code_search",
+        "code_symbol_search",
         json!({
             "query": ROOT_SYMBOL,
             "mode": "exact",
@@ -1426,7 +1426,7 @@ async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search
     .await;
     assert!(
         search.get("error").is_none(),
-        "worker code_search should overlay root graph, got: {search}"
+        "worker code_symbol_search should overlay root graph, got: {search}"
     );
     assert!(candidate_entity_names(&search).contains(ROOT_SYMBOL));
 
