@@ -1,7 +1,12 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use jute::backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -12,6 +17,7 @@ use crate::{
         notebook_port_root, notebook_run_context, NotebookDag, PortStore,
     },
     mcp::bridge::{AgentBridge, TauriBridgeRequester},
+    spur_app::{self, archive, SpurAppExportOptions, SpurAppManifest, SpurAppPreflight},
 };
 
 const ANYWIDGET_COMMAND_KIND: &str = "anywidget-command";
@@ -53,6 +59,36 @@ pub struct AnyWidgetCommandResponse {
     pub kind: String,
     /// Intent-specific response or validation error.
     pub response: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishSpurAppResponse {
+    pub path: String,
+    pub manifest: SpurAppManifest,
+    pub asset_count: usize,
+    #[serde(serialize_with = "serialize_spur_app_preflight")]
+    pub preflight: SpurAppPreflight,
+}
+
+fn serialize_spur_app_preflight<S>(
+    preflight: &SpurAppPreflight,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    #[derive(Serialize)]
+    struct SpurAppPreflightJson<'a> {
+        missing_dependency_locks: &'a [String],
+        warnings: &'a [String],
+    }
+
+    SpurAppPreflightJson {
+        missing_dependency_locks: &preflight.missing_dependency_locks,
+        warnings: &preflight.warnings,
+    }
+    .serialize(serializer)
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +175,54 @@ pub async fn anywidget_command(
         None => None,
     };
     Ok(handle_anywidget_command_intent(&state, engine, intent).await)
+}
+
+pub fn publish_spur_app_for_paths(
+    notebook_path: PathBuf,
+    output_path: PathBuf,
+    name: Option<String>,
+    include_port_snapshots: bool,
+) -> Result<PublishSpurAppResponse, String> {
+    let dependency_roots = notebook_path
+        .parent()
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
+
+    let exported = spur_app::export_spur_app(SpurAppExportOptions {
+        notebook_path,
+        output_path,
+        name,
+        widget_assets: Vec::new(),
+        include_port_snapshots,
+        dependency_roots,
+    })
+    .map_err(|error| error.to_string())?;
+
+    let manifest_file = fs::File::open(&exported.output_path).map_err(|error| error.to_string())?;
+    let manifest = archive::read_manifest(manifest_file).map_err(|error| error.to_string())?;
+
+    Ok(PublishSpurAppResponse {
+        path: exported.output_path.to_string_lossy().to_string(),
+        manifest,
+        asset_count: exported.asset_count,
+        preflight: exported.preflight,
+    })
+}
+
+#[tauri::command]
+pub async fn publish_spur_app(
+    notebook_path: String,
+    output_path: String,
+    name: Option<String>,
+    include_port_snapshots: Option<bool>,
+) -> Result<PublishSpurAppResponse, String> {
+    publish_spur_app_for_paths(
+        PathBuf::from(notebook_path),
+        PathBuf::from(output_path),
+        name,
+        include_port_snapshots.unwrap_or(false),
+    )
 }
 
 /// Core handler for an anywidget command intent, defaulting to the real
