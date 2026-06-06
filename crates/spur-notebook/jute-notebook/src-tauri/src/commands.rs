@@ -25,7 +25,7 @@ use crate::{
         notebook::{
             code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType, NotebookRoot,
         },
-        wire_protocol::build_comm_msg,
+        wire_protocol::{build_comm_msg, KernelConnection},
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
     ports::{
@@ -1656,6 +1656,15 @@ pub async fn send_comm_msg(
     buffers: Vec<Vec<u8>>,
 ) -> Result<(), Error> {
     let conn = kernel_connection_for_slot(state, slot_id)?;
+    send_comm_msg_on_conn(&conn, comm_id, data, buffers).await
+}
+
+async fn send_comm_msg_on_conn(
+    conn: &KernelConnection,
+    comm_id: &str,
+    data: serde_json::Value,
+    buffers: Vec<Vec<u8>>,
+) -> Result<(), Error> {
     let _pending = conn
         .call_shell(build_comm_msg(comm_id, data, buffers))
         .await?;
@@ -2012,7 +2021,9 @@ mod tests {
         Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource, MultilineString,
         NotebookMetadata, PortSpec, SpurCellMetadata,
     };
-    use crate::backend::wire_protocol::{CommMessage, CommOpen};
+    use crate::backend::wire_protocol::{
+        CommMessage, CommOpen, KernelConnection, KernelMessageType,
+    };
     use crate::notebook_store::DeltaKind;
     use crate::state::slot_for_comm;
 
@@ -2215,6 +2226,32 @@ mod tests {
             compile_progress_mode_for_spec("python3"),
             crate::backend::commands::CompileProgressMode::None
         );
+    }
+
+    #[tokio::test]
+    async fn send_comm_msg_on_conn_emits_comm_msg_on_shell_channel() {
+        let (conn, shell_rx) = KernelConnection::for_test();
+        let data = serde_json::json!({
+            "method": "update",
+            "state": { "value": 7 },
+        });
+        let buffers = vec![b"abc".to_vec(), vec![1, 2, 3]];
+
+        send_comm_msg_on_conn(&conn, "comm-xyz", data.clone(), buffers.clone())
+            .await
+            .expect("send_comm_msg_on_conn");
+
+        let sent = shell_rx.try_recv().expect("one shell message");
+        assert!(shell_rx.try_recv().is_err(), "exactly one message");
+        assert_eq!(sent.header.msg_type, KernelMessageType::CommMsg);
+
+        let typed = sent
+            .into_typed::<CommMessage>()
+            .expect("comm_msg content deserializes");
+        assert_eq!(typed.content.comm_id, "comm-xyz");
+        assert_eq!(typed.content.data, data);
+        let got: Vec<Vec<u8>> = typed.buffers.iter().map(|buffer| buffer.to_vec()).collect();
+        assert_eq!(got, buffers);
     }
 
     #[test]

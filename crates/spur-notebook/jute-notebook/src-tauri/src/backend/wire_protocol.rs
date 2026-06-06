@@ -707,6 +707,27 @@ impl Drop for PendingRequest {
 }
 
 #[cfg(test)]
+impl KernelConnection {
+    pub(crate) fn for_test() -> (Self, async_channel::Receiver<KernelMessage>) {
+        let (shell_tx, shell_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = async_channel::unbounded();
+        let (iopub_tx, _iopub_rx) = broadcast::channel(16);
+        let (process_stderr_tx, _stderr_rx) = broadcast::channel(16);
+        let signal = CancellationToken::new();
+        let conn = Self {
+            shell_tx,
+            control_tx,
+            iopub_tx,
+            process_stderr_tx,
+            reply_tx_map: Arc::new(DashMap::new()),
+            signal: signal.clone(),
+            _drop_guard: Arc::new(signal.drop_guard()),
+        };
+        (conn, shell_rx)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use serde_json::json;
     use tokio::sync::broadcast;
