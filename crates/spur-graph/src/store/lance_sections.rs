@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
@@ -20,10 +20,11 @@ use crate::{
     RelationKind,
 };
 
-pub const EMBED_MODEL_NAME: &str = "NomicEmbedTextV15";
+pub const EMBED_MODEL_NAME: &str = "BGESmallENV15";
+pub const EMBED_MODEL_APPROX_SIZE_MB: usize = 130;
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
-const SECTION_VECTOR_DIMENSIONS: usize = 768;
+const SECTION_VECTOR_DIMENSIONS: usize = 384;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
 const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
@@ -49,6 +50,18 @@ pub enum SectionSidecarProgressEvent {
         batch_index: usize,
         batch_rows: usize,
         embedding_eligible_rows: usize,
+        embeddings_available: bool,
+        processed_rows: usize,
+        total_rows: usize,
+    },
+    EmbeddingChunkStarted {
+        batch_index: usize,
+        batch_rows: usize,
+        chunk_index: usize,
+        chunk_count: usize,
+        chunk_rows: usize,
+        completed_eligible_rows: usize,
+        embedding_eligible_rows: usize,
         processed_rows: usize,
         total_rows: usize,
     },
@@ -61,6 +74,7 @@ pub enum SectionSidecarProgressEvent {
     },
     ModelDownloading {
         model_name: &'static str,
+        approximate_size_mb: usize,
     },
     Indexing {
         label: &'static str,
@@ -420,28 +434,45 @@ async fn write_sections_dataset_async(
             );
             continue;
         }
-        if embedder.needs_model_init() {
+        let embedding_eligible_rows = rows.iter().filter(|row| is_embedding_eligible(row)).count();
+        if embedding_eligible_rows > 0 && embedder.needs_model_init() {
             emit_progress(
                 progress,
                 SectionSidecarProgressEvent::ModelDownloading {
                     model_name: EMBED_MODEL_NAME,
+                    approximate_size_mb: EMBED_MODEL_APPROX_SIZE_MB,
                 },
             );
         }
+        let embeddings_available = embedding_eligible_rows > 0 && embedder.prepare_model();
         emit_progress(
             progress,
             SectionSidecarProgressEvent::BatchStarted {
                 batch_index,
                 batch_rows: rows.len(),
-                embedding_eligible_rows: rows
-                    .iter()
-                    .filter(|row| is_embedding_eligible(row))
-                    .count(),
+                embedding_eligible_rows,
+                embeddings_available,
                 processed_rows,
                 total_rows,
             },
         );
-        embedder.embed_rows(&mut rows);
+        let batch_rows = rows.len();
+        embedder.embed_rows_with_progress(&mut rows, |chunk| {
+            emit_progress(
+                progress,
+                SectionSidecarProgressEvent::EmbeddingChunkStarted {
+                    batch_index,
+                    batch_rows,
+                    chunk_index: chunk.chunk_index,
+                    chunk_count: chunk.chunk_count,
+                    chunk_rows: chunk.chunk_rows,
+                    completed_eligible_rows: chunk.completed_eligible_rows,
+                    embedding_eligible_rows: chunk.embedding_eligible_rows,
+                    processed_rows,
+                    total_rows,
+                },
+            );
+        });
         let batch_rows = rows.len();
         let batch = rows_to_batch(rows, schema.clone())?;
         if let Some(table) = table.as_ref() {
@@ -895,6 +926,15 @@ struct SectionEmbedder {
     model: Option<Option<TextEmbedding>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionEmbeddingChunkProgress {
+    chunk_index: usize,
+    chunk_count: usize,
+    chunk_rows: usize,
+    completed_eligible_rows: usize,
+    embedding_eligible_rows: usize,
+}
+
 impl SectionEmbedder {
     fn new(options: SectionEmbeddingOptions) -> Self {
         Self {
@@ -907,14 +947,33 @@ impl SectionEmbedder {
         self.model.is_none() && !self.options.skip_embeddings
     }
 
-    fn embed_rows(&mut self, rows: &mut [SectionRow]) {
-        let vectors = self.embed_row_vectors(rows);
+    fn prepare_model(&mut self) -> bool {
+        !self.options.skip_embeddings && self.model().is_some()
+    }
+
+    fn embed_rows_with_progress<F>(&mut self, rows: &mut [SectionRow], on_chunk_started: F)
+    where
+        F: FnMut(SectionEmbeddingChunkProgress),
+    {
+        let vectors = self.embed_row_vectors_with_progress(rows, on_chunk_started);
         for (row, vector) in rows.iter_mut().zip(vectors) {
             row.vector = vector;
         }
     }
 
+    #[cfg(test)]
     fn embed_row_vectors(&mut self, rows: &[SectionRow]) -> Vec<Option<Vec<f32>>> {
+        self.embed_row_vectors_with_progress(rows, |_| {})
+    }
+
+    fn embed_row_vectors_with_progress<F>(
+        &mut self,
+        rows: &[SectionRow],
+        on_chunk_started: F,
+    ) -> Vec<Option<Vec<f32>>>
+    where
+        F: FnMut(SectionEmbeddingChunkProgress),
+    {
         let result = vec![None; rows.len()];
         if self.options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
             return result;
@@ -924,15 +983,21 @@ impl SectionEmbedder {
             return result;
         };
 
-        embed_eligible_rows_with(rows, options, |texts| model.embed(texts.to_vec(), None))
+        embed_eligible_rows_with(rows, options, on_chunk_started, |texts| {
+            model.embed(texts.to_vec(), None)
+        })
     }
 
     fn model(&mut self) -> &Option<TextEmbedding> {
         self.model.get_or_insert_with(|| {
-            match TextEmbedding::try_new(
-                InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
-                    .with_show_download_progress(true),
-            ) {
+            let mut init_options = InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_show_download_progress(true);
+
+            if let Some(cache_dir) = fastembed_cache_dir() {
+                init_options = init_options.with_cache_dir(cache_dir);
+            }
+
+            match TextEmbedding::try_new(init_options) {
                 Ok(model) => Some(model),
                 Err(error) => {
                     tracing::warn!(error = %error, "fastembed model unavailable; skipping section embeddings");
@@ -946,6 +1011,7 @@ impl SectionEmbedder {
 fn embed_eligible_rows_with<F>(
     rows: &[SectionRow],
     options: SectionEmbeddingOptions,
+    mut on_chunk_started: impl FnMut(SectionEmbeddingChunkProgress),
     mut embed_batch: F,
 ) -> Vec<Option<Vec<f32>>>
 where
@@ -972,8 +1038,18 @@ where
         options.batch_size
     };
 
-    for chunk in eligible.chunks(batch_size) {
+    let chunks: Vec<_> = eligible.chunks(batch_size).collect();
+    let chunk_count = chunks.len();
+    let mut completed_eligible_rows = 0usize;
+    for (chunk_offset, chunk) in chunks.into_iter().enumerate() {
         let texts: Vec<&str> = chunk.iter().map(|(_, text)| *text).collect();
+        on_chunk_started(SectionEmbeddingChunkProgress {
+            chunk_index: chunk_offset + 1,
+            chunk_count,
+            chunk_rows: chunk.len(),
+            completed_eligible_rows,
+            embedding_eligible_rows: eligible.len(),
+        });
         let embeddings = match embed_batch(&texts) {
             Ok(embeddings) => embeddings,
             Err(error) => {
@@ -1002,6 +1078,7 @@ where
                 );
             }
         }
+        completed_eligible_rows += chunk.len();
     }
 
     result
@@ -1171,6 +1248,32 @@ fn sql_string_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+fn fastembed_cache_dir() -> Option<PathBuf> {
+    // Check XDG_CACHE_HOME first (Linux/Unix)
+    if let Ok(xdg_cache) = std::env::var("XDG_CACHE_HOME") {
+        return Some(PathBuf::from(xdg_cache).join("spur").join("fastembed"));
+    }
+
+    // Fall back to HOME directory
+    if let Ok(home) = std::env::var("HOME") {
+        let home_path = PathBuf::from(home);
+
+        // Use platform-specific cache directories
+        #[cfg(target_os = "macos")]
+        {
+            return Some(home_path.join("Library/Caches/spur/fastembed"));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Some(home_path.join(".cache/spur/fastembed"));
+        }
+    }
+
+    // If we can't determine a cache directory, return None to use fastembed's default
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1253,12 +1356,12 @@ mod tests {
 
         assert!(field.is_nullable());
         match field.data_type() {
-            DataType::FixedSizeList(item, 768) => {
+            DataType::FixedSizeList(item, 384) => {
                 assert_eq!(item.name(), "item");
                 assert_eq!(item.data_type(), &DataType::Float32);
                 assert!(item.is_nullable());
             }
-            data_type => panic!("expected FixedSizeList<Float32, 768>, got {data_type:?}"),
+            data_type => panic!("expected FixedSizeList<Float32, 384>, got {data_type:?}"),
         }
     }
 
@@ -1575,7 +1678,12 @@ mod tests {
         };
 
         assert_eq!(
-            embed_eligible_rows_with(&rows, options, |_| panic!("embedder should not be called")),
+            embed_eligible_rows_with(
+                &rows,
+                options,
+                |_| panic!("progress should not be called"),
+                |_| panic!("embedder should not be called"),
+            ),
             vec![None]
         );
     }
@@ -1618,12 +1726,63 @@ mod tests {
         };
         let mut batch_sizes = Vec::new();
 
-        let vectors = embed_eligible_rows_with(&rows, options, |texts| {
-            batch_sizes.push(texts.len());
-            Ok(vec![vec![0.25; SECTION_VECTOR_DIMENSIONS]; texts.len()])
-        });
+        let vectors = embed_eligible_rows_with(
+            &rows,
+            options,
+            |_| {},
+            |texts| {
+                batch_sizes.push(texts.len());
+                Ok(vec![vec![0.25; SECTION_VECTOR_DIMENSIONS]; texts.len()])
+            },
+        );
 
         assert_eq!(batch_sizes, vec![2, 1]);
+        assert!(vectors[0].is_some());
+        assert!(vectors[1].is_none());
+        assert!(vectors[2].is_some());
+        assert!(vectors[3].is_some());
+    }
+
+    #[test]
+    fn embed_eligible_rows_reports_chunk_progress() {
+        let rows = vec![
+            section_row_fixture(2, "## One\n\nBody one.".to_owned()),
+            section_row_fixture(1, "# Title\n\nSkipped.".to_owned()),
+            section_row_fixture(2, "## Two\n\nBody two.".to_owned()),
+            section_row_fixture(2, "## Three\n\nBody three.".to_owned()),
+        ];
+        let options = SectionEmbeddingOptions {
+            skip_embeddings: false,
+            batch_size: 2,
+        };
+        let mut progress = Vec::new();
+
+        let vectors = embed_eligible_rows_with(
+            &rows,
+            options,
+            |chunk| progress.push(chunk),
+            |texts| Ok(vec![vec![0.25; SECTION_VECTOR_DIMENSIONS]; texts.len()]),
+        );
+
+        assert_eq!(
+            progress,
+            vec![
+                SectionEmbeddingChunkProgress {
+                    chunk_index: 1,
+                    chunk_count: 2,
+                    chunk_rows: 2,
+                    completed_eligible_rows: 0,
+                    embedding_eligible_rows: 3,
+                },
+                SectionEmbeddingChunkProgress {
+                    chunk_index: 2,
+                    chunk_count: 2,
+                    chunk_rows: 1,
+                    completed_eligible_rows: 2,
+                    embedding_eligible_rows: 3,
+                },
+            ]
+        );
         assert!(vectors[0].is_some());
         assert!(vectors[1].is_none());
         assert!(vectors[2].is_some());
