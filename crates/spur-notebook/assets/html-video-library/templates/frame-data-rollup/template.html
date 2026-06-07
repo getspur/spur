@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Rollup</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#0a0f14;color:#f8fafc;font-family:Arial,Helvetica,sans-serif}
+body{display:grid;place-items:center;background:
+radial-gradient(circle at 20% 20%,rgba(14,165,233,.26),transparent 30%),
+radial-gradient(circle at 82% 78%,rgba(250,204,21,.18),transparent 28%),
+linear-gradient(135deg,#0a0f14,#13202b 58%,#090b10)}
+.frame{width:min(1180px,92vw);padding:6vh 0}
+.eyebrow{margin:0 0 14px;color:#facc15;font-size:clamp(14px,1.7vw,24px);font-weight:800;text-transform:uppercase;letter-spacing:.18em;animation:rise .6s ease-out both}
+h1{margin:0 0 36px;font-size:clamp(42px,7vw,96px);line-height:.95;letter-spacing:0;animation:rise .75s .08s ease-out both}
+.chart{display:grid;gap:20px}
+.row{display:grid;grid-template-columns:minmax(120px,240px) 1fr 82px;gap:20px;align-items:center;animation:rise .7s calc(var(--i)*.08s + .18s) ease-out both}
+.label{font-size:clamp(18px,2.1vw,30px);font-weight:800;color:#dbeafe;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.track{position:relative;height:clamp(34px,5vw,56px);border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.07);overflow:hidden;box-shadow:inset 0 0 24px rgba(0,0,0,.24)}
+.bar{position:absolute;inset:0 auto 0 0;width:0%;background:linear-gradient(90deg,#22d3ee,#a7f3d0 52%,#fde047);box-shadow:0 0 28px rgba(34,211,238,.35);transform-origin:left center}
+.bar:after{content:"";position:absolute;inset:0;background:linear-gradient(100deg,transparent,rgba(255,255,255,.42),transparent);transform:translateX(-100%);animation:shine 1.7s ease-in-out infinite}
+.value{font-size:clamp(18px,2.1vw,30px);font-weight:900;color:#fef3c7;text-align:right}
+.note{margin:34px 0 0;color:#b6c3d1;font-size:clamp(16px,1.8vw,24px);animation:rise .75s .55s ease-out both}
+@keyframes rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+@keyframes shine{0%,35%{transform:translateX(-100%)}75%,100%{transform:translateX(120%)}}
+</style>
+</head>
+<body>
+<main class="frame" aria-label="Animated data rollup chart">
+  <p class="eyebrow">Quarterly rollup</p>
+  <h1>Momentum by channel</h1>
+  <section class="chart" id="chart"></section>
+  <p class="note">Spring-eased bars settle into place for capture-friendly motion.</p>
+</main>
+<script>
+const data=[
+  {label:"Organic",value:82},
+  {label:"Product",value:64},
+  {label:"Partners",value:47},
+  {label:"Paid",value:38}
+];
+const chart=document.getElementById("chart");
+const max=Math.max(...data.map(item=>item.value),1);
+data.forEach((item,index)=>{
+  const row=document.createElement("div");
+  row.className="row";
+  row.style.setProperty("--i",index);
+  row.innerHTML=`<div class="label">${item.label}</div><div class="track"><div class="bar"></div></div><div class="value">${item.value}</div>`;
+  chart.appendChild(row);
+});
+const bars=[...document.querySelectorAll(".bar")].map((bar,index)=>({
+  el:bar,target:data[index].value/max*100,width:0,velocity:0
+}));
+function tick(){
+  let moving=false;
+  for(const bar of bars){
+    const force=(bar.target-bar.width)*0.085;
+    bar.velocity=(bar.velocity+force)*0.74;
+    bar.width+=bar.velocity;
+    if(Math.abs(bar.target-bar.width)>.02||Math.abs(bar.velocity)>.02)moving=true;
+    bar.el.style.width=Math.max(0,Math.min(100,bar.width)).toFixed(2)+"%";
+  }
+  if(moving)requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

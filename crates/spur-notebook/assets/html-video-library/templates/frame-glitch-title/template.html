@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glitch Title</title>
+<style>
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #050505;
+  color: #f8fafc;
+  font-family: Arial, Helvetica, sans-serif;
+}
+body {
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 30% 25%, rgba(255, 0, 96, .18), transparent 32%),
+    radial-gradient(circle at 70% 65%, rgba(0, 229, 255, .16), transparent 34%),
+    linear-gradient(135deg, #050505, #111318 54%, #050505);
+}
+.frame { position: relative; width: 100vw; height: 100vh; display: grid; place-items: center; text-align: center; isolation: isolate; }
+.frame:before {
+  content: ""; position: absolute; inset: 0; opacity: .5; mix-blend-mode: screen;
+  background: repeating-linear-gradient(0deg, rgba(255,255,255,.045) 0 1px, transparent 1px 5px);
+  animation: scan 5s linear infinite;
+}
+.frame:after {
+  content: ""; position: absolute; inset: -20%; z-index: -1;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+  transform: translateX(-70%) rotate(8deg);
+  animation: sweep 3.8s ease-in-out infinite;
+}
+.stack { width: min(1100px, 90vw); padding: 6vh 4vw; }
+.kicker { margin: 0 0 24px; color: #7dd3fc; font-size: clamp(16px, 2vw, 30px); font-weight: 700; letter-spacing: .22em; text-transform: uppercase; animation: fadeUp .8s ease-out both; }
+.glitch { position: relative; margin: 0; font-size: clamp(58px, 13vw, 180px); line-height: .86; font-weight: 900; text-transform: uppercase; letter-spacing: 0; text-shadow: 0 0 26px rgba(125,211,252,.45); animation: jolt 2.4s steps(1,end) infinite; }
+.glitch:before, .glitch:after { content: attr(data-text); position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; }
+.glitch:before { color: #ff2d75; clip-path: inset(0 0 55% 0); transform: translate(-6px,-2px); animation: sliceA 1.7s steps(2,end) infinite; }
+.glitch:after { color: #00e5ff; clip-path: inset(45% 0 0 0); transform: translate(5px,3px); animation: sliceB 1.3s steps(2,end) infinite; }
+.footer { margin: 28px auto 0; max-width: 760px; color: #cbd5e1; font-size: clamp(16px, 2vw, 28px); line-height: 1.35; animation: fadeUp .8s .25s ease-out both; }
+@keyframes scan { to { background-position: 0 80px; } }
+@keyframes sweep { 0%, 35% { transform: translateX(-80%) rotate(8deg); } 70%, 100% { transform: translateX(80%) rotate(8deg); } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes jolt { 0%, 88%, 100% { transform: none; filter: none; } 90% { transform: translate(3px,-2px); filter: contrast(1.5); } 92% { transform: translate(-4px,2px); } 94% { transform: translate(2px,4px); } }
+@keyframes sliceA { 0%, 76%, 100% { clip-path: inset(0 0 62% 0); } 78% { clip-path: inset(18% 0 47% 0); transform: translate(12px,-2px); } 82% { clip-path: inset(2% 0 76% 0); transform: translate(-10px,2px); } }
+@keyframes sliceB { 0%, 72%, 100% { clip-path: inset(50% 0 0 0); } 75% { clip-path: inset(64% 0 12% 0); transform: translate(-12px,4px); } 80% { clip-path: inset(34% 0 36% 0); transform: translate(8px,-4px); } }
+</style>
+</head>
+<body>
+<main class="frame">
+  <section class="stack" aria-label="Animated glitch title">
+    <p class="kicker">Signal opening</p>
+    <h1 class="glitch" data-text="SYSTEM SHOCK">SYSTEM SHOCK</h1>
+    <p class="footer">A sharp opener for dramatic reveals, chapter breaks, and fast-cut video intros.</p>
+  </section>
+</main>
+</body>
+</html>
