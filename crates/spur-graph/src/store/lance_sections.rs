@@ -21,6 +21,7 @@ use crate::{
     RelationKind,
 };
 
+pub const EMBED_MODEL_NAME: &str = "NomicEmbedTextV15";
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
 const SECTION_VECTOR_DIMENSIONS: usize = 768;
@@ -424,7 +425,7 @@ async fn write_sections_dataset_async(
             emit_progress(
                 progress,
                 SectionSidecarProgressEvent::ModelDownloading {
-                    model_name: "NomicEmbedTextV15",
+                    model_name: EMBED_MODEL_NAME,
                 },
             );
         }
