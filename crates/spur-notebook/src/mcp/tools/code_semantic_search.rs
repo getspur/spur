@@ -38,7 +38,7 @@ const METHOD: &str = "code_semantic_search";
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
 #[cfg(feature = "datasource-introspect")]
-const EMBED_DIM: usize = 768;
+const EMBED_DIM: usize = 384;
 #[cfg(feature = "datasource-introspect")]
 const EMBED_CACHE_ENTRIES: usize = 1024;
 #[cfg(feature = "datasource-introspect")]
@@ -105,10 +105,10 @@ fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
     EMBED_MODEL
         .get_or_init(|| {
             tracing::info!(
-                "Loading embedding model NomicEmbedTextV15 (~270 MB, cached after first run)"
+                "Loading embedding model BGESmallENV15 (~130 MB, cached after first run)"
             );
             fastembed::TextEmbedding::try_new(
-                fastembed::InitOptions::new(fastembed::EmbeddingModel::NomicEmbedTextV15)
+                fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
                     .with_show_download_progress(true),
             )
             .ok()
@@ -781,10 +781,15 @@ mod tests {
         ))))
     }
 
-    fn embedding_with_marker(marker: f32) -> [f32; 768] {
-        let mut embedding = [0.0; 768];
+    fn embedding_with_marker(marker: f32) -> [f32; EMBED_DIM] {
+        let mut embedding = [0.0; EMBED_DIM];
         embedding[0] = marker;
         embedding
+    }
+
+    #[test]
+    fn embed_dim_matches_bge_small_vectors() {
+        assert_eq!(EMBED_DIM, 384);
     }
 
     #[test]
@@ -1020,7 +1025,7 @@ mod tests {
                 content_hash VARCHAR,
                 body_byte_start BIGINT,
                 body_text VARCHAR,
-                vector FLOAT[768]
+                vector FLOAT[384]
             );
             INSERT INTO lance_ns.section_bodies VALUES
               ('a',NULL,'Brain Review Gate','.claude/skills/brain-review-gate/SKILL.md',
