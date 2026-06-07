@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use futures::future::join_all;
 use serde_json::{json, Value};
 use spur_analyst::{
     query_context_candidates, query_graph_candidates, KnowledgeCandidate, KnowledgeQueryOptions,
@@ -462,27 +463,35 @@ async fn pack_query_result_with_exact_context(
         .filter(|candidate| candidate.kind == "doc")
         .count();
     if request.max_symbol_bodies > 0 {
-        let body_selectors: Vec<String> = primary_evidence
+        let body_selectors: Vec<(String, usize)> = primary_evidence
             .iter()
+            .enumerate()
             .take(request.max_symbol_bodies as usize)
-            .filter_map(|evidence| {
+            .filter_map(|(index, evidence)| {
                 evidence
                     .get("stable_symbol_id")
                     .and_then(Value::as_str)
-                    .map(String::from)
+                    .map(|selector| (selector.to_string(), index))
             })
             .collect();
-        for selector in &body_selectors {
-            if let Ok(body) = super::code_graph::code_read_symbol(&json!({
-                "selector": selector,
-            }))
-            .await
-            {
+
+        let body_results = join_all(body_selectors.into_iter().map(
+            |(selector, index)| async move {
+                (
+                    index,
+                    super::code_graph::code_read_symbol(&json!({
+                        "selector": selector,
+                    }))
+                    .await,
+                )
+            },
+        ))
+        .await;
+
+        for (index, body_result) in body_results {
+            if let Ok(body) = body_result {
                 if let Some(source) = body.get("source").and_then(Value::as_str) {
-                    if let Some(evidence) = primary_evidence.iter_mut().find(|evidence| {
-                        evidence.get("stable_symbol_id").and_then(Value::as_str)
-                            == Some(selector.as_str())
-                    }) {
+                    if let Some(evidence) = primary_evidence.get_mut(index) {
                         if let Some(object) = evidence.as_object_mut() {
                             object.insert("source".into(), json!(source));
                             if let Some(line_range) = body.get("line_range") {
