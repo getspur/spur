@@ -69,53 +69,68 @@ Each element in `frames` maps to one notebook code cell with:
 - one and only one output item with MIME `text/html`
 - no external network or CDN assets
 - frame payload embedded as JSON in-page (`window.__FRAME__`) or compile-time constants
+- exactly one capture target: `<canvas data-capture="true">`
 
 Minimal frame structure used by template renderers:
 
 ```html
 <style>/* inlined frame CSS */</style>
-<div id="frame" data-frame-index="0" data-frame-ms="3000">
-  <h1>{{headline}}</h1>
-  <p>{{body}}</p>
-</div>
+<canvas data-capture="true" width="1080" height="1920"></canvas>
 <script>
   const frame = window.__FRAME__ || {}
   const durationMs = frame.duration_ms || 3000
-  // deterministic animation script only
-  setTimeout(() => {
-    document.body.dataset.done = "true"
-  }, durationMs)
+  const canvas = document.querySelector('canvas[data-capture="true"]')
+  const ctx = canvas.getContext("2d")
+
+  function draw(progress) {
+    ctx.fillStyle = "#060f2f"
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.fillStyle = "#ffffff"
+    ctx.font = "700 96px Inter, sans-serif"
+    ctx.fillText(frame.copy?.headline || "Hook line", 96, 240 + progress * 80)
+  }
+
+  draw(0)
 </script>
 ```
 
-## Render cell recipe
+The notebook runtime records the marked canvas in the browser and reports captures
+to the notebook bridge with this message shape:
 
-Use a single Deno-render cell to materialize all frames into MP4. The command path is
-either:
-
-- `node <html-video-cli>` (preferred when available), passing the content-graph and
-  all generated frame HTML outputs.
-- raw Playwright + ffmpeg in Deno subprocess mode when CLI is not available.
-
-Example render sequence:
-
-- Write rendered frame HTML files to temporary disk.
-- Render each frame to an image sequence or direct clip via Playwright screenshots.
-- Invoke ffmpeg to encode and concat all frame clips into one `output.mp4`.
-- Base64-encode `output.mp4` for notebook embedding.
-- Emit a final `text/html` cell containing the inline video player.
-
-Example command skeleton:
-
-```js
-// deno run -A
-const graph = JSON.parse(await Deno.readTextFile("content-graph.json"))
-const nodeCmd = ["node", "<html-video-cli>", "--graph", "content-graph.json", "--out", "artifacts"]
-const cli = new Deno.Command(nodeCmd[0], { args: nodeCmd.slice(1) }).spawn()
-await cli.status
-const ffmpegCmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "artifacts/files.txt", "-c:v", "libx264", "-pix_fmt", "yuv420p", "artifacts/output.mp4"]
-await new Deno.Command(ffmpegCmd[0], { args: ffmpegCmd.slice(1) }).spawn().status
+```json
+{
+  "type": "jute-video-capture",
+  "cellId": "frame-cell-id",
+  "webm": "base64-webm-payload",
+  "duration_sec": 3
+}
 ```
+
+## Render recipe
+
+After frame cells render, collect browser captures through the notebook MCP bridge:
+
+```json
+{
+  "tool": "notebook_get_cell_capture",
+  "arguments": { "cell_id": "frame-cell-id" }
+}
+```
+
+The capture result includes `webm_base64` and `duration_sec`. Keep the captures in
+the same order as `frames`, then call:
+
+```json
+{
+  "tool": "html_video_render",
+  "arguments": {
+    "webm_frames": ["base64-webm-payload"],
+    "output_path": "artifacts/output.mp4"
+  }
+}
+```
+
+Embed the rendered MP4 from `output_path` in the final notebook output cell.
 
 ## Video output cell format
 

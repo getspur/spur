@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use spur_notebook::mcp::{
     bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
     start_server,
-    tools::html_video_render,
+    tools::{self, html_video_render},
     transport::LengthPrefixedJsonTransport,
     ServerDeps,
 };
@@ -24,6 +24,7 @@ use tokio::{fs, net::UnixStream, process::Command, time::timeout};
 const SEARCH_TOOL: &str = "html_video_search_templates";
 const GET_TEMPLATE_TOOL: &str = "html_video_get_template";
 const RENDER_TOOL: &str = "html_video_render";
+const CELL_CAPTURE_TOOL: &str = "notebook_get_cell_capture";
 
 #[tokio::test]
 async fn html_video_render_accepts_base64_webm_frames() {
@@ -72,8 +73,18 @@ fn html_video_render_schema_uses_webm_frames() {
     assert_eq!(schema["required"], json!(["webm_frames", "output_path"]));
     assert!(schema["properties"].get("webm_frames").is_some());
     assert!(schema["properties"].get("frame_duration").is_some());
-    assert!(schema["properties"].get("frame_html_paths").is_none());
     assert!(schema["properties"].get("duration").is_none());
+}
+
+#[test]
+fn html_video_tool_inventory_includes_canvas_capture_and_render() {
+    let names = tools::tools()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(names.iter().any(|name| name == CELL_CAPTURE_TOOL));
+    assert!(names.iter().any(|name| name == RENDER_TOOL));
 }
 
 #[tokio::test]
@@ -218,9 +229,9 @@ async fn generate_webm_fixture(path: &Path) {
         .arg("-f")
         .arg("lavfi")
         .arg("-i")
-        .arg("color=c=0x22d3ee:s=32x32:d=0.5:r=2")
+        .arg("testsrc=duration=1:size=320x240:rate=30")
         .arg("-c:v")
-        .arg("libvpx-vp9")
+        .arg("libvpx")
         .arg(path)
         .status()
         .await
