@@ -800,36 +800,30 @@ mod tests {
     #[test]
     fn init_search_sql_sections_embeddings_materialized() {
         assert!(
-            INIT_SEARCH_SQL.contains("CREATE OR REPLACE TABLE sections_embeddings"),
-            "init_search.sql must materialize sections_embeddings"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("FROM lance_ns.section_bodies"),
-            "sections_embeddings must read from lance section_bodies"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("heading_level >= 2"),
-            "sections_embeddings must skip document roots"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("vector IS NOT NULL"),
-            "sections_embeddings must keep only embedded sections"
+            !INIT_SEARCH_SQL.contains("CREATE OR REPLACE TABLE sections_embeddings")
+                && !INIT_SEARCH_SQL.contains("sections_embeddings"),
+            "init_search.sql must not materialize Lance vectors into DuckDB"
         );
     }
 
     #[test]
     fn init_search_sql_hybrid_macro_present() {
         assert!(
-            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_hybrid(q, vec)"),
-            "init_search.sql must define search_hybrid"
+            !INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_hybrid(q, vec)")
+                && !INIT_SEARCH_SQL.contains("list_cosine_similarity")
+                && !INIT_SEARCH_SQL.contains("1.0 / (60.0 + "),
+            "hybrid ANN and RRF must live in Rust, not init_search.sql"
         );
+    }
+
+    #[test]
+    fn init_search_sql_hybrid_macro_has_per_doc_dedup() {
         assert!(
-            INIT_SEARCH_SQL.contains("list_cosine_similarity"),
-            "search_hybrid must use vector cosine similarity"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("1.0 / (60.0 + "),
-            "search_hybrid must use reciprocal rank fusion"
+            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_docs(q) AS TABLE")
+                && INIT_SEARCH_SQL.contains(
+                    "QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY bm25 DESC) <= 2",
+                ),
+            "init_search.sql should retain only the BM25 docs helper; hybrid per-doc dedup is enforced in Rust"
         );
     }
 

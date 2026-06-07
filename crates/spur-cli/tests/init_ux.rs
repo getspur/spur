@@ -77,6 +77,22 @@ fn stub_binary(dir: &std::path::Path, name: &str) {
     fs::set_permissions(&path, perms).unwrap();
 }
 
+fn stub_which(dir: &std::path::Path) {
+    let path = dir.join("which");
+    fs::write(
+        &path,
+        "#!/bin/sh\nIFS=:\nfor dir in $PATH; do\n  if [ -x \"$dir/$1\" ]; then\n    echo \"$dir/$1\"\n    exit 0\n  fi\ndone\nexit 1\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+}
+
+fn controlled_path(dir: &std::path::Path) -> String {
+    dir.display().to_string()
+}
+
 fn spur() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_spur"));
     // Strip both debug-only env vars that can perturb the resolved
@@ -97,10 +113,11 @@ fn spur() -> Command {
 fn init_with_zero_agents_writes_no_config() {
     let _g = LOCK.lock().unwrap();
     let tmp = TempDir::new().unwrap();
+    stub_which(tmp.path());
 
     let status = spur()
         .current_dir(tmp.path())
-        .env("PATH", format!("{}:/usr/bin", tmp.path().display()))
+        .env("PATH", controlled_path(tmp.path()))
         .arg("init")
         .status()
         .expect("spawn spur init");
@@ -129,13 +146,14 @@ default = "kiro"
 [bot.telegram]
 enabled = true
 operator_user_id = 12345
-"#;
+    "#;
     fs::write(tmp.path().join(".spur/config.toml"), existing).unwrap();
+    stub_which(tmp.path());
     stub_binary(tmp.path(), "npx");
 
     let status = spur()
         .current_dir(tmp.path())
-        .env("PATH", format!("{}:/usr/bin", tmp.path().display()))
+        .env("PATH", controlled_path(tmp.path()))
         .arg("init")
         .status()
         .expect("spawn spur init");
@@ -190,11 +208,12 @@ operator_user_id = 99999
     fs::write(tmp.path().join(".spur/config.toml"), existing).unwrap();
 
     // Only kiro-cli is on PATH.
+    stub_which(tmp.path());
     stub_binary(tmp.path(), "kiro-cli");
 
     let status = spur()
         .current_dir(tmp.path())
-        .env("PATH", format!("{}:/usr/bin", tmp.path().display()))
+        .env("PATH", controlled_path(tmp.path()))
         .args(["init", "--force"])
         .status()
         .expect("spawn spur init --force");
@@ -230,12 +249,13 @@ fn init_prefers_claude_code_as_default_brain() {
     let _g = LOCK.lock().unwrap();
     let tmp = TempDir::new().unwrap();
 
+    stub_which(tmp.path());
     stub_binary(tmp.path(), "kiro-cli");
     stub_binary(tmp.path(), "npx");
 
     let status = spur()
         .current_dir(tmp.path())
-        .env("PATH", format!("{}:/usr/bin", tmp.path().display()))
+        .env("PATH", controlled_path(tmp.path()))
         .arg("init")
         .status()
         .expect("spawn spur init");
