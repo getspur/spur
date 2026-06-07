@@ -35,9 +35,72 @@ Source lives in each crate’s `src/`. Integration tests are primarily in `crate
 
 ## Code Retrieval & Exploration
 
-Treat the repository code graph as the first-class retrieval layer for code work. For code discovery, symbol lookup, reading symbol bodies, caller/callee impact analysis, and semantic searches over code or docs, use the available `code_*` tools first whenever they can answer the question.
+Treat the repository code graph as the first-class retrieval layer for code work. Choose tools based on question shape:
 
-Fall back to native tools such as `rg`, `sed`, `cat`, or direct file reads only when the graph tools do not expose the needed shape of data (for example, full raw markdown/shell-file reads), the graph is unavailable or stale for the file in question, or you need exact working-tree bytes/diffs. When falling back, keep the search scoped and note the reason.
+### Primary: `code_*` — Precise Symbol Work
+
+**`code_search` is the primary discovery tool.** Use `code_*` for most exploration:
+
+- **`code_symbol_search`** — Fuzzy/substring symbol discovery
+- **`code_resolve`** — Exact symbol lookup from stable IDs or qualified names
+- **`code_read_symbol`** — Read source with context lines, file OID tracking
+- **`code_callers`** / **`code_callees`** — Impact analysis with unresolved edge detection
+- **`code_subgraph`** — Neighborhood maps (use sparingly, cap radius at 2)
+
+**When to use:**
+- You know the symbol name or have a specific target
+- Need exact source code, caller/callee impact, or call tracing
+- Verifying symbol signatures, types, or implementations
+
+### Onboarding: `knowledge_context_pack` — Get Oriented First
+
+**Use `knowledge_context_pack` when entering unfamiliar code areas** and you need the big picture before diving into specific symbols. It returns bounded evidence packs combining:
+- **BM25 search** over symbol token text and documentation sections
+- **Scorecard signals** (pagerank, churn, posture) to surface high-value symbols
+- **Exact graph context** with caller/callee impact summaries
+- **Staleness metadata** to detect when the analyst index lags the working tree
+
+**When to use:**
+- You don't know what to look for — "What's around this concept?"
+- Quick orientation before diving into specific symbols
+- Bounded evidence gathering without manual tool chaining
+
+**Example:**
+```rust
+knowledge_context_pack({
+  "query": "delegation error handling",
+  "intent": "change",      // explain|change|review|debug|plan
+  "scope": "code",         // all|docs|code|graph
+  "limit": 8,              // 1-20, default 8
+  "include_tests": false,  // filter test files
+  "max_symbol_bodies": 3   // 0-5, fetch source for top symbols
+})
+```
+
+The response includes `recommended_next_tools` with pre-filled selectors for follow-up with `code_*` tools.
+
+### Specialist: `spur-analyst` — Deep Analysis
+
+**Use `spur-analyst` tools for complex queries requiring SQL, aggregation, or graph algorithms.** The analyst layer exposes the full DuckDB database with:
+- **Aggregation** — GROUP BY, window functions, statistical queries
+- **Temporal analysis** — Commit history, file churn, co-change patterns
+- **Reachability** — Recursive CTEs, shortest paths, connected components
+- **Graph algorithms** — PageRank, betweenness centrality, community detection
+
+**When to use:**
+- "Which symbols have the highest churn in this module?"
+- "Show me the commit history for this file over the last 90 days"
+- "Find all transitive callers within 3 hops"
+- "What's the co-change pattern between these modules?"
+
+### Fallback: Native Tools
+
+Fall back to native tools such as `rg`, `sed`, `cat`, or direct file reads only when:
+- The graph tools do not expose the needed shape of data (e.g., full raw markdown, shell scripts, config files)
+- The graph is unavailable or stale for the file in question
+- You need exact working-tree bytes/diffs for untracked or recently modified files
+
+When falling back, keep the search scoped and note the reason.
 
 ## Build, Test, and Development Commands
 
