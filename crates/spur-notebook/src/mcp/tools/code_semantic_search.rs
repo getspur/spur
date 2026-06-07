@@ -105,7 +105,7 @@ fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
     EMBED_MODEL
         .get_or_init(|| {
             tracing::info!(
-                "Downloading embedding model NomicEmbedTextV15 (~270 MB, cached after first run)"
+                "Loading embedding model NomicEmbedTextV15 (~270 MB, cached after first run)"
             );
             fastembed::TextEmbedding::try_new(
                 fastembed::InitOptions::new(fastembed::EmbeddingModel::NomicEmbedTextV15)
