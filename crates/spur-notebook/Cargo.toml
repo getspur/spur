@@ -26,6 +26,7 @@ fastembed = { version = "4", default-features = false }
 fs4 = "0.13"
 futures = { workspace = true }
 jute = { path = "jute-notebook/src-tauri" }
+lancedb = { workspace = true, optional = true }
 memmap2 = { workspace = true }
 rmcp.workspace = true
 reqwest = { workspace = true }
@@ -77,6 +78,7 @@ custom-protocol = ["tauri/custom-protocol"]
 # build. Tests/cheap builds opt out with `--no-default-features`.
 datasource-introspect = [
     "dep:duckdb",
+    "dep:lancedb",
     "dep:spur-rest-table-gateway",
     "fastembed/hf-hub-native-tls",
     "fastembed/ort-download-binaries",
