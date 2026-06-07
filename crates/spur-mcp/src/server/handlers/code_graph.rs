@@ -1386,6 +1386,7 @@ fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
                 "callers": callers,
                 "include_unresolved": request.include_unresolved,
                 "counts_by_kind": summary.counts_by_kind,
+                "counts_by_context": summary.counts_by_context,
                 "unresolved_sample": summary.unresolved_sample,
             }),
             files,
@@ -1399,6 +1400,7 @@ fn code_callers_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
         "callers": callers,
         "include_unresolved": request.include_unresolved,
         "counts_by_kind": summary.counts_by_kind,
+        "counts_by_context": summary.counts_by_context,
         "unresolved_sample": summary.unresolved_sample,
     }))
 }
@@ -1440,6 +1442,7 @@ fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
                 "callees": callees,
                 "include_unresolved": request.include_unresolved,
                 "counts_by_kind": summary.counts_by_kind,
+                "counts_by_context": summary.counts_by_context,
                 "unresolved_sample": summary.unresolved_sample,
             }),
             files,
@@ -1453,6 +1456,7 @@ fn code_callees_with_client(args: &Value, client: &dyn GraphQueryClient) -> Code
         "callees": callees,
         "include_unresolved": request.include_unresolved,
         "counts_by_kind": summary.counts_by_kind,
+        "counts_by_context": summary.counts_by_context,
         "unresolved_sample": summary.unresolved_sample,
     }))
 }
@@ -5024,7 +5028,24 @@ fn edge_table<'a>(edges: impl IntoIterator<Item = &'a GraphEdgeArtifact>) -> Val
 #[derive(Debug)]
 struct TraversalSummary {
     counts_by_kind: Value,
+    counts_by_context: Value,
     unresolved_sample: Vec<String>,
+}
+
+fn classify_file_context(file_path: &str) -> &'static str {
+    if file_path.contains("/tests/")
+        || file_path.starts_with("tests/")
+        || file_path.contains("/benches/")
+        || file_path.starts_with("benches/")
+    {
+        if file_path.contains("/benches/") || file_path.starts_with("benches/") {
+            "bench"
+        } else {
+            "test"
+        }
+    } else {
+        "production"
+    }
 }
 
 fn owned_caller_summary(records: &[OwnedCallerRecord]) -> TraversalSummary {
@@ -5032,7 +5053,28 @@ fn owned_caller_summary(records: &[OwnedCallerRecord]) -> TraversalSummary {
         OwnedCallerRecord::Unresolved { target_label, .. } => Some(target_label.as_str()),
         OwnedCallerRecord::Resolved { .. } => None,
     });
-    traversal_summary(records.iter().map(OwnedCallerRecord::edge), unresolved)
+    let mut summary = traversal_summary(records.iter().map(OwnedCallerRecord::edge), unresolved);
+    let mut production = 0usize;
+    let mut test = 0usize;
+    let mut bench = 0usize;
+    for record in records {
+        let file_path = match record {
+            OwnedCallerRecord::Resolved { caller, .. }
+            | OwnedCallerRecord::Unresolved { caller, .. } => &caller.file_path,
+        };
+        match classify_file_context(file_path) {
+            "production" => production += 1,
+            "test" => test += 1,
+            "bench" => bench += 1,
+            _ => {}
+        }
+    }
+    summary.counts_by_context = json!({
+        "production": production,
+        "test": test,
+        "bench": bench,
+    });
+    summary
 }
 
 fn owned_callee_summary(records: &[OwnedCalleeRecord]) -> TraversalSummary {
@@ -5040,7 +5082,28 @@ fn owned_callee_summary(records: &[OwnedCalleeRecord]) -> TraversalSummary {
         OwnedCalleeRecord::Unresolved { target_label, .. } => Some(target_label.as_str()),
         OwnedCalleeRecord::Resolved { .. } => None,
     });
-    traversal_summary(records.iter().map(OwnedCalleeRecord::edge), unresolved)
+    let mut summary = traversal_summary(records.iter().map(OwnedCalleeRecord::edge), unresolved);
+    let mut production = 0usize;
+    let mut test = 0usize;
+    let mut bench = 0usize;
+    for record in records {
+        let file_path = match record {
+            OwnedCalleeRecord::Resolved { symbol, .. } => &symbol.file_path,
+            OwnedCalleeRecord::Unresolved { .. } => continue,
+        };
+        match classify_file_context(file_path) {
+            "production" => production += 1,
+            "test" => test += 1,
+            "bench" => bench += 1,
+            _ => {}
+        }
+    }
+    summary.counts_by_context = json!({
+        "production": production,
+        "test": test,
+        "bench": bench,
+    });
+    summary
 }
 
 fn traversal_summary<'a>(
@@ -5073,6 +5136,7 @@ fn traversal_summary<'a>(
             "references_other": references_other,
             "unresolved": unresolved,
         }),
+        counts_by_context: json!({}),
         unresolved_sample: unresolved_sample(unresolved_labels),
     }
 }
@@ -6639,6 +6703,14 @@ mod tests {
                 "unresolved": 1
             })
         );
+        assert_eq!(
+            body["counts_by_context"],
+            json!({
+                "production": 2,
+                "test": 0,
+                "bench": 0
+            })
+        );
         assert_eq!(body["unresolved_sample"], json!(["root"]));
         assert_eq!(body["graph_content_hash"], "test");
         assert_eq!(body["graph_index_version"], GRAPH_INDEX_VERSION_TEMPORAL);
@@ -6728,6 +6800,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn code_callers_counts_by_context_separates_production_test_and_bench() {
+        let _lock = CWD_LOCK.lock().expect("cwd lock");
+        let dir = TempDir::new().expect("tempdir");
+        let artifact = serde_json::from_value(json!({
+            "header": {
+                "graph_index_version": GRAPH_INDEX_VERSION_TEMPORAL
+            },
+            "manifest_version": "test",
+            "graph_content_hash": "test",
+            "files": [
+                { "stable_file_id": "file-src-lib", "file_path": "src/lib.rs" },
+                { "stable_file_id": "file-tests", "file_path": "tests/integration.rs" },
+                { "stable_file_id": "file-benches", "file_path": "benches/perf.rs" },
+                { "stable_file_id": "file-crate-tests", "file_path": "crates/foo/tests/unit.rs" }
+            ],
+            "symbols": [
+                symbol("prod-caller", "src/lib.rs", [1, 3], "prod_caller", "prod_caller"),
+                symbol("test-caller", "tests/integration.rs", [10, 12], "test_caller", "test_caller"),
+                symbol("bench-caller", "benches/perf.rs", [20, 22], "bench_caller", "bench_caller"),
+                symbol("crate-test-caller", "crates/foo/tests/unit.rs", [30, 32], "crate_test_caller", "crate_test_caller"),
+                symbol("target", "src/lib.rs", [50, 52], "target", "target")
+            ],
+            "edges": [
+                edge("prod-caller", "target"),
+                edge("test-caller", "target"),
+                edge("bench-caller", "target"),
+                edge("crate-test-caller", "target")
+            ],
+            "tombstones": []
+        }))
+        .expect("fixture artifact");
+        write_graph_fixture_artifact(&dir, artifact);
+        let _cwd = enter_dir(dir.path());
+        let server = test_server();
+
+        let body = response_json(
+            server
+                .handle_code_callers(Value::from(1), json!({ "selector": "target" }))
+                .await,
+        );
+
+        assert_eq!(
+            body["counts_by_context"],
+            json!({
+                "production": 1,
+                "test": 2,
+                "bench": 1
+            })
+        );
+        assert_eq!(
+            body["counts_by_kind"],
+            json!({
+                "calls": 4,
+                "calls_dyn": 0,
+                "references_hof": 0,
+                "references_other": 0,
+                "unresolved": 0
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn code_callees_accepts_bare_symbol_id() {
         let _lock = CWD_LOCK.lock().expect("cwd lock");
         let dir = TempDir::new().expect("tempdir");
@@ -6754,6 +6888,14 @@ mod tests {
                 "references_hof": 1,
                 "references_other": 0,
                 "unresolved": 0
+            })
+        );
+        assert_eq!(
+            body["counts_by_context"],
+            json!({
+                "production": 3,
+                "test": 0,
+                "bench": 0
             })
         );
         assert_eq!(body["unresolved_sample"], json!([]));

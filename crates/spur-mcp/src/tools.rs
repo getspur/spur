@@ -844,7 +844,7 @@ fn code_read_symbol_def() -> ToolDefinition {
 fn code_callers_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callers".into(),
-        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Supports response_format=full|compact|table.".into(),
+        description: "List symbols that call the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind, counts_by_context (production/test/bench breakdown), and unresolved_sample always report what was filtered. Supports response_format=full|compact|table.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -879,7 +879,7 @@ fn code_callers_def() -> ToolDefinition {
 fn code_callees_def() -> ToolDefinition {
     ToolDefinition {
         name: "code_callees".into(),
-        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind and unresolved_sample always report what was filtered. Supports response_format=full|compact|table.".into(),
+        description: "List symbols called by the requested code symbol from the current worktree graph artifact. Rows include edge_kind (calls, calls_dyn, references_hof, references_other); calls_dyn rows also include confidence=\"heuristic\". Unresolved rows are hidden by default (include_unresolved=false); counts_by_kind, counts_by_context (production/test/bench breakdown), and unresolved_sample always report what was filtered. Supports response_format=full|compact|table.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
