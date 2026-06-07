@@ -1,3 +1,72 @@
+#![expect(
+    clippy::doc_markdown,
+    reason = "legacy ACP docs contain many protocol identifiers that need a dedicated cleanup pass"
+)]
+#![expect(
+    clippy::enum_glob_use,
+    reason = "legacy ACP discriminant helper imports SessionUpdate variants locally"
+)]
+#![expect(
+    clippy::clone_on_ref_ptr,
+    reason = "legacy ACP connection code uses clone syntax heavily around Arc/Rc channel state"
+)]
+#![expect(
+    clippy::doc_link_with_quotes,
+    reason = "legacy ACP config docs include array examples that need a dedicated markdown pass"
+)]
+#![expect(
+    clippy::explicit_iter_loop,
+    reason = "legacy ACP defaults code keeps iterator spelling explicit in config matching"
+)]
+#![expect(
+    clippy::iter_over_hash_type,
+    reason = "shutdown cleanup iterates a terminal map where order is not behaviorally significant"
+)]
+#![expect(
+    clippy::map_err_ignore,
+    reason = "legacy ACP channel error mapping intentionally replaces send/receive details with domain messages"
+)]
+#![expect(
+    clippy::manual_let_else,
+    reason = "legacy ACP parsing code still uses match-based early returns"
+)]
+#![expect(
+    clippy::match_same_arms,
+    reason = "legacy ACP status clipping keeps status-specific arms explicit"
+)]
+#![expect(
+    clippy::ref_option,
+    reason = "serde helper signatures are constrained by derive integration"
+)]
+#![expect(
+    clippy::return_and_then,
+    reason = "legacy adapter extraction keeps chained option flow compact"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "legacy ACP process handling keeps success/error branches visually grouped"
+)]
+#![expect(
+    clippy::str_to_string,
+    reason = "legacy ACP adapter code predates the current to_owned style lint"
+)]
+#![expect(
+    clippy::uninlined_format_args,
+    reason = "legacy ACP error messages use pre-inline formatting style"
+)]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "ACP permission callback signatures intentionally match Result-returning protocol hooks"
+)]
+#![expect(
+    clippy::unused_trait_names,
+    reason = "legacy ACP modules import extension traits by name for readability"
+)]
+#![expect(
+    clippy::use_self,
+    reason = "legacy ACP domain code often spells enum names explicitly for cross-module clarity"
+)]
+
 pub mod adapter;
 pub mod agent_quirks;
 pub mod agents;

@@ -63,7 +63,10 @@ struct ClaudeUsageEntry {
     message: ClaudeMessage,
     #[serde(default, rename = "costUSD")]
     cost_usd: Option<f64>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Claude log schema keeps request_id for compatibility"
+    )]
     #[serde(default)]
     request_id: Option<String>,
 }
@@ -74,7 +77,10 @@ struct ClaudeMessage {
     usage: ClaudeUsage,
     #[serde(default)]
     model: Option<String>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Claude log schema keeps message id for compatibility"
+    )]
     #[serde(default)]
     id: Option<String>,
 }

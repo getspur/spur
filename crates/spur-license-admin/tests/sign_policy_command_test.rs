@@ -45,7 +45,6 @@ async fn sign_policy_command_reads_input_and_writes_signed_output() {
         "test-key",
         &key_path,
     )
-    .await
     .expect("sign-policy command should succeed");
 
     let raw = fs::read_to_string(&output_path).expect("read output");
@@ -105,7 +104,6 @@ async fn sign_policy_command_accepts_pkcs8_pem_signing_key() {
         "test-key-pem",
         &key_path,
     )
-    .await
     .expect("sign-policy command must succeed with a PKCS#8 PEM key");
 
     let raw = fs::read_to_string(&output_path).expect("read output");

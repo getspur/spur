@@ -56,7 +56,7 @@ pub fn verify_signed_policy(signed: &SignedPolicy) -> Result<PolicyDocument, Pol
         .map_err(|e| PolicyVerifyError::InvalidSignatureEncoding(e.to_string()))?;
 
     key.verify(signed.payload.as_bytes(), &sig)
-        .map_err(|_| PolicyVerifyError::SignatureMismatch)?;
+        .map_err(|_err| PolicyVerifyError::SignatureMismatch)?;
 
     let doc: PolicyDocument = serde_json::from_str(&signed.payload)
         .map_err(|e| PolicyVerifyError::PayloadParse(e.to_string()))?;

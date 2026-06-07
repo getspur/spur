@@ -275,7 +275,10 @@ pub fn update_session_end(
 }
 
 /// Update a session when it ends, including token counts and model.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "database update helper mirrors persisted session columns"
+)]
 pub fn update_session_end_with_tokens(
     conn: &Connection,
     id: &str,

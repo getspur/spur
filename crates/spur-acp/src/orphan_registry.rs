@@ -1,6 +1,6 @@
 //! Durable on-disk registry of pgids for orphan reaping.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 

@@ -45,7 +45,7 @@ impl SessionAttachGuard {
     pub fn try_acquire_or_replace(
         repo_root: &Path,
         acp_id: &str,
-        existing_guard: Option<SessionAttachGuard>,
+        existing_guard: Option<Self>,
     ) -> AcquireOutcome {
         if let Some(guard) = existing_guard {
             if guard.acp_id() == acp_id {
@@ -58,7 +58,7 @@ impl SessionAttachGuard {
     }
 
     pub fn try_acquire(repo_root: &Path, acp_id: &str) -> AcquireOutcome {
-        use fs4::fs_std::FileExt;
+        use fs4::fs_std::FileExt as _;
 
         let dir = repo_root.join(".spur").join("sessions");
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -88,10 +88,10 @@ impl SessionAttachGuard {
                 };
                 let _ = write_holder_info(&pid_path, &info);
 
-                AcquireOutcome::Acquired(SessionAttachGuard {
+                AcquireOutcome::Acquired(Self {
                     file,
                     pid_path,
-                    acp_id: acp_id.to_string(),
+                    acp_id: acp_id.to_owned(),
                 })
             }
             Ok(false) => {
@@ -109,7 +109,7 @@ fn detect_tty() -> Option<String> {
 }
 
 fn write_holder_info(path: &Path, info: &HolderInfo) -> std::io::Result<()> {
-    use std::io::Write;
+    use std::io::Write as _;
 
     let mut f = std::fs::OpenOptions::new()
         .write(true)
