@@ -1,13 +1,35 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-SPUR is a Rust workspace with eight crates under `crates/`. Keep changes scoped to one crate unless a cross-crate refactor is clearly necessary.
+SPUR is a Rust workspace (22 members under `crates/` + `xtask/`). Keep changes scoped to one crate unless a cross-crate refactor is clearly necessary.
 
-- `crates/spur-acp`: ACP client, transport, event types
-- `crates/spur-core`: orchestration, review loop, lineage
-- `crates/spur-tui`: `ratatui` interface, views, components
+**Core:**
 - `crates/spur-cli`: binary entry point
-- `crates/spur-mcp`, `spur-pm`, `spur-worktree`, `spur-cost`: integrations and support services
+- `crates/spur-core`: orchestration, review loop, lineage, event pipeline
+- `crates/spur-acp`: ACP client, transports (stdio/native/cli-wrap), event types
+- `crates/spur-tui`: `ratatui` interface, views, components
+- `crates/spur-mcp`: MCP server exposing delegation tools to the brain
+
+**Data & Analytics:**
+- `crates/spur-context`: DuckDB analytics engine + per-agent log extractors
+- `crates/spur-cost`: pricing registry + SQLite session ledger
+- `crates/spur-graph`: tree-sitter code graph, stable IDs, incremental rebuild
+- `crates/spur-analyst`: DuckDB graph index for SQL queries over code/plan data
+
+**Infrastructure:**
+- `crates/spur-worktree`: git worktree creation, isolation, flock liveness, cleanup
+- `crates/spur-pm`: project management adapters (beads, GitHub)
+- `crates/spur-blob-store`: content-addressed delegation outcome artifacts
+- `crates/spur-telemetry`: tracing/logging infrastructure
+
+**Frontends & Bridges:**
+- `crates/spur-interactive`: frontend bridge for non-TUI clients
+- `crates/spur-bot`: Telegram bot frontend
+- `crates/spur-notebook`: Jupyter-style notebook UI (includes `jute-notebook/src-tauri` and `rest-table-gateway` subcrates)
+
+**Licensing & Testing:**
+- `crates/spur-license` / `crates/spur-license-admin`: tier/feature-key registry
+- `crates/spur-test-madsim`: simulation-based testing harness
 
 Source lives in each crate’s `src/`. Integration tests are primarily in `crates/spur-acp/tests`, `crates/spur-core/tests`, `crates/spur-tui/tests`, and `crates/spur-cli/tests`. Specs and implementation plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
@@ -46,7 +68,7 @@ In local mode (fallback, or when remote is disabled) the wrapper also keeps scca
 Use Rust 2021 idioms with `cargo fmt` formatting. Follow existing naming: modules and functions in `snake_case`, types and traits in `CamelCase`, constants in `SCREAMING_SNAKE_CASE`. Prefer small, crate-local changes over broad rewrites. Avoid introducing new crate dependencies without explicit justification.
 
 ## Testing Guidelines
-Bug fixes should follow TDD cadence: add a failing `test(...)` commit first, then the `fix(...)` commit. New ACP event variants or envelope fields require round-trip serialization tests modeled on `crates/spur-acp/tests/executor_events_roundtrip.rs`. When changing config validation, run `cargo test -p spur-acp`.
+Bug fixes should follow TDD cadence: add a failing `test(...)` commit first, then the `fix(...)` commit. New ACP event variants or envelope fields require round-trip serialization tests modeled on `crates/spur-acp/tests/executor_events_roundtrip.rs`. When changing config validation, run `scripts/spur-cargo test -p spur-acp`.
 
 ## Commit & Pull Request Guidelines
 Commit format is:
