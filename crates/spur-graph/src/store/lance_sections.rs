@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -23,6 +23,110 @@ pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
 const SECTION_VECTOR_DIMENSIONS: usize = 768;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
+const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
+const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
+pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
+const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
+const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
+// Integration tests spawn the debug-built CLI; keep this hook out of release builds.
+#[cfg(debug_assertions)]
+const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionEmbeddingOptions {
+    pub skip_embeddings: bool,
+    pub batch_size: usize,
+}
+
+impl SectionEmbeddingOptions {
+    pub fn from_env() -> Self {
+        let skip_embeddings = matches!(
+            std::env::var(SECTION_EMBED_SKIP_ENV),
+            Ok(value) if value == "1"
+        );
+        let batch_size = std::env::var(SECTION_EMBED_BATCH_SIZE_ENV)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(SECTION_EMBED_BATCH_SIZE_DEFAULT);
+
+        Self {
+            skip_embeddings,
+            batch_size,
+        }
+    }
+
+    pub fn from_env_with_skip_override(skip_embeddings_override: bool) -> Self {
+        let mut options = Self::from_env();
+        options.skip_embeddings |= skip_embeddings_override;
+        options
+    }
+}
+
+impl Default for SectionEmbeddingOptions {
+    fn default() -> Self {
+        Self {
+            skip_embeddings: false,
+            batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionSidecarOptions {
+    pub embedding: SectionEmbeddingOptions,
+    pub write_batch_size: usize,
+}
+
+impl SectionSidecarOptions {
+    pub fn from_env() -> Self {
+        Self {
+            embedding: SectionEmbeddingOptions::from_env(),
+            write_batch_size: section_write_batch_size_from_env(),
+        }
+    }
+
+    pub fn from_env_with_skip_override(skip_embeddings_override: bool) -> Self {
+        Self {
+            embedding: SectionEmbeddingOptions::from_env_with_skip_override(
+                skip_embeddings_override,
+            ),
+            write_batch_size: section_write_batch_size_from_env(),
+        }
+    }
+
+    pub fn from_embedding_options(embedding: SectionEmbeddingOptions) -> Self {
+        Self {
+            embedding,
+            write_batch_size: section_write_batch_size_from_env(),
+        }
+    }
+}
+
+impl Default for SectionSidecarOptions {
+    fn default() -> Self {
+        Self {
+            embedding: SectionEmbeddingOptions::default(),
+            write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
+        }
+    }
+}
+
+fn section_write_batch_size_from_env() -> usize {
+    std::env::var(SECTION_WRITE_BATCH_SIZE_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(SECTION_WRITE_BATCH_SIZE_DEFAULT)
+}
+
+fn normalize_section_write_batch_size(write_batch_size: usize) -> usize {
+    if write_batch_size == 0 {
+        SECTION_WRITE_BATCH_SIZE_DEFAULT
+    } else {
+        write_batch_size
+    }
+}
 
 #[derive(Debug)]
 struct SectionRow {
@@ -44,6 +148,89 @@ pub fn write_sections_dataset(
     worktree_root: &Path,
     artifact_dir: &Path,
 ) -> Result<()> {
+    write_sections_dataset_with_sidecar_options(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        SectionSidecarOptions::from_env(),
+    )
+}
+
+pub fn write_sections_dataset_best_effort(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+) {
+    write_sections_dataset_best_effort_with_sidecar_options(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        SectionSidecarOptions::from_env(),
+    );
+}
+
+pub fn write_sections_dataset_best_effort_with_options(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+) {
+    if let Err(error) =
+        write_sections_dataset_with_options(artifact, worktree_root, artifact_dir, options)
+    {
+        tracing::warn!(
+            error = %error,
+            artifact_dir = %artifact_dir.display(),
+            "spur-graph: section sidecar write failed; graph artifact remains usable"
+        );
+    }
+}
+
+fn write_sections_dataset_best_effort_with_sidecar_options(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    options: SectionSidecarOptions,
+) {
+    if let Err(error) =
+        write_sections_dataset_with_sidecar_options(artifact, worktree_root, artifact_dir, options)
+    {
+        tracing::warn!(
+            error = %error,
+            artifact_dir = %artifact_dir.display(),
+            "spur-graph: section sidecar write failed; graph artifact remains usable"
+        );
+    }
+}
+
+fn write_sections_dataset_with_options(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+) -> Result<()> {
+    write_sections_dataset_with_sidecar_options(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        SectionSidecarOptions::from_embedding_options(options),
+    )
+}
+
+fn write_sections_dataset_with_sidecar_options(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    options: SectionSidecarOptions,
+) -> Result<()> {
+    #[cfg(debug_assertions)]
+    if matches!(
+        std::env::var(SECTION_SIDECAR_TEST_FAIL_ENV),
+        Ok(value) if value == "1"
+    ) {
+        anyhow::bail!("forced section sidecar failure for tests");
+    }
+
     if tokio::runtime::Handle::try_current().is_ok() {
         return std::thread::scope(|scope| {
             scope
@@ -52,19 +239,21 @@ pub fn write_sections_dataset(
                         artifact,
                         worktree_root,
                         artifact_dir,
+                        options,
                     )
                 })
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         });
     }
-    write_sections_dataset_without_current_runtime(artifact, worktree_root, artifact_dir)
+    write_sections_dataset_without_current_runtime(artifact, worktree_root, artifact_dir, options)
 }
 
 fn write_sections_dataset_without_current_runtime(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     artifact_dir: &Path,
+    options: SectionSidecarOptions,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -74,6 +263,7 @@ fn write_sections_dataset_without_current_runtime(
         artifact,
         worktree_root,
         artifact_dir,
+        options,
     ))
 }
 
@@ -81,18 +271,8 @@ async fn write_sections_dataset_async(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     artifact_dir: &Path,
+    options: SectionSidecarOptions,
 ) -> Result<()> {
-    let rows = section_rows(artifact, worktree_root)?;
-    let vectors = embed_eligible_rows(&rows);
-    let rows: Vec<SectionRow> = rows
-        .into_iter()
-        .zip(vectors)
-        .map(|(mut row, vector)| {
-            row.vector = vector;
-            row
-        })
-        .collect();
-
     fs::create_dir_all(artifact_dir)
         .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
     let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
@@ -104,31 +284,52 @@ async fn write_sections_dataset_async(
         .await
         .context("failed to connect to sections.lancedb")?;
     let schema = sections_schema();
-    let existing = db.open_table(SECTIONS_TABLE).execute().await.ok();
-    let rows = filter_rows_for_new_file_versions(existing.as_ref(), rows).await?;
-    let batch = rows_to_batch(rows, schema.clone())?;
+    let mut table = db.open_table(SECTIONS_TABLE).execute().await.ok();
+    let mut existing_versions = ExistingFileVersions::new(table.as_ref());
+    let mut embedder = SectionEmbedder::new(options.embedding);
+    let mut batcher = SectionRowBatcher::new(artifact, worktree_root, options.write_batch_size);
+    let mut dataset_changed = false;
 
-    let (table, dataset_changed) = if let Some(table) = existing {
-        if batch.num_rows() > 0 {
+    while let Some(rows) = batcher.next_batch()? {
+        let mut rows = existing_versions.retain_new_rows(rows).await?;
+        if rows.is_empty() {
+            continue;
+        }
+        embedder.embed_rows(&mut rows);
+        let batch = rows_to_batch(rows, schema.clone())?;
+        if let Some(table) = table.as_ref() {
             table
                 .add(batch)
                 .execute()
                 .await
                 .context("failed to append LanceDB section rows")?;
-            (table, true)
+            dataset_changed = true;
         } else {
-            (table, false)
+            table = Some(
+                db.create_table(SECTIONS_TABLE, batch)
+                    .execute()
+                    .await
+                    .context("failed to create LanceDB sections table")?,
+            );
+            dataset_changed = true;
         }
-    } else {
-        let table = db
-            .create_table(SECTIONS_TABLE, batch)
-            .execute()
-            .await
-            .context("failed to create LanceDB sections table")?;
-        (table, true)
-    };
+    }
+
+    if table.is_none() {
+        let empty_batch = rows_to_batch(Vec::new(), schema.clone())?;
+        table = Some(
+            db.create_table(SECTIONS_TABLE, empty_batch)
+                .execute()
+                .await
+                .context("failed to create LanceDB sections table")?,
+        );
+        dataset_changed = true;
+    }
 
     if dataset_changed {
+        let table = table
+            .as_ref()
+            .expect("section table should exist after dataset change");
         ensure_body_text_fts_index(&table).await?;
         ensure_vector_index(&table).await?;
     }
@@ -201,71 +402,158 @@ fn is_vector_index_type(index_type: &IndexType) -> bool {
     )
 }
 
-async fn filter_rows_for_new_file_versions(
-    table: Option<&lancedb::Table>,
-    rows: Vec<SectionRow>,
-) -> Result<Vec<SectionRow>> {
-    let Some(table) = table else {
-        return Ok(rows);
-    };
-    let mut seen = HashSet::new();
-    let mut known_unchanged = HashSet::new();
-    for row in &rows {
-        if !seen.insert((row.file_path.clone(), row.content_hash.clone())) {
-            continue;
+struct ExistingFileVersions {
+    table: Option<lancedb::Table>,
+    exists_by_file_version: HashMap<(String, String), bool>,
+}
+
+impl ExistingFileVersions {
+    fn new(table: Option<&lancedb::Table>) -> Self {
+        Self {
+            table: table.cloned(),
+            exists_by_file_version: HashMap::new(),
+        }
+    }
+
+    async fn retain_new_rows(&mut self, rows: Vec<SectionRow>) -> Result<Vec<SectionRow>> {
+        let mut retained = Vec::with_capacity(rows.len());
+        for row in rows {
+            if !self
+                .file_version_exists(row.file_path.as_str(), row.content_hash.as_str())
+                .await?
+            {
+                retained.push(row);
+            }
+        }
+        Ok(retained)
+    }
+
+    async fn file_version_exists(&mut self, file_path: &str, content_hash: &str) -> Result<bool> {
+        let Some(table) = self.table.as_ref() else {
+            return Ok(false);
+        };
+        let key = (file_path.to_owned(), content_hash.to_owned());
+        if let Some(exists) = self.exists_by_file_version.get(&key) {
+            return Ok(*exists);
         }
         let filter = format!(
             "file_path = '{}' AND content_hash = '{}'",
-            sql_string_literal(row.file_path.as_str()),
-            sql_string_literal(row.content_hash.as_str())
+            sql_string_literal(file_path),
+            sql_string_literal(content_hash)
         );
-        if table
+        let exists = table
             .count_rows(Some(filter))
             .await
             .context("failed to check existing LanceDB section rows")?
-            > 0
-        {
-            known_unchanged.insert((row.file_path.clone(), row.content_hash.clone()));
-        }
+            > 0;
+        self.exists_by_file_version.insert(key, exists);
+        Ok(exists)
     }
-    Ok(rows
-        .into_iter()
-        .filter(|row| !known_unchanged.contains(&(row.file_path.clone(), row.content_hash.clone())))
-        .collect())
 }
 
-fn section_rows(artifact: &GraphIndexArtifact, worktree_root: &Path) -> Result<Vec<SectionRow>> {
-    let section_ids: BTreeSet<&str> = artifact
-        .symbols
-        .iter()
-        .filter(|symbol| symbol.symbol_kind == "section")
-        .map(|symbol| symbol.stable_symbol_id.as_str())
-        .collect();
-    let child_count_by_parent = child_count_by_parent(&artifact.edges, &section_ids);
-    let parent_by_child = parent_by_child(&artifact.edges, &section_ids);
-    let manifest_by_path: BTreeMap<&str, &GraphFileManifestEntry> = artifact
-        .file_manifests
-        .iter()
-        .map(|manifest| (manifest.path.as_str(), manifest))
-        .collect();
+struct SectionRowBatcher<'a> {
+    worktree_root: &'a Path,
+    child_count_by_parent: HashMap<&'a str, u32>,
+    parent_by_child: HashMap<&'a str, String>,
+    manifest_by_path: BTreeMap<&'a str, &'a GraphFileManifestEntry>,
+    sections_by_path: BTreeMap<&'a str, Vec<&'a GraphSymbolArtifact>>,
+    ordered_paths: Vec<&'a str>,
+    next_path_index: usize,
+    pending_rows: VecDeque<SectionRow>,
+    write_batch_size: usize,
+}
 
-    let mut sections_by_path: BTreeMap<&str, Vec<&GraphSymbolArtifact>> = BTreeMap::new();
-    for symbol in &artifact.symbols {
-        if symbol.symbol_kind == "section" {
-            sections_by_path
-                .entry(symbol.file_path.as_str())
-                .or_default()
-                .push(symbol);
+impl<'a> SectionRowBatcher<'a> {
+    fn new(
+        artifact: &'a GraphIndexArtifact,
+        worktree_root: &'a Path,
+        write_batch_size: usize,
+    ) -> Self {
+        let write_batch_size = normalize_section_write_batch_size(write_batch_size);
+        let section_ids: BTreeSet<&str> = artifact
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.symbol_kind == "section")
+            .map(|symbol| symbol.stable_symbol_id.as_str())
+            .collect();
+        let child_count_by_parent = child_count_by_parent(&artifact.edges, &section_ids);
+        let parent_by_child = parent_by_child(&artifact.edges, &section_ids);
+        let manifest_by_path: BTreeMap<&str, &GraphFileManifestEntry> = artifact
+            .file_manifests
+            .iter()
+            .map(|manifest| (manifest.path.as_str(), manifest))
+            .collect();
+
+        let mut sections_by_path: BTreeMap<&str, Vec<&GraphSymbolArtifact>> = BTreeMap::new();
+        for symbol in &artifact.symbols {
+            if symbol.symbol_kind == "section" {
+                sections_by_path
+                    .entry(symbol.file_path.as_str())
+                    .or_default()
+                    .push(symbol);
+            }
+        }
+        for sections in sections_by_path.values_mut() {
+            sections.sort_by(|a, b| {
+                a.byte_range[0]
+                    .cmp(&b.byte_range[0])
+                    .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
+            });
+        }
+
+        let mut ordered_paths = BTreeSet::new();
+        for path in sections_by_path.keys() {
+            ordered_paths.insert(*path);
+        }
+        for manifest in manifest_by_path.values() {
+            if is_markdown_path(&manifest.path)
+                && !sections_by_path.contains_key(manifest.path.as_str())
+            {
+                ordered_paths.insert(manifest.path.as_str());
+            }
+        }
+
+        Self {
+            worktree_root,
+            child_count_by_parent,
+            parent_by_child,
+            manifest_by_path,
+            sections_by_path,
+            ordered_paths: ordered_paths.into_iter().collect(),
+            next_path_index: 0,
+            pending_rows: VecDeque::new(),
+            write_batch_size,
         }
     }
 
-    let mut rows = Vec::new();
-    for (path, sections) in &sections_by_path {
-        let bytes = match read_file_bytes(worktree_root, path) {
+    fn next_batch(&mut self) -> Result<Option<Vec<SectionRow>>> {
+        let mut batch = Vec::with_capacity(self.write_batch_size);
+        while batch.len() < self.write_batch_size {
+            if let Some(row) = self.pending_rows.pop_front() {
+                batch.push(row);
+                continue;
+            }
+
+            let Some(path) = self.ordered_paths.get(self.next_path_index).copied() else {
+                break;
+            };
+            self.next_path_index += 1;
+            self.pending_rows = VecDeque::from(self.rows_for_path(path)?);
+        }
+
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(batch))
+        }
+    }
+
+    fn rows_for_path(&self, path: &str) -> Result<Vec<SectionRow>> {
+        let bytes = match read_file_bytes(self.worktree_root, path) {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!(path = %path, error = %e, "section_rows: skipping unreadable file");
-                continue;
+                return Ok(Vec::new());
             }
         };
         let content_hash = blake3_hex(&bytes);
@@ -273,42 +561,29 @@ fn section_rows(artifact: &GraphIndexArtifact, worktree_root: &Path) -> Result<V
             Ok(source) => source,
             Err(e) => {
                 tracing::warn!(path = %path, error = %e, "section_rows: skipping non-UTF-8 markdown");
-                continue;
+                return Ok(Vec::new());
             }
         };
-        for section in sections {
-            rows.push(section_row(
-                section,
-                source,
-                content_hash.as_str(),
-                &child_count_by_parent,
-                &parent_by_child,
-            )?);
-        }
-    }
 
-    for manifest in manifest_by_path.values() {
-        if !is_markdown_path(&manifest.path)
-            || sections_by_path.contains_key(manifest.path.as_str())
-        {
-            continue;
+        if let Some(sections) = self.sections_by_path.get(path) {
+            return sections
+                .iter()
+                .map(|section| {
+                    section_row(
+                        section,
+                        source,
+                        content_hash.as_str(),
+                        &self.child_count_by_parent,
+                        &self.parent_by_child,
+                    )
+                })
+                .collect();
         }
-        let bytes = match read_file_bytes(worktree_root, &manifest.path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!(path = %manifest.path, error = %e, "section_rows: skipping unreadable file");
-                continue;
-            }
+
+        let Some(manifest) = self.manifest_by_path.get(path) else {
+            return Ok(Vec::new());
         };
-        let content_hash = blake3_hex(&bytes);
-        let source = match std::str::from_utf8(&bytes) {
-            Ok(source) => source,
-            Err(e) => {
-                tracing::warn!(path = %manifest.path, error = %e, "section_rows: skipping non-UTF-8 markdown");
-                continue;
-            }
-        };
-        rows.push(SectionRow {
+        Ok(vec![SectionRow {
             stable_symbol_id: manifest.stable_file_id.clone(),
             file_path: manifest.path.clone(),
             qualified_name: manifest.path.clone(),
@@ -320,16 +595,8 @@ fn section_rows(artifact: &GraphIndexArtifact, worktree_root: &Path) -> Result<V
             parent_stable_id: None,
             content_hash,
             vector: None,
-        });
+        }])
     }
-
-    rows.sort_by(|a, b| {
-        a.file_path
-            .cmp(&b.file_path)
-            .then(a.body_byte_start.cmp(&b.body_byte_start))
-            .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
-    });
-    Ok(rows)
 }
 
 fn section_row(
@@ -370,62 +637,132 @@ fn section_row(
     })
 }
 
-fn embed_eligible_rows(rows: &[SectionRow]) -> Vec<Option<Vec<f32>>> {
+#[cfg(test)]
+fn embed_eligible_rows(
+    rows: &[SectionRow],
+    options: SectionEmbeddingOptions,
+) -> Vec<Option<Vec<f32>>> {
+    let mut embedder = SectionEmbedder::new(options);
+    embedder.embed_row_vectors(rows)
+}
+
+struct SectionEmbedder {
+    options: SectionEmbeddingOptions,
+    model: Option<Option<TextEmbedding>>,
+}
+
+impl SectionEmbedder {
+    fn new(options: SectionEmbeddingOptions) -> Self {
+        Self {
+            options,
+            model: None,
+        }
+    }
+
+    fn embed_rows(&mut self, rows: &mut [SectionRow]) {
+        let vectors = self.embed_row_vectors(rows);
+        for (row, vector) in rows.iter_mut().zip(vectors) {
+            row.vector = vector;
+        }
+    }
+
+    fn embed_row_vectors(&mut self, rows: &[SectionRow]) -> Vec<Option<Vec<f32>>> {
+        let result = vec![None; rows.len()];
+        if self.options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
+            return result;
+        }
+        let options = self.options;
+        let Some(model) = self.model().as_ref() else {
+            return result;
+        };
+
+        embed_eligible_rows_with(rows, options, |texts| {
+            model.embed(texts.to_vec(), None).map_err(Into::into)
+        })
+    }
+
+    fn model(&mut self) -> &Option<TextEmbedding> {
+        self.model.get_or_insert_with(|| {
+            match TextEmbedding::try_new(
+                InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
+                    .with_show_download_progress(false),
+            ) {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    tracing::warn!(error = %error, "fastembed model unavailable; skipping section embeddings");
+                    None
+                }
+            }
+        })
+    }
+}
+
+fn embed_eligible_rows_with<F>(
+    rows: &[SectionRow],
+    options: SectionEmbeddingOptions,
+    mut embed_batch: F,
+) -> Vec<Option<Vec<f32>>>
+where
+    F: FnMut(&[&str]) -> Result<Vec<Vec<f32>>>,
+{
     let eligible: Vec<(usize, &str)> = rows
         .iter()
         .enumerate()
-        .filter(|(_, row)| {
-            row.heading_level >= 2 && row.body_text.len() <= SECTION_EMBED_MAX_BODY_BYTES
-        })
+        .filter(|(_, row)| is_embedding_eligible(row))
         .map(|(index, row)| (index, row.body_text.as_str()))
         .collect();
 
     let mut result = vec![None; rows.len()];
+    if options.skip_embeddings {
+        return result;
+    }
     if eligible.is_empty() {
         return result;
     }
 
-    let model = match TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::NomicEmbedTextV15).with_show_download_progress(false),
-    ) {
-        Ok(model) => model,
-        Err(error) => {
-            tracing::warn!(error = %error, "fastembed model unavailable; skipping section embeddings");
-            return result;
-        }
+    let batch_size = if options.batch_size == 0 {
+        SECTION_EMBED_BATCH_SIZE_DEFAULT
+    } else {
+        options.batch_size
     };
 
-    let texts: Vec<&str> = eligible.iter().map(|(_, text)| *text).collect();
-    let embeddings = match model.embed(texts, None) {
-        Ok(embeddings) => embeddings,
-        Err(error) => {
-            tracing::warn!(error = %error, "fastembed encode failed; skipping section embeddings");
-            return result;
-        }
-    };
+    for chunk in eligible.chunks(batch_size) {
+        let texts: Vec<&str> = chunk.iter().map(|(_, text)| *text).collect();
+        let embeddings = match embed_batch(&texts) {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                tracing::warn!(error = %error, "fastembed encode failed for section embedding batch; skipping remaining section embeddings");
+                return result;
+            }
+        };
 
-    if embeddings.len() != eligible.len() {
-        tracing::warn!(
-            expected = eligible.len(),
-            actual = embeddings.len(),
-            "fastembed returned unexpected section embedding count"
-        );
-        return result;
-    }
-
-    for ((index, _), embedding) in eligible.into_iter().zip(embeddings) {
-        if embedding.len() == SECTION_VECTOR_DIMENSIONS {
-            result[index] = Some(embedding);
-        } else {
+        if embeddings.len() != chunk.len() {
             tracing::warn!(
-                stable_symbol_id = %rows[index].stable_symbol_id,
-                dimensions = embedding.len(),
-                "fastembed returned unexpected section embedding dimensions"
+                expected = chunk.len(),
+                actual = embeddings.len(),
+                "fastembed returned unexpected section embedding count"
             );
+            return result;
+        }
+
+        for ((index, _), embedding) in chunk.iter().copied().zip(embeddings) {
+            if embedding.len() == SECTION_VECTOR_DIMENSIONS {
+                result[index] = Some(embedding);
+            } else {
+                tracing::warn!(
+                    stable_symbol_id = %rows[index].stable_symbol_id,
+                    dimensions = embedding.len(),
+                    "fastembed returned unexpected section embedding dimensions"
+                );
+            }
         }
     }
 
     result
+}
+
+fn is_embedding_eligible(row: &SectionRow) -> bool {
+    row.heading_level >= 2 && row.body_text.len() <= SECTION_EMBED_MAX_BODY_BYTES
 }
 
 fn child_count_by_parent<'a>(
@@ -591,6 +928,9 @@ fn sql_string_literal(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn section_row_fixture(heading_level: u8, body_text: String) -> SectionRow {
         SectionRow {
@@ -606,6 +946,58 @@ mod tests {
             content_hash: "hash".to_owned(),
             vector: None,
         }
+    }
+
+    fn versioned_section_row(
+        stable_symbol_id: &str,
+        file_path: &str,
+        content_hash: &str,
+    ) -> SectionRow {
+        SectionRow {
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            file_path: file_path.to_owned(),
+            qualified_name: stable_symbol_id.to_owned(),
+            heading_level: 2,
+            body_text: format!("## {stable_symbol_id}\n\nBody."),
+            body_byte_start: 0,
+            body_byte_end: 0,
+            child_count: 0,
+            parent_stable_id: None,
+            content_hash: content_hash.to_owned(),
+            vector: None,
+        }
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().expect("env lock")
     }
 
     #[test]
@@ -631,6 +1023,318 @@ mod tests {
             section_row_fixture(2, format!("## Heading\n\n{}", "x".repeat(4097))),
         ];
 
-        assert_eq!(embed_eligible_rows(&rows), vec![None, None]);
+        assert_eq!(
+            embed_eligible_rows(&rows, SectionEmbeddingOptions::default()),
+            vec![None, None]
+        );
+    }
+
+    #[test]
+    fn section_embedding_options_from_env_uses_defaults_for_missing_invalid_and_zero() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let batch = EnvGuard::remove(SECTION_EMBED_BATCH_SIZE_ENV);
+
+        assert_eq!(
+            SectionEmbeddingOptions::from_env(),
+            SectionEmbeddingOptions {
+                skip_embeddings: false,
+                batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
+            }
+        );
+
+        std::env::set_var(SECTION_EMBED_BATCH_SIZE_ENV, "not-a-number");
+        assert_eq!(
+            SectionEmbeddingOptions::from_env().batch_size,
+            SECTION_EMBED_BATCH_SIZE_DEFAULT
+        );
+
+        std::env::set_var(SECTION_EMBED_BATCH_SIZE_ENV, "0");
+        assert_eq!(
+            SectionEmbeddingOptions::from_env().batch_size,
+            SECTION_EMBED_BATCH_SIZE_DEFAULT
+        );
+
+        drop(batch);
+    }
+
+    #[test]
+    fn section_embedding_options_from_env_accepts_skip_and_valid_batch_size() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::set(SECTION_EMBED_SKIP_ENV, "1");
+        let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "7");
+
+        assert_eq!(
+            SectionEmbeddingOptions::from_env(),
+            SectionEmbeddingOptions {
+                skip_embeddings: true,
+                batch_size: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn section_embedding_options_from_env_with_skip_override_matches_env_skip() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "7");
+
+        assert_eq!(
+            SectionEmbeddingOptions::from_env_with_skip_override(true),
+            SectionEmbeddingOptions {
+                skip_embeddings: true,
+                batch_size: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn section_sidecar_options_from_env_uses_default_write_batch_for_missing_invalid_and_zero() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _embed_batch = EnvGuard::remove(SECTION_EMBED_BATCH_SIZE_ENV);
+        let write_batch = EnvGuard::remove(SECTION_WRITE_BATCH_SIZE_ENV);
+
+        assert_eq!(
+            SectionSidecarOptions::from_env().write_batch_size,
+            SECTION_WRITE_BATCH_SIZE_DEFAULT
+        );
+
+        std::env::set_var(SECTION_WRITE_BATCH_SIZE_ENV, "not-a-number");
+        assert_eq!(
+            SectionSidecarOptions::from_env().write_batch_size,
+            SECTION_WRITE_BATCH_SIZE_DEFAULT
+        );
+
+        std::env::set_var(SECTION_WRITE_BATCH_SIZE_ENV, "0");
+        assert_eq!(
+            SectionSidecarOptions::from_env().write_batch_size,
+            SECTION_WRITE_BATCH_SIZE_DEFAULT
+        );
+
+        drop(write_batch);
+    }
+
+    #[test]
+    fn section_sidecar_options_from_embedding_options_reads_write_batch_env() {
+        let _lock = env_lock();
+        let _write_batch = EnvGuard::set(SECTION_WRITE_BATCH_SIZE_ENV, "2");
+        let embedding = SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 13,
+        };
+
+        let options = SectionSidecarOptions::from_embedding_options(embedding);
+
+        assert_eq!(options.embedding, embedding);
+        assert_eq!(options.write_batch_size, 2);
+    }
+
+    #[test]
+    fn section_row_batcher_yields_configured_batch_lengths() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        let path = "docs/sections.md";
+        let source = "## One\n\nBody one.\n## Two\n\nBody two.\n## Three\n\nBody three.\n## Four\n\nBody four.\n## Five\n\nBody five.\n";
+        std::fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+        std::fs::write(root.join(path), source).expect("write markdown");
+
+        let ranges = section_ranges(
+            source,
+            &["## One", "## Two", "## Three", "## Four", "## Five"],
+        );
+        let symbols = ranges
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(index, [start, end])| GraphSymbolArtifact {
+                stable_symbol_id: format!("section-{index}"),
+                file_path: path.to_owned(),
+                byte_range: [*start, *end],
+                line_range: [1, 1],
+                entity_name: format!("Section {index}"),
+                qualified_name: format!("docs/sections.md::Section{index}"),
+                symbol_kind: "section".to_owned(),
+                anchor_hash: format!("anchor-{index}"),
+                enclosing_scope: None,
+            })
+            .collect();
+        let artifact = GraphIndexArtifact {
+            header: crate::GraphIndexHeader {
+                graph_index_version: "test".to_owned(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
+            file_manifests: vec![GraphFileManifestEntry {
+                stable_file_id: "file-sections".to_owned(),
+                path: path.to_owned(),
+                content_oid: "sections".to_owned(),
+                node_ids: Vec::new(),
+            }],
+            files: vec![crate::GraphFileArtifact {
+                stable_file_id: "file-sections".to_owned(),
+                file_path: path.to_owned(),
+            }],
+            file_node_ids: Vec::new(),
+            symbols,
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        };
+        let mut batcher = SectionRowBatcher::new(&artifact, root, 2);
+        let mut lengths = Vec::new();
+
+        while let Some(batch) = batcher.next_batch().expect("section batch") {
+            assert!(batch.len() <= 2);
+            lengths.push(batch.len());
+        }
+
+        assert_eq!(lengths, vec![2, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn lance_sections_existing_file_versions_cache_absent_versions_across_appends() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let dataset_dir = tempdir.path().join(SECTIONS_DATASET_DIR);
+        let db = lancedb::connect(dataset_dir.to_str().expect("dataset path"))
+            .execute()
+            .await
+            .expect("connect lancedb");
+        let schema = sections_schema();
+        let table = db
+            .create_table(
+                SECTIONS_TABLE,
+                rows_to_batch(
+                    vec![versioned_section_row(
+                        "existing-1",
+                        "docs/existing.md",
+                        "hash-existing",
+                    )],
+                    schema.clone(),
+                )
+                .expect("existing batch"),
+            )
+            .execute()
+            .await
+            .expect("create table");
+        let mut existing_versions = ExistingFileVersions::new(Some(&table));
+
+        let retained = existing_versions
+            .retain_new_rows(vec![
+                versioned_section_row("existing-2", "docs/existing.md", "hash-existing"),
+                versioned_section_row("new-1", "docs/new.md", "hash-new"),
+            ])
+            .await
+            .expect("filter first chunk");
+        let retained_ids: Vec<_> = retained
+            .iter()
+            .map(|row| row.stable_symbol_id.as_str())
+            .collect();
+        assert_eq!(retained_ids, vec!["new-1"]);
+        table
+            .add(rows_to_batch(retained, schema.clone()).expect("retained batch"))
+            .execute()
+            .await
+            .expect("append retained rows");
+
+        let retained = existing_versions
+            .retain_new_rows(vec![
+                versioned_section_row("existing-3", "docs/existing.md", "hash-existing"),
+                versioned_section_row("new-2", "docs/new.md", "hash-new"),
+            ])
+            .await
+            .expect("filter second chunk");
+        let retained_ids: Vec<_> = retained
+            .iter()
+            .map(|row| row.stable_symbol_id.as_str())
+            .collect();
+        assert_eq!(retained_ids, vec!["new-2"]);
+    }
+
+    fn section_ranges(source: &str, headings: &[&str]) -> Vec<[usize; 2]> {
+        headings
+            .iter()
+            .enumerate()
+            .map(|(index, heading)| {
+                let start = source.find(heading).expect("heading");
+                let end = headings
+                    .get(index + 1)
+                    .and_then(|next| source.find(next))
+                    .unwrap_or(source.len());
+                [start, end]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn embed_eligible_rows_returns_none_without_calling_embedder_when_skipped() {
+        let rows = vec![section_row_fixture(
+            2,
+            "## Install\n\nInstall body.".to_owned(),
+        )];
+        let options = SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 1,
+        };
+
+        assert_eq!(
+            embed_eligible_rows_with(&rows, options, |_| panic!("embedder should not be called")),
+            vec![None]
+        );
+    }
+
+    #[test]
+    fn section_embedder_does_not_initialize_model_for_skipped_or_ineligible_rows() {
+        let rows = vec![section_row_fixture(1, "# Title\n\nSkipped.".to_owned())];
+        let mut embedder = SectionEmbedder::new(SectionEmbeddingOptions {
+            skip_embeddings: false,
+            batch_size: 1,
+        });
+
+        assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
+        assert!(embedder.model.is_none());
+
+        let rows = vec![section_row_fixture(
+            2,
+            "## Install\n\nInstall body.".to_owned(),
+        )];
+        let mut embedder = SectionEmbedder::new(SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 1,
+        });
+
+        assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
+        assert!(embedder.model.is_none());
+    }
+
+    #[test]
+    fn embed_eligible_rows_uses_configured_batch_size() {
+        let rows = vec![
+            section_row_fixture(2, "## One\n\nBody one.".to_owned()),
+            section_row_fixture(1, "# Title\n\nSkipped.".to_owned()),
+            section_row_fixture(2, "## Two\n\nBody two.".to_owned()),
+            section_row_fixture(2, "## Three\n\nBody three.".to_owned()),
+        ];
+        let options = SectionEmbeddingOptions {
+            skip_embeddings: false,
+            batch_size: 2,
+        };
+        let mut batch_sizes = Vec::new();
+
+        let vectors = embed_eligible_rows_with(&rows, options, |texts| {
+            batch_sizes.push(texts.len());
+            Ok(vec![vec![0.25; SECTION_VECTOR_DIMENSIONS]; texts.len()])
+        });
+
+        assert_eq!(batch_sizes, vec![2, 1]);
+        assert!(vectors[0].is_some());
+        assert!(vectors[1].is_none());
+        assert!(vectors[2].is_some());
+        assert!(vectors[3].is_some());
     }
 }
