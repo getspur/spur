@@ -11,7 +11,6 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use futures::TryStreamExt as _;
 use lancedb::index::{scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Index, IndexType};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 
@@ -495,14 +494,14 @@ async fn write_sections_dataset_async(
                 label: "body_text FTS",
             },
         );
-        ensure_body_text_fts_index(&table).await?;
+        ensure_body_text_fts_index(table).await?;
         emit_progress(
             progress,
             SectionSidecarProgressEvent::Indexing {
                 label: "vector HNSW",
             },
         );
-        ensure_vector_index(&table).await?;
+        ensure_vector_index(table).await?;
     }
 
     emit_progress(
@@ -592,71 +591,90 @@ fn is_vector_index_type(index_type: &IndexType) -> bool {
 
 struct ExistingFileVersions {
     table: Option<lancedb::Table>,
+    missing_by_file_version: HashSet<(String, String)>,
 }
 
 impl ExistingFileVersions {
     fn new(table: Option<&lancedb::Table>) -> Self {
         Self {
             table: table.cloned(),
+            missing_by_file_version: HashSet::new(),
         }
     }
 
-    async fn retain_new_rows(&self, rows: Vec<SectionRow>) -> Result<Vec<SectionRow>> {
-        let Some(table) = self.table.as_ref() else {
-            return Ok(rows);
-        };
-        if rows.is_empty() {
+    async fn retain_new_rows(&mut self, rows: Vec<SectionRow>) -> Result<Vec<SectionRow>> {
+        if rows.is_empty() || self.table.is_none() {
             return Ok(rows);
         }
+        let existing = self.preload_existing_file_versions(&rows).await?;
+        let mut retained = Vec::with_capacity(rows.len());
+        for row in rows {
+            let key = (row.file_path.clone(), row.content_hash.clone());
+            if !existing.contains(&key) {
+                self.missing_by_file_version.insert(key);
+                retained.push(row);
+            }
+        }
+        Ok(retained)
+    }
 
-        let file_paths: HashSet<&str> = rows.iter().map(|r| r.file_path.as_str()).collect();
-
-        let in_clause = file_paths
+    async fn preload_existing_file_versions(
+        &mut self,
+        rows: &[SectionRow],
+    ) -> Result<HashSet<(String, String)>> {
+        let Some(table) = self.table.as_ref() else {
+            return Ok(HashSet::new());
+        };
+        let mut file_paths: Vec<_> = rows
             .iter()
-            .map(|p| format!("'{}'", sql_string_literal(p)))
+            .map(|row| row.file_path.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if file_paths.is_empty() {
+            return Ok(HashSet::new());
+        }
+        file_paths.sort_unstable();
+        let literals = file_paths
+            .into_iter()
+            .map(|path| format!("'{}'", sql_string_literal(path)))
             .collect::<Vec<_>>()
-            .join(",");
-        let filter = format!("file_path IN ({in_clause})");
-
-        let batches = table
+            .join(", ");
+        let filter = format!("file_path IN ({literals})");
+        let mut batches = table
             .query()
-            .only_if(&filter)
+            .only_if(filter)
             .select(Select::columns(&["file_path", "content_hash"]))
             .execute()
             .await
-            .context("failed to query existing LanceDB section rows")?
-            .try_collect::<Vec<_>>()
+            .context("failed to query existing LanceDB section rows")?;
+        let mut existing = HashSet::new();
+        while let Some(batch) = std::future::poll_fn(|cx| batches.as_mut().poll_next(cx))
             .await
-            .context("failed to collect existing LanceDB section rows")?;
-
-        let mut existing: HashSet<(String, String)> = HashSet::new();
-        for batch in &batches {
-            let Some(paths) = batch
+            .transpose()
+            .context("failed to read existing LanceDB section rows")?
+        {
+            let file_paths = batch
                 .column_by_name("file_path")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            else {
-                continue;
-            };
-            let Some(hashes) = batch
+                .context("existing section rows missing file_path column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("existing section file_path column was not Utf8")?;
+            let content_hashes = batch
                 .column_by_name("content_hash")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            else {
-                continue;
-            };
-            for i in 0..paths.len() {
-                existing.insert((paths.value(i).to_owned(), hashes.value(i).to_owned()));
+                .context("existing section rows missing content_hash column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("existing section content_hash column was not Utf8")?;
+            for index in 0..batch.num_rows() {
+                existing.insert((
+                    file_paths.value(index).to_owned(),
+                    content_hashes.value(index).to_owned(),
+                ));
             }
         }
-
-        if existing.is_empty() {
-            return Ok(rows);
-        }
-
-        let retained: Vec<SectionRow> = rows
-            .into_iter()
-            .filter(|r| !existing.contains(&(r.file_path.clone(), r.content_hash.clone())))
-            .collect();
-        Ok(retained)
+        existing.retain(|key| !self.missing_by_file_version.contains(key));
+        Ok(existing)
     }
 }
 
@@ -906,9 +924,7 @@ impl SectionEmbedder {
             return result;
         };
 
-        embed_eligible_rows_with(rows, options, |texts| {
-            model.embed(texts.to_vec(), None).map_err(Into::into)
-        })
+        embed_eligible_rows_with(rows, options, |texts| model.embed(texts.to_vec(), None))
     }
 
     fn model(&mut self) -> &Option<TextEmbedding> {
@@ -1475,7 +1491,7 @@ mod tests {
         let retained = existing_versions
             .retain_new_rows(vec![
                 versioned_section_row("existing-3", "docs/existing.md", "hash-existing"),
-                versioned_section_row("new-2", "docs/new.md", "hash-new"),
+                versioned_section_row("new-2", "docs/new.md", "hash-new-2"),
             ])
             .await
             .expect("filter second chunk");
@@ -1484,6 +1500,52 @@ mod tests {
             .map(|row| row.stable_symbol_id.as_str())
             .collect();
         assert_eq!(retained_ids, vec!["new-2"]);
+    }
+
+    #[tokio::test]
+    async fn lance_sections_existing_file_versions_preloads_batch_file_paths() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let dataset_dir = tempdir.path().join(SECTIONS_DATASET_DIR);
+        let db = lancedb::connect(dataset_dir.to_str().expect("dataset path"))
+            .execute()
+            .await
+            .expect("connect lancedb");
+        let schema = sections_schema();
+        let table = db
+            .create_table(
+                SECTIONS_TABLE,
+                rows_to_batch(
+                    vec![
+                        versioned_section_row("existing-1", "docs/existing.md", "hash-existing"),
+                        versioned_section_row("quote-1", "docs/it's.md", "hash-quote"),
+                        versioned_section_row("other-1", "docs/other.md", "hash-other"),
+                    ],
+                    schema,
+                )
+                .expect("existing batch"),
+            )
+            .execute()
+            .await
+            .expect("create table");
+        let mut existing_versions = ExistingFileVersions::new(Some(&table));
+
+        let existing = existing_versions
+            .preload_existing_file_versions(&[
+                versioned_section_row("existing-2", "docs/existing.md", "hash-existing"),
+                versioned_section_row("new-1", "docs/existing.md", "hash-new"),
+                versioned_section_row("quote-2", "docs/it's.md", "hash-quote"),
+                versioned_section_row("new-2", "docs/new.md", "hash-new"),
+            ])
+            .await
+            .expect("preload existing versions");
+
+        assert_eq!(
+            existing,
+            std::collections::HashSet::from([
+                ("docs/existing.md".to_owned(), "hash-existing".to_owned()),
+                ("docs/it's.md".to_owned(), "hash-quote".to_owned()),
+            ])
+        );
     }
 
     fn section_ranges(source: &str, headings: &[&str]) -> Vec<[usize; 2]> {
