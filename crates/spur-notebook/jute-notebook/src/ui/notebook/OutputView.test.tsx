@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { dispose, on, set } from "@/stores/widgetRegistry";
+import { clearCellCaptures, getCellCapture } from "@/stores/cellCapture";
 
 import OutputView from "./OutputView";
 
@@ -58,6 +59,7 @@ function outputValue(modelId = AFM_MODEL_ID) {
 describe("OutputView AFM widget rendering", () => {
   afterEach(() => {
     cleanup();
+    clearCellCaptures();
     dispose(AFM_MODEL_ID);
     dispose("model-only");
     invokeMock.mockReset();
@@ -203,5 +205,58 @@ describe("OutputView AFM widget rendering", () => {
       intent: { ...content, commId: AFM_MODEL_ID, buffers: [[1, 2, 3]] },
     });
     expect(customListener).toHaveBeenCalledWith(response, []);
+  });
+});
+
+describe("OutputView HTML video capture", () => {
+  afterEach(() => {
+    cleanup();
+    clearCellCaptures();
+  });
+
+  test("stores iframe video capture messages by cell id", async () => {
+    render(
+      <OutputView
+        cellId="cell-capture-1"
+        value={{
+          status: "success",
+          outputs: [
+            {
+              output_type: "display_data",
+              data: {
+                "text/html":
+                  '<canvas data-capture="true" data-capture-duration-sec="1"></canvas>',
+              },
+              metadata: {},
+            },
+          ],
+        }}
+      />,
+    );
+
+    const iframe = screen.getByTitle(
+      "Notebook HTML output",
+    ) as HTMLIFrameElement;
+    expect(iframe).toHaveAttribute("name", "cell-capture-1");
+    expect(iframe.getAttribute("srcdoc")).toContain("jute-video-capture");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: iframe.contentWindow,
+        data: {
+          type: "jute-video-capture",
+          cellId: "cell-capture-1",
+          webm: "d2VibQ==",
+          duration_sec: 1,
+        },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(getCellCapture("cell-capture-1")).toEqual({
+        webm_base64: "d2VibQ==",
+        duration_sec: 1,
+      }),
+    );
   });
 });
