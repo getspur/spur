@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use spur_analyst::{
-    query_context_candidates, KnowledgeCandidate, KnowledgeQueryOptions, KnowledgeQueryResult,
-    KnowledgeSearchScope,
+    query_context_candidates, query_graph_candidates, KnowledgeCandidate, KnowledgeQueryOptions,
+    KnowledgeQueryResult, KnowledgeSearchScope,
 };
 use spur_graph::resolve_worktree_root_from;
 
@@ -45,7 +45,7 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
         return Ok(unavailable_pack(&request, &db_path));
     }
 
-    let query_result = query_context_candidates(
+    let mut query_result = query_context_candidates(
         &db_path,
         &request.query,
         request.scope.as_analyst_scope(),
@@ -59,6 +59,23 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
             db_path.display()
         ))
     })?;
+
+    if request.should_query_graph_candidates() {
+        match query_graph_candidates(
+            &db_path,
+            &request.query,
+            KnowledgeQueryOptions {
+                limit: request.limit as usize,
+            },
+        ) {
+            Ok(graph_result) => merge_graph_candidates(&mut query_result, graph_result),
+            Err(error) => tracing::warn!(
+                db_path = %db_path.display(),
+                error = %error,
+                "knowledge_context_pack failed to query graph candidates; continuing with context candidates"
+            ),
+        }
+    }
 
     let exact_context = exact_graph_context_for_result(&request, &query_result).await;
     Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
@@ -121,6 +138,40 @@ impl KnowledgeContextPackRequest {
             max_symbol_bodies,
         })
     }
+
+    fn should_query_graph_candidates(&self) -> bool {
+        matches!(self.scope, KnowledgeScope::Graph)
+            || (matches!(self.scope, KnowledgeScope::All)
+                && matches!(
+                    self.intent,
+                    KnowledgeIntent::Debug | KnowledgeIntent::Change
+                ))
+    }
+}
+
+fn merge_graph_candidates(result: &mut KnowledgeQueryResult, graph_result: KnowledgeQueryResult) {
+    result.candidates.extend(graph_result.candidates);
+
+    let mut deduped = Vec::with_capacity(result.candidates.len());
+    for candidate in result.candidates.drain(..) {
+        let Some(stable_symbol_id) = candidate.stable_symbol_id.as_deref() else {
+            deduped.push(candidate);
+            continue;
+        };
+
+        if let Some(existing) = deduped
+            .iter_mut()
+            .find(|existing| existing.stable_symbol_id.as_deref() == Some(stable_symbol_id))
+        {
+            if candidate.score > existing.score {
+                *existing = candidate;
+            }
+        } else {
+            deduped.push(candidate);
+        }
+    }
+
+    result.candidates = deduped;
 }
 
 #[derive(Clone, Copy)]
@@ -725,6 +776,21 @@ fn is_test_file(file_path: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn candidate(stable_symbol_id: Option<&str>, title: &str, score: f64) -> KnowledgeCandidate {
+        KnowledgeCandidate {
+            kind: "code".into(),
+            title: title.into(),
+            file_path: "crates/spur-mcp/src/lib.rs".into(),
+            stable_symbol_id: stable_symbol_id.map(str::to_string),
+            symbol_kind: Some("function".into()),
+            score,
+            signal: None,
+            neighbor_kind: None,
+            edge_bind_method: None,
+            grounding: "test".into(),
+        }
+    }
+
     #[tokio::test]
     async fn knowledge_context_pack_missing_analyst_db_returns_structured_unavailable() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -750,6 +816,72 @@ mod tests {
             .as_str()
             .expect("error message")
             .contains(".spur/analyst.duckdb"));
+    }
+
+    #[test]
+    fn knowledge_context_pack_queries_graph_for_graph_scope_or_change_debug_all_scope() {
+        for (scope, intent, expected) in [
+            ("graph", "explain", true),
+            ("all", "debug", true),
+            ("all", "change", true),
+            ("all", "explain", false),
+            ("code", "debug", false),
+            ("docs", "change", false),
+        ] {
+            let request = KnowledgeContextPackRequest::parse(&json!({
+                "query": "semantic search",
+                "scope": scope,
+                "intent": intent
+            }))
+            .expect("request");
+
+            assert_eq!(
+                request.should_query_graph_candidates(),
+                expected,
+                "scope={scope} intent={intent}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_graph_candidates_deduplicates_stable_symbols_by_higher_score() {
+        let mut result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-dup"), "bm25 duplicate", 3.0),
+                candidate(None, "bm25 no symbol", 2.0),
+                candidate(Some("sym-bm25"), "bm25 unique", 5.0),
+            ],
+        };
+        let graph_result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-dup"), "graph duplicate", 8.0),
+                candidate(Some("sym-bm25"), "graph lower duplicate", 1.0),
+                candidate(Some("sym-graph"), "graph unique", 4.0),
+                candidate(None, "graph no symbol", 6.0),
+            ],
+        };
+
+        merge_graph_candidates(&mut result, graph_result);
+
+        let titles = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec![
+                "graph duplicate",
+                "bm25 no symbol",
+                "bm25 unique",
+                "graph unique",
+                "graph no symbol"
+            ]
+        );
     }
 
     #[tokio::test]
