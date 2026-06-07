@@ -1,3 +1,30 @@
+#![allow(
+    clippy::allow_attributes,
+    clippy::branches_sharing_code,
+    clippy::bool_to_int_with_if,
+    clippy::doc_markdown,
+    clippy::format_push_string,
+    clippy::future_not_send,
+    clippy::iter_over_hash_type,
+    clippy::large_futures,
+    clippy::literal_string_with_formatting_args,
+    clippy::manual_is_multiple_of,
+    clippy::map_err_ignore,
+    clippy::match_same_arms,
+    clippy::option_option,
+    clippy::ref_patterns,
+    clippy::return_and_then,
+    clippy::semicolon_if_nothing_returned,
+    clippy::single_match_else,
+    clippy::str_to_string,
+    clippy::uninlined_format_args,
+    clippy::unnecessary_debug_formatting,
+    clippy::unnecessary_wraps,
+    clippy::unused_async,
+    clippy::unused_trait_names,
+    reason = "legacy CLI binary modules have a pre-existing lint backlog"
+)]
+
 mod cmd;
 mod commands;
 mod onboarding;

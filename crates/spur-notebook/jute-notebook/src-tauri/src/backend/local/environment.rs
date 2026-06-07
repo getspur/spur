@@ -70,9 +70,13 @@ fn data_search_paths(interpreter_prefix: Option<&str>) -> Vec<String> {
         #[cfg(target_os = "macos")]
         dirs.push(format!("{}/Library/Jupyter", env::var("HOME").unwrap()));
         #[cfg(target_os = "linux")]
-        match env::var("XDG_DATA_HOME") {
-            Ok(xdg_data_home) => dirs.push(xdg_data_home + "/jupyter"),
-            Err(_) => dirs.push(env::var("HOME").unwrap() + "/.local/share/jupyter"),
+        if let Ok(mut xdg_data_home) = env::var("XDG_DATA_HOME") {
+            xdg_data_home.push_str("/jupyter");
+            dirs.push(xdg_data_home);
+        } else {
+            let mut home = env::var("HOME").unwrap();
+            home.push_str("/.local/share/jupyter");
+            dirs.push(home);
         }
     }
     if let Some(prefix) = interpreter_prefix {

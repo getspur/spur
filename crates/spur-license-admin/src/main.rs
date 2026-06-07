@@ -20,8 +20,7 @@ async fn main() -> anyhow::Result<()> {
                 output.as_deref(),
                 &key_id,
                 &signing_key,
-            )
-            .await?;
+            )?;
         }
         spur_license_admin::cli::Commands::License { action } => match action {
             spur_license_admin::cli::LicenseAction::Create {

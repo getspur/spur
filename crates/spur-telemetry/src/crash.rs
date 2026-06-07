@@ -96,9 +96,8 @@ where
     F: Fn(PosthogEvent) -> Fut,
     Fut: std::future::Future<Output = crate::Result<()>>,
 {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return 0,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
     };
 
     let mut paths = entries

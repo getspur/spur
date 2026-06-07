@@ -5,7 +5,10 @@ use super::events::SpurEventBody;
 /// Replay-compatible body that captures unknown variants without failing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "replay compatibility keeps the known event body inline for serialization shape"
+)]
 pub enum ReplayBody {
     Known(SpurEventBody),
     Unknown(serde_json::Value),
@@ -14,8 +17,8 @@ pub enum ReplayBody {
 impl ReplayBody {
     pub fn as_known(&self) -> Option<&SpurEventBody> {
         match self {
-            ReplayBody::Known(b) => Some(b),
-            ReplayBody::Unknown(_) => None,
+            Self::Known(b) => Some(b),
+            Self::Unknown(_) => None,
         }
     }
 
@@ -24,8 +27,8 @@ impl ReplayBody {
     /// without manual `match` boilerplate.
     pub fn as_unknown(&self) -> Option<&serde_json::Value> {
         match self {
-            ReplayBody::Known(_) => None,
-            ReplayBody::Unknown(v) => Some(v),
+            Self::Known(_) => None,
+            Self::Unknown(v) => Some(v),
         }
     }
 }

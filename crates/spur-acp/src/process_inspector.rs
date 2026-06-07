@@ -175,7 +175,7 @@ impl MockInspector {
         let mut st = HashMap::new();
         st.insert(pid, starttime);
         let mut cm = HashMap::new();
-        cm.insert(pid, cmd.to_string());
+        cm.insert(pid, cmd.to_owned());
         Self {
             starttimes: Mutex::new(st),
             cmds: Mutex::new(cm),
@@ -185,7 +185,7 @@ impl MockInspector {
 
     pub fn add_alive(&mut self, pid: i32, starttime: i64, cmd: &str) {
         self.starttimes.lock().unwrap().insert(pid, starttime);
-        self.cmds.lock().unwrap().insert(pid, cmd.to_string());
+        self.cmds.lock().unwrap().insert(pid, cmd.to_owned());
     }
 
     pub fn killed(&self) -> Vec<(i32, Signal)> {

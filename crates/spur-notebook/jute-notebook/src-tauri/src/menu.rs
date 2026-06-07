@@ -98,11 +98,9 @@ pub fn setup_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         ..Default::default()
     };
 
-    let mut menu = MenuBuilder::new(app);
-
     // App name submenu, only for macOS ("Jute").
     #[cfg(target_os = "macos")]
-    {
+    let menu = {
         let app_menu = SubmenuBuilder::new(app, pkg_info.name.clone())
             .about(Some(about_metadata))
             .separator()
@@ -113,8 +111,11 @@ pub fn setup_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             .separator()
             .quit()
             .build()?;
-        menu = menu.item(&app_menu);
-    }
+        MenuBuilder::new(app).item(&app_menu)
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let menu = MenuBuilder::new(app);
 
     // File submenu.
     let file_menu = SubmenuBuilder::new(app, "File")

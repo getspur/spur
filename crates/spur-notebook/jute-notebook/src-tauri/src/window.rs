@@ -28,7 +28,7 @@ pub fn initialize_builder<'a, R: Runtime, M: Manager<R>>(
 
     let url = tauri::WebviewUrl::App(path.trim_start_matches('/').into());
 
-    let mut builder = WebviewWindowBuilder::new(manager, &label, url)
+    let builder = WebviewWindowBuilder::new(manager, &label, url)
         .title("Jute")
         .inner_size(960.0, 800.0)
         .min_inner_size(720.0, 600.0)
@@ -36,15 +36,16 @@ pub fn initialize_builder<'a, R: Runtime, M: Manager<R>>(
         .resizable(true);
 
     #[cfg(target_os = "macos")]
-    {
+    let builder = {
         // These methods are only available on macOS.
-        builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
-        builder = builder.hidden_title(true);
-        builder = builder.traffic_light_position(tauri::LogicalPosition::new(
-            WINDOW_CONTROL_PAD_X,
-            WINDOW_CONTROL_PAD_Y,
-        ));
-    }
+        builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(tauri::LogicalPosition::new(
+                WINDOW_CONTROL_PAD_X,
+                WINDOW_CONTROL_PAD_Y,
+            ))
+    };
 
     builder
 }

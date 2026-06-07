@@ -92,7 +92,7 @@ impl StdioAdapter {
     }
 
     /// Spawn the persistent child process with piped stdin/stdout and null stderr.
-    async fn spawn_process(&mut self) -> anyhow::Result<()> {
+    fn spawn_process(&mut self) -> anyhow::Result<()> {
         tracing::debug!(
             agent = %self.agent_name,
             command = %self.command,
@@ -146,7 +146,7 @@ impl AgentConnection for StdioAdapter {
         &mut self,
         _request: InitializeRequest,
     ) -> anyhow::Result<InitializeResponse> {
-        self.spawn_process().await?;
+        self.spawn_process()?;
 
         // No ACP handshake — process started means we are ready.
         self.health_status = AgentHealth::Ready;
@@ -304,7 +304,7 @@ impl AgentConnection for StdioAdapter {
     // ─── cancel ──────────────────────────────────────────────────────────
 
     async fn cancel(&mut self, session_id: &str) -> anyhow::Result<()> {
-        if let Some(ref child) = self.child {
+        if let Some(child) = self.child.as_ref() {
             if let Some(pid) = child.id() {
                 tracing::debug!(
                     agent = %self.agent_name,
@@ -375,7 +375,7 @@ impl AgentConnection for StdioAdapter {
     fn health(&self) -> AgentHealth {
         // If we have a child, check whether it's still running by inspecting its PID.
         // `child.id()` returns None once the process has been waited on / exited.
-        if let Some(ref child) = self.child {
+        if let Some(child) = self.child.as_ref() {
             match child.id() {
                 Some(_) => self.health_status.clone(),
                 None => AgentHealth::Error("StdioAdapter subprocess has exited".into()),
