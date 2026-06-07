@@ -1,10 +1,24 @@
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use rmcp::model::{CallToolRequestParams, ClientInfo};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rmcp::ServiceExt;
+use rmcp::{
+    model::{CallToolRequestParams, ClientInfo},
+    service::{RunningService, Service},
+    RoleClient,
+};
 use serde_json::{json, Value};
-use spur_notebook::mcp::{start_server, transport::LengthPrefixedJsonTransport};
+use spur_notebook::mcp::{
+    bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
+    start_server,
+    tools::html_video_render,
+    transport::LengthPrefixedJsonTransport,
+    ServerDeps,
+};
 use tokio::{fs, net::UnixStream, process::Command, time::timeout};
 
 const SEARCH_TOOL: &str = "html_video_search_templates";
@@ -12,14 +26,60 @@ const GET_TEMPLATE_TOOL: &str = "html_video_get_template";
 const RENDER_TOOL: &str = "html_video_render";
 
 #[tokio::test]
-async fn html_video_pipeline() {
+async fn html_video_render_accepts_base64_webm_frames() {
     if !command_succeeds("ffmpeg", &["-version"]).await {
-        eprintln!("skipping html_video_pipeline: ffmpeg is unavailable");
+        eprintln!("skipping html_video_render_accepts_base64_webm_frames: ffmpeg is unavailable");
         return;
     }
 
-    if !playwright_or_chromium_available().await {
-        eprintln!("skipping html_video_pipeline: no Playwright/Chromium binary available");
+    let temp = tempfile::Builder::new()
+        .prefix("spur-notebook-html-video-render-")
+        .tempdir()
+        .expect("temp dir");
+    let input_path = temp.path().join("input.webm");
+    let output_path = temp.path().join("output.mp4");
+
+    generate_webm_fixture(&input_path).await;
+    let encoded = STANDARD.encode(fs::read(&input_path).await.expect("read webm fixture"));
+
+    let result = html_video_render::call(
+        &ServerDeps::from_bridge(Arc::new(NullBridge)),
+        json!({
+            "webm_frames": [encoded],
+            "output_path": output_path,
+            "resolution": "32x32",
+            "fps": 2,
+            "frame_duration": 0.5
+        }),
+    )
+    .await
+    .expect("render accepts base64 webm frame");
+
+    let body = result.structured_content.expect("structured content");
+    assert_eq!(body["frame_count"], 1);
+    assert!(output_path.exists(), "expected mp4 output file to exist");
+    let metadata = fs::metadata(&output_path)
+        .await
+        .expect("render output metadata");
+    assert!(metadata.len() > 0, "rendered mp4 must be non-empty");
+}
+
+#[test]
+fn html_video_render_schema_uses_webm_frames() {
+    let tool = html_video_render::tool();
+    let schema = serde_json::to_value(&tool.input_schema).expect("schema serializes");
+
+    assert_eq!(schema["required"], json!(["webm_frames", "output_path"]));
+    assert!(schema["properties"].get("webm_frames").is_some());
+    assert!(schema["properties"].get("frame_duration").is_some());
+    assert!(schema["properties"].get("frame_html_paths").is_none());
+    assert!(schema["properties"].get("duration").is_none());
+}
+
+#[tokio::test]
+async fn html_video_pipeline() {
+    if !command_succeeds("ffmpeg", &["-version"]).await {
+        eprintln!("skipping html_video_pipeline: ffmpeg is unavailable");
         return;
     }
 
@@ -66,7 +126,7 @@ async fn html_video_pipeline() {
         }
     };
 
-    let template_result = match call_tool_with_variants(
+    let _template_result = match call_tool_with_variants(
         &client,
         GET_TEMPLATE_TOOL,
         &[
@@ -86,84 +146,21 @@ async fn html_video_pipeline() {
         }
     };
 
-    let frame_path = temp.path().join("frame.html");
-    fs::write(
-        &frame_path,
-        r#"
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <style>
-    html, body { margin: 0; width: 100%; height: 100%; background: #020617; }
-    .dot {
-      width: 56px;
-      height: 56px;
-      border-radius: 50%;
-      background: linear-gradient(120deg, #22d3ee, #2563eb);
-      position: absolute;
-      top: calc(50% - 28px);
-      left: calc(50% - 28px);
-      animation: orbit 2s ease-in-out infinite alternate;
-    }
-    @keyframes orbit {
-      0% { transform: translate(-160px, 0px) scale(0.9); opacity: 0.6; }
-      100% { transform: translate(160px, 0px) scale(1.1); opacity: 1; }
-    }
-  </style>
-</head>
-<body>
-  <div class="dot"></div>
-</body>
-</html>
-"#,
-    )
-    .await
-    .expect("write html frame");
-
+    let input_path = temp.path().join("input.webm");
+    generate_webm_fixture(&input_path).await;
+    let encoded = STANDARD.encode(fs::read(&input_path).await.expect("read webm fixture"));
     let hint_path = temp.path().join("output.mp4");
     let hint_path_string = hint_path.to_string_lossy().to_string();
-    let frame_path_string = frame_path.to_string_lossy().to_string();
-    let template_candidates = extract_template_path(&template_result);
 
-    let mut render_payloads = vec![
+    let render_payloads = vec![
         json!({
-            "template_id": template_id.clone(),
-            "frame_path": frame_path_string.clone(),
+            "webm_frames": [encoded.clone()],
             "output_path": hint_path_string.clone()
         }),
         json!({
-            "id": template_id.clone(),
-            "frame_path": frame_path_string.clone(),
-            "output_path": hint_path_string.clone()
-        }),
-        json!({
-            "template_id": template_id.clone(),
-            "frame_path": frame_path_string.clone(),
-        }),
-        json!({
-            "id": template_id.clone(),
-            "frame_path": frame_path_string.clone(),
-        }),
-        json!({
-            "template_id": template_id.clone(),
-            "path": frame_path_string.clone(),
-            "output_path": hint_path_string.clone()
-        }),
-        json!({
-            "id": template_id,
-            "path": frame_path_string.clone(),
-            "output_path": hint_path_string.clone()
+            "webm_frames": [encoded],
         }),
     ];
-
-    if let Some(path) = template_candidates.clone() {
-        render_payloads.push(json!({
-            "template_path": path,
-            "frame_path": frame_path.to_string_lossy().to_string(),
-            "output_path": hint_path_string,
-        }));
-    }
 
     let render_result = match call_tool_with_variants(
         &client,
@@ -213,6 +210,55 @@ async fn html_video_pipeline() {
     let _ = client.cancel().await;
 }
 
+async fn generate_webm_fixture(path: &Path) {
+    let status = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg("color=c=0x22d3ee:s=32x32:d=0.5:r=2")
+        .arg("-c:v")
+        .arg("libvpx-vp9")
+        .arg(path)
+        .status()
+        .await
+        .expect("generate webm fixture");
+    assert!(status.success(), "ffmpeg must generate a webm fixture");
+}
+
+#[derive(Default)]
+struct NullBridge;
+
+impl BridgeRequester for NullBridge {
+    fn listener_registered(&self) -> bool {
+        false
+    }
+
+    fn window_alive(&self) -> bool {
+        false
+    }
+
+    fn notebook_open(&self) -> bool {
+        false
+    }
+
+    fn request<'a>(
+        &'a self,
+        method: &'static str,
+        _params: Value,
+        _timeout: Duration,
+    ) -> BridgeRequestFuture<'a> {
+        Box::pin(async move {
+            Err(BridgeError::Handler {
+                code: "unexpected_bridge_call".to_string(),
+                message: format!("unexpected bridge call to {method}"),
+            })
+        })
+    }
+}
+
 async fn command_succeeds(command: &str, args: &[&str]) -> bool {
     let Ok(Ok(status)) = timeout(
         Duration::from_secs(5),
@@ -229,30 +275,15 @@ async fn command_succeeds(command: &str, args: &[&str]) -> bool {
     status.success()
 }
 
-async fn playwright_or_chromium_available() -> bool {
-    const CANDIDATES: &[&str] = &[
-        "playwright",
-        "chromium",
-        "chromium-browser",
-        "google-chrome",
-        "google-chrome-stable",
-    ];
-
-    for candidate in CANDIDATES {
-        if command_succeeds(candidate, &["--version"]).await {
-            return true;
-        }
-    }
-
-    false
-}
-
-async fn call_tool_with_variants(
-    client: &ClientInfo,
-    method: &str,
+async fn call_tool_with_variants<S>(
+    client: &RunningService<RoleClient, S>,
+    method: &'static str,
     payloads: &[Value],
     max_duration: Duration,
-) -> Option<Value> {
+) -> Option<Value>
+where
+    S: Service<RoleClient>,
+{
     let deadline = Instant::now() + max_duration;
 
     for payload in payloads {
@@ -269,13 +300,17 @@ async fn call_tool_with_variants(
     None
 }
 
-async fn call_tool_once(
-    client: &ClientInfo,
-    method: &str,
+async fn call_tool_once<S>(
+    client: &RunningService<RoleClient, S>,
+    method: &'static str,
     payload: Value,
     timeout_duration: Duration,
-) -> Option<Value> {
-    let request = CallToolRequestParams::new(method).with_arguments(payload);
+) -> Option<Value>
+where
+    S: Service<RoleClient>,
+{
+    let arguments = payload.as_object()?.clone();
+    let request = CallToolRequestParams::new(method).with_arguments(arguments);
     let Ok(Ok(result)) = timeout(timeout_duration, client.call_tool(request)).await else {
         return None;
     };
@@ -350,20 +385,6 @@ fn first_template_id_in_array(templates: &[Value]) -> Option<String> {
     }
 
     None
-}
-
-fn extract_template_path(value: &Value) -> Option<String> {
-    first_matching_field(
-        value,
-        &[
-            "template_path",
-            "path",
-            "template",
-            "file",
-            "templateFile",
-            "template_file",
-        ],
-    )
 }
 
 fn extract_mp4_path(value: &Value) -> Option<PathBuf> {
