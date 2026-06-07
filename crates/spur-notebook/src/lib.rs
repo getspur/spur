@@ -5,6 +5,7 @@ pub mod dag;
 #[cfg(feature = "datasource-introspect")]
 pub mod datasource;
 pub mod extension_install;
+pub mod html_video;
 pub mod mcp;
 pub mod open_design;
 pub mod recents;
