@@ -23,6 +23,43 @@ pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
 const SECTION_VECTOR_DIMENSIONS: usize = 768;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
+const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
+const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
+const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionEmbeddingOptions {
+    pub skip_embeddings: bool,
+    pub batch_size: usize,
+}
+
+impl SectionEmbeddingOptions {
+    pub fn from_env() -> Self {
+        let skip_embeddings = matches!(
+            std::env::var(SECTION_EMBED_SKIP_ENV),
+            Ok(value) if value == "1"
+        );
+        let batch_size = std::env::var(SECTION_EMBED_BATCH_SIZE_ENV)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(SECTION_EMBED_BATCH_SIZE_DEFAULT);
+
+        Self {
+            skip_embeddings,
+            batch_size,
+        }
+    }
+}
+
+impl Default for SectionEmbeddingOptions {
+    fn default() -> Self {
+        Self {
+            skip_embeddings: false,
+            batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct SectionRow {
@@ -44,6 +81,20 @@ pub fn write_sections_dataset(
     worktree_root: &Path,
     artifact_dir: &Path,
 ) -> Result<()> {
+    write_sections_dataset_with_options(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        SectionEmbeddingOptions::from_env(),
+    )
+}
+
+fn write_sections_dataset_with_options(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+) -> Result<()> {
     if tokio::runtime::Handle::try_current().is_ok() {
         return std::thread::scope(|scope| {
             scope
@@ -52,19 +103,21 @@ pub fn write_sections_dataset(
                         artifact,
                         worktree_root,
                         artifact_dir,
+                        options,
                     )
                 })
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         });
     }
-    write_sections_dataset_without_current_runtime(artifact, worktree_root, artifact_dir)
+    write_sections_dataset_without_current_runtime(artifact, worktree_root, artifact_dir, options)
 }
 
 fn write_sections_dataset_without_current_runtime(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -74,6 +127,7 @@ fn write_sections_dataset_without_current_runtime(
         artifact,
         worktree_root,
         artifact_dir,
+        options,
     ))
 }
 
@@ -81,9 +135,10 @@ async fn write_sections_dataset_async(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
 ) -> Result<()> {
     let rows = section_rows(artifact, worktree_root)?;
-    let vectors = embed_eligible_rows(&rows);
+    let vectors = embed_eligible_rows(&rows, options);
     let rows: Vec<SectionRow> = rows
         .into_iter()
         .zip(vectors)
@@ -370,18 +425,12 @@ fn section_row(
     })
 }
 
-fn embed_eligible_rows(rows: &[SectionRow]) -> Vec<Option<Vec<f32>>> {
-    let eligible: Vec<(usize, &str)> = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| {
-            row.heading_level >= 2 && row.body_text.len() <= SECTION_EMBED_MAX_BODY_BYTES
-        })
-        .map(|(index, row)| (index, row.body_text.as_str()))
-        .collect();
-
-    let mut result = vec![None; rows.len()];
-    if eligible.is_empty() {
+fn embed_eligible_rows(
+    rows: &[SectionRow],
+    options: SectionEmbeddingOptions,
+) -> Vec<Option<Vec<f32>>> {
+    let result = vec![None; rows.len()];
+    if options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
         return result;
     }
 
@@ -395,37 +444,77 @@ fn embed_eligible_rows(rows: &[SectionRow]) -> Vec<Option<Vec<f32>>> {
         }
     };
 
-    let texts: Vec<&str> = eligible.iter().map(|(_, text)| *text).collect();
-    let embeddings = match model.embed(texts, None) {
-        Ok(embeddings) => embeddings,
-        Err(error) => {
-            tracing::warn!(error = %error, "fastembed encode failed; skipping section embeddings");
-            return result;
-        }
-    };
+    embed_eligible_rows_with(rows, options, |texts| {
+        model.embed(texts.to_vec(), None).map_err(Into::into)
+    })
+}
 
-    if embeddings.len() != eligible.len() {
-        tracing::warn!(
-            expected = eligible.len(),
-            actual = embeddings.len(),
-            "fastembed returned unexpected section embedding count"
-        );
+fn embed_eligible_rows_with<F>(
+    rows: &[SectionRow],
+    options: SectionEmbeddingOptions,
+    mut embed_batch: F,
+) -> Vec<Option<Vec<f32>>>
+where
+    F: FnMut(&[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    let eligible: Vec<(usize, &str)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| is_embedding_eligible(row))
+        .map(|(index, row)| (index, row.body_text.as_str()))
+        .collect();
+
+    let mut result = vec![None; rows.len()];
+    if options.skip_embeddings {
+        return result;
+    }
+    if eligible.is_empty() {
         return result;
     }
 
-    for ((index, _), embedding) in eligible.into_iter().zip(embeddings) {
-        if embedding.len() == SECTION_VECTOR_DIMENSIONS {
-            result[index] = Some(embedding);
-        } else {
+    let batch_size = if options.batch_size == 0 {
+        SECTION_EMBED_BATCH_SIZE_DEFAULT
+    } else {
+        options.batch_size
+    };
+
+    for chunk in eligible.chunks(batch_size) {
+        let texts: Vec<&str> = chunk.iter().map(|(_, text)| *text).collect();
+        let embeddings = match embed_batch(&texts) {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                tracing::warn!(error = %error, "fastembed encode failed for section embedding batch; skipping remaining section embeddings");
+                return result;
+            }
+        };
+
+        if embeddings.len() != chunk.len() {
             tracing::warn!(
-                stable_symbol_id = %rows[index].stable_symbol_id,
-                dimensions = embedding.len(),
-                "fastembed returned unexpected section embedding dimensions"
+                expected = chunk.len(),
+                actual = embeddings.len(),
+                "fastembed returned unexpected section embedding count"
             );
+            return result;
+        }
+
+        for ((index, _), embedding) in chunk.iter().copied().zip(embeddings) {
+            if embedding.len() == SECTION_VECTOR_DIMENSIONS {
+                result[index] = Some(embedding);
+            } else {
+                tracing::warn!(
+                    stable_symbol_id = %rows[index].stable_symbol_id,
+                    dimensions = embedding.len(),
+                    "fastembed returned unexpected section embedding dimensions"
+                );
+            }
         }
     }
 
     result
+}
+
+fn is_embedding_eligible(row: &SectionRow) -> bool {
+    row.heading_level >= 2 && row.body_text.len() <= SECTION_EMBED_MAX_BODY_BYTES
 }
 
 fn child_count_by_parent<'a>(
@@ -591,6 +680,9 @@ fn sql_string_literal(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn section_row_fixture(heading_level: u8, body_text: String) -> SectionRow {
         SectionRow {
@@ -606,6 +698,38 @@ mod tests {
             content_hash: "hash".to_owned(),
             vector: None,
         }
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().expect("env lock")
     }
 
     #[test]
@@ -631,6 +755,96 @@ mod tests {
             section_row_fixture(2, format!("## Heading\n\n{}", "x".repeat(4097))),
         ];
 
-        assert_eq!(embed_eligible_rows(&rows), vec![None, None]);
+        assert_eq!(
+            embed_eligible_rows(&rows, SectionEmbeddingOptions::default()),
+            vec![None, None]
+        );
+    }
+
+    #[test]
+    fn section_embedding_options_from_env_uses_defaults_for_missing_invalid_and_zero() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let batch = EnvGuard::remove(SECTION_EMBED_BATCH_SIZE_ENV);
+
+        assert_eq!(
+            SectionEmbeddingOptions::from_env(),
+            SectionEmbeddingOptions {
+                skip_embeddings: false,
+                batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
+            }
+        );
+
+        std::env::set_var(SECTION_EMBED_BATCH_SIZE_ENV, "not-a-number");
+        assert_eq!(
+            SectionEmbeddingOptions::from_env().batch_size,
+            SECTION_EMBED_BATCH_SIZE_DEFAULT
+        );
+
+        std::env::set_var(SECTION_EMBED_BATCH_SIZE_ENV, "0");
+        assert_eq!(
+            SectionEmbeddingOptions::from_env().batch_size,
+            SECTION_EMBED_BATCH_SIZE_DEFAULT
+        );
+
+        drop(batch);
+    }
+
+    #[test]
+    fn section_embedding_options_from_env_accepts_skip_and_valid_batch_size() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::set(SECTION_EMBED_SKIP_ENV, "1");
+        let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "7");
+
+        assert_eq!(
+            SectionEmbeddingOptions::from_env(),
+            SectionEmbeddingOptions {
+                skip_embeddings: true,
+                batch_size: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn embed_eligible_rows_returns_none_without_calling_embedder_when_skipped() {
+        let rows = vec![section_row_fixture(
+            2,
+            "## Install\n\nInstall body.".to_owned(),
+        )];
+        let options = SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 1,
+        };
+
+        assert_eq!(
+            embed_eligible_rows_with(&rows, options, |_| panic!("embedder should not be called")),
+            vec![None]
+        );
+    }
+
+    #[test]
+    fn embed_eligible_rows_uses_configured_batch_size() {
+        let rows = vec![
+            section_row_fixture(2, "## One\n\nBody one.".to_owned()),
+            section_row_fixture(1, "# Title\n\nSkipped.".to_owned()),
+            section_row_fixture(2, "## Two\n\nBody two.".to_owned()),
+            section_row_fixture(2, "## Three\n\nBody three.".to_owned()),
+        ];
+        let options = SectionEmbeddingOptions {
+            skip_embeddings: false,
+            batch_size: 2,
+        };
+        let mut batch_sizes = Vec::new();
+
+        let vectors = embed_eligible_rows_with(&rows, options, |texts| {
+            batch_sizes.push(texts.len());
+            Ok(vec![vec![0.25; SECTION_VECTOR_DIMENSIONS]; texts.len()])
+        });
+
+        assert_eq!(batch_sizes, vec![2, 1]);
+        assert!(vectors[0].is_some());
+        assert!(vectors[1].is_none());
+        assert!(vectors[2].is_some());
+        assert!(vectors[3].is_some());
     }
 }
