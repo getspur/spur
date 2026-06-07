@@ -13,7 +13,15 @@ Source lives in each crate’s `src/`. Integration tests are primarily in `crate
 
 ## Code Retrieval & Exploration
 
-Treat the repository code graph as the first-class retrieval layer for code work. For code discovery, symbol lookup, reading symbol bodies, caller/callee impact analysis, and semantic searches over code or docs, use the available `code_*` tools first whenever they can answer the question.
+**`code_search` is the primary discovery tool.** Use `code_*` for most exploration:
+- `code_symbol_search` / `code_resolve` to find specific symbols
+- `code_read_symbol` to read source code with context
+- `code_callers` / `code_callees` for impact analysis and call tracing
+- `code_subgraph` for neighborhood maps
+
+**Use `knowledge_context_pack` when entering unfamiliar code areas** and you need the big picture before diving into specific symbols. It returns bounded evidence packs combining BM25 search, scorecard signals (pagerank, churn, posture), and exact graph context. The response includes `recommended_next_tools` with pre-filled selectors for follow-up with `code_*` tools.
+
+**Use `spur-analyst` for complex queries and graph algorithms.** When you need aggregation, time-series analysis, multi-table JOINs, reachability paths, or graph algorithms (PageRank, SCC, shortest path), use the DuckDB-based analyst tools.
 
 Fall back to native tools such as `rg`, `sed`, `cat`, or direct file reads only when the graph tools do not expose the needed shape of data (for example, full raw markdown/shell-file reads), the graph is unavailable or stale for the file in question, or you need exact working-tree bytes/diffs. When falling back, keep the search scoped and note the reason.
 
