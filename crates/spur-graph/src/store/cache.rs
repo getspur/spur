@@ -11,7 +11,10 @@ use anyhow::{Context as _, Result};
 
 use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::build::BuildStats;
-use crate::store::lance_sections::write_sections_dataset_best_effort;
+use crate::store::lance_sections::{
+    write_sections_dataset_best_effort_with_sidecar_options_and_progress, SectionSidecarOptions,
+    SectionSidecarProgressCallback,
+};
 use crate::store::pointer::resolve_artifact_location;
 use crate::store::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
@@ -62,6 +65,22 @@ pub fn write_with_dedup(
     worktree_root: &Path,
     ctx: &GitCtx,
 ) -> Result<()> {
+    write_with_dedup_with_section_sidecar_options(
+        artifact,
+        worktree_root,
+        ctx,
+        SectionSidecarOptions::from_env(),
+        None,
+    )
+}
+
+pub fn write_with_dedup_with_section_sidecar_options(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    ctx: &GitCtx,
+    section_sidecar_options: SectionSidecarOptions,
+    section_sidecar_progress: Option<&SectionSidecarProgressCallback<'_>>,
+) -> Result<()> {
     let canonical_dir = canonical_base_dir(&ctx.git_common_dir, &artifact.manifest_version);
     let canonical = canonical_path(
         &ctx.git_common_dir,
@@ -85,7 +104,12 @@ pub fn write_with_dedup(
             lock_path = %lock_path.display(),
             "spur-graph: fs2 lock unavailable; writing worktree artifact without canonical pointer"
         );
-        let written_dir = write_artifact_to_worktree(artifact, worktree_root)?;
+        let written_dir = write_artifact_to_worktree(
+            artifact,
+            worktree_root,
+            section_sidecar_options,
+            section_sidecar_progress,
+        )?;
         write_current_pointer(worktree_root, &written_dir)?;
         // No canonical was written, so any prior pointer is stale; remove it.
         remove_if_exists(&worktree_root.join(POINTER_PATH))?;
@@ -95,7 +119,13 @@ pub fn write_with_dedup(
     let write_result = if canonical.join("manifest.json").is_file() {
         Ok(canonical)
     } else {
-        write_canonical_atomically(artifact, worktree_root, &canonical_dir)
+        write_canonical_atomically(
+            artifact,
+            worktree_root,
+            &canonical_dir,
+            section_sidecar_options,
+            section_sidecar_progress,
+        )
     };
     let unlock_result = fs2::FileExt::unlock(&lock).context("failed to unlock graph cache lock");
     let written_dir = write_result?;
@@ -163,6 +193,8 @@ fn write_canonical_atomically(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     canonical_dir: &Path,
+    section_sidecar_options: SectionSidecarOptions,
+    section_sidecar_progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<PathBuf> {
     let staging = ArtifactStagingDir::new(canonical_dir, &artifact.graph_content_hash)?;
     write_artifact_parquet(
@@ -172,7 +204,13 @@ fn write_canonical_atomically(
         Vec::new(),
     )?;
     let final_path = staging.commit()?;
-    write_sections_dataset_best_effort(artifact, worktree_root, &final_path);
+    write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        &final_path,
+        section_sidecar_options,
+        section_sidecar_progress,
+    );
     Ok(final_path)
 }
 
@@ -364,6 +402,8 @@ pub fn emit_base_seed_stats(base: &'static str, stats: BuildStats) {
 fn write_artifact_to_worktree(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
+    section_sidecar_options: SectionSidecarOptions,
+    section_sidecar_progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<PathBuf> {
     let worktree_artifact_base = worktree_root.join(WORKTREE_ARTIFACT_PATH);
     let staging = ArtifactStagingDir::new(&worktree_artifact_base, &artifact.graph_content_hash)?;
@@ -374,7 +414,13 @@ fn write_artifact_to_worktree(
         Vec::new(),
     )?;
     let final_path = staging.commit()?;
-    write_sections_dataset_best_effort(artifact, worktree_root, &final_path);
+    write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        &final_path,
+        section_sidecar_options,
+        section_sidecar_progress,
+    );
     Ok(final_path)
 }
 
