@@ -11,8 +11,30 @@ use spur_graph::{
     GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
 };
 
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 #[tokio::test]
-async fn writes_markdown_sections_dataset_with_body_text() {
+async fn lance_sections_writes_markdown_sections_dataset_with_body_text() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(root.join("docs")).expect("mkdir docs");
@@ -82,7 +104,105 @@ async fn writes_markdown_sections_dataset_with_body_text() {
 }
 
 #[tokio::test]
-async fn section_rows_skips_non_utf8_markdown_files() {
+async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
+    let _env = EnvGuard::set("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("repo");
+    fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+    fs::write(
+        root.join("docs/guide.md"),
+        "# Guide\n\n## Install\n\nInstall body.\n",
+    )
+    .expect("write guide");
+
+    let facts = build_facts(&root, None).expect("build facts").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let out_dir = tempdir.path().join("artifact");
+
+    write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
+
+    let db = lancedb::connect(
+        out_dir
+            .join(SECTIONS_DATASET_DIR)
+            .to_str()
+            .expect("dataset path"),
+    )
+    .execute()
+    .await
+    .expect("connect lancedb");
+    let table = db
+        .open_table(SECTIONS_TABLE)
+        .execute()
+        .await
+        .expect("open table");
+
+    assert_eq!(
+        table
+            .count_rows(Some("vector IS NOT NULL".to_owned()))
+            .await
+            .expect("count vector rows"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn lance_sections_streams_small_write_batches_without_vectors() {
+    let _skip = EnvGuard::set("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1");
+    let _write_batch = EnvGuard::set("SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE", "2");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("repo");
+    fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+    fs::write(
+        root.join("docs/guide.md"),
+        "# Guide\n\n## One\n\nBody one.\n\n## Two\n\nBody two.\n\n## Three\n\nBody three.\n\n## Four\n\nBody four.\n\n## Five\n\nBody five.\n",
+    )
+    .expect("write guide");
+
+    let facts = build_facts(&root, None).expect("build facts").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let section_symbol_count = artifact
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_kind == "section")
+        .count();
+    assert!(
+        section_symbol_count > 2,
+        "test fixture should cross the configured write batch boundary"
+    );
+    let out_dir = tempdir.path().join("artifact");
+
+    write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
+
+    let db = lancedb::connect(
+        out_dir
+            .join(SECTIONS_DATASET_DIR)
+            .to_str()
+            .expect("dataset path"),
+    )
+    .execute()
+    .await
+    .expect("connect lancedb");
+    let table = db
+        .open_table(SECTIONS_TABLE)
+        .execute()
+        .await
+        .expect("open table");
+
+    assert_eq!(
+        table.count_rows(None).await.expect("count rows"),
+        section_symbol_count
+    );
+    assert_eq!(
+        table
+            .count_rows(Some("vector IS NOT NULL".to_owned()))
+            .await
+            .expect("count vector rows"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn lance_sections_skips_non_utf8_markdown_files() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(root.join("docs")).expect("mkdir docs");
