@@ -244,7 +244,7 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
       SELECT
         'code' AS kind,
         symbol AS title,
-        regexp_replace(file_path, '^crates/', '') AS file_path,
+        file_path,
         stable_symbol_id,
         symbol_kind,
         round(fused_rank, 3) AS score,
@@ -260,7 +260,7 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
         SELECT
           'code' AS kind,
           nsrc.entity_name AS title,
-          regexp_replace(nsrc.file_path, '^crates/', '') AS file_path,
+          nsrc.file_path,
           nsrc.stable_symbol_id,
           nsrc.symbol_kind,
           round(COALESCE(sc2.pagerank, 0) * 1e4, 3) AS score,
@@ -281,7 +281,7 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
         SELECT
           'code' AS kind,
           ndst.entity_name AS title,
-          regexp_replace(ndst.file_path, '^crates/', '') AS file_path,
+          ndst.file_path,
           ndst.stable_symbol_id,
           ndst.symbol_kind,
           round(COALESCE(sc3.pagerank, 0) * 1e4, 3) AS score,
