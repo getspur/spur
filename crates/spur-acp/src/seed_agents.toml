@@ -143,7 +143,7 @@ dispatch = "prompt_text"
 [[agents.entries]]
 name = "opencode"
 command = "opencode"
-args = ["-m", "openrouter/z-ai/glm-5.1", "acp"]
+args = ["acp"]
 transport = "acp"
 kind = "open-code"
 role = "both"
