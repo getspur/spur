@@ -15,6 +15,12 @@
 //! libduckdb-sys, so a plain `LOAD` (no network install) suffices. Other
 //! community extensions used to BUILD the DB are irrelevant to the read path.
 
+#[cfg(feature = "datasource-introspect")]
+use arrow_array::{Array, Float32Array, StringArray};
+#[cfg(feature = "datasource-introspect")]
+use futures::TryStreamExt;
+#[cfg(feature = "datasource-introspect")]
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -24,6 +30,7 @@ use serde_json::{json, Value};
 #[cfg(feature = "datasource-introspect")]
 use std::{
     collections::{HashMap, VecDeque},
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -34,11 +41,23 @@ const MAX_LIMIT: usize = 50;
 const EMBED_DIM: usize = 768;
 #[cfg(feature = "datasource-introspect")]
 const EMBED_CACHE_ENTRIES: usize = 1024;
+#[cfg(feature = "datasource-introspect")]
+const HYBRID_CANDIDATES: usize = 30;
+#[cfg(feature = "datasource-introspect")]
+const HYBRID_RRF_K: f64 = 60.0;
+#[cfg(feature = "datasource-introspect")]
+const HYBRID_PER_DOC_LIMIT: usize = 3;
+#[cfg(feature = "datasource-introspect")]
+const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
+#[cfg(feature = "datasource-introspect")]
+const SECTIONS_TABLE: &str = "section_bodies";
 
 #[cfg(feature = "datasource-introspect")]
 static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
 #[cfg(feature = "datasource-introspect")]
 static EMBED_CACHE: OnceLock<Mutex<EmbedCache>> = OnceLock::new();
+#[cfg(feature = "datasource-introspect")]
+static LANCE_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, lancedb::Connection>>> = OnceLock::new();
 
 #[cfg(feature = "datasource-introspect")]
 struct EmbedCache {
@@ -110,23 +129,14 @@ fn embed_cache() -> &'static Mutex<EmbedCache> {
 }
 
 #[cfg(feature = "datasource-introspect")]
-fn embedding_as_csv(embedding: &[f32; EMBED_DIM]) -> String {
-    embedding
-        .iter()
-        .map(|f| format!("{f:.6}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-#[cfg(feature = "datasource-introspect")]
-async fn embed_query(query: &str) -> Option<String> {
+async fn embed_query(query: &str) -> Option<[f32; EMBED_DIM]> {
     let key = embed_cache_key(query);
     let cached = match embed_cache().lock() {
         Ok(mut cache) => cache.get(key),
         Err(_) => None,
     };
     if let Some(embedding) = cached {
-        return Some(embedding_as_csv(&embedding));
+        return Some(embedding);
     }
 
     let query = query.to_owned();
@@ -145,7 +155,303 @@ async fn embed_query(query: &str) -> Option<String> {
         cache.insert(key, embedding);
     }
 
-    Some(embedding_as_csv(&embedding))
+    Some(embedding)
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Clone)]
+struct DocSearchRow {
+    stable_symbol_id: String,
+    title: String,
+    file: String,
+    score: f64,
+    signal: Option<String>,
+}
+
+#[cfg(feature = "datasource-introspect")]
+impl DocSearchRow {
+    fn new(
+        stable_symbol_id: impl Into<String>,
+        title: impl Into<String>,
+        file: impl Into<String>,
+        score: f64,
+    ) -> Self {
+        Self {
+            stable_symbol_id: stable_symbol_id.into(),
+            title: title.into(),
+            file: file.into(),
+            score,
+            signal: None,
+        }
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "kind": "doc",
+            "title": self.title,
+            "file": self.file,
+            "score": self.score,
+            "signal": self.signal,
+        })
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Clone)]
+struct DocMetadata {
+    title: String,
+    file: String,
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn rrf_fuse(
+    bm25_rows: &[DocSearchRow],
+    ann_rows: &[(String, f64)],
+    metadata: &HashMap<String, DocMetadata>,
+    limit: usize,
+) -> Vec<DocSearchRow> {
+    let mut scores = HashMap::<String, f64>::new();
+    let mut first_seen = HashMap::<String, usize>::new();
+    let mut metadata = metadata.clone();
+
+    for row in bm25_rows {
+        metadata
+            .entry(row.stable_symbol_id.clone())
+            .or_insert_with(|| DocMetadata {
+                title: row.title.clone(),
+                file: row.file.clone(),
+            });
+    }
+
+    for (idx, row) in bm25_rows.iter().enumerate() {
+        let rank = idx + 1;
+        *scores.entry(row.stable_symbol_id.clone()).or_default() +=
+            1.0 / (HYBRID_RRF_K + rank as f64);
+        first_seen
+            .entry(row.stable_symbol_id.clone())
+            .or_insert(rank);
+    }
+
+    for (idx, (stable_symbol_id, _distance)) in ann_rows.iter().enumerate() {
+        let rank = idx + 1;
+        *scores.entry(stable_symbol_id.clone()).or_default() += 1.0 / (HYBRID_RRF_K + rank as f64);
+        first_seen
+            .entry(stable_symbol_id.clone())
+            .or_insert(bm25_rows.len() + rank);
+    }
+
+    let mut fused = scores
+        .into_iter()
+        .filter_map(|(stable_symbol_id, score)| {
+            let metadata = metadata.get(&stable_symbol_id)?;
+            Some(DocSearchRow {
+                stable_symbol_id,
+                title: metadata.title.clone(),
+                file: metadata.file.clone(),
+                score,
+                signal: None,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    fused.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                first_seen
+                    .get(&left.stable_symbol_id)
+                    .cmp(&first_seen.get(&right.stable_symbol_id))
+            })
+            .then_with(|| left.stable_symbol_id.cmp(&right.stable_symbol_id))
+    });
+
+    let mut per_doc = HashMap::<String, usize>::new();
+    let mut deduped = Vec::with_capacity(limit.min(fused.len()));
+    for row in fused {
+        let count = per_doc.entry(row.file.clone()).or_default();
+        if *count >= HYBRID_PER_DOC_LIMIT {
+            continue;
+        }
+        *count += 1;
+        deduped.push(row);
+        if deduped.len() >= limit {
+            break;
+        }
+    }
+    deduped
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn search_docs_bm25_rows(
+    conn: &duckdb::Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<DocSearchRow>, McpError> {
+    let q = query.replace('\'', "''");
+    let sql = format!(
+        "SELECT stable_symbol_id, section AS title, \
+         regexp_replace(file_path, '^(crates|docs|\\.claude|\\.spur|\\.codex|\\.kiro|\\.gemini)/', '') AS file, \
+         round(bm25, 3) AS score \
+         FROM search_docs_bm25('{q}') LIMIT {limit}"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| internal("failed to prepare BM25 docs query", &e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocSearchRow::new(
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
+        .map_err(|e| internal("failed to run BM25 docs query", &e))?;
+
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| internal("failed to read BM25 docs rows", &e))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn fetch_doc_metadata(
+    conn: &duckdb::Connection,
+    stable_symbol_ids: &[String],
+) -> Result<HashMap<String, DocMetadata>, McpError> {
+    if stable_symbol_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut unique = Vec::<&str>::new();
+    for stable_symbol_id in stable_symbol_ids {
+        if !unique.contains(&stable_symbol_id.as_str()) {
+            unique.push(stable_symbol_id.as_str());
+        }
+    }
+    let ids = unique
+        .into_iter()
+        .map(|id| format!("'{}'", id.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT stable_symbol_id, qualified_name AS title, \
+         regexp_replace(file_path, '^(crates|docs|\\.claude|\\.spur|\\.codex|\\.kiro|\\.gemini)/', '') AS file \
+         FROM sections_search WHERE stable_symbol_id IN ({ids})"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| internal("failed to prepare doc metadata query", &e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                DocMetadata {
+                    title: row.get::<_, String>(1)?,
+                    file: row.get::<_, String>(2)?,
+                },
+            ))
+        })
+        .map_err(|e| internal("failed to run doc metadata query", &e))?;
+
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| internal("failed to read doc metadata rows", &e))
+}
+
+#[cfg(feature = "datasource-introspect")]
+async fn lance_ann_search(query_vec: &[f32; EMBED_DIM], limit: usize) -> Vec<(String, f64)> {
+    match lance_ann_search_inner(query_vec, limit).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::debug!(%error, "Lance ANN search unavailable; returning BM25-only hybrid rows");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+async fn lance_ann_search_inner(
+    query_vec: &[f32; EMBED_DIM],
+    limit: usize,
+) -> Result<Vec<(String, f64)>, McpError> {
+    let dataset_path = resolve_lance_dataset_path()?;
+    if !dataset_path.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let conn = cached_lance_connection(&dataset_path).await?;
+    let table = conn
+        .open_table(SECTIONS_TABLE)
+        .execute()
+        .await
+        .map_err(|e| internal("failed to open Lance sections table", &e))?;
+    let batches = table
+        .query()
+        .only_if("vector IS NOT NULL AND heading_level >= 2 AND length(body_text) <= 4096")
+        .select(Select::columns(&["stable_symbol_id", "_distance"]))
+        .nearest_to(query_vec.as_slice())
+        .map_err(|e| internal("failed to build Lance vector query", &e))?
+        .limit(limit)
+        .execute()
+        .await
+        .map_err(|e| internal("failed to execute Lance vector query", &e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| internal("failed to read Lance vector rows", &e))?;
+
+    let mut rows = Vec::new();
+    for batch in batches {
+        let ids = batch
+            .column_by_name("stable_symbol_id")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    format!("{METHOD} Lance vector query missing stable_symbol_id column"),
+                    None,
+                )
+            })?;
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|column| column.as_any().downcast_ref::<Float32Array>())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    format!("{METHOD} Lance vector query missing _distance column"),
+                    None,
+                )
+            })?;
+
+        for idx in 0..batch.num_rows() {
+            if ids.is_null(idx) {
+                continue;
+            }
+            let distance = if distances.is_valid(idx) {
+                distances.value(idx) as f64
+            } else {
+                0.0
+            };
+            rows.push((ids.value(idx).to_owned(), distance));
+        }
+    }
+    Ok(rows)
+}
+
+#[cfg(feature = "datasource-introspect")]
+async fn cached_lance_connection(dataset_path: &Path) -> Result<lancedb::Connection, McpError> {
+    let cache = LANCE_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock() {
+        if let Some(conn) = cache.get(dataset_path).cloned() {
+            return Ok(conn);
+        }
+    }
+
+    let conn = lancedb::connect(dataset_path.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .map_err(|e| internal("failed to connect to Lance sections dataset", &e))?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(dataset_path.to_path_buf(), conn.clone());
+    }
+    Ok(conn)
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,11 +520,12 @@ async fn run(
     limit: usize,
     db_path: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    let (path, results, graph_hash) = search_rows(query, scope, limit, db_path).await?;
+    let (path, results, graph_hash, ann_rows) = search_rows(query, scope, limit, db_path).await?;
     Ok(CallToolResult::structured(json!({
         "scope": scope,
         "query": query,
         "count": results.len(),
+        "ann_rows": ann_rows,
         "results": results,
         "graph_content_hash": graph_hash,
         "db_path": path,
@@ -226,14 +533,14 @@ async fn run(
 }
 
 /// Core query: open analyst.duckdb read-only and run the chosen `search*` macro.
-/// Returns (resolved_db_path, rows, graph_content_hash).
+/// Returns (resolved_db_path, rows, graph_content_hash, ann_rows).
 #[cfg(feature = "datasource-introspect")]
 async fn search_rows(
     query: &str,
     scope: &str,
     limit: usize,
     db_path: Option<&str>,
-) -> Result<(String, Vec<Value>, Option<String>), McpError> {
+) -> Result<(String, Vec<Value>, Option<String>, usize), McpError> {
     let path = resolve_db_path(db_path)?;
 
     // Read-only so the tool coexists with the read-only spur-analyst MCP and never
@@ -258,6 +565,35 @@ async fn search_rows(
     // precise binder error — so a load failure here must not break `docs`.
     let _ = conn.execute_batch("LOAD icu;");
 
+    if scope == "hybrid" {
+        let bm25_rows = search_docs_bm25_rows(&conn, query, HYBRID_CANDIDATES.max(limit))?;
+        let ann_rows = match embed_query(query).await {
+            Some(query_vec) => lance_ann_search(&query_vec, HYBRID_CANDIDATES.max(limit)).await,
+            None => Vec::new(),
+        };
+        let mut metadata_ids = bm25_rows
+            .iter()
+            .map(|row| row.stable_symbol_id.clone())
+            .collect::<Vec<_>>();
+        metadata_ids.extend(
+            ann_rows
+                .iter()
+                .map(|(stable_symbol_id, _)| stable_symbol_id.clone()),
+        );
+        let metadata = fetch_doc_metadata(&conn, &metadata_ids)?;
+        let ann_count = ann_rows.len();
+        let results = rrf_fuse(&bm25_rows, &ann_rows, &metadata, limit)
+            .into_iter()
+            .map(DocSearchRow::into_value)
+            .collect::<Vec<_>>();
+
+        let graph_hash: Option<String> = conn
+            .query_row("SELECT graph_content_hash FROM _meta", [], |r| r.get(0))
+            .ok();
+
+        return Ok((path.display().to_string(), results, graph_hash, ann_count));
+    }
+
     // The macro arg flows into FTS match_bm25, which wants a constant — inline the
     // query as an escaped string literal rather than a bind parameter.
     let q = query.replace('\'', "''");
@@ -277,17 +613,7 @@ async fn search_rows(
              neighbor_kind, edge_bind_method \
              FROM search_graph('{q}') LIMIT {limit}"
         ),
-        "hybrid" => match embed_query(query).await {
-            Some(vec_csv) => format!(
-                "SELECT kind, title, file, round(score, 3) AS score, signal \
-                 FROM search_hybrid('{q}', '{vec_csv}') LIMIT {limit}"
-            ),
-            None => format!(
-                "SELECT 'doc' AS kind, section AS title, file_path AS file, \
-                 round(bm25, 3) AS score, CAST(NULL AS VARCHAR) AS signal \
-                 FROM search_docs('{q}') LIMIT {limit}"
-            ),
-        },
+        "hybrid" => unreachable!("hybrid search is handled by Lance ANN plus Rust RRF"),
         _ => format!(
             "SELECT kind, title, file, round(score, 3) AS score, signal \
              FROM search('{q}') LIMIT {limit}"
@@ -322,7 +648,7 @@ async fn search_rows(
         .query_row("SELECT graph_content_hash FROM _meta", [], |r| r.get(0))
         .ok();
 
-    Ok((path.display().to_string(), results, graph_hash))
+    Ok((path.display().to_string(), results, graph_hash, 0))
 }
 
 #[cfg(not(feature = "datasource-introspect"))]
@@ -372,6 +698,60 @@ fn resolve_db_path(explicit: Option<&str>) -> Result<std::path::PathBuf, McpErro
         format!("{METHOD} found no .spur/analyst.duckdb from the working directory upward; run `spur-cli graph build`"),
         Some(json!({ "code": "analyst_db_not_found" })),
     ))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn resolve_lance_dataset_path() -> Result<PathBuf, McpError> {
+    if let Some(raw) = std::env::var_os("SPUR_GRAPH_ARTIFACT_DIR") {
+        if !raw.is_empty() {
+            return Ok(PathBuf::from(raw).join(SECTIONS_DATASET_DIR));
+        }
+    }
+
+    let mut dir = std::env::current_dir().map_err(|e| {
+        McpError::internal_error(
+            format!("{METHOD} could not read current directory"),
+            Some(json!({ "error": e.to_string() })),
+        )
+    })?;
+    loop {
+        let pointer = dir.join(".spur").join("graph").join("CURRENT");
+        if std::fs::symlink_metadata(&pointer).is_ok() {
+            let artifact_dir = resolve_graph_current_pointer(&pointer)?;
+            return Ok(artifact_dir.join(SECTIONS_DATASET_DIR));
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Err(McpError::internal_error(
+        format!("{METHOD} found no .spur/graph/CURRENT from the working directory upward; run `spur-cli graph build`"),
+        Some(json!({ "code": "graph_artifact_not_found" })),
+    ))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn resolve_graph_current_pointer(pointer: &Path) -> Result<PathBuf, McpError> {
+    let metadata = std::fs::symlink_metadata(pointer)
+        .map_err(|e| internal("failed to inspect .spur/graph/CURRENT", &e))?;
+    if metadata.file_type().is_symlink() || metadata.is_dir() {
+        return std::fs::canonicalize(pointer)
+            .map_err(|e| internal("failed to resolve .spur/graph/CURRENT", &e));
+    }
+
+    let raw = std::fs::read_to_string(pointer)
+        .map_err(|e| internal("failed to read .spur/graph/CURRENT", &e))?;
+    let raw = raw.trim();
+    let target = PathBuf::from(raw);
+    let target = if target.is_absolute() {
+        target
+    } else {
+        pointer
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(target)
+    };
+    Ok(std::fs::canonicalize(&target).unwrap_or(target))
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -451,6 +831,55 @@ mod tests {
         assert_eq!(embed_cache_key("architecture"), expected);
     }
 
+    #[test]
+    fn rrf_fuse_merges_bm25_and_ann_with_per_document_cap() {
+        let bm25 = vec![
+            DocSearchRow::new("bm25-only", "BM25 only", "docs/a.md", 3.0),
+            DocSearchRow::new("shared", "Shared", "docs/a.md", 2.0),
+            DocSearchRow::new("a-third", "A third", "docs/a.md", 1.0),
+            DocSearchRow::new("a-fourth", "A fourth", "docs/a.md", 0.5),
+            DocSearchRow::new("other", "Other", "docs/b.md", 0.25),
+        ];
+        let metadata = bm25
+            .iter()
+            .map(|row| {
+                (
+                    row.stable_symbol_id.clone(),
+                    DocMetadata {
+                        title: row.title.clone(),
+                        file: row.file.clone(),
+                    },
+                )
+            })
+            .chain([(
+                "ann-only".to_owned(),
+                DocMetadata {
+                    title: "ANN only".to_owned(),
+                    file: "docs/c.md".to_owned(),
+                },
+            )])
+            .collect::<HashMap<_, _>>();
+        let ann = vec![
+            ("ann-only".to_owned(), 0.01),
+            ("shared".to_owned(), 0.02),
+            ("a-fourth".to_owned(), 0.03),
+        ];
+
+        let fused = rrf_fuse(&bm25, &ann, &metadata, 10);
+
+        assert_eq!(fused[0].stable_symbol_id, "shared");
+        assert!(fused.iter().any(|row| row.stable_symbol_id == "ann-only"));
+        assert_eq!(
+            fused.iter().filter(|row| row.file == "docs/a.md").count(),
+            3,
+            "one file must not contribute more than three fused rows"
+        );
+        assert!(
+            fused.iter().all(|row| (0.0..1.0).contains(&row.score)),
+            "RRF scores should be normalized reciprocal-rank contributions"
+        );
+    }
+
     #[tokio::test]
     async fn search_hybrid_scope_accepted_by_validation() {
         let deps = deps_without_app();
@@ -472,77 +901,31 @@ mod tests {
     }
 
     #[test]
-    fn search_hybrid_scope_graceful_fallback_when_no_embeddings_table() -> anyhow::Result<()> {
-        let conn = duckdb::Connection::open_in_memory()?;
-        conn.execute_batch(
-            r#"
-            INSTALL fts; LOAD fts;
-            CREATE TABLE sections_search (
-                stable_symbol_id VARCHAR PRIMARY KEY,
-                qualified_name VARCHAR,
-                file_path VARCHAR,
-                heading_level UTINYINT,
-                body_text VARCHAR
-            );
-            INSERT INTO sections_search VALUES
-                ('s1', 'design/overview', 'docs/design.md', 2,
-                 'This section covers the architecture of the system.');
-            "#,
-        )?;
-        conn.execute_batch(
-            "PRAGMA create_fts_index('sections_search', 'stable_symbol_id', 'body_text', overwrite=1);",
-        )?;
-
-        let result: i64 = conn.query_row(
-            r#"
-            SELECT count(*) FROM (
-                WITH bm25 AS (
-                    SELECT
-                        stable_symbol_id,
-                        qualified_name AS title,
-                        file_path AS file,
-                        fts_main_sections_search.match_bm25(stable_symbol_id, 'architecture') AS bm25_score,
-                        row_number() OVER (
-                            ORDER BY fts_main_sections_search.match_bm25(stable_symbol_id, 'architecture') DESC
-                        ) AS bm25_rank
-                    FROM sections_search
-                    WHERE fts_main_sections_search.match_bm25(stable_symbol_id, 'architecture') IS NOT NULL
-                    LIMIT 30
-                ),
-                ann AS (
-                    SELECT stable_symbol_id, 0.0 AS cos_sim, 1 AS ann_rank
-                    FROM sections_search
-                    WHERE 1 = 0
-                ),
-                rrf AS (
-                    SELECT
-                        COALESCE(b.stable_symbol_id, a.stable_symbol_id) AS stable_symbol_id,
-                        1.0 / (60.0 + COALESCE(CAST(b.bm25_rank AS DOUBLE), 31.0))
-                            + 1.0 / (60.0 + COALESCE(CAST(a.ann_rank AS DOUBLE), 31.0)) AS rrf_score
-                    FROM bm25 b
-                    FULL OUTER JOIN ann a USING (stable_symbol_id)
+    fn rrf_fuse_returns_bm25_rows_when_ann_is_unavailable() {
+        let bm25 = vec![DocSearchRow::new(
+            "s1",
+            "design/overview",
+            "docs/design.md",
+            3.0,
+        )];
+        let metadata = bm25
+            .iter()
+            .map(|row| {
+                (
+                    row.stable_symbol_id.clone(),
+                    DocMetadata {
+                        title: row.title.clone(),
+                        file: row.file.clone(),
+                    },
                 )
-                SELECT
-                    'doc' AS kind,
-                    s.qualified_name AS title,
-                    s.file_path AS file,
-                    round(r.rrf_score, 4) AS score,
-                    CAST(NULL AS VARCHAR) AS signal
-                FROM rrf r
-                JOIN sections_search s ON s.stable_symbol_id = r.stable_symbol_id
-                ORDER BY rrf_score DESC
-                LIMIT 30
-            )
-            "#,
-            [],
-            |row| row.get(0),
-        )?;
+            })
+            .collect::<HashMap<_, _>>();
 
-        assert!(
-            result >= 0,
-            "hybrid query must not error on missing embeddings table"
-        );
-        Ok(())
+        let fused = rrf_fuse(&bm25, &[], &metadata, 10);
+
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].stable_symbol_id, "s1");
+        assert_eq!(fused[0].score, 1.0 / 61.0);
     }
 
     // Rerank: a high-BM25 leaf CONSTANT must not outrank a lower-BM25, high-pagerank
@@ -780,18 +1163,23 @@ mod tests {
             conn.execute_batch("CHECKPOINT;")?;
         }
 
-        let (resolved, results, graph_hash) =
+        let (resolved, results, graph_hash, ann_rows) =
             search_rows("oauth token refresh", "docs", 10, db.to_str())
                 .await
                 .expect("semantic search over fixture");
         assert_eq!(resolved, db.display().to_string());
         assert_eq!(graph_hash.as_deref(), Some("deadbeef"));
+        assert_eq!(ann_rows, 0);
         assert!(!results.is_empty(), "expected at least one ranked hit");
         assert_eq!(results[0]["title"], "OAuth refresh");
         // run() wraps the same rows into a CallToolResult without error.
-        run("oauth token refresh", "docs", 10, db.to_str())
+        let result = run("oauth token refresh", "docs", 10, db.to_str())
             .await
             .expect("run wraps result");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["ann_rows"],
+            json!(0)
+        );
         Ok(())
     }
 
@@ -912,7 +1300,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let (_, rows, _) = search_rows(
+        let (_, rows, _, ann_rows) = search_rows(
             "search bm25 graph",
             "graph",
             20,
@@ -920,6 +1308,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(ann_rows, 0);
 
         // Must have at least one primary and one callee row
         let has_primary = rows
@@ -1020,11 +1409,12 @@ mod tests {
         // search_rows reopens read-only and must LOAD icu so the TIMESTAMPTZ churn
         // boundary binds. Without that load this errors with the production
         // `-(TIMESTAMP WITH TIME ZONE, INTERVAL)` binder error.
-        let (_path, results, graph_hash) =
+        let (_path, results, graph_hash, ann_rows) =
             search_rows("response metadata compression", "code", 10, db.to_str())
                 .await
                 .expect("code-scope search must bind temporal views via icu");
         assert_eq!(graph_hash.as_deref(), Some("cafebabe"));
+        assert_eq!(ann_rows, 0);
         assert!(!results.is_empty(), "expected at least one ranked code hit");
         assert_eq!(results[0]["title"], "compress_response");
         // posture flowed through as the `signal` column (active: churn==2, <10).

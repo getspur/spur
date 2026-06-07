@@ -800,57 +800,30 @@ mod tests {
     #[test]
     fn init_search_sql_sections_embeddings_materialized() {
         assert!(
-            INIT_SEARCH_SQL.contains("CREATE OR REPLACE TABLE sections_embeddings"),
-            "init_search.sql must materialize sections_embeddings"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("FROM lance_ns.section_bodies"),
-            "sections_embeddings must read from lance section_bodies"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("heading_level >= 2"),
-            "sections_embeddings must skip document roots"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("vector IS NOT NULL"),
-            "sections_embeddings must keep only embedded sections"
+            !INIT_SEARCH_SQL.contains("CREATE OR REPLACE TABLE sections_embeddings")
+                && !INIT_SEARCH_SQL.contains("sections_embeddings"),
+            "init_search.sql must not materialize Lance vectors into DuckDB"
         );
     }
 
     #[test]
     fn init_search_sql_hybrid_macro_present() {
         assert!(
-            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_hybrid(q, vec)"),
-            "init_search.sql must define search_hybrid"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("list_cosine_similarity"),
-            "search_hybrid must use vector cosine similarity"
-        );
-        assert!(
-            INIT_SEARCH_SQL.contains("1.0 / (60.0 + "),
-            "search_hybrid must use reciprocal rank fusion"
+            !INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_hybrid(q, vec)")
+                && !INIT_SEARCH_SQL.contains("list_cosine_similarity")
+                && !INIT_SEARCH_SQL.contains("1.0 / (60.0 + "),
+            "hybrid ANN and RRF must live in Rust, not init_search.sql"
         );
     }
 
     #[test]
     fn init_search_sql_hybrid_macro_has_per_doc_dedup() {
-        let search_hybrid_sql = INIT_SEARCH_SQL
-            .split("CREATE OR REPLACE MACRO search_hybrid(q, vec) AS TABLE")
-            .nth(1)
-            .expect("search_hybrid macro should be present");
         assert!(
-            search_hybrid_sql.contains("JOIN sections_search ss USING (stable_symbol_id)")
-                && search_hybrid_sql.contains(
-                    "QUALIFY row_number() OVER (PARTITION BY ss.file_path ORDER BY cosine DESC) <= 3",
+            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_docs(q) AS TABLE")
+                && INIT_SEARCH_SQL.contains(
+                    "QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY bm25 DESC) <= 2",
                 ),
-            "search_hybrid ANN branch must cap vector candidates at 3 per document"
-        );
-        assert!(
-            search_hybrid_sql.contains(
-                "QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY rrf_score DESC NULLS LAST) <= 3",
-            ),
-            "search_hybrid final output must cap fused results at 3 per document"
+            "init_search.sql should retain only the BM25 docs helper; hybrid per-doc dedup is enforced in Rust"
         );
     }
 
