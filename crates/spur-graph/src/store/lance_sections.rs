@@ -420,6 +420,14 @@ async fn write_sections_dataset_async(
             );
             continue;
         }
+        if embedder.needs_model_init() {
+            emit_progress(
+                progress,
+                SectionSidecarProgressEvent::ModelDownloading {
+                    model_name: "NomicEmbedTextV15",
+                },
+            );
+        }
         emit_progress(
             progress,
             SectionSidecarProgressEvent::BatchStarted {
@@ -433,14 +441,6 @@ async fn write_sections_dataset_async(
                 total_rows,
             },
         );
-        if embedder.needs_model_init() {
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::ModelDownloading {
-                    model_name: "NomicEmbedTextV15",
-                },
-            );
-        }
         embedder.embed_rows(&mut rows);
         let batch_rows = rows.len();
         let batch = rows_to_batch(rows, schema.clone())?;
