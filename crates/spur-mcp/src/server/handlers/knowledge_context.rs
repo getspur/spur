@@ -12,6 +12,9 @@ use crate::handlers::McpHandlerError;
 use super::McpCallbackServer;
 use super::*;
 
+const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
+const MAX_IMPACT_NEIGHBORS: usize = 3;
+
 impl McpCallbackServer {
     pub(crate) async fn handle_knowledge_context_pack(
         &self,
@@ -57,7 +60,12 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
         ))
     })?;
 
-    Ok(pack_query_result(&request, query_result))
+    let exact_context = exact_graph_context_for_result(&request, &query_result).await;
+    Ok(pack_query_result_with_exact_context(
+        &request,
+        query_result,
+        exact_context,
+    ))
 }
 
 struct KnowledgeContextPackRequest {
@@ -262,43 +270,232 @@ fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Va
     }))
 }
 
+#[cfg(test)]
 fn pack_query_result(request: &KnowledgeContextPackRequest, result: KnowledgeQueryResult) -> Value {
+    pack_query_result_with_exact_context(request, result, ExactGraphContext::default())
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExactGraphContext {
+    graph_content_hash: Option<String>,
+    response_file_oids_match: Option<bool>,
+    impact: Option<SymbolImpactSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct SymbolImpactSummary {
+    selector: String,
+    callers_count: u64,
+    callees_count: u64,
+    caller_neighbors: Vec<Value>,
+    callee_neighbors: Vec<Value>,
+}
+
+async fn exact_graph_context_for_result(
+    request: &KnowledgeContextPackRequest,
+    result: &KnowledgeQueryResult,
+) -> ExactGraphContext {
+    let Some(selector) = top_code_selector(&result.candidates, request) else {
+        return ExactGraphContext::default();
+    };
+
+    let symbol_info = super::code_graph::code_symbol_info(&json!({
+        "selector": selector,
+    }))
+    .await;
+    let mut context = match symbol_info {
+        Ok(body) => ExactGraphContext {
+            graph_content_hash: body
+                .get("graph_content_hash")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            response_file_oids_match: body
+                .get("response_file_oids_match")
+                .and_then(Value::as_bool),
+            impact: None,
+        },
+        Err(_) => return ExactGraphContext::default(),
+    };
+
+    context.impact = impact_summary_for_selector(&selector).await;
+    context
+}
+
+async fn impact_summary_for_selector(selector: &str) -> Option<SymbolImpactSummary> {
+    let callers = super::code_graph::code_callers(&json!({
+        "selector": selector,
+        "include_unresolved": true,
+    }))
+    .await
+    .ok()?;
+    let callees = super::code_graph::code_callees(&json!({
+        "selector": selector,
+        "include_unresolved": true,
+    }))
+    .await
+    .ok()?;
+
+    let callers_count = array_len(&callers, "callers")?;
+    let callees_count = array_len(&callees, "callees")?;
+    let popular_sink = callers_count > POPULAR_SINK_CALLERS_THRESHOLD;
+
+    Some(SymbolImpactSummary {
+        selector: selector.to_string(),
+        callers_count,
+        callees_count,
+        caller_neighbors: representative_neighbors(&callers, "callers", popular_sink),
+        callee_neighbors: representative_neighbors(&callees, "callees", false),
+    })
+}
+
+fn array_len(body: &Value, field: &str) -> Option<u64> {
+    body.get(field)
+        .and_then(Value::as_array)
+        .map(|values| values.len() as u64)
+}
+
+fn representative_neighbors(body: &Value, field: &str, suppress: bool) -> Vec<Value> {
+    if suppress {
+        return Vec::new();
+    }
+    body.get(field)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .take(MAX_IMPACT_NEIGHBORS)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn top_code_selector(
+    candidates: &[KnowledgeCandidate],
+    request: &KnowledgeContextPackRequest,
+) -> Option<String> {
+    candidates
+        .iter()
+        .filter(|candidate| request.include_tests || !is_test_file(&candidate.file_path))
+        .filter(|candidate| candidate.kind == "code" || candidate.kind == "symbol")
+        .filter_map(|candidate| candidate.stable_symbol_id.as_deref())
+        .map(normalized_code_selector)
+        .next()
+}
+
+fn normalized_code_selector(stable_symbol_id: &str) -> String {
+    format!(
+        "graph://symbol/{}",
+        stable_symbol_id
+            .strip_prefix("graph://symbol/")
+            .unwrap_or(stable_symbol_id)
+    )
+}
+
+fn pack_query_result_with_exact_context(
+    request: &KnowledgeContextPackRequest,
+    result: KnowledgeQueryResult,
+    exact_context: ExactGraphContext,
+) -> Value {
     let (primary_evidence, supporting_docs) = split_evidence(&result.candidates, request);
     let recommended_next_tools = recommended_next_tools(request.intent, &primary_evidence);
     let answerable = !primary_evidence.is_empty() || !supporting_docs.is_empty();
     let confidence = if answerable { "medium" } else { "low" };
-    let mut pack = base_pack(
-        request,
-        result.graph_content_hash.clone(),
-        json!({
-            "available": result.graph_content_hash.is_some(),
-            "analyst_db": result.db_path,
-            "graph_hash_present": result.graph_content_hash.is_some(),
-            "exact_graph_verified": false,
-            "exact_graph_note": "Use recommended exact code graph tools to verify current working tree freshness."
-        }),
-    );
+    let impact = impact_value(exact_context.impact.as_ref());
+    let staleness = staleness_value(&result, &exact_context);
+    let mut pack = base_pack(request, result.graph_content_hash.clone(), staleness);
 
     if let Some(object) = pack.as_object_mut() {
         object.insert("answerable".into(), json!(answerable));
         object.insert("confidence".into(), json!(confidence));
-        object.insert("primary_evidence".into(), Value::Array(primary_evidence));
-        object.insert("supporting_docs".into(), Value::Array(supporting_docs));
         object.insert(
-            "impact".into(),
-            json!({
-                "summary": "impact counts are deferred to exact graph follow-up tools",
-                "callers_count": null,
-                "callees_count": null,
-                "popular_sink": null
-            }),
+            "primary_evidence".into(),
+            Value::Array(primary_evidence_with_impact(
+                primary_evidence,
+                exact_context.impact.as_ref(),
+            )),
         );
+        object.insert("supporting_docs".into(), Value::Array(supporting_docs));
+        object.insert("impact".into(), impact);
         object.insert(
             "recommended_next_tools".into(),
             Value::Array(recommended_next_tools),
         );
     }
     pack
+}
+
+fn staleness_value(result: &KnowledgeQueryResult, exact_context: &ExactGraphContext) -> Value {
+    let analyst_hash = result.graph_content_hash.clone();
+    let exact_hash = exact_context.graph_content_hash.clone();
+    let analyst_matches_exact_graph = match (analyst_hash.as_deref(), exact_hash.as_deref()) {
+        (Some(analyst), Some(exact)) => Value::Bool(analyst == exact),
+        _ => Value::Null,
+    };
+
+    json!({
+        "available": analyst_hash.is_some(),
+        "analyst_db": result.db_path.clone(),
+        "analyst_graph_content_hash": analyst_hash.clone(),
+        "graph_hash_present": result.graph_content_hash.is_some(),
+        "exact_graph_hash": exact_hash.clone(),
+        "exact_graph_verified": exact_context.graph_content_hash.is_some(),
+        "analyst_matches_exact_graph": analyst_matches_exact_graph,
+        "response_file_oids_match": exact_context.response_file_oids_match,
+        "exact_graph_note": "Exact graph tools remain the source-of-truth follow-up for current working tree source and impact."
+    })
+}
+
+fn primary_evidence_with_impact(
+    mut primary_evidence: Vec<Value>,
+    impact: Option<&SymbolImpactSummary>,
+) -> Vec<Value> {
+    let Some(impact) = impact else {
+        return primary_evidence;
+    };
+    if let Some(evidence) = primary_evidence.iter_mut().find(|evidence| {
+        evidence.get("stable_symbol_id").and_then(Value::as_str) == Some(impact.selector.as_str())
+    }) {
+        if let Some(object) = evidence.as_object_mut() {
+            object.insert("impact".into(), impact_value(Some(impact)));
+        }
+    }
+    primary_evidence
+}
+
+fn impact_value(impact: Option<&SymbolImpactSummary>) -> Value {
+    match impact {
+        Some(impact) => {
+            let popular_sink = impact.callers_count > POPULAR_SINK_CALLERS_THRESHOLD;
+            json!({
+                "summary": if popular_sink {
+                    "popular sink counted but not expanded"
+                } else {
+                    "bounded exact graph impact summary"
+                },
+                "selector": impact.selector.clone(),
+                "callers_count": impact.callers_count,
+                "callees_count": impact.callees_count,
+                "popular_sink": popular_sink,
+                "caller_neighbors": if popular_sink {
+                    Vec::<Value>::new()
+                } else {
+                    impact.caller_neighbors.clone()
+                },
+                "callee_neighbors": if popular_sink {
+                    Vec::<Value>::new()
+                } else {
+                    impact.callee_neighbors.clone()
+                }
+            })
+        }
+        None => json!({
+            "summary": "impact counts are deferred to exact graph follow-up tools",
+            "callers_count": null,
+            "callees_count": null,
+            "popular_sink": null
+        }),
+    }
 }
 
 fn base_pack(
@@ -378,10 +575,7 @@ fn evidence_from_candidate(candidate: &KnowledgeCandidate, intent: KnowledgeInte
     };
     let stable_symbol_id = candidate.stable_symbol_id.as_ref().map(|id| {
         if is_code {
-            format!(
-                "graph://symbol/{}",
-                id.strip_prefix("graph://symbol/").unwrap_or(id)
-            )
+            normalized_code_selector(id)
         } else {
             id.clone()
         }
@@ -574,6 +768,114 @@ mod tests {
                 .len(),
             1,
             "include_tests=false should filter test evidence"
+        );
+    }
+
+    #[test]
+    fn knowledge_context_pack_includes_bounded_impact_for_top_code_evidence() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "change impact",
+            "intent": "change",
+            "scope": "code"
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![KnowledgeCandidate {
+                kind: "code".into(),
+                title: "top_symbol".into(),
+                file_path: "crates/spur-mcp/src/lib.rs".into(),
+                stable_symbol_id: Some("sym-top".into()),
+                symbol_kind: Some("function".into()),
+                score: 9.0,
+                signal: Some("stable".into()),
+                neighbor_kind: Some("primary".into()),
+                edge_bind_method: None,
+                grounding: "bm25-code".into(),
+            }],
+        };
+
+        let pack = pack_query_result_with_exact_context(
+            &request,
+            result,
+            ExactGraphContext {
+                graph_content_hash: Some("fixture-hash".into()),
+                response_file_oids_match: Some(true),
+                impact: Some(SymbolImpactSummary {
+                    selector: "graph://symbol/sym-top".into(),
+                    callers_count: 4,
+                    callees_count: 2,
+                    caller_neighbors: vec![json!({ "title": "caller_a" })],
+                    callee_neighbors: vec![json!({ "title": "callee_a" })],
+                }),
+            },
+        );
+
+        assert_eq!(pack["impact"]["callers_count"], 4);
+        assert_eq!(pack["impact"]["callees_count"], 2);
+        assert_eq!(pack["impact"]["popular_sink"], false);
+        assert_eq!(
+            pack["staleness"]["analyst_graph_content_hash"],
+            "fixture-hash"
+        );
+        assert_eq!(pack["staleness"]["exact_graph_hash"], "fixture-hash");
+        assert_eq!(pack["staleness"]["analyst_matches_exact_graph"], true);
+        assert_eq!(pack["primary_evidence"][0]["impact"]["callers_count"], 4);
+        assert_eq!(pack["primary_evidence"][0]["impact"]["callees_count"], 2);
+        assert_eq!(pack["primary_evidence"][0]["impact"]["popular_sink"], false);
+    }
+
+    #[test]
+    fn knowledge_context_pack_marks_popular_sink_without_expanding_neighbors() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "popular impact",
+            "intent": "change",
+            "scope": "code"
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![KnowledgeCandidate {
+                kind: "code".into(),
+                title: "sink_symbol".into(),
+                file_path: "crates/spur-mcp/src/lib.rs".into(),
+                stable_symbol_id: Some("sym-sink".into()),
+                symbol_kind: Some("function".into()),
+                score: 9.0,
+                signal: Some("load-bearing wall".into()),
+                neighbor_kind: Some("primary".into()),
+                edge_bind_method: None,
+                grounding: "bm25-code".into(),
+            }],
+        };
+
+        let pack = pack_query_result_with_exact_context(
+            &request,
+            result,
+            ExactGraphContext {
+                graph_content_hash: Some("fixture-hash".into()),
+                response_file_oids_match: Some(true),
+                impact: Some(SymbolImpactSummary {
+                    selector: "graph://symbol/sym-sink".into(),
+                    callers_count: 31,
+                    callees_count: 2,
+                    caller_neighbors: vec![json!({ "title": "caller_a" })],
+                    callee_neighbors: vec![json!({ "title": "callee_a" })],
+                }),
+            },
+        );
+
+        assert_eq!(pack["impact"]["callers_count"], 31);
+        assert_eq!(pack["impact"]["popular_sink"], true);
+        assert_eq!(
+            pack["impact"]["caller_neighbors"].as_array().unwrap().len(),
+            0
+        );
+        assert_eq!(
+            pack["impact"]["callee_neighbors"].as_array().unwrap().len(),
+            0
         );
     }
 }
