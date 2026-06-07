@@ -157,6 +157,53 @@ CREATE OR REPLACE MACRO search(q) AS TABLE
   ORDER BY rank DESC NULLS LAST
   LIMIT 30;
 
+-- Stable-ID-preserving context candidates for one-shot Knowledge Context packs.
+-- Unlike the human-facing search/search_graph macros above, this keeps raw
+-- file_path and stable_symbol_id so Rust callers can ground exact symbols/docs.
+CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope) AS TABLE
+  SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
+         neighbor_kind, edge_bind_method, grounding
+  FROM (
+    SELECT 'doc' AS kind,
+           s.qualified_name AS title,
+           s.file_path,
+           s.stable_symbol_id,
+           CAST('section' AS VARCHAR) AS symbol_kind,
+           round(fts_main_sections_search.match_bm25(s.stable_symbol_id, q), 3) AS score,
+           CAST(NULL AS VARCHAR) AS signal,
+           CAST(NULL AS VARCHAR) AS neighbor_kind,
+           CAST(NULL AS VARCHAR) AS edge_bind_method,
+           'bm25-doc' AS grounding,
+           fts_main_sections_search.match_bm25(s.stable_symbol_id, q) AS rank
+    FROM sections_search s
+    WHERE requested_scope IN ('all', 'docs')
+      AND fts_main_sections_search.match_bm25(s.stable_symbol_id, q) IS NOT NULL
+    UNION ALL
+    SELECT 'code' AS kind,
+           st.entity_name AS title,
+           st.file_path,
+           st.stable_symbol_id,
+           st.symbol_kind,
+           round(fts_main_symbol_text.match_bm25(st.stable_symbol_id, q), 3) AS score,
+           sc.posture || ' · pr=' || round(sc.pagerank * 1e4, 1) || ' · churn=' || sc.churn_90d AS signal,
+           'primary' AS neighbor_kind,
+           CAST(NULL AS VARCHAR) AS edge_bind_method,
+           'bm25-code' AS grounding,
+           fts_main_symbol_text.match_bm25(st.stable_symbol_id, q)
+             * CASE WHEN st.file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+             * CASE WHEN st.symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
+                    WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+             * (1 + 0.15 * ln(1 + sc.pagerank * 1e4)) AS rank
+    FROM symbol_text st
+    JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+    WHERE requested_scope IN ('all', 'code', 'graph')
+      AND fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+  )
+  WHERE score IS NOT NULL
+  QUALIFY row_number() OVER (PARTITION BY file_path ORDER BY rank DESC) <= 2
+  ORDER BY rank DESC NULLS LAST
+  LIMIT 40;
+
 -- Graph-augmented: BM25 top-k hits + selective 1-hop call-graph expansion.
 -- Gate: symbols with posture = 'load-bearing wall' AND callers > 30 are popular
 -- sinks — expanding them would flood results with noise. All other hits expand.
