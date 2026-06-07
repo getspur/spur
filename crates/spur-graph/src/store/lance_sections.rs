@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -273,18 +273,6 @@ async fn write_sections_dataset_async(
     artifact_dir: &Path,
     options: SectionSidecarOptions,
 ) -> Result<()> {
-    let rows =
-        section_rows_with_write_batch_size(artifact, worktree_root, options.write_batch_size)?;
-    let vectors = embed_eligible_rows(&rows, options.embedding);
-    let rows: Vec<SectionRow> = rows
-        .into_iter()
-        .zip(vectors)
-        .map(|(mut row, vector)| {
-            row.vector = vector;
-            row
-        })
-        .collect();
-
     fs::create_dir_all(artifact_dir)
         .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
     let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
@@ -296,31 +284,52 @@ async fn write_sections_dataset_async(
         .await
         .context("failed to connect to sections.lancedb")?;
     let schema = sections_schema();
-    let existing = db.open_table(SECTIONS_TABLE).execute().await.ok();
-    let rows = filter_rows_for_new_file_versions(existing.as_ref(), rows).await?;
-    let batch = rows_to_batch(rows, schema.clone())?;
+    let mut table = db.open_table(SECTIONS_TABLE).execute().await.ok();
+    let mut existing_versions = ExistingFileVersions::new(table.as_ref());
+    let mut embedder = SectionEmbedder::new(options.embedding);
+    let mut batcher = SectionRowBatcher::new(artifact, worktree_root, options.write_batch_size);
+    let mut dataset_changed = false;
 
-    let (table, dataset_changed) = if let Some(table) = existing {
-        if batch.num_rows() > 0 {
+    while let Some(rows) = batcher.next_batch()? {
+        let mut rows = existing_versions.retain_new_rows(rows).await?;
+        if rows.is_empty() {
+            continue;
+        }
+        embedder.embed_rows(&mut rows);
+        let batch = rows_to_batch(rows, schema.clone())?;
+        if let Some(table) = table.as_ref() {
             table
                 .add(batch)
                 .execute()
                 .await
                 .context("failed to append LanceDB section rows")?;
-            (table, true)
+            dataset_changed = true;
         } else {
-            (table, false)
+            table = Some(
+                db.create_table(SECTIONS_TABLE, batch)
+                    .execute()
+                    .await
+                    .context("failed to create LanceDB sections table")?,
+            );
+            dataset_changed = true;
         }
-    } else {
-        let table = db
-            .create_table(SECTIONS_TABLE, batch)
-            .execute()
-            .await
-            .context("failed to create LanceDB sections table")?;
-        (table, true)
-    };
+    }
+
+    if table.is_none() {
+        let empty_batch = rows_to_batch(Vec::new(), schema.clone())?;
+        table = Some(
+            db.create_table(SECTIONS_TABLE, empty_batch)
+                .execute()
+                .await
+                .context("failed to create LanceDB sections table")?,
+        );
+        dataset_changed = true;
+    }
 
     if dataset_changed {
+        let table = table
+            .as_ref()
+            .expect("section table should exist after dataset change");
         ensure_body_text_fts_index(&table).await?;
         ensure_vector_index(&table).await?;
     }
@@ -393,50 +402,53 @@ fn is_vector_index_type(index_type: &IndexType) -> bool {
     )
 }
 
-async fn filter_rows_for_new_file_versions(
-    table: Option<&lancedb::Table>,
-    rows: Vec<SectionRow>,
-) -> Result<Vec<SectionRow>> {
-    let Some(table) = table else {
-        return Ok(rows);
-    };
-    let mut seen = HashSet::new();
-    let mut known_unchanged = HashSet::new();
-    for row in &rows {
-        if !seen.insert((row.file_path.clone(), row.content_hash.clone())) {
-            continue;
+struct ExistingFileVersions {
+    table: Option<lancedb::Table>,
+    exists_by_file_version: HashMap<(String, String), bool>,
+}
+
+impl ExistingFileVersions {
+    fn new(table: Option<&lancedb::Table>) -> Self {
+        Self {
+            table: table.cloned(),
+            exists_by_file_version: HashMap::new(),
+        }
+    }
+
+    async fn retain_new_rows(&mut self, rows: Vec<SectionRow>) -> Result<Vec<SectionRow>> {
+        let mut retained = Vec::with_capacity(rows.len());
+        for row in rows {
+            if !self
+                .file_version_exists(row.file_path.as_str(), row.content_hash.as_str())
+                .await?
+            {
+                retained.push(row);
+            }
+        }
+        Ok(retained)
+    }
+
+    async fn file_version_exists(&mut self, file_path: &str, content_hash: &str) -> Result<bool> {
+        let Some(table) = self.table.as_ref() else {
+            return Ok(false);
+        };
+        let key = (file_path.to_owned(), content_hash.to_owned());
+        if let Some(exists) = self.exists_by_file_version.get(&key) {
+            return Ok(*exists);
         }
         let filter = format!(
             "file_path = '{}' AND content_hash = '{}'",
-            sql_string_literal(row.file_path.as_str()),
-            sql_string_literal(row.content_hash.as_str())
+            sql_string_literal(file_path),
+            sql_string_literal(content_hash)
         );
-        if table
+        let exists = table
             .count_rows(Some(filter))
             .await
             .context("failed to check existing LanceDB section rows")?
-            > 0
-        {
-            known_unchanged.insert((row.file_path.clone(), row.content_hash.clone()));
-        }
+            > 0;
+        self.exists_by_file_version.insert(key, exists);
+        Ok(exists)
     }
-    Ok(rows
-        .into_iter()
-        .filter(|row| !known_unchanged.contains(&(row.file_path.clone(), row.content_hash.clone())))
-        .collect())
-}
-
-fn section_rows_with_write_batch_size(
-    artifact: &GraphIndexArtifact,
-    worktree_root: &Path,
-    write_batch_size: usize,
-) -> Result<Vec<SectionRow>> {
-    let mut batcher = SectionRowBatcher::new(artifact, worktree_root, write_batch_size);
-    let mut rows = Vec::new();
-    while let Some(batch) = batcher.next_batch()? {
-        rows.extend(batch);
-    }
-    Ok(rows)
 }
 
 struct SectionRowBatcher<'a> {
@@ -625,28 +637,64 @@ fn section_row(
     })
 }
 
+#[cfg(test)]
 fn embed_eligible_rows(
     rows: &[SectionRow],
     options: SectionEmbeddingOptions,
 ) -> Vec<Option<Vec<f32>>> {
-    let result = vec![None; rows.len()];
-    if options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
-        return result;
+    let mut embedder = SectionEmbedder::new(options);
+    embedder.embed_row_vectors(rows)
+}
+
+struct SectionEmbedder {
+    options: SectionEmbeddingOptions,
+    model: Option<Option<TextEmbedding>>,
+}
+
+impl SectionEmbedder {
+    fn new(options: SectionEmbeddingOptions) -> Self {
+        Self {
+            options,
+            model: None,
+        }
     }
 
-    let model = match TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::NomicEmbedTextV15).with_show_download_progress(false),
-    ) {
-        Ok(model) => model,
-        Err(error) => {
-            tracing::warn!(error = %error, "fastembed model unavailable; skipping section embeddings");
+    fn embed_rows(&mut self, rows: &mut [SectionRow]) {
+        let vectors = self.embed_row_vectors(rows);
+        for (row, vector) in rows.iter_mut().zip(vectors) {
+            row.vector = vector;
+        }
+    }
+
+    fn embed_row_vectors(&mut self, rows: &[SectionRow]) -> Vec<Option<Vec<f32>>> {
+        let result = vec![None; rows.len()];
+        if self.options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
             return result;
         }
-    };
+        let options = self.options;
+        let Some(model) = self.model().as_ref() else {
+            return result;
+        };
 
-    embed_eligible_rows_with(rows, options, |texts| {
-        model.embed(texts.to_vec(), None).map_err(Into::into)
-    })
+        embed_eligible_rows_with(rows, options, |texts| {
+            model.embed(texts.to_vec(), None).map_err(Into::into)
+        })
+    }
+
+    fn model(&mut self) -> &Option<TextEmbedding> {
+        self.model.get_or_insert_with(|| {
+            match TextEmbedding::try_new(
+                InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
+                    .with_show_download_progress(false),
+            ) {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    tracing::warn!(error = %error, "fastembed model unavailable; skipping section embeddings");
+                    None
+                }
+            }
+        })
+    }
 }
 
 fn embed_eligible_rows_with<F>(
@@ -900,6 +948,26 @@ mod tests {
         }
     }
 
+    fn versioned_section_row(
+        stable_symbol_id: &str,
+        file_path: &str,
+        content_hash: &str,
+    ) -> SectionRow {
+        SectionRow {
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            file_path: file_path.to_owned(),
+            qualified_name: stable_symbol_id.to_owned(),
+            heading_level: 2,
+            body_text: format!("## {stable_symbol_id}\n\nBody."),
+            body_byte_start: 0,
+            body_byte_end: 0,
+            child_count: 0,
+            parent_stable_id: None,
+            content_hash: content_hash.to_owned(),
+            vector: None,
+        }
+    }
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<std::ffi::OsString>,
@@ -1129,6 +1197,65 @@ mod tests {
         assert_eq!(lengths, vec![2, 2, 1]);
     }
 
+    #[tokio::test]
+    async fn lance_sections_existing_file_versions_cache_absent_versions_across_appends() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let dataset_dir = tempdir.path().join(SECTIONS_DATASET_DIR);
+        let db = lancedb::connect(dataset_dir.to_str().expect("dataset path"))
+            .execute()
+            .await
+            .expect("connect lancedb");
+        let schema = sections_schema();
+        let table = db
+            .create_table(
+                SECTIONS_TABLE,
+                rows_to_batch(
+                    vec![versioned_section_row(
+                        "existing-1",
+                        "docs/existing.md",
+                        "hash-existing",
+                    )],
+                    schema.clone(),
+                )
+                .expect("existing batch"),
+            )
+            .execute()
+            .await
+            .expect("create table");
+        let mut existing_versions = ExistingFileVersions::new(Some(&table));
+
+        let retained = existing_versions
+            .retain_new_rows(vec![
+                versioned_section_row("existing-2", "docs/existing.md", "hash-existing"),
+                versioned_section_row("new-1", "docs/new.md", "hash-new"),
+            ])
+            .await
+            .expect("filter first chunk");
+        let retained_ids: Vec<_> = retained
+            .iter()
+            .map(|row| row.stable_symbol_id.as_str())
+            .collect();
+        assert_eq!(retained_ids, vec!["new-1"]);
+        table
+            .add(rows_to_batch(retained, schema.clone()).expect("retained batch"))
+            .execute()
+            .await
+            .expect("append retained rows");
+
+        let retained = existing_versions
+            .retain_new_rows(vec![
+                versioned_section_row("existing-3", "docs/existing.md", "hash-existing"),
+                versioned_section_row("new-2", "docs/new.md", "hash-new"),
+            ])
+            .await
+            .expect("filter second chunk");
+        let retained_ids: Vec<_> = retained
+            .iter()
+            .map(|row| row.stable_symbol_id.as_str())
+            .collect();
+        assert_eq!(retained_ids, vec!["new-2"]);
+    }
+
     fn section_ranges(source: &str, headings: &[&str]) -> Vec<[usize; 2]> {
         headings
             .iter()
@@ -1159,6 +1286,30 @@ mod tests {
             embed_eligible_rows_with(&rows, options, |_| panic!("embedder should not be called")),
             vec![None]
         );
+    }
+
+    #[test]
+    fn section_embedder_does_not_initialize_model_for_skipped_or_ineligible_rows() {
+        let rows = vec![section_row_fixture(1, "# Title\n\nSkipped.".to_owned())];
+        let mut embedder = SectionEmbedder::new(SectionEmbeddingOptions {
+            skip_embeddings: false,
+            batch_size: 1,
+        });
+
+        assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
+        assert!(embedder.model.is_none());
+
+        let rows = vec![section_row_fixture(
+            2,
+            "## Install\n\nInstall body.".to_owned(),
+        )];
+        let mut embedder = SectionEmbedder::new(SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 1,
+        });
+
+        assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
+        assert!(embedder.model.is_none());
     }
 
     #[test]
