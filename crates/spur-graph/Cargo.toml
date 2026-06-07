@@ -27,7 +27,6 @@ arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 base64 = "0.22"
 fastembed = { version = "4", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries"] }
-futures = { workspace = true }
 lance-index = { workspace = true }
 lancedb = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
