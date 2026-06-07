@@ -3,7 +3,7 @@
 use std::{
     env, fs,
     future::Future,
-    io::{self, Write},
+    io::{self, Write as _},
     path::{Component, Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -136,9 +136,9 @@ pub enum DatasourceKind {
     Parquet,
     /// JSON file.
     Json,
-    /// DuckDB database file.
+    /// `DuckDB` database file.
     DuckDb,
-    /// SQLite database file.
+    /// `SQLite` database file.
     Sqlite,
     /// REST API table-function source.
     ApiTables,
@@ -218,7 +218,7 @@ pub struct TablePreviewColumn {
     pub name: String,
     /// Gateway column type.
     pub ty: String,
-    /// JSONPath used to extract the column value.
+    /// `JSONPath` used to extract the column value.
     pub json: String,
 }
 
@@ -231,7 +231,7 @@ pub struct TablePreview {
     pub name: String,
     /// Request path for the table.
     pub path: String,
-    /// JSONPath to the response array when detected.
+    /// `JSONPath` to the response array when detected.
     #[ts(type = "string | null")]
     pub response_path: Option<String>,
     /// Generated columns.
@@ -243,7 +243,7 @@ pub struct TablePreview {
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
 pub struct OpenApiTablePreview {
-    /// Tables detected from the OpenAPI document.
+    /// Tables detected from the `OpenAPI` document.
     pub tables: Vec<TablePreview>,
 }
 
@@ -263,14 +263,15 @@ impl DaemonControlRequest {
     /// Build a notebook daemon v1 request.
     pub fn new(command: DaemonControlCommand) -> Self {
         Self {
-            daemon: "notebook.v1".to_string(),
+            daemon: "notebook.v1".to_owned(),
             command,
         }
     }
 }
 
 /// Operation encoded in a daemon control request.
-#[allow(missing_docs)]
+#[expect(missing_docs)]
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "command", rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
@@ -280,15 +281,15 @@ pub enum DaemonControlCommand {
     /// Rename a notebook file.
     Rename { from: String, to: String },
     /// Create a scratch notebook.
-    New {},
+    New,
     /// Create a notebook at an exact path.
     #[serde(rename = "new_at")]
     #[ts(rename = "new_at")]
     NewAt { path: String },
     /// Reopen the current notebook window.
-    Reopen {},
+    Reopen,
     /// Close the current notebook window.
-    Close {},
+    Close,
     /// Attach a local datasource to the current notebook.
     AttachDatasource {
         name: String,
@@ -298,8 +299,8 @@ pub enum DaemonControlCommand {
     /// Add an API-backed table-function datasource to the current notebook.
     AddApiDatasource { name: String, source: String },
     /// List Nango providers available to the API datasource import wizard.
-    ListNangoProviders {},
-    /// Preview table definitions generated from an OpenAPI document.
+    ListNangoProviders,
+    /// Preview table definitions generated from an `OpenAPI` document.
     PreviewOpenApiTables { spec_text: String },
     /// Compose and attach an API datasource from Nango/OpenAPI import inputs.
     AddApiDatasourceFromImport {
@@ -328,9 +329,9 @@ pub enum DaemonControlCommand {
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.
-    ListDatasources {},
+    ListDatasources,
     /// List globally saved API connection templates.
-    ListSavedConnections {},
+    ListSavedConnections,
     /// Re-attach a saved connection template into the current notebook.
     AttachSavedConnection {
         name: String,
@@ -349,7 +350,7 @@ pub enum DaemonControlCommand {
         credentials: Vec<(String, String)>,
     },
     /// List daemon recents.
-    ListRecents {},
+    ListRecents,
     /// Remove a path from daemon recents.
     RemoveFromRecents { path: String },
     /// Set a recent notebook's pin state.
@@ -397,15 +398,15 @@ pub enum DaemonControlCommand {
         expected_version: u64,
     },
     /// Return the full notebook root and store version.
-    Snapshot {},
+    Snapshot,
     /// Apply a UI edit without an optimistic concurrency check.
     ApplyEdit { id: String, source: String },
     /// Persist the current store snapshot to disk.
-    FlushNotebook {},
+    FlushNotebook,
 }
 
 /// A daemon control protocol response.
-#[allow(missing_docs)]
+#[expect(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -455,21 +456,20 @@ impl DaemonControlResponse {
             Ok(self.result.unwrap_or(DaemonControlResult::Empty {}))
         } else {
             Err(self.error.unwrap_or_else(|| DaemonControlError {
-                code: "daemon_command_failed".to_string(),
-                message: "daemon command failed without an error body".to_string(),
+                code: "daemon_command_failed".to_owned(),
+                message: "daemon command failed without an error body".to_owned(),
             }))
         }
     }
 }
 
 /// Successful daemon control payloads.
-#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "type", content = "data", rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
 pub enum DaemonControlResult {
     /// No payload.
-    Empty {},
+    Empty,
     /// Notebook mutation delta.
     Delta(NotebookDelta),
     /// Full cell payload.
@@ -493,7 +493,7 @@ pub enum DaemonControlResult {
 }
 
 /// Full notebook snapshot returned by daemon control.
-#[allow(missing_docs)]
+#[expect(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -682,12 +682,12 @@ fn daemon_socket_path_from_args() -> Result<PathBuf, Error> {
     while let Some(arg) = args.next() {
         if arg == "--socket" {
             return args.next().map(PathBuf::from).ok_or_else(|| {
-                Error::NotebookDaemon("--socket requires a notebook daemon path".to_string())
+                Error::NotebookDaemon("--socket requires a notebook daemon path".to_owned())
             });
         }
     }
     Err(Error::NotebookDaemon(
-        "notebook daemon socket path was not provided".to_string(),
+        "notebook daemon socket path was not provided".to_owned(),
     ))
 }
 
@@ -704,7 +704,7 @@ where
             bytes.len()
         )));
     }
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::AsyncWriteExt as _;
     writer
         .write_all(&(bytes.len() as u32).to_be_bytes())
         .await
@@ -720,7 +720,7 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncReadExt as _;
     let mut len = [0_u8; 4];
     reader
         .read_exact(&mut len)
@@ -761,7 +761,7 @@ pub async fn send_daemon_control_to(
             .error
             .as_ref()
             .map(|error| format!("{}: {}", error.code, error.message))
-            .unwrap_or_else(|| "daemon command failed without an error body".to_string());
+            .unwrap_or_else(|| "daemon command failed without an error body".to_owned());
         Err(Error::NotebookDaemon(message))
     }
 }
@@ -785,7 +785,7 @@ pub async fn daemon_control(
     state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<DaemonControlResponse, Error> {
     let socket_path = daemon_socket_path_from_args()?;
-    let enrich_recents = matches!(cmd, DaemonControlCommand::ListRecents {});
+    let enrich_recents = matches!(cmd, DaemonControlCommand::ListRecents);
     let request = DaemonControlRequest::new(cmd);
     let mut response = send_daemon_control_to(&socket_path, &request).await?;
     if enrich_recents {
@@ -910,7 +910,7 @@ async fn handle_daemon_control_inner(
             let delta = replace_notebook_and_hydrate_catalog(state, PathBuf::from(path), contents);
             Ok(DaemonControlResult::Delta(delta))
         }
-        DaemonControlCommand::ListDatasources {} => {
+        DaemonControlCommand::ListDatasources => {
             let entries = state.datasource_catalog.lock().list();
             Ok(DaemonControlResult::Datasources(entries))
         }
@@ -1013,7 +1013,7 @@ async fn handle_daemon_control_inner(
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::Snapshot {} => {
+        DaemonControlCommand::Snapshot => {
             let (root, version) = notebook.snapshot();
             Ok(DaemonControlResult::Snapshot(DaemonNotebookSnapshot {
                 root,
@@ -1027,10 +1027,10 @@ async fn handle_daemon_control_inner(
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::FlushNotebook {} => notebook
+        DaemonControlCommand::FlushNotebook => notebook
             .flush()
             .await
-            .map(|()| DaemonControlResult::Empty {})
+            .map(|()| DaemonControlResult::Empty)
             .map_err(|error| DaemonControlResponse::failure("flush_failed", error.to_string())),
         command => Err(DaemonControlResponse::failure(
             "unsupported_daemon_command",
@@ -1039,6 +1039,7 @@ async fn handle_daemon_control_inner(
     }
 }
 
+#[expect(clippy::result_large_err)]
 fn validate_cell_id(id: &str) -> Result<(), DaemonControlResponse> {
     if id.is_empty() {
         Err(DaemonControlResponse::failure(
@@ -1067,6 +1068,7 @@ fn store_error_response(error: StoreError) -> DaemonControlResponse {
 
 /// Thin daemon-layer wrapper over [`daemon_cell`], mapping a missing cell to the
 /// daemon control error the read path returns.
+#[expect(clippy::result_large_err)]
 fn read_daemon_cell(root: &NotebookRoot, id: &str) -> Result<DaemonCell, DaemonControlResponse> {
     daemon_cell(root, id).ok_or_else(|| {
         DaemonControlResponse::failure("cell_not_found", format!("cell not found: {id}"))
@@ -1170,7 +1172,7 @@ fn apply_notebook_port_root_env(
 ) {
     if let Some(root) = port_root {
         kernel_spec.env.insert(
-            SPUR_NOTEBOOK_PORT_ROOT_ENV.to_string(),
+            SPUR_NOTEBOOK_PORT_ROOT_ENV.to_owned(),
             root.display().to_string(),
         );
     }
@@ -1222,7 +1224,7 @@ pub fn install_kernel_in_slot(
     spec_name: String,
     kernel: LocalKernel,
 ) -> (u64, Option<LocalKernel>) {
-    match state.kernels.entry(slot_id.to_string()) {
+    match state.kernels.entry(slot_id.to_owned()) {
         Entry::Occupied(mut entry) => {
             let slot = entry.get_mut();
             let previous_kernel = slot.kernel.take();
@@ -1259,8 +1261,8 @@ fn spawn_kernel_supervisor(
     liveness: tokio_util::sync::CancellationToken,
 ) {
     let sup_state = Arc::clone(state);
-    let sup_slot = slot_id.to_string();
-    let sup_spec = spec_name.to_string();
+    let sup_slot = slot_id.to_owned();
+    let sup_spec = spec_name.to_owned();
     tokio::spawn(async move {
         supervise_until_dead(liveness, || async move {
             restart_kernel_in_slot(&sup_state, &sup_slot, &sup_spec)
@@ -1290,7 +1292,7 @@ pub async fn restart_kernel_in_slot(
     }
     let liveness = kernel.conn().liveness_token();
     let (generation, _previous) =
-        install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
+        install_kernel_in_slot(state, slot_id, spec_name.to_owned(), kernel);
     spawn_kernel_supervisor(state, slot_id, spec_name, liveness);
     Ok(generation)
 }
@@ -1301,13 +1303,13 @@ pub async fn restart_kernel_in_slot(
 /// a structured bridge error instead of Tauri's generic "command not found"
 /// when the SPUR brain delegation path has not been wired into this process.
 #[tauri::command]
-pub async fn spur_delegate_to_worker(
+pub fn spur_delegate_to_worker(
     task: String,
     worker_type: String,
     tool_allowlist: Vec<String>,
 ) -> Result<DelegateResult, String> {
     let _ = (task, worker_type, tool_allowlist);
-    Err("delegate_to_worker bridge not wired; see plan task 11".to_string())
+    Err("delegate_to_worker bridge not wired; see plan task 11".to_owned())
 }
 
 fn take_kernel_if_present(state: &State, slot_id: &str) -> Option<LocalKernel> {
@@ -1346,7 +1348,7 @@ fn kernel_connection_for_slot(
 /// Return the spec name recorded for an existing kernel slot.
 pub fn spec_name_for_slot(state: &State, slot_id: &str) -> Result<String, Error> {
     let slot = state.kernels.get(slot_id).ok_or(Error::KernelDisconnect)?;
-    Ok(slot.spec_name().to_string())
+    Ok(slot.spec_name().to_owned())
 }
 
 struct KernelProcessUsage {
@@ -1412,7 +1414,7 @@ pub async fn kernel_slot_info_for_state(
     let (spec_name, generation, pid) = {
         let slot = state.kernels.get(kernel_id).ok_or(Error::KernelNotFound)?;
         (
-            slot.spec_name().to_string(),
+            slot.spec_name().to_owned(),
             slot.generation(),
             slot.kernel.as_ref().and_then(|kernel| kernel.pid()),
         )
@@ -1427,18 +1429,18 @@ pub async fn kernel_slot_info_for_state(
                     0.0
                 };
                 (
-                    "idle".to_string(),
+                    "idle".to_owned(),
                     cpu_pct,
                     usage.memory_consumed / 1024.0 / 1024.0,
                 )
             }
-            None => ("dead".to_string(), 0.0, 0.0),
+            None => ("dead".to_owned(), 0.0, 0.0),
         },
-        None => ("dead".to_string(), 0.0, 0.0),
+        None => ("dead".to_owned(), 0.0, 0.0),
     };
 
     Ok(KernelSlotInfo {
-        kernel_id: kernel_id.to_string(),
+        kernel_id: kernel_id.to_owned(),
         spec_name,
         generation,
         status,
@@ -1491,15 +1493,14 @@ where
 {
     if current_path == Some(path) {
         return Err(Error::NotebookDaemon(
-            "cannot move the currently loaded notebook to trash".to_string(),
+            "cannot move the currently loaded notebook to trash".to_owned(),
         ));
     }
     trasher(path)
 }
 
 fn trash_path(path: &Path) -> Result<(), Error> {
-    trash::delete(path)
-        .map_err(|error| Error::Filesystem(io::Error::new(io::ErrorKind::Other, error.to_string())))
+    trash::delete(path).map_err(|error| Error::Filesystem(io::Error::other(error.to_string())))
 }
 
 /// Reveal a notebook in the platform file manager.
@@ -1514,26 +1515,29 @@ async fn reveal_notebook_path(path: &Path) -> Result<(), Error> {
     if status.success() {
         Ok(())
     } else {
-        Err(Error::Subprocess(io::Error::new(
-            io::ErrorKind::Other,
-            format!("file manager exited with status {status}"),
-        )))
+        Err(Error::Subprocess(io::Error::other(format!(
+            "file manager exited with status {status}"
+        ))))
     }
 }
 
+#[cfg_attr(
+    any(target_os = "macos", target_os = "windows"),
+    expect(clippy::unnecessary_wraps)
+)]
 fn reveal_command(path: &Path) -> Result<tokio::process::Command, Error> {
     #[cfg(target_os = "macos")]
     {
         let mut command = tokio::process::Command::new("open");
         command.arg("-R").arg(path);
-        return Ok(command);
+        Ok(command)
     }
 
     #[cfg(target_os = "windows")]
     {
         let mut command = tokio::process::Command::new("explorer");
         command.arg(format!("/select,{}", path.display()));
-        return Ok(command);
+        Ok(command)
     }
 
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
@@ -1618,7 +1622,7 @@ pub async fn start_kernel(
     }
     let liveness = kernel.conn().liveness_token();
     let (generation, _previous_kernel) =
-        install_kernel_in_slot(&state, &slot_id, spec_name.to_string(), kernel);
+        install_kernel_in_slot(&state, &slot_id, spec_name.to_owned(), kernel);
     spawn_kernel_supervisor(state.inner(), &slot_id, spec_name, liveness);
     info!(slot_id = %slot_id, generation, "started jute kernel slot");
 
@@ -1657,7 +1661,7 @@ pub async fn restart_kernel(
     spawn_kernel_supervisor(state.inner(), slot_id, &next_spec_name, liveness);
     info!(slot_id = %slot_id, generation, "restarted jute kernel slot");
 
-    Ok(slot_id.to_string())
+    Ok(slot_id.to_owned())
 }
 
 /// Stop a Jupyter kernel.
@@ -1838,8 +1842,10 @@ async fn drain_port_bootstrap_events(
             | RunCellEvent::ExecuteResult(_)
             | RunCellEvent::DisplayData(_)
             | RunCellEvent::UpdateDisplayData(_)
-            | RunCellEvent::ClearOutput(_) => {}
-            RunCellEvent::CommOpen(_) | RunCellEvent::CommMsg(_) | RunCellEvent::CommClose(_) => {}
+            | RunCellEvent::ClearOutput(_)
+            | RunCellEvent::CommOpen(_)
+            | RunCellEvent::CommMsg(_)
+            | RunCellEvent::CommClose(_) => {}
         }
     }
 
@@ -1863,7 +1869,7 @@ async fn drain_port_bootstrap_events(
         }),
         None => Err(Error::PortBootstrapFailed {
             stage: "event-stream",
-            cause: "kernel closed without Finished event".to_string(),
+            cause: "kernel closed without Finished event".to_owned(),
         }),
     }
 }
@@ -1885,7 +1891,7 @@ fn resolve_run_cell_dispatch(
     let (root, _version) = state.get_notebook().snapshot();
     let code_type = resolve_cell_code_type(&root, cell_id)?;
     let source = resolve_cell_source(&root, cell_id)?;
-    let spec_name = kernelspec_for(code_type).to_string();
+    let spec_name = kernelspec_for(code_type).to_owned();
     let slot_id = slot_id_for(notebook_path, code_type);
 
     if supplied_kernel_id.is_some_and(|kernel_id| kernel_id != slot_id) {
@@ -1938,10 +1944,8 @@ fn resolve_cell_code_type(root: &NotebookRoot, cell_id: &str) -> Result<CodeType
         .as_ref()
         .and_then(|spur| spur.code_type)
         .or_else(|| {
-            root.metadata
-                .kernelspec
-                .as_ref()
-                .and_then(|kernelspec| code_type_for_spec(&kernelspec.name))
+            let kernelspec = root.metadata.kernelspec.as_ref()?;
+            code_type_for_spec(&kernelspec.name)
         })
         .unwrap_or(CodeType::Python))
 }
@@ -2021,7 +2025,7 @@ async fn ensure_kernel_slot_live(
                 return Err(error);
             }
             let liveness = kernel.conn().liveness_token();
-            install_kernel_in_slot(state, slot_id, spec_name.to_string(), kernel);
+            install_kernel_in_slot(state, slot_id, spec_name.to_owned(), kernel);
             spawn_kernel_supervisor(state, slot_id, spec_name, liveness);
             Ok(())
         }

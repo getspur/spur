@@ -4,8 +4,8 @@ use std::io;
 
 use ini::Ini;
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
-use tauri_plugin_shell::ShellExt;
+use tauri::{AppHandle, Manager as _};
+use tauri_plugin_shell::ShellExt as _;
 use tracing::{error, info};
 
 use crate::{
@@ -37,10 +37,7 @@ pub async fn venv_list_python_versions_impl(app: &AppHandle) -> Result<Vec<Strin
         )))
     } else {
         let message = String::from_utf8_lossy(&output.stderr);
-        Err(Error::Subprocess(io::Error::new(
-            io::ErrorKind::Other,
-            message.trim(),
-        )))
+        Err(Error::Subprocess(io::Error::other(message.trim())))
     }
 }
 
@@ -54,7 +51,7 @@ fn parse_python_versions(output: &str) -> Vec<String> {
                     Some(index) => &stripped[..index],
                     None => stripped,
                 };
-                versions.push(version_number.to_string());
+                versions.push(version_number.to_owned());
             }
         }
     }
@@ -93,10 +90,7 @@ pub async fn venv_create_impl(python_version: &str, app: &AppHandle) -> Result<E
 
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Subprocess(io::Error::new(
-            io::ErrorKind::Other,
-            message.trim(),
-        )));
+        return Err(Error::Subprocess(io::Error::other(message.trim())));
     }
 
     info!("created venv at {venv_path:?}");
@@ -119,10 +113,7 @@ pub async fn venv_create_impl(python_version: &str, app: &AppHandle) -> Result<E
         error!("failed to install packages in venv, will remove");
         _ = tokio::fs::remove_dir_all(&venv_path).await;
         let message = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Subprocess(io::Error::new(
-            io::ErrorKind::Other,
-            message.trim(),
-        )));
+        return Err(Error::Subprocess(io::Error::other(message.trim())));
     }
 
     Ok(venv_id)

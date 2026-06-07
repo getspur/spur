@@ -451,9 +451,10 @@ impl State {
     /// Return the process-wide notebook store, initializing it on first use.
     pub fn get_notebook(&self) -> Arc<NotebookStore> {
         let mut notebook = self.notebook.lock();
-        notebook
-            .get_or_insert_with(|| NotebookStore::new(Arc::new(self.save_coordinator.clone())))
-            .clone()
+        Arc::clone(
+            notebook
+                .get_or_insert_with(|| NotebookStore::new(Arc::new(self.save_coordinator.clone()))),
+        )
     }
 
     pub(crate) fn emit_datasources_changed(&self, entries: Vec<DatasourceEntry>) {

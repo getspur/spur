@@ -208,7 +208,7 @@ pub enum DeltaKind {
 }
 
 /// Self-contained cell payload carried by deltas and daemon control reads.
-#[allow(missing_docs)]
+#[expect(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -249,14 +249,14 @@ pub struct DaemonCell {
 /// can be built from the post-mutation document after the version + metadata
 /// update is applied.
 enum PendingDelta {
-    CellWritten {
+    Written {
         id: String,
     },
-    CellInserted {
+    Inserted {
         id: String,
         after_id: Option<String>,
     },
-    CellDeleted {
+    Deleted {
         id: String,
     },
 }
@@ -382,7 +382,7 @@ impl NotebookStore {
     /// Check that an existing cell's SPUR metadata version matches the caller's expectation.
     pub fn check_cell_version(&self, cell_id: &str, expected: u64) -> Result<(), StoreError> {
         let root = self.inner.read();
-        self.ensure_cell_version(&root, cell_id, expected)
+        Self::ensure_cell_version(&root, cell_id, expected)
     }
 
     /// Apply a notebook edit operation.
@@ -396,13 +396,13 @@ impl NotebookStore {
                 last_edited_by,
             } => {
                 if let Some(expected) = expected_version {
-                    self.ensure_cell_version(&root, &id, expected)?;
+                    Self::ensure_cell_version(&root, &id, expected)?;
                 }
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 set_cell_source(cell, source);
                 let metadata_update = Some((id.clone(), last_edited_by));
-                (PendingDelta::CellWritten { id }, metadata_update)
+                (PendingDelta::Written { id }, metadata_update)
             }
             NotebookOp::InsertCell {
                 kind,
@@ -415,7 +415,7 @@ impl NotebookStore {
                     Some(after_id) => find_cell_index(&root, after_id)
                         .map(|index| index + 1)
                         .ok_or_else(|| StoreError::CellNotFound {
-                            id: after_id.to_string(),
+                            id: after_id.to_owned(),
                         })?,
                     None => root.cells.len(),
                 };
@@ -423,24 +423,24 @@ impl NotebookStore {
                 root.cells
                     .insert(insert_at, make_cell(kind, id.clone(), source, code_type));
                 let metadata_update = Some((id.clone(), last_edited_by));
-                (PendingDelta::CellInserted { id, after_id }, metadata_update)
+                (PendingDelta::Inserted { id, after_id }, metadata_update)
             }
             NotebookOp::DeleteCell {
                 id,
                 expected_version,
             } => {
-                self.ensure_cell_version(&root, &id, expected_version)?;
+                Self::ensure_cell_version(&root, &id, expected_version)?;
                 let index = find_cell_index(&root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 root.cells.remove(index);
-                (PendingDelta::CellDeleted { id }, None)
+                (PendingDelta::Deleted { id }, None)
             }
             NotebookOp::SetJuteDeckMetadata {
                 id,
                 patch,
                 expected_version,
             } => {
-                self.ensure_cell_version(&root, &id, expected_version)?;
+                Self::ensure_cell_version(&root, &id, expected_version)?;
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
@@ -448,69 +448,69 @@ impl NotebookStore {
                 merge_jute_deck_metadata(&mut merged, patch);
                 metadata.jute_deck = Some(merged);
                 let metadata_update = Some((id.clone(), Some("brain".to_owned())));
-                (PendingDelta::CellWritten { id }, metadata_update)
+                (PendingDelta::Written { id }, metadata_update)
             }
             NotebookOp::SetSpurDagMetadata {
                 id,
                 patch,
                 expected_version,
             } => {
-                self.ensure_cell_version(&root, &id, expected_version)?;
+                Self::ensure_cell_version(&root, &id, expected_version)?;
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
-                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
+                let spur = metadata.spur.get_or_insert_with(empty_spur_cell_metadata);
                 spur.dag = Some(patch);
                 let metadata_update = Some((id.clone(), Some("brain".to_owned())));
-                (PendingDelta::CellWritten { id }, metadata_update)
+                (PendingDelta::Written { id }, metadata_update)
             }
             NotebookOp::SetSpurCodeTypeMetadata {
                 id,
                 code_type,
                 expected_version,
             } => {
-                self.ensure_cell_version(&root, &id, expected_version)?;
+                Self::ensure_cell_version(&root, &id, expected_version)?;
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
-                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
+                let spur = metadata.spur.get_or_insert_with(empty_spur_cell_metadata);
                 spur.code_type = Some(code_type);
                 let metadata_update = Some((id.clone(), Some("brain".to_owned())));
-                (PendingDelta::CellWritten { id }, metadata_update)
+                (PendingDelta::Written { id }, metadata_update)
             }
             NotebookOp::SetSpurFrontendMetadata {
                 id,
                 patch,
                 expected_version,
             } => {
-                self.ensure_cell_version(&root, &id, expected_version)?;
+                Self::ensure_cell_version(&root, &id, expected_version)?;
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
-                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
+                let spur = metadata.spur.get_or_insert_with(empty_spur_cell_metadata);
                 spur.frontend = Some(patch);
                 let metadata_update = Some((id.clone(), Some("brain".to_owned())));
-                (PendingDelta::CellWritten { id }, metadata_update)
+                (PendingDelta::Written { id }, metadata_update)
             }
             NotebookOp::ApplyEdit { id, source } => {
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 set_cell_source(cell, source);
                 let metadata_update = Some((id.clone(), None));
-                (PendingDelta::CellWritten { id }, metadata_update)
+                (PendingDelta::Written { id }, metadata_update)
             }
             NotebookOp::MarkDatasourceSetupCell {
                 id,
                 expected_version,
             } => {
-                self.ensure_cell_version(&root, &id, expected_version)?;
+                Self::ensure_cell_version(&root, &id, expected_version)?;
                 let cell = find_cell_mut(&mut root, &id)
                     .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
                 let metadata = cell_metadata_mut(cell);
-                let spur = metadata.spur.get_or_insert(empty_spur_cell_metadata());
+                let spur = metadata.spur.get_or_insert_with(empty_spur_cell_metadata);
                 spur.datasource_setup = Some(true);
                 let metadata_update = Some((id.clone(), None));
-                (PendingDelta::CellWritten { id }, metadata_update)
+                (PendingDelta::Written { id }, metadata_update)
             }
         };
 
@@ -525,14 +525,14 @@ impl NotebookStore {
         }
 
         let kind = match pending {
-            PendingDelta::CellWritten { id } => DeltaKind::CellWritten {
+            PendingDelta::Written { id } => DeltaKind::CellWritten {
                 cell: daemon_cell(&root, &id).ok_or(StoreError::CellNotFound { id })?,
             },
-            PendingDelta::CellInserted { id, after_id } => DeltaKind::CellInserted {
+            PendingDelta::Inserted { id, after_id } => DeltaKind::CellInserted {
                 cell: daemon_cell(&root, &id).ok_or(StoreError::CellNotFound { id })?,
                 after_id,
             },
-            PendingDelta::CellDeleted { id } => DeltaKind::CellDeleted { id },
+            PendingDelta::Deleted { id } => DeltaKind::CellDeleted { id },
         };
 
         let delta = self.make_delta(version, kind);
@@ -609,13 +609,12 @@ impl NotebookStore {
     }
 
     fn ensure_cell_version(
-        &self,
         root: &NotebookRoot,
         cell_id: &str,
         expected: u64,
     ) -> Result<(), StoreError> {
         let cell = find_cell(root, cell_id).ok_or_else(|| StoreError::CellNotFound {
-            id: cell_id.to_string(),
+            id: cell_id.to_owned(),
         })?;
         let actual = cell_spur_version(cell).unwrap_or_default();
         if expected == actual {
@@ -806,8 +805,8 @@ pub(crate) fn daemon_cell(root: &NotebookRoot, id: &str) -> Option<DaemonCell> {
     };
 
     Some(DaemonCell {
-        id: id.to_string(),
-        kind: kind.to_string(),
+        id: id.to_owned(),
+        kind: kind.to_owned(),
         version: spur.map(|spur| spur.version).unwrap_or_default(),
         last_edited_by: spur.and_then(|spur| spur.last_edited_by.clone()),
         datasource_setup: spur.and_then(|spur| spur.datasource_setup),
@@ -818,7 +817,7 @@ pub(crate) fn daemon_cell(root: &NotebookRoot, id: &str) -> Option<DaemonCell> {
         metadata_other: metadata.other.clone(),
         source,
         exec_count,
-        status: "idle".to_string(),
+        status: "idle".to_owned(),
         outputs,
     })
 }
@@ -1015,7 +1014,7 @@ fn apply_event_to_code_cell(cell: &mut CodeCell, event: &RunCellEvent) {
         }
         RunCellEvent::Disconnect(message) => {
             cell.outputs.push(Output::Error(OutputError {
-                ename: "KernelDisconnect".to_string(),
+                ename: "KernelDisconnect".to_owned(),
                 evalue: message.clone(),
                 traceback: Vec::new(),
                 other: Map::new(),
@@ -1033,8 +1032,8 @@ fn apply_event_to_code_cell(cell: &mut CodeCell, event: &RunCellEvent) {
 
 fn stream_output(name: &str, text: &str) -> Output {
     Output::Stream(OutputStream {
-        name: name.to_string(),
-        text: MultilineString::Single(text.to_string()),
+        name: name.to_owned(),
+        text: MultilineString::Single(text.to_owned()),
         other: Map::new(),
     })
 }

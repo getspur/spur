@@ -53,7 +53,7 @@ pub enum KernelInterruptMode {
 ///
 /// This is specified in
 /// <https://docs.jupyter.org/en/latest/use/jupyter-directories.html#data-files>.
-async fn data_search_paths(interpreter_prefix: Option<&str>) -> Vec<String> {
+fn data_search_paths(interpreter_prefix: Option<&str>) -> Vec<String> {
     let mut dirs = Vec::new();
     if let Some(path) = spur_jupyter_dir() {
         dirs.push(path.to_string_lossy().into_owned());
@@ -68,7 +68,7 @@ async fn data_search_paths(interpreter_prefix: Option<&str>) -> Vec<String> {
         #[cfg(windows)]
         dirs.push(env::var("AppData").unwrap() + "\\jupyter");
         #[cfg(target_os = "macos")]
-        dirs.push(env::var("HOME").unwrap() + "/Library/Jupyter");
+        dirs.push(format!("{}/Library/Jupyter", env::var("HOME").unwrap()));
         #[cfg(target_os = "linux")]
         match env::var("XDG_DATA_HOME") {
             Ok(xdg_data_home) => dirs.push(xdg_data_home + "/jupyter"),
@@ -76,7 +76,7 @@ async fn data_search_paths(interpreter_prefix: Option<&str>) -> Vec<String> {
         }
     }
     if let Some(prefix) = interpreter_prefix {
-        dirs.push(prefix.to_string() + "/share/jupyter");
+        dirs.push(format!("{prefix}/share/jupyter"));
     }
     #[cfg(windows)]
     dirs.push(env::var("ProgramData").unwrap() + "\\jupyter");
@@ -118,7 +118,7 @@ fn non_empty_var(key: &str) -> Option<std::ffi::OsString> {
 
 /// List all available kernels from the environment, checking the search path.
 pub async fn list_kernels(interpreter_prefix: Option<&str>) -> Vec<(PathBuf, KernelSpec)> {
-    let dirs = data_search_paths(interpreter_prefix).await;
+    let dirs = data_search_paths(interpreter_prefix);
     join_all(dirs.iter().map(|path| list_kernels_from_path(path)))
         .await
         .into_iter()
@@ -159,7 +159,7 @@ pub fn data_dir() -> String {
 pub fn runtime_dir() -> String {
     match env::var("JUPYTER_RUNTIME_DIR") {
         Ok(jupyter_runtime_dir) => jupyter_runtime_dir.trim_end_matches(SEP).into(),
-        Err(_) => data_dir() + SEP + "runtime",
+        Err(_) => format!("{}{SEP}runtime", data_dir()),
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::Context as _;
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 use uuid::Uuid;
 
@@ -28,7 +28,6 @@ pub fn initialize_builder<'a, R: Runtime, M: Manager<R>>(
 
     let url = tauri::WebviewUrl::App(path.trim_start_matches('/').into());
 
-    #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(manager, &label, url)
         .title("Jute")
         .inner_size(960.0, 800.0)
@@ -42,8 +41,8 @@ pub fn initialize_builder<'a, R: Runtime, M: Manager<R>>(
         builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
         builder = builder.hidden_title(true);
         builder = builder.traffic_light_position(tauri::LogicalPosition::new(
-            WINDOW_CONTROL_PAD_X as f64,
-            WINDOW_CONTROL_PAD_Y as f64,
+            WINDOW_CONTROL_PAD_X,
+            WINDOW_CONTROL_PAD_Y,
         ));
     }
 
