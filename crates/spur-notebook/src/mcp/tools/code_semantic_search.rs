@@ -22,14 +22,64 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 #[cfg(feature = "datasource-introspect")]
-use std::sync::OnceLock;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Mutex, OnceLock},
+};
 
 const METHOD: &str = "code_semantic_search";
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
+#[cfg(feature = "datasource-introspect")]
+const EMBED_DIM: usize = 768;
+#[cfg(feature = "datasource-introspect")]
+const EMBED_CACHE_ENTRIES: usize = 1024;
 
 #[cfg(feature = "datasource-introspect")]
 static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
+#[cfg(feature = "datasource-introspect")]
+static EMBED_CACHE: OnceLock<Mutex<EmbedCache>> = OnceLock::new();
+
+#[cfg(feature = "datasource-introspect")]
+struct EmbedCache {
+    entries: HashMap<u64, [f32; EMBED_DIM]>,
+    order: VecDeque<u64>,
+    capacity: usize,
+}
+
+#[cfg(feature = "datasource-introspect")]
+impl EmbedCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: u64) -> Option<[f32; EMBED_DIM]> {
+        let embedding = self.entries.get(&key).copied()?;
+        self.touch(key);
+        Some(embedding)
+    }
+
+    fn insert(&mut self, key: u64, embedding: [f32; EMBED_DIM]) {
+        self.entries.insert(key, embedding);
+        self.touch(key);
+        while self.entries.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn touch(&mut self, key: u64) {
+        self.order.retain(|existing| *existing != key);
+        self.order.push_back(key);
+    }
+}
 
 #[cfg(feature = "datasource-introspect")]
 fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
@@ -45,19 +95,57 @@ fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
 }
 
 #[cfg(feature = "datasource-introspect")]
-fn embed_query_as_csv(query: &str) -> Option<String> {
-    let model = get_embed_model()?;
-    let embeddings = model.embed(vec![query], None).ok()?;
-    let vec = embeddings.into_iter().next()?;
-    if vec.len() != 768 {
-        return None;
-    }
-    Some(
-        vec.iter()
-            .map(|f| format!("{f:.6}"))
-            .collect::<Vec<_>>()
-            .join(","),
+fn embed_cache_key(query: &str) -> u64 {
+    let digest = blake3::hash(query.as_bytes());
+    u64::from_le_bytes(
+        digest.as_bytes()[..8]
+            .try_into()
+            .expect("blake3 digest has at least eight bytes"),
     )
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn embed_cache() -> &'static Mutex<EmbedCache> {
+    EMBED_CACHE.get_or_init(|| Mutex::new(EmbedCache::new(EMBED_CACHE_ENTRIES)))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn embedding_as_csv(embedding: &[f32; EMBED_DIM]) -> String {
+    embedding
+        .iter()
+        .map(|f| format!("{f:.6}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[cfg(feature = "datasource-introspect")]
+async fn embed_query(query: &str) -> Option<String> {
+    let key = embed_cache_key(query);
+    let cached = match embed_cache().lock() {
+        Ok(mut cache) => cache.get(key),
+        Err(_) => None,
+    };
+    if let Some(embedding) = cached {
+        return Some(embedding_as_csv(&embedding));
+    }
+
+    let query = query.to_owned();
+    let embedding = tokio::task::spawn_blocking(move || {
+        let model = get_embed_model()?;
+        let embeddings = model.embed(vec![query.as_str()], None).ok()?;
+        let vec = embeddings.into_iter().next()?;
+        let embedding: [f32; EMBED_DIM] = vec.try_into().ok()?;
+        Some(embedding)
+    })
+    .await
+    .ok()
+    .flatten()?;
+
+    if let Ok(mut cache) = embed_cache().lock() {
+        cache.insert(key, embedding);
+    }
+
+    Some(embedding_as_csv(&embedding))
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,17 +204,17 @@ pub async fn call(
     }
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
-    run(&params.query, scope, limit, params.db_path.as_deref())
+    run(&params.query, scope, limit, params.db_path.as_deref()).await
 }
 
 #[cfg(feature = "datasource-introspect")]
-fn run(
+async fn run(
     query: &str,
     scope: &str,
     limit: usize,
     db_path: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    let (path, results, graph_hash) = search_rows(query, scope, limit, db_path)?;
+    let (path, results, graph_hash) = search_rows(query, scope, limit, db_path).await?;
     Ok(CallToolResult::structured(json!({
         "scope": scope,
         "query": query,
@@ -140,7 +228,7 @@ fn run(
 /// Core query: open analyst.duckdb read-only and run the chosen `search*` macro.
 /// Returns (resolved_db_path, rows, graph_content_hash).
 #[cfg(feature = "datasource-introspect")]
-fn search_rows(
+async fn search_rows(
     query: &str,
     scope: &str,
     limit: usize,
@@ -189,7 +277,7 @@ fn search_rows(
              neighbor_kind, edge_bind_method \
              FROM search_graph('{q}') LIMIT {limit}"
         ),
-        "hybrid" => match embed_query_as_csv(query) {
+        "hybrid" => match embed_query(query).await {
             Some(vec_csv) => format!(
                 "SELECT kind, title, file, round(score, 3) AS score, signal \
                  FROM search_hybrid('{q}', '{vec_csv}') LIMIT {limit}"
@@ -238,7 +326,7 @@ fn search_rows(
 }
 
 #[cfg(not(feature = "datasource-introspect"))]
-fn run(
+async fn run(
     _query: &str,
     _scope: &str,
     _limit: usize,
@@ -308,6 +396,59 @@ mod tests {
         ServerDeps::from_bridge(Arc::new(TauriBridgeRequester::without_app(Arc::new(
             AgentBridge::new(),
         ))))
+    }
+
+    fn embedding_with_marker(marker: f32) -> [f32; 768] {
+        let mut embedding = [0.0; 768];
+        embedding[0] = marker;
+        embedding
+    }
+
+    #[test]
+    fn embed_cache_get_refreshes_lru_order() {
+        let mut cache = EmbedCache::new(2);
+        let first = embedding_with_marker(1.0);
+        let second = embedding_with_marker(2.0);
+        let third = embedding_with_marker(3.0);
+
+        cache.insert(1, first);
+        cache.insert(2, second);
+        assert_eq!(cache.get(1), Some(first));
+
+        cache.insert(3, third);
+
+        assert_eq!(cache.get(1), Some(first));
+        assert_eq!(cache.get(2), None);
+        assert_eq!(cache.get(3), Some(third));
+    }
+
+    #[test]
+    fn embed_cache_insert_refreshes_lru_order() {
+        let mut cache = EmbedCache::new(2);
+        let updated_first = embedding_with_marker(10.0);
+        let second = embedding_with_marker(2.0);
+        let third = embedding_with_marker(3.0);
+
+        cache.insert(1, embedding_with_marker(1.0));
+        cache.insert(2, second);
+        cache.insert(1, updated_first);
+        cache.insert(3, third);
+
+        assert_eq!(cache.get(1), Some(updated_first));
+        assert_eq!(cache.get(2), None);
+        assert_eq!(cache.get(3), Some(third));
+    }
+
+    #[test]
+    fn embed_cache_key_uses_first_eight_blake3_bytes() {
+        let digest = blake3::hash(b"architecture");
+        let expected = u64::from_le_bytes(
+            digest.as_bytes()[..8]
+                .try_into()
+                .expect("blake3 digest has at least eight bytes"),
+        );
+
+        assert_eq!(embed_cache_key("architecture"), expected);
     }
 
     #[tokio::test]
@@ -492,24 +633,28 @@ mod tests {
                 child_count BIGINT,
                 content_hash VARCHAR,
                 body_byte_start BIGINT,
-                body_text VARCHAR
+                body_text VARCHAR,
+                vector FLOAT[768]
             );
             INSERT INTO lance_ns.section_bodies VALUES
               ('a',NULL,'Brain Review Gate','.claude/skills/brain-review-gate/SKILL.md',
                1,0,'ha',0,
-               '<!-- SPUR-MANAGED v=1 sha256=aaa -->\napprove or reject worker output gate'),
+               '<!-- SPUR-MANAGED v=1 sha256=aaa -->\napprove or reject worker output gate',
+               NULL),
               ('b',NULL,'Brain Review Gate','.codex/skills/brain-review-gate/SKILL.md',
                1,0,'hb',0,
-               '<!-- SPUR-MANAGED v=1 sha256=bbb -->\napprove or reject worker output gate'),
+               '<!-- SPUR-MANAGED v=1 sha256=bbb -->\napprove or reject worker output gate',
+               NULL),
               ('c',NULL,'Brain Review Gate','crates/spur-core/src/skills/brain-review-gate/SKILL.md',
                1,0,'hc',0,
-               '<!-- SPUR-MANAGED v=1 sha256=ccc -->\napprove or reject worker output gate'),
+               '<!-- SPUR-MANAGED v=1 sha256=ccc -->\napprove or reject worker output gate',
+               NULL),
               ('p1',NULL,'Plan::S1','docs/superpowers/plans/p.md',
-               2,0,'hp',0,'worker output review section one'),
+               2,0,'hp',0,'worker output review section one', NULL),
               ('p2',NULL,'Plan::S2','docs/superpowers/plans/p.md',
-               2,0,'hp',42,'worker output review section two'),
+               2,0,'hp',42,'worker output review section two', NULL),
               ('p3',NULL,'Plan::S3','docs/superpowers/plans/p.md',
-               2,0,'hp',84,'worker output review section three');
+               2,0,'hp',84,'worker output review section three', NULL);
 
             CREATE TABLE nodes(
                 stable_symbol_id VARCHAR,
@@ -595,8 +740,8 @@ mod tests {
     // reads with), creates the FTS index + search macro, and asserts the tool's
     // query path returns ranked rows. Proves fts + create_fts_index + the search
     // macro all work with the linked libduckdb — independent of the CLI version.
-    #[test]
-    fn search_docs_over_bundled_fixture_returns_ranked_rows() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn search_docs_over_bundled_fixture_returns_ranked_rows() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let db = dir.path().join("analyst.duckdb");
         {
@@ -637,18 +782,21 @@ mod tests {
 
         let (resolved, results, graph_hash) =
             search_rows("oauth token refresh", "docs", 10, db.to_str())
+                .await
                 .expect("semantic search over fixture");
         assert_eq!(resolved, db.display().to_string());
         assert_eq!(graph_hash.as_deref(), Some("deadbeef"));
         assert!(!results.is_empty(), "expected at least one ranked hit");
         assert_eq!(results[0]["title"], "OAuth refresh");
         // run() wraps the same rows into a CallToolResult without error.
-        run("oauth token refresh", "docs", 10, db.to_str()).expect("run wraps result");
+        run("oauth token refresh", "docs", 10, db.to_str())
+            .await
+            .expect("run wraps result");
         Ok(())
     }
 
-    #[test]
-    fn search_graph_scope_returns_neighbor_kind_rows() {
+    #[tokio::test]
+    async fn search_graph_scope_returns_neighbor_kind_rows() {
         // Build a minimal fixture with FTS + scorecard + edges so search_graph can run.
         // Uses an in-memory DB with the same macro structure as the real analyst.
         let dir = tempfile::tempdir().unwrap();
@@ -770,6 +918,7 @@ mod tests {
             20,
             Some(db_path.to_str().unwrap()),
         )
+        .await
         .unwrap();
 
         // Must have at least one primary and one callee row
@@ -801,8 +950,8 @@ mod tests {
     // This fixture mirrors the production view chain with the real timestamptz
     // boundary and proves the `code` scope binds + returns the posture signal,
     // under the bundled libduckdb (fts + the statically-linked icu).
-    #[test]
-    fn search_code_scope_binds_temporal_views_via_icu() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn search_code_scope_binds_temporal_views_via_icu() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let db = dir.path().join("analyst.duckdb");
         {
@@ -873,6 +1022,7 @@ mod tests {
         // `-(TIMESTAMP WITH TIME ZONE, INTERVAL)` binder error.
         let (_path, results, graph_hash) =
             search_rows("response metadata compression", "code", 10, db.to_str())
+                .await
                 .expect("code-scope search must bind temporal views via icu");
         assert_eq!(graph_hash.as_deref(), Some("cafebabe"));
         assert!(!results.is_empty(), "expected at least one ranked code hit");
