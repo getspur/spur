@@ -26,6 +26,9 @@ const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
 const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
 const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
+// Integration tests spawn the debug-built CLI; keep this hook out of release builds.
+#[cfg(debug_assertions)]
+const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SectionEmbeddingOptions {
@@ -89,12 +92,34 @@ pub fn write_sections_dataset(
     )
 }
 
+pub fn write_sections_dataset_best_effort(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+) {
+    if let Err(error) = write_sections_dataset(artifact, worktree_root, artifact_dir) {
+        tracing::warn!(
+            error = %error,
+            artifact_dir = %artifact_dir.display(),
+            "spur-graph: section sidecar write failed; graph artifact remains usable"
+        );
+    }
+}
+
 fn write_sections_dataset_with_options(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     artifact_dir: &Path,
     options: SectionEmbeddingOptions,
 ) -> Result<()> {
+    #[cfg(debug_assertions)]
+    if matches!(
+        std::env::var(SECTION_SIDECAR_TEST_FAIL_ENV),
+        Ok(value) if value == "1"
+    ) {
+        anyhow::bail!("forced section sidecar failure for tests");
+    }
+
     if tokio::runtime::Handle::try_current().is_ok() {
         return std::thread::scope(|scope| {
             scope
