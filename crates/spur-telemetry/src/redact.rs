@@ -1,7 +1,6 @@
 use sha2::{Digest as _, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code)]
 pub enum PanicType {
     Bounds,
     Unwrap,
@@ -11,7 +10,6 @@ pub enum PanicType {
     Other,
 }
 
-#[expect(dead_code)]
 pub fn scrub_stack(raw: &str) -> String {
     raw.lines()
         .map(scrub_stack_line)
@@ -114,7 +112,6 @@ fn strip_prefix_family(input: &str, prefix: &str, sep: char) -> String {
     out
 }
 
-#[expect(dead_code)]
 pub fn bucket_model(name: &str) -> &'static str {
     let normalized = name.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -148,7 +145,6 @@ pub fn bucket_model(name: &str) -> &'static str {
     }
 }
 
-#[expect(dead_code)]
 pub fn classify_panic(msg: &str) -> PanicType {
     if msg.contains("index out of bounds") {
         return PanicType::Bounds;
@@ -168,7 +164,6 @@ pub fn classify_panic(msg: &str) -> PanicType {
     PanicType::Other
 }
 
-#[expect(dead_code)]
 pub fn payload_hash(msg: &str, anonymous_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(msg.as_bytes());
@@ -190,7 +185,6 @@ pub fn sha256_prefix(value: &str) -> String {
         .collect::<String>()
 }
 
-#[expect(dead_code)]
 pub fn classify_server(server_name: &str) -> crate::tier2_events::McpServerName {
     match server_name.trim().to_ascii_lowercase().as_str() {
         "github" => crate::tier2_events::McpServerName::Github,

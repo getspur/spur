@@ -21,7 +21,7 @@ impl FlagEvaluator {
         }
 
         // 2. Tier filter
-        if let Some(ref tiers) = flag.tier_filter {
+        if let Some(tiers) = flag.tier_filter.as_ref() {
             let tier_str = tier.label().to_lowercase();
             if !tiers.iter().any(|t| t == &tier_str) {
                 return false;

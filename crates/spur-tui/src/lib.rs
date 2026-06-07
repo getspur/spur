@@ -1,3 +1,168 @@
+#![expect(
+    elided_lifetimes_in_paths,
+    reason = "legacy TUI render function signatures omit explicit Frame lifetimes"
+)]
+#![expect(
+    clippy::allow_attributes,
+    reason = "legacy TUI code still contains localized allow attributes"
+)]
+#![expect(
+    clippy::branches_sharing_code,
+    reason = "legacy TUI wrapping/rendering code keeps branch-local structure for readability"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "legacy TUI docs contain UI/component terms that are not consistently backticked yet"
+)]
+#![expect(
+    clippy::bool_to_int_with_if,
+    reason = "legacy TUI layout code uses explicit boolean branches for dimensions"
+)]
+#![expect(
+    clippy::clone_on_ref_ptr,
+    reason = "legacy TUI image/config code still uses method-call clone syntax for Arc values"
+)]
+#![expect(
+    clippy::derive_partial_eq_without_eq,
+    reason = "legacy TUI DTOs derive PartialEq without consistently deriving Eq"
+)]
+#![expect(
+    clippy::equatable_if_let,
+    reason = "legacy TUI input code uses if-let patterns for key checks"
+)]
+#![expect(
+    clippy::elidable_lifetime_names,
+    reason = "legacy TUI component impls spell explicit lifetimes"
+)]
+#![expect(
+    clippy::enum_glob_use,
+    reason = "legacy TUI event handlers use enum variant glob imports"
+)]
+#![expect(
+    clippy::explicit_iter_loop,
+    reason = "legacy TUI rendering loops sometimes call iter explicitly for clarity"
+)]
+#![expect(
+    clippy::format_push_string,
+    reason = "legacy TUI renderers append formatted strings directly"
+)]
+#![expect(
+    clippy::future_not_send,
+    reason = "legacy TUI futures capture non-Send UI state and run on the UI task"
+)]
+#![expect(
+    clippy::ignored_unit_patterns,
+    reason = "legacy TUI select branches use wildcard unit patterns"
+)]
+#![expect(
+    clippy::implicit_clone,
+    reason = "legacy TUI code sometimes clones strings through to_string"
+)]
+#![expect(
+    clippy::iter_over_hash_type,
+    reason = "legacy TUI worker stream rendering iterates hash maps in UI state updates"
+)]
+#![expect(
+    clippy::manual_let_else,
+    reason = "legacy TUI code still contains match-based early-return control flow"
+)]
+#![expect(
+    clippy::manual_string_new,
+    reason = "legacy TUI table construction uses empty string conversions"
+)]
+#![expect(
+    clippy::map_err_ignore,
+    reason = "legacy TUI theme parsing maps errors into domain errors without preserving all sources"
+)]
+#![expect(
+    clippy::match_same_arms,
+    reason = "legacy TUI input matches keep duplicated arms for interaction readability"
+)]
+#![expect(
+    clippy::match_wildcard_for_single_variants,
+    reason = "legacy TUI state matches use wildcard arms for future-proofing"
+)]
+#![expect(
+    clippy::missing_assert_message,
+    reason = "legacy TUI debug assertions omit explicit messages"
+)]
+#![expect(
+    clippy::needless_pass_by_ref_mut,
+    reason = "legacy TUI component APIs keep mutable receiver/reference shapes for compatibility"
+)]
+#![expect(
+    clippy::or_fun_call,
+    reason = "legacy TUI action routing uses eager option fallbacks"
+)]
+#![expect(
+    clippy::option_option,
+    reason = "legacy TUI startup state uses nested Option to represent three states"
+)]
+#![expect(
+    clippy::ref_patterns,
+    reason = "legacy TUI action routing still uses explicit ref bindings"
+)]
+#![expect(
+    clippy::return_and_then,
+    reason = "legacy TUI option extraction uses and_then chains"
+)]
+#![expect(
+    clippy::redundant_type_annotations,
+    reason = "legacy TUI local annotations are kept for readability"
+)]
+#![expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "legacy TUI render branches omit semicolons in unit-returning expressions"
+)]
+#![expect(
+    clippy::str_to_string,
+    reason = "legacy TUI code has many &str to String conversions pending mechanical cleanup"
+)]
+#![expect(
+    clippy::string_add,
+    reason = "legacy TUI truncation helpers use string concatenation"
+)]
+#![expect(
+    clippy::uninlined_format_args,
+    reason = "legacy TUI formatting has not all moved to captured format args"
+)]
+#![expect(
+    clippy::unnested_or_patterns,
+    reason = "legacy TUI input matching keeps separate key alternatives for readability"
+)]
+#![expect(
+    clippy::unused_async,
+    reason = "legacy TUI async APIs preserve call-site compatibility"
+)]
+#![expect(
+    clippy::unused_trait_names,
+    reason = "legacy TUI modules import extension traits by name"
+)]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "legacy TUI action helpers preserve Option return shapes used by callers"
+)]
+#![expect(
+    clippy::unnecessary_literal_bound,
+    reason = "legacy TUI query source traits keep receiver-tied string return signatures"
+)]
+#![expect(
+    clippy::useless_let_if_seq,
+    reason = "legacy TUI event handlers keep mutation flags explicit"
+)]
+#![expect(
+    clippy::unused_self,
+    reason = "legacy TUI methods keep receiver shape for API consistency"
+)]
+#![expect(
+    clippy::use_self,
+    reason = "legacy TUI code often spells concrete type names in impl bodies"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "legacy TUI code uses match for nontrivial fallback branches"
+)]
+
 pub mod action;
 pub mod agents;
 pub mod app;

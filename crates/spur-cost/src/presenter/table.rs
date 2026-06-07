@@ -42,7 +42,7 @@ fn fmt_tokens(v: u64) -> String {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "kept for table rendering variants")]
 fn fmt_dur(secs: u64) -> String {
     let mins = secs / 60;
     let hours = mins / 60;
@@ -63,7 +63,7 @@ fn pad(s: &str, width: usize) -> String {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "kept for table rendering variants")]
 fn pad_left(s: &str, width: usize) -> String {
     let len = s.chars().count();
     if len >= width {

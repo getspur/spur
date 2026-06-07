@@ -155,18 +155,16 @@ impl PolicyResolver {
     /// `build.rs`, so a runtime panic here means the binary was tampered).
     pub fn embedded() -> Arc<Self> {
         static RESOLVER: OnceLock<Arc<PolicyResolver>> = OnceLock::new();
-        RESOLVER
-            .get_or_init(|| {
-                let raw = include_str!("../../resources/default_policy.json");
-                let signed: SignedPolicy = serde_json::from_str(raw)
-                    .expect("embedded default_policy.json must parse as SignedPolicy");
-                let doc = crate::policy::trust::verify_signed_policy(&signed)
-                    .expect("embedded policy MUST verify (build.rs guarantees)");
-                Arc::new(Self {
-                    document: Arc::new(doc),
-                })
+        Arc::clone(RESOLVER.get_or_init(|| {
+            let raw = include_str!("../../resources/default_policy.json");
+            let signed: SignedPolicy = serde_json::from_str(raw)
+                .expect("embedded default_policy.json must parse as SignedPolicy");
+            let doc = crate::policy::trust::verify_signed_policy(&signed)
+                .expect("embedded policy MUST verify (build.rs guarantees)");
+            Arc::new(Self {
+                document: Arc::new(doc),
             })
-            .clone()
+        }))
     }
 
     /// Construct a resolver from an arbitrary document. Test-only; keeps
@@ -270,9 +268,8 @@ impl PolicyResolver {
     /// at `path`. Falls back to embedded on any error (file missing, bad
     /// signature, expired, schema-version too high).
     pub fn with_overlay_path(path: &std::path::Path) -> Arc<Self> {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(_) => return Self::embedded(),
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return Self::embedded();
         };
         let signed: SignedPolicy = match serde_json::from_str(&raw) {
             Ok(s) => s,

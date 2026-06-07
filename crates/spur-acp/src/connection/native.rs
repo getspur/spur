@@ -112,7 +112,10 @@ pub async fn spawn_native_worker_for_test(
 // ─── Commands sent to the dedicated ACP thread ──────────────────────────────
 
 /// Commands sent from the main (Send) world to the dedicated !Send ACP thread.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "ACP command payloads are sent across a private channel and boxed variants make call sites noisier"
+)]
 enum AcpCommand {
     Initialize {
         request: InitializeRequest,
@@ -465,7 +468,10 @@ impl NativeAcpConnection {
 ///
 /// Benign races (ESRCH on an already-reaped group, EPERM on a recycled pgid)
 /// are intentionally ignored; shutdown and Drop paths are best-effort cleanup.
-#[allow(unsafe_code)] // libc::kill FFI for process-group signal delivery.
+#[expect(
+    unsafe_code,
+    reason = "libc::kill FFI is required for Unix process-group signal delivery"
+)]
 fn killpg(pgid: i32, signal: &str) {
     #[cfg(unix)]
     {
@@ -477,7 +483,8 @@ fn killpg(pgid: i32, signal: &str) {
             "KILL" => libc::SIGKILL,
             _ => return,
         };
-        // Negative pid targets the process group whose id is `pgid`.
+        // SAFETY: Negative pid targets the process group whose id is `pgid`;
+        // invalid or already-reaped groups are intentionally ignored.
         let _ = unsafe { libc::kill(-pgid, signal) };
     }
 
@@ -1044,7 +1051,10 @@ impl AgentConnection for NativeAcpConnection {
 /// This function creates its own single-threaded Tokio runtime + `LocalSet`
 /// and runs the SDK's I/O loop alongside a command handler that processes
 /// requests from the main thread.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thread entry point wires explicit channel ownership into the !Send ACP runtime"
+)]
 fn acp_thread_main(
     agent_name: String,
     agent_kind: AgentKind,

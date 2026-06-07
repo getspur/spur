@@ -113,9 +113,8 @@ impl SpurAgentCaps {
             .iter()
             .find(|option| option.id.0.as_ref() == "model")?;
 
-        let select = match &option.kind {
-            SessionConfigKind::Select(select) => select,
-            _ => return None,
+        let SessionConfigKind::Select(select) = &option.kind else {
+            return None;
         };
         let current = select.current_value.0.as_ref();
         match &select.options {
@@ -143,9 +142,8 @@ impl SpurAgentCaps {
             .iter()
             .find(|option| option.id.0.as_ref() == "reasoning_effort")?;
 
-        let select = match &option.kind {
-            SessionConfigKind::Select(select) => select,
-            _ => return None,
+        let SessionConfigKind::Select(select) = &option.kind else {
+            return None;
         };
         let current = select.current_value.0.as_ref();
         let name = match &select.options {
@@ -161,7 +159,7 @@ impl SpurAgentCaps {
             _ => None,
         };
 
-        Some(name.unwrap_or_else(|| current.to_string()))
+        Some(name.unwrap_or_else(|| current.to_owned()))
     }
 
     /// Display label for the active reasoning effort from this caps snapshot.

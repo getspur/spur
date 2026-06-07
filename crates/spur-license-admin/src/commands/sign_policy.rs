@@ -11,7 +11,7 @@ use spur_license::policy::SignedPolicy;
 /// If the input already has a `SignedPolicy` wrapper, extracts the inner
 /// payload and re-signs it. Accepts either a 32-byte raw seed file or a
 /// PKCS#8 PEM-encoded Ed25519 private key.
-pub async fn run(
+pub fn run(
     input: &Path,
     output: Option<&Path>,
     key_id: &str,

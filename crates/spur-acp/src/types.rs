@@ -132,7 +132,7 @@ pub enum AgentRole {
 impl AgentRole {
     /// True if this role can receive delegation tasks.
     pub fn is_worker_capable(&self) -> bool {
-        matches!(self, AgentRole::Worker | AgentRole::Both)
+        matches!(self, Self::Worker | Self::Both)
     }
 }
 
@@ -175,7 +175,7 @@ pub enum AgentKind {
     Kimi,
     /// Gemini CLI via `gemini --acp`.
     Gemini,
-    /// OpenCode CLI via `opencode acp`.
+    /// `OpenCode` CLI via `opencode acp`.
     OpenCode,
     /// Any ACP-speaking agent not otherwise recognized.
     #[default]
@@ -189,19 +189,17 @@ impl AgentKind {
     ///
     /// Used by the TUI to style per-executor traces and session panes
     /// when only the `ExecutorNode.agent: String` is in hand.
-    pub fn from_name(name: &str) -> AgentKind {
+    pub fn from_name(name: &str) -> Self {
         let norm = name.trim().to_ascii_lowercase();
         match norm.as_str() {
-            "claude-stream-json" => AgentKind::ClaudeStreamJson,
-            "claude-code-acp" | "claude" | "claude code" | "claude-code" => {
-                AgentKind::ClaudeCodeAcp
-            }
-            "codex-acp" | "codex" => AgentKind::CodexAcp,
-            "kiro" => AgentKind::Kiro,
-            "kimi" | "kimi-code" | "kimi code" => AgentKind::Kimi,
-            "gemini" | "gemini-acp" | "gemini-cli" | "gemini cli" => AgentKind::Gemini,
-            "opencode" | "open-code" => AgentKind::OpenCode,
-            _ => AgentKind::Generic,
+            "claude-stream-json" => Self::ClaudeStreamJson,
+            "claude-code-acp" | "claude" | "claude code" | "claude-code" => Self::ClaudeCodeAcp,
+            "codex-acp" | "codex" => Self::CodexAcp,
+            "kiro" => Self::Kiro,
+            "kimi" | "kimi-code" | "kimi code" => Self::Kimi,
+            "gemini" | "gemini-acp" | "gemini-cli" | "gemini cli" => Self::Gemini,
+            "opencode" | "open-code" => Self::OpenCode,
+            _ => Self::Generic,
         }
     }
 }
