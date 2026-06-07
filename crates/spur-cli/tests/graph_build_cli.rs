@@ -222,6 +222,35 @@ fn graph_build_reads_pointer_artifact_when_default_json_is_missing() {
 }
 
 #[test]
+fn graph_build_publishes_current_when_section_sidecar_fails_with_embeddings_skipped() {
+    let dir = fixture_git_repo();
+
+    let output = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args(["graph", "build", "--workspace", "--no-analyst", "--quiet"])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .env("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1")
+        .env("SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR", "1")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        output.status.success(),
+        "expected success; stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    assert!(artifact_path.is_dir(), "expected graph index artifact dir");
+    assert!(
+        !artifact_path.join("sections.lancedb").exists(),
+        "forced sidecar failure should leave the optional sidecar absent"
+    );
+    let artifact = read_artifact_parquet(&artifact_path).expect("load artifact");
+    assert_eq!(artifact.files.len(), 1);
+}
+
+#[test]
 fn graph_build_custom_output_bypasses_canonical_cache() {
     let dir = fixture_git_repo();
     let output_path = dir.path().join("custom-index");
