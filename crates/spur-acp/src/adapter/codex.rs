@@ -29,12 +29,9 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
 
     // Command shape: {cmd, cwd?}
     if let Some(cmd) = obj.get("cmd").and_then(|v| v.as_str()) {
-        let cwd = obj
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let cwd = obj.get("cwd").and_then(|v| v.as_str()).map(str::to_owned);
         return Some(ToolInputDisplay::Command {
-            cmd: cmd.to_string(),
+            cmd: cmd.to_owned(),
             cwd,
         });
     }
@@ -44,13 +41,10 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
     if let Some(command) = obj.get("command") {
         let cmd = command
             .as_str()
-            .map(str::to_string)
+            .map(str::to_owned)
             .or_else(|| command_array_to_display(command));
         if let Some(cmd) = cmd {
-            let cwd = obj
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let cwd = obj.get("cwd").and_then(|v| v.as_str()).map(str::to_owned);
             return Some(ToolInputDisplay::Command { cmd, cwd });
         }
     }
@@ -58,8 +52,8 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
     // Patch shape: {patch}
     if let Some(patch) = obj.get("patch").and_then(|v| v.as_str()) {
         return Some(ToolInputDisplay::Diff {
-            path: "<patch>".to_string(),
-            diff: patch.to_string(),
+            path: "<patch>".to_owned(),
+            diff: patch.to_owned(),
         });
     }
 
@@ -73,7 +67,7 @@ fn command_array_to_display(command: &Value) -> Option<String> {
         return None;
     }
     if strings.len() >= 3 && matches!(strings[1], "-lc" | "-c") {
-        return Some(strings[2].to_string());
+        return Some(strings[2].to_owned());
     }
     Some(strings.join(" "))
 }
@@ -93,12 +87,12 @@ pub fn try_extract_observe(raw: &Value) -> Option<ObservePayload> {
         .get("stdout")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string();
+        .to_owned();
     let stderr = obj
         .get("stderr")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string();
+        .to_owned();
 
     // Semantic guard: require at least one field to carry meaningful content.
     // An object like `{"exit_code": null, "stdout": "", "stderr": ""}` has all

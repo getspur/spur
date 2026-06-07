@@ -13,11 +13,10 @@ pub enum Tier {
 impl Tier {
     pub fn from_plan(plan: Plan) -> Self {
         match plan {
-            Plan::Community => Self::Community,
             Plan::Pro | Plan::StarterLtd | Plan::BuilderLtd | Plan::FounderLtd => Self::Pro,
             Plan::Team => Self::Team,
             Plan::Enterprise => Self::Enterprise,
-            Plan::Unknown => Self::Community,
+            Plan::Community | Plan::Unknown => Self::Community,
         }
     }
 

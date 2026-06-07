@@ -1,3 +1,20 @@
+#![expect(
+    clippy::doc_markdown,
+    reason = "legacy blob-store docs include path templates and field identifiers"
+)]
+#![expect(
+    clippy::needless_continue,
+    reason = "legacy namespace cleanup keeps match arms visually explicit"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "legacy measured-store error metrics keep not-found and other errors grouped"
+)]
+#![expect(
+    clippy::unused_trait_names,
+    reason = "legacy blob-store hashing modules import extension traits by name"
+)]
+
 //! Content-addressed outcome blob storage for SPUR delegations.
 //!
 //! This crate owns the [`OutcomeStore`] trait and its in-process

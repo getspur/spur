@@ -1,5 +1,5 @@
 //! Vendor-neutral arg-picker descriptors derived from agent-advertised data
-//! (config_options for v1 synthetic commands; AvailableCommand.input + _meta
+//! (`config_options` for v1 synthetic commands; `AvailableCommand.input` + `_meta`
 //! for v2 advertised commands). Consumed by spur-tui without ACP-schema
 //! imports — spur-tui sees only the types defined here.
 
@@ -13,7 +13,7 @@ use agent_client_protocol::schema::{AvailableCommand, AvailableCommandInput};
 ///
 /// PR-3 implements only the free-text case: `typed_hint` is always `None`.
 /// PR-4 will extend this to read `cmd.meta._<vendor>.dev.arg_picker_hint`
-/// for typed pickers (GitRef, FilePath, etc.).
+/// for typed pickers (`GitRef`, `FilePath`, etc.).
 pub fn parse(cmd: &AvailableCommand) -> Option<ArgPickerSpec> {
     match cmd.input.as_ref()? {
         AvailableCommandInput::Unstructured(u) => Some(ArgPickerSpec {
@@ -28,19 +28,19 @@ pub fn parse(cmd: &AvailableCommand) -> Option<ArgPickerSpec> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArgPickerSpec {
     /// Hint string for picker placeholder. Empty when the source is a typed
-    /// select with no free-text fallback (e.g. v1 ConfigOption commands).
+    /// select with no free-text fallback (e.g. v1 `ConfigOption` commands).
     pub free_text_hint: String,
     /// If Some, the picker uses a typed query source. None means free-text.
     pub typed_hint: Option<ArgPickerHint>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgPickerHint {
-    /// v1: picker reads choices from the agent's cached SessionConfigOption
-    /// select for the given config_id.
+    /// v1: picker reads choices from the agent's cached `SessionConfigOption`
+    /// select for the given `config_id`.
     ConfigOption { config_id: String },
     // v2 will add: GitRef { kind: GitRefKind }, etc.
 }
@@ -92,7 +92,7 @@ mod tests {
         assert!(spec.free_text_hint.is_empty());
         assert!(matches!(
             spec.typed_hint,
-            Some(ArgPickerHint::ConfigOption { ref config_id }) if config_id == "model"
+            Some(ArgPickerHint::ConfigOption { config_id }) if config_id == "model"
         ));
     }
 

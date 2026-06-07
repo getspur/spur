@@ -101,7 +101,7 @@ impl<'a> UserMessage<'a> {
 
 // ─── Parsing ────────────────────────────────────────────────────────────
 
-/// Parse a single stdout line into a ClaudeEvent.
+/// Parse a single stdout line into a `ClaudeEvent`.
 /// Returns Err for unknown or malformed event types.
 pub fn parse_event(line: &str) -> Result<ClaudeEvent, serde_json::Error> {
     serde_json::from_str(line)
@@ -109,7 +109,7 @@ pub fn parse_event(line: &str) -> Result<ClaudeEvent, serde_json::Error> {
 
 // ─── Mapping to ACP types ───────────────────────────────────────────────
 
-/// Map a ClaudeEvent to zero or more ACP SessionNotifications.
+/// Map a `ClaudeEvent` to zero or more ACP `SessionNotifications`.
 ///
 /// System and Result events are handled internally by the adapter
 /// and produce no notifications.

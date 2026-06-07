@@ -29,7 +29,10 @@ impl CostTracker {
 
     /// Record the start of a new session.
     // TODO: consolidate args into a SessionStartParams struct to reduce arity.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public tracker API mirrors session-start fields"
+    )]
     pub fn start_session(
         &self,
         id: &SessionId,

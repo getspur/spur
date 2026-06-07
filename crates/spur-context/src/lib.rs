@@ -1,3 +1,24 @@
+#![expect(
+    clippy::clone_on_ref_ptr,
+    reason = "legacy async context wrapper uses clone syntax around Arc engine state"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "context docs mention DuckDB and extractor identifiers throughout"
+)]
+#![expect(
+    clippy::or_fun_call,
+    reason = "legacy reporter date fallback uses eager default calls"
+)]
+#![expect(
+    clippy::uninlined_format_args,
+    reason = "legacy reporter errors use pre-inline format argument style"
+)]
+#![expect(
+    clippy::unused_trait_names,
+    reason = "legacy reporter imports extension traits by name for readability"
+)]
+
 //! SPUR Context Engine — DuckDB-backed analytics.
 //!
 //! This crate provides a unified query interface over agent-generated

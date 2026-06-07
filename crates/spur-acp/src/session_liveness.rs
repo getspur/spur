@@ -48,7 +48,7 @@ pub enum SessionLivenessProbeResult {
 
 #[derive(Debug)]
 pub struct DeadSessionGuard {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "the file handle is held to keep the lock alive")]
     file: File,
     brain_session_id: BrainSessionId,
 }
@@ -88,7 +88,7 @@ impl SessionLivenessProbe {
             }
         };
 
-        use fs4::fs_std::FileExt;
+        use fs4::fs_std::FileExt as _;
         match file.try_lock_exclusive() {
             Ok(true) => SessionLivenessProbeResult::DeadAcquired(DeadSessionGuard {
                 file,
