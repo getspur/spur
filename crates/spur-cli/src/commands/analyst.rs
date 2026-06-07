@@ -834,6 +834,27 @@ mod tests {
     }
 
     #[test]
+    fn init_search_sql_hybrid_macro_has_per_doc_dedup() {
+        let search_hybrid_sql = INIT_SEARCH_SQL
+            .split("CREATE OR REPLACE MACRO search_hybrid(q, vec) AS TABLE")
+            .nth(1)
+            .expect("search_hybrid macro should be present");
+        assert!(
+            search_hybrid_sql.contains("JOIN sections_search ss USING (stable_symbol_id)")
+                && search_hybrid_sql.contains(
+                    "QUALIFY row_number() OVER (PARTITION BY ss.file_path ORDER BY cosine DESC) <= 3",
+                ),
+            "search_hybrid ANN branch must cap vector candidates at 3 per document"
+        );
+        assert!(
+            search_hybrid_sql.contains(
+                "QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY rrf_score DESC NULLS LAST) <= 3",
+            ),
+            "search_hybrid final output must cap fused results at 3 per document"
+        );
+    }
+
+    #[test]
     fn duckdb_cli_present_returns_some_when_on_path() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();
