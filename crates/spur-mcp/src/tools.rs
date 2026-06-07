@@ -1091,6 +1091,44 @@ fn doc_navigate_def() -> ToolDefinition {
     }
 }
 
+fn knowledge_context_pack_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "knowledge_context_pack".into(),
+        description: "Return a bounded, grounded context evidence pack for a natural-language query. Task 2 registers the MCP contract; the handler returns structured not_implemented until the grounded packer lands.".into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": { "type": "string", "minLength": 1 },
+                "intent": {
+                    "type": "string",
+                    "enum": ["explain", "change", "review", "debug", "plan"],
+                    "default": "explain"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "docs", "code", "graph"],
+                    "default": "all"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 8
+                },
+                "include_tests": { "type": "boolean", "default": true },
+                "max_symbol_bodies": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5,
+                    "default": 3
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
 // ─── Issue creation + dependency tools ────────────────────────────
 
 fn create_issue_def() -> ToolDefinition {
@@ -1528,6 +1566,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_subgraph_def(),
         code_symbol_history_def(),
         doc_navigate_def(),
+        knowledge_context_pack_def(),
         submit_plan_def(),
         execute_epic_def(),
         get_plan_status_def(),
@@ -1571,6 +1610,7 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_subgraph_def(),
         code_symbol_history_def(),
         doc_navigate_def(),
+        knowledge_context_pack_def(),
         update_issue_def(),
         report_signal_def(),
         report_progress_def(),
@@ -1653,6 +1693,94 @@ mod schema_truthfulness_tests {
         assert!(
             names.contains(&"recover_orphaned_dispatch"),
             "recover_orphaned_dispatch must appear in tools/list, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn knowledge_context_pack_schema_matches_contract() {
+        let tools = tools_list();
+        let def = tools
+            .iter()
+            .find(|tool| tool.name == "knowledge_context_pack")
+            .expect("knowledge_context_pack must appear in tools/list");
+        let props = def
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("properties");
+
+        assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
+        assert_eq!(
+            def.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+        let mut prop_names = props.keys().cloned().collect::<Vec<_>>();
+        prop_names.sort();
+        assert_eq!(
+            prop_names,
+            vec![
+                "include_tests",
+                "intent",
+                "limit",
+                "max_symbol_bodies",
+                "query",
+                "scope",
+            ],
+            "knowledge_context_pack property set drifted",
+        );
+        assert_eq!(
+            props.get("query").and_then(|v| v.get("minLength")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            props.get("intent").and_then(|v| v.get("enum")),
+            Some(&json!(["explain", "change", "review", "debug", "plan"]))
+        );
+        assert_eq!(
+            props.get("intent").and_then(|v| v.get("default")),
+            Some(&json!("explain"))
+        );
+        assert_eq!(
+            props.get("scope").and_then(|v| v.get("enum")),
+            Some(&json!(["all", "docs", "code", "graph"]))
+        );
+        assert_eq!(
+            props.get("scope").and_then(|v| v.get("default")),
+            Some(&json!("all"))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("minimum")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("maximum")),
+            Some(&json!(20))
+        );
+        assert_eq!(
+            props.get("limit").and_then(|v| v.get("default")),
+            Some(&json!(8))
+        );
+        assert_eq!(
+            props.get("include_tests").and_then(|v| v.get("default")),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            props
+                .get("max_symbol_bodies")
+                .and_then(|v| v.get("minimum")),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            props
+                .get("max_symbol_bodies")
+                .and_then(|v| v.get("maximum")),
+            Some(&json!(5))
+        );
+        assert_eq!(
+            props
+                .get("max_symbol_bodies")
+                .and_then(|v| v.get("default")),
+            Some(&json!(3))
         );
     }
 
@@ -1835,10 +1963,20 @@ mod worker_tools_subset_tests {
         "code_subgraph",
         "code_symbol_history",
         "doc_navigate",
+        "knowledge_context_pack",
         "update_issue",
         "report_signal",
         "report_progress",
     ];
+
+    #[test]
+    fn knowledge_context_pack_appears_in_worker_tools_list() {
+        let actual: Vec<String> = worker_tools_list()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert!(actual.contains(&"knowledge_context_pack".to_string()));
+    }
 
     #[test]
     fn worker_tools_list_contains_exactly_the_curated_set() {
