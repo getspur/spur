@@ -174,6 +174,8 @@ const IMAGE_MIME_TYPES = [
   "image/gif",
 ];
 
+const VIDEO_MIME_TYPES = ["video/mp4", "video/webm"];
+
 const IFRAME_MIN_HEIGHT = 40;
 const IFRAME_HEIGHT_MESSAGE = "jute-iframe-height";
 
@@ -203,6 +205,11 @@ const OutputViewDisplayData = memo(
     const imageHtml = displayImageDataToHtml(output.data, output.metadata);
     if (imageHtml) {
       return <div dangerouslySetInnerHTML={{ __html: imageHtml }}></div>;
+    }
+
+    const videoHtml = displayVideoDataToHtml(output.data, output.metadata);
+    if (videoHtml) {
+      return <div dangerouslySetInnerHTML={{ __html: videoHtml }}></div>;
     }
 
     const html = displayStringData(output.data["text/html"]);
@@ -324,6 +331,22 @@ function displayImageDataToHtml(
         }
         image += " />";
         return image;
+      }
+    }
+  }
+
+  return null;
+}
+
+function displayVideoDataToHtml(
+  data: Record<string, any>,
+  _metadata: Record<string, any>,
+): string | null {
+  for (const videoType of VIDEO_MIME_TYPES) {
+    if (Object.hasOwn(data, videoType)) {
+      const value = data[videoType];
+      if (typeof value === "string") {
+        return `<video controls style="max-width:100%"><source src="data:${videoType};base64,${encode(value)}" type="${videoType}"></video>`;
       }
     }
   }
