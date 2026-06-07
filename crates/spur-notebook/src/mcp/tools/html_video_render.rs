@@ -51,11 +51,13 @@ struct PlaywrightCaptureConfig {
     output_json: String,
     width: u32,
     height: u32,
+    duration_sec: f64,
+    fps: u32,
 }
 
 #[derive(Deserialize)]
 struct PlaywrightCaptureOutput {
-    frame_png_paths: Vec<String>,
+    frame_webm_paths: Vec<String>,
 }
 
 pub fn tool() -> Tool {
@@ -155,21 +157,29 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
         }
     }
 
-    match capture_frame_pngs(&params.frame_html_paths, &scratch_dir, options.resolution).await {
-        Ok(frame_png_paths) => {
-            if frame_png_paths.is_empty() {
+    match capture_frame_webms(
+        &params.frame_html_paths,
+        &scratch_dir,
+        options.resolution,
+        frame_duration,
+        options.fps,
+    )
+    .await
+    {
+        Ok(frame_webm_paths) => {
+            if frame_webm_paths.is_empty() {
                 return Err(McpError::internal_error(
                     format!("{METHOD} produced no frames from Playwright"),
                     Some(json!({ "code": "render_capture_frames_empty" })),
                 ));
             }
 
-            if frame_png_paths.len() == 1 {
-                encode_single_frame(&frame_png_paths[0], &output_path, options, frame_duration)
+            if frame_webm_paths.len() == 1 {
+                encode_single_frame(&frame_webm_paths[0], &output_path, options, frame_duration)
                     .await?;
             } else {
                 encode_frame_sequence(
-                    &frame_png_paths,
+                    &frame_webm_paths,
                     &output_path,
                     &scratch_dir,
                     options,
@@ -180,7 +190,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
 
             Ok(CallToolResult::structured(json!({
                 "output_path": output_path.to_string_lossy(),
-                "frame_count": frame_png_paths.len(),
+                "frame_count": frame_webm_paths.len(),
                 "fps": options.fps,
                 "duration": options.total_duration,
                 "resolution": format!("{}x{}", options.resolution.width, options.resolution.height),
@@ -271,10 +281,12 @@ async fn ensure_node_available() -> Result<(), McpError> {
     Ok(())
 }
 
-async fn capture_frame_pngs(
+async fn capture_frame_webms(
     frame_html_paths: &[String],
     scratch_dir: &Path,
     resolution: RenderDimensions,
+    duration_sec: f64,
+    fps: u32,
 ) -> Result<Vec<PathBuf>, McpError> {
     ensure_node_available().await?;
 
@@ -292,6 +304,8 @@ async fn capture_frame_pngs(
         output_json: output_json.to_string_lossy().to_string(),
         width: resolution.width,
         height: resolution.height,
+        duration_sec,
+        fps,
     };
     let config_json = serde_json::to_string_pretty(&config).map_err(|error| {
         McpError::internal_error(
@@ -350,7 +364,7 @@ async fn capture_frame_pngs(
     })?;
 
     let paths = result
-        .frame_png_paths
+        .frame_webm_paths
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
@@ -358,7 +372,7 @@ async fn capture_frame_pngs(
     for path in paths {
         if !path.is_file() {
             return Err(McpError::invalid_params(
-                "html_video_render received a missing frame screenshot",
+                "html_video_render received a missing frame capture",
                 Some(json!({ "path": path })),
             ));
         }
@@ -368,27 +382,27 @@ async fn capture_frame_pngs(
 }
 
 async fn encode_single_frame(
-    frame_png_path: &Path,
+    frame_webm_path: &Path,
     output_path: &Path,
     options: RenderOptions,
     duration_seconds: f64,
 ) -> Result<(), McpError> {
-    run_ffmpeg_frame_encode(frame_png_path, output_path, options, duration_seconds).await
+    run_ffmpeg_frame_encode(frame_webm_path, output_path, options, duration_seconds).await
 }
 
 async fn encode_frame_sequence(
-    frame_png_paths: &[PathBuf],
+    frame_webm_paths: &[PathBuf],
     output_path: &Path,
     scratch_dir: &Path,
     options: RenderOptions,
     duration_seconds: f64,
 ) -> Result<(), McpError> {
     let segments_dir = scratch_dir;
-    let mut segment_paths = Vec::with_capacity(frame_png_paths.len());
+    let mut segment_paths = Vec::with_capacity(frame_webm_paths.len());
 
-    for (index, frame_png_path) in frame_png_paths.iter().enumerate() {
+    for (index, frame_webm_path) in frame_webm_paths.iter().enumerate() {
         let segment_path = segments_dir.join(format!("spur-html-video-segment-{}.mp4", index));
-        run_ffmpeg_frame_encode(frame_png_path, &segment_path, options, duration_seconds).await?;
+        run_ffmpeg_frame_encode(frame_webm_path, &segment_path, options, duration_seconds).await?;
         segment_paths.push(segment_path);
     }
 
@@ -450,7 +464,7 @@ async fn encode_frame_sequence(
 }
 
 async fn run_ffmpeg_frame_encode(
-    frame_png_path: &Path,
+    frame_webm_path: &Path,
     output_path: &Path,
     options: RenderOptions,
     duration_seconds: f64,
@@ -459,10 +473,8 @@ async fn run_ffmpeg_frame_encode(
         .arg("-y")
         .arg("-loglevel")
         .arg("error")
-        .arg("-loop")
-        .arg("1")
         .arg("-i")
-        .arg(frame_png_path)
+        .arg(frame_webm_path)
         .arg("-c:v")
         .arg("libx264")
         .arg("-pix_fmt")
@@ -501,6 +513,86 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 const { pathToFileURL } = require('node:url');
 
+async function findNewestWebm(dir) {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const webms = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.webm')) {
+      continue;
+    }
+    const filePath = path.join(dir, entry.name);
+    const stat = await fs.stat(filePath);
+    webms.push({ filePath, mtimeMs: stat.mtimeMs });
+  }
+  webms.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return webms.length > 0 ? webms[0].filePath : null;
+}
+
+async function captureScreenshot(browser, htmlPath, outputPath, width, height) {
+  const page = await browser.newPage({
+    viewport: { width, height },
+  });
+  try {
+    const fileUrl = pathToFileURL(htmlPath).toString();
+    await page.goto(fileUrl, { waitUntil: 'networkidle' });
+    await page.screenshot({ path: outputPath, fullPage: true });
+    return outputPath;
+  } finally {
+    await page.close();
+  }
+}
+
+async function captureFrame(browser, config, htmlPath, index) {
+  const frameDir = path.join(config.output_dir, `frame_${String(index).padStart(4, '0')}`);
+  await fs.mkdir(frameDir, { recursive: true });
+
+  let context;
+  let video;
+  try {
+    context = await browser.newContext({
+      viewport: { width: config.width, height: config.height },
+      recordVideo: {
+        dir: frameDir,
+        size: { width: config.width, height: config.height },
+      },
+    });
+    const page = await context.newPage();
+    video = page.video();
+    const fileUrl = pathToFileURL(htmlPath).toString();
+    await page.goto(fileUrl, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(Math.max(1, config.duration_sec * 1000));
+    await context.close();
+    context = null;
+
+    if (video) {
+      try {
+        const videoPath = await video.path();
+        if (videoPath) {
+          return videoPath;
+        }
+      } catch (_) {
+        // Fall through to directory lookup.
+      }
+    }
+
+    const discoveredPath = await findNewestWebm(frameDir);
+    if (discoveredPath) {
+      return discoveredPath;
+    }
+
+    throw new Error(`recordVideo produced no webm for frame ${index}`);
+  } catch (error) {
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    const screenshotPath = path.join(
+      config.output_dir,
+      `frame_${String(index).padStart(4, '0')}.png`,
+    );
+    return captureScreenshot(browser, htmlPath, screenshotPath, config.width, config.height);
+  }
+}
+
 async function main() {
   const configPath = process.argv[2];
   if (!configPath) {
@@ -510,30 +602,19 @@ async function main() {
 
   const config = JSON.parse(await fs.readFile(configPath, 'utf8'));
   const browser = await chromium.launch({ headless: true });
-  const framePngPaths = [];
+  const frameWebmPaths = [];
 
   try {
     for (let index = 0; index < config.frame_html_paths.length; index += 1) {
       const htmlPath = path.resolve(config.frame_html_paths[index]);
-      const outputPath = path.join(
-        config.output_dir,
-        `frame_${String(index).padStart(4, '0')}.png`,
-      );
-
-      const page = await browser.newPage({
-        viewport: { width: config.width, height: config.height },
-      });
-      const fileUrl = pathToFileURL(htmlPath).toString();
-      await page.goto(fileUrl, { waitUntil: 'networkidle' });
-      await page.screenshot({ path: outputPath, fullPage: true });
-      await page.close();
-      framePngPaths.push(outputPath);
+      const outputPath = await captureFrame(browser, config, htmlPath, index);
+      frameWebmPaths.push(outputPath);
     }
   } finally {
     await browser.close();
   }
 
-  await fs.writeFile(config.output_json, JSON.stringify({ frame_png_paths: framePngPaths }));
+  await fs.writeFile(config.output_json, JSON.stringify({ frame_webm_paths: frameWebmPaths }));
 }
 
 main().catch((error) => {
@@ -541,4 +622,20 @@ main().catch((error) => {
   process.exit(1);
 });
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_script_records_webm_video_with_screenshot_fallback() {
+        let script = capture_script();
+
+        assert!(script.contains("recordVideo"));
+        assert!(script.contains("waitForTimeout"));
+        assert!(script.contains("frame_webm_paths"));
+        assert!(script.contains("screenshot"));
+        assert!(!script.contains("frame_png_paths"));
+    }
 }
