@@ -54,6 +54,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 tempfile = "3"
+lancedb = { workspace = true }
 spur-license = { workspace = true, features = ["test-support"] }
 spur-pm = { workspace = true, features = ["test-helpers"] }
 tokio = { workspace = true }
