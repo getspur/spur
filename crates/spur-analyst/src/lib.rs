@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context as _, Result};
 
 const MAX_CONTEXT_CANDIDATES: usize = 40;
+const MAX_GRAPH_CANDIDATES: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeSearchScope {
@@ -134,6 +135,73 @@ pub fn query_context_candidates(
     let candidates = rows
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("failed to read context candidate rows")?;
+
+    Ok(KnowledgeQueryResult {
+        db_path: db_path.display().to_string(),
+        graph_content_hash,
+        candidates,
+    })
+}
+
+pub fn query_graph_candidates(
+    db_path: &Path,
+    query: &str,
+    options: KnowledgeQueryOptions,
+) -> Result<KnowledgeQueryResult> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(anyhow!("knowledge graph query must be non-empty"));
+    }
+    let limit = options.limit.clamp(1, MAX_GRAPH_CANDIDATES);
+
+    let config = duckdb::Config::default()
+        .access_mode(duckdb::AccessMode::ReadOnly)
+        .context("failed to configure read-only duckdb")?;
+    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
+        format!(
+            "failed to open analyst DuckDB read-only at {}",
+            db_path.display()
+        )
+    })?;
+
+    // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
+    // live in DuckDB's ICU extension. Docs-only queries can still work without it,
+    // so keep this best-effort and let query preparation surface real failures.
+    let _ = conn.execute_batch("LOAD icu;");
+
+    let graph_content_hash = conn
+        .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
+        .ok();
+
+    let escaped_query = query.replace('\'', "''");
+    let sql = format!(
+        "SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, \
+         signal, neighbor_kind, edge_bind_method, grounding \
+         FROM search_graph('{escaped_query}') \
+         LIMIT {limit}"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .context("failed to prepare graph candidate query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(KnowledgeCandidate {
+                kind: row.get(0)?,
+                title: row.get(1)?,
+                file_path: row.get(2)?,
+                stable_symbol_id: row.get(3)?,
+                symbol_kind: row.get(4)?,
+                score: row.get(5)?,
+                signal: row.get(6)?,
+                neighbor_kind: row.get(7)?,
+                edge_bind_method: row.get(8)?,
+                grounding: row.get(9)?,
+            })
+        })
+        .context("failed to run graph candidate query")?;
+    let candidates = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read graph candidate rows")?;
 
     Ok(KnowledgeQueryResult {
         db_path: db_path.display().to_string(),
