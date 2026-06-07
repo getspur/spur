@@ -574,19 +574,60 @@ fn report_section_sidecar_progress(
             batch_index,
             batch_rows,
             embedding_eligible_rows,
+            embeddings_available,
             processed_rows,
             total_rows,
         } => {
             if let Some(progress) = progress {
                 let batch_start = processed_rows.saturating_sub(batch_rows);
                 progress.set_position(u64::try_from(batch_start).unwrap_or(u64::MAX));
-                progress.set_message(format!(
-                    "batch {}: embedding {}/{} eligible rows",
-                    fmt_thousands(batch_index),
-                    fmt_thousands(embedding_eligible_rows),
-                    fmt_thousands(batch_rows)
-                ));
+                let message = if embedding_eligible_rows == 0 {
+                    format!(
+                        "batch {}: writing {} rows, no embedding-eligible rows",
+                        fmt_thousands(batch_index),
+                        fmt_thousands(batch_rows)
+                    )
+                } else if embeddings_available {
+                    format!(
+                        "batch {}: preparing {} embedding-eligible rows",
+                        fmt_thousands(batch_index),
+                        fmt_thousands(embedding_eligible_rows)
+                    )
+                } else {
+                    format!(
+                        "batch {}: writing {} rows, embeddings unavailable",
+                        fmt_thousands(batch_index),
+                        fmt_thousands(batch_rows)
+                    )
+                };
+                progress.set_message(message);
                 progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
+            }
+        }
+        SectionSidecarProgressEvent::EmbeddingChunkStarted {
+            batch_index,
+            batch_rows,
+            chunk_index,
+            chunk_count,
+            chunk_rows,
+            completed_eligible_rows,
+            embedding_eligible_rows,
+            processed_rows,
+            total_rows,
+        } => {
+            if let Some(progress) = progress {
+                let batch_start = processed_rows.saturating_sub(batch_rows);
+                progress.set_position(u64::try_from(batch_start).unwrap_or(u64::MAX));
+                progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                progress.set_message(format!(
+                    "batch {}: embedding chunk {}/{} ({}-{}/{} eligible rows)",
+                    fmt_thousands(batch_index),
+                    fmt_thousands(chunk_index),
+                    fmt_thousands(chunk_count),
+                    fmt_thousands(completed_eligible_rows + 1),
+                    fmt_thousands(completed_eligible_rows + chunk_rows),
+                    fmt_thousands(embedding_eligible_rows)
+                ));
             }
         }
         SectionSidecarProgressEvent::BatchWritten {
@@ -607,14 +648,17 @@ fn report_section_sidecar_progress(
                 ));
             }
         }
-        SectionSidecarProgressEvent::ModelDownloading { model_name } => {
+        SectionSidecarProgressEvent::ModelDownloading {
+            model_name,
+            approximate_size_mb,
+        } => {
             if let Some(progress) = progress {
                 progress.set_message(format!(
-                    "downloading embedding model ({model_name}) — first run only, ~270 MB"
+                    "preparing embedding model ({model_name}) — first run may download ~{approximate_size_mb} MB"
                 ));
             }
             println!(
-                "[spur] Downloading embedding model {model_name} (~270 MB, cached after first run)"
+                "[spur] Preparing embedding model {model_name} (~{approximate_size_mb} MB, cached after first run)"
             );
         }
         SectionSidecarProgressEvent::Indexing { label } => {
