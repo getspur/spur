@@ -251,6 +251,37 @@ fn graph_build_publishes_current_when_section_sidecar_fails_with_embeddings_skip
 }
 
 #[test]
+fn graph_build_no_section_embeddings_flag_publishes_loadable_artifact() {
+    let dir = fixture_tree();
+
+    let output = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args([
+            "graph",
+            "build",
+            "--workspace",
+            "--no-analyst",
+            "--quiet",
+            "--no-section-embeddings",
+        ])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .env_remove("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        output.status.success(),
+        "expected success; stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    assert!(artifact_path.is_dir(), "expected graph index artifact dir");
+    let artifact = read_artifact_parquet(&artifact_path).expect("load artifact");
+    assert_eq!(artifact.files.len(), 1);
+}
+
+#[test]
 fn graph_build_custom_output_bypasses_canonical_cache() {
     let dir = fixture_git_repo();
     let output_path = dir.path().join("custom-index");

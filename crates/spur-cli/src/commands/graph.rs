@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,7 +10,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
-use spur_graph::store::lance_sections::write_sections_dataset_best_effort;
+use spur_graph::store::lance_sections::{
+    write_sections_dataset_best_effort_with_options, SectionEmbeddingOptions,
+    SECTION_EMBED_SKIP_ENV,
+};
 use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
     artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
@@ -33,6 +37,13 @@ pub struct GraphBuildOptions {
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
+    build_with_section_embedding_override(options, false)
+}
+
+pub fn build_with_section_embedding_override(
+    options: GraphBuildOptions,
+    no_section_embeddings: bool,
+) -> anyhow::Result<()> {
     let root = match (options.root, options.workspace) {
         (Some(path), _) => path,
         (None, _) => resolve_worktree_root_from(std::env::current_dir()?),
@@ -52,6 +63,8 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
 
     let temporal_shard_config = options.temporal_shard_config;
     let use_temporal = should_use_temporal(options.with_temporal);
+    let section_embedding_options =
+        SectionEmbeddingOptions::from_env_with_skip_override(no_section_embeddings);
     let warmup_stats = if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
         let stats = WarmupStats::collect(&root, use_temporal)?;
@@ -177,7 +190,12 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                 if !uses_output_override {
                     spur_graph::write_current_pointer(&root, &written_dir)?;
                 }
-                write_sections_dataset_best_effort(&artifact, &root, &written_dir);
+                write_sections_dataset_best_effort_with_options(
+                    &artifact,
+                    &root,
+                    &written_dir,
+                    section_embedding_options,
+                );
                 Ok::<_, anyhow::Error>(written_dir)
             })();
             match &result {
@@ -221,7 +239,12 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                     Vec::new(),
                 )?;
                 let written_dir = staging.commit()?;
-                write_sections_dataset_best_effort(&artifact, &root, &written_dir);
+                write_sections_dataset_best_effort_with_options(
+                    &artifact,
+                    &root,
+                    &written_dir,
+                    section_embedding_options,
+                );
                 Ok::<_, anyhow::Error>(written_dir)
             })();
             match &result {
@@ -256,7 +279,9 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         );
         {
             let _entered = write_span.enter();
-            let result = spur_graph::store::cache::write_with_dedup(&artifact, &root, &ctx);
+            let result = with_section_embedding_env_override(no_section_embeddings, || {
+                spur_graph::store::cache::write_with_dedup(&artifact, &root, &ctx)
+            });
             match &result {
                 Ok(()) => {
                     tracing::info!(
@@ -305,7 +330,12 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
                 if !uses_output_override {
                     spur_graph::write_current_pointer(&root, &written_dir)?;
                 }
-                write_sections_dataset_best_effort(&artifact, &root, &written_dir);
+                write_sections_dataset_best_effort_with_options(
+                    &artifact,
+                    &root,
+                    &written_dir,
+                    section_embedding_options,
+                );
                 Ok::<_, anyhow::Error>(written_dir)
             })();
             match &result {
@@ -359,6 +389,43 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
 
 fn should_skip_analyst(skip_analyst: bool) -> bool {
     skip_analyst || matches!(std::env::var("SPUR_GRAPH_SKIP_ANALYST"), Ok(v) if v == "1")
+}
+
+fn with_section_embedding_env_override<T>(
+    skip_embeddings: bool,
+    f: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if !skip_embeddings {
+        return f();
+    }
+
+    // cache::write_with_dedup owns section sidecar creation but exposes no
+    // embedding options. Keep the env-compatible override scoped to that
+    // synchronous cache publication call.
+    let _guard = EnvGuard::set(SECTION_EMBED_SKIP_ENV, "1");
+    f()
+}
+
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
 }
 
 fn should_use_temporal(with_temporal: bool) -> bool {
