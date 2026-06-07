@@ -1,5 +1,6 @@
 use std::process::Command;
 
+use spur_graph::store::lance_sections::{SECTIONS_DATASET_DIR, SECTIONS_TABLE};
 use spur_graph::{read_artifact_parquet, read_current_pointer};
 
 fn spur_binary() -> std::path::PathBuf {
@@ -31,6 +32,17 @@ fn fixture_git_repo() -> tempfile::TempDir {
     .expect("write source");
     run_git(dir.path(), &["add", "src/lib.rs"]);
     run_git(dir.path(), &["commit", "-m", "initial"]);
+    dir
+}
+
+fn fixture_tree_with_markdown_sections() -> tempfile::TempDir {
+    let dir = fixture_tree();
+    std::fs::create_dir_all(dir.path().join("docs")).expect("mkdir docs");
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "# Guide\n\nIntro body.\n\n## One\n\nBody one.\n\n## Two\n\nBody two.\n\n## Three\n\nBody three.\n\n## Four\n\nBody four.\n\n## Five\n\nBody five.\n",
+    )
+    .expect("write guide");
     dir
 }
 
@@ -279,6 +291,64 @@ fn graph_build_no_section_embeddings_flag_publishes_loadable_artifact() {
     assert!(artifact_path.is_dir(), "expected graph index artifact dir");
     let artifact = read_artifact_parquet(&artifact_path).expect("load artifact");
     assert_eq!(artifact.files.len(), 1);
+}
+
+#[tokio::test]
+async fn graph_build_section_sidecar_streaming_writes_all_rows() {
+    let dir = fixture_tree_with_markdown_sections();
+
+    let output = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args([
+            "graph",
+            "build",
+            "--workspace",
+            "--no-analyst",
+            "--quiet",
+            "--no-section-embeddings",
+        ])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .env_remove("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS")
+        .env_remove("SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR")
+        .env("SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE", "2")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        output.status.success(),
+        "expected success; stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    assert!(artifact_path.is_dir(), "expected graph index artifact dir");
+    let artifact = read_artifact_parquet(&artifact_path).expect("load artifact");
+    let expected_rows = artifact
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_kind == "section")
+        .count();
+    assert!(
+        expected_rows > 2,
+        "test fixture should cross the configured write batch boundary"
+    );
+
+    let dataset_dir = artifact_path.join(SECTIONS_DATASET_DIR);
+    assert!(dataset_dir.exists(), "sections.lancedb should exist");
+    let db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .expect("connect lancedb");
+    let table = db
+        .open_table(SECTIONS_TABLE)
+        .execute()
+        .await
+        .expect("open section_bodies table");
+
+    assert_eq!(
+        table.count_rows(None).await.expect("count rows"),
+        expected_rows
+    );
 }
 
 #[test]
