@@ -19,7 +19,10 @@ use serde_json::{json, Value};
 #[cfg(feature = "datasource-introspect")]
 use spur_notebook::mcp::tools::list_datasources;
 use spur_notebook::{
-    dag::{notebook_port_root, notebook_run_context, CellRunReport, CellRunStatus, PortStore},
+    dag::{
+        notebook_port_root, notebook_run_context, CellRunReport, CellRunStatus, PortKind, PortRead,
+        PortStore,
+    },
     mcp::{
         bridge::{
             AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester, TauriBridgeRequester,
@@ -1082,26 +1085,30 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
         .manifest()
         .get("t")
         .expect("port manifest contains t")
-        .schema
+        .kind
         .clone();
+    let PortKind::Arrow(entry_schema) = entry_schema else {
+        panic!("expected Arrow manifest entry");
+    };
     let read = store.get("t").expect("rust reads deno-written port");
-    let row_count = read
-        .batches
+    let PortRead::Arrow {
+        schema, batches, ..
+    } = read
+    else {
+        panic!("expected Arrow port read");
+    };
+    let row_count = batches
         .iter()
         .map(arrow_array::RecordBatch::num_rows)
         .sum::<usize>();
 
     assert_eq!(row_count, 2);
-    assert_eq!(entry_schema, read.schema.as_ref().clone());
-    assert_eq!(read.schema.fields().len(), 4);
-    assert_eq!(read.schema.field(0).name(), "id");
-    assert_eq!(
-        read.schema.field(0).data_type(),
-        &arrow_schema::DataType::Int32
-    );
+    assert_eq!(entry_schema, schema.as_ref().clone());
+    assert_eq!(schema.fields().len(), 4);
+    assert_eq!(schema.field(0).name(), "id");
+    assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Int32);
 
-    let occurred_at = read
-        .schema
+    let occurred_at = schema
         .field_with_name("occurred_at")
         .expect("timestamp field exists");
     assert_eq!(
@@ -1117,8 +1124,7 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
         occurred_at.data_type()
     );
 
-    let amount = read
-        .schema
+    let amount = schema
         .field_with_name("amount")
         .expect("decimal field exists");
     assert_eq!(
@@ -1133,8 +1139,7 @@ async fn deno_write_port_is_readable_from_deno_and_rust() {
         amount.data_type()
     );
 
-    let category = read
-        .schema
+    let category = schema
         .field_with_name("category")
         .expect("dictionary field exists");
     assert_eq!(
@@ -1251,14 +1256,19 @@ async fn polyglot_run_cascade_reads_python_port_from_deno() {
     let read = store
         .get("py_table")
         .expect("rust reads python-written port");
-    let row_count = read
-        .batches
+    let PortRead::Arrow {
+        schema, batches, ..
+    } = read
+    else {
+        panic!("expected Arrow port read");
+    };
+    let row_count = batches
         .iter()
         .map(arrow_array::RecordBatch::num_rows)
         .sum::<usize>();
     assert_eq!(row_count, 2);
-    assert_eq!(read.schema.field(0).name(), "value");
-    assert_eq!(read.schema.field(1).name(), "label");
+    assert_eq!(schema.field(0).name(), "value");
+    assert_eq!(schema.field(1).name(), "label");
 
     let _ = stop_kernel::call(
         context.deps.as_ref(),

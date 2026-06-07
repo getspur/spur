@@ -208,7 +208,6 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::dag::ai::acp_backend::AcpAgentBackend;
-    use crate::dag::ai::NullAiBackend;
     use crate::dag::cell_runner::NotebookCellRunner;
     use crate::dag::engine::{
         CellRunOutcome, CellRunRequest, CellRunStatus, CellRunner, EngineError,
@@ -395,7 +394,10 @@ mod tests {
         let store =
             PortStore::open_read_only_at(notebook_port_root(notebook_path)).expect("port store");
         let read = store.get(port).expect("read output port");
-        let column = read.batches[0]
+        let crate::dag::PortRead::Arrow { batches, .. } = read else {
+            panic!("expected Arrow output port");
+        };
+        let column = batches[0]
             .column(0)
             .as_any()
             .downcast_ref::<StringArray>()

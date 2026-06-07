@@ -64,7 +64,7 @@ where
 
             for port in &routing.consumed {
                 let read = store.get(port)?;
-                port_versions.push((port.clone(), read.version));
+                port_versions.push((port.clone(), read.version()));
                 context.push(render_port_context(port, &read));
             }
 
@@ -448,8 +448,16 @@ mod tests {
         let store =
             PortStore::open_read_only_at(notebook_port_root(notebook_path)).expect("port store");
         let read = store.get(port).expect("read output");
-        assert_eq!(read.version, version);
-        let column = read.batches[0]
+        let crate::dag::PortRead::Arrow {
+            version: actual_version,
+            batches,
+            ..
+        } = read
+        else {
+            panic!("expected Arrow output port");
+        };
+        assert_eq!(actual_version, version);
+        let column = batches[0]
             .column(0)
             .as_any()
             .downcast_ref::<StringArray>()

@@ -1,6 +1,8 @@
 use super::PortContext;
 use crate::dag::ports::PortRead;
 
+use std::fmt::Write as _;
+
 use arrow_array::{
     Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
     LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
@@ -10,11 +12,23 @@ use arrow_schema::DataType;
 const MAX_ROWS: usize = 50;
 
 /// Render an Arrow port to a compact, model-friendly text table:
-/// a header line of column names, then up to MAX_ROWS comma-joined rows.
+/// a header line of column names, then up to `MAX_ROWS` comma-joined rows.
 pub fn render_port_context(port: &str, read: &PortRead) -> PortContext {
+    let PortRead::Arrow {
+        schema, batches, ..
+    } = read
+    else {
+        let PortRead::Media { mime, bytes, .. } = read else {
+            unreachable!("PortRead variants are exhaustive")
+        };
+        return PortContext {
+            port: port.to_owned(),
+            rendered: format!("media,{mime},{} bytes\n", bytes.len()),
+        };
+    };
+
     let mut rendered = String::new();
-    let columns: Vec<String> = read
-        .schema
+    let columns: Vec<String> = schema
         .fields()
         .iter()
         .map(|field| field.name().clone())
@@ -22,10 +36,10 @@ pub fn render_port_context(port: &str, read: &PortRead) -> PortContext {
     rendered.push_str(&columns.join(","));
     rendered.push('\n');
 
-    let total_rows: usize = read.batches.iter().map(|batch| batch.num_rows()).sum();
+    let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
     let mut emitted = 0usize;
 
-    'batches: for batch in &read.batches {
+    'batches: for batch in batches {
         for row in 0..batch.num_rows() {
             if emitted >= MAX_ROWS {
                 break 'batches;
@@ -43,10 +57,11 @@ pub fn render_port_context(port: &str, read: &PortRead) -> PortContext {
     }
 
     if total_rows > emitted {
-        rendered.push_str(&format!(
-            "... ({} more rows truncated)\n",
+        let _ = writeln!(
+            rendered,
+            "... ({} more rows truncated)",
             total_rows - emitted
-        ));
+        );
     }
 
     PortContext {
@@ -57,7 +72,7 @@ pub fn render_port_context(port: &str, read: &PortRead) -> PortContext {
 
 fn array_value_to_string(array: &dyn Array, row: usize) -> String {
     if array.is_null(row) {
-        return "NULL".to_string();
+        return "NULL".to_owned();
     }
 
     match array.data_type() {
@@ -142,7 +157,7 @@ mod tests {
         )
         .expect("test batch is valid");
 
-        crate::dag::ports::PortRead {
+        crate::dag::ports::PortRead::Arrow {
             path: PathBuf::from("df.arrow"),
             version: 1,
             schema,
@@ -177,7 +192,7 @@ mod tests {
             ],
         )
         .expect("test batch is valid");
-        let read = crate::dag::ports::PortRead {
+        let read = crate::dag::ports::PortRead::Arrow {
             path: PathBuf::from("df.arrow"),
             version: 1,
             schema,

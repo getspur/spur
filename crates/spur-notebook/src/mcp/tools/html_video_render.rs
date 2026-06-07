@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::dag::{notebook_port_root, PortRead, PortStore};
 use crate::mcp::ServerDeps;
 
 const METHOD: &str = "html_video_render";
@@ -23,7 +24,10 @@ const DEFAULT_FRAME_DURATION: f64 = 3.0;
 
 #[derive(Debug, Deserialize)]
 struct HtmlVideoRenderParams {
+    #[serde(default)]
     webm_frames: Vec<String>,
+    #[serde(default)]
+    port_names: Vec<String>,
     output_path: String,
     #[serde(default)]
     resolution: Option<String>,
@@ -49,12 +53,20 @@ struct RenderOptions {
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Render base64-encoded webm frames into an mp4 file using ffmpeg.",
+        "Render webm media ports or base64-encoded webm frames into an mp4 file using ffmpeg.",
         rmcp_object(json!({
             "type": "object",
-            "required": ["webm_frames", "output_path"],
+            "required": ["output_path"],
             "properties": {
                 "webm_frames": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "port_names": {
                     "type": "array",
                     "minItems": 1,
                     "items": {
@@ -75,15 +87,15 @@ pub fn tool() -> Tool {
 pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
     let params: HtmlVideoRenderParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
-            format!("{METHOD} requires {{ webm_frames, output_path, resolution?, fps?, frame_duration? }}"),
+            format!("{METHOD} requires {{ output_path, webm_frames?, port_names?, resolution?, fps?, frame_duration? }}"),
             Some(json!({ "error": error.to_string() })),
         )
     })?;
 
-    if params.webm_frames.is_empty() {
+    if params.webm_frames.is_empty() && params.port_names.is_empty() {
         return Err(McpError::invalid_params(
-            format!("{METHOD} requires at least one webm_frame"),
-            Some(json!({ "code": "missing_webm_frames" })),
+            format!("{METHOD} requires at least one webm_frame or port_name"),
+            Some(json!({ "code": "missing_frames" })),
         ));
     }
 
@@ -97,7 +109,12 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
         .frame_duration
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(DEFAULT_FRAME_DURATION);
-    let total_duration = frame_duration * params.webm_frames.len() as f64;
+    let frame_bytes = if params.port_names.is_empty() {
+        decode_webm_frames(&params.webm_frames)?
+    } else {
+        read_webm_port_frames(_deps, &params.port_names).await?
+    };
+    let total_duration = frame_duration * frame_bytes.len() as f64;
 
     let output_path = normalize_output_path(&params.output_path);
     if let Some(parent) = output_path
@@ -128,7 +145,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
         total_duration,
     };
 
-    let frame_webm_paths = write_webm_frames(&params.webm_frames, &scratch_dir)?;
+    let frame_webm_paths = write_webm_frames(&frame_bytes, &scratch_dir)?;
 
     if frame_webm_paths.len() == 1 {
         encode_single_frame(&frame_webm_paths[0], &output_path, options, frame_duration).await?;
@@ -213,19 +230,84 @@ async fn ensure_ffmpeg_available() -> Result<(), McpError> {
     Ok(())
 }
 
-fn write_webm_frames(webm_frames: &[String], scratch_dir: &Path) -> Result<Vec<PathBuf>, McpError> {
-    let mut frame_webm_paths = Vec::with_capacity(webm_frames.len());
-    for (index, encoded) in webm_frames.iter().enumerate() {
-        let bytes = STANDARD.decode(encoded).map_err(|error| {
-            McpError::invalid_params(
-                format!("{METHOD} received invalid base64 webm data"),
-                Some(json!({
-                    "code": "invalid_webm_frame_base64",
-                    "frame_index": index,
-                    "error": error.to_string(),
-                })),
+fn decode_webm_frames(webm_frames: &[String]) -> Result<Vec<Vec<u8>>, McpError> {
+    webm_frames
+        .iter()
+        .enumerate()
+        .map(|(index, encoded)| {
+            STANDARD.decode(encoded).map_err(|error| {
+                McpError::invalid_params(
+                    format!("{METHOD} received invalid base64 webm data"),
+                    Some(json!({
+                        "code": "invalid_webm_frame_base64",
+                        "frame_index": index,
+                        "error": error.to_string(),
+                    })),
+                )
+            })
+        })
+        .collect()
+}
+
+async fn read_webm_port_frames(
+    deps: &ServerDeps,
+    port_names: &[String],
+) -> Result<Vec<Vec<u8>>, McpError> {
+    let state = deps.state.as_ref().ok_or_else(|| {
+        McpError::internal_error(
+            format!("{METHOD} port_names require notebook daemon state"),
+            Some(json!({ "code": "notebook_state_unavailable" })),
+        )
+    })?;
+    let notebook_path = if let Some(daemon) = &deps.daemon {
+        daemon.current_path().await
+    } else {
+        state.get_notebook().path()
+    }
+    .ok_or_else(|| {
+        McpError::internal_error(
+            format!("{METHOD} port_names require an open notebook path"),
+            Some(json!({ "code": "notebook_path_unavailable" })),
+        )
+    })?;
+    let store =
+        PortStore::open_read_only_at(notebook_port_root(&notebook_path)).map_err(|error| {
+            McpError::internal_error(
+                format!("{METHOD} failed to open notebook port store"),
+                Some(json!({ "error": error.to_string() })),
             )
         })?;
+
+    port_names
+        .iter()
+        .map(|port| {
+            let read = store.get(port).map_err(|error| {
+                McpError::invalid_params(
+                    format!("{METHOD} could not read media port"),
+                    Some(json!({ "port": port, "error": error.to_string() })),
+                )
+            })?;
+            match read {
+                PortRead::Media { mime, bytes, .. } if mime == "video/webm" => Ok(bytes),
+                PortRead::Media { mime, .. } => Err(McpError::invalid_params(
+                    format!("{METHOD} media port must be video/webm"),
+                    Some(json!({ "port": port, "mime": mime })),
+                )),
+                PortRead::Arrow { .. } => Err(McpError::invalid_params(
+                    format!("{METHOD} port is Arrow data, not media"),
+                    Some(json!({ "port": port })),
+                )),
+            }
+        })
+        .collect()
+}
+
+fn write_webm_frames(
+    webm_frames: &[Vec<u8>],
+    scratch_dir: &Path,
+) -> Result<Vec<PathBuf>, McpError> {
+    let mut frame_webm_paths = Vec::with_capacity(webm_frames.len());
+    for (index, bytes) in webm_frames.iter().enumerate() {
         let path = scratch_dir.join(format!("spur-html-video-frame-{index}.webm"));
         fs::write(&path, bytes).map_err(|error| {
             McpError::internal_error(

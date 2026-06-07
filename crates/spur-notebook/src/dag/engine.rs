@@ -30,7 +30,7 @@ use crate::mcp::{
     ServerDeps,
 };
 
-use super::{notebook_port_root, NotebookDag, PortStore, PortStoreError};
+use super::{notebook_port_root, NotebookDag, PortPayload, PortRead, PortStore, PortStoreError};
 
 const DEFAULT_SOURCE_DEBOUNCE: Duration = Duration::from_millis(150);
 const DEFAULT_MAX_IN_FLIGHT: usize = 4;
@@ -55,7 +55,13 @@ impl Default for ReactiveEngineConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcePush {
     pub source: DagSource,
-    pub ipc_bytes: Vec<u8>,
+    pub payload: SourcePayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourcePayload {
+    IpcBytes(Vec<u8>),
+    MediaBlob { bytes: Vec<u8>, mime: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,7 +325,20 @@ where
         self.ensure_dag_kernels().await?;
 
         let mut ports = PortStore::open_at(&self.port_root)?;
-        ports.put(&push.source.port, &push.ipc_bytes)?;
+        match &push.payload {
+            SourcePayload::IpcBytes(bytes) => {
+                ports.put(&push.source.port, bytes)?;
+            }
+            SourcePayload::MediaBlob { bytes, mime } => {
+                ports.put(
+                    &push.source.port,
+                    PortPayload::MediaBlob {
+                        bytes,
+                        mime: mime.as_str(),
+                    },
+                )?;
+            }
+        }
 
         let graph = self.graph.as_ref().expect("graph was rebuilt");
         let stale = graph.stale_from_source(&push.source)?;
@@ -626,10 +645,23 @@ where
                 Err(error) => return Err(error.into()),
             };
             let before = before_versions.get(port).copied().flatten();
-            if Some(read.version) == before {
-                // `ipc_bytes` is now an arrow Buffer (zero-copy mmap of the port
-                // file); deref to &[u8] so it routes through PortPayload::IpcBytes.
-                store.put(port, &*read.ipc_bytes)?;
+            if Some(read.version()) == before {
+                match read {
+                    PortRead::Arrow { ipc_bytes, .. } => {
+                        // `ipc_bytes` is an arrow Buffer (zero-copy mmap of the port
+                        // file); deref to &[u8] so it routes through PortPayload::IpcBytes.
+                        store.put(port, &*ipc_bytes)?;
+                    }
+                    PortRead::Media { bytes, mime, .. } => {
+                        store.put(
+                            port,
+                            PortPayload::MediaBlob {
+                                bytes: &bytes,
+                                mime: &mime,
+                            },
+                        )?;
+                    }
+                }
                 changed = true;
             }
         }
@@ -1262,7 +1294,7 @@ mod tests {
         let report = engine
             .process_source_push(SourcePush {
                 source: source("csv", "sales"),
-                ipc_bytes: ipc_bytes(),
+                payload: SourcePayload::IpcBytes(ipc_bytes()),
             })
             .await
             .expect("source push");
@@ -1289,7 +1321,7 @@ mod tests {
                 .expect("open ports")
                 .get("sales")
                 .expect("source port written")
-                .version,
+                .version(),
             1
         );
     }
@@ -1324,7 +1356,7 @@ mod tests {
         engine
             .process_source_push(SourcePush {
                 source: source("csv", "sales"),
-                ipc_bytes: ipc_bytes(),
+                payload: SourcePayload::IpcBytes(ipc_bytes()),
             })
             .await
             .expect("source push");
@@ -1366,7 +1398,7 @@ mod tests {
         let report = engine
             .process_source_push(SourcePush {
                 source: source("csv", "sales"),
-                ipc_bytes: ipc_bytes(),
+                payload: SourcePayload::IpcBytes(ipc_bytes()),
             })
             .await
             .expect("source push");
@@ -1419,7 +1451,7 @@ mod tests {
         let report = engine
             .process_source_push(SourcePush {
                 source: source("csv", "sales"),
-                ipc_bytes: ipc_bytes(),
+                payload: SourcePayload::IpcBytes(ipc_bytes()),
             })
             .await
             .expect("source push");
@@ -1481,9 +1513,9 @@ mod tests {
             vec!["a", "b", "c"]
         );
         let ports = PortStore::open_at(temp.path()).expect("open ports");
-        assert_eq!(ports.get("a").expect("a bumped").version, 2);
-        assert_eq!(ports.get("b").expect("b unchanged").version, 1);
-        assert_eq!(ports.get("z").expect("z untouched").version, 1);
+        assert_eq!(ports.get("a").expect("a bumped").version(), 2);
+        assert_eq!(ports.get("b").expect("b unchanged").version(), 1);
+        assert_eq!(ports.get("z").expect("z untouched").version(), 1);
     }
 
     #[tokio::test]
@@ -1945,11 +1977,11 @@ mod tests {
 
         debounce.push(SourcePush {
             source: source("csv", "sales"),
-            ipc_bytes: vec![1],
+            payload: SourcePayload::IpcBytes(vec![1]),
         });
         debounce.push(SourcePush {
             source: source("csv", "sales"),
-            ipc_bytes: vec![2],
+            payload: SourcePayload::IpcBytes(vec![2]),
         });
 
         assert_eq!(debounce.pending_len(), 1);

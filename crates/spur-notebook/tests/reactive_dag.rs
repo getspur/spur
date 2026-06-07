@@ -436,8 +436,8 @@ async fn run_cell_cascade_reruns_target_then_downstream_cells() {
         .collect::<Vec<_>>();
     assert_eq!(requests, ["source", "left", "join"]);
     let ports = PortStore::open_at(&port_root).expect("open ports");
-    assert_eq!(ports.get("raw").expect("raw bumped").version, 2);
-    assert_eq!(ports.get("left").expect("left unchanged").version, 1);
+    assert_eq!(ports.get("raw").expect("raw bumped").version(), 2);
+    assert_eq!(ports.get("left").expect("left unchanged").version(), 1);
 }
 
 #[tokio::test]

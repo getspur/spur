@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::{
     dag::{
         graph::{resolve_source_for_port, SourcePortError},
-        SourcePush,
+        SourcePayload, SourcePush,
     },
     mcp::{tools::parse_byte_payload, ServerDeps},
 };
@@ -79,7 +79,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     engine
         .push_source(SourcePush {
             source,
-            ipc_bytes: payload,
+            payload: SourcePayload::IpcBytes(payload),
         })
         .await
         .map_err(|error| {
@@ -124,7 +124,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::{
-        dag::{ReactiveEngineClient, SourcePush},
+        dag::{ReactiveEngineClient, SourcePayload, SourcePush},
         mcp::{
             bridge::{AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester},
             DaemonWindowOps, NotebookDaemonControl, ServerDeps,
@@ -279,7 +279,7 @@ mod tests {
         let push = rx.recv().await.expect("source push queued");
         assert_eq!(push.source.kind, "csv");
         assert_eq!(push.source.port, "sales");
-        assert_eq!(push.ipc_bytes, vec![1, 2, 3]);
+        assert_eq!(push.payload, SourcePayload::IpcBytes(vec![1, 2, 3]));
     }
 
     #[tokio::test]

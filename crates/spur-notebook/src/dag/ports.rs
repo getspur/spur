@@ -18,7 +18,7 @@ use arrow_ipc::{
 use arrow_schema::{ArrowError, Schema, SchemaRef};
 use directories::BaseDirs;
 use memmap2::Mmap;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 const MANIFEST_FILE: &str = "manifest.json";
@@ -49,11 +49,17 @@ pub enum PortStoreError {
     Arrow(#[from] ArrowError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortKind {
+    Arrow(Schema),
+    Media { mime: String, size: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortEntry {
     pub path: PathBuf,
     pub version: u64,
-    pub schema: Schema,
+    pub kind: PortKind,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,21 +68,120 @@ pub struct PortManifest {
 }
 
 #[derive(Debug)]
-pub struct PortRead {
-    pub path: PathBuf,
-    pub version: u64,
-    pub schema: SchemaRef,
-    pub batches: Vec<RecordBatch>,
-    /// Raw Arrow IPC File bytes, backed by the memory-mapped port file. The
-    /// decoded `batches` reference this same buffer, so reads are zero-copy and
-    /// the buffer can be re-shipped to other consumers without re-encoding.
-    pub ipc_bytes: Buffer,
+pub enum PortRead {
+    Arrow {
+        path: PathBuf,
+        version: u64,
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+        /// Raw Arrow IPC File bytes, backed by the memory-mapped port file. The
+        /// decoded `batches` reference this same buffer, so reads are zero-copy and
+        /// the buffer can be re-shipped to other consumers without re-encoding.
+        ipc_bytes: Buffer,
+    },
+    Media {
+        path: PathBuf,
+        version: u64,
+        mime: String,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum PortPayload<'a> {
     RecordBatch(&'a RecordBatch),
     IpcBytes(&'a [u8]),
+    MediaBlob { bytes: &'a [u8], mime: &'a str },
+}
+
+impl Serialize for PortEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct WireEntry<'a> {
+            path: &'a Path,
+            version: u64,
+            kind: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            schema: Option<&'a Schema>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            mime: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            size: Option<u64>,
+        }
+
+        let wire = match &self.kind {
+            PortKind::Arrow(schema) => WireEntry {
+                path: &self.path,
+                version: self.version,
+                kind: "arrow",
+                schema: Some(schema),
+                mime: None,
+                size: None,
+            },
+            PortKind::Media { mime, size } => WireEntry {
+                path: &self.path,
+                version: self.version,
+                kind: "media",
+                schema: None,
+                mime: Some(mime),
+                size: Some(*size),
+            },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PortEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireEntry {
+            path: PathBuf,
+            version: u64,
+            #[serde(default)]
+            kind: Option<String>,
+            #[serde(default)]
+            schema: Option<Schema>,
+            #[serde(default)]
+            mime: Option<String>,
+            #[serde(default)]
+            size: Option<u64>,
+        }
+
+        let wire = WireEntry::deserialize(deserializer)?;
+        let kind = match wire.kind.as_deref().unwrap_or("arrow") {
+            "arrow" | "Arrow" => PortKind::Arrow(
+                wire.schema
+                    .ok_or_else(|| de::Error::missing_field("schema"))?,
+            ),
+            "media" | "Media" => PortKind::Media {
+                mime: wire.mime.ok_or_else(|| de::Error::missing_field("mime"))?,
+                size: wire.size.ok_or_else(|| de::Error::missing_field("size"))?,
+            },
+            other => {
+                return Err(de::Error::unknown_variant(other, &["arrow", "media"]));
+            }
+        };
+
+        Ok(Self {
+            path: wire.path,
+            version: wire.version,
+            kind,
+        })
+    }
+}
+
+impl PortRead {
+    pub fn version(&self) -> u64 {
+        match self {
+            Self::Arrow { version, .. } | Self::Media { version, .. } => *version,
+        }
+    }
 }
 
 impl<'a> From<&'a RecordBatch> for PortPayload<'a> {
@@ -160,26 +265,42 @@ impl PortStore {
     ) -> Result<PortEntry, PortStoreError> {
         validate_path_segment(port)?;
 
-        let payload = payload.into();
-        let ipc_bytes = match payload {
-            PortPayload::RecordBatch(batch) => ipc_bytes_for_batch(batch)?,
-            PortPayload::IpcBytes(bytes) => bytes.to_vec(),
+        let (bytes, kind, extension) = match payload.into() {
+            PortPayload::RecordBatch(batch) => {
+                let ipc_bytes = ipc_bytes_for_batch(batch)?;
+                let (schema, _) = read_ipc(&ipc_bytes)?;
+                (ipc_bytes, PortKind::Arrow(schema.as_ref().clone()), "arrow")
+            }
+            PortPayload::IpcBytes(bytes) => {
+                let ipc_bytes = bytes.to_vec();
+                let (schema, _) = read_ipc(&ipc_bytes)?;
+                (ipc_bytes, PortKind::Arrow(schema.as_ref().clone()), "arrow")
+            }
+            PortPayload::MediaBlob { bytes, mime } => (
+                bytes.to_vec(),
+                PortKind::Media {
+                    mime: mime.to_owned(),
+                    size: bytes.len() as u64,
+                },
+                "media",
+            ),
         };
-        let (schema, _) = read_ipc(&ipc_bytes)?;
 
         let version = self
             .manifest
             .ports
             .get(port)
             .map_or(1, |entry| entry.version + 1);
-        let path = self.ports_dir.join(format!("{port}@v{version}.arrow"));
+        let path = self
+            .ports_dir
+            .join(format!("{port}@v{version}.{extension}"));
 
-        fs::write(&path, &ipc_bytes).map_err(|source| io_error(&path, source))?;
+        fs::write(&path, &bytes).map_err(|source| io_error(&path, source))?;
 
         let entry = PortEntry {
             path,
             version,
-            schema: schema.as_ref().clone(),
+            kind,
         };
         let mut next_manifest = self.manifest.clone();
         next_manifest.ports.insert(port.to_owned(), entry.clone());
@@ -189,13 +310,30 @@ impl PortStore {
         Ok(entry)
     }
 
-    #[allow(unsafe_code)] // memmap2::Mmap::map: maps a write-once, atomically-renamed port file.
+    #[expect(
+        unsafe_code,
+        reason = "memmap2::Mmap::map maps a write-once, atomically-renamed port file"
+    )]
     pub fn get(&self, port: &str) -> Result<PortRead, PortStoreError> {
         let entry = self
             .manifest
             .ports
             .get(port)
             .ok_or_else(|| PortStoreError::MissingPort(port.to_owned()))?;
+        if entry.path.extension().and_then(|value| value.to_str()) == Some("media") {
+            let bytes = fs::read(&entry.path).map_err(|source| io_error(&entry.path, source))?;
+            let mime = match &entry.kind {
+                PortKind::Media { mime, .. } => mime.clone(),
+                PortKind::Arrow(_) => "application/octet-stream".to_owned(),
+            };
+            return Ok(PortRead::Media {
+                path: entry.path.clone(),
+                version: entry.version,
+                mime,
+                bytes,
+            });
+        }
+
         let file = fs::File::open(&entry.path).map_err(|source| io_error(&entry.path, source))?;
         // SAFETY: port files are written once via create + atomic rename and are
         // never mutated in place (each `put` writes a new versioned file), so the
@@ -204,7 +342,7 @@ impl PortStore {
         let ipc_bytes = mmap_to_buffer(mmap);
         let (schema, batches) = decode_ipc_file(&ipc_bytes)?;
 
-        Ok(PortRead {
+        Ok(PortRead::Arrow {
             path: entry.path.clone(),
             version: entry.version,
             schema,
@@ -262,7 +400,10 @@ fn read_ipc(bytes: &[u8]) -> Result<(SchemaRef, Vec<RecordBatch>), PortStoreErro
 /// Wrap a memory-mapped region in an Arrow [`Buffer`] without copying. The
 /// `Mmap` is moved into the buffer's allocation owner, keeping the mapping alive
 /// for exactly as long as the buffer (and any arrays sliced from it) are used.
-#[allow(unsafe_code)] // Buffer::from_custom_allocation: wraps the mmap; the Mmap owner backs it.
+#[expect(
+    unsafe_code,
+    reason = "Buffer::from_custom_allocation wraps the mmap and keeps the Mmap owner alive"
+)]
 fn mmap_to_buffer(mmap: Mmap) -> Buffer {
     let len = mmap.len();
     if len == 0 {
@@ -304,17 +445,17 @@ fn decode_ipc_file(buffer: &Buffer) -> Result<(SchemaRef, Vec<RecordBatch>), Por
 
     let mut decoder = FileDecoder::new(Arc::clone(&schema), footer.version());
     if let Some(dictionaries) = footer.dictionaries() {
-        for block in dictionaries.iter() {
-            let data = block_slice(buffer, &block);
-            decoder.read_dictionary(&block, &data)?;
+        for block in dictionaries {
+            let data = block_slice(buffer, block);
+            decoder.read_dictionary(block, &data)?;
         }
     }
 
     let mut batches = Vec::new();
     if let Some(record_batches) = footer.recordBatches() {
-        for block in record_batches.iter() {
-            let data = block_slice(buffer, &block);
-            if let Some(batch) = decoder.read_record_batch(&block, &data)? {
+        for block in record_batches {
+            let data = block_slice(buffer, block);
+            if let Some(batch) = decoder.read_record_batch(block, &data)? {
                 batches.push(batch);
             }
         }
@@ -449,8 +590,47 @@ mod tests {
         );
         assert_eq!(1, entry.version);
         assert_eq!(
-            Schema::new(vec![Field::new("id", DataType::Int64, false)]),
-            entry.schema
+            PortKind::Arrow(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
+            entry.kind
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_without_kind_defaults_to_arrow_schema() {
+        let manifest_json = r#"{
+  "ports": {
+    "legacy": {
+      "path": "/tmp/spur-notebook/ports/legacy@v4.arrow",
+      "version": 4,
+      "schema": {
+        "fields": [
+          {
+            "name": "value",
+            "data_type": "Utf8",
+            "nullable": false,
+            "dict_id": 0,
+            "dict_is_ordered": false,
+            "metadata": {}
+          }
+        ],
+        "metadata": {}
+      }
+    }
+  }
+}"#;
+
+        let manifest: PortManifest =
+            serde_json::from_str(manifest_json).expect("legacy manifest deserializes");
+        let entry = manifest.ports.get("legacy").expect("legacy port entry");
+
+        assert_eq!(4, entry.version);
+        assert_eq!(
+            PortKind::Arrow(Schema::new(vec![Field::new(
+                "value",
+                DataType::Utf8,
+                false
+            )])),
+            entry.kind
         );
     }
 
@@ -516,12 +696,25 @@ mod tests {
         let first_entry = store.put("sales", &first).expect("put first batch");
         assert_eq!(1, first_entry.version);
         assert_eq!(dir.path().join("ports/sales@v1.arrow"), first_entry.path);
+        assert_eq!(
+            PortKind::Arrow(first.schema().as_ref().clone()),
+            first_entry.kind
+        );
 
         let first_read = store.get("sales").expect("get first batch");
-        assert_eq!(1, first_read.version);
-        assert_eq!(first.schema().as_ref(), first_read.schema.as_ref());
-        assert_eq!(1, first_read.batches.len());
-        assert_batch_eq(&first, &first_read.batches[0]);
+        let PortRead::Arrow {
+            version,
+            schema,
+            batches,
+            ..
+        } = first_read
+        else {
+            panic!("expected Arrow port read");
+        };
+        assert_eq!(1, version);
+        assert_eq!(first.schema().as_ref(), schema.as_ref());
+        assert_eq!(1, batches.len());
+        assert_batch_eq(&first, &batches[0]);
 
         let second = batch(vec![3, 4, 5], vec!["gamma", "delta", "epsilon"]);
         let second_entry = store.put("sales", &second).expect("put second batch");
@@ -532,12 +725,65 @@ mod tests {
         let manifest_entry = reloaded.manifest().get("sales").expect("manifest entry");
         assert_eq!(2, manifest_entry.version);
         assert_eq!(dir.path().join("ports/sales@v2.arrow"), manifest_entry.path);
-        assert_eq!(second.schema().as_ref(), &manifest_entry.schema);
+        assert_eq!(
+            PortKind::Arrow(second.schema().as_ref().clone()),
+            manifest_entry.kind
+        );
 
         let second_read = reloaded.get("sales").expect("get latest batch");
-        assert_eq!(2, second_read.version);
-        assert_eq!(second.schema().as_ref(), second_read.schema.as_ref());
-        assert_eq!(1, second_read.batches.len());
-        assert_batch_eq(&second, &second_read.batches[0]);
+        let PortRead::Arrow {
+            version,
+            schema,
+            batches,
+            ..
+        } = second_read
+        else {
+            panic!("expected Arrow port read");
+        };
+        assert_eq!(2, version);
+        assert_eq!(second.schema().as_ref(), schema.as_ref());
+        assert_eq!(1, batches.len());
+        assert_batch_eq(&second, &batches[0]);
+    }
+
+    #[test]
+    fn put_get_round_trip_preserves_media_blob_and_mime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = PortStore::open_at(dir.path()).expect("open store");
+        let webm = b"webm bytes";
+
+        let entry = store
+            .put(
+                "frame-1",
+                PortPayload::MediaBlob {
+                    bytes: webm,
+                    mime: "video/webm",
+                },
+            )
+            .expect("put media blob");
+
+        assert_eq!(1, entry.version);
+        assert_eq!(dir.path().join("ports/frame-1@v1.media"), entry.path);
+        assert_eq!(
+            PortKind::Media {
+                mime: "video/webm".to_string(),
+                size: webm.len() as u64,
+            },
+            entry.kind
+        );
+
+        let read = store.get("frame-1").expect("get media blob");
+        let PortRead::Media {
+            version,
+            mime,
+            bytes,
+            ..
+        } = read
+        else {
+            panic!("expected media port read");
+        };
+        assert_eq!(1, version);
+        assert_eq!("video/webm", mime);
+        assert_eq!(webm, bytes.as_slice());
     }
 }
