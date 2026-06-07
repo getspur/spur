@@ -61,11 +61,7 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
     })?;
 
     let exact_context = exact_graph_context_for_result(&request, &query_result).await;
-    Ok(pack_query_result_with_exact_context(
-        &request,
-        query_result,
-        exact_context,
-    ))
+    Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
 }
 
 struct KnowledgeContextPackRequest {
@@ -271,8 +267,11 @@ fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Va
 }
 
 #[cfg(test)]
-fn pack_query_result(request: &KnowledgeContextPackRequest, result: KnowledgeQueryResult) -> Value {
-    pack_query_result_with_exact_context(request, result, ExactGraphContext::default())
+async fn pack_query_result(
+    request: &KnowledgeContextPackRequest,
+    result: KnowledgeQueryResult,
+) -> Value {
+    pack_query_result_with_exact_context(request, result, ExactGraphContext::default()).await
 }
 
 #[derive(Debug, Clone, Default)]
@@ -322,18 +321,20 @@ async fn exact_graph_context_for_result(
 }
 
 async fn impact_summary_for_selector(selector: &str) -> Option<SymbolImpactSummary> {
-    let callers = super::code_graph::code_callers(&json!({
+    let callers_args = json!({
         "selector": selector,
         "include_unresolved": true,
-    }))
-    .await
-    .ok()?;
-    let callees = super::code_graph::code_callees(&json!({
+    });
+    let callees_args = json!({
         "selector": selector,
         "include_unresolved": true,
-    }))
-    .await
-    .ok()?;
+    });
+    let (callers, callees) = tokio::join!(
+        super::code_graph::code_callers(&callers_args),
+        super::code_graph::code_callees(&callees_args)
+    );
+    let callers = callers.ok()?;
+    let callees = callees.ok()?;
 
     let callers_count = array_len(&callers, "callers")?;
     let callees_count = array_len(&callees, "callees")?;
@@ -392,18 +393,79 @@ fn normalized_code_selector(stable_symbol_id: &str) -> String {
     )
 }
 
-fn pack_query_result_with_exact_context(
+async fn pack_query_result_with_exact_context(
     request: &KnowledgeContextPackRequest,
     result: KnowledgeQueryResult,
     exact_context: ExactGraphContext,
 ) -> Value {
-    let (primary_evidence, supporting_docs) = split_evidence(&result.candidates, request);
+    let (mut primary_evidence, supporting_docs) = split_evidence(&result.candidates, request);
+    let total_candidates = result.candidates.len();
+    let total_code = result
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.kind == "code" || candidate.kind == "symbol")
+        .count();
+    let total_docs = result
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.kind == "doc")
+        .count();
+    if request.max_symbol_bodies > 0 {
+        let body_selectors: Vec<String> = primary_evidence
+            .iter()
+            .take(request.max_symbol_bodies as usize)
+            .filter_map(|evidence| {
+                evidence
+                    .get("stable_symbol_id")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+            .collect();
+        for selector in &body_selectors {
+            if let Ok(body) = super::code_graph::code_read_symbol(&json!({
+                "selector": selector,
+            }))
+            .await
+            {
+                if let Some(source) = body.get("source").and_then(Value::as_str) {
+                    if let Some(evidence) = primary_evidence.iter_mut().find(|evidence| {
+                        evidence.get("stable_symbol_id").and_then(Value::as_str)
+                            == Some(selector.as_str())
+                    }) {
+                        if let Some(object) = evidence.as_object_mut() {
+                            object.insert("source".into(), json!(source));
+                            if let Some(line_range) = body.get("line_range") {
+                                object.insert("line_range".into(), line_range.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let recommended_next_tools = recommended_next_tools(request.intent, &primary_evidence);
     let answerable = !primary_evidence.is_empty() || !supporting_docs.is_empty();
-    let confidence = if answerable { "medium" } else { "low" };
+    let confidence = if !answerable {
+        "low"
+    } else {
+        let top_score = primary_evidence
+            .first()
+            .and_then(|evidence| evidence.get("score").and_then(Value::as_f64))
+            .unwrap_or(0.0);
+        let evidence_count = primary_evidence.len() + supporting_docs.len();
+        if top_score > 8.0 && evidence_count >= 3 {
+            "high"
+        } else if top_score > 3.0 || evidence_count >= 2 {
+            "medium"
+        } else {
+            "low"
+        }
+    };
     let impact = impact_value(exact_context.impact.as_ref());
     let staleness = staleness_value(&result, &exact_context);
     let mut pack = base_pack(request, result.graph_content_hash.clone(), staleness);
+    let returned_primary = primary_evidence.len();
+    let returned_supporting_docs = supporting_docs.len();
 
     if let Some(object) = pack.as_object_mut() {
         object.insert("answerable".into(), json!(answerable));
@@ -420,6 +482,16 @@ fn pack_query_result_with_exact_context(
         object.insert(
             "recommended_next_tools".into(),
             Value::Array(recommended_next_tools),
+        );
+        object.insert(
+            "candidates".into(),
+            json!({
+                "total": total_candidates,
+                "returned_primary": returned_primary,
+                "returned_supporting_docs": returned_supporting_docs,
+                "total_code": total_code,
+                "total_docs": total_docs,
+            }),
         );
     }
     pack
@@ -591,9 +663,21 @@ fn evidence_from_candidate(candidate: &KnowledgeCandidate, intent: KnowledgeInte
         "neighbor_kind": candidate.neighbor_kind,
         "edge_bind_method": candidate.edge_bind_method,
         "grounding": candidate.grounding,
-        "why_relevant": "Matched analyst candidate for query",
+        "why_relevant": build_why_relevant(candidate),
         "next": next
     })
+}
+
+fn build_why_relevant(candidate: &KnowledgeCandidate) -> String {
+    let mut parts = vec![format!("BM25 {:.1}", candidate.score)];
+    if let Some(signal) = &candidate.signal {
+        parts.push(signal.clone());
+    }
+    if let Some(kind) = &candidate.symbol_kind {
+        parts.push(format!("kind={kind}"));
+    }
+    parts.push(format!("grounding={}", candidate.grounding));
+    parts.join(", ")
 }
 
 fn recommended_next_tools(intent: KnowledgeIntent, primary_evidence: &[Value]) -> Vec<Value> {
@@ -680,8 +764,182 @@ mod tests {
         );
     }
 
-    #[test]
-    fn knowledge_context_pack_returns_grounded_evidence_and_followups() {
+    #[tokio::test]
+    async fn knowledge_context_pack_explains_why_evidence_is_relevant() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "semantic search"
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![KnowledgeCandidate {
+                kind: "code".into(),
+                title: "query_context_candidates".into(),
+                file_path: "crates/spur-analyst/src/lib.rs".into(),
+                stable_symbol_id: Some("sym-1".into()),
+                symbol_kind: Some("function".into()),
+                score: 7.5,
+                signal: Some("stable".into()),
+                neighbor_kind: Some("primary".into()),
+                edge_bind_method: None,
+                grounding: "bm25-code".into(),
+            }],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+        let why_relevant = pack["primary_evidence"][0]["why_relevant"]
+            .as_str()
+            .expect("why relevant");
+
+        assert!(why_relevant.contains("BM25"));
+        assert!(why_relevant.contains("grounding=bm25-code"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_reports_high_confidence_for_strong_evidence_set() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "semantic search",
+            "limit": 3
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "top_symbol".into(),
+                    file_path: "crates/spur-mcp/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-top".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 9.2,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "supporting_symbol".into(),
+                    file_path: "crates/spur-core/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-support".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 4.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "doc".into(),
+                    title: "Knowledge Context API".into(),
+                    file_path: "docs/context.md".into(),
+                    stable_symbol_id: Some("doc-1".into()),
+                    symbol_kind: Some("section".into()),
+                    score: 3.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-doc".into(),
+                },
+            ],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+
+        assert_eq!(pack["confidence"], "high");
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_reports_low_confidence_for_single_weak_evidence() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "semantic search"
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![KnowledgeCandidate {
+                kind: "code".into(),
+                title: "weak_symbol".into(),
+                file_path: "crates/spur-mcp/src/lib.rs".into(),
+                stable_symbol_id: Some("sym-weak".into()),
+                symbol_kind: Some("function".into()),
+                score: 2.5,
+                signal: None,
+                neighbor_kind: None,
+                edge_bind_method: None,
+                grounding: "bm25-code".into(),
+            }],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+
+        assert_eq!(pack["confidence"], "low");
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_reports_candidate_totals() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "semantic search",
+            "limit": 3
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "code_symbol".into(),
+                    file_path: "crates/spur-mcp/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-code".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 7.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "symbol".into(),
+                    title: "graph_symbol".into(),
+                    file_path: "crates/spur-graph/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-graph".into()),
+                    symbol_kind: Some("struct".into()),
+                    score: 6.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "doc".into(),
+                    title: "Knowledge Context API".into(),
+                    file_path: "docs/context.md".into(),
+                    stable_symbol_id: Some("doc-1".into()),
+                    symbol_kind: Some("section".into()),
+                    score: 5.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-doc".into(),
+                },
+            ],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+
+        assert_eq!(pack["candidates"]["total"], 3);
+        assert_eq!(pack["candidates"]["returned_primary"], 2);
+        assert_eq!(pack["candidates"]["returned_supporting_docs"], 1);
+        assert_eq!(pack["candidates"]["total_code"], 2);
+        assert_eq!(pack["candidates"]["total_docs"], 1);
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_returns_grounded_evidence_and_followups() {
         let request = KnowledgeContextPackRequest::parse(&json!({
             "query": "semantic search",
             "intent": "change",
@@ -734,7 +992,7 @@ mod tests {
             ],
         };
 
-        let pack = pack_query_result(&request, result);
+        let pack = pack_query_result(&request, result).await;
 
         assert_eq!(pack["query"], "semantic search");
         assert_eq!(pack["intent"], "change");
@@ -770,8 +1028,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn knowledge_context_pack_includes_bounded_impact_for_top_code_evidence() {
+    #[tokio::test]
+    async fn knowledge_context_pack_includes_bounded_impact_for_top_code_evidence() {
         let request = KnowledgeContextPackRequest::parse(&json!({
             "query": "change impact",
             "intent": "change",
@@ -809,7 +1067,8 @@ mod tests {
                     callee_neighbors: vec![json!({ "title": "callee_a" })],
                 }),
             },
-        );
+        )
+        .await;
 
         assert_eq!(pack["impact"]["callers_count"], 4);
         assert_eq!(pack["impact"]["callees_count"], 2);
@@ -825,8 +1084,8 @@ mod tests {
         assert_eq!(pack["primary_evidence"][0]["impact"]["popular_sink"], false);
     }
 
-    #[test]
-    fn knowledge_context_pack_marks_popular_sink_without_expanding_neighbors() {
+    #[tokio::test]
+    async fn knowledge_context_pack_marks_popular_sink_without_expanding_neighbors() {
         let request = KnowledgeContextPackRequest::parse(&json!({
             "query": "popular impact",
             "intent": "change",
@@ -864,7 +1123,8 @@ mod tests {
                     callee_neighbors: vec![json!({ "title": "callee_a" })],
                 }),
             },
-        );
+        )
+        .await;
 
         assert_eq!(pack["impact"]["callers_count"], 31);
         assert_eq!(pack["impact"]["popular_sink"], true);
