@@ -607,6 +607,16 @@ fn report_section_sidecar_progress(
                 ));
             }
         }
+        SectionSidecarProgressEvent::ModelDownloading { model_name } => {
+            if let Some(progress) = progress {
+                progress.set_message(format!(
+                    "downloading embedding model ({model_name}) — first run only, ~270 MB"
+                ));
+            }
+            println!(
+                "[spur] Downloading embedding model {model_name} (~270 MB, cached after first run)"
+            );
+        }
         SectionSidecarProgressEvent::Indexing { label } => {
             if let Some(progress) = progress {
                 progress.set_message(format!("building {label} index"));
