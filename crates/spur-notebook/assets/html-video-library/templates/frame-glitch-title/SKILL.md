@@ -1,21 +1,26 @@
 ---
 name: frame-glitch-title
-description: CSS-only chromatic glitch title card for short video openers, chapter breaks, and high-energy text reveals.
+description: Canvas chromatic glitch title card for short video openers, chapter breaks, and high-energy text reveals.
 ---
 # Frame: Glitch Title
 
 Use this template when a video needs an immediate title-card hit: a large
-headline with chromatic aberration, scanlines, and short CSS glitch bursts.
+headline with chromatic aberration, scanlines, and short glitch bursts.
+
+## Capture Contract
+
+The template renders all visible content to one `<canvas data-capture="true">`.
+Do not add DOM-rendered visual layers, CSS animations, external fonts, scripts,
+images, or CDN links. The script sizes the canvas with
+`canvas.width = window.innerWidth` and `canvas.height = window.innerHeight`,
+then starts a `requestAnimationFrame` loop on load so `canvas.captureStream()`
+records the same pixels shown in the iframe preview.
 
 ## Inputs
 
-- `title`: the main title text. Replace every `SYSTEM SHOCK` occurrence in
-  `template.html`, including the `data-text` attribute and pseudo-layer text.
-- Optional kicker and footer copy can be edited in the `.kicker` and `.footer`
-  elements.
+- `copy.title`: the main title text.
+- `copy.kicker`: the small uppercase label above the title.
+- `copy.footer`: the supporting line below the title.
 
-## Usage
-
-Keep the template self-contained. Do not add external fonts, scripts, images,
-or CDN links. The animation starts on page load through CSS keyframes, so the
-frame can be captured directly by a browser-based renderer.
+Customize colors, slice offsets, glow positions, and scanline density inside the
+inline `frame()` function.

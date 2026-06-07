@@ -3,21 +3,21 @@
     "id": "frame-glitch-title",
     "title": "Glitch Title",
     "intent": "Create an energetic opener or title card with chromatic aberration glitch text that animates immediately on load.",
-    "summary": "CSS-only animated title frame with layered red and cyan offsets, scanlines, and short glitch bursts.",
+    "summary": "Canvas-rendered title frame with layered red and cyan offsets, scanlines, and short glitch bursts.",
     "tags": ["title", "opener", "glitch", "text"]
   },
   {
     "id": "frame-data-rollup",
     "title": "Data Rollup",
     "intent": "Create a compact data visualization frame with animated horizontal bars for labels and numeric values.",
-    "summary": "Self-contained CSS and JavaScript bar chart that springs each bar width into place on load.",
+    "summary": "Self-contained canvas bar chart that springs each bar width into place on load.",
     "tags": ["data", "chart", "bars", "rollup"]
   },
   {
     "id": "frame-liquid-hero",
     "title": "Liquid Hero",
     "intent": "Create a polished hero or opener frame with a flowing animated gradient background and centered headline.",
-    "summary": "Self-contained animated gradient hero frame with headline, subtext, and soft liquid motion.",
+    "summary": "Self-contained canvas gradient hero frame with headline, subtext, and soft liquid motion.",
     "tags": ["hero", "opener", "gradient", "headline"]
   }
 ]
