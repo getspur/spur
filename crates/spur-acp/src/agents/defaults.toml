@@ -76,7 +76,7 @@ avoid_for = [
 ]
 strengths = ["model flexibility via OpenRouter"]
 limitations = ["behavior varies by routed model"]
-input_expectations = "Specify the routed model in seed args; assume baseline capability."
+input_expectations = "Select the routed model through ACP session config or the OpenCode default config; assume baseline capability."
 output_shape = "Unified diff + brief rationale."
 
 [kimi]

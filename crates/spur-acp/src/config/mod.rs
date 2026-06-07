@@ -1152,6 +1152,21 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_opencode_starts_acp_without_cli_model_arg() {
+        // OpenCode accepts `-m` for run mode, but `opencode -m <model> acp`
+        // is rejected before ACP initialize. ACP model selection is a
+        // session config option, so the seed must spawn only the ACP server.
+        let seeds = load_seed_template();
+        let opencode = seeds
+            .entries
+            .iter()
+            .find(|a| a.name == "opencode")
+            .expect("opencode should be in seed template");
+        assert_eq!(opencode.kind, crate::types::AgentKind::OpenCode);
+        assert_eq!(opencode.effective_args(), vec!["acp".to_string()]);
+    }
+
+    #[test]
     fn brain_delegation_framework_defaults_per_build() {
         // Empty [brain.delegation] block → build-aware default.
         let toml = r#"
