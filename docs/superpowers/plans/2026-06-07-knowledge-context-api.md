@@ -45,7 +45,7 @@ flowchart LR
 
 ### Task 1: Analyst Context Candidate Query Layer
 
-**Task ID:** `task-1-analyst-context-candidates`
+**Task ID:** `t1-candidates`
 
 **Files:**
 - Modify: `crates/spur-context/poc/duckdb-analyst/init_search.sql`
@@ -243,7 +243,7 @@ git commit -m "feat(spur-analyst): task-1 add context candidate query"
 
 ### Task 2: Register `knowledge_context_pack` MCP Contract
 
-**Task ID:** `task-2-mcp-tool-contract`
+**Task ID:** `t2-contract`
 
 **Files:**
 - Modify: `crates/spur-mcp/Cargo.toml`
@@ -251,7 +251,7 @@ git commit -m "feat(spur-analyst): task-1 add context candidate query"
 - Modify: `crates/spur-mcp/src/server/handlers/mod.rs`
 - Create: `crates/spur-mcp/src/server/handlers/knowledge_context.rs`
 
-**Depends on:** `task-1-analyst-context-candidates`
+**Depends on:** `t1-candidates`
 
 **Acceptance Criteria:**
 - [ ] `knowledge_context_pack` appears in `tools_list()` and `worker_tools_list()`.
@@ -364,14 +364,14 @@ git commit -m "feat(spur-mcp): task-2 register knowledge context tool"
 
 ### Task 3: Implement Grounded Context Pack Handler
 
-**Task ID:** `task-3-grounded-context-pack`
+**Task ID:** `t3-pack`
 
 **Files:**
 - Modify: `crates/spur-mcp/src/server/handlers/knowledge_context.rs`
 - Modify: `crates/spur-mcp/src/server/handlers/code_graph.rs` only if narrow helper visibility is required
 - Add tests in: `crates/spur-mcp/src/server/handlers/knowledge_context.rs`
 
-**Depends on:** `task-2-mcp-tool-contract`
+**Depends on:** `t2-contract`
 
 **Acceptance Criteria:**
 - [ ] Handler resolves `.spur/analyst.duckdb` from the configured repository root.
@@ -478,7 +478,7 @@ git commit -m "feat(spur-mcp): task-3 implement grounded context pack"
 
 ### Task 4: Add Impact Summaries, Documentation, And Full Verification
 
-**Task ID:** `task-4-impact-tests-docs`
+**Task ID:** `t4-impact`
 
 **Files:**
 - Modify: `crates/spur-mcp/src/server/handlers/knowledge_context.rs`
@@ -486,7 +486,7 @@ git commit -m "feat(spur-mcp): task-3 implement grounded context pack"
 - Modify: `docs/superpowers/specs/2026-06-07-knowledge-context-api-design.ipynb` only to add a short implementation note if behavior differs from spec
 - Modify: `docs/superpowers/plans/2026-06-07-knowledge-context-api.md` only if worker discovers the accepted plan needs a documented correction
 
-**Depends on:** `task-3-grounded-context-pack`
+**Depends on:** `t3-pack`
 
 **Acceptance Criteria:**
 - [ ] For top code evidence, response includes bounded impact counts: `callers_count`, `callees_count`, and `popular_sink`.
