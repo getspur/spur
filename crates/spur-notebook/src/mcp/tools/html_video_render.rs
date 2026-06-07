@@ -37,7 +37,7 @@ struct RenderDimensions {
     height: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct RenderOptions {
     fps: u32,
     resolution: RenderDimensions,
@@ -242,7 +242,7 @@ async fn ensure_ffmpeg_available() -> Result<(), McpError> {
             )
         })?;
 
-    if !status.success() {
+    if !status.status.success() {
         return Err(McpError::internal_error(
             "html_video_render requires ffmpeg in PATH",
             Some(json!({ "code": "ffmpeg_unavailable" })),
@@ -262,7 +262,7 @@ async fn ensure_node_available() -> Result<(), McpError> {
                 Some(json!({ "code": "node_unavailable", "error": error.to_string() })),
             )
         })?;
-    if !status.success() {
+    if !status.status.success() {
         return Err(McpError::internal_error(
             "html_video_render requires node for Playwright capture",
             Some(json!({ "code": "node_unavailable" })),
@@ -325,7 +325,7 @@ async fn capture_frame_pngs(
                 Some(json!({ "code": "playwright_capture_launch_failed", "error": error.to_string() })),
             )
         })?;
-    if !status.success() {
+    if !status.status.success() {
         let stderr = String::from_utf8_lossy(&status.stderr);
         return Err(McpError::internal_error(
             "html_video_render could not capture html frames (Playwright/Node)",
@@ -439,7 +439,7 @@ async fn encode_frame_sequence(
                 Some(json!({ "error": error.to_string(), "code": "ffmpeg_concat_launch_failed" })),
             )
         })?;
-    if !status.success() {
+    if !status.status.success() {
         let stderr = String::from_utf8_lossy(&status.stderr);
         return Err(McpError::internal_error(
             "html_video_render failed to concat rendered frame segments",
@@ -485,7 +485,7 @@ async fn run_ffmpeg_frame_encode(
                 Some(json!({ "error": error.to_string(), "code": "ffmpeg_launch_failed" })),
             )
         })?;
-    if !status.success() {
+    if !status.status.success() {
         let stderr = String::from_utf8_lossy(&status.stderr);
         return Err(McpError::internal_error(
             format!("{METHOD} failed to encode frame"),
