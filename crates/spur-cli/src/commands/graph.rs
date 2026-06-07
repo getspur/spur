@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -11,8 +10,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset_best_effort_with_options, SectionEmbeddingOptions,
-    SECTION_EMBED_SKIP_ENV,
+    write_sections_dataset_best_effort_with_sidecar_options_and_progress, SectionSidecarOptions,
+    SectionSidecarProgressCallback, SectionSidecarProgressEvent,
 };
 use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
@@ -63,8 +62,16 @@ pub fn build_with_section_embedding_override(
 
     let temporal_shard_config = options.temporal_shard_config;
     let use_temporal = should_use_temporal(options.with_temporal);
-    let section_embedding_options =
-        SectionEmbeddingOptions::from_env_with_skip_override(no_section_embeddings);
+    let section_sidecar_options =
+        SectionSidecarOptions::from_env_with_skip_override(no_section_embeddings);
+    let section_progress_bar = (!options.quiet).then(section_sidecar_progress_bar);
+    let section_progress_reporter =
+        |event| report_section_sidecar_progress(section_progress_bar.as_ref(), event);
+    let section_sidecar_progress = if options.quiet {
+        None
+    } else {
+        Some(&section_progress_reporter as &SectionSidecarProgressCallback<'_>)
+    };
     let warmup_stats = if !options.quiet {
         println!("[spur] Building code graph index for {}", root.display());
         let stats = WarmupStats::collect(&root, use_temporal)?;
@@ -190,11 +197,12 @@ pub fn build_with_section_embedding_override(
                 if !uses_output_override {
                     spur_graph::write_current_pointer(&root, &written_dir)?;
                 }
-                write_sections_dataset_best_effort_with_options(
+                write_sections_dataset_best_effort_with_sidecar_options_and_progress(
                     &artifact,
                     &root,
                     &written_dir,
-                    section_embedding_options,
+                    section_sidecar_options,
+                    section_sidecar_progress,
                 );
                 Ok::<_, anyhow::Error>(written_dir)
             })();
@@ -239,11 +247,12 @@ pub fn build_with_section_embedding_override(
                     Vec::new(),
                 )?;
                 let written_dir = staging.commit()?;
-                write_sections_dataset_best_effort_with_options(
+                write_sections_dataset_best_effort_with_sidecar_options_and_progress(
                     &artifact,
                     &root,
                     &written_dir,
-                    section_embedding_options,
+                    section_sidecar_options,
+                    section_sidecar_progress,
                 );
                 Ok::<_, anyhow::Error>(written_dir)
             })();
@@ -279,9 +288,13 @@ pub fn build_with_section_embedding_override(
         );
         {
             let _entered = write_span.enter();
-            let result = with_section_embedding_env_override(no_section_embeddings, || {
-                spur_graph::store::cache::write_with_dedup(&artifact, &root, &ctx)
-            });
+            let result = spur_graph::store::cache::write_with_dedup_with_section_sidecar_options(
+                &artifact,
+                &root,
+                &ctx,
+                section_sidecar_options,
+                section_sidecar_progress,
+            );
             match &result {
                 Ok(()) => {
                     tracing::info!(
@@ -330,11 +343,12 @@ pub fn build_with_section_embedding_override(
                 if !uses_output_override {
                     spur_graph::write_current_pointer(&root, &written_dir)?;
                 }
-                write_sections_dataset_best_effort_with_options(
+                write_sections_dataset_best_effort_with_sidecar_options_and_progress(
                     &artifact,
                     &root,
                     &written_dir,
-                    section_embedding_options,
+                    section_sidecar_options,
+                    section_sidecar_progress,
                 );
                 Ok::<_, anyhow::Error>(written_dir)
             })();
@@ -389,43 +403,6 @@ pub fn build_with_section_embedding_override(
 
 fn should_skip_analyst(skip_analyst: bool) -> bool {
     skip_analyst || matches!(std::env::var("SPUR_GRAPH_SKIP_ANALYST"), Ok(v) if v == "1")
-}
-
-fn with_section_embedding_env_override<T>(
-    skip_embeddings: bool,
-    f: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    if !skip_embeddings {
-        return f();
-    }
-
-    // cache::write_with_dedup owns section sidecar creation but exposes no
-    // embedding options. Keep the env-compatible override scoped to that
-    // synchronous cache publication call.
-    let _guard = EnvGuard::set(SECTION_EMBED_SKIP_ENV, "1");
-    f()
-}
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
 }
 
 fn should_use_temporal(with_temporal: bool) -> bool {
@@ -555,6 +532,108 @@ fn temporal_progress_bar(total: usize) -> ProgressBar {
             .expect("valid temporal progress template"),
     );
     progress
+}
+
+fn section_sidecar_progress_bar() -> ProgressBar {
+    let progress = ProgressBar::new(0);
+    progress.set_style(
+        ProgressStyle::with_template("{spinner} sections  [{bar:30}] {pos}/{len} rows {wide_msg}")
+            .expect("valid section sidecar progress template"),
+    );
+    progress.enable_steady_tick(Duration::from_millis(120));
+    progress
+}
+
+fn report_section_sidecar_progress(
+    progress: Option<&ProgressBar>,
+    event: SectionSidecarProgressEvent,
+) {
+    match event {
+        SectionSidecarProgressEvent::Started {
+            total_rows,
+            markdown_files,
+            embeddings_enabled,
+            embedding_batch_size,
+            write_batch_size,
+        } => {
+            if let Some(progress) = progress {
+                progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                progress.set_position(0);
+                progress.set_message("preparing Lance section rows");
+            }
+            println!(
+                "[spur] Section sidecar: rows: {}, markdown files: {}, embeddings: {}, embed batch: {}, write batch: {}",
+                fmt_thousands(total_rows),
+                fmt_thousands(markdown_files),
+                if embeddings_enabled { "enabled" } else { "disabled" },
+                fmt_thousands(embedding_batch_size),
+                fmt_thousands(write_batch_size)
+            );
+        }
+        SectionSidecarProgressEvent::BatchStarted {
+            batch_index,
+            batch_rows,
+            embedding_eligible_rows,
+            processed_rows,
+            total_rows,
+        } => {
+            if let Some(progress) = progress {
+                let batch_start = processed_rows.saturating_sub(batch_rows);
+                progress.set_position(u64::try_from(batch_start).unwrap_or(u64::MAX));
+                progress.set_message(format!(
+                    "batch {}: embedding {}/{} eligible rows",
+                    fmt_thousands(batch_index),
+                    fmt_thousands(embedding_eligible_rows),
+                    fmt_thousands(batch_rows)
+                ));
+                progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
+            }
+        }
+        SectionSidecarProgressEvent::BatchWritten {
+            batch_index,
+            written_rows,
+            skipped_existing_rows,
+            processed_rows,
+            total_rows,
+        } => {
+            if let Some(progress) = progress {
+                progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                progress.set_position(u64::try_from(processed_rows).unwrap_or(u64::MAX));
+                progress.set_message(format!(
+                    "batch {}: wrote {}, skipped {} unchanged",
+                    fmt_thousands(batch_index),
+                    fmt_thousands(written_rows),
+                    fmt_thousands(skipped_existing_rows)
+                ));
+            }
+        }
+        SectionSidecarProgressEvent::Indexing { label } => {
+            if let Some(progress) = progress {
+                progress.set_message(format!("building {label} index"));
+            }
+        }
+        SectionSidecarProgressEvent::Finished {
+            total_rows,
+            written_rows,
+            skipped_existing_rows,
+        } => {
+            if let Some(progress) = progress {
+                progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                progress.finish_and_clear();
+            }
+            println!(
+                "[spur] Section sidecar ready: wrote {} rows, skipped {} unchanged rows",
+                fmt_thousands(written_rows),
+                fmt_thousands(skipped_existing_rows)
+            );
+        }
+        SectionSidecarProgressEvent::Failed { error } => {
+            if let Some(progress) = progress {
+                progress.finish_and_clear();
+            }
+            eprintln!("[spur] Section sidecar failed; graph artifact remains usable: {error}");
+        }
+    }
 }
 
 fn merge_temporal_artifact(artifact: &mut GraphIndexArtifact, temporal: GraphIndexArtifact) {
