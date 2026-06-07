@@ -69,8 +69,9 @@ fn html_video_render_schema_uses_webm_frames() {
     let tool = html_video_render::tool();
     let schema = serde_json::to_value(&tool.input_schema).expect("schema serializes");
 
-    assert_eq!(schema["required"], json!(["webm_frames", "output_path"]));
+    assert_eq!(schema["required"], json!(["output_path"]));
     assert!(schema["properties"].get("webm_frames").is_some());
+    assert!(schema["properties"].get("port_names").is_some());
     assert!(schema["properties"].get("frame_duration").is_some());
     assert!(schema["properties"].get("duration").is_none());
 }
