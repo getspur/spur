@@ -720,7 +720,11 @@ fn evidence_from_candidate(candidate: &KnowledgeCandidate, intent: KnowledgeInte
 }
 
 fn build_why_relevant(candidate: &KnowledgeCandidate) -> String {
-    let mut parts = vec![format!("BM25 {:.1}", candidate.score)];
+    let mut parts = vec![format!(
+        "{} {:.1}",
+        grounding_score_prefix(&candidate.grounding),
+        candidate.score
+    )];
     if let Some(signal) = &candidate.signal {
         parts.push(signal.clone());
     }
@@ -729,6 +733,17 @@ fn build_why_relevant(candidate: &KnowledgeCandidate) -> String {
     }
     parts.push(format!("grounding={}", candidate.grounding));
     parts.join(", ")
+}
+
+fn grounding_score_prefix(grounding: &str) -> &str {
+    match grounding {
+        "bm25-code" | "bm25-doc" => "BM25",
+        "bm25-graph" => "BM25+graph",
+        "bm25-graph-expanded" => "graph",
+        "ann-embedding" => "ANN",
+        _ if grounding.starts_with("bm25-") => "BM25",
+        _ => grounding,
+    }
 }
 
 fn recommended_next_tools(intent: KnowledgeIntent, primary_evidence: &[Value]) -> Vec<Value> {
@@ -915,7 +930,7 @@ mod tests {
                 signal: Some("stable".into()),
                 neighbor_kind: Some("primary".into()),
                 edge_bind_method: None,
-                grounding: "bm25-code".into(),
+                grounding: "bm25-graph-expanded".into(),
             }],
         };
 
@@ -924,8 +939,10 @@ mod tests {
             .as_str()
             .expect("why relevant");
 
-        assert!(why_relevant.contains("BM25"));
-        assert!(why_relevant.contains("grounding=bm25-code"));
+        assert!(why_relevant.starts_with("graph 7.5"));
+        assert!(why_relevant.contains("stable"));
+        assert!(why_relevant.contains("kind=function"));
+        assert!(why_relevant.contains("grounding=bm25-graph-expanded"));
     }
 
     #[tokio::test]
