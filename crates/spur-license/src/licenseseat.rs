@@ -15,12 +15,12 @@ const LICENSESEAT_API_KEY_ENV: &str = "SPUR_LICENSESEAT_API_KEY";
 const LICENSESEAT_PRODUCT_SLUG_ENV: &str = "SPUR_LICENSESEAT_PRODUCT_SLUG";
 
 pub fn from_env() -> Result<LicenseSeatProvider> {
-    let api_key = std::env::var(LICENSESEAT_API_KEY_ENV).map_err(|_| {
+    let api_key = std::env::var(LICENSESEAT_API_KEY_ENV).map_err(|_err| {
         LicenseError::NotConfigured(format!(
             "missing environment variable {LICENSESEAT_API_KEY_ENV}"
         ))
     })?;
-    let product_slug = std::env::var(LICENSESEAT_PRODUCT_SLUG_ENV).map_err(|_| {
+    let product_slug = std::env::var(LICENSESEAT_PRODUCT_SLUG_ENV).map_err(|_err| {
         LicenseError::NotConfigured(format!(
             "missing environment variable {LICENSESEAT_PRODUCT_SLUG_ENV}"
         ))
@@ -474,7 +474,6 @@ fn map_event_kind(kind: EventKind) -> LicenseEventKind {
     match kind {
         EventKind::ActivationSuccess => LicenseEventKind::Activated,
         EventKind::ActivationError => LicenseEventKind::ActivationFailed,
-        EventKind::ValidationSuccess => LicenseEventKind::Validated,
         EventKind::ValidationFailed
         | EventKind::ValidationError
         | EventKind::ValidationOfflineFailed

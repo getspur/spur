@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use agent_client_protocol::schema::ToolCall;
 use serde_json::Value;
 
@@ -30,16 +32,16 @@ pub fn refine(title: &str, base: ToolFamily) -> ToolFamily {
 /// preview purposes without pulling in an external diff library.
 fn make_unified(path: &str, old: &str, new: &str) -> String {
     let mut out = String::new();
-    out.push_str(&format!("--- a/{path}\n"));
-    out.push_str(&format!("+++ b/{path}\n"));
+    let _ = writeln!(out, "--- a/{path}");
+    let _ = writeln!(out, "+++ b/{path}");
 
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let hunk_header = format!(
         "@@ -{},{} +{},{} @@\n",
-        if old_lines.is_empty() { 0 } else { 1 },
+        i32::from(!old_lines.is_empty()),
         old_lines.len(),
-        if new_lines.is_empty() { 0 } else { 1 },
+        i32::from(!new_lines.is_empty()),
         new_lines.len()
     );
     out.push_str(&hunk_header);
@@ -74,31 +76,28 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
     ) {
         let diff = make_unified(fp, old, new);
         return Some(ToolInputDisplay::Diff {
-            path: fp.to_string(),
+            path: fp.to_owned(),
             diff,
         });
     }
 
     // Command shape: {command, cwd?}
     if let Some(cmd) = obj.get("command").and_then(|v| v.as_str()) {
-        let cwd = obj
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let cwd = obj.get("cwd").and_then(|v| v.as_str()).map(str::to_owned);
         return Some(ToolInputDisplay::Command {
-            cmd: cmd.to_string(),
+            cmd: cmd.to_owned(),
             cwd,
         });
     }
 
     // Path shape: {file_path}
     if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) {
-        return Some(ToolInputDisplay::Path(fp.to_string()));
+        return Some(ToolInputDisplay::Path(fp.to_owned()));
     }
 
     // Query/search shape: {pattern, …}
     if let Some(q) = obj.get("pattern").and_then(|v| v.as_str()) {
-        return Some(ToolInputDisplay::Query(q.to_string()));
+        return Some(ToolInputDisplay::Query(q.to_owned()));
     }
 
     None
@@ -128,12 +127,12 @@ pub fn try_extract_observe(raw: &Value) -> Option<ObservePayload> {
         .get("stdout")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string();
+        .to_owned();
     let stderr = obj
         .get("stderr")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string();
+        .to_owned();
 
     Some(ObservePayload::CommandOutput {
         exit_code,
@@ -168,7 +167,7 @@ pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
     }
 }
 
-/// Read `_meta.claudeCode.{toolName, parentToolUseId}` from a ToolCall.
+/// Read `_meta.claudeCode.{toolName, parentToolUseId}` from a `ToolCall`.
 /// Absent keys produce `None`; non-string values are treated as absent.
 pub fn extract_tool_meta(tc: &ToolCall) -> super::SpurToolMeta {
     let cc = tc.meta.as_ref().and_then(|m| m.get("claudeCode"));

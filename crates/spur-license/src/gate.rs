@@ -299,39 +299,45 @@ fn resolve_jwt_feature_key(s: &str) -> Option<FeatureKey> {
 }
 
 fn legacy_to_wave9_mapping(s: &str) -> Option<FeatureKey> {
+    if matches!(
+        s,
+        "single_worker"
+            | "local_config"
+            | "custom_worktree_policies"
+            | "custom_notifications"
+            | "extended_retention"
+            | "shared_lineage"
+            | "team_cost_dashboard"
+            | "centralized_config"
+            | "rbac"
+            | "shared_review_queue"
+            | "pm_webhooks"
+            | "sso_saml"
+            | "audit_logs"
+            | "custom_policies"
+            | "custom_mcp_tools"
+            | "dedicated_support"
+            | "sla_guarantee"
+    ) {
+        return None;
+    }
+
     match s {
         "brain_session" => Some(FeatureKey::CORE_CORE_BRAIN_SESSION),
-        "single_worker" => None,
         "worktree_isolation" => Some(FeatureKey::WORKTREE_CORE_ISOLATION),
         "manual_review" => Some(FeatureKey::CORE_CORE_REVIEW),
-        "event_persistence" => Some(FeatureKey::CORE_CORE_EVENT_PIPELINE),
-        "basic_lineage" => Some(FeatureKey::CORE_CORE_EVENT_PIPELINE),
+        "event_persistence" | "basic_lineage" | "basic_notifications" => {
+            Some(FeatureKey::CORE_CORE_EVENT_PIPELINE)
+        }
         "tui_dashboard" => Some(FeatureKey::TUI_CORE_VIEW_DASHBOARD),
         "basic_cost_display" => Some(FeatureKey::COST_CORE_SESSION_DISPLAY),
-        "basic_notifications" => Some(FeatureKey::CORE_CORE_EVENT_PIPELINE),
-        "local_config" => None,
         "mcp_standard_tools" => Some(FeatureKey::MCP_CORE_SERVER_DISPATCH),
         "parallel_workers" => Some(FeatureKey::CORE_CORE_PARALLEL_WORKERS),
         "auto_review_policies" => Some(FeatureKey::CORE_PRO_REVIEW_AUTO_APPROVE),
         "session_resume" => Some(FeatureKey::CORE_CORE_SESSION_RESUME),
         "advanced_cost_analytics" => Some(FeatureKey::COST_PRO_PER_PROJECT_TRACKING),
-        "custom_worktree_policies" => None,
-        "custom_notifications" => None,
-        "extended_retention" => None,
         "tui_session_detail" => Some(FeatureKey::TUI_CORE_VIEW_SESSION_DETAIL),
         "pm_integration" => Some(FeatureKey::PM_CORE_BROWSE),
-        "shared_lineage" => None,
-        "team_cost_dashboard" => None,
-        "centralized_config" => None,
-        "rbac" => None,
-        "shared_review_queue" => None,
-        "pm_webhooks" => None,
-        "sso_saml" => None,
-        "audit_logs" => None,
-        "custom_policies" => None,
-        "custom_mcp_tools" => None,
-        "dedicated_support" => None,
-        "sla_guarantee" => None,
         _ => None,
     }
 }

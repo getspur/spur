@@ -242,8 +242,13 @@ pub fn shutdown_sync() {
 }
 
 #[cfg(unix)]
-#[allow(unsafe_code)] // libc signal FFI to restore default SIGINT and re-raise.
+#[expect(
+    unsafe_code,
+    reason = "libc signal FFI is required to restore default SIGINT behavior"
+)]
 fn re_raise_sigint() {
+    // SAFETY: Restores the default SIGINT handler and immediately re-raises
+    // SIGINT in the current process to preserve conventional exit semantics.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
         libc::raise(libc::SIGINT);

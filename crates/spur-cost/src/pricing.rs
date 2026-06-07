@@ -44,7 +44,7 @@ pub struct TieredPricing {
 }
 
 /// Token usage breakdown for a single request or session.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     /// Input (prompt) tokens.
     pub input_tokens: u64,
@@ -305,7 +305,7 @@ impl PricingRegistry {
             let kb = k.as_bytes();
             if key.as_bytes().starts_with(kb)
                 && (key.len() == kb.len()
-                    || matches!(key.as_bytes().get(kb.len()), Some(&b'-') | Some(&b'.')))
+                    || matches!(key.as_bytes().get(kb.len()), Some(&b'-' | &b'.')))
             {
                 return Some(v);
             }
