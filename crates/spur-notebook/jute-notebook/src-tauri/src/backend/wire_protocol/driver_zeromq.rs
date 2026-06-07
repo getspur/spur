@@ -1,4 +1,4 @@
-//! Adapter for the Jupyter wire protocol over ZeroMQ.
+//! Adapter for the Jupyter wire protocol over `ZeroMQ`.
 //!
 //! This protocol is documented in the `jupyter-client` project at
 //! <https://jupyter-client.readthedocs.io/en/stable/messaging.html>. It relies
@@ -11,14 +11,14 @@ use dashmap::DashMap;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
-use zeromq::{Socket, SocketRecv, SocketSend, ZmqMessage};
+use zeromq::{Socket as _, SocketRecv as _, SocketSend as _, ZmqMessage};
 
 use super::{KernelConnection, KernelHeader, KernelMessage};
 use crate::Error;
 
 /// Sign a message using HMAC-SHA256 with the kernel's signing key.
 fn sign_message(signing_key: &str, bytes: &[Bytes]) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, Mac as _};
     use sha2::Sha256;
 
     let mut mac: Hmac<Sha256> = Hmac::new_from_slice(signing_key.as_bytes()).unwrap();
@@ -62,7 +62,7 @@ fn from_zmq_payload(payload: ZmqMessage) -> Option<KernelMessage> {
     })
 }
 
-/// Connect to Jupyter via ZeroMQ to a local kernel.
+/// Connect to Jupyter via `ZeroMQ` to a local kernel.
 pub async fn create_zeromq_connection(
     shell_port: u16,
     control_port: u16,
@@ -84,7 +84,7 @@ pub async fn create_zeromq_connection(
         control_tx,
         iopub_tx: iopub_tx.clone(),
         process_stderr_tx,
-        reply_tx_map: reply_tx_map.clone(),
+        reply_tx_map: Arc::clone(&reply_tx_map),
         signal: signal.clone(),
         liveness,
         _drop_guard: Arc::new(signal.clone().drop_guard()),
@@ -157,8 +157,8 @@ pub async fn create_zeromq_connection(
         }
     });
 
-    let key = signing_key.to_string();
-    let tx_map = reply_tx_map.clone();
+    let key = signing_key.to_owned();
+    let tx_map = Arc::clone(&reply_tx_map);
     let shell_fut = async move {
         // Send and receive shell messages.
         loop {
@@ -188,8 +188,8 @@ pub async fn create_zeromq_connection(
         }
     };
 
-    let key = signing_key.to_string();
-    let tx_map = reply_tx_map.clone();
+    let key = signing_key.to_owned();
+    let tx_map = Arc::clone(&reply_tx_map);
     let control_fut = async move {
         // Send and receive control messages.
         loop {
@@ -233,7 +233,7 @@ pub async fn create_zeromq_connection(
     tokio::spawn(async move {
         tokio::select! {
             _ = async { tokio::join!(shell_fut, control_fut, iopub_fut) } => {}
-            _ = signal.cancelled() => {}
+            () = signal.cancelled() => {}
         }
     });
 

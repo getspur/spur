@@ -3,9 +3,9 @@
 use std::{array, fmt, str::FromStr};
 
 use anyhow::bail;
-use rand::Rng;
+use rand::Rng as _;
 use serde_with::{DeserializeFromStr, SerializeDisplay};
-use strum::{EnumIter, IntoEnumIterator};
+use strum::{EnumIter, IntoEnumIterator as _};
 
 /// Entity category for generated IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
@@ -18,7 +18,7 @@ impl Entity {
     /// Get the prefix for IDs generated for this entity.
     pub const fn id_prefix(&self) -> &'static str {
         match self {
-            Entity::Venv => "ve-",
+            Self::Venv => "ve-",
         }
     }
 }
@@ -44,7 +44,7 @@ impl EntityId {
         let charset = b"0123456789abcdefghijklmnopqrstuvwxyz";
         let mut rng = rand::thread_rng();
         let id = array::from_fn(|_| charset[rng.gen_range(0..charset.len())]);
-        EntityId { kind, id }
+        Self { kind, id }
     }
 }
 
@@ -79,7 +79,7 @@ impl FromStr for EntityId {
             if let Some(maybe_id) = s.strip_prefix(kind.id_prefix()) {
                 let id = maybe_id.as_bytes();
                 if let Ok(id) = id.try_into() {
-                    return Ok(EntityId { kind, id });
+                    return Ok(Self { kind, id });
                 } else {
                     bail!("invalid entity ID length {s}")
                 }

@@ -1,6 +1,7 @@
 //! High-level APIs for doing operations over [`KernelConnection`] objects.
 
 use serde::{Deserialize, Serialize};
+use tracing::error;
 use ts_rs::TS;
 
 use super::{
@@ -13,7 +14,7 @@ use super::{
 };
 use crate::Error;
 
-/// Get information through the KernelInfo command.
+/// Get information through the `KernelInfo` command.
 pub async fn kernel_info(conn: &KernelConnection) -> Result<KernelInfoReply, Error> {
     let mut req = conn
         .call_shell(KernelMessage::new(
@@ -197,7 +198,7 @@ pub fn parse_cargo_progress(line: &str) -> Option<String> {
     if !version.starts_with('v') {
         return None;
     }
-    Some(krate.to_string())
+    Some(krate.to_owned())
 }
 
 async fn send_compile_progress(
@@ -314,7 +315,10 @@ pub async fn run_cell_with_mode(
                     continue;
                 }
                 msg = iopub_rx.recv() => {
-                    msg.map_err(|_| Error::KernelDisconnect)?
+                    msg.map_err(|e| {
+                        error!("iopub recv error: {e:?}");
+                        Error::KernelDisconnect
+                    })?
                 }
             };
             if msg
@@ -339,8 +343,6 @@ pub async fn run_cell_with_mode(
                         _ = tx.send(RunCellEvent::Stderr(msg.content.text)).await;
                     }
                 }
-                // We ignore ExecuteInput messages since they just echo the input code.
-                KernelMessageType::ExecuteInput => {}
                 KernelMessageType::ExecuteResult => {
                     let msg = msg.into_typed::<ExecuteResult>()?;
                     send_compile_progress(&tx, compile_tracker.on_output()).await;
@@ -370,15 +372,16 @@ pub async fn run_cell_with_mode(
                     let msg = msg.into_typed::<ErrorReply>()?;
                     _ = tx.send(RunCellEvent::Error(msg.content)).await;
                 }
+                // We ignore ExecuteInput messages since they just echo the input code.
                 _ => {}
             }
         }
 
         let reply = req.get_reply::<ExecuteReply>().await?;
         let (exec_count, status) = match reply.content {
-            Reply::Ok(reply) => (u32::try_from(reply.execution_count).ok(), "ok".to_string()),
-            Reply::Error(_) => (None, "error".to_string()),
-            Reply::Abort => (None, "abort".to_string()),
+            Reply::Ok(reply) => (u32::try_from(reply.execution_count).ok(), "ok".to_owned()),
+            Reply::Error(_) => (None, "error".to_owned()),
+            Reply::Abort => (None, "abort".to_owned()),
         };
         _ = tx.send(RunCellEvent::Finished { exec_count, status }).await;
 

@@ -2,7 +2,7 @@
 //!
 //! See the [Messaging in Jupyter](https://jupyter-client.readthedocs.io/en/stable/messaging.html)
 //! page for documentation about how this works. The wire protocol is used to
-//! communicate with Jupyter kernels over ZeroMQ or WebSocket.
+//! communicate with Jupyter kernels over `ZeroMQ` or WebSocket.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::{CancellationToken, DropGuard};
+use tracing::error;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -110,7 +111,7 @@ pub enum KernelMessageType {
     /// Update display data with new information.
     UpdateDisplayData,
 
-    /// Re-broadcast of code in ExecuteRequest.
+    /// Re-broadcast of code in `ExecuteRequest`.
     ExecuteInput,
 
     /// Results of a code execution.
@@ -142,7 +143,7 @@ pub enum KernelMessageType {
     Other(String),
 }
 
-/// Header of a message, generally part of the {header, parent_header, metadata,
+/// Header of a message, generally part of the {header, `parent_header`, metadata,
 /// content, buffers} 5-tuple.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct KernelHeader {
@@ -189,8 +190,8 @@ impl<T> KernelMessage<T> {
         Self {
             header: KernelHeader {
                 msg_id: Uuid::new_v4().to_string(),
-                session: "jute-session".to_string(),
-                username: "jute-user".to_string(),
+                session: "jute-session".to_owned(),
+                username: "jute-user".to_owned(),
                 date: OffsetDateTime::now_utc(),
                 msg_type,
                 version: "5.4".into(),
@@ -260,7 +261,7 @@ pub enum Reply<T> {
     /// This is the same as `status="error"` but with no information about the
     /// error. No fields should be present other than status.
     ///
-    /// Some messages like execute_reply return "aborted" instead, see
+    /// Some messages like `execute_reply` return "aborted" instead, see
     /// <https://github.com/ipython/ipykernel/issues/367> for details.
     #[serde(alias = "aborted")]
     Abort,
@@ -269,11 +270,11 @@ pub enum Reply<T> {
 /// Content of an error response message.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct ErrorReply {
-    /// The error name, such as 'NameError'.
+    /// The error name, such as '`NameError`'.
     #[serde(default)]
     pub ename: String,
 
-    /// The error message, such as 'NameError: name 'x' is not defined'.
+    /// The error message, such as '`NameError`: name 'x' is not defined'.
     #[serde(default)]
     pub evalue: String,
 
@@ -337,7 +338,7 @@ pub struct InspectRequest {
     pub cursor_pos: u32,
 
     /// The level of detail desired, where 0 might be basic info (`x?` in
-    /// IPython) and 1 includes more detail (`x??` in IPython).
+    /// `IPython`) and 1 includes more detail (`x??` in `IPython`).
     pub detail_level: u8,
 }
 
@@ -391,7 +392,7 @@ pub struct CompleteReply {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct KernelInfoRequest {}
 
-/// Represents a reply to a kernel_info request, providing details about the
+/// Represents a reply to a `kernel_info` request, providing details about the
 /// kernel.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct KernelInfoReply {
@@ -591,17 +592,17 @@ pub struct CommMessage {
 /// Represents a stateful kernel connection that can be used to communicate with
 /// a running Jupyter kernel.
 ///
-/// Connections can be obtained through either WebSocket or ZeroMQ network
+/// Connections can be obtained through either WebSocket or `ZeroMQ` network
 /// protocols. They send messages to the kernel and receive responses through
 /// one of the five dedicated channels:
 ///
 /// - Shell: Main channel for code execution and info requests.
-/// - IOPub: Broadcast channel for side effects (stdout, stderr) and requests
+/// - `IOPub`: Broadcast channel for side effects (stdout, stderr) and requests
 ///   from any client over the shell channel.
 /// - Stdin: Requests from the kernel to the client for standard input.
 /// - Control: Just like Shell, but separated to avoid queueing.
 /// - Heartbeat: Periodic ping/pong to ensure the connection is alive. This
-///   appears to only be supported by ZeroMQ.
+///   appears to only be supported by `ZeroMQ`.
 ///
 /// The specific details of which messages are sent on which channels are left
 /// to the user. Functions will block if disconnected or return an error after
@@ -641,13 +642,13 @@ impl KernelConnection {
         let msg_id = message.header.msg_id.clone();
         self.reply_tx_map.insert(msg_id.clone(), reply_tx);
 
-        self.shell_tx
-            .send(message.into_json())
-            .await
-            .map_err(|_| Error::KernelDisconnect)?;
+        self.shell_tx.send(message.into_json()).await.map_err(|e| {
+            error!("shell_tx send error: {e:?}");
+            Error::KernelDisconnect
+        })?;
 
         Ok(PendingRequest {
-            reply_tx_map: self.reply_tx_map.clone(),
+            reply_tx_map: Arc::clone(&self.reply_tx_map),
             reply_rx,
             msg_id,
         })
@@ -665,28 +666,31 @@ impl KernelConnection {
         self.control_tx
             .send(message.into_json())
             .await
-            .map_err(|_| Error::KernelDisconnect)?;
+            .map_err(|e| {
+                error!("control_tx send error: {e:?}");
+                Error::KernelDisconnect
+            })?;
 
         Ok(PendingRequest {
-            reply_tx_map: self.reply_tx_map.clone(),
+            reply_tx_map: Arc::clone(&self.reply_tx_map),
             reply_rx,
             msg_id,
         })
     }
 
-    /// Subscribe to kernel IOPub messages.
+    /// Subscribe to kernel `IOPub` messages.
     ///
     /// This is the fan-out point for cell execution events. Broadcasting here,
     /// directly at the `KernelConnection` event source, lets the existing Tauri
     /// `Channel<RunCellEvent>` path and MCP progress streaming each receive the
-    /// same IOPub messages without racing to drain a single receiver.
+    /// same `IOPub` messages without racing to drain a single receiver.
     pub fn subscribe_iopub(&self) -> broadcast::Receiver<KernelMessage> {
         self.iopub_tx.subscribe()
     }
 
     /// Subscribe to lines written to the kernel process's stderr (fd 2).
     ///
-    /// Unlike IOPub `Stream` messages, some kernels (notably evcxr) emit
+    /// Unlike `IOPub` `Stream` messages, some kernels (notably evcxr) emit
     /// progress such as `Compiling <crate> v<ver>` directly on the child
     /// process's stderr rather than over the wire protocol. Local kernels feed
     /// those lines into this broadcast; connections without an owned process
@@ -718,7 +722,10 @@ impl PendingRequest {
     ) -> Result<KernelMessage<Reply<U>>, Error> {
         (&mut self.reply_rx)
             .await
-            .map_err(|_| Error::KernelDisconnect)?
+            .map_err(|e| {
+                error!("reply_rx recv error: {e:?}");
+                Error::KernelDisconnect
+            })?
             .into_typed()
     }
 }

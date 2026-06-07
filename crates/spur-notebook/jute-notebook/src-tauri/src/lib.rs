@@ -5,7 +5,7 @@
 
 use std::{io, sync::Arc};
 
-use tauri::Emitter;
+use tauri::Emitter as _;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
@@ -25,7 +25,7 @@ const DATASOURCES_CHANGED_EVENT: &str = "datasources://changed";
 
 /// Spawn the process-wide notebook delta forwarder.
 ///
-/// The forwarder owns the single broadcast::Receiver for the process and emits
+/// The forwarder owns the single `broadcast::Receiver` for the process and emits
 /// `notebook://changed` for every `NotebookDelta`.
 pub fn spawn_notebook_delta_forwarder(app: tauri::AppHandle, state: Arc<state::State>) {
     let mut receiver = state.get_notebook().subscribe();
@@ -48,7 +48,7 @@ pub fn spawn_notebook_delta_forwarder(app: tauri::AppHandle, state: Arc<state::S
 
 /// Spawn the process-wide datasource catalog forwarder.
 ///
-/// The forwarder owns a broadcast::Receiver for daemon events and emits
+/// The forwarder owns a `broadcast::Receiver` for daemon events and emits
 /// `datasources://changed` for every datasource catalog update.
 pub fn spawn_datasources_changed_forwarder(app: tauri::AppHandle, state: Arc<state::State>) {
     let mut receiver = state.event_tx.subscribe();
@@ -122,11 +122,11 @@ pub enum Error {
     #[error("could not deserialize message: {0}")]
     DeserializeMessage(String),
 
-    /// Error originating from ZeroMQ.
+    /// Error originating from `ZeroMQ`.
     #[error("zeromq: {0}")]
     Zmq(#[from] zeromq::ZmqError),
 
-    /// Error originating from serde_json.
+    /// Error originating from `serde_json`.
     #[error("serde_json error: {0}")]
     SerdeJson(#[from] serde_json::error::Error),
 

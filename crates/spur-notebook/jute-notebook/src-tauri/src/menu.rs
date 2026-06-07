@@ -20,8 +20,8 @@ use tauri::{
     },
     AppHandle, Runtime,
 };
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
+use tauri_plugin_opener::OpenerExt as _;
 use tracing::warn;
 use ts_rs::TS;
 
@@ -98,7 +98,6 @@ pub fn setup_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         ..Default::default()
     };
 
-    #[allow(unused_mut)]
     let mut menu = MenuBuilder::new(app);
 
     // App name submenu, only for macOS ("Jute").

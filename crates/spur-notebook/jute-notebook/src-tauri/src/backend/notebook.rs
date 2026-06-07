@@ -83,7 +83,7 @@ pub struct LanguageInfo {
     /// Programming language name.
     pub name: String,
 
-    /// CodeMirror mode to use for the language.
+    /// `CodeMirror` mode to use for the language.
     #[ts(optional)]
     pub codemirror_mode: Option<CodeMirrorMode>,
 
@@ -105,13 +105,13 @@ pub struct LanguageInfo {
     pub other: Map<String, Value>,
 }
 
-/// Represents the CodeMirror mode, which could be a string or a nested object.
+/// Represents the `CodeMirror` mode, which could be a string or a nested object.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 #[serde(untagged)]
 pub enum CodeMirrorMode {
-    /// String representation of the CodeMirror mode.
+    /// String representation of the `CodeMirror` mode.
     String(String),
-    /// Nested object representation of the CodeMirror mode.
+    /// Nested object representation of the `CodeMirror` mode.
     Object(BTreeMap<String, Value>),
 }
 
@@ -205,7 +205,7 @@ pub struct CellMetadata {
     #[ts(optional)]
     pub spur: Option<SpurCellMetadata>,
 
-    /// jute-deck per-cell metadata (layout, hidden, speaker_notes, ...).
+    /// jute-deck per-cell metadata (layout, hidden, `speaker_notes`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub jute_deck: Option<JuteDeckCellMetadata>,
@@ -466,7 +466,7 @@ impl From<MultilineString> for String {
     fn from(m: MultilineString) -> Self {
         match m {
             MultilineString::Single(s) => s,
-            MultilineString::Multi(v) if v.len() == 1 => v.into_iter().next().unwrap(),
+            MultilineString::Multi(v) if v.len() == 1 => v.into_iter().next().unwrap_or_default(),
             MultilineString::Multi(v) => v.join(""),
         }
     }
@@ -480,8 +480,8 @@ impl MultilineString {
     /// breaks strings after newline characters.
     pub fn normalize(&self) -> Self {
         let value = match self {
-            MultilineString::Single(s) => s,
-            MultilineString::Multi(v) => &v.join(""),
+            Self::Single(s) => s,
+            Self::Multi(v) => &v.join(""),
         };
 
         let mut lines = Vec::new();
@@ -491,7 +491,7 @@ impl MultilineString {
             lines.push(remaining[..next_break].to_string());
             remaining = &remaining[next_break..];
         }
-        MultilineString::Multi(lines)
+        Self::Multi(lines)
     }
 }
 

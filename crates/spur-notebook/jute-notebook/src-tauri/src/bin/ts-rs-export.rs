@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     fs,
     path::Path,
     process::{exit, Command},
@@ -14,7 +15,7 @@ use jute::{
     },
     notebook_store::{CellKind, DeltaKind, NotebookDelta},
 };
-use ts_rs::TS;
+use ts_rs::TS as _;
 
 fn main() {
     let jute_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -23,7 +24,10 @@ fn main() {
     let export_path = jute_root.join("src/bindings");
 
     // print the full path of the export directory
-    println!("Exporting TypeScript bindings to `{export_path:?}`");
+    println!(
+        "Exporting TypeScript bindings to `{}`",
+        export_path.display()
+    );
 
     // Clear the `src/bindings` directory
     if export_path.exists() {
@@ -70,7 +74,7 @@ fn main() {
         if let Some(extension) = path.extension() {
             if extension == "ts" {
                 let file_name = path.file_stem().unwrap().to_string_lossy();
-                index_file.push_str(&format!("export * from './{}';\n", file_name));
+                let _ = writeln!(index_file, "export * from './{file_name}';");
             }
         }
     }

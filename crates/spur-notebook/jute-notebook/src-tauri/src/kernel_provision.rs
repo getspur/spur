@@ -1,7 +1,7 @@
 use std::{env, future::Future, path::PathBuf, pin::Pin};
 
 use tauri::AppHandle;
-use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::ShellExt as _;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -27,7 +27,7 @@ pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     let spur_jupyter =
         environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {
             stage: "home_dir",
-            cause: "could not determine home directory".to_string(),
+            cause: "could not determine home directory".to_owned(),
         })?;
     let runner = AppProvisionRunner { app: app.clone() };
 
@@ -49,7 +49,7 @@ pub async fn ensure_deno_kernelspec() -> Result<(), Error> {
     let spur_jupyter =
         environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {
             stage: "home_dir",
-            cause: "could not determine home directory".to_string(),
+            cause: "could not determine home directory".to_owned(),
         })?;
 
     ensure_deno_kernelspec_in_dir(&spur_jupyter).await
@@ -61,7 +61,7 @@ pub async fn ensure_evcxr_kernelspec() -> Result<(), Error> {
     let spur_jupyter =
         environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {
             stage: "home_dir",
-            cause: "could not determine home directory".to_string(),
+            cause: "could not determine home directory".to_owned(),
         })?;
 
     ensure_evcxr_kernelspec_installed(&spur_jupyter).await
@@ -73,7 +73,7 @@ pub async fn ensure_gonb_kernelspec() -> Result<(), Error> {
     let spur_jupyter =
         environment::spur_jupyter_dir().ok_or_else(|| Error::KernelProvisionFailed {
             stage: "home_dir",
-            cause: "could not determine home directory".to_string(),
+            cause: "could not determine home directory".to_owned(),
         })?;
 
     ensure_gonb_kernelspec_installed(&spur_jupyter).await
@@ -126,9 +126,9 @@ async fn ensure_evcxr_kernelspec_installed(spur_jupyter: &std::path::Path) -> Re
     run_process(
         cargo,
         vec![
-            "install".to_string(),
-            "--locked".to_string(),
-            "evcxr_jupyter".to_string(),
+            "install".to_owned(),
+            "--locked".to_owned(),
+            "evcxr_jupyter".to_owned(),
         ],
     )
     .await
@@ -154,8 +154,8 @@ async fn ensure_gonb_kernelspec_installed(spur_jupyter: &std::path::Path) -> Res
     run_process(
         go,
         vec![
-            "install".to_string(),
-            "github.com/janpfeifer/gonb@latest".to_string(),
+            "install".to_owned(),
+            "github.com/janpfeifer/gonb@latest".to_owned(),
         ],
     )
     .await
@@ -360,11 +360,11 @@ where
 
     runner
         .run_uv(vec![
-            "pip".to_string(),
-            "install".to_string(),
-            "--python".to_string(),
+            "pip".to_owned(),
+            "install".to_owned(),
+            "--python".to_owned(),
             path_to_string(&python, "ipykernel_install")?,
-            "ipykernel".to_string(),
+            "ipykernel".to_owned(),
             format!("duckdb=={MANAGED_KERNEL_DUCKDB_VERSION}"),
         ])
         .await
@@ -377,15 +377,15 @@ where
         .run_python(
             python,
             vec![
-                "-m".to_string(),
-                "ipykernel".to_string(),
-                "install".to_string(),
-                "--prefix".to_string(),
+                "-m".to_owned(),
+                "ipykernel".to_owned(),
+                "install".to_owned(),
+                "--prefix".to_owned(),
                 path_to_string(spur_jupyter, "ipykernel_install_kernelspec")?,
-                "--name".to_string(),
-                "python3".to_string(),
-                "--display-name".to_string(),
-                "Python 3 (SPUR)".to_string(),
+                "--name".to_owned(),
+                "python3".to_owned(),
+                "--display-name".to_owned(),
+                "Python 3 (SPUR)".to_owned(),
             ],
         )
         .await
@@ -507,13 +507,13 @@ where
 
         let result = runner
             .run_uv(vec![
-                "venv".to_string(),
-                "--no-project".to_string(),
-                "--seed".to_string(),
-                "--python".to_string(),
-                version.to_string(),
-                "--python-preference".to_string(),
-                "managed".to_string(),
+                "venv".to_owned(),
+                "--no-project".to_owned(),
+                "--seed".to_owned(),
+                "--python".to_owned(),
+                version.to_owned(),
+                "--python-preference".to_owned(),
+                "managed".to_owned(),
                 path_to_string(venv, "venv_create")?,
             ])
             .await;
@@ -674,9 +674,9 @@ fn find_binary_in_candidates_or_path(
 
 fn binary_path_names(binary: &str) -> Vec<String> {
     if cfg!(windows) {
-        vec![format!("{binary}.exe"), binary.to_string()]
+        vec![format!("{binary}.exe"), binary.to_owned()]
     } else {
-        vec![binary.to_string()]
+        vec![binary.to_owned()]
     }
 }
 
@@ -774,7 +774,7 @@ fn format_command_failure(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> St
     let stderr = String::from_utf8_lossy(stderr);
     let mut message = match code {
         Some(code) => format!("process exited with status {code}"),
-        None => "process terminated by signal".to_string(),
+        None => "process terminated by signal".to_owned(),
     };
 
     let stderr = stderr.trim();

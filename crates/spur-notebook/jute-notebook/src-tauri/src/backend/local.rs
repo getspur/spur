@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, process::Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ts_rs::TS;
@@ -74,7 +74,7 @@ impl LocalKernel {
         fs::create_dir_all(&runtime_dir)
             .await
             .map_err(|err| Error::KernelConnect(format!("could not create runtime dir: {err}")))?;
-        let connection_filename = runtime_dir + &format!("jute-{kernel_id}.json");
+        let connection_filename = format!("{runtime_dir}jute-{kernel_id}.json");
         fs::write(&connection_filename, connection_file.to_string())
             .await
             .map_err(|err| {
@@ -167,7 +167,7 @@ async fn get_available_port() -> Result<u16, Error> {
         .await
         .map_err(|err| Error::KernelConnect(format!("could not get available port: {err}")))?
         .local_addr()
-        .map_err(|_| Error::KernelConnect("tcp listener has no local address".into()))?;
+        .map_err(|e| Error::KernelConnect(format!("tcp listener has no local address: {e}")))?;
     Ok(addr.port())
 }
 

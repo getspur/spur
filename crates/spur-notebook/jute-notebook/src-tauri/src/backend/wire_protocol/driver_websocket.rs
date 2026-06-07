@@ -3,7 +3,7 @@
 //! This protocol is documented in the `jupyter-server` project at
 //! <https://jupyter-server.readthedocs.io/en/latest/developers/websocket-protocols.html>.
 //!
-//! It is very similar to the ZeroMQ protocol, but there is a thin framing layer
+//! It is very similar to the `ZeroMQ` protocol, but there is a thin framing layer
 //! that allows messages to be sent over WebSocket binary payloads instead of
 //! raw TCP sockets.
 
@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest as _, Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
@@ -136,7 +136,7 @@ pub async fn create_websocket_connection(
         control_tx,
         iopub_tx: iopub_tx.clone(),
         process_stderr_tx,
-        reply_tx_map: reply_tx_map.clone(),
+        reply_tx_map: Arc::clone(&reply_tx_map),
         signal: signal.clone(),
         liveness,
         _drop_guard: Arc::new(signal.clone().drop_guard()),
@@ -188,14 +188,12 @@ pub async fn create_websocket_connection(
     let receive_fut = async move {
         // Receieve shell, control, and iopub messages from the WebSocket.
         while let Some(Ok(ws_payload)) = ws_rx.next().await {
-            let payload = match ws_payload {
-                Message::Binary(payload) => payload,
-                _ => continue,
+            let Message::Binary(payload) = ws_payload else {
+                continue;
             };
 
-            let (msg, channel) = match from_ws_payload(&payload) {
-                Some(msg) => msg,
-                None => continue,
+            let Some((msg, channel)) = from_ws_payload(&payload) else {
+                continue;
             };
 
             match &*channel {
@@ -221,7 +219,7 @@ pub async fn create_websocket_connection(
     tokio::spawn(async move {
         tokio::select! {
             _ = async { tokio::join!(send_fut, receive_fut) } => {}
-            _ = signal.cancelled() => {}
+            () = signal.cancelled() => {}
         }
     });
 
