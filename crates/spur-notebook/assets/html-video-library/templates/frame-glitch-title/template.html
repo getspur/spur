@@ -5,57 +5,86 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Glitch Title</title>
 <style>
-* { box-sizing: border-box; }
-html, body {
-  margin: 0;
-  height: 100%;
-  overflow: hidden;
-  background: #050505;
-  color: #f8fafc;
-  font-family: Arial, Helvetica, sans-serif;
-}
-body {
-  display: grid;
-  place-items: center;
-  background:
-    radial-gradient(circle at 30% 25%, rgba(255, 0, 96, .18), transparent 32%),
-    radial-gradient(circle at 70% 65%, rgba(0, 229, 255, .16), transparent 34%),
-    linear-gradient(135deg, #050505, #111318 54%, #050505);
-}
-.frame { position: relative; width: 100vw; height: 100vh; display: grid; place-items: center; text-align: center; isolation: isolate; }
-.frame:before {
-  content: ""; position: absolute; inset: 0; opacity: .5; mix-blend-mode: screen;
-  background: repeating-linear-gradient(0deg, rgba(255,255,255,.045) 0 1px, transparent 1px 5px);
-  animation: scan 5s linear infinite;
-}
-.frame:after {
-  content: ""; position: absolute; inset: -20%; z-index: -1;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
-  transform: translateX(-70%) rotate(8deg);
-  animation: sweep 3.8s ease-in-out infinite;
-}
-.stack { width: min(1100px, 90vw); padding: 6vh 4vw; }
-.kicker { margin: 0 0 24px; color: #7dd3fc; font-size: clamp(16px, 2vw, 30px); font-weight: 700; letter-spacing: .22em; text-transform: uppercase; animation: fadeUp .8s ease-out both; }
-.glitch { position: relative; margin: 0; font-size: clamp(58px, 13vw, 180px); line-height: .86; font-weight: 900; text-transform: uppercase; letter-spacing: 0; text-shadow: 0 0 26px rgba(125,211,252,.45); animation: jolt 2.4s steps(1,end) infinite; }
-.glitch:before, .glitch:after { content: attr(data-text); position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; }
-.glitch:before { color: #ff2d75; clip-path: inset(0 0 55% 0); transform: translate(-6px,-2px); animation: sliceA 1.7s steps(2,end) infinite; }
-.glitch:after { color: #00e5ff; clip-path: inset(45% 0 0 0); transform: translate(5px,3px); animation: sliceB 1.3s steps(2,end) infinite; }
-.footer { margin: 28px auto 0; max-width: 760px; color: #cbd5e1; font-size: clamp(16px, 2vw, 28px); line-height: 1.35; animation: fadeUp .8s .25s ease-out both; }
-@keyframes scan { to { background-position: 0 80px; } }
-@keyframes sweep { 0%, 35% { transform: translateX(-80%) rotate(8deg); } 70%, 100% { transform: translateX(80%) rotate(8deg); } }
-@keyframes fadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes jolt { 0%, 88%, 100% { transform: none; filter: none; } 90% { transform: translate(3px,-2px); filter: contrast(1.5); } 92% { transform: translate(-4px,2px); } 94% { transform: translate(2px,4px); } }
-@keyframes sliceA { 0%, 76%, 100% { clip-path: inset(0 0 62% 0); } 78% { clip-path: inset(18% 0 47% 0); transform: translate(12px,-2px); } 82% { clip-path: inset(2% 0 76% 0); transform: translate(-10px,2px); } }
-@keyframes sliceB { 0%, 72%, 100% { clip-path: inset(50% 0 0 0); } 75% { clip-path: inset(64% 0 12% 0); transform: translate(-12px,4px); } 80% { clip-path: inset(34% 0 36% 0); transform: translate(8px,-4px); } }
+html,body{margin:0;height:100%;overflow:hidden;background:#050505}
+canvas{display:block;width:100vw;height:100vh}
 </style>
 </head>
 <body>
-<main class="frame">
-  <section class="stack" aria-label="Animated glitch title">
-    <p class="kicker">Signal opening</p>
-    <h1 class="glitch" data-text="SYSTEM SHOCK">SYSTEM SHOCK</h1>
-    <p class="footer">A sharp opener for dramatic reveals, chapter breaks, and fast-cut video intros.</p>
-  </section>
-</main>
+<canvas data-capture="true" aria-label="Animated glitch title"></canvas>
+<script>
+const canvas=document.querySelector("canvas");
+const ctx=canvas.getContext("2d");
+const copy={
+  kicker:"Signal opening",
+  title:"SYSTEM SHOCK",
+  footer:"A sharp opener for dramatic reveals, chapter breaks, and fast-cut video intros."
+};
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize",resize);
+resize();
+function fit(size,text,maxWidth){
+  ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  while(size>32&&ctx.measureText(text).width>maxWidth){
+    size-=4;
+    ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  }
+  return size;
+}
+function drawTextBlock(text,x,y,maxWidth,size,lineHeight){
+  ctx.font=`700 ${size}px Arial, Helvetica, sans-serif`;
+  const words=text.split(" ");
+  let line="";
+  for(const word of words){
+    const test=line?`${line} ${word}`:word;
+    if(ctx.measureText(test).width>maxWidth&&line){
+      ctx.fillText(line,x,y);
+      y+=lineHeight;
+      line=word;
+    }else{
+      line=test;
+    }
+  }
+  if(line)ctx.fillText(line,x,y);
+}
+function frame(now){
+  const t=now/1000,w=canvas.width,h=canvas.height,cx=w/2,cy=h/2;
+  const bg=ctx.createLinearGradient(0,0,w,h);
+  bg.addColorStop(0,"#050505"); bg.addColorStop(.55,"#111318"); bg.addColorStop(1,"#050505");
+  ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
+  for(const glow of [[.30,.25,"rgba(255,0,96,.18)"],[.70,.65,"rgba(0,229,255,.16)"]]){
+    const g=ctx.createRadialGradient(w*glow[0],h*glow[1],0,w*glow[0],h*glow[1],Math.max(w,h)*.36);
+    g.addColorStop(0,glow[2]); g.addColorStop(1,"transparent"); ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+  }
+  ctx.fillStyle="rgba(255,255,255,.045)";
+  for(let y=(t*18)%5;y<h;y+=5)ctx.fillRect(0,y,w,1);
+  const sweep=(Math.sin(t*1.7)*.5+.5)*w*1.7-w*.35;
+  const sg=ctx.createLinearGradient(sweep-180,0,sweep+180,h);
+  sg.addColorStop(0,"transparent"); sg.addColorStop(.5,"rgba(255,255,255,.08)"); sg.addColorStop(1,"transparent");
+  ctx.fillStyle=sg; ctx.fillRect(0,0,w,h);
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.font=`800 ${Math.max(15,Math.min(30,w*.02))}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle="#7dd3fc"; ctx.fillText(copy.kicker.toUpperCase(),cx,cy-h*.19);
+  const burst=Math.sin(t*19)> .72 ? 1 : 0;
+  const jitter=burst?Math.sin(t*91)*7:Math.sin(t*4)*1.2;
+  const size=fit(Math.min(180,Math.max(58,w*.13)),copy.title,w*.9);
+  ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  ctx.shadowColor="rgba(125,211,252,.45)"; ctx.shadowBlur=26;
+  ctx.fillStyle="#f8fafc"; ctx.fillText(copy.title,cx+jitter,cy);
+  ctx.shadowBlur=0; ctx.globalCompositeOperation="screen";
+  const slices=[[0,.42,"#ff2d75",-9-burst*10,-2],[.50,1,"#00e5ff",8+burst*9,3]];
+  for(const [a,b,color,dx,dy] of slices){
+    ctx.save(); ctx.beginPath(); ctx.rect(0,cy-size*.54+size*a,w,size*(b-a)); ctx.clip();
+    ctx.fillStyle=color; ctx.fillText(copy.title,cx+dx,cy+dy); ctx.restore();
+  }
+  ctx.globalCompositeOperation="source-over";
+  ctx.fillStyle="#cbd5e1";
+  drawTextBlock(copy.footer,cx,cy+h*.22,Math.min(760,w*.82),Math.max(16,Math.min(28,w*.021)),Math.max(24,w*.031));
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
 </body>
 </html>

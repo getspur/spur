@@ -3,6 +3,7 @@ import { encode } from "html-entities";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { MultilineString, OutputDisplayData } from "@/bindings";
+import { setCellCapture } from "@/stores/cellCapture";
 import { CellResult } from "@/stores/notebook";
 import { useOutputActiveContentEnabled } from "@/stores/settings";
 
@@ -18,10 +19,11 @@ import {
   compileProgressMessage,
   formatCompileElapsed,
 } from "./compileProgress";
-import { htmlOutputSandbox } from "./rendering";
+import { htmlOutputSandbox, withVideoCapture } from "./rendering";
 
 type Props = {
   value: CellResult | undefined;
+  cellId?: string;
   chromeless?: boolean;
   afmPortBindings?: AfmPortBindingSnapshot;
 };
@@ -30,6 +32,7 @@ type CompileProgressState = NonNullable<CellResult["compile"]>;
 
 export default function OutputView({
   value,
+  cellId,
   chromeless = false,
   afmPortBindings,
 }: Props) {
@@ -60,12 +63,14 @@ export default function OutputView({
             <pre>{multiline(output.text)}</pre>
           ) : output.output_type === "display_data" ? (
             <OutputViewDisplayData
+              cellId={cellId}
               output={output}
               chromeless={chromeless}
               afmPortBindings={afmPortBindings}
             />
           ) : output.output_type === "execute_result" ? (
             <OutputViewDisplayData
+              cellId={cellId}
               output={output}
               chromeless={chromeless}
               afmPortBindings={afmPortBindings}
@@ -182,10 +187,12 @@ const IFRAME_HEIGHT_MESSAGE = "jute-iframe-height";
 const OutputViewDisplayData = memo(
   ({
     output,
+    cellId,
     chromeless,
     afmPortBindings,
   }: {
     output: OutputDisplayData;
+    cellId?: string;
     chromeless?: boolean;
     afmPortBindings?: AfmPortBindingSnapshot;
   }) => {
@@ -214,7 +221,7 @@ const OutputViewDisplayData = memo(
 
     const html = displayStringData(output.data["text/html"]);
     if (html !== null) {
-      return <HtmlOutput html={html} />;
+      return <HtmlOutput html={html} cellId={cellId} />;
     }
 
     const markdown = displayStringData(output.data["text/markdown"]);
@@ -232,12 +239,16 @@ const OutputViewDisplayData = memo(
   },
 );
 
-// sandbox='allow-scripts' lets output scripts run; omitting allow-same-origin blocks parent-origin storage access.
-function HtmlOutput({ html }: { html: string }) {
+// Active output scripts run in the sandboxed srcdoc iframe; same-origin is
+// needed for capture APIs.
+function HtmlOutput({ html, cellId }: { html: string; cellId?: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(IFRAME_MIN_HEIGHT);
   const activeContent = useOutputActiveContentEnabled();
-  const srcDoc = useMemo(() => withHeightReporter(html), [html]);
+  const srcDoc = useMemo(
+    () => withHeightReporter(withVideoCapture(html)),
+    [html],
+  );
 
   useEffect(() => {
     setHeight(IFRAME_MIN_HEIGHT);
@@ -248,26 +259,44 @@ function HtmlOutput({ html }: { html: string }) {
       if (event.source !== iframeRef.current?.contentWindow) {
         return;
       }
-      if (
-        typeof event.data !== "object" ||
-        event.data === null ||
-        event.data.type !== IFRAME_HEIGHT_MESSAGE ||
-        typeof event.data.height !== "number" ||
-        !Number.isFinite(event.data.height)
-      ) {
+      if (typeof event.data !== "object" || event.data === null) {
         return;
       }
-      setHeight(Math.max(IFRAME_MIN_HEIGHT, Math.ceil(event.data.height)));
+
+      if (
+        event.data.type === IFRAME_HEIGHT_MESSAGE &&
+        typeof event.data.height === "number" &&
+        Number.isFinite(event.data.height)
+      ) {
+        setHeight(Math.max(IFRAME_MIN_HEIGHT, Math.ceil(event.data.height)));
+        return;
+      }
+
+      if (
+        event.data.type === "jute-video-capture" &&
+        typeof event.data.cellId === "string" &&
+        event.data.cellId.length > 0 &&
+        event.data.cellId === cellId &&
+        typeof event.data.webm === "string" &&
+        typeof event.data.duration_sec === "number" &&
+        Number.isFinite(event.data.duration_sec)
+      ) {
+        setCellCapture(event.data.cellId, {
+          webm_base64: event.data.webm,
+          duration_sec: event.data.duration_sec,
+        });
+      }
     };
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, []);
+  }, [cellId]);
 
   return (
     <iframe
       key={activeContent ? "active" : "static"}
       ref={iframeRef}
+      name={cellId ?? ""}
       title="Notebook HTML output"
       srcDoc={srcDoc}
       // TODO: per-notebook trust (Jupyter-style signature) deferred.

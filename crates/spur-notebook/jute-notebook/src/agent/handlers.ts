@@ -1,5 +1,6 @@
 import type { CodeType, NotebookDelta } from "@/bindings";
 import { daemonControl } from "@/daemon/control";
+import { getCellCapture } from "@/stores/cellCapture";
 import {
   type CellType,
   type Notebook,
@@ -37,6 +38,8 @@ export async function dispatchAgentRequest(
       return flushPending(requireNotebook(notebook));
     case "notebook.read_cell":
       return readCell(requireNotebook(notebook), request.params);
+    case "notebook.get_cell_capture":
+      return getCellCaptureForAgent(request.params);
     case "notebook.insert_cell":
       return insertCell(requireNotebook(notebook), request.params);
     case "notebook.write_cell":
@@ -110,6 +113,22 @@ function readCell(notebook: Notebook, params: unknown): AgentReadCell {
     source: cell.source,
     outputs: cell.result?.outputs ?? [],
   };
+}
+
+function getCellCaptureForAgent(params: unknown) {
+  const cellId = readStringParam(
+    params,
+    "cell_id",
+    "notebook.get_cell_capture",
+  );
+  const capture = getCellCapture(cellId);
+  if (!capture) {
+    throw new AgentHandlerError(
+      "capture_not_found",
+      `No video capture is available for cell: ${cellId}`,
+    );
+  }
+  return capture;
 }
 
 function insertCell(notebook: Notebook, params: unknown): AgentInsertCell {

@@ -303,6 +303,7 @@ export function CellOutput({
   return (
     <OutputView
       value={output}
+      cellId={cellId}
       chromeless={chromeless}
       afmPortBindings={afmPortBindings}
     />

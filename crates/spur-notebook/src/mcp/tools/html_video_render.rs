@@ -4,11 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::process::Command;
 use uuid::Uuid;
@@ -18,17 +19,18 @@ use crate::mcp::ServerDeps;
 const METHOD: &str = "html_video_render";
 const DEFAULT_FPS: u32 = 30;
 const DEFAULT_RESOLUTION: &str = "1280x720";
+const DEFAULT_FRAME_DURATION: f64 = 3.0;
 
 #[derive(Debug, Deserialize)]
 struct HtmlVideoRenderParams {
-    frame_html_paths: Vec<String>,
+    webm_frames: Vec<String>,
     output_path: String,
     #[serde(default)]
     resolution: Option<String>,
     #[serde(default)]
     fps: Option<u32>,
     #[serde(default)]
-    duration: Option<f64>,
+    frame_duration: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,31 +46,15 @@ struct RenderOptions {
     total_duration: f64,
 }
 
-#[derive(Serialize)]
-struct PlaywrightCaptureConfig {
-    frame_html_paths: Vec<String>,
-    output_dir: String,
-    output_json: String,
-    width: u32,
-    height: u32,
-    duration_sec: f64,
-    fps: u32,
-}
-
-#[derive(Deserialize)]
-struct PlaywrightCaptureOutput {
-    frame_webm_paths: Vec<String>,
-}
-
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Render html frames into an mp4 file using Playwright + ffmpeg.",
+        "Render base64-encoded webm frames into an mp4 file using ffmpeg.",
         rmcp_object(json!({
             "type": "object",
-            "required": ["frame_html_paths", "output_path"],
+            "required": ["webm_frames", "output_path"],
             "properties": {
-                "frame_html_paths": {
+                "webm_frames": {
                     "type": "array",
                     "minItems": 1,
                     "items": {
@@ -79,7 +65,7 @@ pub fn tool() -> Tool {
                 "output_path": { "type": "string", "minLength": 1 },
                 "resolution": { "type": "string", "pattern": "^\\d+x\\d+$" },
                 "fps": { "type": "integer", "minimum": 1 },
-                "duration": { "type": "number", "minimum": 0.01 }
+                "frame_duration": { "type": "number", "minimum": 0.01 }
             },
             "additionalProperties": false
         })),
@@ -89,15 +75,15 @@ pub fn tool() -> Tool {
 pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
     let params: HtmlVideoRenderParams = serde_json::from_value(arguments).map_err(|error| {
         McpError::invalid_params(
-            format!("{METHOD} requires {{ frame_html_paths, output_path, resolution?, fps?, duration? }}"),
+            format!("{METHOD} requires {{ webm_frames, output_path, resolution?, fps?, frame_duration? }}"),
             Some(json!({ "error": error.to_string() })),
         )
     })?;
 
-    if params.frame_html_paths.is_empty() {
+    if params.webm_frames.is_empty() {
         return Err(McpError::invalid_params(
-            format!("{METHOD} requires at least one frame_html_path"),
-            Some(json!({ "code": "missing_frame_paths" })),
+            format!("{METHOD} requires at least one webm_frame"),
+            Some(json!({ "code": "missing_webm_frames" })),
         ));
     }
 
@@ -107,16 +93,11 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
             .resolution
             .unwrap_or_else(|| DEFAULT_RESOLUTION.to_string()),
     )?;
-    let total_duration = crate::html_video::default_render_duration(
-        params.frame_html_paths.len(),
-        fps,
-        params.duration,
-    );
-    let frame_duration = if params.frame_html_paths.len() <= 1 {
-        total_duration
-    } else {
-        total_duration / params.frame_html_paths.len() as f64
-    };
+    let frame_duration = params
+        .frame_duration
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_FRAME_DURATION);
+    let total_duration = frame_duration * params.webm_frames.len() as f64;
 
     let output_path = normalize_output_path(&params.output_path);
     if let Some(parent) = output_path
@@ -147,57 +128,28 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
         total_duration,
     };
 
-    for frame_html_path in &params.frame_html_paths {
-        let path = Path::new(frame_html_path);
-        if !path.is_file() {
-            return Err(McpError::invalid_params(
-                format!("{METHOD} received a missing frame html path"),
-                Some(json!({ "path": frame_html_path })),
-            ));
-        }
+    let frame_webm_paths = write_webm_frames(&params.webm_frames, &scratch_dir)?;
+
+    if frame_webm_paths.len() == 1 {
+        encode_single_frame(&frame_webm_paths[0], &output_path, options, frame_duration).await?;
+    } else {
+        encode_frame_sequence(
+            &frame_webm_paths,
+            &output_path,
+            &scratch_dir,
+            options,
+            frame_duration,
+        )
+        .await?;
     }
 
-    match capture_frame_webms(
-        &params.frame_html_paths,
-        &scratch_dir,
-        options.resolution,
-        frame_duration,
-        options.fps,
-    )
-    .await
-    {
-        Ok(frame_webm_paths) => {
-            if frame_webm_paths.is_empty() {
-                return Err(McpError::internal_error(
-                    format!("{METHOD} produced no frames from Playwright"),
-                    Some(json!({ "code": "render_capture_frames_empty" })),
-                ));
-            }
-
-            if frame_webm_paths.len() == 1 {
-                encode_single_frame(&frame_webm_paths[0], &output_path, options, frame_duration)
-                    .await?;
-            } else {
-                encode_frame_sequence(
-                    &frame_webm_paths,
-                    &output_path,
-                    &scratch_dir,
-                    options,
-                    frame_duration,
-                )
-                .await?;
-            }
-
-            Ok(CallToolResult::structured(json!({
-                "output_path": output_path.to_string_lossy(),
-                "frame_count": frame_webm_paths.len(),
-                "fps": options.fps,
-                "duration": options.total_duration,
-                "resolution": format!("{}x{}", options.resolution.width, options.resolution.height),
-            })))
-        }
-        Err(error) => Err(error),
-    }
+    Ok(CallToolResult::structured(json!({
+        "output_path": output_path.to_string_lossy(),
+        "frame_count": frame_webm_paths.len(),
+        "fps": options.fps,
+        "duration": options.total_duration,
+        "resolution": format!("{}x{}", options.resolution.width, options.resolution.height),
+    })))
 }
 
 fn parse_resolution(raw: String) -> Result<RenderDimensions, McpError> {
@@ -261,124 +213,29 @@ async fn ensure_ffmpeg_available() -> Result<(), McpError> {
     Ok(())
 }
 
-async fn ensure_node_available() -> Result<(), McpError> {
-    let status = Command::new("node")
-        .arg("-v")
-        .output()
-        .await
-        .map_err(|error| {
-            McpError::internal_error(
-                "html_video_render requires node for Playwright capture",
-                Some(json!({ "code": "node_unavailable", "error": error.to_string() })),
+fn write_webm_frames(webm_frames: &[String], scratch_dir: &Path) -> Result<Vec<PathBuf>, McpError> {
+    let mut frame_webm_paths = Vec::with_capacity(webm_frames.len());
+    for (index, encoded) in webm_frames.iter().enumerate() {
+        let bytes = STANDARD.decode(encoded).map_err(|error| {
+            McpError::invalid_params(
+                format!("{METHOD} received invalid base64 webm data"),
+                Some(json!({
+                    "code": "invalid_webm_frame_base64",
+                    "frame_index": index,
+                    "error": error.to_string(),
+                })),
             )
         })?;
-    if !status.status.success() {
-        return Err(McpError::internal_error(
-            "html_video_render requires node for Playwright capture",
-            Some(json!({ "code": "node_unavailable" })),
-        ));
-    }
-    Ok(())
-}
-
-async fn capture_frame_webms(
-    frame_html_paths: &[String],
-    scratch_dir: &Path,
-    resolution: RenderDimensions,
-    duration_sec: f64,
-    fps: u32,
-) -> Result<Vec<PathBuf>, McpError> {
-    ensure_node_available().await?;
-
-    let output_json = scratch_dir.join("captures.json");
-    let script_path = scratch_dir.join("capture_frames.js");
-    let config_path = scratch_dir.join("capture_config.json");
-
-    let config = PlaywrightCaptureConfig {
-        frame_html_paths: frame_html_paths
-            .iter()
-            .map(PathBuf::from)
-            .map(|path| path.to_string_lossy().to_string())
-            .collect(),
-        output_dir: scratch_dir.to_string_lossy().to_string(),
-        output_json: output_json.to_string_lossy().to_string(),
-        width: resolution.width,
-        height: resolution.height,
-        duration_sec,
-        fps,
-    };
-    let config_json = serde_json::to_string_pretty(&config).map_err(|error| {
-        McpError::internal_error(
-            format!("{METHOD} failed to serialize capture configuration"),
-            Some(json!({ "error": error.to_string() })),
-        )
-    })?;
-    let script = CAPTURE_SCRIPT;
-
-    fs::write(&config_path, config_json).map_err(|error| {
-        McpError::internal_error(
-            format!("{METHOD} failed to write capture configuration"),
-            Some(json!({ "error": error.to_string() })),
-        )
-    })?;
-    fs::write(&script_path, script).map_err(|error| {
-        McpError::internal_error(
-            format!("{METHOD} failed to write capture script"),
-            Some(json!({ "error": error.to_string() })),
-        )
-    })?;
-
-    let status = Command::new("node")
-        .arg(&script_path)
-        .arg(&config_path)
-        .output()
-        .await
-        .map_err(|error| {
+        let path = scratch_dir.join(format!("spur-html-video-frame-{index}.webm"));
+        fs::write(&path, bytes).map_err(|error| {
             McpError::internal_error(
-                "html_video_render failed to launch node capture process",
-                Some(json!({ "code": "playwright_capture_launch_failed", "error": error.to_string() })),
+                format!("{METHOD} failed to write temporary webm frame"),
+                Some(json!({ "frame_index": index, "error": error.to_string() })),
             )
         })?;
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        return Err(McpError::internal_error(
-            "html_video_render could not capture html frames (Playwright/Node)",
-            Some(json!({
-                "code": "playwright_capture_failed",
-                "stderr": stderr.trim(),
-            })),
-        ));
+        frame_webm_paths.push(path);
     }
-
-    let raw = fs::read_to_string(&output_json).map_err(|error| {
-        McpError::internal_error(
-            "html_video_render could not read capture output",
-            Some(json!({ "error": error.to_string() })),
-        )
-    })?;
-    let result: PlaywrightCaptureOutput = serde_json::from_str(&raw).map_err(|error| {
-        McpError::internal_error(
-            "html_video_render produced invalid capture output",
-            Some(json!({ "error": error.to_string() })),
-        )
-    })?;
-
-    let paths = result
-        .frame_webm_paths
-        .into_iter()
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
-    let mut validated = Vec::with_capacity(paths.len());
-    for path in paths {
-        if !path.is_file() {
-            return Err(McpError::invalid_params(
-                "html_video_render received a missing frame capture",
-                Some(json!({ "path": path })),
-            ));
-        }
-        validated.push(path);
-    }
-    Ok(validated)
+    Ok(frame_webm_paths)
 }
 
 async fn encode_single_frame(
@@ -505,25 +362,4 @@ async fn run_ffmpeg_frame_encode(
         ));
     }
     Ok(())
-}
-
-const CAPTURE_SCRIPT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/html_video/capture_frames.js"
-));
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capture_script_records_webm_video_with_screenshot_fallback() {
-        let script = CAPTURE_SCRIPT;
-
-        assert!(script.contains("recordVideo"));
-        assert!(script.contains("waitForTimeout"));
-        assert!(script.contains("frame_webm_paths"));
-        assert!(script.contains("screenshot"));
-        assert!(!script.contains("frame_png_paths"));
-    }
 }

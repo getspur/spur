@@ -1,22 +1,28 @@
 ---
 name: frame-data-rollup
-description: Animated horizontal bar chart frame for showing a small set of labels and values in video.
+description: Canvas animated horizontal bar chart frame for showing a small set of labels and values in video.
 ---
 # Frame: Data Rollup
 
 Use this template when a video needs a concise data visualization: rankings,
 metric comparisons, progress summaries, or KPI rollups.
 
+## Capture Contract
+
+The template renders all visible content to one `<canvas data-capture="true">`.
+Do not add DOM-rendered chart rows, CSS animations, external fonts, scripts,
+images, or CDN links. The script sizes the canvas with
+`canvas.width = window.innerWidth` and `canvas.height = window.innerHeight`,
+then starts a `requestAnimationFrame` loop on load so `canvas.captureStream()`
+records the same pixels shown in the iframe preview.
+
 ## Inputs
 
-- `labels`: edit the `label` fields in the `data` array inside `template.html`.
-- `values`: edit the numeric `value` fields. The script scales bars against
-  the largest value in the array.
-- Optional title and deck copy live in the `.eyebrow`, `h1`, and `.note`
-  elements.
+- `title.eyebrow`: the small uppercase label above the chart.
+- `title.headline`: the main chart title.
+- `title.note`: the footer note.
+- `data`: edit each object `label`, numeric `value`, and optional `color`.
 
-## Usage
-
-Keep all CSS and JavaScript inline. The bars animate on page load with a
-requestAnimationFrame spring loop, so browser capture starts from zero width
-and settles into the final chart without external dependencies.
+The script scales bar widths against the largest `value`. Bar state lives in the
+`bars` array and uses spring easing each frame; adjust the force and damping
+constants in `frame()` to change how quickly bars settle.
