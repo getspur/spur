@@ -352,6 +352,50 @@ async fn graph_build_section_sidecar_streaming_writes_all_rows() {
 }
 
 #[test]
+fn graph_build_prints_section_sidecar_progress_for_markdown() {
+    let dir = fixture_tree_with_markdown_sections();
+
+    let output = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args([
+            "graph",
+            "build",
+            "--workspace",
+            "--no-analyst",
+            "--no-section-embeddings",
+        ])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .env_remove("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS")
+        .env("SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE", "2")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        output.status.success(),
+        "expected success; stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("[spur] Section sidecar:"),
+        "expected sidecar start progress in stdout, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("embeddings: disabled"),
+        "expected embedding status in sidecar progress, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("write batch: 2"),
+        "expected write batch size in sidecar progress, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[spur] Section sidecar ready:"),
+        "expected sidecar completion progress in stdout, got: {stdout}"
+    );
+}
+
+#[test]
 fn graph_build_custom_output_bypasses_canonical_cache() {
     let dir = fixture_git_repo();
     let output_path = dir.path().join("custom-index");

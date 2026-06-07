@@ -32,6 +32,44 @@ const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE"
 #[cfg(debug_assertions)]
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
+pub type SectionSidecarProgressCallback<'a> = dyn Fn(SectionSidecarProgressEvent) + Sync + 'a;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SectionSidecarProgressEvent {
+    Started {
+        total_rows: usize,
+        markdown_files: usize,
+        embeddings_enabled: bool,
+        embedding_batch_size: usize,
+        write_batch_size: usize,
+    },
+    BatchStarted {
+        batch_index: usize,
+        batch_rows: usize,
+        embedding_eligible_rows: usize,
+        processed_rows: usize,
+        total_rows: usize,
+    },
+    BatchWritten {
+        batch_index: usize,
+        written_rows: usize,
+        skipped_existing_rows: usize,
+        processed_rows: usize,
+        total_rows: usize,
+    },
+    Indexing {
+        label: &'static str,
+    },
+    Finished {
+        total_rows: usize,
+        written_rows: usize,
+        skipped_existing_rows: usize,
+    },
+    Failed {
+        error: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SectionEmbeddingOptions {
     pub skip_embeddings: bool,
@@ -192,9 +230,35 @@ fn write_sections_dataset_best_effort_with_sidecar_options(
     artifact_dir: &Path,
     options: SectionSidecarOptions,
 ) {
-    if let Err(error) =
-        write_sections_dataset_with_sidecar_options(artifact, worktree_root, artifact_dir, options)
-    {
+    write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        options,
+        None,
+    );
+}
+
+pub fn write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    options: SectionSidecarOptions,
+    progress: Option<&SectionSidecarProgressCallback<'_>>,
+) {
+    if let Err(error) = write_sections_dataset_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        options,
+        progress,
+    ) {
+        emit_progress(
+            progress,
+            SectionSidecarProgressEvent::Failed {
+                error: error.to_string(),
+            },
+        );
         tracing::warn!(
             error = %error,
             artifact_dir = %artifact_dir.display(),
@@ -223,6 +287,22 @@ fn write_sections_dataset_with_sidecar_options(
     artifact_dir: &Path,
     options: SectionSidecarOptions,
 ) -> Result<()> {
+    write_sections_dataset_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        options,
+        None,
+    )
+}
+
+fn write_sections_dataset_with_sidecar_options_and_progress(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    options: SectionSidecarOptions,
+    progress: Option<&SectionSidecarProgressCallback<'_>>,
+) -> Result<()> {
     #[cfg(debug_assertions)]
     if matches!(
         std::env::var(SECTION_SIDECAR_TEST_FAIL_ENV),
@@ -240,13 +320,20 @@ fn write_sections_dataset_with_sidecar_options(
                         worktree_root,
                         artifact_dir,
                         options,
+                        progress,
                     )
                 })
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         });
     }
-    write_sections_dataset_without_current_runtime(artifact, worktree_root, artifact_dir, options)
+    write_sections_dataset_without_current_runtime(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        options,
+        progress,
+    )
 }
 
 fn write_sections_dataset_without_current_runtime(
@@ -254,6 +341,7 @@ fn write_sections_dataset_without_current_runtime(
     worktree_root: &Path,
     artifact_dir: &Path,
     options: SectionSidecarOptions,
+    progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -264,6 +352,7 @@ fn write_sections_dataset_without_current_runtime(
         worktree_root,
         artifact_dir,
         options,
+        progress,
     ))
 }
 
@@ -272,7 +361,21 @@ async fn write_sections_dataset_async(
     worktree_root: &Path,
     artifact_dir: &Path,
     options: SectionSidecarOptions,
+    progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<()> {
+    let mut batcher = SectionRowBatcher::new(artifact, worktree_root, options.write_batch_size);
+    let total_rows = batcher.total_rows();
+    emit_progress(
+        progress,
+        SectionSidecarProgressEvent::Started {
+            total_rows,
+            markdown_files: batcher.markdown_file_count(),
+            embeddings_enabled: !options.embedding.skip_embeddings,
+            embedding_batch_size: options.embedding.batch_size,
+            write_batch_size: batcher.write_batch_size(),
+        },
+    );
+
     fs::create_dir_all(artifact_dir)
         .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
     let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
@@ -287,15 +390,46 @@ async fn write_sections_dataset_async(
     let mut table = db.open_table(SECTIONS_TABLE).execute().await.ok();
     let mut existing_versions = ExistingFileVersions::new(table.as_ref());
     let mut embedder = SectionEmbedder::new(options.embedding);
-    let mut batcher = SectionRowBatcher::new(artifact, worktree_root, options.write_batch_size);
     let mut dataset_changed = false;
+    let mut batch_index = 0usize;
+    let mut processed_rows = 0usize;
+    let mut written_rows = 0usize;
+    let mut skipped_existing_rows = 0usize;
 
     while let Some(rows) = batcher.next_batch()? {
+        batch_index += 1;
+        processed_rows += rows.len();
+        let candidate_rows = rows.len();
         let mut rows = existing_versions.retain_new_rows(rows).await?;
+        skipped_existing_rows += candidate_rows.saturating_sub(rows.len());
         if rows.is_empty() {
+            emit_progress(
+                progress,
+                SectionSidecarProgressEvent::BatchWritten {
+                    batch_index,
+                    written_rows,
+                    skipped_existing_rows,
+                    processed_rows,
+                    total_rows,
+                },
+            );
             continue;
         }
+        emit_progress(
+            progress,
+            SectionSidecarProgressEvent::BatchStarted {
+                batch_index,
+                batch_rows: rows.len(),
+                embedding_eligible_rows: rows
+                    .iter()
+                    .filter(|row| is_embedding_eligible(row))
+                    .count(),
+                processed_rows,
+                total_rows,
+            },
+        );
         embedder.embed_rows(&mut rows);
+        let batch_rows = rows.len();
         let batch = rows_to_batch(rows, schema.clone())?;
         if let Some(table) = table.as_ref() {
             table
@@ -313,6 +447,17 @@ async fn write_sections_dataset_async(
             );
             dataset_changed = true;
         }
+        written_rows += batch_rows;
+        emit_progress(
+            progress,
+            SectionSidecarProgressEvent::BatchWritten {
+                batch_index,
+                written_rows,
+                skipped_existing_rows,
+                processed_rows,
+                total_rows,
+            },
+        );
     }
 
     if table.is_none() {
@@ -330,11 +475,40 @@ async fn write_sections_dataset_async(
         let table = table
             .as_ref()
             .expect("section table should exist after dataset change");
+        emit_progress(
+            progress,
+            SectionSidecarProgressEvent::Indexing {
+                label: "body_text FTS",
+            },
+        );
         ensure_body_text_fts_index(&table).await?;
+        emit_progress(
+            progress,
+            SectionSidecarProgressEvent::Indexing {
+                label: "vector HNSW",
+            },
+        );
         ensure_vector_index(&table).await?;
     }
 
+    emit_progress(
+        progress,
+        SectionSidecarProgressEvent::Finished {
+            total_rows,
+            written_rows,
+            skipped_existing_rows,
+        },
+    );
     Ok(())
+}
+
+fn emit_progress(
+    progress: Option<&SectionSidecarProgressCallback<'_>>,
+    event: SectionSidecarProgressEvent,
+) {
+    if let Some(progress) = progress {
+        progress(event);
+    }
 }
 
 async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<()> {
@@ -546,6 +720,23 @@ impl<'a> SectionRowBatcher<'a> {
         } else {
             Ok(Some(batch))
         }
+    }
+
+    fn total_rows(&self) -> usize {
+        self.sections_by_path.values().map(Vec::len).sum::<usize>()
+            + self
+                .ordered_paths
+                .iter()
+                .filter(|path| !self.sections_by_path.contains_key(**path))
+                .count()
+    }
+
+    fn markdown_file_count(&self) -> usize {
+        self.ordered_paths.len()
+    }
+
+    fn write_batch_size(&self) -> usize {
+        self.write_batch_size
     }
 
     fn rows_for_path(&self, path: &str) -> Result<Vec<SectionRow>> {
