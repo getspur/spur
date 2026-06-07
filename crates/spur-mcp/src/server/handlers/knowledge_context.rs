@@ -599,8 +599,7 @@ fn evidence_from_candidate(candidate: &KnowledgeCandidate, intent: KnowledgeInte
 fn recommended_next_tools(intent: KnowledgeIntent, primary_evidence: &[Value]) -> Vec<Value> {
     let top_symbol = primary_evidence
         .iter()
-        .filter_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str))
-        .next();
+        .find_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str));
 
     match (intent, top_symbol) {
         (KnowledgeIntent::Change, Some(selector)) => vec![

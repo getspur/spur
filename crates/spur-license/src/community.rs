@@ -44,10 +44,10 @@ impl CommunityProvider {
         // for Team; future tier-design pass for Enterprise). Unknown
         // values fall back to community with a debug log.
         #[cfg(debug_assertions)]
-        let (features, plan) = match std::env::var(DEV_PLAN_ENV).ok() {
-            Some(ref v) if v == "pro" => (resolve_features("pro"), Plan::Pro),
-            Some(ref v) if v == "team" => (resolve_features("team"), Plan::Team),
-            Some(ref v) if v == "enterprise" => (resolve_features("enterprise"), Plan::Enterprise),
+        let (features, plan) = match std::env::var(DEV_PLAN_ENV).ok().as_deref() {
+            Some("pro") => (resolve_features("pro"), Plan::Pro),
+            Some("team") => (resolve_features("team"), Plan::Team),
+            Some("enterprise") => (resolve_features("enterprise"), Plan::Enterprise),
             Some(v) if !v.is_empty() => {
                 tracing::debug!(
                     requested = %v,

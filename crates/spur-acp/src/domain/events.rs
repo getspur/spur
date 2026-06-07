@@ -635,7 +635,7 @@ pub enum SpurEventBody {
         quiet_window_ms: u64,
     },
     /// Diagnostic-only. Do NOT count in message-loss metrics — message loss
-    /// is counted via WorkerPeerMessageIgnored per-message events. Use this
+    /// is counted via `WorkerPeerMessageIgnored` per-message events. Use this
     /// for drain-health / worker-behavior dashboards.
     WorkerPeerMessageDrainCappedOut {
         brain_session_id: String,
@@ -804,7 +804,7 @@ pub enum SpurEventBody {
         issue_id: Option<String>,
     },
     /// Emitted after the worker worktree base has been finalized and before
-    /// agent initialization, so lineage can explain which BaseSpec and overlay
+    /// agent initialization, so lineage can explain which `BaseSpec` and overlay
     /// closure a dispatch attempt saw.
     DispatchOverlayApplied {
         request_id: String,
@@ -813,7 +813,7 @@ pub enum SpurEventBody {
         overlay_task_ids: Vec<String>,
     },
     /// Emitted immediately after the orchestrator spawns an executor
-    /// for a brain delegation. Lets the brain-side session_detail
+    /// for a brain delegation. Lets the brain-side `session_detail`
     /// view correlate its `DelegationRequested` trace entry with the
     /// new executor node so an inline executor card can render.
     DelegationDispatched {
@@ -888,12 +888,12 @@ pub enum SpurEventBody {
     },
 
     /// Response to a TUI request for full issue detail.
-    /// Follows SessionsListed / IssuesLoaded precedent for request-response on broadcast.
+    /// Follows `SessionsListed` / `IssuesLoaded` precedent for request-response on broadcast.
     IssueDetailFetched {
         /// The ID that was requested — TUI checks against focused issue
         /// to discard stale responses from navigation races.
         requested_id: String,
-        /// Full issue data from PmService.
+        /// Full issue data from `PmService`.
         issue: IssueDetailEvent,
     },
 
@@ -922,7 +922,7 @@ pub enum SpurEventBody {
         error: String,
     },
 
-    /// Graph health alert summary from bv (beads_viewer) analysis.
+    /// Graph health alert summary from bv (`beads_viewer`) analysis.
     /// Emitted at startup and after each delegation completion.
     GraphAlertsSummary {
         total: usize,
@@ -1062,7 +1062,7 @@ pub enum SpurEventBody {
     SessionsListError {
         message: String,
     },
-    /// Replayed conversation history from disk (when agent doesn't support load_session).
+    /// Replayed conversation history from disk (when agent doesn't support `load_session`).
     SessionHistory {
         session: SessionId,
         entries: Vec<HistoryEntry>,
@@ -1119,7 +1119,7 @@ pub enum SpurEventBody {
 
     /// Worker read or wrote a file. Either emitted explicitly by the
     /// worker via `_spur/file_touched`, or synthesized by the
-    /// orchestrator from observed ToolCall events with a 200ms
+    /// orchestrator from observed `ToolCall` events with a 200ms
     /// de-duplication window.
     WorkerFileTouched {
         brain_session_id: SessionId,
@@ -1142,7 +1142,7 @@ pub enum SpurEventBody {
         /// chars). `None` on replay of pre-Phase-2 events.
         #[serde(default)]
         task_name: Option<String>,
-        /// "approve" | "reject" | "request_changes"
+        /// "approve" | "reject" | "`request_changes`"
         decision: String,
         feedback: Option<String>,
         attempt: u32,
@@ -1159,7 +1159,7 @@ pub enum SpurEventBody {
         /// Human-readable task name. `None` on replay of pre-Phase-2 events.
         #[serde(default)]
         task_name: Option<String>,
-        /// New attempt number (the attempt that just started, i.e., old_attempt + 1).
+        /// New attempt number (the attempt that just started, i.e., `old_attempt` + 1).
         attempt: u32,
         /// Attempt budget. Defaults to 0 on pre-Phase-2 replay.
         #[serde(default)]
@@ -1239,7 +1239,7 @@ pub enum SpurEventBody {
     // ── Plan lifecycle events (INV-7) ─────────────────────────────────────────
     /// Emitted once when a submitted plan reaches a terminal state (no tasks
     /// left to dispatch). Counts reflect the final status of all tasks.
-    /// Brain awaits this instead of polling get_plan_status.
+    /// Brain awaits this instead of polling `get_plan_status`.
     PlanCompleted {
         plan_id: String,
         approved: u32,
@@ -1249,7 +1249,7 @@ pub enum SpurEventBody {
         cancelled: u32,
     },
     /// Emitted when all tasks in a plan are Approved. Distinct from
-    /// PlanCompleted (which fires on any terminal state). Brain treats this
+    /// `PlanCompleted` (which fires on any terminal state). Brain treats this
     /// as the merge-authorization signal.
     PlanReadyToMerge {
         plan_id: String,

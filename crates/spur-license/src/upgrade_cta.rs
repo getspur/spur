@@ -13,6 +13,8 @@
 //! Tier 3 — trial JWT CTA refinements — is wontfix-by-strategy per
 //! the 2026-04-29 no-trial decision; closed as bd-22q.11.)
 
+use std::fmt::Write as _;
+
 use crate::policy::PolicyResolver;
 use crate::{FeatureGateError, FeatureKey, Plan};
 
@@ -51,7 +53,7 @@ pub fn find_gate_error(err: &anyhow::Error) -> Option<&FeatureGateError> {
 /// the error variant.
 pub fn format_upgrade_cta(gate_err: &FeatureGateError) -> String {
     let mut out = String::new();
-    out.push_str(&format!("Error: {gate_err}\n"));
+    let _ = writeln!(out, "Error: {gate_err}");
     out.push('\n');
     out.push_str("To unlock this feature:\n");
     out.push_str("  \u{2022} View tier comparison:  spur auth status\n");
@@ -83,9 +85,11 @@ pub fn required_tier_for(key: FeatureKey) -> Option<Plan> {
     let needle = key.as_str();
     for plan in [Plan::Community, Plan::Pro, Plan::Team, Plan::Enterprise] {
         let tier_label = plan_to_resolver_label(plan);
-        match resolver.tier_features(tier_label) {
-            Ok(features) if features.iter().any(|f| f == needle) => return Some(plan),
-            _ => continue,
+        if resolver
+            .tier_features(tier_label)
+            .is_ok_and(|features| features.iter().any(|f| f == needle))
+        {
+            return Some(plan);
         }
     }
     None
@@ -93,16 +97,10 @@ pub fn required_tier_for(key: FeatureKey) -> Option<Plan> {
 
 fn plan_to_resolver_label(plan: Plan) -> &'static str {
     match plan {
-        Plan::Community => "community",
-        Plan::Pro => "pro",
+        Plan::Community | Plan::Unknown => "community",
+        Plan::Pro | Plan::StarterLtd | Plan::BuilderLtd | Plan::FounderLtd => "pro",
         Plan::Team => "team",
         Plan::Enterprise => "enterprise",
-        // LTD plans inherit the Pro feature set; treat as Pro for
-        // the required-tier display.
-        Plan::StarterLtd | Plan::BuilderLtd | Plan::FounderLtd => "pro",
-        // Defensive default for an unknown plan: render as community
-        // (the most conservative tier).
-        Plan::Unknown => "community",
     }
 }
 

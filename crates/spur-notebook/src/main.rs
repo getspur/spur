@@ -1,5 +1,25 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![expect(
+    clippy::allow_attributes,
+    reason = "legacy notebook binary contains localized cfg-related allow attributes"
+)]
+#![expect(
+    clippy::large_stack_frames,
+    reason = "Tauri generate_context macro expands into a large stack frame"
+)]
+#![expect(
+    clippy::ptr_arg,
+    reason = "legacy notebook daemon helper accepts PathBuf references"
+)]
+#![expect(
+    clippy::unnecessary_map_on_constructor,
+    reason = "legacy notebook daemon spawn code maps constructor errors explicitly"
+)]
+#![expect(
+    clippy::unused_trait_names,
+    reason = "legacy notebook binary imports extension traits by name"
+)]
 
 use std::{
     env,

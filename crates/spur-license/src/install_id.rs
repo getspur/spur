@@ -10,7 +10,7 @@ impl InstallId {
         let path = directories::BaseDirs::new()
             .map(|dirs| dirs.home_dir().join(".spur").join("install-id"));
 
-        if let Some(ref p) = path {
+        if let Some(p) = path.as_ref() {
             if let Ok(s) = std::fs::read_to_string(p) {
                 if let Ok(uuid) = s.trim().parse::<uuid::Uuid>() {
                     return Self(uuid);
@@ -19,7 +19,7 @@ impl InstallId {
         }
 
         let new_id = Self(uuid::Uuid::new_v4());
-        if let Some(ref p) = path {
+        if let Some(p) = path.as_ref() {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }

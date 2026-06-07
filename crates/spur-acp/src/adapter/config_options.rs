@@ -11,7 +11,7 @@ use crate::SpurAgentCaps;
 /// Vendor-neutral description of an interactive slash command synthesized from
 /// the agent's advertised config options. spur-tui consumes this without
 /// needing ACP schema imports.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdvertisedCommand {
     /// Slash name (no leading `/`). E.g. "model", "effort".
     pub name: String,
@@ -31,7 +31,7 @@ pub struct AdvertisedCommand {
 }
 
 /// One option in a synthesized command's picker.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdvertisedChoice {
     pub value: String,
     pub label: String,

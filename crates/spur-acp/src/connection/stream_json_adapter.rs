@@ -168,7 +168,7 @@ impl AgentConnection for StreamJsonAdapter {
 
         // Build args: base args + optional --resume + prompt as trailing arg.
         let mut args = self.extra_args.clone();
-        if let Some(ref claude_sid) = self.claude_session_id {
+        if let Some(claude_sid) = self.claude_session_id.as_ref() {
             args.push("--resume".to_string());
             args.push(claude_sid.clone());
         }
@@ -225,7 +225,7 @@ impl AgentConnection for StreamJsonAdapter {
                 };
 
                 // Extract Claude's session ID from the init event (first turn only).
-                if let ClaudeEvent::System(ref sys) = event {
+                if let ClaudeEvent::System(sys) = &event {
                     if sys.subtype == "init" {
                         if let Ok(mut holder) = claude_session_holder.lock() {
                             if holder.is_none() {
@@ -242,7 +242,7 @@ impl AgentConnection for StreamJsonAdapter {
                 }
 
                 // Extract cost from result events.
-                if let ClaudeEvent::Result(ref r) = event {
+                if let ClaudeEvent::Result(r) = &event {
                     if let Some(c) = r.total_cost_usd {
                         if let Ok(mut total) = cost.lock() {
                             *total += c;
