@@ -38,7 +38,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     let params: HtmlVideoSearchTemplatesParams =
         serde_json::from_value(arguments).map_err(|error| {
             McpError::invalid_params(
-                format!("{METHOD} requires { intent, top? }"),
+                format!("{METHOD} requires {{ intent, top? }}"),
                 Some(json!({ "error": error.to_string() })),
             )
         })?;
