@@ -24,10 +24,7 @@ use spur_notebook::{
         bridge::{
             AgentBridge, BridgeError, BridgeRequestFuture, BridgeRequester, TauriBridgeRequester,
         },
-        tools::{
-            cell_capture, kernel_info, read_cell, run_cell, save, snapshot, start_kernel,
-            stop_kernel,
-        },
+        tools::{kernel_info, read_cell, run_cell, save, snapshot, start_kernel, stop_kernel},
         DaemonControlRequest, DaemonWindowOps, NotebookDaemonControl, ServerDeps,
     },
 };
@@ -485,34 +482,6 @@ async fn read_cell_returns_full_source_and_outputs_for_one_cell() {
     assert_eq!(
         bridge.calls().await,
         vec![("notebook.read_cell".to_string(), json!({ "id": "code-1" }))]
-    );
-}
-
-#[tokio::test]
-async fn notebook_get_cell_capture_returns_stored_webm_for_cell() {
-    let bridge = Arc::new(MockBridge::default());
-    bridge
-        .push_response(Ok(json!({
-            "webm_base64": "d2VibQ==",
-            "duration_sec": 1.5
-        })))
-        .await;
-
-    let deps = deps_with(bridge.clone());
-    let body = structured(
-        cell_capture::call(&deps, json!({ "cell_id": "code-1" }))
-            .await
-            .expect("cell capture succeeds"),
-    );
-
-    assert_eq!(body["webm_base64"], "d2VibQ==");
-    assert_eq!(body["duration_sec"], 1.5);
-    assert_eq!(
-        bridge.calls().await,
-        vec![(
-            "notebook.get_cell_capture".to_string(),
-            json!({ "cell_id": "code-1" })
-        )]
     );
 }
 

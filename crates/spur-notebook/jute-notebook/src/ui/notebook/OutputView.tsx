@@ -1,9 +1,9 @@
 import clsx from "clsx";
 import { encode } from "html-entities";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import { MultilineString, OutputDisplayData } from "@/bindings";
-import { setCellCapture } from "@/stores/cellCapture";
 import { CellResult } from "@/stores/notebook";
 import { useOutputActiveContentEnabled } from "@/stores/settings";
 
@@ -281,9 +281,12 @@ function HtmlOutput({ html, cellId }: { html: string; cellId?: string }) {
         typeof event.data.duration_sec === "number" &&
         Number.isFinite(event.data.duration_sec)
       ) {
-        setCellCapture(event.data.cellId, {
-          webm_base64: event.data.webm,
-          duration_sec: event.data.duration_sec,
+        void invoke("push_capture_port", {
+          port: event.data.cellId,
+          webmBase64: event.data.webm,
+          durationSec: event.data.duration_sec,
+        }).catch((error) => {
+          console.error("Failed to push capture port", error);
         });
       }
     };

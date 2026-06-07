@@ -5,6 +5,10 @@ use std::{
     sync::Arc,
 };
 
+use arrow_array::{BinaryArray, Float64Array, RecordBatch};
+use arrow_ipc::writer::FileWriter;
+use arrow_schema::{DataType, Field, Schema};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use jute::backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
@@ -175,6 +179,121 @@ pub async fn anywidget_command(
         None => None,
     };
     Ok(handle_anywidget_command_intent(&state, engine, intent).await)
+}
+
+/// Push a captured HTML canvas recording into the reactive source port store.
+#[tauri::command]
+pub async fn push_capture_port(
+    state: tauri::State<'_, Arc<jute::state::State>>,
+    daemon_control: tauri::State<'_, NotebookDaemonControlSlot>,
+    port: String,
+    webm_base64: String,
+    duration_sec: f64,
+) -> Result<Value, jute::Error> {
+    let control = { daemon_control.lock().await.clone() };
+    let engine = match control {
+        Some(control) => control.reactive_engine_client().await,
+        None => None,
+    };
+    push_capture_port_for_state(&state, engine, port, webm_base64, duration_sec).await
+}
+
+async fn push_capture_port_for_state(
+    state: &jute::state::State,
+    engine: Option<ReactiveEngineClient>,
+    port: String,
+    webm_base64: String,
+    duration_sec: f64,
+) -> Result<Value, jute::Error> {
+    if port.is_empty() {
+        return Err(jute::Error::NotebookDaemon(
+            "push_capture_port port must not be empty".to_string(),
+        ));
+    }
+    if !duration_sec.is_finite() || duration_sec < 0.0 {
+        return Err(jute::Error::NotebookDaemon(
+            "push_capture_port duration_sec must be a finite non-negative number".to_string(),
+        ));
+    }
+
+    let webm = STANDARD.decode(webm_base64).map_err(|error| {
+        jute::Error::NotebookDaemon(format!("push_capture_port invalid webm_base64: {error}"))
+    })?;
+    let ipc_bytes = capture_ipc_bytes(&webm, duration_sec)?;
+    let engine = engine.ok_or_else(|| {
+        jute::Error::NotebookDaemon("push_capture_port reactive engine is unavailable".to_string())
+    })?;
+    let (root, _) = state.get_notebook().snapshot();
+    let source = capture_source_for_port(&root, &port)?;
+    engine
+        .push_source(SourcePush { source, ipc_bytes })
+        .await
+        .map_err(|error| {
+            jute::Error::NotebookDaemon(format!(
+                "push_capture_port failed to queue source push: {error}"
+            ))
+        })?;
+
+    Ok(json!({
+        "port": port,
+        "accepted": true,
+    }))
+}
+
+fn capture_ipc_bytes(webm: &[u8], duration_sec: f64) -> Result<Vec<u8>, jute::Error> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("webm", DataType::Binary, false),
+        Field::new("duration_sec", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(std::iter::once(webm))),
+            Arc::new(Float64Array::from(vec![duration_sec])),
+        ],
+    )
+    .map_err(|error| {
+        jute::Error::NotebookDaemon(format!(
+            "push_capture_port failed to build Arrow batch: {error}"
+        ))
+    })?;
+
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, schema.as_ref()).map_err(|error| {
+            jute::Error::NotebookDaemon(format!(
+                "push_capture_port failed to create Arrow IPC writer: {error}"
+            ))
+        })?;
+        writer.write(&batch).map_err(|error| {
+            jute::Error::NotebookDaemon(format!(
+                "push_capture_port failed to write Arrow batch: {error}"
+            ))
+        })?;
+        writer.finish().map_err(|error| {
+            jute::Error::NotebookDaemon(format!(
+                "push_capture_port failed to finish Arrow IPC file: {error}"
+            ))
+        })?;
+    }
+    Ok(bytes)
+}
+
+fn capture_source_for_port(root: &NotebookRoot, port: &str) -> Result<DagSource, jute::Error> {
+    let source = resolve_source_for_port(root, port).map_err(|error| match error {
+        SourcePortError::NotDeclared { port } => jute::Error::NotebookDaemon(format!(
+            "push_capture_port source port is not declared: {port}"
+        )),
+        SourcePortError::Ambiguous { port } => jute::Error::NotebookDaemon(format!(
+            "push_capture_port source port is ambiguous: {port}"
+        )),
+    })?;
+    if source.kind != "canvas-capture" {
+        return Err(jute::Error::NotebookDaemon(format!(
+            "push_capture_port source kind must be canvas-capture for port: {port}"
+        )));
+    }
+    Ok(source)
 }
 
 pub fn publish_spur_app_for_paths(
@@ -717,8 +836,10 @@ mod tests {
         time::Duration,
     };
 
-    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_array::{Array as _, BinaryArray, Float64Array, Int64Array, RecordBatch};
+    use arrow_ipc::reader::FileReader;
     use arrow_schema::{DataType, Field, Schema};
+    use base64::Engine as _;
     use jute::backend::notebook::{
         Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
         NotebookMetadata, NotebookRoot, PortSpec, SpurCellMetadata,
@@ -997,6 +1118,61 @@ mod tests {
         let push = source_rx.recv().await.expect("source push queued");
         assert_eq!(push.source, source);
         assert_eq!(push.ipc_bytes, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn push_capture_port_queues_canvas_capture_arrow_batch() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("nb.ipynb");
+        let state = jute::state::State::new();
+        state.get_notebook().load(
+            &notebook_path,
+            notebook(vec![source_cell(
+                "capture",
+                DagSource {
+                    kind: "canvas-capture".to_owned(),
+                    port: "capture".to_owned(),
+                },
+            )]),
+        );
+        let (engine, mut source_rx) = source_engine_for_test();
+
+        let response = push_capture_port_for_state(
+            &state,
+            Some(engine),
+            "capture".to_owned(),
+            base64::engine::general_purpose::STANDARD.encode(b"webm bytes"),
+            1.5,
+        )
+        .await
+        .expect("capture push succeeds");
+
+        assert_eq!(response["port"], "capture");
+        assert_eq!(response["accepted"], true);
+        let push = source_rx.recv().await.expect("source push queued");
+        assert_eq!(push.source.kind, "canvas-capture");
+        assert_eq!(push.source.port, "capture");
+
+        let cursor = std::io::Cursor::new(push.ipc_bytes);
+        let mut reader = FileReader::try_new(cursor, None).expect("ipc reader");
+        let batch = reader.next().expect("one batch").expect("batch decodes");
+        assert_eq!(batch.schema().field(0).name(), "webm");
+        assert_eq!(batch.schema().field(0).data_type(), &DataType::Binary);
+        assert_eq!(batch.schema().field(1).name(), "duration_sec");
+        assert_eq!(batch.schema().field(1).data_type(), &DataType::Float64);
+
+        let webm = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("webm column");
+        let duration = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("duration column");
+        assert_eq!(webm.value(0), b"webm bytes");
+        assert_eq!(duration.value(0), 1.5);
     }
 
     #[tokio::test]
