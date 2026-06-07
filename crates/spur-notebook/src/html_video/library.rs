@@ -5,64 +5,67 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const ENV_VAR: &str = "HTML_VIDEO_TEMPLATES_DIR";
-const LIBRARY_DIR: &str = "html-video-library";
-const TEMPLATE_METADATA_FILENAME: &str = "template.html-video.yaml";
-const DEFAULT_SOURCE_ENTRY: &str = "template.html";
-const DEFAULT_ENGINE: &str = "html";
+use directories::BaseDirs;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
-pub struct TemplateMetadata {
-    #[serde(default)]
+const ENV_VAR: &str = "SPUR_HTML_VIDEO_LIBRARY";
+const LIB_DIR: &str = "html-video-library";
+const INDEX_FILE: &str = "index.json";
+const DEFAULT_HTML_FILE_NAMES: [&str; 4] =
+    ["template.html", "frame.html", "index.html", "index.htm"];
+const DEFAULT_SKILL_FILE_NAMES: [&str; 2] = ["SKILL.md", "skill.md"];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateSearchResult {
     pub id: String,
+    pub title: String,
     #[serde(default)]
-    pub category: Option<String>,
+    pub intent: String,
+    #[serde(default)]
+    pub summary: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default)]
-    pub best_for: Option<String>,
-    #[serde(default = "default_engine")]
-    pub engine: String,
-    #[serde(default = "default_source_entry")]
-    pub source_entry: String,
-    #[serde(default)]
-    pub inputs_schema: Option<String>,
-    #[serde(default)]
-    pub min_duration: Option<u32>,
-    #[serde(default)]
-    pub max_duration: Option<u32>,
-    #[serde(default)]
-    pub resolutions: Vec<String>,
+    pub score: f64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateMetadata {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub intent: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Template {
     pub metadata: TemplateMetadata,
-    pub source_html: String,
+    pub html: String,
     pub skill_md: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
-pub struct Ranked {
-    pub metadata: TemplateMetadata,
-    pub score: f64,
 }
 
 #[derive(Debug)]
 pub enum LibraryError {
     RootNotFound,
     NotFound { id: String },
+    InvalidIndex { path: PathBuf, reason: String },
     Io(io::Error),
-    Yaml(serde_yaml::Error),
+    Json(serde_json::Error),
 }
 
 impl fmt::Display for LibraryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RootNotFound => write!(f, "html-video template library root not found"),
-            Self::NotFound { id } => write!(f, "template not found: {id}"),
-            Self::Io(error) => write!(f, "html-video template library I/O error: {error}"),
-            Self::Yaml(error) => write!(f, "html-video template yaml parse error: {error}"),
+            Self::RootNotFound => write!(f, "html video library root not found"),
+            Self::NotFound { id } => write!(f, "html video template not found: {id}"),
+            Self::InvalidIndex { path, reason } => {
+                write!(f, "invalid index in {}: {reason}", path.display())
+            }
+            Self::Io(error) => write!(f, "html video library I/O error: {error}"),
+            Self::Json(error) => write!(f, "html video library JSON error: {error}"),
         }
     }
 }
@@ -71,8 +74,8 @@ impl Error for LibraryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::Yaml(error) => Some(error),
-            Self::RootNotFound | Self::NotFound { .. } => None,
+            Self::Json(error) => Some(error),
+            Self::InvalidIndex { .. } | Self::RootNotFound | Self::NotFound { .. } => None,
         }
     }
 }
@@ -83,35 +86,74 @@ impl From<io::Error> for LibraryError {
     }
 }
 
-impl From<serde_yaml::Error> for LibraryError {
-    fn from(error: serde_yaml::Error) -> Self {
-        Self::Yaml(error)
+impl From<serde_json::Error> for LibraryError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
     }
 }
 
-pub fn resolve_root() -> Option<PathBuf> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let bundled_dir = manifest_dir.join("assets");
-    resolve_root_with(Some(&bundled_dir), Some(manifest_dir))
+#[derive(Debug, Deserialize)]
+struct LibraryIndex {
+    #[serde(default)]
+    templates: Vec<IndexTemplate>,
+    #[serde(default)]
+    items: Vec<IndexTemplate>,
 }
 
-fn resolve_root_with(resource_dir: Option<&Path>, repo_path: Option<&Path>) -> Option<PathBuf> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexTemplate {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub intent: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+pub fn resolve_root(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let home_dir = user_home_dir();
+    let repo_assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    resolve_root_with(
+        resource_dir,
+        home_dir.as_deref(),
+        Some(repo_assets.as_path()),
+    )
+}
+
+fn resolve_root_with(
+    resource_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+    repo_assets_dir: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(base) = std::env::var_os(ENV_VAR) {
-        let candidate = PathBuf::from(base);
+        let candidate = PathBuf::from(&base);
+        let legacy_candidate = candidate.join(LIB_DIR);
+        if is_library_root(&candidate) {
+            return Some(candidate);
+        }
+        if is_library_root(&legacy_candidate) {
+            return Some(legacy_candidate);
+        }
+    }
+
+    if let Some(home_dir) = home_dir {
+        let candidate = home_dir.join(".spur").join(LIB_DIR);
         if is_library_root(&candidate) {
             return Some(candidate);
         }
     }
 
     if let Some(resource_dir) = resource_dir {
-        let candidate = resource_dir.join(LIBRARY_DIR);
+        let candidate = resource_dir.join(LIB_DIR);
         if is_library_root(&candidate) {
             return Some(candidate);
         }
     }
 
-    if let Some(repo_path) = repo_path {
-        let candidate = repo_path.join(LIBRARY_DIR);
+    if let Some(repo_assets_dir) = repo_assets_dir {
+        let candidate = repo_assets_dir.join(LIB_DIR);
         if is_library_root(&candidate) {
             return Some(candidate);
         }
@@ -121,457 +163,210 @@ fn resolve_root_with(resource_dir: Option<&Path>, repo_path: Option<&Path>) -> O
 }
 
 fn is_library_root(path: &Path) -> bool {
-    path.join("templates").is_dir()
+    path.join(INDEX_FILE).is_file()
 }
 
-pub fn scan_templates(root: &Path) -> Result<Vec<TemplateMetadata>, LibraryError> {
-    let templates_root = root.join("templates");
-    if !templates_root.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut templates = Vec::new();
-
-    for entry in fs::read_dir(templates_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-
-        let metadata_path = path.join(TEMPLATE_METADATA_FILENAME);
-        if !metadata_path.is_file() {
-            continue;
-        }
-
-        let template_id = entry.file_name().to_string_lossy().to_string();
-        let mut metadata = load_template_metadata(&metadata_path, &template_id)?;
-        if metadata.id.is_empty() {
-            metadata.id = template_id;
-        }
-        templates.push(metadata);
-    }
-
-    templates.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.category.cmp(&b.category)));
-    Ok(templates)
+fn user_home_dir() -> Option<PathBuf> {
+    BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }
 
-pub fn get_template(id: &str) -> Result<Template, LibraryError> {
-    let root = resolve_root().ok_or(LibraryError::RootNotFound)?;
-    get_template_with_root(&root, id)
-}
-
-pub fn search(intent: &str, top: usize) -> Result<Vec<Ranked>, LibraryError> {
-    let root = resolve_root().ok_or(LibraryError::RootNotFound)?;
-    search_with_root(&root, intent, top)
-}
-
-fn get_template_with_root(root: &Path, id: &str) -> Result<Template, LibraryError> {
-    let template_dir = root.join("templates").join(id);
-    let metadata_path = template_dir.join(TEMPLATE_METADATA_FILENAME);
-    let mut metadata = load_template_metadata(&metadata_path, id)?;
-    let source_path = template_dir.join(&metadata.source_entry);
-    let source_html = read_required_string(&source_path, id)?;
-    let skill_md = read_required_string(&template_dir.join("SKILL.md"), id)?;
-
-    if metadata.id.is_empty() {
-        metadata.id = id.to_string();
-    }
-
-    Ok(Template {
-        metadata,
-        source_html,
-        skill_md,
-    })
-}
-
-fn search_with_root(root: &Path, intent: &str, top: usize) -> Result<Vec<Ranked>, LibraryError> {
-    let templates = scan_templates(root)?;
+pub fn search(
+    intent: &str,
+    top: usize,
+    resource_dir: Option<&Path>,
+) -> Result<Vec<TemplateSearchResult>, LibraryError> {
+    let root = resolve_root(resource_dir).ok_or(LibraryError::RootNotFound)?;
+    let items = load_index(&root)?;
     let tokens = tokenize(intent);
     let query_is_empty = tokens.is_empty();
-
-    let mut results = Vec::new();
-    for metadata in templates {
-        let score = score_template(intent, &metadata);
-        if !query_is_empty && score == 0.0 {
-            continue;
-        }
-        results.push(Ranked { metadata, score });
-    }
+    let mut results: Vec<_> = items
+        .into_iter()
+        .filter_map(|item| {
+            let score = score(item.intent.as_str(), &tokens, &item);
+            if !query_is_empty && score == 0.0 {
+                None
+            } else {
+                Some(TemplateSearchResult {
+                    id: item.id,
+                    title: item.title,
+                    intent: item.intent,
+                    summary: item.summary,
+                    tags: item.tags,
+                    score,
+                })
+            }
+        })
+        .collect();
 
     results.sort_by(|left, right| {
         right
             .score
             .partial_cmp(&left.score)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| left.metadata.id.cmp(&right.metadata.id))
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.title.cmp(&right.title))
     });
-    results.truncate(top);
+    if top > 0 {
+        results.truncate(top);
+    }
     Ok(results)
 }
 
-fn load_template_metadata(path: &Path, id: &str) -> Result<TemplateMetadata, LibraryError> {
-    let data = match fs::read_to_string(path) {
-        Ok(data) => data,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(LibraryError::NotFound { id: id.to_string() });
+pub fn get_template(id: &str, resource_dir: Option<&Path>) -> Result<Template, LibraryError> {
+    let root = resolve_root(resource_dir).ok_or(LibraryError::RootNotFound)?;
+    let items = load_index(&root)?;
+    let item = items
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| LibraryError::NotFound { id: id.to_string() })?;
+
+    let template_dir = resolve_template_dir(&root, &item.id)?;
+    let html = read_template_html(&template_dir)?;
+    let skill_md = read_template_skill_md(&template_dir)?;
+
+    Ok(Template {
+        metadata: TemplateMetadata {
+            id: item.id,
+            title: item.title,
+            intent: item.intent,
+            summary: item.summary,
+            tags: item.tags,
+        },
+        html,
+        skill_md,
+    })
+}
+
+fn resolve_template_dir(root: &Path, id: &str) -> Result<PathBuf, LibraryError> {
+    let package_dir = root.join("templates").join(id);
+    if package_dir.is_dir() {
+        return Ok(package_dir);
+    }
+
+    let direct_dir = root.join(id);
+    if direct_dir.is_dir() {
+        Ok(direct_dir)
+    } else {
+        Err(LibraryError::NotFound { id: id.to_string() })
+    }
+}
+
+fn load_index(root: &Path) -> Result<Vec<IndexTemplate>, LibraryError> {
+    let index_path = root.join(INDEX_FILE);
+    let raw = fs::read_to_string(&index_path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            LibraryError::InvalidIndex {
+                path: index_path.clone(),
+                reason: "missing index".to_string(),
+            }
+        } else {
+            LibraryError::Io(error)
         }
-        Err(error) => {
-            return Err(LibraryError::Io(error));
-        }
+    })?;
+
+    let array_result: Result<Vec<IndexTemplate>, serde_json::Error> = serde_json::from_str(&raw);
+    if let Ok(items) = array_result {
+        return Ok(items);
+    }
+
+    let file: LibraryIndex = serde_json::from_str(&raw)?;
+    let items = if !file.templates.is_empty() {
+        file.templates
+    } else if !file.items.is_empty() {
+        file.items
+    } else {
+        Vec::new()
     };
-    let mut metadata: TemplateMetadata = serde_yaml::from_str(&data)?;
-    metadata.id = metadata.id.trim().to_string();
-    metadata.source_entry = metadata.source_entry.trim().to_string();
-    metadata.engine = metadata.engine.trim().to_string();
-    if metadata.source_entry.is_empty() {
-        metadata.source_entry = DEFAULT_SOURCE_ENTRY.to_string();
-    }
-    if metadata.engine.is_empty() {
-        metadata.engine = DEFAULT_ENGINE.to_string();
-    }
-    Ok(metadata)
+    Ok(items)
 }
 
-fn read_required_string(path: &Path, id: &str) -> Result<String, LibraryError> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Err(LibraryError::NotFound { id: id.to_string() })
+fn read_template_html(template_dir: &Path) -> Result<String, LibraryError> {
+    for name in DEFAULT_HTML_FILE_NAMES {
+        let candidate = template_dir.join(name);
+        if candidate.is_file() {
+            return fs::read_to_string(candidate).map_err(Into::into);
         }
-        Err(error) => Err(LibraryError::Io(error)),
     }
+    Err(LibraryError::NotFound {
+        id: template_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
-fn score_template(intent: &str, item: &TemplateMetadata) -> f64 {
-    let query_tokens = tokenize(intent);
-    let category_tokens = tokenize(item.category.as_deref().unwrap_or_default());
-    let best_for_tokens = tokenize(item.best_for.as_deref().unwrap_or_default());
-    let tag_tokens = item
-        .tags
-        .iter()
-        .flat_map(|tag| tokenize(tag))
-        .collect::<Vec<_>>();
+fn read_template_skill_md(template_dir: &Path) -> Result<String, LibraryError> {
+    for name in DEFAULT_SKILL_FILE_NAMES {
+        let candidate = template_dir.join(name);
+        if candidate.is_file() {
+            return fs::read_to_string(candidate).map_err(Into::into);
+        }
+    }
+    Err(LibraryError::NotFound {
+        id: template_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+pub fn default_render_duration(frame_count: usize, fps: u32, duration: Option<f64>) -> f64 {
+    let fps = u32::max(fps, 1);
+    duration
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| {
+            if frame_count <= 1 {
+                1.0
+            } else {
+                frame_count as f64 / fps as f64
+            }
+        })
+}
+
+fn tokenize(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn score(intent: &str, tokens: &[String], item: &IndexTemplate) -> f64 {
+    if tokens.is_empty() {
+        return 1.0;
+    }
+
     let mut score = 0.0;
+    let title = item.title.to_lowercase();
+    let intent_index = intent.to_lowercase();
+    let summary = item.summary.as_deref().unwrap_or_default().to_lowercase();
+    let tags = item.tags.join(" ").to_lowercase();
 
-    for token in query_tokens {
-        if category_tokens.iter().any(|field| field == &token) {
-            score += 3.0;
+    for token in tokens {
+        if item.id.to_lowercase().contains(token) {
+            score += 10.0;
         }
-        if tag_tokens.iter().any(|tag| tag == &token) {
-            score += 2.0;
+        if title.contains(token) {
+            score += 6.0;
         }
-        if best_for_tokens.iter().any(|field| field == &token) {
-            score += 1.0;
+        if intent_index.contains(token) {
+            score += 4.0;
+        }
+        if !summary.is_empty() && summary.contains(token) {
+            score += 1.5;
+        }
+        if tags.contains(token) {
+            score += 0.5;
         }
     }
 
     score
-}
-
-fn tokenize(value: &str) -> Vec<String> {
-    value
-        .to_lowercase()
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn default_source_entry() -> String {
-    DEFAULT_SOURCE_ENTRY.to_string()
-}
-
-fn default_engine() -> String {
-    DEFAULT_ENGINE.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        env,
-        ffi::OsString,
-        fs, io,
-        path::{Path, PathBuf},
-        sync::{Mutex, MutexGuard},
-    };
-
-    use super::*;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    const ENV_VAR: &str = "HTML_VIDEO_TEMPLATES_DIR";
-
-    struct EnvGuard {
-        previous: Option<OsString>,
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl EnvGuard {
-        fn unset() -> Self {
-            let lock = ENV_LOCK.lock().expect("env lock poisoned");
-            let previous = env::var_os(ENV_VAR);
-            env::remove_var(ENV_VAR);
-            Self {
-                previous,
-                _lock: lock,
-            }
-        }
-
-        fn set(&mut self, value: &Path) {
-            env::set_var(ENV_VAR, value);
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                env::set_var(ENV_VAR, previous);
-            } else {
-                env::remove_var(ENV_VAR);
-            }
-        }
-    }
-
-    fn write_library_root(root: &Path) -> io::Result<PathBuf> {
-        let library_root = root.to_path_buf();
-        fs::create_dir_all(library_root.join("templates"))?;
-        Ok(library_root)
-    }
-
-    fn write_template(
-        root: &Path,
-        id: &str,
-        source_entry: &str,
-        metadata: &str,
-        skill_md: &str,
-        html: &str,
-    ) -> io::Result<PathBuf> {
-        let template_dir = root.join("templates").join(id);
-        fs::create_dir_all(&template_dir)?;
-        fs::write(template_dir.join(TEMPLATE_METADATA_FILENAME), metadata)?;
-        fs::write(template_dir.join(source_entry), html)?;
-        fs::write(template_dir.join("SKILL.md"), skill_md)?;
-        Ok(template_dir)
-    }
-
-    fn write_library_with_templates(root: &Path) -> io::Result<PathBuf> {
-        write_library_root(root)
-    }
-
-    #[test]
-    fn resolve_root_prefers_env_override_then_resource_then_fallback() -> io::Result<()> {
-        let mut env_guard = EnvGuard::unset();
-        let temp = tempfile::tempdir()?;
-        let resource = temp.path().join("resource");
-        let fallback = temp.path().join("fallback");
-        let env_root = temp.path().join("env");
-
-        let resource_lib = write_library_root(&resource.join(LIBRARY_DIR))?;
-        let fallback_lib = write_library_root(&fallback.join(LIBRARY_DIR))?;
-        let env_lib = write_library_root(&env_root)?;
-
-        assert_eq!(
-            resolve_root_with(Some(&resource), Some(&fallback)),
-            Some(resource_lib.clone())
-        );
-
-        env_guard.set(&env_root);
-        assert_eq!(
-            resolve_root_with(Some(&resource), Some(&fallback)),
-            Some(env_lib.clone())
-        );
-        env::remove_var(ENV_VAR);
-        assert_eq!(resolve_root_with(None, Some(&fallback)), Some(fallback_lib));
-        Ok(())
-    }
-
-    #[test]
-    fn scan_templates_reads_template_metadata() -> io::Result<()> {
-        let temp = tempfile::tempdir()?;
-        let root = write_library_with_templates(temp.path())?;
-        write_template(
-            &root,
-            "product-pitch",
-            "template.html",
-            r#"id: product-pitch
-category: marketing
-tags:
-  - keynote
-  - deck
-best_for: investor pitch
-engine: html
-source_entry: template.html
-inputs_schema: schema
-min_duration: 30
-max_duration: 120
-resolutions:
-  - 1080p
-  - 4k
-"#,
-            "template skill",
-            "<html><body>pitch</body></html>",
-        )?;
-
-        let mut templates = scan_templates(&root)?;
-        templates.sort_by(|left, right| left.id.cmp(&right.id));
-
-        assert_eq!(templates.len(), 1);
-        assert_eq!(templates[0].id, "product-pitch");
-        assert_eq!(templates[0].category.as_deref(), Some("marketing"));
-        assert_eq!(templates[0].tags, vec!["keynote", "deck"]);
-        assert_eq!(templates[0].best_for.as_deref(), Some("investor pitch"));
-        assert_eq!(templates[0].engine, "html");
-        assert_eq!(templates[0].source_entry, "template.html");
-        assert_eq!(templates[0].inputs_schema.as_deref(), Some("schema"));
-        assert_eq!(templates[0].min_duration, Some(30));
-        assert_eq!(templates[0].max_duration, Some(120));
-        assert_eq!(templates[0].resolutions, vec!["1080p", "4k"]);
-        Ok(())
-    }
-
-    #[test]
-    fn get_template_returns_metadata_and_source_html_and_skill() -> io::Result<()> {
-        let mut env_guard = EnvGuard::unset();
-        let temp = tempfile::tempdir()?;
-        let root = write_library_with_templates(temp.path())?;
-        write_template(
-            &root,
-            "story",
-            "story.html",
-            r#"id: story
-category: social
-tags:
-  - short
-  - promo
-best_for: product launch
-engine: html
-source_entry: story.html
-inputs_schema: schema.json
-resolutions:
-  - 720p
-  - 1080p
-"#,
-            "skill",
-            "<html><body>story</body></html>",
-        )?;
-        env_guard.set(&root);
-
-        let template = get_template("story").expect("template exists");
-
-        assert_eq!(template.metadata.id, "story");
-        assert_eq!(template.metadata.category.as_deref(), Some("social"));
-        assert_eq!(template.metadata.tags, vec!["short", "promo"]);
-        assert_eq!(
-            template.metadata.best_for.as_deref(),
-            Some("product launch")
-        );
-        assert_eq!(template.metadata.engine, "html");
-        assert_eq!(template.metadata.source_entry, "story.html");
-        assert_eq!(
-            template.metadata.inputs_schema.as_deref(),
-            Some("schema.json")
-        );
-        assert_eq!(template.source_html, "<html><body>story</body></html>");
-        assert_eq!(template.skill_md, "skill");
-        Ok(())
-    }
-
-    #[test]
-    fn get_template_missing_id_errors() -> io::Result<()> {
-        let mut env_guard = EnvGuard::unset();
-        let temp = tempfile::tempdir()?;
-        let root = write_library_with_templates(temp.path())?;
-        env_guard.set(&root);
-
-        let err = get_template("missing").expect_err("missing id errors");
-        assert!(matches!(err, LibraryError::NotFound { id } if id == "missing"));
-        Ok(())
-    }
-
-    #[test]
-    fn search_ranks_category_match_above_tags() -> io::Result<()> {
-        let mut env_guard = EnvGuard::unset();
-        let temp = tempfile::tempdir()?;
-        let root = write_library_with_templates(temp.path())?;
-        write_template(
-            &root,
-            "alpha",
-            "template.html",
-            r#"id: alpha
-category: short
-tags:
-  - review
-best_for: education
-engine: html
-source_entry: template.html
-"#,
-            "alpha skill",
-            "<html>alpha</html>",
-        )?;
-        write_template(
-            &root,
-            "beta",
-            "template.html",
-            r#"id: beta
-category: long
-tags:
-  - short
-best_for: social video
-engine: html
-source_entry: template.html
-"#,
-            "beta skill",
-            "<html>beta</html>",
-        )?;
-        env_guard.set(&root);
-
-        let results = search("short", 2).expect("search succeeds");
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].metadata.id, "alpha");
-        assert!(results[0].score > results[1].score);
-        Ok(())
-    }
-
-    #[test]
-    fn search_empty_query_returns_all() -> io::Result<()> {
-        let mut env_guard = EnvGuard::unset();
-        let temp = tempfile::tempdir()?;
-        let root = write_library_with_templates(temp.path())?;
-        write_template(
-            &root,
-            "zeta",
-            "template.html",
-            r#"id: zeta
-engine: html
-source_entry: template.html
-"#,
-            "zeta skill",
-            "<html>zeta</html>",
-        )?;
-        write_template(
-            &root,
-            "alpha",
-            "template.html",
-            r#"id: alpha
-engine: html
-source_entry: template.html
-"#,
-            "alpha skill",
-            "<html>alpha</html>",
-        )?;
-        env_guard.set(&root);
-
-        let results = search("", 8).expect("search succeeds");
-
-        assert_eq!(
-            results
-                .iter()
-                .map(|result| result.metadata.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["alpha", "zeta"]
-        );
-        assert!(results.iter().all(|result| result.score == 0.0));
-        Ok(())
-    }
 }
