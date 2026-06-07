@@ -14,8 +14,6 @@ import {
   set as setWidgetModel,
 } from "@/stores/widgetRegistry";
 
-import { htmlOutputSandbox } from "./rendering";
-
 export const WIDGET_VIEW_MIME = "application/vnd.jupyter.widget-view+json";
 export const JUTE_PORT_BINDINGS_STATE_KEY = "__jute_port_bindings";
 
@@ -183,7 +181,7 @@ export default function AfmView({
       ref={iframeRef}
       title={`anywidget ${modelId}`}
       srcDoc={srcDoc}
-      sandbox={htmlOutputSandbox(true)}
+      sandbox="allow-scripts"
       onLoad={postModelUpdate}
       style={{ height, minHeight: AFM_MIN_HEIGHT }}
       className={clsx(
