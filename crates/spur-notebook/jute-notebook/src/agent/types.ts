@@ -25,6 +25,10 @@ export type AgentBridgeRequest =
       params: unknown;
     })
   | (AgentBridgeRequestBase & {
+      method: "notebook.get_cell_capture";
+      params: unknown;
+    })
+  | (AgentBridgeRequestBase & {
       method: "notebook.insert_cell";
       params: unknown;
     })
