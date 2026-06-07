@@ -15,7 +15,8 @@ artifact in one document.
 <HARD-GATE>
 You operate the notebook and html-video assets ONLY through these MCP tools:
 (`notebook_insert_cell`, `notebook_write_cell`, `notebook_read_cell`,
-`html_video_search_templates`, `html_video_get_template`, `html_video_render`).
+`notebook_get_cell_capture`, `html_video_search_templates`,
+`html_video_get_template`, `html_video_render`).
 Never ask the user to paste code or open files. The final artifact MUST be a cell
 whose output carries `text/html`, so Jute renders it in its sandboxed iframe.
 </HARD-GATE>
@@ -63,17 +64,18 @@ clarity beats 20 minutes of assumptions.
 - Each frame cell MUST render exactly one `text/html` output.
 - Per-frame HTML cells share the selected template contract and must be
   deterministic, self-contained, and style-complete in one frame payload.
+- The capturable scene MUST be drawn into a `<canvas data-capture="true">` element.
+  The browser records this canvas in-cell and stores the captured WebM for the
+  notebook bridge.
 - Re-read each frame cell with `notebook_read_cell(id)` and verify its output mime is
   `text/html`.
 
 ### 5. Render
 
-- Use `html_video_render` to trigger the rendering batch using the content-graph IR and
-  all frame outputs.
-- If using a custom code cell renderer, the Deno cell must shell out to either:
-  - `node <html-video-cli>` for frame stitching/encoding, or
-  - raw Playwright + ffmpeg for capture and composition.
-- Do not rely on browser-installed helpers outside the Deno-render subprocess.
+- For each frame cell, call `notebook_get_cell_capture(cell_id)` and collect the
+  returned WebM base64 payload.
+- Call `html_video_render({ webm_frames: [...], output_path: "..." })` with the
+  captured WebM payloads in timeline order.
 - Write the resulting artifact into a new notebook `text/html` cell as an inline video tag.
 - Re-read this output cell to verify MIME and that the video tag is valid.
 
