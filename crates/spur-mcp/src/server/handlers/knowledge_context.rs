@@ -503,7 +503,8 @@ async fn pack_query_result_with_exact_context(
             }
         }
     }
-    let recommended_next_tools = recommended_next_tools(request.intent, &primary_evidence);
+    let recommended_next_tools =
+        recommended_next_tools(request.intent, &primary_evidence, &supporting_docs);
     let answerable = !primary_evidence.is_empty() || !supporting_docs.is_empty();
     let confidence = if !answerable {
         "low"
@@ -755,9 +756,21 @@ fn grounding_score_prefix(grounding: &str) -> &str {
     }
 }
 
-fn recommended_next_tools(intent: KnowledgeIntent, primary_evidence: &[Value]) -> Vec<Value> {
+fn recommended_next_tools(
+    intent: KnowledgeIntent,
+    primary_evidence: &[Value],
+    supporting_docs: &[Value],
+) -> Vec<Value> {
     let top_symbol = primary_evidence
         .iter()
+        .find_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str));
+    let top_file = primary_evidence
+        .iter()
+        .find_map(|evidence| evidence.get("file").and_then(Value::as_str));
+    let top_doc_root = supporting_docs
+        .iter()
+        .chain(primary_evidence.iter())
+        .filter(|evidence| evidence.get("kind").and_then(Value::as_str) == Some("doc"))
         .find_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str));
 
     match (intent, top_symbol) {
@@ -766,7 +779,34 @@ fn recommended_next_tools(intent: KnowledgeIntent, primary_evidence: &[Value]) -
             json!({ "tool": "code_callees", "selector": selector, "reason": "Trace direct dependencies for the selected symbol." }),
             json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body." }),
         ],
-        (_, Some(selector)) => vec![json!({
+        (KnowledgeIntent::Debug, Some(selector)) => vec![
+            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body before debugging." }),
+            json!({ "tool": "code_symbol_history", "selector": selector, "reason": "Inspect recent edits that may explain the failure." }),
+            json!({ "tool": "code_subgraph", "selector": selector, "radius": 2, "reason": "Map nearby dependencies and callers around the failing symbol." }),
+        ],
+        (KnowledgeIntent::Review, Some(selector)) => vec![
+            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body for review." }),
+            json!({ "tool": "code_callers", "selector": selector, "reason": "Verify behavioral impact from direct callers." }),
+        ],
+        (KnowledgeIntent::Plan, Some(_)) => {
+            let mut tools = Vec::new();
+            if let Some(root) = top_doc_root {
+                tools.push(json!({
+                    "tool": "doc_navigate",
+                    "root": root,
+                    "reason": "Start planning from the most relevant documentation evidence."
+                }));
+            }
+            if let Some(file) = top_file {
+                tools.push(json!({
+                    "tool": "code_file_symbols",
+                    "file": file,
+                    "reason": "Survey symbols in the relevant file before planning edits."
+                }));
+            }
+            tools
+        }
+        (KnowledgeIntent::Explain, Some(selector)) => vec![json!({
             "tool": "code_read_symbol",
             "selector": selector,
             "reason": "Read exact current symbol body for grounded follow-up."
@@ -786,7 +826,19 @@ fn code_next_tools(intent: KnowledgeIntent) -> Vec<Value> {
             json!({ "tool": "code_callees" }),
             json!({ "tool": "code_read_symbol" }),
         ],
-        _ => vec![json!({ "tool": "code_read_symbol" })],
+        KnowledgeIntent::Debug => vec![
+            json!({ "tool": "code_read_symbol" }),
+            json!({ "tool": "code_symbol_history" }),
+        ],
+        KnowledgeIntent::Review => vec![
+            json!({ "tool": "code_read_symbol" }),
+            json!({ "tool": "code_callers" }),
+        ],
+        KnowledgeIntent::Plan => vec![
+            json!({ "tool": "code_read_symbol" }),
+            json!({ "tool": "code_file_symbols" }),
+        ],
+        KnowledgeIntent::Explain => vec![json!({ "tool": "code_read_symbol" })],
     }
 }
 
@@ -813,6 +865,76 @@ mod tests {
             edge_bind_method: None,
             grounding: "test".into(),
         }
+    }
+
+    #[test]
+    fn recommended_next_tools_are_intent_adaptive() {
+        let primary = vec![json!({
+            "stable_symbol_id": "graph://symbol/sym-1",
+            "file": "crates/spur-mcp/src/lib.rs"
+        })];
+        let docs = vec![json!({
+            "kind": "doc",
+            "stable_symbol_id": "doc-1",
+            "file": "docs/context.md"
+        })];
+
+        let debug_tools = recommended_next_tools(KnowledgeIntent::Debug, &primary, &[]);
+        assert_eq!(
+            debug_tools
+                .iter()
+                .map(|tool| tool["tool"].as_str().expect("tool name"))
+                .collect::<Vec<_>>(),
+            vec!["code_read_symbol", "code_symbol_history", "code_subgraph"]
+        );
+        assert_eq!(debug_tools[2]["radius"], 2);
+
+        let review_tools = recommended_next_tools(KnowledgeIntent::Review, &primary, &[]);
+        assert_eq!(
+            review_tools
+                .iter()
+                .map(|tool| tool["tool"].as_str().expect("tool name"))
+                .collect::<Vec<_>>(),
+            vec!["code_read_symbol", "code_callers"]
+        );
+
+        let plan_tools = recommended_next_tools(KnowledgeIntent::Plan, &primary, &docs);
+        assert_eq!(
+            plan_tools
+                .iter()
+                .map(|tool| tool["tool"].as_str().expect("tool name"))
+                .collect::<Vec<_>>(),
+            vec!["doc_navigate", "code_file_symbols"]
+        );
+        assert_eq!(plan_tools[0]["root"], "doc-1");
+        assert_eq!(plan_tools[1]["file"], "crates/spur-mcp/src/lib.rs");
+
+        let fallback = recommended_next_tools(KnowledgeIntent::Debug, &[], &[]);
+        assert_eq!(fallback[0]["tool"], "code_semantic_search");
+    }
+
+    #[test]
+    fn code_next_tools_are_intent_adaptive() {
+        let tools = |intent| {
+            code_next_tools(intent)
+                .into_iter()
+                .map(|tool| tool["tool"].as_str().expect("tool name").to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            tools(KnowledgeIntent::Debug),
+            vec!["code_read_symbol", "code_symbol_history"]
+        );
+        assert_eq!(
+            tools(KnowledgeIntent::Review),
+            vec!["code_read_symbol", "code_callers"]
+        );
+        assert_eq!(
+            tools(KnowledgeIntent::Plan),
+            vec!["code_read_symbol", "code_file_symbols"]
+        );
+        assert_eq!(tools(KnowledgeIntent::Explain), vec!["code_read_symbol"]);
     }
 
     #[tokio::test]
