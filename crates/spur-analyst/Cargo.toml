@@ -10,6 +10,11 @@ repository = "https://github.com/getspur/spur-releases"
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+anyhow = { workspace = true }
+duckdb = { workspace = true, features = ["bundled"] }
+serde = { workspace = true }
+
 [dev-dependencies]
 spur-cli = { path = "../spur-cli" }
 spur-graph = { workspace = true }

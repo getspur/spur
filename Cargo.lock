@@ -11449,6 +11449,9 @@ dependencies = [
 name = "spur-analyst"
 version = "1.1.20"
 dependencies = [
+ "anyhow",
+ "duckdb",
+ "serde",
  "spur-cli",
  "spur-graph",
  "tempfile",
@@ -11742,6 +11745,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "spur-acp",
+ "spur-analyst",
  "spur-blob-store",
  "spur-core",
  "spur-graph",
