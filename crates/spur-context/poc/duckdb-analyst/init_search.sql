@@ -278,6 +278,8 @@ CREATE OR REPLACE MACRO search_hybrid(q, vec) AS TABLE
         stable_symbol_id,
         list_cosine_similarity(vector, CAST('[' || vec || ']' AS FLOAT[768])) AS cosine
       FROM sections_embeddings
+      JOIN sections_search ss USING (stable_symbol_id)
+      QUALIFY row_number() OVER (PARTITION BY ss.file_path ORDER BY cosine DESC) <= 3
       ORDER BY cosine DESC NULLS LAST
       LIMIT 30
     )
@@ -298,5 +300,6 @@ CREATE OR REPLACE MACRO search_hybrid(q, vec) AS TABLE
     CAST(NULL AS VARCHAR) AS signal
   FROM rrf
   JOIN sections_search s USING (stable_symbol_id)
+  QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY rrf_score DESC NULLS LAST) <= 3
   ORDER BY rrf.rrf_score DESC NULLS LAST
   LIMIT 30;
