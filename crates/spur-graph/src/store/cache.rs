@@ -11,10 +11,11 @@ use anyhow::{Context as _, Result};
 
 use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::build::BuildStats;
+use crate::store::lance_sections::write_sections_dataset_best_effort;
 use crate::store::pointer::resolve_artifact_location;
 use crate::store::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
-    write_current_pointer, write_sections_dataset, ArtifactStagingDir, WriteOptions,
+    write_current_pointer, ArtifactStagingDir, WriteOptions,
 };
 use crate::{git, git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
@@ -170,8 +171,9 @@ fn write_canonical_atomically(
         WriteOptions::default(),
         Vec::new(),
     )?;
-    write_sections_dataset(artifact, worktree_root, staging.path())?;
-    staging.commit()
+    let final_path = staging.commit()?;
+    write_sections_dataset_best_effort(artifact, worktree_root, &final_path);
+    Ok(final_path)
 }
 
 fn load_pointer_artifact(
@@ -371,8 +373,9 @@ fn write_artifact_to_worktree(
         WriteOptions::default(),
         Vec::new(),
     )?;
-    write_sections_dataset(artifact, worktree_root, staging.path())?;
-    staging.commit()
+    let final_path = staging.commit()?;
+    write_sections_dataset_best_effort(artifact, worktree_root, &final_path);
+    Ok(final_path)
 }
 
 fn write_pointer(

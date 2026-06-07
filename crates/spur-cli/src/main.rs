@@ -397,6 +397,19 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_graph_build_no_section_embeddings_flag() {
+        Cli::command()
+            .try_get_matches_from([
+                "spur",
+                "graph",
+                "build",
+                "--workspace",
+                "--no-section-embeddings",
+            ])
+            .expect("graph build --no-section-embeddings should parse");
+    }
+
+    #[test]
     fn cli_accepts_graph_build_with_temporal_flag() {
         Cli::command()
             .try_get_matches_from([
@@ -525,6 +538,10 @@ enum GraphCommands {
         /// Also honored via SPUR_GRAPH_SKIP_ANALYST=1.
         #[arg(long)]
         no_analyst: bool,
+        /// Skip fastembed section vectors while still writing searchable section bodies.
+        /// Also honored via SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS=1.
+        #[arg(long)]
+        no_section_embeddings: bool,
         /// Enable temporal git walk preparation for graph build.
         /// Also honored via SPUR_GRAPH_WITH_TEMPORAL=1.
         #[arg(long)]
@@ -1000,21 +1017,29 @@ async fn run() -> Result<()> {
                 output,
                 quiet,
                 no_analyst,
+                no_section_embeddings,
                 with_temporal,
                 temporal_max_rows_per_shard,
                 temporal_max_commits_per_shard,
-            } => commands::graph::build(commands::graph::GraphBuildOptions {
-                root,
-                workspace,
-                output,
-                quiet,
-                skip_analyst: no_analyst,
-                with_temporal,
-                temporal_shard_config: spur_graph::TemporalShardConfig {
-                    max_rows_per_shard: temporal_max_rows_per_shard,
-                    max_commits_per_shard: temporal_max_commits_per_shard,
-                },
-            }),
+            } => {
+                let options = commands::graph::GraphBuildOptions {
+                    root,
+                    workspace,
+                    output,
+                    quiet,
+                    skip_analyst: no_analyst,
+                    with_temporal,
+                    temporal_shard_config: spur_graph::TemporalShardConfig {
+                        max_rows_per_shard: temporal_max_rows_per_shard,
+                        max_commits_per_shard: temporal_max_commits_per_shard,
+                    },
+                };
+                if no_section_embeddings {
+                    commands::graph::build_with_section_embedding_override(options, true)
+                } else {
+                    commands::graph::build(options)
+                }
+            }
         },
         Commands::Gc {
             cmd:
