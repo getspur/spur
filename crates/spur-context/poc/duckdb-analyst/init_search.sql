@@ -208,7 +208,8 @@ CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope) AS TABLE
 -- Gate: symbols with posture = 'load-bearing wall' AND callers > 30 are popular
 -- sinks — expanding them would flood results with noise. All other hits expand.
 CREATE OR REPLACE MACRO search_graph(q) AS TABLE
-  SELECT kind, title, file, score, signal, neighbor_kind, edge_bind_method
+  SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
+         neighbor_kind, edge_bind_method, grounding
   FROM (
     WITH base AS (
       SELECT
@@ -243,11 +244,14 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
       SELECT
         'code' AS kind,
         symbol AS title,
-        regexp_replace(file_path, '^crates/', '') AS file,
+        file_path,
+        stable_symbol_id,
+        symbol_kind,
         round(fused_rank, 3) AS score,
         posture || ' · pr=' || round(pagerank * 1e4, 1) || ' · churn=' || churn_90d AS signal,
         'primary' AS neighbor_kind,
-        CAST(NULL AS VARCHAR) AS edge_bind_method
+        CAST(NULL AS VARCHAR) AS edge_bind_method,
+        'bm25-graph' AS grounding
       FROM base
     ),
     neighbor_rows AS (
@@ -256,11 +260,14 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
         SELECT
           'code' AS kind,
           nsrc.entity_name AS title,
-          regexp_replace(nsrc.file_path, '^crates/', '') AS file,
+          nsrc.file_path,
+          nsrc.stable_symbol_id,
+          nsrc.symbol_kind,
           round(COALESCE(sc2.pagerank, 0) * 1e4, 3) AS score,
           COALESCE(sc2.posture, 'unknown') || ' · caller of ' || g.symbol AS signal,
           'caller' AS neighbor_kind,
-          e.bind_method AS edge_bind_method
+          e.bind_method AS edge_bind_method,
+          'graph-expanded' AS grounding
         FROM gated g
         LEFT JOIN edges e
           ON e.target_stable_id = g.stable_symbol_id AND e.relation = 'calls'
@@ -274,11 +281,14 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
         SELECT
           'code' AS kind,
           ndst.entity_name AS title,
-          regexp_replace(ndst.file_path, '^crates/', '') AS file,
+          ndst.file_path,
+          ndst.stable_symbol_id,
+          ndst.symbol_kind,
           round(COALESCE(sc3.pagerank, 0) * 1e4, 3) AS score,
           COALESCE(sc3.posture, 'unknown') || ' · callee of ' || g.symbol AS signal,
           'callee' AS neighbor_kind,
-          e.bind_method AS edge_bind_method
+          e.bind_method AS edge_bind_method,
+          'graph-expanded' AS grounding
         FROM gated g
         LEFT JOIN edges e
           ON e.source_stable_id = g.stable_symbol_id AND e.relation = 'calls'
@@ -289,7 +299,7 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
         WHERE ndst.file_path NOT LIKE '.%'
           AND ndst.file_path NOT LIKE '%/tests/%'
       )
-      QUALIFY row_number() OVER (PARTITION BY file, title ORDER BY score DESC) <= 2
+      QUALIFY row_number() OVER (PARTITION BY file_path, stable_symbol_id ORDER BY score DESC) <= 2
     )
     SELECT * FROM primary_rows
     UNION ALL
