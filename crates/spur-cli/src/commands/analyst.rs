@@ -798,6 +798,28 @@ mod tests {
     }
 
     #[test]
+    fn init_search_sql_context_candidates_macro_present() {
+        assert!(
+            INIT_SEARCH_SQL.contains(
+                "CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope) AS TABLE",
+            ),
+            "init_search.sql must define the context candidate macro"
+        );
+        for required in [
+            "stable_symbol_id",
+            "neighbor_kind",
+            "edge_bind_method",
+            "grounding",
+            "requested_scope",
+        ] {
+            assert!(
+                INIT_SEARCH_SQL.contains(required),
+                "context candidate macro must project {required}"
+            );
+        }
+    }
+
+    #[test]
     fn init_search_sql_sections_embeddings_materialized() {
         assert!(
             !INIT_SEARCH_SQL.contains("CREATE OR REPLACE TABLE sections_embeddings")
