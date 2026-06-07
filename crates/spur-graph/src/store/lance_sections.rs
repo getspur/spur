@@ -1,17 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use arrow_array::{
-    FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch, StringArray, UInt32Array,
-    UInt64Array, UInt8Array,
+    Array as _, FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch, StringArray,
+    UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use futures::TryStreamExt as _;
 use lancedb::index::{scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Index, IndexType};
+use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 
 use crate::content_hash::blake3_hex;
 use crate::{
@@ -56,6 +58,9 @@ pub enum SectionSidecarProgressEvent {
         skipped_existing_rows: usize,
         processed_rows: usize,
         total_rows: usize,
+    },
+    ModelDownloading {
+        model_name: &'static str,
     },
     Indexing {
         label: &'static str,
@@ -428,6 +433,14 @@ async fn write_sections_dataset_async(
                 total_rows,
             },
         );
+        if embedder.needs_model_init() {
+            emit_progress(
+                progress,
+                SectionSidecarProgressEvent::ModelDownloading {
+                    model_name: "NomicEmbedTextV15",
+                },
+            );
+        }
         embedder.embed_rows(&mut rows);
         let batch_rows = rows.len();
         let batch = rows_to_batch(rows, schema.clone())?;
@@ -578,50 +591,71 @@ fn is_vector_index_type(index_type: &IndexType) -> bool {
 
 struct ExistingFileVersions {
     table: Option<lancedb::Table>,
-    exists_by_file_version: HashMap<(String, String), bool>,
 }
 
 impl ExistingFileVersions {
     fn new(table: Option<&lancedb::Table>) -> Self {
         Self {
             table: table.cloned(),
-            exists_by_file_version: HashMap::new(),
         }
     }
 
-    async fn retain_new_rows(&mut self, rows: Vec<SectionRow>) -> Result<Vec<SectionRow>> {
-        let mut retained = Vec::with_capacity(rows.len());
-        for row in rows {
-            if !self
-                .file_version_exists(row.file_path.as_str(), row.content_hash.as_str())
-                .await?
-            {
-                retained.push(row);
+    async fn retain_new_rows(&self, rows: Vec<SectionRow>) -> Result<Vec<SectionRow>> {
+        let Some(table) = self.table.as_ref() else {
+            return Ok(rows);
+        };
+        if rows.is_empty() {
+            return Ok(rows);
+        }
+
+        let file_paths: HashSet<&str> = rows.iter().map(|r| r.file_path.as_str()).collect();
+
+        let in_clause = file_paths
+            .iter()
+            .map(|p| format!("'{}'", sql_string_literal(p)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let filter = format!("file_path IN ({in_clause})");
+
+        let batches = table
+            .query()
+            .only_if(&filter)
+            .select(Select::columns(&["file_path", "content_hash"]))
+            .execute()
+            .await
+            .context("failed to query existing LanceDB section rows")?
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to collect existing LanceDB section rows")?;
+
+        let mut existing: HashSet<(String, String)> = HashSet::new();
+        for batch in &batches {
+            let Some(paths) = batch
+                .column_by_name("file_path")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            else {
+                continue;
+            };
+            let Some(hashes) = batch
+                .column_by_name("content_hash")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            else {
+                continue;
+            };
+            for i in 0..paths.len() {
+                existing.insert((paths.value(i).to_owned(), hashes.value(i).to_owned()));
             }
         }
-        Ok(retained)
-    }
 
-    async fn file_version_exists(&mut self, file_path: &str, content_hash: &str) -> Result<bool> {
-        let Some(table) = self.table.as_ref() else {
-            return Ok(false);
-        };
-        let key = (file_path.to_owned(), content_hash.to_owned());
-        if let Some(exists) = self.exists_by_file_version.get(&key) {
-            return Ok(*exists);
+        if existing.is_empty() {
+            return Ok(rows);
         }
-        let filter = format!(
-            "file_path = '{}' AND content_hash = '{}'",
-            sql_string_literal(file_path),
-            sql_string_literal(content_hash)
-        );
-        let exists = table
-            .count_rows(Some(filter))
-            .await
-            .context("failed to check existing LanceDB section rows")?
-            > 0;
-        self.exists_by_file_version.insert(key, exists);
-        Ok(exists)
+
+        let retained: Vec<SectionRow> = rows
+            .into_iter()
+            .filter(|r| !existing.contains(&(r.file_path.clone(), r.content_hash.clone())))
+            .collect();
+        Ok(retained)
     }
 }
 
@@ -850,6 +884,10 @@ impl SectionEmbedder {
         }
     }
 
+    fn needs_model_init(&self) -> bool {
+        self.model.is_none() && !self.options.skip_embeddings
+    }
+
     fn embed_rows(&mut self, rows: &mut [SectionRow]) {
         let vectors = self.embed_row_vectors(rows);
         for (row, vector) in rows.iter_mut().zip(vectors) {
@@ -876,7 +914,7 @@ impl SectionEmbedder {
         self.model.get_or_insert_with(|| {
             match TextEmbedding::try_new(
                 InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
-                    .with_show_download_progress(false),
+                    .with_show_download_progress(true),
             ) {
                 Ok(model) => Some(model),
                 Err(error) => {
