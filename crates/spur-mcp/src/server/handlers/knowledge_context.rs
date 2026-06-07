@@ -1,4 +1,11 @@
+use std::path::{Path, PathBuf};
+
 use serde_json::{json, Value};
+use spur_analyst::{
+    query_context_candidates, KnowledgeCandidate, KnowledgeQueryOptions, KnowledgeQueryResult,
+    KnowledgeSearchScope,
+};
+use spur_graph::resolve_worktree_root_from;
 
 use crate::handlers::McpHandlerError;
 
@@ -30,25 +37,33 @@ impl McpCallbackServer {
 
 pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
-    Ok(json!({
-        "query": request.query,
-        "intent": request.intent,
-        "scope": request.scope,
-        "limit": request.limit,
-        "include_tests": request.include_tests,
-        "max_symbol_bodies": request.max_symbol_bodies,
-        "answerable": false,
-        "confidence": "low",
-        "error": {
-            "code": "not_implemented"
-        }
-    }))
+    let db_path = analyst_db_path()?;
+    if !db_path.exists() {
+        return Ok(unavailable_pack(&request, &db_path));
+    }
+
+    let query_result = query_context_candidates(
+        &db_path,
+        &request.query,
+        request.scope.as_analyst_scope(),
+        KnowledgeQueryOptions {
+            limit: request.limit as usize,
+        },
+    )
+    .map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "knowledge_context_pack failed to query analyst DB at {}: {error}",
+            db_path.display()
+        ))
+    })?;
+
+    Ok(pack_query_result(&request, query_result))
 }
 
 struct KnowledgeContextPackRequest {
     query: String,
-    intent: String,
-    scope: String,
+    intent: KnowledgeIntent,
+    scope: KnowledgeScope,
     limit: u64,
     include_tests: bool,
     max_symbol_bodies: u64,
@@ -67,13 +82,18 @@ impl KnowledgeContextPackRequest {
                 )
             })?
             .to_string();
-        let intent = parse_enum(
+        let intent = KnowledgeIntent::parse(parse_enum(
             args,
             "intent",
             &["explain", "change", "review", "debug", "plan"],
             "explain",
-        )?;
-        let scope = parse_enum(args, "scope", &["all", "docs", "code", "graph"], "all")?;
+        )?);
+        let scope = KnowledgeScope::parse(parse_enum(
+            args,
+            "scope",
+            &["all", "docs", "code", "graph"],
+            "all",
+        )?);
         let limit = parse_u64(args, "limit", 8, 1, 20)?;
         let include_tests = args
             .get("include_tests")
@@ -96,6 +116,74 @@ impl KnowledgeContextPackRequest {
             include_tests,
             max_symbol_bodies,
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum KnowledgeIntent {
+    Explain,
+    Change,
+    Review,
+    Debug,
+    Plan,
+}
+
+impl KnowledgeIntent {
+    fn parse(value: String) -> Self {
+        match value.as_str() {
+            "change" => Self::Change,
+            "review" => Self::Review,
+            "debug" => Self::Debug,
+            "plan" => Self::Plan,
+            _ => Self::Explain,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Explain => "explain",
+            Self::Change => "change",
+            Self::Review => "review",
+            Self::Debug => "debug",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum KnowledgeScope {
+    All,
+    Docs,
+    Code,
+    Graph,
+}
+
+impl KnowledgeScope {
+    fn parse(value: String) -> Self {
+        match value.as_str() {
+            "docs" => Self::Docs,
+            "code" => Self::Code,
+            "graph" => Self::Graph,
+            _ => Self::All,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Docs => "docs",
+            Self::Code => "code",
+            Self::Graph => "graph",
+        }
+    }
+
+    fn as_analyst_scope(self) -> KnowledgeSearchScope {
+        match self {
+            Self::All => KnowledgeSearchScope::All,
+            Self::Docs => KnowledgeSearchScope::Docs,
+            Self::Code => KnowledgeSearchScope::Code,
+            Self::Graph => KnowledgeSearchScope::Graph,
+        }
     }
 }
 
@@ -147,32 +235,244 @@ fn parse_u64(
     }
 }
 
+fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
+    Ok(current_repo_root()?.join(".spur").join("analyst.duckdb"))
+}
+
+fn current_repo_root() -> Result<PathBuf, McpHandlerError> {
+    if let Some(worktree) = super::code_graph::scoped_worktree_root() {
+        return Ok(worktree);
+    }
+    let current_dir = std::env::current_dir().map_err(|error| {
+        McpHandlerError::Internal(format!("failed to read current directory: {error}"))
+    })?;
+    Ok(resolve_worktree_root_from(current_dir))
+}
+
+fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Value {
+    base_pack(
+        request,
+        None,
+        json!({ "available": false, "reason": "analyst_db_missing" }),
+    )
+    .with_error(json!({
+        "code": "analyst_unavailable",
+        "message": format!("analyst DB not found at {}", db_path.display()),
+        "db_path": db_path.display().to_string()
+    }))
+}
+
+fn pack_query_result(request: &KnowledgeContextPackRequest, result: KnowledgeQueryResult) -> Value {
+    let (primary_evidence, supporting_docs) = split_evidence(&result.candidates, request);
+    let recommended_next_tools = recommended_next_tools(request.intent, &primary_evidence);
+    let answerable = !primary_evidence.is_empty() || !supporting_docs.is_empty();
+    let confidence = if answerable { "medium" } else { "low" };
+    let mut pack = base_pack(
+        request,
+        result.graph_content_hash.clone(),
+        json!({
+            "available": result.graph_content_hash.is_some(),
+            "analyst_db": result.db_path,
+            "graph_hash_present": result.graph_content_hash.is_some(),
+            "exact_graph_verified": false,
+            "exact_graph_note": "Use recommended exact code graph tools to verify current working tree freshness."
+        }),
+    );
+
+    if let Some(object) = pack.as_object_mut() {
+        object.insert("answerable".into(), json!(answerable));
+        object.insert("confidence".into(), json!(confidence));
+        object.insert("primary_evidence".into(), Value::Array(primary_evidence));
+        object.insert("supporting_docs".into(), Value::Array(supporting_docs));
+        object.insert(
+            "impact".into(),
+            json!({
+                "summary": "impact counts are deferred to exact graph follow-up tools",
+                "callers_count": null,
+                "callees_count": null,
+                "popular_sink": null
+            }),
+        );
+        object.insert(
+            "recommended_next_tools".into(),
+            Value::Array(recommended_next_tools),
+        );
+    }
+    pack
+}
+
+fn base_pack(
+    request: &KnowledgeContextPackRequest,
+    graph_content_hash: Option<String>,
+    staleness: Value,
+) -> Value {
+    json!({
+        "query": request.query,
+        "intent": request.intent.as_str(),
+        "scope": request.scope.as_str(),
+        "limit": request.limit,
+        "include_tests": request.include_tests,
+        "max_symbol_bodies": request.max_symbol_bodies,
+        "answerable": false,
+        "confidence": "low",
+        "graph_content_hash": graph_content_hash,
+        "staleness": staleness,
+        "primary_evidence": [],
+        "supporting_docs": [],
+        "impact": {
+            "summary": "no analyst evidence available",
+            "callers_count": null,
+            "callees_count": null,
+            "popular_sink": null
+        },
+        "recommended_next_tools": []
+    })
+}
+
+trait PackErrorExt {
+    fn with_error(self, error: Value) -> Value;
+}
+
+impl PackErrorExt for Value {
+    fn with_error(mut self, error: Value) -> Value {
+        if let Some(object) = self.as_object_mut() {
+            object.insert("error".into(), error);
+        }
+        self
+    }
+}
+
+fn split_evidence(
+    candidates: &[KnowledgeCandidate],
+    request: &KnowledgeContextPackRequest,
+) -> (Vec<Value>, Vec<Value>) {
+    let mut primary = Vec::new();
+    let mut docs = Vec::new();
+    let max_primary = request.limit as usize;
+
+    for candidate in candidates {
+        if !request.include_tests && is_test_file(&candidate.file_path) {
+            continue;
+        }
+        let evidence = evidence_from_candidate(candidate, request.intent);
+        if candidate.kind == "doc" {
+            docs.push(evidence);
+        } else if primary.len() < max_primary {
+            primary.push(evidence);
+        } else {
+            docs.push(evidence);
+        }
+    }
+
+    (primary, docs)
+}
+
+fn evidence_from_candidate(candidate: &KnowledgeCandidate, intent: KnowledgeIntent) -> Value {
+    let is_code = candidate.kind == "code" || candidate.kind == "symbol";
+    let next = if is_code {
+        code_next_tools(intent)
+    } else if let Some(root) = candidate.stable_symbol_id.as_deref() {
+        vec![json!({ "tool": "doc_navigate", "root": root })]
+    } else {
+        vec![json!({ "tool": "code_semantic_search", "query": candidate.title })]
+    };
+    let stable_symbol_id = candidate.stable_symbol_id.as_ref().map(|id| {
+        if is_code {
+            format!(
+                "graph://symbol/{}",
+                id.strip_prefix("graph://symbol/").unwrap_or(id)
+            )
+        } else {
+            id.clone()
+        }
+    });
+    json!({
+        "kind": if is_code { "symbol" } else { "doc" },
+        "title": candidate.title,
+        "file": candidate.file_path,
+        "stable_symbol_id": stable_symbol_id,
+        "symbol_kind": candidate.symbol_kind,
+        "score": candidate.score,
+        "signal": candidate.signal,
+        "neighbor_kind": candidate.neighbor_kind,
+        "edge_bind_method": candidate.edge_bind_method,
+        "grounding": candidate.grounding,
+        "why_relevant": "Matched analyst candidate for query",
+        "next": next
+    })
+}
+
+fn recommended_next_tools(intent: KnowledgeIntent, primary_evidence: &[Value]) -> Vec<Value> {
+    let top_symbol = primary_evidence
+        .iter()
+        .filter_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str))
+        .next();
+
+    match (intent, top_symbol) {
+        (KnowledgeIntent::Change, Some(selector)) => vec![
+            json!({ "tool": "code_callers", "selector": selector, "reason": "Find direct change impact before editing." }),
+            json!({ "tool": "code_callees", "selector": selector, "reason": "Trace direct dependencies for the selected symbol." }),
+            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body." }),
+        ],
+        (_, Some(selector)) => vec![json!({
+            "tool": "code_read_symbol",
+            "selector": selector,
+            "reason": "Read exact current symbol body for grounded follow-up."
+        })],
+        _ => vec![json!({
+            "tool": "code_semantic_search",
+            "query": "",
+            "reason": "No symbol evidence was available; broaden retrieval with semantic search."
+        })],
+    }
+}
+
+fn code_next_tools(intent: KnowledgeIntent) -> Vec<Value> {
+    match intent {
+        KnowledgeIntent::Change => vec![
+            json!({ "tool": "code_callers" }),
+            json!({ "tool": "code_callees" }),
+            json!({ "tool": "code_read_symbol" }),
+        ],
+        _ => vec![json!({ "tool": "code_read_symbol" })],
+    }
+}
+
+fn is_test_file(file_path: &str) -> bool {
+    file_path.contains("/tests/")
+        || file_path.ends_with("_test.rs")
+        || file_path.ends_with("_tests.rs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn knowledge_context_pack_returns_structured_not_implemented() {
-        let result = knowledge_context_pack(&json!({
-            "query": "semantic search",
-            "intent": "debug",
-            "scope": "code",
-            "limit": 4,
-            "include_tests": false,
-            "max_symbol_bodies": 1
-        }))
-        .await
-        .expect("structured response");
+    async fn knowledge_context_pack_missing_analyst_db_returns_structured_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".spur")).expect("create .spur");
+
+        let result =
+            super::super::code_graph::with_worktree_root_for_request(repo.clone(), async {
+                knowledge_context_pack(&json!({ "query": "semantic search" })).await
+            })
+            .await
+            .expect("structured unavailable response");
 
         assert_eq!(result["query"], "semantic search");
-        assert_eq!(result["intent"], "debug");
-        assert_eq!(result["scope"], "code");
-        assert_eq!(result["limit"], 4);
-        assert_eq!(result["include_tests"], false);
-        assert_eq!(result["max_symbol_bodies"], 1);
+        assert_eq!(result["intent"], "explain");
+        assert_eq!(result["scope"], "all");
         assert_eq!(result["answerable"], false);
         assert_eq!(result["confidence"], "low");
-        assert_eq!(result["error"]["code"], "not_implemented");
+        assert_eq!(result["graph_content_hash"], Value::Null);
+        assert_eq!(result["staleness"]["available"], false);
+        assert_eq!(result["error"]["code"], "analyst_unavailable");
+        assert!(result["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains(".spur/analyst.duckdb"));
     }
 
     #[tokio::test]
@@ -184,6 +484,96 @@ mod tests {
         assert!(
             error.to_string().contains("non-empty string field 'query'"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn knowledge_context_pack_returns_grounded_evidence_and_followups() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "semantic search",
+            "intent": "change",
+            "scope": "code",
+            "limit": 4,
+            "include_tests": false,
+            "max_symbol_bodies": 1
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "query_context_candidates".into(),
+                    file_path: "crates/spur-analyst/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-1".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 7.5,
+                    signal: Some("stable".into()),
+                    neighbor_kind: Some("primary".into()),
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "doc".into(),
+                    title: "Knowledge Context API".into(),
+                    file_path: "docs/context.md".into(),
+                    stable_symbol_id: Some("doc-1".into()),
+                    symbol_kind: Some("section".into()),
+                    score: 3.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-doc".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "test helper".into(),
+                    file_path: "crates/spur-mcp/tests/context_tests.rs".into(),
+                    stable_symbol_id: Some("test-sym".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 1.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+            ],
+        };
+
+        let pack = pack_query_result(&request, result);
+
+        assert_eq!(pack["query"], "semantic search");
+        assert_eq!(pack["intent"], "change");
+        assert_eq!(pack["scope"], "code");
+        assert_eq!(pack["answerable"], true);
+        assert_eq!(pack["confidence"], "medium");
+        assert_eq!(pack["graph_content_hash"], "fixture-hash");
+        assert_eq!(pack["staleness"]["graph_hash_present"], true);
+        assert_eq!(pack["primary_evidence"][0]["kind"], "symbol");
+        assert_eq!(
+            pack["primary_evidence"][0]["stable_symbol_id"],
+            "graph://symbol/sym-1"
+        );
+        assert_eq!(pack["supporting_docs"][0]["kind"], "doc");
+        assert_eq!(pack["supporting_docs"][0]["stable_symbol_id"], "doc-1");
+        assert_eq!(
+            pack["supporting_docs"][0]["next"][0]["tool"],
+            "doc_navigate"
+        );
+        assert_eq!(pack["recommended_next_tools"][0]["tool"], "code_callers");
+        assert_eq!(
+            pack["recommended_next_tools"][0]["selector"],
+            "graph://symbol/sym-1"
+        );
+        assert_eq!(pack["impact"]["popular_sink"], Value::Null);
+        assert_eq!(
+            pack["primary_evidence"]
+                .as_array()
+                .expect("primary evidence")
+                .len(),
+            1,
+            "include_tests=false should filter test evidence"
         );
     }
 }
