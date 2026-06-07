@@ -10,7 +10,6 @@ use super::{DaemonControlResponse, ServerDeps};
 
 pub mod add_api_datasource;
 pub mod api_connection;
-pub mod cell_capture;
 pub mod code_semantic_search;
 pub mod daemon_files;
 pub mod daemon_lifecycle;
@@ -56,7 +55,6 @@ pub fn tools() -> Vec<Tool> {
         snapshot::tool(),
         get_notebook::tool(),
         read_cell::tool(),
-        cell_capture::tool(),
         kernel_info::tool(),
         add_api_datasource::tool(),
         list_datasources::tool(),
@@ -285,7 +283,6 @@ mod tests {
 
         assert!(names.iter().any(|name| name == "notebook.save"));
         assert!(names.iter().any(|name| name == "notebook.get_notebook"));
-        assert!(names.iter().any(|name| name == "notebook_get_cell_capture"));
         assert!(names
             .iter()
             .any(|name| name == "notebook.set_cell_metadata"));

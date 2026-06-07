@@ -24,7 +24,6 @@ use tokio::{fs, net::UnixStream, process::Command, time::timeout};
 const SEARCH_TOOL: &str = "html_video_search_templates";
 const GET_TEMPLATE_TOOL: &str = "html_video_get_template";
 const RENDER_TOOL: &str = "html_video_render";
-const CELL_CAPTURE_TOOL: &str = "notebook_get_cell_capture";
 
 #[tokio::test]
 async fn html_video_render_accepts_base64_webm_frames() {
@@ -83,7 +82,6 @@ fn html_video_tool_inventory_includes_canvas_capture_and_render() {
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
 
-    assert!(names.iter().any(|name| name == CELL_CAPTURE_TOOL));
     assert!(names.iter().any(|name| name == RENDER_TOOL));
 }
 

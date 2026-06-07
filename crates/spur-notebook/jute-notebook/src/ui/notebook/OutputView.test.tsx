@@ -3,7 +3,6 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { dispose, on, set } from "@/stores/widgetRegistry";
-import { clearCellCaptures, getCellCapture } from "@/stores/cellCapture";
 
 import OutputView from "./OutputView";
 
@@ -59,7 +58,6 @@ function outputValue(modelId = AFM_MODEL_ID) {
 describe("OutputView AFM widget rendering", () => {
   afterEach(() => {
     cleanup();
-    clearCellCaptures();
     dispose(AFM_MODEL_ID);
     dispose("model-only");
     invokeMock.mockReset();
@@ -211,10 +209,12 @@ describe("OutputView AFM widget rendering", () => {
 describe("OutputView HTML video capture", () => {
   afterEach(() => {
     cleanup();
-    clearCellCaptures();
+    invokeMock.mockReset();
   });
 
-  test("stores iframe video capture messages by cell id", async () => {
+  test("pushes iframe video capture messages to the capture port", async () => {
+    invokeMock.mockResolvedValue({});
+
     render(
       <OutputView
         cellId="cell-capture-1"
@@ -253,9 +253,10 @@ describe("OutputView HTML video capture", () => {
     );
 
     await waitFor(() =>
-      expect(getCellCapture("cell-capture-1")).toEqual({
-        webm_base64: "d2VibQ==",
-        duration_sec: 1,
+      expect(invokeMock).toHaveBeenCalledWith("push_capture_port", {
+        port: "cell-capture-1",
+        webmBase64: "d2VibQ==",
+        durationSec: 1,
       }),
     );
   });

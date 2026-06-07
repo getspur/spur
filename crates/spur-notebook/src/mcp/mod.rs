@@ -166,7 +166,6 @@ impl ServerHandler for NotebookMcpServer {
             "notebook.snapshot" => tools::snapshot::call(&self.deps).await,
             "notebook.get_notebook" => tools::get_notebook::call(&self.deps, arguments).await,
             "notebook.read_cell" => tools::read_cell::call(&self.deps, arguments).await,
-            "notebook_get_cell_capture" => tools::cell_capture::call(&self.deps, arguments).await,
             "notebook.kernel_info" => tools::kernel_info::call(&self.deps, arguments).await,
             "notebook_add_api_datasource" => {
                 tools::add_api_datasource::call(&self.deps, arguments).await
