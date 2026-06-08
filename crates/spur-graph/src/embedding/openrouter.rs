@@ -13,6 +13,7 @@ impl OpenRouterEmbedder {
     pub const BATCH_SIZE: usize = 256;
     pub const MODEL: &'static str = "baai/bge-base-en-v1.5";
     pub const MAX_INPUT_CHARS: usize = 2000;
+    pub const MAX_INPUT_TOKENS: usize = 480;
 
     const DEFAULT_ENDPOINT: &'static str = "https://openrouter.ai/api/v1/embeddings";
 
@@ -40,15 +41,7 @@ impl OpenRouterEmbedder {
 
         let truncated: Vec<String> = texts
             .iter()
-            .map(|t: &&str| {
-                if t.len() > Self::MAX_INPUT_CHARS {
-                    let mut s = t[..Self::MAX_INPUT_CHARS].to_owned();
-                    s.push('…');
-                    s
-                } else {
-                    (*t).to_owned()
-                }
-            })
+            .map(|t: &&str| Self::request_input_text(t))
             .collect();
         let truncated_refs: Vec<&str> = truncated.iter().map(|s: &String| s.as_str()).collect();
 
@@ -139,6 +132,53 @@ impl OpenRouterEmbedder {
         }
         Ok(embeddings)
     }
+
+    fn request_input_text(text: &str) -> String {
+        let (token_limited, token_truncated) =
+            truncate_to_whitespace_token_budget(text, Self::MAX_INPUT_TOKENS);
+        let (char_limited, char_truncated) =
+            truncate_to_char_budget(token_limited, Self::MAX_INPUT_CHARS);
+        if token_truncated || char_truncated {
+            let mut truncated = char_limited.trim_end().to_owned();
+            truncated.push('…');
+            truncated
+        } else {
+            text.to_owned()
+        }
+    }
+}
+
+fn truncate_to_whitespace_token_budget(input: &str, max_tokens: usize) -> (&str, bool) {
+    if max_tokens == 0 {
+        return ("", !input.trim().is_empty());
+    }
+
+    let mut tokens = 0usize;
+    let mut in_token = false;
+    for (index, character) in input.char_indices() {
+        if character.is_whitespace() {
+            in_token = false;
+        } else if !in_token {
+            if tokens == max_tokens {
+                return (&input[..index], true);
+            }
+            tokens += 1;
+            in_token = true;
+        }
+    }
+
+    (input, false)
+}
+
+fn truncate_to_char_budget(input: &str, max_chars: usize) -> (&str, bool) {
+    if max_chars == 0 {
+        return ("", !input.is_empty());
+    }
+
+    match input.char_indices().nth(max_chars) {
+        Some((index, _)) => (&input[..index], true),
+        None => (input, false),
+    }
 }
 
 fn response_body_preview(body: &str, max_chars: usize) -> String {
@@ -202,8 +242,10 @@ fn ordered_embeddings_from_response(response: EmbeddingResponse) -> Result<Vec<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
 
     async fn malformed_openrouter_server(body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
@@ -223,6 +265,31 @@ mod tests {
                 .expect("write response");
         });
         format!("http://{addr}/embeddings")
+    }
+
+    async fn capturing_openrouter_server() -> (String, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let addr = listener.local_addr().expect("server addr");
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0; 8192];
+            let bytes_read = stream.read(&mut request).await.expect("read request");
+            request.truncate(bytes_read);
+            let request = String::from_utf8(request).expect("utf8 request");
+            let _ = tx.send(request);
+            let body = r#"{"data":[{"index":0,"embedding":[1.0]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        (format!("http://{addr}/embeddings"), rx)
     }
 
     #[test]
@@ -300,23 +367,55 @@ mod tests {
         assert!(message.contains("HTTP 400: input too long"));
     }
 
+    #[tokio::test]
+    async fn embed_batch_truncates_token_dense_input_before_request() {
+        let (endpoint, request_rx) = capturing_openrouter_server().await;
+        let embedder = OpenRouterEmbedder {
+            client: Client::new(),
+            api_key: "test-key".to_owned(),
+            endpoint,
+        };
+        let token_budget = OpenRouterEmbedder::MAX_INPUT_TOKENS;
+        let token_dense_text = std::iter::repeat("x")
+            .take(token_budget + 64)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        embedder
+            .embed_batch(&[&token_dense_text])
+            .await
+            .expect("embedding request succeeds");
+
+        let request = request_rx.await.expect("captured request");
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("request body present");
+        let json: Value = serde_json::from_str(body).expect("request json");
+        let input = json["input"][0].as_str().expect("input text");
+
+        assert!(input.split_whitespace().count() <= token_budget);
+        assert!(input.ends_with('…'));
+    }
+
     #[test]
     fn long_input_text_is_truncated() {
         let long_text = "x".repeat(3000);
-        let texts: Vec<&str> = vec![&long_text];
-        let truncated: Vec<String> = texts
-            .iter()
-            .map(|t| {
-                if t.len() > OpenRouterEmbedder::MAX_INPUT_CHARS {
-                    let mut s = t[..OpenRouterEmbedder::MAX_INPUT_CHARS].to_owned();
-                    s.push('…');
-                    s
-                } else {
-                    t.to_owned()
-                }
-            })
-            .collect();
-        assert_eq!(truncated[0].len(), OpenRouterEmbedder::MAX_INPUT_CHARS + 3);
-        assert!(truncated[0].ends_with('…'));
+        let truncated = OpenRouterEmbedder::request_input_text(&long_text);
+
+        assert_eq!(truncated.len(), OpenRouterEmbedder::MAX_INPUT_CHARS + 3);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn long_multibyte_input_text_is_truncated_on_char_boundary() {
+        let long_text = "€".repeat(3000);
+        let truncated = OpenRouterEmbedder::request_input_text(&long_text);
+
+        assert_eq!(
+            truncated.chars().count(),
+            OpenRouterEmbedder::MAX_INPUT_CHARS + 1
+        );
+        assert!(truncated.ends_with('…'));
     }
 }
