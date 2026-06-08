@@ -27,7 +27,7 @@ pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
 pub const CODE_SYMBOLS_DATASET_DIR: &str = "code_symbols.lance";
 pub const CODE_SYMBOLS_TABLE: &str = "code_symbols";
-const SECTION_VECTOR_DIMENSIONS: usize = 384;
+pub const EMBEDDING_VECTOR_DIMENSIONS: usize = 384;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
 const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
@@ -1661,7 +1661,7 @@ where
         }
 
         for (input, embedding) in chunk.iter().copied().zip(embeddings) {
-            if embedding.len() == SECTION_VECTOR_DIMENSIONS {
+            if embedding.len() == EMBEDDING_VECTOR_DIMENSIONS {
                 result[input.row_index] = Some(embedding);
             } else {
                 tracing::warn!(
@@ -1759,7 +1759,7 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
     let mut child_counts = Vec::with_capacity(rows.len());
     let mut parent_stable_ids = Vec::with_capacity(rows.len());
     let mut content_hashes = Vec::with_capacity(rows.len());
-    let mut flat_vectors = Vec::with_capacity(rows.len() * SECTION_VECTOR_DIMENSIONS);
+    let mut flat_vectors = Vec::with_capacity(rows.len() * EMBEDDING_VECTOR_DIMENSIONS);
     let mut vector_validity = Vec::with_capacity(rows.len());
 
     for row in rows {
@@ -1775,19 +1775,19 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
         content_hashes.push(row.content_hash);
         if let Some(vector) = row
             .vector
-            .filter(|vector| vector.len() == SECTION_VECTOR_DIMENSIONS)
+            .filter(|vector| vector.len() == EMBEDDING_VECTOR_DIMENSIONS)
         {
             flat_vectors.extend(vector);
             vector_validity.push(true);
         } else {
-            flat_vectors.extend(std::iter::repeat_n(0.0f32, SECTION_VECTOR_DIMENSIONS));
+            flat_vectors.extend(std::iter::repeat_n(0.0f32, EMBEDDING_VECTOR_DIMENSIONS));
             vector_validity.push(false);
         }
     }
 
     let vector_array = FixedSizeListArray::try_new(
         Arc::new(Field::new("item", DataType::Float32, true)),
-        SECTION_VECTOR_DIMENSIONS as i32,
+        EMBEDDING_VECTOR_DIMENSIONS as i32,
         Arc::new(Float32Array::from(flat_vectors)),
         Some(NullBuffer::from(vector_validity)),
     )
@@ -1819,7 +1819,7 @@ fn symbol_rows_to_batch(rows: Vec<SymbolRow>, schema: Arc<Schema>) -> Result<Rec
     let mut entity_names = Vec::with_capacity(rows.len());
     let mut symbol_kinds = Vec::with_capacity(rows.len());
     let mut embed_texts = Vec::with_capacity(rows.len());
-    let mut flat_vectors = Vec::with_capacity(rows.len() * SECTION_VECTOR_DIMENSIONS);
+    let mut flat_vectors = Vec::with_capacity(rows.len() * EMBEDDING_VECTOR_DIMENSIONS);
     let mut vector_validity = Vec::with_capacity(rows.len());
     let mut content_hashes = Vec::with_capacity(rows.len());
 
@@ -1832,12 +1832,12 @@ fn symbol_rows_to_batch(rows: Vec<SymbolRow>, schema: Arc<Schema>) -> Result<Rec
         embed_texts.push(row.embed_text);
         if let Some(vector) = row
             .vector
-            .filter(|vector| vector.len() == SECTION_VECTOR_DIMENSIONS)
+            .filter(|vector| vector.len() == EMBEDDING_VECTOR_DIMENSIONS)
         {
             flat_vectors.extend(vector);
             vector_validity.push(true);
         } else {
-            flat_vectors.extend(std::iter::repeat_n(0.0f32, SECTION_VECTOR_DIMENSIONS));
+            flat_vectors.extend(std::iter::repeat_n(0.0f32, EMBEDDING_VECTOR_DIMENSIONS));
             vector_validity.push(false);
         }
         content_hashes.push(row.content_hash);
@@ -1845,7 +1845,7 @@ fn symbol_rows_to_batch(rows: Vec<SymbolRow>, schema: Arc<Schema>) -> Result<Rec
 
     let vector_array = FixedSizeListArray::try_new(
         Arc::new(Field::new("item", DataType::Float32, true)),
-        SECTION_VECTOR_DIMENSIONS as i32,
+        EMBEDDING_VECTOR_DIMENSIONS as i32,
         Arc::new(Float32Array::from(flat_vectors)),
         Some(NullBuffer::from(vector_validity)),
     )
@@ -1883,7 +1883,7 @@ fn sections_schema() -> Arc<Schema> {
             "vector",
             DataType::FixedSizeList(
                 Arc::new(Field::new("item", DataType::Float32, true)),
-                SECTION_VECTOR_DIMENSIONS as i32,
+                EMBEDDING_VECTOR_DIMENSIONS as i32,
             ),
             true,
         ),
@@ -1902,7 +1902,7 @@ fn symbol_rows_schema() -> Arc<Schema> {
             "vector",
             DataType::FixedSizeList(
                 Arc::new(Field::new("item", DataType::Float32, true)),
-                SECTION_VECTOR_DIMENSIONS as i32,
+                EMBEDDING_VECTOR_DIMENSIONS as i32,
             ),
             true,
         ),
@@ -2077,12 +2077,17 @@ mod tests {
 
         assert!(field.is_nullable());
         match field.data_type() {
-            DataType::FixedSizeList(item, 384) => {
+            DataType::FixedSizeList(item, dimensions)
+                if *dimensions == EMBEDDING_VECTOR_DIMENSIONS as i32 =>
+            {
                 assert_eq!(item.name(), "item");
                 assert_eq!(item.data_type(), &DataType::Float32);
                 assert!(item.is_nullable());
             }
-            data_type => panic!("expected FixedSizeList<Float32, 384>, got {data_type:?}"),
+            data_type => panic!(
+                "expected FixedSizeList<Float32, {}>, got {data_type:?}",
+                EMBEDDING_VECTOR_DIMENSIONS
+            ),
         }
     }
 
@@ -2550,7 +2555,7 @@ mod tests {
             |_| {},
             |texts| {
                 batch_sizes.push(texts.len());
-                Ok(vec![vec![0.25; SECTION_VECTOR_DIMENSIONS]; texts.len()])
+                Ok(vec![vec![0.25; EMBEDDING_VECTOR_DIMENSIONS]; texts.len()])
             },
         );
 
@@ -2585,7 +2590,7 @@ mod tests {
                         .map(|text| (*text).to_owned())
                         .collect::<Vec<_>>(),
                 );
-                Ok(vec![vec![0.5; SECTION_VECTOR_DIMENSIONS]; texts.len()])
+                Ok(vec![vec![0.5; EMBEDDING_VECTOR_DIMENSIONS]; texts.len()])
             },
         );
 
@@ -2617,7 +2622,7 @@ mod tests {
             &rows,
             options,
             |chunk| progress.push(chunk),
-            |texts| Ok(vec![vec![0.25; SECTION_VECTOR_DIMENSIONS]; texts.len()]),
+            |texts| Ok(vec![vec![0.25; EMBEDDING_VECTOR_DIMENSIONS]; texts.len()]),
         );
 
         assert_eq!(
