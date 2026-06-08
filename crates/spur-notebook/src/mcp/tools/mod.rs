@@ -17,9 +17,6 @@ pub mod daemon_recents;
 pub mod delete_cell;
 pub mod export_spur_app;
 pub mod get_notebook;
-pub mod html_video_get_template;
-pub mod html_video_render;
-pub mod html_video_search_templates;
 pub mod import_spur_app;
 pub mod insert_cell;
 pub mod interrupt;
@@ -73,9 +70,6 @@ pub fn tools() -> Vec<Tool> {
         notebook_set_dag_metadata::tool(),
         open_design_search::tool(),
         open_design_get::tool(),
-        html_video_search_templates::tool(),
-        html_video_get_template::tool(),
-        html_video_render::tool(),
         code_semantic_search::tool(),
         insert_cell::tool(),
         write_cell::tool(),
