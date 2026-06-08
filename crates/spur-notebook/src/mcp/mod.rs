@@ -47,6 +47,7 @@ const CONNECTIONS_CHANGED_EVENT: &str = "connections://changed";
 
 pub mod bridge;
 pub mod loopback_requester;
+pub mod plugin_loader;
 pub mod tools;
 pub mod transport;
 
