@@ -354,6 +354,22 @@ mod tests {
             })
             .await
             .expect("create task issue");
+        let gate = Arc::new(spur_license::FeatureGate::new(
+            spur_license::policy::PolicyResolver::embedded(),
+        ));
+        let features =
+            std::collections::BTreeSet::from([spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED
+                .as_str()
+                .to_string()]);
+        gate.update_state(&spur_license::LicenseState::active_validated(
+            spur_license::Plan::Pro,
+            features,
+        ));
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            gate.as_ref(),
+        )
+        .expect("test feature gate should allow beads advanced");
         let adv = pm.advanced().expect("advanced beads surface");
         adv.add_comment(
             &task_id,
