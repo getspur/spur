@@ -3,10 +3,10 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};
+use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 
 const MAX_CONTEXT_CANDIDATES: usize = 40;
 const MAX_GRAPH_CANDIDATES: usize = 30;
-const QUERY_VECTOR_DIMENSIONS: usize = 384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeSearchScope {
@@ -219,7 +219,7 @@ fn query_context_candidates_inner(
 
 fn format_query_vec_sql(query_vec: Option<&[f32]>) -> Option<String> {
     let query_vec = query_vec?;
-    if query_vec.len() != QUERY_VECTOR_DIMENSIONS
+    if query_vec.len() != EMBEDDING_VECTOR_DIMENSIONS
         || query_vec.iter().any(|value| !value.is_finite())
     {
         return None;
@@ -232,7 +232,9 @@ fn format_query_vec_sql(query_vec: Option<&[f32]>) -> Option<String> {
         }
         sql.push_str(&value.to_string());
     }
-    sql.push_str("]::FLOAT[384]");
+    sql.push_str("]::FLOAT[");
+    sql.push_str(&EMBEDDING_VECTOR_DIMENSIONS.to_string());
+    sql.push(']');
     Some(sql)
 }
 
