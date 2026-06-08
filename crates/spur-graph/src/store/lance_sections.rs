@@ -16,7 +16,6 @@ use lancedb::index::{scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Ind
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 
 use crate::content_hash::blake3_hex;
-#[cfg(feature = "openrouter")]
 use crate::embedding::openrouter::OpenRouterEmbedder;
 use crate::{
     GraphEdgeArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact,
@@ -1617,7 +1616,6 @@ impl TextEmbeddingService {
         texts: &[&str],
         embedding_kind: &'static str,
     ) -> Result<Vec<Vec<f32>>> {
-        #[cfg(feature = "openrouter")]
         if openrouter_api_key_available() {
             tracing::info!(
                 embedding_kind,
@@ -1814,8 +1812,7 @@ fn shared_embed_model(embedding_kind: &'static str) -> Option<&'static TextEmbed
 }
 
 fn openrouter_api_key_available() -> bool {
-    cfg!(feature = "openrouter")
-        && std::env::var("OPENROUTER_API_KEY").is_ok_and(|value| !value.trim().is_empty())
+    std::env::var("OPENROUTER_API_KEY").is_ok_and(|value| !value.trim().is_empty())
 }
 
 fn is_embedding_eligible(row: &SectionRow) -> bool {
