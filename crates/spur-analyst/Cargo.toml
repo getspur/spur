@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 duckdb = { workspace = true, features = ["bundled"] }
 serde = { workspace = true }
 spur-graph = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 spur-cli = { path = "../spur-cli" }
