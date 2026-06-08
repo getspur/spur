@@ -59,6 +59,8 @@ pub enum PluginError {
     Io(#[from] std::io::Error),
     #[error("failed to (de)serialize plugin message: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("failed to prepare plugin venv: {0}")]
+    VenvSetup(String),
 }
 
 /// Resolved configuration for one plugin child process.
@@ -116,17 +118,146 @@ impl PluginConfig {
     }
 }
 
+/// Directory name for per-app virtual environments, relative to `working_dir`.
+const VENV_DIR: &str = ".spur-venv";
+
+/// Marker file written after a successful venv + requirements install so
+/// subsequent launches skip the setup step.
+const VENV_READY_MARKER: &str = ".spur-venv/READY";
+
 /// Map a `server_type` selector to the interpreter program to exec.
-fn program_for(server_type: &str) -> Result<&'static str, PluginError> {
+///
+/// For Python plugins, returns the per-app venv python if it exists, otherwise
+/// falls back to the system `python3`. The venv is created (and requirements
+/// installed) by [`ensure_python_venv`] during launch.
+fn program_for(server_type: &str, config: &PluginConfig) -> Result<PathBuf, PluginError> {
     match server_type {
-        "python" => Ok("python3"),
-        "node" => Ok("node"),
+        "python" => {
+            let venv_python = config
+                .working_dir
+                .join(VENV_DIR)
+                .join("bin")
+                .join("python3");
+            if venv_python.is_file() {
+                Ok(venv_python)
+            } else {
+                Ok(PathBuf::from("python3"))
+            }
+        }
+        "node" => Ok(PathBuf::from("node")),
         other => Err(PluginError::UnsupportedServerType(other.to_string())),
     }
 }
 
-fn build_command(config: &PluginConfig) -> Result<Command, PluginError> {
-    let program = program_for(&config.server_type)?;
+/// Create a per-app Python venv and install requirements (if declared).
+///
+/// Idempotent — skips setup when the `READY` marker file exists. The marker
+/// records a content hash of the requirements file so it re-installs when
+/// requirements change.
+async fn ensure_python_venv(config: &PluginConfig) -> Result<(), PluginError> {
+    let venv_dir = config.working_dir.join(VENV_DIR);
+    let marker_path = config.working_dir.join(VENV_READY_MARKER);
+
+    let requirements_path = config
+        .requirements
+        .as_ref()
+        .map(|rel| config.working_dir.join(rel));
+
+    let current_hash = match &requirements_path {
+        Some(path) => {
+            let bytes = tokio::fs::read(path).await.map_err(|e| {
+                PluginError::VenvSetup(format!("failed to read {}: {e}", path.display()))
+            })?;
+            Some(blake3::hash(&bytes).to_hex().to_string())
+        }
+        None => None,
+    };
+
+    let needs_setup = if marker_path.is_file() {
+        let stored = tokio::fs::read_to_string(&marker_path)
+            .await
+            .unwrap_or_default();
+        let stored_hash = stored.trim();
+        match (&current_hash, stored_hash.is_empty()) {
+            (Some(hash), false) => hash != stored_hash,
+            (None, true) => false,
+            _ => true,
+        }
+    } else {
+        true
+    };
+
+    if !needs_setup {
+        return Ok(());
+    }
+
+    if venv_dir.is_dir() {
+        tokio::fs::remove_dir_all(&venv_dir).await.map_err(|e| {
+            PluginError::VenvSetup(format!(
+                "failed to remove old venv {}: {e}",
+                venv_dir.display()
+            ))
+        })?;
+    }
+
+    let venv_python = venv_dir.join("bin").join("python3");
+
+    let create_status = tokio::process::Command::new("python3")
+        .args(["-m", "venv", venv_dir.to_str().unwrap_or(VENV_DIR)])
+        .current_dir(&config.working_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .status()
+        .await
+        .map_err(|e| PluginError::VenvSetup(format!("failed to run python3 -m venv: {e}")))?;
+
+    if !create_status.success() {
+        return Err(PluginError::VenvSetup(format!(
+            "python3 -m venv exited with {}",
+            create_status.code().unwrap_or(-1)
+        )));
+    }
+
+    if let Some(rel) = &config.requirements {
+        let req_arg = format!("-r{rel}");
+        let install_status = tokio::process::Command::new(&venv_python)
+            .args(["-m", "pip", "install", "--quiet", &req_arg])
+            .current_dir(&config.working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .status()
+            .await
+            .map_err(|e| {
+                PluginError::VenvSetup(format!(
+                    "failed to run pip install for {}: {e}",
+                    config.name
+                ))
+            })?;
+
+        if !install_status.success() {
+            return Err(PluginError::VenvSetup(format!(
+                "pip install -r{} exited with {} for plugin {}",
+                rel,
+                install_status.code().unwrap_or(-1),
+                config.name,
+            )));
+        }
+    }
+
+    let marker_content = current_hash.as_deref().unwrap_or("");
+    tokio::fs::write(&marker_path, marker_content)
+        .await
+        .map_err(|e| {
+            PluginError::VenvSetup(format!(
+                "failed to write venv marker {}: {e}",
+                marker_path.display()
+            ))
+        })?;
+
+    Ok(())
+}
+
+fn build_command(config: &PluginConfig, program: PathBuf) -> Result<Command, PluginError> {
     let mut command = Command::new(program);
     command
         .arg(&config.entry)
@@ -135,8 +266,6 @@ fn build_command(config: &PluginConfig) -> Result<Command, PluginError> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Backstop: if a `PluginHandle` is dropped without an explicit shutdown,
-        // the child is still reaped.
         .kill_on_drop(true);
     Ok(command)
 }
@@ -276,7 +405,11 @@ pub struct PluginHandle {
 impl PluginHandle {
     /// Spawn the child process, perform the MCP handshake, and discover tools.
     async fn launch(config: PluginConfig) -> Result<Self, PluginError> {
-        let mut command = build_command(&config)?;
+        if config.server_type == "python" {
+            ensure_python_venv(&config).await?;
+        }
+        let program = program_for(&config.server_type, &config)?;
+        let mut command = build_command(&config, program)?;
         let mut child = command.spawn().map_err(PluginError::Spawn)?;
 
         let stdin = child
@@ -323,7 +456,8 @@ impl PluginHandle {
             .collect()
     }
 
-    /// Kill the child process and reap it.
+    /// Kill the child process and reap it. The per-app venv is left in place so
+    /// subsequent launches skip the setup step.
     async fn shutdown(mut self) {
         if let Err(error) = self.child.start_kill() {
             warn!(plugin = %self.config.name, %error, "failed to signal plugin shutdown");
@@ -517,9 +651,17 @@ mod tests {
 
     #[test]
     fn program_for_rejects_unknown_server_type() {
-        assert!(program_for("python").is_ok());
-        assert!(program_for("node").is_ok());
-        match program_for("ruby") {
+        let config = PluginConfig {
+            name: "test".to_string(),
+            server_type: "python".to_string(),
+            entry: "x".to_string(),
+            requirements: None,
+            env: BTreeMap::new(),
+            working_dir: PathBuf::from("/tmp"),
+        };
+        assert!(program_for("python", &config).is_ok());
+        assert!(program_for("node", &config).is_ok());
+        match program_for("ruby", &config) {
             Err(PluginError::UnsupportedServerType(kind)) => assert_eq!(kind, "ruby"),
             other => panic!("expected UnsupportedServerType, got {other:?}"),
         }
