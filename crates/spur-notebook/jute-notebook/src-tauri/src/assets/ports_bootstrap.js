@@ -210,7 +210,337 @@ class _SpurAnywidgetModel {
 }
 
 function _spurAnywidgetToEsm({ imports = "", render }) {
-  return `${imports}\nexport default { render: ${render.toString()} }`;
+  const renderSource = _spurAnywidgetAsFunctionExpression(
+    _spurAnywidgetStripTypeScript(render.toString()),
+  );
+  return `${imports}\nexport default { render: ${renderSource} }`;
+}
+
+function _spurAnywidgetStripTypeScript(source) {
+  let output = "";
+  for (let i = 0; i < source.length; ) {
+    const skipped = _spurAnywidgetSkipLiteralOrComment(source, i);
+    if (skipped > i) {
+      output += source.slice(i, skipped);
+      i = skipped;
+      continue;
+    }
+    if (source[i] === "<") {
+      const genericEnd = _spurAnywidgetSkipType(source, i + 1, new Set(["("]), { angle: 1 });
+      if (genericEnd < source.length && source[genericEnd] === "(") {
+        i = genericEnd;
+        continue;
+      }
+    }
+    if (source[i] === "(") {
+      const close = _spurAnywidgetFindMatching(source, i, "(", ")");
+      if (close !== -1) {
+        const next = _spurAnywidgetSkipWhitespace(source, close + 1);
+        let after = next;
+        if (source[after] === ":") {
+          after = _spurAnywidgetSkipWhitespace(
+            source,
+            _spurAnywidgetSkipType(source, after + 1, new Set(["{", "="])),
+          );
+        }
+        const hasArrow = source.startsWith("=>", after);
+        const hasFunctionBody =
+          source[after] === "{" && _spurAnywidgetIsFunctionHeaderBeforeBlock(source, i);
+        if (hasArrow || hasFunctionBody) {
+          output += `(${_spurAnywidgetStripTypeScriptParams(source.slice(i + 1, close))})`;
+          i = source[next] === ":" ? after : close + 1;
+          continue;
+        }
+      }
+    }
+    if (_spurAnywidgetIsSingleParamArrow(source, i)) {
+      const nameEnd = _spurAnywidgetReadIdentifier(source, i);
+      const optional = _spurAnywidgetSkipWhitespace(source, nameEnd);
+      const typeStart = source[optional] === "?" ? optional + 1 : optional;
+      const arrow = _spurAnywidgetSkipWhitespace(
+        source,
+        _spurAnywidgetSkipType(source, typeStart + 1, new Set(["="])),
+      );
+      output += source.slice(i, nameEnd);
+      i = arrow;
+      continue;
+    }
+    output += source[i];
+    i += 1;
+  }
+  return output;
+}
+
+function _spurAnywidgetStripTypeScriptParams(source) {
+  let output = "";
+  let brace = 0;
+  let bracket = 0;
+  let paren = 0;
+  for (let i = 0; i < source.length; ) {
+    const skipped = _spurAnywidgetSkipLiteralOrComment(source, i);
+    if (skipped > i) {
+      output += source.slice(i, skipped);
+      i = skipped;
+      continue;
+    }
+    const char = source[i];
+    if (char === "{") {
+      brace += 1;
+    } else if (char === "}" && brace > 0) {
+      brace -= 1;
+    } else if (char === "[") {
+      bracket += 1;
+    } else if (char === "]" && bracket > 0) {
+      bracket -= 1;
+    } else if (char === "(") {
+      paren += 1;
+    } else if (char === ")" && paren > 0) {
+      paren -= 1;
+    }
+    const atTopLevel = brace === 0 && bracket === 0 && paren === 0;
+    if (char === "?" && atTopLevel) {
+      const next = _spurAnywidgetSkipWhitespace(source, i + 1);
+      if (
+        source[next] === ":" ||
+        source[next] === "," ||
+        source[next] === "=" ||
+        source[next] === ")"
+      ) {
+        i += 1;
+        continue;
+      }
+    }
+    if (char === ":" && atTopLevel) {
+      i = _spurAnywidgetSkipType(source, i + 1, new Set([",", "="]));
+      continue;
+    }
+    output += char;
+    i += 1;
+  }
+  return output;
+}
+
+function _spurAnywidgetSkipType(source, index, stopChars, depth = {}) {
+  let brace = depth.brace ?? 0;
+  let bracket = depth.bracket ?? 0;
+  let paren = depth.paren ?? 0;
+  let angle = depth.angle ?? 0;
+  for (let i = index; i < source.length; ) {
+    const skipped = _spurAnywidgetSkipLiteralOrComment(source, i);
+    if (skipped > i) {
+      i = skipped;
+      continue;
+    }
+    const char = source[i];
+    const atTopLevel = brace === 0 && bracket === 0 && paren === 0 && angle === 0;
+    if (atTopLevel) {
+      if (char === "=" && source[i + 1] === ">") {
+        return i;
+      }
+      if (stopChars.has(char) || char === "\n") {
+        return i;
+      }
+    }
+    if (char === "{") {
+      brace += 1;
+    } else if (char === "}" && brace > 0) {
+      brace -= 1;
+    } else if (char === "[") {
+      bracket += 1;
+    } else if (char === "]" && bracket > 0) {
+      bracket -= 1;
+    } else if (char === "(") {
+      paren += 1;
+    } else if (char === ")" && paren > 0) {
+      paren -= 1;
+    } else if (char === "<") {
+      angle += 1;
+    } else if (char === ">" && angle > 0) {
+      angle -= 1;
+    }
+    i += 1;
+  }
+  return source.length;
+}
+
+function _spurAnywidgetIsSingleParamArrow(source, index) {
+  const prev = _spurAnywidgetPreviousSignificantChar(source, index);
+  if (prev === "." || prev === ":" || prev === "'" || prev === '"' || prev === "`") {
+    return false;
+  }
+  if (!_spurAnywidgetIsIdentifierStart(source[index])) {
+    return false;
+  }
+  const nameEnd = _spurAnywidgetReadIdentifier(source, index);
+  const afterName = _spurAnywidgetSkipWhitespace(source, nameEnd);
+  const typeStart = source[afterName] === "?" ? _spurAnywidgetSkipWhitespace(source, afterName + 1) : afterName;
+  if (source[typeStart] !== ":") {
+    return false;
+  }
+  const arrow = _spurAnywidgetSkipWhitespace(
+    source,
+    _spurAnywidgetSkipType(source, typeStart + 1, new Set(["="])),
+  );
+  return source.startsWith("=>", arrow);
+}
+
+function _spurAnywidgetAsFunctionExpression(source) {
+  const trimmed = source.trim();
+  if (
+    trimmed.startsWith("function") ||
+    trimmed.startsWith("async function") ||
+    trimmed.startsWith("(") ||
+    trimmed.startsWith("async (") ||
+    trimmed.startsWith("async(")
+  ) {
+    return trimmed;
+  }
+  if (trimmed.startsWith("async *")) {
+    return `async function${trimmed.slice("async".length)}`;
+  }
+  if (trimmed.startsWith("*")) {
+    return `function ${trimmed}`;
+  }
+  if (trimmed.startsWith("async ")) {
+    return `async function ${trimmed.slice("async ".length)}`;
+  }
+  return `function ${trimmed}`;
+}
+
+function _spurAnywidgetIsFunctionHeaderBeforeBlock(source, openParen) {
+  const token = _spurAnywidgetPreviousIdentifier(source, openParen);
+  return token !== null && !new Set(["if", "for", "while", "switch", "catch", "with"]).has(token);
+}
+
+function _spurAnywidgetPreviousIdentifier(source, index) {
+  let i = index - 1;
+  while (i >= 0 && /\s/.test(source[i])) {
+    i -= 1;
+  }
+  if (i < 0) {
+    return null;
+  }
+  if (!_spurAnywidgetIsIdentifierPart(source[i])) {
+    return source[i] === "*" ? "*" : null;
+  }
+  let start = i;
+  while (start >= 0 && _spurAnywidgetIsIdentifierPart(source[start])) {
+    start -= 1;
+  }
+  return source.slice(start + 1, i + 1);
+}
+
+function _spurAnywidgetPreviousSignificantChar(source, index) {
+  let i = index - 1;
+  while (i >= 0 && /\s/.test(source[i])) {
+    i -= 1;
+  }
+  return i >= 0 ? source[i] : "";
+}
+
+function _spurAnywidgetReadIdentifier(source, index) {
+  let i = index;
+  while (i < source.length && _spurAnywidgetIsIdentifierPart(source[i])) {
+    i += 1;
+  }
+  return i;
+}
+
+function _spurAnywidgetIsIdentifierStart(char) {
+  return /[A-Za-z_$]/.test(char);
+}
+
+function _spurAnywidgetIsIdentifierPart(char) {
+  return /[A-Za-z0-9_$]/.test(char);
+}
+
+function _spurAnywidgetSkipWhitespace(source, index) {
+  let i = index;
+  while (i < source.length && /\s/.test(source[i])) {
+    i += 1;
+  }
+  return i;
+}
+
+function _spurAnywidgetFindMatching(source, start, openChar, closeChar) {
+  let depth = 1;
+  for (let i = start + 1; i < source.length; ) {
+    const skipped = _spurAnywidgetSkipLiteralOrComment(source, i);
+    if (skipped > i) {
+      i = skipped;
+      continue;
+    }
+    if (source[i] === openChar) {
+      depth += 1;
+    } else if (source[i] === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+function _spurAnywidgetSkipLiteralOrComment(source, index) {
+  const char = source[index];
+  if (char === "'" || char === '"') {
+    return _spurAnywidgetSkipQuoted(source, index, char);
+  }
+  if (char === "`") {
+    return _spurAnywidgetSkipTemplate(source, index);
+  }
+  if (char === "/" && source[index + 1] === "/") {
+    let i = index + 2;
+    while (i < source.length && source[i] !== "\n") {
+      i += 1;
+    }
+    return i;
+  }
+  if (char === "/" && source[index + 1] === "*") {
+    const close = source.indexOf("*/", index + 2);
+    return close === -1 ? source.length : close + 2;
+  }
+  return index;
+}
+
+function _spurAnywidgetSkipQuoted(source, index, quote) {
+  let i = index + 1;
+  while (i < source.length) {
+    if (source[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (source[i] === quote) {
+      return i + 1;
+    }
+    i += 1;
+  }
+  return source.length;
+}
+
+function _spurAnywidgetSkipTemplate(source, index) {
+  let i = index + 1;
+  while (i < source.length) {
+    if (source[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (source[i] === "`") {
+      return i + 1;
+    }
+    if (source[i] === "$" && source[i + 1] === "{") {
+      const close = _spurAnywidgetFindMatching(source, i + 1, "{", "}");
+      if (close === -1) {
+        return source.length;
+      }
+      i = close + 1;
+      continue;
+    }
+    i += 1;
+  }
+  return source.length;
 }
 
 function _spurAnywidgetWidget(options) {

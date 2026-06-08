@@ -46,6 +46,7 @@ pub fn go_bootstrap() -> &'static str {
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
     #[test]
@@ -87,6 +88,66 @@ mod tests {
         assert!(!bootstrap.contains("jsr:@anywidget/deno"));
         assert!(!bootstrap.contains("npm:@anywidget/deno"));
         assert!(!bootstrap.contains("esm.sh/jsr/@anywidget/deno"));
+    }
+
+    #[test]
+    fn javascript_bootstrap_strips_typescript_from_anywidget_render_esm() {
+        let Some(deno) = deno_binary_for_test() else {
+            eprintln!("skipping JS anywidget ESM parse test: deno binary is not available");
+            return;
+        };
+
+        let bootstrap = javascript_bootstrap();
+        let helper_start = bootstrap
+            .find("function _spurAnywidgetToEsm(")
+            .expect("anywidget ESM helper present");
+        let helper_end = bootstrap
+            .find("function _spurAnywidgetWidget(")
+            .expect("anywidget widget helper present");
+        let helper_source = &bootstrap[helper_start..helper_end];
+        let render_source = r#"render({ model, el, experimental }: any): void {
+  const text = ((value: string): string => value)(String(model.get("html") ?? ""));
+  const pluck = ({ value }: { value: string }) => value;
+  el.innerHTML = pluck({ value: text });
+}"#;
+        let script = format!(
+            r#"
+{helper_source}
+
+const esm = _spurAnywidgetToEsm({{
+  imports: "",
+  render: {{
+    toString() {{
+      return {render_source};
+    }},
+  }},
+}});
+if (esm.includes(": any") || esm.includes(": void") || esm.includes(": string")) {{
+  throw new Error(`expected stripped TypeScript annotations, got: ${{esm}}`);
+}}
+const moduleUrl = `data:text/javascript,${{encodeURIComponent(esm)}}`;
+const module = await import(moduleUrl);
+if (typeof module.default.render !== "function") {{
+  throw new Error(`expected exported render function, got ${{typeof module.default.render}}`);
+}}
+"#,
+            helper_source = helper_source,
+            render_source = serde_json::to_string(render_source).unwrap(),
+        );
+
+        let output = Command::new(deno)
+            .arg("eval")
+            .arg("--ext=js")
+            .arg(script)
+            .output()
+            .expect("deno eval runs");
+
+        assert!(
+            output.status.success(),
+            "anywidget ESM helper failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -212,5 +273,29 @@ assert pathlib.Path(manifest["ports"]["sales"]["path"]).exists()
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    fn deno_binary_for_test() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("DENO_PATH").map(PathBuf::from) {
+            if path.is_absolute() && path.exists() {
+                return Some(path);
+            }
+        }
+
+        let paths = std::env::var_os("PATH")?;
+        let names = if cfg!(windows) {
+            vec!["deno.exe", "deno"]
+        } else {
+            vec!["deno"]
+        };
+        for dir in std::env::split_paths(&paths) {
+            for name in &names {
+                let candidate = dir.join(name);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 }
