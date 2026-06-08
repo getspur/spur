@@ -4,7 +4,8 @@ use arrow_array::{Array as _, LargeStringArray, StringArray, UInt32Array};
 use futures::TryStreamExt as _;
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset, CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR,
+    write_sections_dataset, write_sections_dataset_best_effort_with_options,
+    SectionEmbeddingOptions, CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR,
     SECTIONS_TABLE,
 };
 use spur_graph::{
@@ -106,7 +107,6 @@ async fn lance_sections_writes_markdown_sections_dataset_with_body_text() {
 
 #[tokio::test]
 async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
-    let _env = EnvGuard::set("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1");
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(root.join("docs")).expect("mkdir docs");
@@ -120,7 +120,15 @@ async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let out_dir = tempdir.path().join("artifact");
 
-    write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        &root,
+        &out_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
 
     let db = lancedb::connect(
         out_dir
@@ -148,7 +156,6 @@ async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
 
 #[tokio::test]
 async fn lance_sections_streams_small_write_batches_without_vectors() {
-    let _skip = EnvGuard::set("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1");
     let _write_batch = EnvGuard::set("SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE", "2");
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
@@ -172,7 +179,15 @@ async fn lance_sections_streams_small_write_batches_without_vectors() {
     );
     let out_dir = tempdir.path().join("artifact");
 
-    write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        &root,
+        &out_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
 
     let db = lancedb::connect(
         out_dir
@@ -203,7 +218,7 @@ async fn lance_sections_streams_small_write_batches_without_vectors() {
 }
 
 #[tokio::test]
-async fn lance_sections_writes_code_symbol_rows_without_vectors() {
+async fn lance_sections_skip_embeddings_writes_code_symbol_rows_without_vectors() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -222,7 +237,15 @@ async fn lance_sections_writes_code_symbol_rows_without_vectors() {
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let out_dir = tempdir.path().join("artifact");
 
-    write_sections_dataset(&artifact, &root, &out_dir).expect("write sidecars");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        &root,
+        &out_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
 
     let db = lancedb::connect(out_dir.to_str().expect("dataset path"))
         .execute()
