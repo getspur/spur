@@ -36,6 +36,19 @@ pub struct SpurAppManifest {
     pub ports: Option<SpurAppPorts>,
     #[serde(default)]
     pub dependencies: SpurAppDependencies,
+    #[serde(default)]
+    pub mcp_server: Option<SpurAppMcpServer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpurAppMcpServer {
+    #[serde(rename = "type")]
+    pub server_type: String,
+    pub entry: String,
+    #[serde(default)]
+    pub requirements: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +136,7 @@ impl SpurAppManifest {
             widgets: Vec::new(),
             ports: None,
             dependencies: SpurAppDependencies::default(),
+            mcp_server: None,
         }
     }
 }
