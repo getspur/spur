@@ -24,6 +24,8 @@ pub const EMBED_MODEL_NAME: &str = "BGESmallENV15";
 pub const EMBED_MODEL_APPROX_SIZE_MB: usize = 130;
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
+pub const CODE_SYMBOLS_DATASET_DIR: &str = "code_symbols.lance";
+pub const CODE_SYMBOLS_TABLE: &str = "code_symbols";
 const SECTION_VECTOR_DIMENSIONS: usize = 384;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
@@ -198,6 +200,18 @@ struct SectionRow {
     parent_stable_id: Option<String>,
     content_hash: String,
     vector: Option<Vec<f32>>,
+}
+
+#[derive(Debug)]
+struct SymbolRow {
+    stable_symbol_id: String,
+    file_path: String,
+    qualified_name: String,
+    entity_name: String,
+    symbol_kind: String,
+    embed_text: String,
+    vector: Option<Vec<f32>>,
+    content_hash: String,
 }
 
 pub fn write_sections_dataset(
@@ -543,6 +557,64 @@ async fn write_sections_dataset_async(
             skipped_existing_rows,
         },
     );
+    write_symbol_rows_dataset_async(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        options.write_batch_size,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn write_symbol_rows_dataset_async(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    write_batch_size: usize,
+) -> Result<()> {
+    let mut batcher = SymbolRowBatcher::new(artifact, worktree_root, write_batch_size);
+
+    fs::create_dir_all(artifact_dir)
+        .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
+    let db = lancedb::connect(artifact_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .context("failed to connect to code_symbols.lance")?;
+    let schema = symbol_rows_schema();
+    let mut table = db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok();
+    let mut existing_versions = ExistingSymbolFileVersions::new(table.as_ref());
+
+    while let Some(rows) = batcher.next_batch()? {
+        let rows = existing_versions.retain_new_rows(rows).await?;
+        if rows.is_empty() {
+            continue;
+        }
+        let batch = symbol_rows_to_batch(rows, schema.clone())?;
+        if let Some(table) = table.as_ref() {
+            table
+                .add(batch)
+                .execute()
+                .await
+                .context("failed to append LanceDB code symbol rows")?;
+        } else {
+            table = Some(
+                db.create_table(CODE_SYMBOLS_TABLE, batch)
+                    .execute()
+                    .await
+                    .context("failed to create LanceDB code symbols table")?,
+            );
+        }
+    }
+
+    if table.is_none() {
+        let empty_batch = symbol_rows_to_batch(Vec::new(), schema)?;
+        db.create_table(CODE_SYMBOLS_TABLE, empty_batch)
+            .execute()
+            .await
+            .context("failed to create LanceDB code symbols table")?;
+    }
+
     Ok(())
 }
 
@@ -697,6 +769,95 @@ impl ExistingFileVersions {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .context("existing section content_hash column was not Utf8")?;
+            for index in 0..batch.num_rows() {
+                existing.insert((
+                    file_paths.value(index).to_owned(),
+                    content_hashes.value(index).to_owned(),
+                ));
+            }
+        }
+        existing.retain(|key| !self.missing_by_file_version.contains(key));
+        Ok(existing)
+    }
+}
+
+struct ExistingSymbolFileVersions {
+    table: Option<lancedb::Table>,
+    missing_by_file_version: HashSet<(String, String)>,
+}
+
+impl ExistingSymbolFileVersions {
+    fn new(table: Option<&lancedb::Table>) -> Self {
+        Self {
+            table: table.cloned(),
+            missing_by_file_version: HashSet::new(),
+        }
+    }
+
+    async fn retain_new_rows(&mut self, rows: Vec<SymbolRow>) -> Result<Vec<SymbolRow>> {
+        if rows.is_empty() || self.table.is_none() {
+            return Ok(rows);
+        }
+        let existing = self.preload_existing_file_versions(&rows).await?;
+        let mut retained = Vec::with_capacity(rows.len());
+        for row in rows {
+            let key = (row.file_path.clone(), row.content_hash.clone());
+            if !existing.contains(&key) {
+                self.missing_by_file_version.insert(key);
+                retained.push(row);
+            }
+        }
+        Ok(retained)
+    }
+
+    async fn preload_existing_file_versions(
+        &mut self,
+        rows: &[SymbolRow],
+    ) -> Result<HashSet<(String, String)>> {
+        let Some(table) = self.table.as_ref() else {
+            return Ok(HashSet::new());
+        };
+        let mut file_paths: Vec<_> = rows
+            .iter()
+            .map(|row| row.file_path.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if file_paths.is_empty() {
+            return Ok(HashSet::new());
+        }
+        file_paths.sort_unstable();
+        let literals = file_paths
+            .into_iter()
+            .map(|path| format!("'{}'", sql_string_literal(path)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let filter = format!("file_path IN ({literals})");
+        let mut batches = table
+            .query()
+            .only_if(filter)
+            .select(Select::columns(&["file_path", "content_hash"]))
+            .execute()
+            .await
+            .context("failed to query existing LanceDB code symbol rows")?;
+        let mut existing = HashSet::new();
+        while let Some(batch) = std::future::poll_fn(|cx| batches.as_mut().poll_next(cx))
+            .await
+            .transpose()
+            .context("failed to read existing LanceDB code symbol rows")?
+        {
+            let file_paths = batch
+                .column_by_name("file_path")
+                .context("existing code symbol rows missing file_path column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("existing code symbol file_path column was not Utf8")?;
+            let content_hashes = batch
+                .column_by_name("content_hash")
+                .context("existing code symbol rows missing content_hash column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("existing code symbol content_hash column was not Utf8")?;
             for index in 0..batch.num_rows() {
                 existing.insert((
                     file_paths.value(index).to_owned(),
@@ -874,6 +1035,102 @@ impl<'a> SectionRowBatcher<'a> {
     }
 }
 
+struct SymbolRowBatcher<'a> {
+    worktree_root: &'a Path,
+    symbols_by_path: BTreeMap<&'a str, Vec<&'a GraphSymbolArtifact>>,
+    ordered_paths: Vec<&'a str>,
+    next_path_index: usize,
+    pending_rows: VecDeque<SymbolRow>,
+    write_batch_size: usize,
+}
+
+impl<'a> SymbolRowBatcher<'a> {
+    fn new(
+        artifact: &'a GraphIndexArtifact,
+        worktree_root: &'a Path,
+        write_batch_size: usize,
+    ) -> Self {
+        let write_batch_size = normalize_section_write_batch_size(write_batch_size);
+        let mut symbols_by_path: BTreeMap<&str, Vec<&GraphSymbolArtifact>> = BTreeMap::new();
+        for symbol in &artifact.symbols {
+            if is_code_symbol_kind(&symbol.symbol_kind) {
+                symbols_by_path
+                    .entry(symbol.file_path.as_str())
+                    .or_default()
+                    .push(symbol);
+            }
+        }
+        for symbols in symbols_by_path.values_mut() {
+            symbols.sort_by(|a, b| {
+                a.byte_range[0]
+                    .cmp(&b.byte_range[0])
+                    .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
+            });
+        }
+        let ordered_paths = symbols_by_path.keys().copied().collect();
+
+        Self {
+            worktree_root,
+            symbols_by_path,
+            ordered_paths,
+            next_path_index: 0,
+            pending_rows: VecDeque::new(),
+            write_batch_size,
+        }
+    }
+
+    fn next_batch(&mut self) -> Result<Option<Vec<SymbolRow>>> {
+        let mut batch = Vec::with_capacity(self.write_batch_size);
+        while batch.len() < self.write_batch_size {
+            if let Some(row) = self.pending_rows.pop_front() {
+                batch.push(row);
+                continue;
+            }
+
+            let Some(path) = self.ordered_paths.get(self.next_path_index).copied() else {
+                break;
+            };
+            self.next_path_index += 1;
+            self.pending_rows = VecDeque::from(self.rows_for_path(path)?);
+        }
+
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(batch))
+        }
+    }
+
+    fn rows_for_path(&self, path: &str) -> Result<Vec<SymbolRow>> {
+        let bytes = match read_file_bytes(self.worktree_root, path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(path = %path, error = %e, "symbol_rows: skipping unreadable file");
+                return Ok(Vec::new());
+            }
+        };
+        let content_hash = blake3_hex(&bytes);
+        let source = match std::str::from_utf8(&bytes) {
+            Ok(source) => source,
+            Err(e) => {
+                tracing::warn!(path = %path, error = %e, "symbol_rows: skipping non-UTF-8 source");
+                return Ok(Vec::new());
+            }
+        };
+        let Some(symbols) = self.symbols_by_path.get(path) else {
+            return Ok(Vec::new());
+        };
+
+        let mut rows = Vec::new();
+        for symbol in symbols {
+            if let Some(row) = symbol_row(symbol, source, content_hash.as_str())? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+}
+
 fn section_row(
     section: &GraphSymbolArtifact,
     source: &str,
@@ -910,6 +1167,132 @@ fn section_row(
         content_hash: content_hash.to_owned(),
         vector: None,
     })
+}
+
+fn symbol_row(
+    symbol: &GraphSymbolArtifact,
+    source: &str,
+    content_hash: &str,
+) -> Result<Option<SymbolRow>> {
+    let doc_text = doc_text_for_symbol(source, symbol.byte_range[0]).with_context(|| {
+        format!(
+            "failed to derive doc text for symbol `{}` in `{}`",
+            symbol.stable_symbol_id, symbol.file_path
+        )
+    })?;
+    let has_long_doc = doc_text.chars().count() > 50;
+    if !has_long_doc && !is_meaningful_entity_name(&symbol.entity_name) {
+        return Ok(None);
+    }
+
+    let qualified_name = if symbol.qualified_name.is_empty() {
+        symbol.entity_name.clone()
+    } else {
+        symbol.qualified_name.clone()
+    };
+    let embed_text = if has_long_doc {
+        format!("{} {} {}", symbol.entity_name, qualified_name, doc_text)
+    } else {
+        format!(
+            "{} {} {}",
+            symbol.entity_name, qualified_name, symbol.symbol_kind
+        )
+    };
+
+    Ok(Some(SymbolRow {
+        stable_symbol_id: symbol.stable_symbol_id.clone(),
+        file_path: symbol.file_path.clone(),
+        qualified_name,
+        entity_name: symbol.entity_name.clone(),
+        symbol_kind: symbol.symbol_kind.clone(),
+        embed_text,
+        vector: None,
+        content_hash: content_hash.to_owned(),
+    }))
+}
+
+fn doc_text_for_symbol(source: &str, byte_start: usize) -> Result<String> {
+    let prefix = source
+        .get(..byte_start)
+        .with_context(|| format!("symbol byte start {byte_start} is not a UTF-8 boundary"))?;
+    let line_doc = preceding_line_doc_text(prefix);
+    if !line_doc.is_empty() {
+        return Ok(line_doc);
+    }
+    Ok(preceding_block_doc_text(prefix).unwrap_or_default())
+}
+
+fn preceding_line_doc_text(prefix: &str) -> String {
+    let prefix = prefix.trim_end_matches([' ', '\t', '\r']);
+    let mut lines = Vec::new();
+    for line in prefix.lines().rev() {
+        let trimmed = line.trim_start();
+        let text = trimmed
+            .strip_prefix("///")
+            .or_else(|| trimmed.strip_prefix("//!"))
+            .or_else(|| {
+                trimmed
+                    .strip_prefix('#')
+                    .filter(|_| !trimmed.starts_with("#!") && !trimmed.starts_with("#["))
+            });
+        let Some(text) = text else {
+            break;
+        };
+        lines.push(text.trim().to_owned());
+    }
+    lines.reverse();
+    normalize_doc_lines(lines)
+}
+
+fn preceding_block_doc_text(prefix: &str) -> Option<String> {
+    let prefix = prefix.trim_end_matches([' ', '\t', '\r']).trim_end();
+    if !prefix.ends_with("*/") {
+        return None;
+    }
+    let start = prefix.rfind("/*")?;
+    let body = &prefix[start + 2..prefix.len().saturating_sub(2)];
+    if !(body.starts_with('*') || body.starts_with('!')) {
+        return None;
+    }
+    let body = body.trim_start_matches(['*', '!']);
+    let lines = body
+        .lines()
+        .map(|line| {
+            line.trim()
+                .strip_prefix('*')
+                .unwrap_or(line.trim())
+                .trim()
+                .to_owned()
+        })
+        .collect();
+    Some(normalize_doc_lines(lines))
+}
+
+fn normalize_doc_lines(lines: Vec<String>) -> String {
+    lines
+        .into_iter()
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_code_symbol_kind(symbol_kind: &str) -> bool {
+    !matches!(symbol_kind, "section" | "external" | "commit")
+}
+
+fn is_meaningful_entity_name(entity_name: &str) -> bool {
+    let mut has_alpha = false;
+    let mut meaningful_len = 0usize;
+    for ch in entity_name.chars() {
+        if ch.is_alphabetic() {
+            has_alpha = true;
+        }
+        if ch.is_alphanumeric() || ch == '_' {
+            meaningful_len += 1;
+        }
+    }
+    has_alpha && meaningful_len > 2
 }
 
 #[cfg(test)]
@@ -1197,6 +1580,61 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
     .context("failed to build LanceDB sections batch")
 }
 
+fn symbol_rows_to_batch(rows: Vec<SymbolRow>, schema: Arc<Schema>) -> Result<RecordBatch> {
+    let mut stable_symbol_ids = Vec::with_capacity(rows.len());
+    let mut file_paths = Vec::with_capacity(rows.len());
+    let mut qualified_names = Vec::with_capacity(rows.len());
+    let mut entity_names = Vec::with_capacity(rows.len());
+    let mut symbol_kinds = Vec::with_capacity(rows.len());
+    let mut embed_texts = Vec::with_capacity(rows.len());
+    let mut flat_vectors = Vec::with_capacity(rows.len() * SECTION_VECTOR_DIMENSIONS);
+    let mut vector_validity = Vec::with_capacity(rows.len());
+    let mut content_hashes = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        stable_symbol_ids.push(row.stable_symbol_id);
+        file_paths.push(row.file_path);
+        qualified_names.push(row.qualified_name);
+        entity_names.push(row.entity_name);
+        symbol_kinds.push(row.symbol_kind);
+        embed_texts.push(row.embed_text);
+        if let Some(vector) = row
+            .vector
+            .filter(|vector| vector.len() == SECTION_VECTOR_DIMENSIONS)
+        {
+            flat_vectors.extend(vector);
+            vector_validity.push(true);
+        } else {
+            flat_vectors.extend(std::iter::repeat_n(0.0f32, SECTION_VECTOR_DIMENSIONS));
+            vector_validity.push(false);
+        }
+        content_hashes.push(row.content_hash);
+    }
+
+    let vector_array = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Float32, true)),
+        SECTION_VECTOR_DIMENSIONS as i32,
+        Arc::new(Float32Array::from(flat_vectors)),
+        Some(NullBuffer::from(vector_validity)),
+    )
+    .context("failed to build LanceDB code symbol vector array")?;
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(stable_symbol_ids)),
+            Arc::new(StringArray::from(file_paths)),
+            Arc::new(StringArray::from(qualified_names)),
+            Arc::new(StringArray::from(entity_names)),
+            Arc::new(StringArray::from(symbol_kinds)),
+            Arc::new(LargeStringArray::from(embed_texts)),
+            Arc::new(vector_array),
+            Arc::new(StringArray::from(content_hashes)),
+        ],
+    )
+    .context("failed to build LanceDB code symbols batch")
+}
+
 fn sections_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("stable_symbol_id", DataType::Utf8, false),
@@ -1217,6 +1655,26 @@ fn sections_schema() -> Arc<Schema> {
             ),
             true,
         ),
+    ]))
+}
+
+fn symbol_rows_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("stable_symbol_id", DataType::Utf8, false),
+        Field::new("file_path", DataType::Utf8, false),
+        Field::new("qualified_name", DataType::Utf8, false),
+        Field::new("entity_name", DataType::Utf8, false),
+        Field::new("symbol_kind", DataType::Utf8, false),
+        Field::new("embed_text", DataType::LargeUtf8, false),
+        Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                SECTION_VECTOR_DIMENSIONS as i32,
+            ),
+            true,
+        ),
+        Field::new("content_hash", DataType::Utf8, false),
     ]))
 }
 
