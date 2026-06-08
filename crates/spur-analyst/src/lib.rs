@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context as _, Result};
 
 const MAX_CONTEXT_CANDIDATES: usize = 40;
 const MAX_GRAPH_CANDIDATES: usize = 30;
+const QUERY_VECTOR_DIMENSIONS: usize = 384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeSearchScope {
@@ -42,14 +43,41 @@ impl TryFrom<&str> for KnowledgeSearchScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeQueryIntent {
+    Explain,
+    Change,
+    Review,
+    Debug,
+    Plan,
+}
+
+impl KnowledgeQueryIntent {
+    fn as_sql_intent(self) -> &'static str {
+        match self {
+            Self::Explain => "explain",
+            Self::Change => "change",
+            Self::Review => "review",
+            Self::Debug => "debug",
+            Self::Plan => "plan",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KnowledgeQueryOptions {
     pub limit: usize,
+    pub intent: KnowledgeQueryIntent,
+    pub query_vec: Option<Vec<f32>>,
 }
 
 impl Default for KnowledgeQueryOptions {
     fn default() -> Self {
-        Self { limit: 20 }
+        Self {
+            limit: 20,
+            intent: KnowledgeQueryIntent::Explain,
+            query_vec: None,
+        }
     }
 }
 
@@ -100,6 +128,10 @@ pub fn query_context_candidates(
     // live in DuckDB's ICU extension. Docs-only queries can still work without it,
     // so keep this best-effort and let query preparation surface real failures.
     let _ = conn.execute_batch("LOAD icu;");
+    // Hybrid retrieval uses DuckDB's Lance extension when available. Keep this
+    // best-effort so missing extension binaries degrade to the BM25 macro below.
+    let _ = conn.execute_batch("INSTALL lance;");
+    let _ = conn.execute_batch("LOAD lance;");
 
     let graph_content_hash = conn
         .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
@@ -107,10 +139,56 @@ pub fn query_context_candidates(
 
     let escaped_query = query.replace('\'', "''");
     let sql_scope = scope.as_sql_scope();
+    let sql_intent = options.intent.as_sql_intent();
+    let query_vec_sql = format_query_vec_sql(options.query_vec.as_deref());
+    let candidates = match query_context_candidates_inner(
+        &conn,
+        &escaped_query,
+        sql_scope,
+        sql_intent,
+        query_vec_sql.as_deref(),
+        limit,
+    ) {
+        Ok(candidates) => candidates,
+        Err(error) if query_vec_sql.is_some() => {
+            let _ = error;
+            query_context_candidates_inner(
+                &conn,
+                &escaped_query,
+                sql_scope,
+                sql_intent,
+                None,
+                limit,
+            )?
+        }
+        Err(error) => return Err(error),
+    };
+
+    Ok(KnowledgeQueryResult {
+        db_path: db_path.display().to_string(),
+        graph_content_hash,
+        candidates,
+    })
+}
+
+fn query_context_candidates_inner(
+    conn: &duckdb::Connection,
+    escaped_query: &str,
+    sql_scope: &str,
+    sql_intent: &str,
+    query_vec_sql: Option<&str>,
+    limit: usize,
+) -> Result<Vec<KnowledgeCandidate>> {
+    let macro_call = match query_vec_sql {
+        Some(query_vec_sql) => format!(
+            "search_context_candidates_hybrid('{escaped_query}', '{sql_scope}', '{sql_intent}', {query_vec_sql})"
+        ),
+        None => format!("search_context_candidates('{escaped_query}', '{sql_scope}', '{sql_intent}')"),
+    };
     let sql = format!(
         "SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, \
          signal, neighbor_kind, edge_bind_method, grounding \
-         FROM search_context_candidates('{escaped_query}', '{sql_scope}') \
+         FROM {macro_call} \
          LIMIT {limit}"
     );
     let mut stmt = conn
@@ -136,11 +214,26 @@ pub fn query_context_candidates(
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("failed to read context candidate rows")?;
 
-    Ok(KnowledgeQueryResult {
-        db_path: db_path.display().to_string(),
-        graph_content_hash,
-        candidates,
-    })
+    Ok(candidates)
+}
+
+fn format_query_vec_sql(query_vec: Option<&[f32]>) -> Option<String> {
+    let query_vec = query_vec?;
+    if query_vec.len() != QUERY_VECTOR_DIMENSIONS
+        || query_vec.iter().any(|value| !value.is_finite())
+    {
+        return None;
+    }
+
+    let mut sql = String::from("[");
+    for (index, value) in query_vec.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str(&value.to_string());
+    }
+    sql.push_str("]::FLOAT[384]");
+    Some(sql)
 }
 
 pub fn query_graph_candidates(
@@ -174,10 +267,11 @@ pub fn query_graph_candidates(
         .ok();
 
     let escaped_query = query.replace('\'', "''");
+    let sql_intent = options.intent.as_sql_intent();
     let sql = format!(
         "SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, \
          signal, neighbor_kind, edge_bind_method, grounding \
-         FROM search_graph('{escaped_query}') \
+         FROM search_graph('{escaped_query}', '{sql_intent}') \
          LIMIT {limit}"
     );
     let mut stmt = conn

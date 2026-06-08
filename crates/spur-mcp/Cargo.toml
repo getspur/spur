@@ -14,6 +14,7 @@ axum = { workspace = true }
 base64ct = { version = "1", features = ["alloc"] }
 chrono = { workspace = true }
 futures = { workspace = true }
+fastembed = { version = "4", default-features = false, optional = true }
 globset = "0.4"
 hmac = "0.12"
 lance-index = { workspace = true }
@@ -47,6 +48,11 @@ test-support = []
 # Enables cfg(madsim)-only reconciler simulation tests. Normal builds and
 # default cargo test runs do not compile the madsim harness.
 madsim-sim = ["test-support"]
+embed = [
+    "dep:fastembed",
+    "fastembed/hf-hub-native-tls",
+    "fastembed/ort-download-binaries",
+]
 
 [[test]]
 name = "madsim_reconciler"
