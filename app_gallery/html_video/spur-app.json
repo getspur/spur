@@ -1,0 +1,21 @@
+{
+  "schema": "spur.app/v1",
+  "name": "html-video",
+  "entry_notebook": "app.ipynb",
+  "open_mode": "app",
+  "mcp_server": {
+    "type": "python",
+    "entry": "server/main.py",
+    "requirements": "server/requirements.txt",
+    "env": {
+      "TEMPLATES_DIR": "templates"
+    }
+  },
+  "runtime": {
+    "jute_min": "0.1.0",
+    "features": ["frontend-cells", "anywidget-afm", "ports-arrow"]
+  },
+  "widgets": [],
+  "ports": null,
+  "dependencies": {}
+}
