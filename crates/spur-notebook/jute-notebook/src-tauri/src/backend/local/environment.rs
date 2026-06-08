@@ -171,8 +171,8 @@ pub fn runtime_dir() -> String {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn data_search_paths_prepend_spur_jupyter_prefix() {
+    #[test]
+    fn data_search_paths_prepend_spur_jupyter_prefix() {
         let home = default_home_dir().expect("test host should have a home directory");
         let expected = home
             .join(".spur")
@@ -180,7 +180,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
 
-        let paths = data_search_paths(None).await;
+        let paths = data_search_paths(None);
 
         assert_eq!(paths.first().map(String::as_str), Some(expected.as_str()));
     }
