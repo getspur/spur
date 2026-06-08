@@ -4,7 +4,9 @@ use arrow_array::{Array as _, LargeStringArray, StringArray, UInt32Array};
 use futures::TryStreamExt as _;
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+    write_sections_dataset, write_sections_dataset_best_effort_with_options,
+    SectionEmbeddingOptions, CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR,
+    SECTIONS_TABLE,
 };
 use spur_graph::{
     artifact_from_facts, build_facts, GraphFileArtifact, GraphFileManifestEntry,
@@ -105,7 +107,6 @@ async fn lance_sections_writes_markdown_sections_dataset_with_body_text() {
 
 #[tokio::test]
 async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
-    let _env = EnvGuard::set("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1");
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(root.join("docs")).expect("mkdir docs");
@@ -119,7 +120,15 @@ async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let out_dir = tempdir.path().join("artifact");
 
-    write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        &root,
+        &out_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
 
     let db = lancedb::connect(
         out_dir
@@ -147,7 +156,6 @@ async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
 
 #[tokio::test]
 async fn lance_sections_streams_small_write_batches_without_vectors() {
-    let _skip = EnvGuard::set("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1");
     let _write_batch = EnvGuard::set("SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE", "2");
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
@@ -171,7 +179,15 @@ async fn lance_sections_streams_small_write_batches_without_vectors() {
     );
     let out_dir = tempdir.path().join("artifact");
 
-    write_sections_dataset(&artifact, &root, &out_dir).expect("write sections sidecar");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        &root,
+        &out_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
 
     let db = lancedb::connect(
         out_dir
@@ -199,6 +215,113 @@ async fn lance_sections_streams_small_write_batches_without_vectors() {
             .expect("count vector rows"),
         0
     );
+}
+
+#[tokio::test]
+async fn lance_sections_skip_embeddings_writes_code_symbol_rows_without_vectors() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("repo");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    let source = concat!(
+        "/// Parses the request payload into a normalized command shape.\n",
+        "/// Keeps enough context for downstream handlers to preserve provenance.\n",
+        "fn parse_request() {}\n",
+        "\n",
+        "fn x() {}\n",
+        "\n",
+        "struct CommandEnvelope;\n",
+    );
+    fs::write(root.join("src/lib.rs"), source).expect("write source");
+
+    let facts = build_facts(&root, None).expect("build facts").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let out_dir = tempdir.path().join("artifact");
+
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        &root,
+        &out_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
+
+    let db = lancedb::connect(out_dir.to_str().expect("dataset path"))
+        .execute()
+        .await
+        .expect("connect lancedb");
+    let table = db
+        .open_table(CODE_SYMBOLS_TABLE)
+        .execute()
+        .await
+        .expect("open code symbols table");
+    assert!(
+        out_dir.join(CODE_SYMBOLS_DATASET_DIR).exists(),
+        "code_symbols.lance should exist"
+    );
+    assert_eq!(table.count_rows(None).await.expect("count rows"), 2);
+    assert_eq!(
+        table
+            .count_rows(Some("vector IS NOT NULL".to_owned()))
+            .await
+            .expect("count vector rows"),
+        0
+    );
+
+    let batches = table
+        .query()
+        .select(Select::columns(&[
+            "entity_name",
+            "symbol_kind",
+            "embed_text",
+        ]))
+        .execute()
+        .await
+        .expect("query symbols")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect symbols");
+
+    let mut rows = Vec::new();
+    for batch in batches {
+        let entity_names = batch
+            .column_by_name("entity_name")
+            .expect("entity_name column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("entity_name string");
+        let symbol_kinds = batch
+            .column_by_name("symbol_kind")
+            .expect("symbol_kind column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("symbol_kind string");
+        let embed_texts = batch
+            .column_by_name("embed_text")
+            .expect("embed_text column")
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .expect("embed_text large string");
+        for index in 0..batch.num_rows() {
+            rows.push((
+                entity_names.value(index).to_owned(),
+                symbol_kinds.value(index).to_owned(),
+                embed_texts.value(index).to_owned(),
+            ));
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "CommandEnvelope");
+    assert_eq!(rows[0].1, "struct");
+    assert_eq!(rows[0].2, "CommandEnvelope CommandEnvelope struct");
+    assert_eq!(rows[1].0, "parse_request");
+    assert_eq!(rows[1].1, "function");
+    assert!(rows[1].2.starts_with("parse_request parse_request "));
+    assert!(rows[1].2.contains("normalized command shape"));
+    assert!(!rows.iter().any(|(entity_name, _, _)| entity_name == "x"));
 }
 
 #[tokio::test]
