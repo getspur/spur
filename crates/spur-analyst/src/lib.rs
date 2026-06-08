@@ -5,6 +5,8 @@ use std::path::Path;
 use anyhow::{anyhow, Context as _, Result};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 
+static LANCE_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 const MAX_CONTEXT_CANDIDATES: usize = 40;
 const MAX_GRAPH_CANDIDATES: usize = 30;
 
@@ -130,7 +132,9 @@ pub fn query_context_candidates(
     let _ = conn.execute_batch("LOAD icu;");
     // Hybrid retrieval uses DuckDB's Lance extension when available. Keep this
     // best-effort so missing extension binaries degrade to the BM25 macro below.
-    let _ = conn.execute_batch("INSTALL lance;");
+    LANCE_INSTALLED.get_or_init(|| {
+        let _ = conn.execute_batch("INSTALL lance;");
+    });
     let _ = conn.execute_batch("LOAD lance;");
 
     let graph_content_hash = conn

@@ -596,6 +596,8 @@ impl McpCallbackServer {
     /// Returns the MCP endpoint URL (e.g. `http://127.0.0.1:12345/mcp`) and
     /// a `JoinHandle`.
     pub async fn start(self: Arc<Self>) -> Result<(String, AbortOnDropHandle<()>)> {
+        handlers::knowledge_context::warm_embed_model();
+
         // Extract data needed by beads-backed startup tasks before moving self
         // into the async block.
         let repo_root = self.repo_root.clone();
