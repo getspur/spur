@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+import base64
+import shutil
+import subprocess
+
+import pytest
+
+
+render = pytest.importorskip("server.render")
+
+
+def test_parse_resolution_valid() -> None:
+    dimensions = render.parse_resolution("1920x1080")
+
+    assert (dimensions.width, dimensions.height) == (1920, 1080)
+
+
+def test_parse_resolution_invalid_raises() -> None:
+    with pytest.raises(render.InvalidParams):
+        render.parse_resolution("abc")
+
+
+def test_normalize_output_path_adds_mp4() -> None:
+    assert str(render.normalize_output_path("/tmp/out")) == "/tmp/out.mp4"
+
+
+def test_ensure_ffmpeg_available_raises_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    with pytest.raises(render.RenderError):
+        render.ensure_ffmpeg_available()
+
+
+def test_render_html_video_single_frame_mocks_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(render.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(render.subprocess, "run", fake_run)
+
+    result = render.render_html_video(
+        webm_frames=[base64.b64encode(b"fake webm").decode("ascii")],
+        output_path=str(tmp_path / "out"),
+        resolution="320x180",
+        fps=12,
+        frame_duration=0.5,
+    )
+
+    assert result == {
+        "output_path": str(tmp_path / "out.mp4"),
+        "frame_count": 1,
+        "fps": 12,
+        "duration": 0.5,
+        "resolution": "320x180",
+    }
+    assert len(calls) == 1
+    assert calls[0][0][0] == "ffmpeg"
