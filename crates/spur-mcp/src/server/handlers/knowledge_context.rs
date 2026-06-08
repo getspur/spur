@@ -16,8 +16,8 @@ use super::McpCallbackServer;
 use super::*;
 
 const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
-const MAX_IMPACT_SYMBOLS: usize = 3;
-const MAX_IMPACT_NEIGHBORS: usize = 3;
+const MAX_IMPACT_SYMBOLS: usize = 2;
+const MAX_IMPACT_NEIGHBORS: usize = 2;
 const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
 const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
@@ -249,17 +249,42 @@ fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
 }
 
 #[cfg(feature = "embed")]
+pub fn warm_embed_model() {
+    std::thread::spawn(|| {
+        tracing::info!("Pre-warming BGEBaseENV15 embedding model for knowledge_context_pack");
+        match get_embed_model() {
+            Some(_) => tracing::info!("BGEBaseENV15 embedding model loaded successfully"),
+            None => tracing::warn!(
+                "BGEBaseENV15 embedding model failed to load; hybrid search will be unavailable"
+            ),
+        }
+    });
+}
+
+#[cfg(not(feature = "embed"))]
+pub fn warm_embed_model() {}
+
+#[cfg(feature = "embed")]
 async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
     let query = query.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let model = get_embed_model()?;
-        let embeddings = model.embed(vec![query.as_str()], None).ok()?;
-        let embedding = embeddings.into_iter().next()?;
-        embedding.try_into().ok()
-    })
-    .await
-    .ok()
-    .flatten()
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            let model = get_embed_model()?;
+            let embeddings = model.embed(vec![query.as_str()], None).ok()?;
+            let embedding = embeddings.into_iter().next()?;
+            embedding.try_into().ok()
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(embedding)) => embedding,
+        Ok(Err(_join_error)) => None,
+        Err(_timeout) => {
+            tracing::warn!("embed_query timed out after 5s; degrading to BM25-only search");
+            None
+        }
+    }
 }
 
 #[cfg(not(feature = "embed"))]
@@ -1555,7 +1580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn knowledge_context_pack_attaches_aggregate_impact_for_top_three_code_evidence() {
+    async fn knowledge_context_pack_attaches_aggregate_impact_for_top_two_code_evidence() {
         let request = KnowledgeContextPackRequest::parse(&json!({
             "query": "change impact",
             "intent": "change",
@@ -1606,20 +1631,13 @@ mod tests {
                         caller_neighbors: vec![json!({ "title": "caller_b" })],
                         callee_neighbors: vec![json!({ "title": "callee_b" })],
                     }),
-                    Some(SymbolImpactSummary {
-                        selector: "graph://symbol/sym-three".into(),
-                        callers_count: 1,
-                        callees_count: 5,
-                        caller_neighbors: vec![json!({ "title": "caller_c" })],
-                        callee_neighbors: vec![json!({ "title": "callee_c" })],
-                    }),
                 ],
             },
         )
         .await;
 
-        assert_eq!(pack["impact"]["callers_count"], 36);
-        assert_eq!(pack["impact"]["callees_count"], 10);
+        assert_eq!(pack["impact"]["callers_count"], 35);
+        assert_eq!(pack["impact"]["callees_count"], 5);
         assert_eq!(pack["impact"]["popular_sink"], true);
         assert_eq!(
             pack["impact"]["caller_neighbors"].as_array().unwrap().len(),
@@ -1631,7 +1649,7 @@ mod tests {
         );
         assert_eq!(pack["primary_evidence"][0]["impact"]["callers_count"], 4);
         assert_eq!(pack["primary_evidence"][1]["impact"]["callers_count"], 31);
-        assert_eq!(pack["primary_evidence"][2]["impact"]["callers_count"], 1);
+        assert_eq!(pack["primary_evidence"][2].get("impact"), None);
         assert_eq!(pack["primary_evidence"][3].get("impact"), None);
         assert_eq!(
             pack["primary_evidence"][0]["impact"]
