@@ -232,13 +232,6 @@ impl ServerHandler for NotebookMcpServer {
             }
             "open_design_search" => tools::open_design_search::call(&self.deps, arguments).await,
             "open_design_get" => tools::open_design_get::call(&self.deps, arguments).await,
-            "html_video_search_templates" => {
-                tools::html_video_search_templates::call(&self.deps, arguments).await
-            }
-            "html_video_get_template" => {
-                tools::html_video_get_template::call(&self.deps, arguments).await
-            }
-            "html_video_render" => tools::html_video_render::call(&self.deps, arguments).await,
             "code_semantic_search" => {
                 tools::code_semantic_search::call(&self.deps, arguments).await
             }

@@ -209,10 +209,11 @@ CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS
                       WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
                * (1 + 0.15 * ln(1 + sc.pagerank * 1e4)) AS raw_rank,
              sc.churn_90d,
-             sc.callers AS caller_count,
+             COALESCE(vi.callers, 0) AS caller_count,
              sc.posture
       FROM symbol_text st
       JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+      LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
       WHERE requested_scope IN ('all', 'code', 'graph')
         AND fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
     )
@@ -244,7 +245,7 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
             * (1 + 0.15 * ln(1 + COALESCE(sc.pagerank, 0) * 1e4))
             * CASE
                 WHEN intent = 'debug' THEN 1 + 0.12 * ln(1 + COALESCE(sc.churn_90d, 0))
-                WHEN intent = 'change' THEN 1 + 0.10 * ln(1 + COALESCE(sc.callers, 0))
+                WHEN intent = 'change' THEN 1 + 0.10 * ln(1 + COALESCE(vi.callers, 0))
                 WHEN intent = 'review' AND COALESCE(sc.posture, '') = 'load-bearing wall' THEN 1.35
                 ELSE 1.0
               END,
@@ -260,6 +261,7 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
         'vector', query_vec, 'embed_text', q, 30, 0.5, 5
       ) h
       JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+      LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
       WHERE requested_scope IN ('all', 'code', 'graph')
     ),
     hybrid_docs AS (
