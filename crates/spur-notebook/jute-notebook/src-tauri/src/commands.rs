@@ -49,6 +49,7 @@ type SaveFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SaveWriter = dyn Fn(PathBuf, NotebookRoot) -> SaveFuture + Send + Sync;
 type BeforeSaveHook = dyn Fn(&Path, &mut NotebookRoot) + Send + Sync;
 const SPUR_NOTEBOOK_PORT_ROOT_ENV: &str = "SPUR_NOTEBOOK_PORT_ROOT";
+const SPUR_NOTEBOOK_MCP_SOCKET_ENV: &str = "SPUR_NOTEBOOK_MCP_SOCKET";
 
 /// Snapshot of a stable kernel slot for agent read-side tools.
 #[derive(Debug, Clone, Serialize)]
@@ -1178,6 +1179,16 @@ fn apply_notebook_port_root_env(
     }
 }
 
+fn apply_notebook_mcp_socket_env(kernel_spec: &mut environment::KernelSpec) {
+    let Ok(socket_path) = daemon_socket_path_from_args() else {
+        return;
+    };
+    kernel_spec.env.insert(
+        SPUR_NOTEBOOK_MCP_SOCKET_ENV.to_owned(),
+        socket_path.display().to_string(),
+    );
+}
+
 /// Start a local Jupyter kernel by spec name.
 pub async fn start_local_kernel(
     spec_name: &str,
@@ -1209,6 +1220,7 @@ pub async fn start_local_kernel(
     }
 
     apply_notebook_port_root_env(&mut kernel_spec, port_root);
+    apply_notebook_mcp_socket_env(&mut kernel_spec);
     let kernel = LocalKernel::start(&kernel_spec).await?;
 
     let info = commands::kernel_info(kernel.conn()).await?;
