@@ -18,6 +18,10 @@ use super::*;
 const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
 const MAX_IMPACT_SYMBOLS: usize = 3;
 const MAX_IMPACT_NEIGHBORS: usize = 3;
+const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
+const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
+const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 1.0;
+const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.3;
 
 #[cfg(feature = "embed")]
 static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
@@ -573,14 +577,17 @@ async fn pack_query_result_with_exact_context(
     let confidence = if !answerable {
         "low"
     } else {
-        let top_score = primary_evidence
-            .first()
+        let top_evidence = primary_evidence.first();
+        let top_score = top_evidence
             .and_then(|evidence| evidence.get("score").and_then(Value::as_f64))
             .unwrap_or(0.0);
+        let top_grounding =
+            top_evidence.and_then(|evidence| evidence.get("grounding").and_then(Value::as_str));
+        let (high_score, medium_score) = confidence_score_thresholds(top_grounding);
         let evidence_count = primary_evidence.len() + supporting_docs.len();
-        if top_score > 8.0 && evidence_count >= 3 {
+        if top_score > high_score && evidence_count >= 3 {
             "high"
-        } else if top_score > 3.0 && evidence_count >= 2 {
+        } else if top_score > medium_score && evidence_count >= 2 {
             "medium"
         } else {
             "low"
@@ -620,6 +627,15 @@ async fn pack_query_result_with_exact_context(
         );
     }
     pack
+}
+
+fn confidence_score_thresholds(grounding: Option<&str>) -> (f64, f64) {
+    match grounding {
+        Some(grounding) if grounding.starts_with("hybrid-") => {
+            (HYBRID_HIGH_CONFIDENCE_SCORE, HYBRID_MEDIUM_CONFIDENCE_SCORE)
+        }
+        _ => (BM25_HIGH_CONFIDENCE_SCORE, BM25_MEDIUM_CONFIDENCE_SCORE),
+    }
 }
 
 fn staleness_value(result: &KnowledgeQueryResult, exact_context: &ExactGraphContext) -> Value {
@@ -1219,6 +1235,61 @@ mod tests {
                     neighbor_kind: None,
                     edge_bind_method: None,
                     grounding: "bm25-doc".into(),
+                },
+            ],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+
+        assert_eq!(pack["confidence"], "high");
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_uses_lower_high_threshold_for_hybrid_evidence() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "semantic search",
+            "limit": 3
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "top_symbol".into(),
+                    file_path: "crates/spur-mcp/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-top".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 1.1,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "hybrid-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "supporting_symbol".into(),
+                    file_path: "crates/spur-core/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-support".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 0.8,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "hybrid-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "doc".into(),
+                    title: "Knowledge Context API".into(),
+                    file_path: "docs/context.md".into(),
+                    stable_symbol_id: Some("doc-1".into()),
+                    symbol_kind: Some("section".into()),
+                    score: 0.4,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "hybrid-doc".into(),
                 },
             ],
         };
