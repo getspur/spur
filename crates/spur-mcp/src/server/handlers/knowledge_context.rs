@@ -8,7 +8,7 @@ use spur_analyst::{
     query_context_candidates, query_graph_candidates, KnowledgeCandidate, KnowledgeQueryIntent,
     KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope,
 };
-use spur_graph::resolve_worktree_root_from;
+use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
 
 use crate::handlers::McpHandlerError;
 
@@ -18,7 +18,6 @@ use super::*;
 const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
 const MAX_IMPACT_SYMBOLS: usize = 3;
 const MAX_IMPACT_NEIGHBORS: usize = 3;
-const EMBED_DIM: usize = 384;
 
 #[cfg(feature = "embed")]
 static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
@@ -246,7 +245,7 @@ fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
 }
 
 #[cfg(feature = "embed")]
-async fn embed_query(query: &str) -> Option<[f32; EMBED_DIM]> {
+async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
     let query = query.to_owned();
     tokio::task::spawn_blocking(move || {
         let model = get_embed_model()?;
@@ -260,7 +259,7 @@ async fn embed_query(query: &str) -> Option<[f32; EMBED_DIM]> {
 }
 
 #[cfg(not(feature = "embed"))]
-async fn embed_query(_query: &str) -> Option<[f32; EMBED_DIM]> {
+async fn embed_query(_query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
     None
 }
 
