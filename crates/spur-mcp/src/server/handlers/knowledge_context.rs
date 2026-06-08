@@ -580,7 +580,7 @@ async fn pack_query_result_with_exact_context(
         let evidence_count = primary_evidence.len() + supporting_docs.len();
         if top_score > 8.0 && evidence_count >= 3 {
             "high"
-        } else if top_score > 3.0 || evidence_count >= 2 {
+        } else if top_score > 3.0 && evidence_count >= 2 {
             "medium"
         } else {
             "low"
@@ -1229,7 +1229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn knowledge_context_pack_reports_low_confidence_for_single_weak_evidence() {
+    async fn knowledge_context_pack_reports_low_confidence_for_weak_evidence_set() {
         let request = KnowledgeContextPackRequest::parse(&json!({
             "query": "semantic search"
         }))
@@ -1237,18 +1237,32 @@ mod tests {
         let result = KnowledgeQueryResult {
             db_path: "/repo/.spur/analyst.duckdb".into(),
             graph_content_hash: Some("fixture-hash".into()),
-            candidates: vec![KnowledgeCandidate {
-                kind: "code".into(),
-                title: "weak_symbol".into(),
-                file_path: "crates/spur-mcp/src/lib.rs".into(),
-                stable_symbol_id: Some("sym-weak".into()),
-                symbol_kind: Some("function".into()),
-                score: 2.5,
-                signal: None,
-                neighbor_kind: None,
-                edge_bind_method: None,
-                grounding: "bm25-code".into(),
-            }],
+            candidates: vec![
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "weak_symbol".into(),
+                    file_path: "crates/spur-mcp/src/lib.rs".into(),
+                    stable_symbol_id: Some("sym-weak".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 2.5,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "doc".into(),
+                    title: "Weak Context API".into(),
+                    file_path: "docs/context.md".into(),
+                    stable_symbol_id: Some("doc-weak".into()),
+                    symbol_kind: Some("section".into()),
+                    score: 2.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-doc".into(),
+                },
+            ],
         };
 
         let pack = pack_query_result(&request, result).await;
