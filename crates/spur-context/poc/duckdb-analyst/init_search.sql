@@ -258,7 +258,8 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
         'hybrid-code' AS grounding
       FROM lance_hybrid_search(
         '__SPUR_GRAPH_ARTIFACT_DIR__/code_symbols.lance',
-        'vector', query_vec, 'embed_text', q, 30, 0.5, 5
+        'vector', query_vec, 'embed_text', q,
+        k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
       ) h
       JOIN v_symbol_scorecard sc USING (stable_symbol_id)
       LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
@@ -281,8 +282,9 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
         CAST(NULL AS VARCHAR) AS edge_bind_method,
         'hybrid-doc' AS grounding
       FROM lance_hybrid_search(
-        'lance_ns.main.section_bodies',
-        'vector', query_vec, 'body_text', q, 30, 0.5, 5
+        '__SPUR_GRAPH_ARTIFACT_DIR__/sections.lancedb/section_bodies.lance',
+        'vector', query_vec, 'body_text', q,
+        k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
       ) h
       JOIN sections_search s USING (stable_symbol_id)
       WHERE requested_scope IN ('all', 'docs')
