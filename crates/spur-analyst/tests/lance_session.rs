@@ -12,11 +12,13 @@ fn duckdb_cli_present() -> bool {
         .unwrap_or(false)
 }
 
-fn query_csv(db_path: &Path, sql: &str) -> String {
+fn query_csv(db_path: &Path, lance_dataset_dir: &Path, sql: &str) -> String {
+    let lance_dataset_dir = lance_dataset_dir.display().to_string().replace('\'', "''");
+    let sql = format!("LOAD lance;\nATTACH '{lance_dataset_dir}' AS lance_ns (TYPE LANCE);\n{sql}");
     let output = Command::new("duckdb")
         .args(["-csv", "-noheader"])
         .arg(db_path)
-        .args(["-c", sql])
+        .args(["-c", &sql])
         .output()
         .expect("duckdb query");
     assert!(
@@ -60,7 +62,7 @@ fn analyst_session_attaches_lance_sections_and_joins_nodes() {
     analyst::build(
         tempdir.path(),
         AnalystBuildOptions {
-            artifact_dir: Some(artifact_dir),
+            artifact_dir: Some(artifact_dir.clone()),
             db_path: Some(db_path.clone()),
             quiet: true,
         },
@@ -73,6 +75,7 @@ fn analyst_session_attaches_lance_sections_and_joins_nodes() {
 
     let rows = query_csv(
         &db_path,
+        &artifact_dir.join(spur_graph::store::SECTIONS_DATASET_DIR),
         "SELECT s.stable_symbol_id, n.qualified_name, s._score
          FROM lance_fts('lance_ns.main.section_bodies', 'body_text',
                         'emit_sections body span widen', k => 10) AS s
