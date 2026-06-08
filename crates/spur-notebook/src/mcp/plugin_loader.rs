@@ -125,6 +125,15 @@ const VENV_DIR: &str = ".spur-venv";
 /// subsequent launches skip the setup step.
 const VENV_READY_MARKER: &str = ".spur-venv/READY";
 
+/// Check if `uv` is available on PATH.
+fn which_uv() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join("uv"))
+            .find(|path| path.is_file())
+    })
+}
+
 /// Map a `server_type` selector to the interpreter program to exec.
 ///
 /// For Python plugins, returns the per-app venv python if it exists, otherwise
@@ -201,46 +210,107 @@ async fn ensure_python_venv(config: &PluginConfig) -> Result<(), PluginError> {
     }
 
     let venv_python = venv_dir.join("bin").join("python3");
+    let venv_path = venv_dir.to_str().unwrap_or(VENV_DIR);
+    let uv_available = which_uv().is_some();
 
-    let create_status = tokio::process::Command::new("python3")
-        .args(["-m", "venv", venv_dir.to_str().unwrap_or(VENV_DIR)])
-        .current_dir(&config.working_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .status()
-        .await
-        .map_err(|e| PluginError::VenvSetup(format!("failed to run python3 -m venv: {e}")))?;
-
-    if !create_status.success() {
-        return Err(PluginError::VenvSetup(format!(
-            "python3 -m venv exited with {}",
-            create_status.code().unwrap_or(-1)
-        )));
-    }
-
-    if let Some(rel) = &config.requirements {
-        let req_arg = format!("-r{rel}");
-        let install_status = tokio::process::Command::new(&venv_python)
-            .args(["-m", "pip", "install", "--quiet", &req_arg])
+    if uv_available {
+        let uv = which_uv().unwrap();
+        let create_status = tokio::process::Command::new(&uv)
+            .args(["venv", venv_path])
             .current_dir(&config.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .status()
             .await
-            .map_err(|e| {
-                PluginError::VenvSetup(format!(
-                    "failed to run pip install for {}: {e}",
-                    config.name
-                ))
-            })?;
+            .map_err(|e| PluginError::VenvSetup(format!("failed to run uv venv: {e}")))?;
 
-        if !install_status.success() {
+        if !create_status.success() {
             return Err(PluginError::VenvSetup(format!(
-                "pip install -r{} exited with {} for plugin {}",
-                rel,
-                install_status.code().unwrap_or(-1),
-                config.name,
+                "uv venv exited with {}",
+                create_status.code().unwrap_or(-1)
             )));
+        }
+
+        if let Some(rel) = &config.requirements {
+            let req_path = format!("-r{rel}");
+            let install_status = tokio::process::Command::new(&uv)
+                .args([
+                    "pip",
+                    "install",
+                    "--python",
+                    venv_python.to_str().unwrap_or("python3"),
+                    &req_path,
+                ])
+                .current_dir(&config.working_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .status()
+                .await
+                .map_err(|e| {
+                    PluginError::VenvSetup(format!(
+                        "failed to run uv pip install for {}: {e}",
+                        config.name
+                    ))
+                })?;
+
+            if !install_status.success() {
+                return Err(PluginError::VenvSetup(format!(
+                    "uv pip install -r{} exited with {} for plugin {}",
+                    rel,
+                    install_status.code().unwrap_or(-1),
+                    config.name,
+                )));
+            }
+        }
+    } else {
+        let create_status = tokio::process::Command::new("python3")
+            .args(["-m", "venv", venv_path])
+            .current_dir(&config.working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .status()
+            .await
+            .map_err(|e| PluginError::VenvSetup(format!("failed to run python3 -m venv: {e}")))?;
+
+        if !create_status.success() {
+            return Err(PluginError::VenvSetup(format!(
+                "python3 -m venv exited with {}",
+                create_status.code().unwrap_or(-1)
+            )));
+        }
+
+        let _ = tokio::process::Command::new(&venv_python)
+            .args(["-m", "ensurepip", "--upgrade"])
+            .current_dir(&config.working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .status()
+            .await;
+
+        if let Some(rel) = &config.requirements {
+            let req_arg = format!("-r{rel}");
+            let install_status = tokio::process::Command::new(&venv_python)
+                .args(["-m", "pip", "install", "--quiet", &req_arg])
+                .current_dir(&config.working_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .status()
+                .await
+                .map_err(|e| {
+                    PluginError::VenvSetup(format!(
+                        "failed to run pip install for {}: {e}",
+                        config.name
+                    ))
+                })?;
+
+            if !install_status.success() {
+                return Err(PluginError::VenvSetup(format!(
+                    "pip install -r{} exited with {} for plugin {}",
+                    rel,
+                    install_status.code().unwrap_or(-1),
+                    config.name,
+                )));
+            }
         }
     }
 
@@ -255,6 +325,45 @@ async fn ensure_python_venv(config: &PluginConfig) -> Result<(), PluginError> {
         })?;
 
     Ok(())
+}
+
+/// Build the child process command for a plugin.
+///
+/// For Python plugins with `uv` available, runs the server via
+/// `uv run --with-requirements <req> python <entry>` — this creates an
+/// ephemeral, isolated environment with the required packages, avoiding
+/// the venv + pip bootstrap entirely.
+///
+/// For other server types, or as a fallback when `uv` is unavailable,
+/// runs the entry script with the specified interpreter (venv or system).
+async fn build_python_command(config: &PluginConfig) -> Result<Command, PluginError> {
+    if config.server_type == "python" {
+        if let Some(uv) = which_uv() {
+            let mut command = Command::new(&uv);
+            command.arg("run");
+            if let Some(rel) = &config.requirements {
+                command
+                    .arg("--with-requirements")
+                    .arg(config.working_dir.join(rel));
+            }
+            command.arg("python").arg(&config.entry);
+            command
+                .current_dir(&config.working_dir)
+                .envs(config.command_env())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            return Ok(command);
+        }
+
+        ensure_python_venv(config).await?;
+        let program = program_for(&config.server_type, config)?;
+        return build_command(config, program);
+    }
+
+    let program = program_for(&config.server_type, config)?;
+    build_command(config, program)
 }
 
 fn build_command(config: &PluginConfig, program: PathBuf) -> Result<Command, PluginError> {
@@ -405,11 +514,8 @@ pub struct PluginHandle {
 impl PluginHandle {
     /// Spawn the child process, perform the MCP handshake, and discover tools.
     async fn launch(config: PluginConfig) -> Result<Self, PluginError> {
-        if config.server_type == "python" {
-            ensure_python_venv(&config).await?;
-        }
-        let program = program_for(&config.server_type, &config)?;
-        let mut command = build_command(&config, program)?;
+        let mut command = build_python_command(&config).await?;
+
         let mut child = command.spawn().map_err(PluginError::Spawn)?;
 
         let stdin = child
@@ -456,8 +562,7 @@ impl PluginHandle {
             .collect()
     }
 
-    /// Kill the child process and reap it. The per-app venv is left in place so
-    /// subsequent launches skip the setup step.
+    /// Kill the child process and reap it.
     async fn shutdown(mut self) {
         if let Err(error) = self.child.start_kill() {
             warn!(plugin = %self.config.name, %error, "failed to signal plugin shutdown");
