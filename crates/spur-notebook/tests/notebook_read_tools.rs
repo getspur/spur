@@ -53,6 +53,7 @@ fn deps_with_state(state: Arc<State>) -> ServerDeps {
         state: Some(state),
         app: None,
         daemon: None,
+        plugins: None,
     }
 }
 
@@ -64,6 +65,7 @@ fn deps_with_state_and_daemon(state: Arc<State>, daemon: NotebookDaemonControl) 
         state: Some(state),
         app: None,
         daemon: Some(daemon),
+        plugins: None,
     }
 }
 
