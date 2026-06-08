@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
+#[cfg(feature = "embed")]
+use std::sync::OnceLock;
 
 use futures::future::join_all;
 use serde_json::{json, Value};
 use spur_analyst::{
-    query_context_candidates, query_graph_candidates, KnowledgeCandidate, KnowledgeQueryOptions,
-    KnowledgeQueryResult, KnowledgeSearchScope,
+    query_context_candidates, query_graph_candidates, KnowledgeCandidate, KnowledgeQueryIntent,
+    KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope,
 };
 use spur_graph::resolve_worktree_root_from;
 
@@ -16,6 +18,10 @@ use super::*;
 const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
 const MAX_IMPACT_SYMBOLS: usize = 3;
 const MAX_IMPACT_NEIGHBORS: usize = 3;
+const EMBED_DIM: usize = 384;
+
+#[cfg(feature = "embed")]
+static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
 
 impl McpCallbackServer {
     pub(crate) async fn handle_knowledge_context_pack(
@@ -47,12 +53,16 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
         return Ok(unavailable_pack(&request, &db_path));
     }
 
+    let query_vec = embed_query(&request.query).await.map(Vec::from);
+    let analyst_intent = request.intent.as_analyst_intent();
     let mut query_result = query_context_candidates(
         &db_path,
         &request.query,
         request.scope.as_analyst_scope(),
         KnowledgeQueryOptions {
             limit: request.limit as usize,
+            intent: analyst_intent,
+            query_vec,
         },
     )
     .map_err(|error| {
@@ -68,6 +78,8 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
             &request.query,
             KnowledgeQueryOptions {
                 limit: request.limit as usize,
+                intent: analyst_intent,
+                query_vec: None,
             },
         ) {
             Ok(graph_result) => merge_graph_candidates(&mut query_result, graph_result),
@@ -205,6 +217,51 @@ impl KnowledgeIntent {
             Self::Plan => "plan",
         }
     }
+
+    fn as_analyst_intent(self) -> KnowledgeQueryIntent {
+        match self {
+            Self::Explain => KnowledgeQueryIntent::Explain,
+            Self::Change => KnowledgeQueryIntent::Change,
+            Self::Review => KnowledgeQueryIntent::Review,
+            Self::Debug => KnowledgeQueryIntent::Debug,
+            Self::Plan => KnowledgeQueryIntent::Plan,
+        }
+    }
+}
+
+#[cfg(feature = "embed")]
+fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
+    EMBED_MODEL
+        .get_or_init(|| {
+            tracing::info!(
+                "Loading embedding model BGESmallENV15 for knowledge_context_pack hybrid search"
+            );
+            fastembed::TextEmbedding::try_new(
+                fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
+                    .with_show_download_progress(false),
+            )
+            .ok()
+        })
+        .as_ref()
+}
+
+#[cfg(feature = "embed")]
+async fn embed_query(query: &str) -> Option<[f32; EMBED_DIM]> {
+    let query = query.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let model = get_embed_model()?;
+        let embeddings = model.embed(vec![query.as_str()], None).ok()?;
+        let embedding = embeddings.into_iter().next()?;
+        embedding.try_into().ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[cfg(not(feature = "embed"))]
+async fn embed_query(_query: &str) -> Option<[f32; EMBED_DIM]> {
+    None
 }
 
 #[derive(Clone, Copy)]

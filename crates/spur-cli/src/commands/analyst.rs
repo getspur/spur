@@ -792,7 +792,7 @@ mod tests {
             "search_graph macro must project neighbor_kind and edge_bind_method"
         );
         assert!(
-            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_graph(q)"),
+            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_graph(q, intent)"),
             "search_graph macro must be defined"
         );
     }
@@ -801,7 +801,7 @@ mod tests {
     fn init_search_sql_context_candidates_macro_present() {
         assert!(
             INIT_SEARCH_SQL.contains(
-                "CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope) AS TABLE",
+                "CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE",
             ),
             "init_search.sql must define the context candidate macro"
         );
@@ -831,21 +831,21 @@ mod tests {
     #[test]
     fn init_search_sql_hybrid_macro_present() {
         assert!(
-            !INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_hybrid(q, vec)")
-                && !INIT_SEARCH_SQL.contains("list_cosine_similarity")
-                && !INIT_SEARCH_SQL.contains("1.0 / (60.0 + "),
-            "hybrid ANN and RRF must live in Rust, not init_search.sql"
+            INIT_SEARCH_SQL.contains(
+                "CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE",
+            ) && INIT_SEARCH_SQL.contains("lance_hybrid_search(")
+                && INIT_SEARCH_SQL.contains("query_vec IS NULL"),
+            "hybrid ANN fusion must live in the DuckDB Lance macro and keep a BM25 fallback branch"
         );
     }
 
     #[test]
     fn init_search_sql_hybrid_macro_has_per_doc_dedup() {
         assert!(
-            INIT_SEARCH_SQL.contains("CREATE OR REPLACE MACRO search_docs(q) AS TABLE")
-                && INIT_SEARCH_SQL.contains(
-                    "QUALIFY row_number() OVER (PARTITION BY s.file_path ORDER BY bm25 DESC) <= 2",
-                ),
-            "init_search.sql should retain only the BM25 docs helper; hybrid per-doc dedup is enforced in Rust"
+            INIT_SEARCH_SQL
+                .contains("PARTITION BY COALESCE(stable_symbol_id, file_path || ':' || title)")
+                && INIT_SEARCH_SQL.contains("WHERE dedupe_rank = 1"),
+            "hybrid context candidates must deduplicate by stable symbol before final ranking"
         );
     }
 
