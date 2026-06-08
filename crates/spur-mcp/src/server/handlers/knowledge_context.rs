@@ -20,8 +20,8 @@ const MAX_IMPACT_SYMBOLS: usize = 3;
 const MAX_IMPACT_NEIGHBORS: usize = 3;
 const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
-const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 1.0;
-const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.3;
+const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
+const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
 
 #[cfg(feature = "embed")]
 static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
@@ -237,10 +237,10 @@ fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
     EMBED_MODEL
         .get_or_init(|| {
             tracing::info!(
-                "Loading embedding model BGESmallENV15 for knowledge_context_pack hybrid search"
+                "Loading embedding model BGEBaseENV15 for knowledge_context_pack hybrid search"
             );
             fastembed::TextEmbedding::try_new(
-                fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
+                fastembed::InitOptions::new(fastembed::EmbeddingModel::BGEBaseENV15)
                     .with_show_download_progress(false),
             )
             .ok()
@@ -964,6 +964,14 @@ fn is_test_file(file_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hybrid_confidence_thresholds_match_bge_base_scores() {
+        assert_eq!(
+            confidence_score_thresholds(Some("hybrid-code")),
+            (0.80, 0.55)
+        );
+    }
 
     fn candidate(stable_symbol_id: Option<&str>, title: &str, score: f64) -> KnowledgeCandidate {
         KnowledgeCandidate {
