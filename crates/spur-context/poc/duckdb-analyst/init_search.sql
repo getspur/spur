@@ -257,7 +257,7 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
         CAST(NULL AS VARCHAR) AS edge_bind_method,
         'hybrid-code' AS grounding
       FROM lance_hybrid_search(
-        '__SPUR_GRAPH_ARTIFACT_DIR__/code_symbols.lance/code_symbols',
+        '__SPUR_GRAPH_ARTIFACT_DIR__/code_symbols.lance',
         'vector', query_vec, 'embed_text', q, 30, 0.5, 5
       ) h
       JOIN v_symbol_scorecard sc USING (stable_symbol_id)
