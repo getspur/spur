@@ -400,6 +400,16 @@ impl PluginRegistry {
         io.ping().await
     }
 
+    /// Every running plugin's tool catalog (captured at launch), flattened in
+    /// stable plugin-name order. Used to merge plugin tools into the notebook
+    /// server's `tools/list` response.
+    pub fn all_tools(&self) -> Vec<Tool> {
+        self.plugins
+            .values()
+            .flat_map(|handle| handle.tools.iter().cloned())
+            .collect()
+    }
+
     /// Whether any running plugin exposes a tool with the given name (matched
     /// against the catalog captured at launch).
     pub fn has_tool(&self, tool_name: &str) -> bool {
