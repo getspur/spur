@@ -1,5 +1,3 @@
-#![cfg(feature = "openrouter")]
-
 use spur_graph::embedding::openrouter::OpenRouterEmbedder;
 
 #[test]
