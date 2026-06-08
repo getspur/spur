@@ -614,7 +614,7 @@ async fn search_rows(
         "graph" => format!(
             "SELECT kind, title, file, round(score, 3) AS score, signal, \
              neighbor_kind, edge_bind_method \
-             FROM search_graph('{q}') LIMIT {limit}"
+             FROM search_graph('{q}', 'explain') LIMIT {limit}"
         ),
         "hybrid" => unreachable!("hybrid search is handled by Lance ANN plus Rust RRF"),
         _ => format!(
@@ -1257,7 +1257,7 @@ mod tests {
               ('aa01','aa02','calls','singleton','calls',1,2,'run_bm25_search','high',0.9);
 
             -- FTS macro (simplified version of real search_graph)
-            CREATE OR REPLACE MACRO search_graph(q) AS TABLE
+            CREATE OR REPLACE MACRO search_graph(q, intent) AS TABLE
               SELECT kind, title, file, score, signal, neighbor_kind, edge_bind_method
               FROM (
                 WITH base AS (
