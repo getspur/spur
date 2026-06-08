@@ -36,7 +36,7 @@ use crate::recents::{self, RecentEntry};
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
 use self::loopback_requester::LoopbackDaemonRequester;
-use self::plugin_loader::PluginRegistry;
+use self::plugin_loader::{PluginConfig, PluginRegistry};
 use self::{
     bridge::{AgentBridge, BridgeError},
     transport::{read_frame_value, write_frame_json, LengthPrefixedJsonTransport},
@@ -45,6 +45,8 @@ use self::{
 const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
 const NOTEBOOK_LOAD_READY_POLL: Duration = Duration::from_millis(25);
 const CONNECTIONS_CHANGED_EVENT: &str = "connections://changed";
+
+pub type SharedPluginRegistry = Arc<tokio::sync::RwLock<PluginRegistry>>;
 
 pub mod bridge;
 pub mod loopback_requester;
@@ -69,7 +71,7 @@ pub struct ServerDeps {
     /// are additive: they augment the static foundation tools in `tools/list`
     /// and are routed only after the foundation registry has been checked.
     /// `None` for entry points that do not load plugins.
-    pub plugins: Option<Arc<PluginRegistry>>,
+    pub plugins: Option<SharedPluginRegistry>,
 }
 
 impl ServerDeps {
@@ -78,7 +80,7 @@ impl ServerDeps {
         state: Option<Arc<State>>,
         app: Option<tauri::AppHandle>,
         daemon: Option<NotebookDaemonControl>,
-        plugins: Option<Arc<PluginRegistry>>,
+        plugins: Option<SharedPluginRegistry>,
     ) -> Self {
         Self {
             bridge,
@@ -123,9 +125,19 @@ impl NotebookMcpServer {
     }
 
     fn tool(&self, name: &str) -> Option<Tool> {
-        self.merged_tools()
-            .into_iter()
-            .find(|tool| tool.name == name)
+        if let Some(tool) = self.tools().into_iter().find(|tool| tool.name == name) {
+            return Some(tool);
+        }
+        self.deps
+            .plugins
+            .as_ref()
+            .and_then(|plugins| plugins.try_read().ok())
+            .and_then(|plugins| {
+                plugins
+                    .all_tools()
+                    .into_iter()
+                    .find(|tool| tool.name == name)
+            })
     }
 
     /// Foundation tools plus any plugin tools, with foundation winning on a name
@@ -134,12 +146,13 @@ impl NotebookMcpServer {
     /// responses consistent with the `has_tool`/`plugin_for_tool` routing used
     /// by `call_tool`. A plugin tool whose name shadows a foundation tool (or an
     /// already-merged plugin tool) is dropped with a `warn!`.
-    fn merged_tools(&self) -> Vec<Tool> {
+    async fn merged_tools(&self) -> Vec<Tool> {
         let mut merged = self.tools();
         let Some(plugins) = self.deps.plugins.as_ref() else {
             return merged;
         };
 
+        let plugins = plugins.read().await;
         let mut seen: std::collections::HashSet<String> =
             merged.iter().map(|tool| tool.name.to_string()).collect();
         for tool in plugins.all_tools() {
@@ -181,7 +194,7 @@ impl ServerHandler for NotebookMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.merged_tools()))
+        Ok(ListToolsResult::with_all_items(self.merged_tools().await))
     }
 
     async fn call_tool(
@@ -307,6 +320,7 @@ impl NotebookMcpServer {
         arguments: Value,
     ) -> Result<CallToolResult, McpError> {
         if let Some(plugins) = self.deps.plugins.as_ref() {
+            let plugins = plugins.read().await;
             if let Some(plugin_name) = plugins.plugin_for_tool(name).map(str::to_string) {
                 return match plugins.call_tool(&plugin_name, name, arguments).await {
                     Ok(value) => Ok(serde_json::from_value::<CallToolResult>(value.clone())
@@ -539,6 +553,7 @@ pub struct NotebookDaemonControl {
     jute_state: Arc<State>,
     windows: Arc<dyn DaemonWindowOps>,
     app: Option<tauri::AppHandle>,
+    plugins: Option<SharedPluginRegistry>,
     state: Arc<tokio::sync::Mutex<NotebookDaemonState>>,
     reactive_engine: Arc<tokio::sync::Mutex<Option<crate::dag::ReactiveEngineClient>>>,
     last_record_path: Option<PathBuf>,
@@ -1432,22 +1447,24 @@ impl NotebookDaemonControl {
         windows: Arc<dyn DaemonWindowOps>,
         last_record_path: Option<PathBuf>,
     ) -> Self {
-        Self::new_with_parts_and_app(
+        Self::new_with_parts_and_app_and_plugins(
             bridge,
             requester,
             jute_state,
             windows,
             None,
+            None,
             last_record_path,
         )
     }
 
-    fn new_with_parts_and_app(
+    fn new_with_parts_and_app_and_plugins(
         bridge: Arc<AgentBridge>,
         requester: Arc<dyn BridgeRequester>,
         jute_state: Arc<State>,
         windows: Arc<dyn DaemonWindowOps>,
         app: Option<tauri::AppHandle>,
+        plugins: Option<SharedPluginRegistry>,
         last_record_path: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -1456,6 +1473,7 @@ impl NotebookDaemonControl {
             jute_state,
             windows,
             app,
+            plugins,
             state: Arc::new(tokio::sync::Mutex::new(NotebookDaemonState::default())),
             reactive_engine: Arc::new(tokio::sync::Mutex::new(None)),
             last_record_path,
@@ -1472,6 +1490,26 @@ impl NotebookDaemonControl {
         last_record_path: Option<PathBuf>,
     ) -> Self {
         Self::new_with_parts(bridge, requester, jute_state, windows, last_record_path)
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_plugins(
+        bridge: Arc<AgentBridge>,
+        requester: Arc<dyn BridgeRequester>,
+        jute_state: Arc<State>,
+        windows: Arc<dyn DaemonWindowOps>,
+        last_record_path: Option<PathBuf>,
+        plugins: Option<SharedPluginRegistry>,
+    ) -> Self {
+        Self::new_with_parts_and_app_and_plugins(
+            bridge,
+            requester,
+            jute_state,
+            windows,
+            None,
+            plugins,
+            last_record_path,
+        )
     }
 
     #[cfg(test)]
@@ -1603,6 +1641,7 @@ impl NotebookDaemonControl {
             DaemonControlCommand::Close {} => {
                 async {
                     self.save_current().await?;
+                    self.shutdown_app_plugins().await;
                     self.close_current_window().await;
                     self.bridge.set_notebook_open(false);
                     {
@@ -2894,6 +2933,7 @@ impl NotebookDaemonControl {
     }
 
     async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
+        let app_plugin = self.app_plugin_config_for_notebook(&path).await?;
         let (previous_path, previous_window_label) = {
             let state = self.state.lock().await;
             let previous_path = state.current_path.clone();
@@ -2909,6 +2949,8 @@ impl NotebookDaemonControl {
 
             (previous_path, previous_window_label)
         };
+
+        self.shutdown_app_plugins().await;
 
         // Try to open the new window first; only mutate state on success so a
         // failure leaves the previously open notebook recoverable (H2).
@@ -2949,7 +2991,81 @@ impl NotebookDaemonControl {
         if let Err(error) = self.persist_last_notebook(&path).await {
             warn!(%error, path = %path.display(), "failed to persist last notebook record");
         }
+        if let Some(config) = app_plugin {
+            self.spawn_app_plugin(config).await?;
+        }
         Ok(path)
+    }
+
+    async fn app_plugin_config_for_notebook(
+        &self,
+        path: &Path,
+    ) -> Result<Option<PluginConfig>, BridgeError> {
+        let Some(app_root) = path.parent() else {
+            return Ok(None);
+        };
+        let manifest_path = app_root.join(crate::spur_app::SPUR_APP_MANIFEST);
+        let content = match tokio::fs::read_to_string(&manifest_path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(BridgeError::Handler {
+                    code: "app_manifest_read_failed".to_string(),
+                    message: format!("failed to read {}: {error}", manifest_path.display()),
+                });
+            }
+        };
+        let manifest: crate::spur_app::SpurAppManifest =
+            serde_json::from_str(&content).map_err(|error| BridgeError::Handler {
+                code: "app_manifest_parse_failed".to_string(),
+                message: format!("failed to parse {}: {error}", manifest_path.display()),
+            })?;
+
+        if manifest.open_mode != "app" {
+            return Ok(None);
+        }
+        if path.file_name().and_then(|name| name.to_str()) != Some(manifest.entry_notebook.as_str())
+        {
+            return Ok(None);
+        }
+
+        Ok(manifest
+            .mcp_server
+            .as_ref()
+            .map(|server| PluginConfig::from_manifest(manifest.name.clone(), server, app_root)))
+    }
+
+    async fn shutdown_app_plugins(&self) {
+        if let Some(plugins) = self.plugins.as_ref() {
+            plugins.write().await.shutdown_all().await;
+        }
+    }
+
+    async fn spawn_app_plugin(&self, config: PluginConfig) -> Result<(), BridgeError> {
+        let Some(plugins) = self.plugins.as_ref() else {
+            warn!(
+                plugin = %config.name,
+                "app declares an MCP plugin but the daemon has no plugin registry"
+            );
+            return Ok(());
+        };
+        let plugin_name = config.name.clone();
+        let tool_names =
+            plugins
+                .write()
+                .await
+                .spawn(config)
+                .await
+                .map_err(|error| BridgeError::Handler {
+                    code: "app_plugin_spawn_failed".to_string(),
+                    message: format!("failed to spawn app plugin {plugin_name}: {error}"),
+                })?;
+        tracing::debug!(
+            plugin = %plugin_name,
+            tools = ?tool_names,
+            "spawned app MCP plugin"
+        );
+        Ok(())
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -3262,12 +3378,14 @@ pub async fn start_daemon_server(
     let requester: Arc<dyn BridgeRequester> =
         Arc::new(LoopbackDaemonRequester::new(socket_path.clone()));
     let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
-    let control = NotebookDaemonControl::new_with_parts_and_app(
+    let plugins: SharedPluginRegistry = Arc::new(tokio::sync::RwLock::new(PluginRegistry::new()));
+    let control = NotebookDaemonControl::new_with_parts_and_app_and_plugins(
         lifecycle_bridge,
         Arc::clone(&requester),
         Arc::clone(&state),
         windows,
         Some(app_for_control),
+        Some(Arc::clone(&plugins)),
         None,
     );
     let deps = Arc::new(ServerDeps::new(
@@ -3275,7 +3393,7 @@ pub async fn start_daemon_server(
         Some(state),
         Some(app_for_deps),
         Some(control.clone()),
-        None,
+        Some(plugins),
     ));
     let reactive_engine = match crate::dag::engine::spawn_reactive_engine(
         Arc::clone(&deps),
@@ -3477,7 +3595,9 @@ mod tests {
     use crate::connection_secrets::CredentialSink as _;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
+    use tokio::fs;
     use tokio::net::UnixStream;
+    use tokio::process::Command;
     use tokio::time::{timeout, Duration};
 
     use jute::state::State;
@@ -5563,6 +5683,74 @@ paths:
         })
     }
 
+    async fn write_test_app(root: &Path, name: &str, tool_name: &str) -> std::io::Result<PathBuf> {
+        fs::create_dir_all(root).await?;
+        let notebook_path = root.join("app.ipynb");
+        fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+        )
+        .await?;
+        fs::write(
+            root.join("spur-app.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": crate::spur_app::SPUR_APP_SCHEMA,
+                "name": name,
+                "entry_notebook": "app.ipynb",
+                "open_mode": "app",
+                "runtime": {
+                    "jute_min": "0.1.0",
+                    "features": ["mcp-tools"]
+                },
+                "mcp_server": {
+                    "type": "python",
+                    "entry": "server.py",
+                    "env": {
+                        "TEST_TOOL_NAME": tool_name
+                    }
+                }
+            }))
+            .expect("app manifest serializes"),
+        )
+        .await?;
+        fs::write(root.join("server.py"), PYTHON_TEST_APP_SERVER).await?;
+        Ok(notebook_path)
+    }
+
+    const PYTHON_TEST_APP_SERVER: &str = r#"
+from mcp.server.fastmcp import FastMCP
+import os
+
+tool_name = os.environ["TEST_TOOL_NAME"]
+mcp = FastMCP(tool_name)
+
+def dynamic_tool() -> str:
+    """Return the configured test tool name."""
+    return tool_name
+
+dynamic_tool.__name__ = tool_name
+mcp.tool()(dynamic_tool)
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+"#;
+
+    async fn command_succeeds(command: &str, args: &[&str]) -> bool {
+        let Ok(Ok(status)) = timeout(
+            Duration::from_secs(5),
+            Command::new(command)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status(),
+        )
+        .await
+        else {
+            return false;
+        };
+        status.success()
+    }
+
     #[tokio::test]
     async fn open_flushes_buffered_edits_to_current_path_before_switching() {
         let temp_dir = tempfile::Builder::new()
@@ -5643,6 +5831,88 @@ paths:
             saved["cells"][0]["metadata"]["spur"]["last_edited_by"],
             "brain"
         );
+    }
+
+    #[tokio::test]
+    async fn opening_app_notebook_spawns_plugin_and_switching_shuts_down_previous_plugin() {
+        if !command_succeeds("python3", &["--version"]).await {
+            eprintln!("skipping app plugin lifecycle test: python3 is unavailable");
+            return;
+        }
+
+        if !command_succeeds("python3", &["-c", "import mcp"]).await {
+            eprintln!("skipping app plugin lifecycle test: Python mcp package is unavailable");
+            return;
+        }
+
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-app-plugin-lifecycle-")
+            .tempdir()
+            .expect("temp dir");
+        let socket_path = temp_dir.path().join("notebook.sock");
+        let first_app = temp_dir.path().join("first");
+        let second_app = temp_dir.path().join("second");
+        let first_notebook = write_test_app(&first_app, "First App", "first_tool")
+            .await
+            .expect("first app fixture");
+        let second_notebook = write_test_app(&second_app, "Second App", "second_tool")
+            .await
+            .expect("second app fixture");
+
+        let jute_state = Arc::new(State::new());
+        let requester: Arc<dyn BridgeRequester> =
+            Arc::new(LoopbackDaemonRequester::new(socket_path.clone()));
+        let plugins = Arc::new(tokio::sync::RwLock::new(PluginRegistry::new()));
+        let control = NotebookDaemonControl::new_for_test_with_plugins(
+            Arc::new(AgentBridge::new()),
+            Arc::clone(&requester),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+            Some(Arc::clone(&plugins)),
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: requester,
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+            plugins: Some(Arc::clone(&plugins)),
+        });
+        let _server = start_multiplexed_server(&socket_path, deps, control.clone())
+            .await
+            .expect("daemon server starts");
+
+        let first_response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: first_notebook.display().to_string(),
+            }))
+            .await;
+        assert!(first_response.ok, "{:?}", first_response.error);
+        {
+            let registry = plugins.read().await;
+            assert!(registry.has_tool("first_tool"));
+            assert!(!registry.has_tool("second_tool"));
+        }
+
+        let second_response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: second_notebook.display().to_string(),
+            }))
+            .await;
+        assert!(second_response.ok, "{:?}", second_response.error);
+        {
+            let registry = plugins.read().await;
+            assert!(!registry.has_tool("first_tool"));
+            assert!(registry.has_tool("second_tool"));
+        }
+
+        let close_response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::Close {},
+            ))
+            .await;
+        assert!(close_response.ok, "{:?}", close_response.error);
+        assert!(plugins.read().await.is_empty());
     }
 
     #[tokio::test]
