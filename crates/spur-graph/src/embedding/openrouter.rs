@@ -12,6 +12,7 @@ pub struct OpenRouterEmbedder {
 impl OpenRouterEmbedder {
     pub const BATCH_SIZE: usize = 256;
     pub const MODEL: &'static str = "baai/bge-base-en-v1.5";
+    pub const MAX_INPUT_CHARS: usize = 2000;
 
     const DEFAULT_ENDPOINT: &'static str = "https://openrouter.ai/api/v1/embeddings";
 
@@ -37,8 +38,22 @@ impl OpenRouterEmbedder {
             return Ok(Vec::new());
         }
 
+        let truncated: Vec<String> = texts
+            .iter()
+            .map(|t: &&str| {
+                if t.len() > Self::MAX_INPUT_CHARS {
+                    let mut s = t[..Self::MAX_INPUT_CHARS].to_owned();
+                    s.push('…');
+                    s
+                } else {
+                    (*t).to_owned()
+                }
+            })
+            .collect();
+        let truncated_refs: Vec<&str> = truncated.iter().map(|s: &String| s.as_str()).collect();
+
         let mut embeddings = Vec::with_capacity(texts.len());
-        for chunk in texts.chunks(Self::BATCH_SIZE) {
+        for chunk in truncated_refs.chunks(Self::BATCH_SIZE) {
             let request = EmbeddingRequest {
                 model: Self::MODEL,
                 input: chunk,
@@ -70,6 +85,17 @@ impl OpenRouterEmbedder {
                 .text()
                 .await
                 .context("failed to read OpenRouter embeddings response body")?;
+            if let Some(api_error) = openrouter_error_from_body(&body) {
+                bail!(
+                    "OpenRouter API error (model={}, batch_size={}, status={}): {}. \
+                     Response body (first 500 chars): {}",
+                    Self::MODEL,
+                    chunk.len(),
+                    status_code.as_u16(),
+                    api_error,
+                    response_body_preview(&body, 500)
+                );
+            }
             let response = match serde_json::from_str::<EmbeddingResponse>(&body) {
                 Ok(response) => response,
                 Err(error) => {
@@ -123,6 +149,22 @@ fn response_body_preview(body: &str, max_chars: usize) -> String {
     } else {
         preview
     }
+}
+
+fn openrouter_error_from_body(body: &str) -> Option<String> {
+    serde_json::from_str::<OpenRouterApiError>(body)
+        .ok()
+        .map(|e| e.error.message)
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterApiError {
+    error: OpenRouterErrorDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterErrorDetail {
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,5 +278,45 @@ mod tests {
         assert!(message.contains("status=200"));
         assert!(message.contains("content_type=text/html"));
         assert!(message.contains("Response body (first 500 chars): not-json"));
+    }
+
+    #[tokio::test]
+    async fn embed_batch_detects_openrouter_api_error_in_200_body() {
+        let error_body = r#"{"error":{"message":"HTTP 400: input too long","code":400}}"#;
+        let endpoint = malformed_openrouter_server(error_body).await;
+        let embedder = OpenRouterEmbedder {
+            client: Client::new(),
+            api_key: "test-key".to_owned(),
+            endpoint,
+        };
+
+        let error = embedder
+            .embed_batch(&["hello"])
+            .await
+            .expect_err("API error in 200 body should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("OpenRouter API error"));
+        assert!(message.contains("HTTP 400: input too long"));
+    }
+
+    #[test]
+    fn long_input_text_is_truncated() {
+        let long_text = "x".repeat(3000);
+        let texts: Vec<&str> = vec![&long_text];
+        let truncated: Vec<String> = texts
+            .iter()
+            .map(|t| {
+                if t.len() > OpenRouterEmbedder::MAX_INPUT_CHARS {
+                    let mut s = t[..OpenRouterEmbedder::MAX_INPUT_CHARS].to_owned();
+                    s.push('…');
+                    s
+                } else {
+                    t.to_owned()
+                }
+            })
+            .collect();
+        assert_eq!(truncated[0].len(), OpenRouterEmbedder::MAX_INPUT_CHARS + 3);
+        assert!(truncated[0].ends_with('…'));
     }
 }
