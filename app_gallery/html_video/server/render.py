@@ -1,0 +1,355 @@
+from __future__ import annotations
+
+import base64
+import json
+import math
+import os
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+METHOD = "html_video_render"
+DEFAULT_FPS = 30
+DEFAULT_RESOLUTION = "1280x720"
+DEFAULT_FRAME_DURATION = 3.0
+
+
+class RenderError(Exception):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.details = details or {}
+
+    def __str__(self) -> str:
+        if not self.details:
+            return self.message
+        return f"{self.message}: {json.dumps(self.details, sort_keys=True)}"
+
+
+class InvalidParams(RenderError):
+    pass
+
+
+@dataclass(frozen=True)
+class RenderDimensions:
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class RenderOptions:
+    fps: int
+    resolution: RenderDimensions
+    total_duration: float
+
+
+def render_html_video(
+    *,
+    webm_frames: list[str] | None = None,
+    port_names: list[str] | None = None,
+    output_path: str,
+    resolution: str | None = None,
+    fps: int | None = None,
+    frame_duration: float | None = None,
+) -> dict[str, Any]:
+    webm_frames = webm_frames or []
+    port_names = port_names or []
+    if not webm_frames and not port_names:
+        raise InvalidParams(
+            f"{METHOD} requires at least one webm_frame or port_name",
+            {"code": "missing_frames"},
+        )
+
+    resolved_fps = max(int(fps or DEFAULT_FPS), 1)
+    dimensions = parse_resolution(resolution or DEFAULT_RESOLUTION)
+    resolved_frame_duration = (
+        float(frame_duration)
+        if frame_duration is not None
+        and math.isfinite(float(frame_duration))
+        and float(frame_duration) > 0.0
+        else DEFAULT_FRAME_DURATION
+    )
+
+    frame_bytes = (
+        read_webm_port_frames(port_names)
+        if port_names
+        else decode_webm_frames(webm_frames)
+    )
+    total_duration = resolved_frame_duration * len(frame_bytes)
+
+    normalized_output_path = normalize_output_path(output_path)
+    if normalized_output_path.parent:
+        normalized_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ensure_ffmpeg_available()
+
+    options = RenderOptions(
+        fps=resolved_fps,
+        resolution=dimensions,
+        total_duration=total_duration,
+    )
+    with tempfile.TemporaryDirectory(prefix="spur-html-video-render-") as scratch:
+        scratch_dir = Path(scratch)
+        frame_webm_paths = write_webm_frames(frame_bytes, scratch_dir)
+        if len(frame_webm_paths) == 1:
+            encode_single_frame(
+                frame_webm_paths[0],
+                normalized_output_path,
+                options,
+                resolved_frame_duration,
+            )
+        else:
+            encode_frame_sequence(
+                frame_webm_paths,
+                normalized_output_path,
+                scratch_dir,
+                options,
+                resolved_frame_duration,
+            )
+
+    return {
+        "output_path": str(normalized_output_path),
+        "frame_count": len(frame_bytes),
+        "fps": options.fps,
+        "duration": options.total_duration,
+        "resolution": f"{options.resolution.width}x{options.resolution.height}",
+    }
+
+
+def parse_resolution(raw: str) -> RenderDimensions:
+    parts = raw.split("x", 1)
+    if len(parts) != 2:
+        raise InvalidParams(
+            f"{METHOD} resolution must be WIDTHxHEIGHT",
+            {"resolution": raw},
+        )
+
+    width_raw, height_raw = parts
+    try:
+        width = int(width_raw)
+    except ValueError as error:
+        raise InvalidParams(
+            f"{METHOD} resolution width must be a positive integer",
+            {"resolution": raw},
+        ) from error
+
+    try:
+        height = int(height_raw)
+    except ValueError as error:
+        raise InvalidParams(
+            f"{METHOD} resolution height must be a positive integer",
+            {"resolution": raw},
+        ) from error
+
+    if width <= 0 or height <= 0:
+        raise InvalidParams(
+            f"{METHOD} resolution width and height must be > 0",
+            {"resolution": raw},
+        )
+
+    return RenderDimensions(width=width, height=height)
+
+
+def normalize_output_path(path: str) -> Path:
+    output_path = Path(path)
+    if output_path.suffix.lower() != ".mp4":
+        output_path = output_path.with_suffix(".mp4")
+    return output_path
+
+
+def ensure_ffmpeg_available() -> None:
+    if shutil.which("ffmpeg") is None:
+        raise RenderError(
+            "html_video_render requires ffmpeg in PATH",
+            {"code": "ffmpeg_unavailable"},
+        )
+
+
+def decode_webm_frames(webm_frames: list[str]) -> list[bytes]:
+    decoded: list[bytes] = []
+    for index, encoded in enumerate(webm_frames):
+        try:
+            decoded.append(base64.b64decode(encoded, validate=True))
+        except Exception as error:
+            raise InvalidParams(
+                f"{METHOD} received invalid base64 webm data",
+                {
+                    "code": "invalid_webm_frame_base64",
+                    "frame_index": index,
+                    "error": str(error),
+                },
+            ) from error
+    return decoded
+
+
+def read_webm_port_frames(port_names: list[str]) -> list[bytes]:
+    root_raw = os.environ.get("SPUR_PORTS_ROOT")
+    if not root_raw:
+        raise RenderError(
+            f"{METHOD} port_names require SPUR_PORTS_ROOT",
+            {"code": "ports_root_unavailable"},
+        )
+
+    root = Path(root_raw)
+    manifest_path = root / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception as error:
+        raise RenderError(
+            f"{METHOD} failed to open notebook port store",
+            {"error": str(error)},
+        ) from error
+
+    ports = manifest.get("ports", {}) if isinstance(manifest, dict) else {}
+    if not isinstance(ports, dict):
+        raise RenderError(
+            f"{METHOD} failed to open notebook port store",
+            {"error": "manifest ports must be an object"},
+        )
+
+    frames: list[bytes] = []
+    for port in port_names:
+        entry = ports.get(port)
+        if not isinstance(entry, dict):
+            raise InvalidParams(
+                f"{METHOD} could not read media port",
+                {"port": port, "error": "port not found"},
+            )
+
+        mime = entry.get("mime")
+        if mime != "video/webm":
+            raise InvalidParams(
+                f"{METHOD} media port must be video/webm",
+                {"port": port, "mime": mime},
+            )
+
+        try:
+            frames.append((root / port).read_bytes())
+        except Exception as error:
+            raise InvalidParams(
+                f"{METHOD} could not read media port",
+                {"port": port, "error": str(error)},
+            ) from error
+
+    return frames
+
+
+def write_webm_frames(webm_frames: list[bytes], scratch_dir: Path) -> list[Path]:
+    frame_webm_paths: list[Path] = []
+    for index, data in enumerate(webm_frames):
+        path = scratch_dir / f"spur-html-video-frame-{index}.webm"
+        try:
+            path.write_bytes(data)
+        except Exception as error:
+            raise RenderError(
+                f"{METHOD} failed to write temporary webm frame",
+                {"frame_index": index, "error": str(error)},
+            ) from error
+        frame_webm_paths.append(path)
+    return frame_webm_paths
+
+
+def encode_single_frame(
+    frame_webm_path: Path,
+    output_path: Path,
+    options: RenderOptions,
+    duration_seconds: float,
+) -> None:
+    run_ffmpeg_frame_encode(frame_webm_path, output_path, options, duration_seconds)
+
+
+def encode_frame_sequence(
+    frame_webm_paths: list[Path],
+    output_path: Path,
+    scratch_dir: Path,
+    options: RenderOptions,
+    duration_seconds: float,
+) -> None:
+    segment_paths: list[Path] = []
+    for index, frame_webm_path in enumerate(frame_webm_paths):
+        segment_path = scratch_dir / f"spur-html-video-segment-{index}.mp4"
+        run_ffmpeg_frame_encode(frame_webm_path, segment_path, options, duration_seconds)
+        segment_paths.append(segment_path)
+
+    list_path = scratch_dir / "html-video-concat-list.txt"
+    list_contents = "".join(f"file '{_escape_concat_path(path)}'\n" for path in segment_paths)
+    try:
+        list_path.write_text(list_contents)
+    except Exception as error:
+        raise RenderError(
+            "html_video_render failed to write ffmpeg concat list",
+            {"error": str(error)},
+        ) from error
+
+    status = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        raise RenderError(
+            "html_video_render failed to concat rendered frame segments",
+            {"code": "ffmpeg_concat_failed", "stderr": status.stderr.strip()},
+        )
+
+
+def run_ffmpeg_frame_encode(
+    frame_webm_path: Path,
+    output_path: Path,
+    options: RenderOptions,
+    duration_seconds: float,
+) -> None:
+    status = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(frame_webm_path),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(options.fps),
+            "-t",
+            f"{duration_seconds:.6f}",
+            "-vf",
+            f"scale={options.resolution.width}:{options.resolution.height}",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        raise RenderError(
+            f"{METHOD} failed to encode frame",
+            {"code": "ffmpeg_encode_failed", "stderr": status.stderr.strip()},
+        )
+
+
+def _escape_concat_path(path: Path) -> str:
+    return str(path).replace("'", "'\\''")
