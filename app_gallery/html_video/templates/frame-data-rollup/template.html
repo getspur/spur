@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Rollup</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#0a0f14}
+canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas data-capture="true" aria-label="Animated data rollup chart"></canvas>
+<script>
+const canvas=document.querySelector("canvas");
+const ctx=canvas.getContext("2d");
+const title={eyebrow:"Quarterly rollup",headline:"Momentum by channel",note:"Spring-eased bars settle into place for capture-friendly motion."};
+const data=[
+  {label:"Organic",value:82,color:"#22d3ee"},
+  {label:"Product",value:64,color:"#a7f3d0"},
+  {label:"Partners",value:47,color:"#fde047"},
+  {label:"Paid",value:38,color:"#fb7185"}
+];
+const bars=data.map(()=>({width:0,velocity:0}));
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize",resize);
+resize();
+function rounded(x,y,w,h,r){
+  const rr=Math.min(r,h/2,w/2);
+  ctx.beginPath();
+  ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr);
+  ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); ctx.closePath();
+}
+function text(size,weight,color,align){
+  ctx.font=`${weight} ${size}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle=color; ctx.textAlign=align; ctx.textBaseline="middle";
+}
+function frame(now){
+  const t=now/1000,w=canvas.width,h=canvas.height;
+  const bg=ctx.createLinearGradient(0,0,w,h);
+  bg.addColorStop(0,"#0a0f14"); bg.addColorStop(.58,"#13202b"); bg.addColorStop(1,"#090b10");
+  ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
+  for(const glow of [[.20,.20,"rgba(14,165,233,.26)"],[.82,.78,"rgba(250,204,21,.18)"]]){
+    const g=ctx.createRadialGradient(w*glow[0],h*glow[1],0,w*glow[0],h*glow[1],Math.max(w,h)*.34);
+    g.addColorStop(0,glow[2]); g.addColorStop(1,"transparent"); ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+  }
+  const left=Math.max(36,w*.07),right=Math.max(32,w*.06),top=h*.16;
+  const labelW=Math.min(240,Math.max(128,w*.20));
+  const valueW=Math.min(90,Math.max(64,w*.08));
+  const gap=Math.max(14,w*.018);
+  const chartW=w-left-right-labelW-valueW-gap*2;
+  const rowH=Math.max(42,Math.min(58,h*.07));
+  const rowGap=Math.max(16,h*.026);
+  text(Math.max(14,Math.min(24,w*.017)),800,"#facc15","left");
+  ctx.fillText(title.eyebrow.toUpperCase(),left,top);
+  text(Math.max(42,Math.min(96,w*.07)),900,"#f8fafc","left");
+  ctx.fillText(title.headline,left,top+h*.085);
+  const max=Math.max(...data.map(item=>item.value),1);
+  const chartTop=top+h*.19;
+  data.forEach((item,i)=>{
+    const target=item.value/max;
+    const force=(target-bars[i].width)*0.085;
+    bars[i].velocity=(bars[i].velocity+force)*0.74;
+    bars[i].width+=bars[i].velocity;
+    const y=chartTop+i*(rowH+rowGap);
+    const visible=Math.min(1,Math.max(0,(t-.18-i*.08)/.5));
+    ctx.globalAlpha=visible;
+    text(Math.max(18,Math.min(30,w*.021)),800,"#dbeafe","left");
+    ctx.fillText(item.label,left,y+rowH/2);
+    const x=left+labelW+gap;
+    rounded(x,y,chartW,rowH,8); ctx.fillStyle="rgba(255,255,255,.07)"; ctx.fill();
+    ctx.strokeStyle="rgba(255,255,255,.13)"; ctx.lineWidth=1; ctx.stroke();
+    const barW=Math.max(0,Math.min(chartW,chartW*bars[i].width));
+    const grad=ctx.createLinearGradient(x,y,x+chartW,y);
+    grad.addColorStop(0,item.color); grad.addColorStop(.56,"#a7f3d0"); grad.addColorStop(1,"#fde047");
+    rounded(x,y,barW,rowH,8); ctx.fillStyle=grad; ctx.fill();
+    const shineX=x+((t*170+i*43)%(chartW+180))-180;
+    const shine=ctx.createLinearGradient(shineX,y,shineX+150,y);
+    shine.addColorStop(0,"transparent"); shine.addColorStop(.5,"rgba(255,255,255,.38)"); shine.addColorStop(1,"transparent");
+    rounded(x,y,barW,rowH,8); ctx.fillStyle=shine; ctx.fill();
+    text(Math.max(18,Math.min(30,w*.021)),900,"#fef3c7","right");
+    ctx.fillText(String(item.value),w-right,y+rowH/2);
+    ctx.globalAlpha=1;
+  });
+  text(Math.max(16,Math.min(24,w*.018)),700,"#b6c3d1","left");
+  ctx.fillText(title.note,left,Math.min(h-44,chartTop+data.length*(rowH+rowGap)+h*.035));
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
