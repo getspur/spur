@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use arrow_array::{
     Array as _, FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch, StringArray,
     UInt32Array, UInt64Array, UInt8Array,
@@ -33,6 +34,7 @@ const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE"
 pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
+const SYMBOL_EMBED_TEXT_VERSION: &str = "source-first-line-v1";
 // Integration tests spawn the debug-built CLI; keep this hook out of release builds.
 #[cfg(debug_assertions)]
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
@@ -1044,6 +1046,7 @@ impl<'a> SectionRowBatcher<'a> {
 struct SymbolRowBatcher<'a> {
     worktree_root: &'a Path,
     symbols_by_path: BTreeMap<&'a str, Vec<&'a GraphSymbolArtifact>>,
+    manifest_by_path: BTreeMap<&'a str, &'a GraphFileManifestEntry>,
     ordered_paths: Vec<&'a str>,
     next_path_index: usize,
     pending_rows: VecDeque<SymbolRow>,
@@ -1066,6 +1069,11 @@ impl<'a> SymbolRowBatcher<'a> {
                     .push(symbol);
             }
         }
+        let manifest_by_path: BTreeMap<&str, &GraphFileManifestEntry> = artifact
+            .file_manifests
+            .iter()
+            .map(|manifest| (manifest.path.as_str(), manifest))
+            .collect();
         for symbols in symbols_by_path.values_mut() {
             symbols.sort_by(|a, b| {
                 a.byte_range[0]
@@ -1078,6 +1086,7 @@ impl<'a> SymbolRowBatcher<'a> {
         Self {
             worktree_root,
             symbols_by_path,
+            manifest_by_path,
             ordered_paths,
             next_path_index: 0,
             pending_rows: VecDeque::new(),
@@ -1108,7 +1117,7 @@ impl<'a> SymbolRowBatcher<'a> {
     }
 
     fn rows_for_path(&self, path: &str) -> Result<Vec<SymbolRow>> {
-        let bytes = match read_file_bytes(self.worktree_root, path) {
+        let bytes = match self.read_source_bytes(path) {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!(path = %path, error = %e, "symbol_rows: skipping unreadable file");
@@ -1134,6 +1143,23 @@ impl<'a> SymbolRowBatcher<'a> {
             }
         }
         Ok(rows)
+    }
+
+    fn read_source_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        if let Some(manifest) = self.manifest_by_path.get(path) {
+            match read_git_blob_bytes(self.worktree_root, &manifest.content_oid) {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => {
+                    tracing::debug!(
+                        path = %path,
+                        content_oid = %manifest.content_oid,
+                        error = %error,
+                        "symbol_rows: falling back to worktree source after git blob read failed"
+                    );
+                }
+            }
+        }
+        read_file_bytes(self.worktree_root, path)
     }
 }
 
@@ -1204,6 +1230,20 @@ fn symbol_row(
             symbol.entity_name, qualified_name, symbol.symbol_kind
         )
     };
+    let has_significant_body = symbol_body_line_count(symbol) > 5;
+    let embed_text = if has_significant_body {
+        match first_source_line_for_symbol(source, symbol)? {
+            Some(first_line) => format!("{first_line} {embed_text}"),
+            None => embed_text,
+        }
+    } else {
+        embed_text
+    };
+    let content_hash = if has_significant_body {
+        symbol_embed_content_hash(content_hash)
+    } else {
+        content_hash.to_owned()
+    };
 
     Ok(Some(SymbolRow {
         stable_symbol_id: symbol.stable_symbol_id.clone(),
@@ -1213,8 +1253,32 @@ fn symbol_row(
         symbol_kind: symbol.symbol_kind.clone(),
         embed_text,
         vector: None,
-        content_hash: content_hash.to_owned(),
+        content_hash,
     }))
+}
+
+fn symbol_body_line_count(symbol: &GraphSymbolArtifact) -> usize {
+    let [start, end] = symbol.line_range;
+    end.saturating_sub(start).saturating_add(1)
+}
+
+fn first_source_line_for_symbol<'a>(
+    source: &'a str,
+    symbol: &GraphSymbolArtifact,
+) -> Result<Option<&'a str>> {
+    let start = symbol.byte_range[0];
+    let end = symbol.byte_range[1];
+    let body = source.get(start..end).with_context(|| {
+        format!(
+            "symbol byte range {}..{} is not a UTF-8 boundary in `{}`",
+            start, end, symbol.file_path
+        )
+    })?;
+    Ok(body.lines().map(str::trim).find(|line| !line.is_empty()))
+}
+
+fn symbol_embed_content_hash(source_content_hash: &str) -> String {
+    blake3_hex(format!("{SYMBOL_EMBED_TEXT_VERSION}\0{source_content_hash}").as_bytes())
 }
 
 fn doc_text_for_symbol(source: &str, byte_start: usize) -> Result<String> {
@@ -1851,6 +1915,24 @@ fn read_file_bytes(worktree_root: &Path, path: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("failed to read `{}`", worktree_root.join(path).display()))
 }
 
+fn read_git_blob_bytes(worktree_root: &Path, oid: &str) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .args(["cat-file", "blob", oid])
+        .current_dir(worktree_root)
+        .output()
+        .with_context(|| format!("failed to spawn git cat-file blob `{oid}`"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "git cat-file blob `{oid}` failed in `{}`: {}",
+        worktree_root.display(),
+        stderr.trim()
+    )
+}
+
 fn heading_level(body_text: &str) -> u8 {
     body_text
         .as_bytes()
@@ -2183,6 +2265,103 @@ mod tests {
         }
 
         assert_eq!(lengths, vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn symbol_row_batcher_prepends_first_source_line_for_long_bodies_only() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        let path = "src/lib.rs";
+        let source = concat!(
+            "fn tiny() {\n",
+            "    ready();\n",
+            "}\n",
+            "\n",
+            "fn handle_error(delegation: Delegation) {\n",
+            "    let status = delegation.status();\n",
+            "    if status.is_retryable() {\n",
+            "        delegation.retry();\n",
+            "    }\n",
+            "    delegation.finish();\n",
+            "}\n",
+        );
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join(path), source).expect("write source");
+
+        let tiny_start = source.find("fn tiny").expect("tiny start");
+        let tiny_end = source.find("\n\nfn handle_error").expect("tiny end");
+        let long_start = source.find("fn handle_error").expect("long start");
+        let artifact = GraphIndexArtifact {
+            header: crate::GraphIndexHeader {
+                graph_index_version: "test".to_owned(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
+            file_manifests: vec![GraphFileManifestEntry {
+                stable_file_id: "file-lib".to_owned(),
+                path: path.to_owned(),
+                content_oid: "blob-oid".to_owned(),
+                node_ids: Vec::new(),
+            }],
+            files: vec![crate::GraphFileArtifact {
+                stable_file_id: "file-lib".to_owned(),
+                file_path: path.to_owned(),
+            }],
+            file_node_ids: Vec::new(),
+            symbols: vec![
+                GraphSymbolArtifact {
+                    stable_symbol_id: "tiny".to_owned(),
+                    file_path: path.to_owned(),
+                    byte_range: [tiny_start, tiny_end],
+                    line_range: [1, 3],
+                    entity_name: "tiny".to_owned(),
+                    qualified_name: "crate::tiny".to_owned(),
+                    symbol_kind: "function".to_owned(),
+                    anchor_hash: "tiny-anchor".to_owned(),
+                    enclosing_scope: None,
+                },
+                GraphSymbolArtifact {
+                    stable_symbol_id: "handle-error".to_owned(),
+                    file_path: path.to_owned(),
+                    byte_range: [long_start, source.len()],
+                    line_range: [5, 11],
+                    entity_name: "handle_error".to_owned(),
+                    qualified_name: "crate::handle_error".to_owned(),
+                    symbol_kind: "function".to_owned(),
+                    anchor_hash: "handle-error-anchor".to_owned(),
+                    enclosing_scope: None,
+                },
+            ],
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        };
+
+        let mut batcher = SymbolRowBatcher::new(&artifact, root, 16);
+        let rows = batcher
+            .next_batch()
+            .expect("symbol batch")
+            .expect("symbol rows");
+        let embed_text_by_id: HashMap<_, _> = rows
+            .iter()
+            .map(|row| (row.stable_symbol_id.as_str(), row.embed_text.as_str()))
+            .collect();
+
+        assert_eq!(
+            embed_text_by_id.get("tiny").copied(),
+            Some("tiny crate::tiny function")
+        );
+        assert_eq!(
+            embed_text_by_id.get("handle-error").copied(),
+            Some(
+                "fn handle_error(delegation: Delegation) { handle_error crate::handle_error function"
+            )
+        );
     }
 
     #[tokio::test]
