@@ -170,6 +170,7 @@ mod tests {
             state: Some(Arc::new(State::new())),
             app: None,
             daemon: None,
+            plugins: None,
         }
     }
 

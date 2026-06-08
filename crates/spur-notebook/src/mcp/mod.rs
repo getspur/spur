@@ -36,6 +36,7 @@ use crate::recents::{self, RecentEntry};
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
 use self::loopback_requester::LoopbackDaemonRequester;
+use self::plugin_loader::PluginRegistry;
 use self::{
     bridge::{AgentBridge, BridgeError},
     transport::{read_frame_value, write_frame_json, LengthPrefixedJsonTransport},
@@ -47,6 +48,7 @@ const CONNECTIONS_CHANGED_EVENT: &str = "connections://changed";
 
 pub mod bridge;
 pub mod loopback_requester;
+pub mod plugin_loader;
 pub mod tools;
 pub mod transport;
 
@@ -63,6 +65,11 @@ pub struct ServerDeps {
     /// In-process daemon control plane. Populated only by `start_daemon_server`;
     /// daemon-routed MCP tools surface `daemon_unavailable` when this is `None`.
     pub daemon: Option<NotebookDaemonControl>,
+    /// Registry of running `.spurapp` MCP plugin child processes. Plugin tools
+    /// are additive: they augment the static foundation tools in `tools/list`
+    /// and are routed only after the foundation registry has been checked.
+    /// `None` for entry points that do not load plugins.
+    pub plugins: Option<Arc<PluginRegistry>>,
 }
 
 impl ServerDeps {
@@ -71,12 +78,14 @@ impl ServerDeps {
         state: Option<Arc<State>>,
         app: Option<tauri::AppHandle>,
         daemon: Option<NotebookDaemonControl>,
+        plugins: Option<Arc<PluginRegistry>>,
     ) -> Self {
         Self {
             bridge,
             state,
             app,
             daemon,
+            plugins,
         }
     }
 
@@ -84,7 +93,7 @@ impl ServerDeps {
     /// `start_server` path and by tool-level unit tests that exercise the
     /// bridge contract directly.
     pub fn from_bridge(bridge: Arc<dyn BridgeRequester>) -> Self {
-        Self::new(bridge, None, None, None)
+        Self::new(bridge, None, None, None, None)
     }
 }
 
@@ -114,7 +123,38 @@ impl NotebookMcpServer {
     }
 
     fn tool(&self, name: &str) -> Option<Tool> {
-        self.tools().into_iter().find(|tool| tool.name == name)
+        self.merged_tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
+    }
+
+    /// Foundation tools plus any plugin tools, with foundation winning on a name
+    /// collision. Plugin tools are sourced from each plugin's catalog captured
+    /// during the launch-time `tools/list` handshake, keeping `tools/list`
+    /// responses consistent with the `has_tool`/`plugin_for_tool` routing used
+    /// by `call_tool`. A plugin tool whose name shadows a foundation tool (or an
+    /// already-merged plugin tool) is dropped with a `warn!`.
+    fn merged_tools(&self) -> Vec<Tool> {
+        let mut merged = self.tools();
+        let Some(plugins) = self.deps.plugins.as_ref() else {
+            return merged;
+        };
+
+        let mut seen: std::collections::HashSet<String> =
+            merged.iter().map(|tool| tool.name.to_string()).collect();
+        for tool in plugins.all_tools() {
+            let name = tool.name.to_string();
+            if seen.contains(&name) {
+                warn!(
+                    tool = %name,
+                    "plugin tool name collides with an existing tool; keeping the existing tool"
+                );
+                continue;
+            }
+            seen.insert(name);
+            merged.push(tool);
+        }
+        merged
     }
 }
 
@@ -141,7 +181,7 @@ impl ServerHandler for NotebookMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.tools()))
+        Ok(ListToolsResult::with_all_items(self.merged_tools()))
     }
 
     async fn call_tool(
@@ -192,13 +232,6 @@ impl ServerHandler for NotebookMcpServer {
             }
             "open_design_search" => tools::open_design_search::call(&self.deps, arguments).await,
             "open_design_get" => tools::open_design_get::call(&self.deps, arguments).await,
-            "html_video_search_templates" => {
-                tools::html_video_search_templates::call(&self.deps, arguments).await
-            }
-            "html_video_get_template" => {
-                tools::html_video_get_template::call(&self.deps, arguments).await
-            }
-            "html_video_render" => tools::html_video_render::call(&self.deps, arguments).await,
             "code_semantic_search" => {
                 tools::code_semantic_search::call(&self.deps, arguments).await
             }
@@ -258,11 +291,38 @@ impl ServerHandler for NotebookMcpServer {
             "notebook.oauth_connect" => {
                 tools::api_connection::call_oauth_connect(&self.deps, arguments).await
             }
-            name => Err(McpError::invalid_params(
-                format!("unknown notebook tool: {name}"),
-                Some(json!({ "tool": name })),
-            )),
+            name => self.dispatch_plugin_tool(name, arguments).await,
         }
+    }
+}
+
+impl NotebookMcpServer {
+    /// Route a tool call that did not match the static foundation registry to a
+    /// plugin child process. This layer is checked only after foundation
+    /// dispatch, so foundation tools always win on a name collision. Returns the
+    /// `unknown notebook tool` error when no plugin owns the tool.
+    async fn dispatch_plugin_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(plugins) = self.deps.plugins.as_ref() {
+            if let Some(plugin_name) = plugins.plugin_for_tool(name).map(str::to_string) {
+                return match plugins.call_tool(&plugin_name, name, arguments).await {
+                    Ok(value) => Ok(serde_json::from_value::<CallToolResult>(value.clone())
+                        .unwrap_or_else(|_| CallToolResult::structured(value))),
+                    Err(error) => Err(McpError::internal_error(
+                        format!("plugin '{plugin_name}' failed to handle tool '{name}': {error}"),
+                        Some(json!({ "tool": name, "plugin": plugin_name })),
+                    )),
+                };
+            }
+        }
+
+        Err(McpError::invalid_params(
+            format!("unknown notebook tool: {name}"),
+            Some(json!({ "tool": name })),
+        ))
     }
 }
 
@@ -3215,6 +3275,7 @@ pub async fn start_daemon_server(
         Some(state),
         Some(app_for_deps),
         Some(control.clone()),
+        None,
     ));
     let reactive_engine = match crate::dag::engine::spawn_reactive_engine(
         Arc::clone(&deps),
@@ -4556,6 +4617,7 @@ paths:
             state: Some(Arc::clone(&jute_state)),
             app: None,
             daemon: Some(control.clone()),
+            plugins: None,
         });
         let tempdir = tempfile::tempdir().expect("socket dir");
         let socket_path = tempdir.path().join("notebook.sock");
@@ -4620,6 +4682,7 @@ paths:
             state: Some(Arc::clone(&jute_state)),
             app: None,
             daemon: Some(control.clone()),
+            plugins: None,
         });
         let server = NotebookMcpServer::new(Arc::clone(&deps));
         assert!(server
@@ -4689,6 +4752,7 @@ paths:
             state: Some(Arc::clone(&jute_state)),
             app: None,
             daemon: Some(control.clone()),
+            plugins: None,
         });
         let server = NotebookMcpServer::new(Arc::clone(&deps));
         assert!(server
@@ -4744,6 +4808,7 @@ paths:
             state: Some(Arc::clone(&jute_state)),
             app: None,
             daemon: None,
+            plugins: None,
         };
 
         let result = tools::list_datasources::call(&deps, json!({}))
@@ -5064,6 +5129,7 @@ paths:
             state: Some(Arc::clone(&jute_state)),
             app: None,
             daemon: Some(control.clone()),
+            plugins: None,
         });
         let _server = start_multiplexed_server(&socket_path, deps, control.clone()).await?;
         let mut events = jute_state.event_tx.subscribe();
@@ -5178,6 +5244,17 @@ paths:
 
     fn test_server_deps() -> Arc<ServerDeps> {
         Arc::new(ServerDeps::from_bridge(test_bridge_requester()))
+    }
+
+    #[test]
+    fn server_deps_plugins_default_to_none() {
+        let deps = ServerDeps::from_bridge(test_bridge_requester());
+        assert!(deps.plugins.is_none());
+
+        // The explicit constructor also defaults plugins to `None` when the
+        // caller passes no registry.
+        let deps = ServerDeps::new(test_bridge_requester(), None, None, None, None);
+        assert!(deps.plugins.is_none());
     }
 
     fn test_datasource_entry(name: &str) -> jute::commands::DatasourceEntry {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Cursor, Write};
 
@@ -6,7 +7,8 @@ use spur_notebook::spur_app::archive::{
 };
 use spur_notebook::spur_app::{
     export_spur_app, import_spur_app, is_safe_archive_path, SpurAppDependencies,
-    SpurAppExportOptions, SpurAppManifest, SPUR_APP_EXTENSION, SPUR_APP_MANIFEST, SPUR_APP_SCHEMA,
+    SpurAppExportOptions, SpurAppManifest, SpurAppMcpServer, SPUR_APP_EXTENSION, SPUR_APP_MANIFEST,
+    SPUR_APP_SCHEMA,
 };
 
 #[test]
@@ -23,6 +25,49 @@ fn spur_app_archive_manifest_defaults_to_spur_app_v1() {
 
     let decoded: SpurAppManifest = serde_json::from_value(json).expect("deserialize manifest");
     assert_eq!(decoded, manifest);
+}
+
+#[test]
+fn spur_app_manifest_with_mcp_server_round_trips() {
+    let mut manifest = SpurAppManifest::minimal("Forecast Dashboard", "app.ipynb");
+    manifest.mcp_server = Some(SpurAppMcpServer {
+        server_type: "python".to_string(),
+        entry: "mcp/server.py".to_string(),
+        requirements: Some("mcp/requirements.txt".to_string()),
+        env: BTreeMap::from([
+            ("SPUR_APP_ENV".to_string(), "test".to_string()),
+            ("SPUR_APP_LOG".to_string(), "debug".to_string()),
+        ]),
+    });
+
+    let json = serde_json::to_value(&manifest).expect("serialize manifest");
+    assert_eq!(json["mcp_server"]["type"], "python");
+    assert_eq!(json["mcp_server"]["entry"], "mcp/server.py");
+    assert_eq!(json["mcp_server"]["requirements"], "mcp/requirements.txt");
+    assert_eq!(json["mcp_server"]["env"]["SPUR_APP_ENV"], "test");
+    assert_eq!(json["mcp_server"]["env"]["SPUR_APP_LOG"], "debug");
+
+    let decoded: SpurAppManifest = serde_json::from_value(json).expect("deserialize manifest");
+    assert_eq!(decoded, manifest);
+}
+
+#[test]
+fn spur_app_manifest_without_mcp_server_deserializes() {
+    let json = serde_json::json!({
+        "schema": SPUR_APP_SCHEMA,
+        "name": "Forecast Dashboard",
+        "entry_notebook": "app.ipynb",
+        "open_mode": "app",
+        "runtime": {
+            "jute_min": "0.1.0",
+            "features": ["frontend-cells"]
+        }
+    });
+
+    let manifest: SpurAppManifest = serde_json::from_value(json).expect("deserialize manifest");
+
+    assert_eq!(manifest.name, "Forecast Dashboard");
+    assert_eq!(manifest.mcp_server, None);
 }
 
 #[test]

@@ -192,6 +192,7 @@ async fn spur_app_mcp_import_can_open_imported_notebook_through_daemon() {
         state: Some(state),
         app: None,
         daemon: Some(daemon),
+        plugins: None,
     };
 
     let result = import_spur_app::call(&deps, json!({ "path": package_path, "open": true }))
