@@ -16,7 +16,9 @@ pub use build::{
     EXTRACTOR_VERSION, SCHEMA_VERSION,
 };
 pub use canonical_hash::artifact_content_hash_blake3_hex;
-pub use lance_sections::{write_sections_dataset, SECTIONS_DATASET_DIR, SECTIONS_TABLE};
+pub use lance_sections::{
+    write_sections_dataset, EMBEDDING_VECTOR_DIMENSIONS, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+};
 pub use parquet::{
     load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,
     stream_temporal_artifact_parquet, write_artifact_parquet, GraphArtifactManifest,
