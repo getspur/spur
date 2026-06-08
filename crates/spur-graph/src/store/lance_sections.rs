@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -32,6 +33,7 @@ pub const EMBEDDING_VECTOR_DIMENSIONS: usize = 768;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
 const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
+const OPENROUTER_EMBED_CONCURRENCY: usize = 8;
 pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
@@ -1390,6 +1392,24 @@ struct TextEmbeddingService {
     model_requested: bool,
 }
 
+struct OpenRouterEmbeddingChunkResult {
+    rows: Vec<OpenRouterEmbeddingChunkRow>,
+    embeddings: Vec<Vec<f32>>,
+}
+
+struct OpenRouterEmbeddingChunkRow {
+    row_index: usize,
+    stable_symbol_id: String,
+}
+
+struct ConcurrentEmbeddingConfig {
+    row_count: usize,
+    batch_size: usize,
+    concurrency: usize,
+    chunk_count: usize,
+    embedding_kind: &'static str,
+}
+
 #[derive(Clone, Copy)]
 struct EmbeddingTextInput<'a> {
     row_index: usize,
@@ -1555,8 +1575,94 @@ impl TextEmbeddingService {
 
         let chunks: Vec<_> = inputs.chunks(batch_size).collect();
         let chunk_count = chunks.len();
+
+        if openrouter_api_key_available() {
+            tracing::info!(
+                embedding_kind,
+                batch_size,
+                concurrency = OPENROUTER_EMBED_CONCURRENCY,
+                model = OpenRouterEmbedder::MODEL,
+                "Using OpenRouter for concurrent bulk embedding"
+            );
+            match self
+                .embed_inputs_with_openrouter_concurrency(
+                    row_count,
+                    &inputs,
+                    batch_size,
+                    chunk_count,
+                    &mut on_chunk_started,
+                    embedding_kind,
+                )
+                .await
+            {
+                Ok(result) => return result,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        embedding_kind,
+                        "OpenRouter embedding failed; Using local fastembed"
+                    );
+                }
+            }
+        }
+
+        self.embed_inputs_locally_with_progress(
+            result,
+            chunks,
+            chunk_count,
+            inputs.len(),
+            on_chunk_started,
+            embedding_kind,
+        )
+    }
+
+    async fn embed_inputs_with_openrouter_concurrency<F>(
+        &self,
+        row_count: usize,
+        inputs: &[EmbeddingTextInput<'_>],
+        batch_size: usize,
+        chunk_count: usize,
+        on_chunk_started: &mut F,
+        embedding_kind: &'static str,
+    ) -> Result<Vec<Option<Vec<f32>>>>
+    where
+        F: FnMut(SectionEmbeddingChunkProgress),
+    {
+        let embedder = Arc::new(OpenRouterEmbedder::new()?);
+        embed_text_inputs_concurrently_with(
+            inputs,
+            ConcurrentEmbeddingConfig {
+                row_count,
+                batch_size,
+                concurrency: OPENROUTER_EMBED_CONCURRENCY,
+                chunk_count,
+                embedding_kind,
+            },
+            on_chunk_started,
+            move |texts| {
+                let embedder = Arc::clone(&embedder);
+                async move {
+                    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                    embedder.embed_batch(&refs).await
+                }
+            },
+        )
+        .await
+    }
+
+    fn embed_inputs_locally_with_progress<F>(
+        &mut self,
+        mut result: Vec<Option<Vec<f32>>>,
+        chunks: Vec<&[EmbeddingTextInput<'_>]>,
+        chunk_count: usize,
+        embedding_eligible_rows: usize,
+        mut on_chunk_started: F,
+        embedding_kind: &'static str,
+    ) -> Vec<Option<Vec<f32>>>
+    where
+        F: FnMut(SectionEmbeddingChunkProgress),
+    {
         let mut completed_eligible_rows = 0usize;
-        let mut result = result;
         for (chunk_offset, chunk) in chunks.into_iter().enumerate() {
             let texts: Vec<&str> = chunk.iter().map(|input| input.text).collect();
             on_chunk_started(SectionEmbeddingChunkProgress {
@@ -1564,9 +1670,9 @@ impl TextEmbeddingService {
                 chunk_count,
                 chunk_rows: chunk.len(),
                 completed_eligible_rows,
-                embedding_eligible_rows: inputs.len(),
+                embedding_eligible_rows,
             });
-            let embeddings = match self.embed_texts(&texts, embedding_kind).await {
+            let embeddings = match self.embed_texts_locally(&texts, embedding_kind) {
                 Ok(embeddings) => embeddings,
                 Err(error) => {
                     tracing::warn!(
@@ -1578,27 +1684,8 @@ impl TextEmbeddingService {
                 }
             };
 
-            if embeddings.len() != chunk.len() {
-                tracing::warn!(
-                    expected = chunk.len(),
-                    actual = embeddings.len(),
-                    embedding_kind,
-                    "embedder returned unexpected embedding count"
-                );
+            if !apply_embeddings_to_inputs(&mut result, chunk, embeddings, embedding_kind) {
                 return result;
-            }
-
-            for (input, embedding) in chunk.iter().copied().zip(embeddings) {
-                if embedding.len() == EMBEDDING_VECTOR_DIMENSIONS {
-                    result[input.row_index] = Some(embedding);
-                } else {
-                    tracing::warn!(
-                        stable_symbol_id = %input.stable_symbol_id,
-                        dimensions = embedding.len(),
-                        embedding_kind,
-                        "embedder returned unexpected embedding dimensions"
-                    );
-                }
             }
             completed_eligible_rows += chunk.len();
         }
@@ -1611,45 +1698,140 @@ impl TextEmbeddingService {
         shared_embed_model(embedding_kind)
     }
 
-    async fn embed_texts(
+    fn embed_texts_locally(
         &mut self,
         texts: &[&str],
         embedding_kind: &'static str,
     ) -> Result<Vec<Vec<f32>>> {
-        if openrouter_api_key_available() {
-            tracing::info!(
-                embedding_kind,
-                batch_size = texts.len(),
-                model = OpenRouterEmbedder::MODEL,
-                "Using OpenRouter for bulk embedding"
-            );
-            match OpenRouterEmbedder::new() {
-                Ok(embedder) => match embedder.embed_batch(texts).await {
-                    Ok(embeddings) => return Ok(embeddings),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            embedding_kind,
-                            "OpenRouter embedding failed; Using local fastembed"
-                        );
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        embedding_kind,
-                        "OpenRouter embedding unavailable; Using local fastembed"
-                    );
-                }
-            }
-        }
-
         tracing::info!(embedding_kind, "Using local fastembed");
         let Some(model) = self.model(embedding_kind) else {
             return Ok(Vec::new());
         };
         model.embed(texts.to_vec(), None)
     }
+}
+
+async fn embed_text_inputs_concurrently_with<F, Fut>(
+    inputs: &[EmbeddingTextInput<'_>],
+    config: ConcurrentEmbeddingConfig,
+    on_chunk_started: &mut impl FnMut(SectionEmbeddingChunkProgress),
+    embed_batch: F,
+) -> Result<Vec<Option<Vec<f32>>>>
+where
+    F: Fn(Vec<String>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Vec<Vec<f32>>>> + Send + 'static,
+{
+    let concurrency = config.concurrency.max(1);
+    let mut result = vec![None; config.row_count];
+    let mut completed_eligible_rows = 0usize;
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for (chunk_offset, chunk) in inputs.chunks(config.batch_size).enumerate() {
+        on_chunk_started(SectionEmbeddingChunkProgress {
+            chunk_index: chunk_offset + 1,
+            chunk_count: config.chunk_count,
+            chunk_rows: chunk.len(),
+            completed_eligible_rows,
+            embedding_eligible_rows: inputs.len(),
+        });
+
+        let rows = chunk
+            .iter()
+            .map(|input| OpenRouterEmbeddingChunkRow {
+                row_index: input.row_index,
+                stable_symbol_id: input.stable_symbol_id.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let texts = chunk
+            .iter()
+            .map(|input| input.text.to_owned())
+            .collect::<Vec<_>>();
+        let embed_batch = embed_batch.clone();
+        join_set.spawn(async move {
+            let embeddings = embed_batch(texts).await?;
+            Ok(OpenRouterEmbeddingChunkResult { rows, embeddings })
+        });
+
+        if join_set.len() >= concurrency {
+            collect_completed_embedding_chunk(&mut join_set, &mut result, config.embedding_kind)
+                .await?;
+        }
+        completed_eligible_rows += chunk.len();
+    }
+
+    while !join_set.is_empty() {
+        collect_completed_embedding_chunk(&mut join_set, &mut result, config.embedding_kind)
+            .await?;
+    }
+
+    Ok(result)
+}
+
+async fn collect_completed_embedding_chunk(
+    join_set: &mut tokio::task::JoinSet<Result<OpenRouterEmbeddingChunkResult>>,
+    result: &mut [Option<Vec<f32>>],
+    embedding_kind: &'static str,
+) -> Result<()> {
+    let completed = join_set
+        .join_next()
+        .await
+        .context("OpenRouter embedding task set ended unexpectedly")?
+        .context("OpenRouter embedding task panicked")??;
+
+    if completed.embeddings.len() != completed.rows.len() {
+        bail!(
+            "OpenRouter returned {} embeddings for {} inputs",
+            completed.embeddings.len(),
+            completed.rows.len()
+        );
+    }
+
+    for (row, embedding) in completed.rows.into_iter().zip(completed.embeddings) {
+        if embedding.len() == EMBEDDING_VECTOR_DIMENSIONS {
+            result[row.row_index] = Some(embedding);
+        } else {
+            tracing::warn!(
+                stable_symbol_id = %row.stable_symbol_id,
+                dimensions = embedding.len(),
+                embedding_kind,
+                "embedder returned unexpected embedding dimensions"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_embeddings_to_inputs(
+    result: &mut [Option<Vec<f32>>],
+    chunk: &[EmbeddingTextInput<'_>],
+    embeddings: Vec<Vec<f32>>,
+    embedding_kind: &'static str,
+) -> bool {
+    if embeddings.len() != chunk.len() {
+        tracing::warn!(
+            expected = chunk.len(),
+            actual = embeddings.len(),
+            embedding_kind,
+            "embedder returned unexpected embedding count"
+        );
+        return false;
+    }
+
+    for (input, embedding) in chunk.iter().copied().zip(embeddings) {
+        if embedding.len() == EMBEDDING_VECTOR_DIMENSIONS {
+            result[input.row_index] = Some(embedding);
+        } else {
+            tracing::warn!(
+                stable_symbol_id = %input.stable_symbol_id,
+                dimensions = embedding.len(),
+                embedding_kind,
+                "embedder returned unexpected embedding dimensions"
+            );
+        }
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -2101,7 +2283,11 @@ fn fastembed_cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard,
+    };
+    use tokio::sync::Barrier;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -2725,6 +2911,73 @@ mod tests {
             ]
         );
         assert!(vectors.iter().all(Option::is_some));
+    }
+
+    #[tokio::test]
+    async fn embed_text_inputs_concurrently_caps_openrouter_requests_at_eight() {
+        let ids = (0..16)
+            .map(|index| format!("symbol-{index}"))
+            .collect::<Vec<_>>();
+        let texts = (0..16).map(|index| index.to_string()).collect::<Vec<_>>();
+        let inputs = ids
+            .iter()
+            .zip(texts.iter())
+            .enumerate()
+            .map(|(row_index, (stable_symbol_id, text))| EmbeddingTextInput {
+                row_index,
+                stable_symbol_id,
+                text,
+            })
+            .collect::<Vec<_>>();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(OPENROUTER_EMBED_CONCURRENCY));
+
+        let vectors = embed_text_inputs_concurrently_with(
+            &inputs,
+            ConcurrentEmbeddingConfig {
+                row_count: inputs.len(),
+                batch_size: 1,
+                concurrency: OPENROUTER_EMBED_CONCURRENCY,
+                chunk_count: inputs.len(),
+                embedding_kind: "section",
+            },
+            &mut |_| {},
+            {
+                let in_flight = Arc::clone(&in_flight);
+                let max_in_flight = Arc::clone(&max_in_flight);
+                let barrier = Arc::clone(&barrier);
+                move |texts| {
+                    let in_flight = Arc::clone(&in_flight);
+                    let max_in_flight = Arc::clone(&max_in_flight);
+                    let barrier = Arc::clone(&barrier);
+                    async move {
+                        let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_in_flight.fetch_max(current, Ordering::SeqCst);
+                        barrier.wait().await;
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+
+                        let value = texts[0].parse::<f32>().expect("numeric text");
+                        Ok(vec![vec![value; EMBEDDING_VECTOR_DIMENSIONS]])
+                    }
+                }
+            },
+        )
+        .await
+        .expect("concurrent embeddings");
+
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            OPENROUTER_EMBED_CONCURRENCY
+        );
+        assert_eq!(vectors.len(), inputs.len());
+        for (index, vector) in vectors.into_iter().enumerate() {
+            assert_eq!(
+                vector.expect("embedding vector")[0],
+                index as f32,
+                "vector should stay mapped to its input row"
+            );
+        }
     }
 
     #[test]
