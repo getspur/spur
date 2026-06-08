@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glitch Title</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#050505}
+canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas data-capture="true" aria-label="Animated glitch title"></canvas>
+<script>
+const canvas=document.querySelector("canvas");
+const ctx=canvas.getContext("2d");
+const copy={
+  kicker:"Signal opening",
+  title:"SYSTEM SHOCK",
+  footer:"A sharp opener for dramatic reveals, chapter breaks, and fast-cut video intros."
+};
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize",resize);
+resize();
+function fit(size,text,maxWidth){
+  ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  while(size>32&&ctx.measureText(text).width>maxWidth){
+    size-=4;
+    ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  }
+  return size;
+}
+function drawTextBlock(text,x,y,maxWidth,size,lineHeight){
+  ctx.font=`700 ${size}px Arial, Helvetica, sans-serif`;
+  const words=text.split(" ");
+  let line="";
+  for(const word of words){
+    const test=line?`${line} ${word}`:word;
+    if(ctx.measureText(test).width>maxWidth&&line){
+      ctx.fillText(line,x,y);
+      y+=lineHeight;
+      line=word;
+    }else{
+      line=test;
+    }
+  }
+  if(line)ctx.fillText(line,x,y);
+}
+function frame(now){
+  const t=now/1000,w=canvas.width,h=canvas.height,cx=w/2,cy=h/2;
+  const bg=ctx.createLinearGradient(0,0,w,h);
+  bg.addColorStop(0,"#050505"); bg.addColorStop(.55,"#111318"); bg.addColorStop(1,"#050505");
+  ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
+  for(const glow of [[.30,.25,"rgba(255,0,96,.18)"],[.70,.65,"rgba(0,229,255,.16)"]]){
+    const g=ctx.createRadialGradient(w*glow[0],h*glow[1],0,w*glow[0],h*glow[1],Math.max(w,h)*.36);
+    g.addColorStop(0,glow[2]); g.addColorStop(1,"transparent"); ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+  }
+  ctx.fillStyle="rgba(255,255,255,.045)";
+  for(let y=(t*18)%5;y<h;y+=5)ctx.fillRect(0,y,w,1);
+  const sweep=(Math.sin(t*1.7)*.5+.5)*w*1.7-w*.35;
+  const sg=ctx.createLinearGradient(sweep-180,0,sweep+180,h);
+  sg.addColorStop(0,"transparent"); sg.addColorStop(.5,"rgba(255,255,255,.08)"); sg.addColorStop(1,"transparent");
+  ctx.fillStyle=sg; ctx.fillRect(0,0,w,h);
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.font=`800 ${Math.max(15,Math.min(30,w*.02))}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle="#7dd3fc"; ctx.fillText(copy.kicker.toUpperCase(),cx,cy-h*.19);
+  const burst=Math.sin(t*19)> .72 ? 1 : 0;
+  const jitter=burst?Math.sin(t*91)*7:Math.sin(t*4)*1.2;
+  const size=fit(Math.min(180,Math.max(58,w*.13)),copy.title,w*.9);
+  ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  ctx.shadowColor="rgba(125,211,252,.45)"; ctx.shadowBlur=26;
+  ctx.fillStyle="#f8fafc"; ctx.fillText(copy.title,cx+jitter,cy);
+  ctx.shadowBlur=0; ctx.globalCompositeOperation="screen";
+  const slices=[[0,.42,"#ff2d75",-9-burst*10,-2],[.50,1,"#00e5ff",8+burst*9,3]];
+  for(const [a,b,color,dx,dy] of slices){
+    ctx.save(); ctx.beginPath(); ctx.rect(0,cy-size*.54+size*a,w,size*(b-a)); ctx.clip();
+    ctx.fillStyle=color; ctx.fillText(copy.title,cx+dx,cy+dy); ctx.restore();
+  }
+  ctx.globalCompositeOperation="source-over";
+  ctx.fillStyle="#cbd5e1";
+  drawTextBlock(copy.footer,cx,cy+h*.22,Math.min(760,w*.82),Math.max(16,Math.min(28,w*.021)),Math.max(24,w*.031));
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
