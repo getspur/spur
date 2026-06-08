@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
 use arrow_array::{
@@ -36,6 +36,8 @@ const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE"
 // Integration tests spawn the debug-built CLI; keep this hook out of release builds.
 #[cfg(debug_assertions)]
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
+
+static EMBED_MODEL: OnceLock<Option<TextEmbedding>> = OnceLock::new();
 
 pub type SectionSidecarProgressCallback<'a> = dyn Fn(SectionSidecarProgressEvent) + Sync + 'a;
 
@@ -562,6 +564,7 @@ async fn write_sections_dataset_async(
         worktree_root,
         artifact_dir,
         options.write_batch_size,
+        options.embedding,
     )
     .await?;
     Ok(())
@@ -572,6 +575,7 @@ async fn write_symbol_rows_dataset_async(
     worktree_root: &Path,
     artifact_dir: &Path,
     write_batch_size: usize,
+    embedding_options: SectionEmbeddingOptions,
 ) -> Result<()> {
     let mut batcher = SymbolRowBatcher::new(artifact, worktree_root, write_batch_size);
 
@@ -584,12 +588,14 @@ async fn write_symbol_rows_dataset_async(
     let schema = symbol_rows_schema();
     let mut table = db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok();
     let mut existing_versions = ExistingSymbolFileVersions::new(table.as_ref());
+    let mut embedder = SymbolEmbedder::new(embedding_options);
 
     while let Some(rows) = batcher.next_batch()? {
-        let rows = existing_versions.retain_new_rows(rows).await?;
+        let mut rows = existing_versions.retain_new_rows(rows).await?;
         if rows.is_empty() {
             continue;
         }
+        embedder.embed_rows(&mut rows);
         let batch = symbol_rows_to_batch(rows, schema.clone())?;
         if let Some(table) = table.as_ref() {
             table
@@ -1305,8 +1311,23 @@ fn embed_eligible_rows(
 }
 
 struct SectionEmbedder {
+    service: TextEmbeddingService,
+}
+
+struct SymbolEmbedder {
+    service: TextEmbeddingService,
+}
+
+struct TextEmbeddingService {
     options: SectionEmbeddingOptions,
-    model: Option<Option<TextEmbedding>>,
+    model_requested: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EmbeddingTextInput<'a> {
+    row_index: usize,
+    stable_symbol_id: &'a str,
+    text: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1321,17 +1342,16 @@ struct SectionEmbeddingChunkProgress {
 impl SectionEmbedder {
     fn new(options: SectionEmbeddingOptions) -> Self {
         Self {
-            options,
-            model: None,
+            service: TextEmbeddingService::new(options),
         }
     }
 
     fn needs_model_init(&self) -> bool {
-        self.model.is_none() && !self.options.skip_embeddings
+        self.service.needs_model_init()
     }
 
     fn prepare_model(&mut self) -> bool {
-        !self.options.skip_embeddings && self.model().is_some()
+        self.service.prepare_model("section")
     }
 
     fn embed_rows_with_progress<F>(&mut self, rows: &mut [SectionRow], on_chunk_started: F)
@@ -1358,56 +1378,181 @@ impl SectionEmbedder {
         F: FnMut(SectionEmbeddingChunkProgress),
     {
         let result = vec![None; rows.len()];
-        if self.options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
+        if self.service.options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
             return result;
         }
-        let options = self.options;
-        let Some(model) = self.model().as_ref() else {
-            return result;
-        };
 
-        embed_eligible_rows_with(rows, options, on_chunk_started, |texts| {
-            model.embed(texts.to_vec(), None)
-        })
-    }
-
-    fn model(&mut self) -> &Option<TextEmbedding> {
-        self.model.get_or_insert_with(|| {
-            let mut init_options = InitOptions::new(EmbeddingModel::BGESmallENV15)
-                .with_show_download_progress(true);
-
-            if let Some(cache_dir) = fastembed_cache_dir() {
-                init_options = init_options.with_cache_dir(cache_dir);
-            }
-
-            match TextEmbedding::try_new(init_options) {
-                Ok(model) => Some(model),
-                Err(error) => {
-                    tracing::warn!(error = %error, "fastembed model unavailable; skipping section embeddings");
-                    None
-                }
-            }
-        })
+        self.service.embed_inputs_with_progress(
+            rows.len(),
+            section_embedding_inputs(rows),
+            on_chunk_started,
+            "section",
+        )
     }
 }
 
+impl SymbolEmbedder {
+    fn new(options: SectionEmbeddingOptions) -> Self {
+        Self {
+            service: TextEmbeddingService::new(options),
+        }
+    }
+
+    fn embed_rows(&mut self, rows: &mut [SymbolRow]) {
+        let vectors = self.embed_row_vectors(rows);
+        for (row, vector) in rows.iter_mut().zip(vectors) {
+            row.vector = vector;
+        }
+    }
+
+    fn embed_row_vectors(&mut self, rows: &[SymbolRow]) -> Vec<Option<Vec<f32>>> {
+        self.embed_row_vectors_with_progress(rows, |_| {})
+    }
+
+    fn embed_row_vectors_with_progress<F>(
+        &mut self,
+        rows: &[SymbolRow],
+        on_chunk_started: F,
+    ) -> Vec<Option<Vec<f32>>>
+    where
+        F: FnMut(SectionEmbeddingChunkProgress),
+    {
+        self.service.embed_inputs_with_progress(
+            rows.len(),
+            symbol_embedding_inputs(rows),
+            on_chunk_started,
+            "code symbol",
+        )
+    }
+}
+
+impl TextEmbeddingService {
+    fn new(options: SectionEmbeddingOptions) -> Self {
+        Self {
+            options,
+            model_requested: false,
+        }
+    }
+
+    fn needs_model_init(&self) -> bool {
+        !self.options.skip_embeddings && !self.model_requested && EMBED_MODEL.get().is_none()
+    }
+
+    fn prepare_model(&mut self, embedding_kind: &'static str) -> bool {
+        !self.options.skip_embeddings && self.model(embedding_kind).is_some()
+    }
+
+    fn embed_inputs_with_progress<F>(
+        &mut self,
+        row_count: usize,
+        inputs: Vec<EmbeddingTextInput<'_>>,
+        on_chunk_started: F,
+        embedding_kind: &'static str,
+    ) -> Vec<Option<Vec<f32>>>
+    where
+        F: FnMut(SectionEmbeddingChunkProgress),
+    {
+        let result = vec![None; row_count];
+        if self.options.skip_embeddings || inputs.is_empty() {
+            return result;
+        }
+        let options = self.options;
+        let Some(model) = self.model(embedding_kind) else {
+            return result;
+        };
+
+        embed_text_inputs_with(
+            row_count,
+            inputs,
+            options,
+            on_chunk_started,
+            embedding_kind,
+            |texts| model.embed(texts.to_vec(), None),
+        )
+    }
+
+    fn model(&mut self, embedding_kind: &'static str) -> Option<&'static TextEmbedding> {
+        self.model_requested = true;
+        shared_embed_model(embedding_kind)
+    }
+}
+
+#[cfg(test)]
 fn embed_eligible_rows_with<F>(
     rows: &[SectionRow],
     options: SectionEmbeddingOptions,
+    on_chunk_started: impl FnMut(SectionEmbeddingChunkProgress),
+    embed_batch: F,
+) -> Vec<Option<Vec<f32>>>
+where
+    F: FnMut(&[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    embed_text_inputs_with(
+        rows.len(),
+        section_embedding_inputs(rows),
+        options,
+        on_chunk_started,
+        "section",
+        embed_batch,
+    )
+}
+
+#[cfg(test)]
+fn embed_symbol_rows_with<F>(
+    rows: &[SymbolRow],
+    options: SectionEmbeddingOptions,
+    on_chunk_started: impl FnMut(SectionEmbeddingChunkProgress),
+    embed_batch: F,
+) -> Vec<Option<Vec<f32>>>
+where
+    F: FnMut(&[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    embed_text_inputs_with(
+        rows.len(),
+        symbol_embedding_inputs(rows),
+        options,
+        on_chunk_started,
+        "code symbol",
+        embed_batch,
+    )
+}
+
+fn section_embedding_inputs(rows: &[SectionRow]) -> Vec<EmbeddingTextInput<'_>> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| is_embedding_eligible(row))
+        .map(|(row_index, row)| EmbeddingTextInput {
+            row_index,
+            stable_symbol_id: row.stable_symbol_id.as_str(),
+            text: row.body_text.as_str(),
+        })
+        .collect()
+}
+
+fn symbol_embedding_inputs(rows: &[SymbolRow]) -> Vec<EmbeddingTextInput<'_>> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| !row.embed_text.trim().is_empty())
+        .map(|(row_index, row)| EmbeddingTextInput {
+            row_index,
+            stable_symbol_id: row.stable_symbol_id.as_str(),
+            text: row.embed_text.as_str(),
+        })
+        .collect()
+}
+
+fn embed_text_inputs_with<F>(
+    row_count: usize,
+    eligible: Vec<EmbeddingTextInput<'_>>,
+    options: SectionEmbeddingOptions,
     mut on_chunk_started: impl FnMut(SectionEmbeddingChunkProgress),
+    embedding_kind: &'static str,
     mut embed_batch: F,
 ) -> Vec<Option<Vec<f32>>>
 where
     F: FnMut(&[&str]) -> Result<Vec<Vec<f32>>>,
 {
-    let eligible: Vec<(usize, &str)> = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| is_embedding_eligible(row))
-        .map(|(index, row)| (index, row.body_text.as_str()))
-        .collect();
-
-    let mut result = vec![None; rows.len()];
+    let mut result = vec![None; row_count];
     if options.skip_embeddings {
         return result;
     }
@@ -1425,7 +1570,7 @@ where
     let chunk_count = chunks.len();
     let mut completed_eligible_rows = 0usize;
     for (chunk_offset, chunk) in chunks.into_iter().enumerate() {
-        let texts: Vec<&str> = chunk.iter().map(|(_, text)| *text).collect();
+        let texts: Vec<&str> = chunk.iter().map(|input| input.text).collect();
         on_chunk_started(SectionEmbeddingChunkProgress {
             chunk_index: chunk_offset + 1,
             chunk_count,
@@ -1436,7 +1581,7 @@ where
         let embeddings = match embed_batch(&texts) {
             Ok(embeddings) => embeddings,
             Err(error) => {
-                tracing::warn!(error = %error, "fastembed encode failed for section embedding batch; skipping remaining section embeddings");
+                tracing::warn!(error = %error, embedding_kind, "fastembed encode failed for embedding batch; skipping remaining embeddings");
                 return result;
             }
         };
@@ -1445,19 +1590,21 @@ where
             tracing::warn!(
                 expected = chunk.len(),
                 actual = embeddings.len(),
-                "fastembed returned unexpected section embedding count"
+                embedding_kind,
+                "fastembed returned unexpected embedding count"
             );
             return result;
         }
 
-        for ((index, _), embedding) in chunk.iter().copied().zip(embeddings) {
+        for (input, embedding) in chunk.iter().copied().zip(embeddings) {
             if embedding.len() == SECTION_VECTOR_DIMENSIONS {
-                result[index] = Some(embedding);
+                result[input.row_index] = Some(embedding);
             } else {
                 tracing::warn!(
-                    stable_symbol_id = %rows[index].stable_symbol_id,
+                    stable_symbol_id = %input.stable_symbol_id,
                     dimensions = embedding.len(),
-                    "fastembed returned unexpected section embedding dimensions"
+                    embedding_kind,
+                    "fastembed returned unexpected embedding dimensions"
                 );
             }
         }
@@ -1465,6 +1612,27 @@ where
     }
 
     result
+}
+
+fn shared_embed_model(embedding_kind: &'static str) -> Option<&'static TextEmbedding> {
+    EMBED_MODEL
+        .get_or_init(|| {
+            let mut init_options = InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_show_download_progress(true);
+
+            if let Some(cache_dir) = fastembed_cache_dir() {
+                init_options = init_options.with_cache_dir(cache_dir);
+            }
+
+            match TextEmbedding::try_new(init_options) {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    tracing::warn!(error = %error, embedding_kind, "fastembed model unavailable; skipping embeddings");
+                    None
+                }
+            }
+        })
+        .as_ref()
 }
 
 fn is_embedding_eligible(row: &SectionRow) -> bool {
@@ -1772,6 +1940,19 @@ mod tests {
             parent_stable_id: None,
             content_hash: content_hash.to_owned(),
             vector: None,
+        }
+    }
+
+    fn symbol_row_fixture(stable_symbol_id: &str, embed_text: &str) -> SymbolRow {
+        SymbolRow {
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            file_path: "src/lib.rs".to_owned(),
+            qualified_name: stable_symbol_id.to_owned(),
+            entity_name: stable_symbol_id.to_owned(),
+            symbol_kind: "function".to_owned(),
+            embed_text: embed_text.to_owned(),
+            vector: None,
+            content_hash: "hash".to_owned(),
         }
     }
 
@@ -2155,7 +2336,7 @@ mod tests {
         });
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
-        assert!(embedder.model.is_none());
+        assert!(!embedder.service.model_requested);
 
         let rows = vec![section_row_fixture(
             2,
@@ -2167,7 +2348,7 @@ mod tests {
         });
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
-        assert!(embedder.model.is_none());
+        assert!(!embedder.service.model_requested);
     }
 
     #[test]
@@ -2199,6 +2380,44 @@ mod tests {
         assert!(vectors[1].is_none());
         assert!(vectors[2].is_some());
         assert!(vectors[3].is_some());
+    }
+
+    #[test]
+    fn embed_symbol_rows_uses_embed_text_and_configured_batch_size() {
+        let rows = vec![
+            symbol_row_fixture("symbol-one", "one embed text"),
+            symbol_row_fixture("symbol-two", "two embed text"),
+            symbol_row_fixture("symbol-three", "three embed text"),
+        ];
+        let options = SectionEmbeddingOptions {
+            skip_embeddings: false,
+            batch_size: 2,
+        };
+        let mut batch_texts = Vec::new();
+
+        let vectors = embed_symbol_rows_with(
+            &rows,
+            options,
+            |_| {},
+            |texts: &[&str]| {
+                batch_texts.push(
+                    texts
+                        .iter()
+                        .map(|text| (*text).to_owned())
+                        .collect::<Vec<_>>(),
+                );
+                Ok(vec![vec![0.5; SECTION_VECTOR_DIMENSIONS]; texts.len()])
+            },
+        );
+
+        assert_eq!(
+            batch_texts,
+            vec![
+                vec!["one embed text".to_owned(), "two embed text".to_owned()],
+                vec!["three embed text".to_owned()],
+            ]
+        );
+        assert!(vectors.iter().all(Option::is_some));
     }
 
     #[test]
