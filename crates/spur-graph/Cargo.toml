@@ -8,7 +8,6 @@ license.workspace = true
 autobenches = false
 
 [features]
-openrouter = ["dep:reqwest"]
 perf-gates = []
 
 [lib]
@@ -32,7 +31,7 @@ lance-index = { workspace = true }
 lancedb = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
 petgraph = { workspace = true }
-reqwest = { workspace = true, optional = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha1 = "0.10"
