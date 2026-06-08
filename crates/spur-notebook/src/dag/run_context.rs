@@ -170,7 +170,7 @@ where
 {
     let notebook_path = notebook_path.as_ref();
     let store = state.get_notebook();
-    let deps = Arc::new(ServerDeps::new(bridge, Some(state), app, daemon));
+    let deps = Arc::new(ServerDeps::new(bridge, Some(state), app, daemon, None));
     let runner = build_runner(Arc::clone(&deps));
     let engine = ReactiveEngine::new(
         store,

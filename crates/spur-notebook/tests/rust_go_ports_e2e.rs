@@ -374,6 +374,7 @@ fn deps_with_state(state: Arc<State>) -> ServerDeps {
         state: Some(state),
         app: None,
         daemon: None,
+        plugins: None,
     }
 }
 

@@ -1916,6 +1916,7 @@ mod tests {
             state: Some(Arc::clone(&state)),
             app: None,
             daemon: None,
+            plugins: None,
         };
         let runner = RunCellCommandRunner::new(Arc::new(deps));
         let mut engine = ReactiveEngine::new(

@@ -252,6 +252,7 @@ mod tests {
                 state: Some(state),
                 app: None,
                 daemon: Some(control),
+                plugins: None,
             },
             rx,
             temp,
