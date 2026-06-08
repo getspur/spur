@@ -50,6 +50,12 @@ fn context_candidates_return_stable_ids_for_docs_and_code() {
         );
         INSERT INTO v_symbol_scorecard VALUES
             ('sym-1', 0.01, 3, 'stable', 1, 2);
+
+        CREATE TABLE v_symbol_inbound (
+            stable_symbol_id VARCHAR,
+            callers BIGINT
+        );
+        INSERT INTO v_symbol_inbound VALUES ('sym-1', 2);
         "#,
     )
     .expect("create fixture schema");
@@ -136,6 +142,12 @@ fn context_candidates_accept_query_vector_and_degrade_to_bm25() {
         );
         INSERT INTO v_symbol_scorecard VALUES
             ('sym-1', 0.01, 3, 'stable', 1, 2);
+
+        CREATE TABLE v_symbol_inbound (
+            stable_symbol_id VARCHAR,
+            callers BIGINT
+        );
+        INSERT INTO v_symbol_inbound VALUES ('sym-1', 2);
         "#,
     )
     .expect("create fixture schema");
