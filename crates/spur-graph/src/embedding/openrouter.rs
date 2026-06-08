@@ -12,8 +12,8 @@ pub struct OpenRouterEmbedder {
 impl OpenRouterEmbedder {
     pub const BATCH_SIZE: usize = 256;
     pub const MODEL: &'static str = "baai/bge-base-en-v1.5";
-    pub const MAX_INPUT_CHARS: usize = 2000;
-    pub const MAX_INPUT_TOKENS: usize = 480;
+    pub const MAX_INPUT_CHARS: usize = 384;
+    pub const MAX_INPUT_TOKENS: usize = 384;
 
     const DEFAULT_ENDPOINT: &'static str = "https://openrouter.ai/api/v1/embeddings";
 
@@ -396,6 +396,15 @@ mod tests {
 
         assert!(input.split_whitespace().count() <= token_budget);
         assert!(input.ends_with('…'));
+    }
+
+    #[test]
+    fn request_input_text_truncates_token_dense_text_without_whitespace() {
+        let token_dense_text = "/".repeat(OpenRouterEmbedder::MAX_INPUT_CHARS + 64);
+        let truncated = OpenRouterEmbedder::request_input_text(&token_dense_text);
+
+        assert!(truncated.chars().count() <= OpenRouterEmbedder::MAX_INPUT_TOKENS + 1);
+        assert!(truncated.ends_with('…'));
     }
 
     #[test]
