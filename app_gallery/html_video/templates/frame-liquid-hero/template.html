@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liquid Hero</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#071019}
+canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas data-capture="true" aria-label="Animated liquid gradient hero"></canvas>
+<script>
+const canvas=document.querySelector("canvas");
+const ctx=canvas.getContext("2d");
+const copy={
+  eyebrow:"Now entering",
+  headline:"Fluid Strategy",
+  subtext:"A calm, cinematic opener for product narratives, creative briefs, and section transitions."
+};
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize",resize);
+resize();
+function fit(size,text,maxWidth){
+  ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  while(size>34&&ctx.measureText(text).width>maxWidth){
+    size-=4; ctx.font=`900 ${size}px Arial, Helvetica, sans-serif`;
+  }
+  return size;
+}
+function wrap(text,x,y,maxWidth,size,lineHeight){
+  ctx.font=`700 ${size}px Arial, Helvetica, sans-serif`;
+  const words=text.split(" "); let line="";
+  for(const word of words){
+    const test=line?`${line} ${word}`:word;
+    if(ctx.measureText(test).width>maxWidth&&line){ctx.fillText(line,x,y); y+=lineHeight; line=word;}
+    else line=test;
+  }
+  if(line)ctx.fillText(line,x,y);
+}
+function blob(x,y,r,color){
+  const g=ctx.createRadialGradient(x,y,0,x,y,r);
+  g.addColorStop(0,color); g.addColorStop(.58,color.replace(/[\d.]+\)$/,".18)")); g.addColorStop(1,"transparent");
+  ctx.fillStyle=g; ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+function frame(now){
+  const t=now/1000,w=canvas.width,h=canvas.height,cx=w/2,cy=h/2;
+  const bg=ctx.createLinearGradient(0,0,w,h);
+  bg.addColorStop(0,"#08111f"); bg.addColorStop(.28,"#0f766e"); bg.addColorStop(.55,"#155e75");
+  bg.addColorStop(.78,"#7c3aed"); bg.addColorStop(1,"#111827"); ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
+  ctx.globalCompositeOperation="screen";
+  blob(cx+Math.sin(t*.62)*w*.18,cy+Math.cos(t*.48)*h*.16,Math.max(w,h)*.55,"rgba(103,232,249,.66)");
+  blob(cx+Math.cos(t*.50)*w*.22,cy+Math.sin(t*.55)*h*.18,Math.max(w,h)*.50,"rgba(240,171,252,.58)");
+  blob(cx+Math.sin(t*.34+2)*w*.25,cy+Math.cos(t*.41+1)*h*.12,Math.max(w,h)*.42,"rgba(167,243,208,.42)");
+  ctx.globalCompositeOperation="source-over";
+  const wash=ctx.createLinearGradient(0,0,0,h); wash.addColorStop(0,"rgba(0,0,0,.08)"); wash.addColorStop(1,"rgba(0,0,0,.28)");
+  ctx.fillStyle=wash; ctx.fillRect(0,0,w,h);
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.shadowColor="rgba(0,0,0,.28)"; ctx.shadowBlur=24;
+  ctx.font=`800 ${Math.max(15,Math.min(26,w*.018))}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle="#bae6fd"; ctx.fillText(copy.eyebrow.toUpperCase(),cx,cy-h*.18+Math.sin(t*1.2)*3);
+  const titleSize=fit(Math.max(58,Math.min(150,w*.10)),copy.headline,w*.88);
+  ctx.font=`900 ${titleSize}px Arial, Helvetica, sans-serif`; ctx.fillStyle="#ffffff";
+  ctx.fillText(copy.headline,cx,cy);
+  ctx.fillStyle="#e0f2fe"; wrap(copy.subtext,cx,cy+h*.18,Math.min(760,w*.82),Math.max(18,Math.min(31,w*.022)),Math.max(27,w*.032));
+  ctx.shadowBlur=0;
+  const pulse=.72+Math.sin(t*2.2)*.18,barW=w*.58*pulse;
+  const line=ctx.createLinearGradient(cx-barW/2,0,cx+barW/2,0);
+  line.addColorStop(0,"transparent"); line.addColorStop(.35,"#a7f3d0"); line.addColorStop(.65,"#f0abfc"); line.addColorStop(1,"transparent");
+  ctx.fillStyle=line; ctx.fillRect(cx-barW/2,h*.88,barW,2);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
