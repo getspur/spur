@@ -94,7 +94,7 @@ function extensionForLanguage(type: CellType, codeType?: CodeType): Extension {
 
   switch (codeType) {
     case "javascript":
-      return javascript();
+      return javascript({ typescript: true });
     case "rust":
       return rust();
     case "go":
