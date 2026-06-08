@@ -11,6 +11,9 @@
 -- analyst.rs gates inclusion on (temporal AND lance) presence.
 
 INSTALL fts; LOAD fts;
+-- Lance hybrid search is opportunistic. The Rust query layer retries BM25-only
+-- if this extension is unavailable in a read connection.
+INSTALL lance; LOAD lance;
 
 -- ── Prose corpus: section bodies materialized from Lance + persistent FTS ─────
 CREATE OR REPLACE TABLE sections AS
@@ -160,54 +163,152 @@ CREATE OR REPLACE MACRO search(q) AS TABLE
 -- Stable-ID-preserving context candidates for one-shot Knowledge Context packs.
 -- Unlike the human-facing search/search_graph macros above, this keeps raw
 -- file_path and stable_symbol_id so Rust callers can ground exact symbols/docs.
-CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope) AS TABLE
+CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE
+  SELECT kind, title, file_path, stable_symbol_id, symbol_kind,
+         round(rank, 3) AS score, signal, neighbor_kind, edge_bind_method, grounding
+  FROM (
+    SELECT *,
+           raw_rank
+             * CASE
+                 WHEN intent = 'plan' AND kind = 'doc' THEN 1.3
+                 WHEN intent = 'debug' AND kind = 'code' THEN 1 + 0.12 * ln(1 + churn_90d)
+                 WHEN intent = 'change' AND kind = 'code' THEN 1 + 0.10 * ln(1 + caller_count)
+                 WHEN intent = 'review' AND kind = 'code' AND posture = 'load-bearing wall' THEN 1.35
+                 ELSE 1.0
+               END AS rank
+    FROM (
+      SELECT 'doc' AS kind,
+             s.qualified_name AS title,
+             s.file_path,
+             s.stable_symbol_id,
+             CAST('section' AS VARCHAR) AS symbol_kind,
+             CAST(NULL AS VARCHAR) AS signal,
+             CAST(NULL AS VARCHAR) AS neighbor_kind,
+             CAST(NULL AS VARCHAR) AS edge_bind_method,
+             'bm25-doc' AS grounding,
+             fts_main_sections_search.match_bm25(s.stable_symbol_id, q) AS raw_rank,
+             0::BIGINT AS churn_90d,
+             0::BIGINT AS caller_count,
+             CAST(NULL AS VARCHAR) AS posture
+      FROM sections_search s
+      WHERE requested_scope IN ('all', 'docs')
+        AND fts_main_sections_search.match_bm25(s.stable_symbol_id, q) IS NOT NULL
+      UNION ALL
+      SELECT 'code' AS kind,
+             st.entity_name AS title,
+             st.file_path,
+             st.stable_symbol_id,
+             st.symbol_kind,
+             sc.posture || ' · pr=' || round(sc.pagerank * 1e4, 1) || ' · churn=' || sc.churn_90d AS signal,
+             'primary' AS neighbor_kind,
+             CAST(NULL AS VARCHAR) AS edge_bind_method,
+             'bm25-code' AS grounding,
+             fts_main_symbol_text.match_bm25(st.stable_symbol_id, q)
+               * CASE WHEN st.file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+               * CASE WHEN st.symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
+                      WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+               * (1 + 0.15 * ln(1 + sc.pagerank * 1e4)) AS raw_rank,
+             sc.churn_90d,
+             sc.callers AS caller_count,
+             sc.posture
+      FROM symbol_text st
+      JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+      WHERE requested_scope IN ('all', 'code', 'graph')
+        AND fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+    )
+  )
+  WHERE rank IS NOT NULL
+  QUALIFY row_number() OVER (PARTITION BY file_path ORDER BY rank DESC) <= 2
+  ORDER BY rank DESC NULLS LAST
+  LIMIT 40;
+
+CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE
   SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
          neighbor_kind, edge_bind_method, grounding
   FROM (
-    SELECT 'doc' AS kind,
-           s.qualified_name AS title,
-           s.file_path,
-           s.stable_symbol_id,
-           CAST('section' AS VARCHAR) AS symbol_kind,
-           round(fts_main_sections_search.match_bm25(s.stable_symbol_id, q), 3) AS score,
-           CAST(NULL AS VARCHAR) AS signal,
-           CAST(NULL AS VARCHAR) AS neighbor_kind,
-           CAST(NULL AS VARCHAR) AS edge_bind_method,
-           'bm25-doc' AS grounding,
-           fts_main_sections_search.match_bm25(s.stable_symbol_id, q) AS rank
-    FROM sections_search s
-    WHERE requested_scope IN ('all', 'docs')
-      AND fts_main_sections_search.match_bm25(s.stable_symbol_id, q) IS NOT NULL
-    UNION ALL
-    SELECT 'code' AS kind,
-           st.entity_name AS title,
-           st.file_path,
-           st.stable_symbol_id,
-           st.symbol_kind,
-           round(fts_main_symbol_text.match_bm25(st.stable_symbol_id, q), 3) AS score,
-           sc.posture || ' · pr=' || round(sc.pagerank * 1e4, 1) || ' · churn=' || sc.churn_90d AS signal,
-           'primary' AS neighbor_kind,
-           CAST(NULL AS VARCHAR) AS edge_bind_method,
-           'bm25-code' AS grounding,
-           fts_main_symbol_text.match_bm25(st.stable_symbol_id, q)
-             * CASE WHEN st.file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
-             * CASE WHEN st.symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
-                    WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
-             * (1 + 0.15 * ln(1 + sc.pagerank * 1e4)) AS rank
-    FROM symbol_text st
-    JOIN v_symbol_scorecard sc USING (stable_symbol_id)
-    WHERE requested_scope IN ('all', 'code', 'graph')
-      AND fts_main_symbol_text.match_bm25(st.stable_symbol_id, q) IS NOT NULL
+    WITH bm25_rows AS (
+      SELECT * FROM search_context_candidates(q, requested_scope, intent)
+    ),
+    hybrid_code AS (
+      SELECT
+        'code' AS kind,
+        COALESCE(sc.entity_name, h.entity_name) AS title,
+        COALESCE(sc.file_path, h.file_path) AS file_path,
+        h.stable_symbol_id,
+        COALESCE(sc.symbol_kind, h.symbol_kind) AS symbol_kind,
+        round(
+          COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
+            * CASE WHEN COALESCE(sc.file_path, h.file_path) LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+            * CASE WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('function','method','struct','enum','trait') THEN 1.15
+                   WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+            * (1 + 0.15 * ln(1 + COALESCE(sc.pagerank, 0) * 1e4))
+            * CASE
+                WHEN intent = 'debug' THEN 1 + 0.12 * ln(1 + COALESCE(sc.churn_90d, 0))
+                WHEN intent = 'change' THEN 1 + 0.10 * ln(1 + COALESCE(sc.callers, 0))
+                WHEN intent = 'review' AND COALESCE(sc.posture, '') = 'load-bearing wall' THEN 1.35
+                ELSE 1.0
+              END,
+          3
+        ) AS score,
+        COALESCE(sc.posture, 'unknown') || ' · pr=' || round(COALESCE(sc.pagerank, 0) * 1e4, 1)
+          || ' · churn=' || COALESCE(sc.churn_90d, 0) AS signal,
+        'primary' AS neighbor_kind,
+        CAST(NULL AS VARCHAR) AS edge_bind_method,
+        'hybrid-code' AS grounding
+      FROM lance_hybrid_search(
+        '__SPUR_GRAPH_ARTIFACT_DIR__/code_symbols.lance/code_symbols',
+        'vector', query_vec, 'embed_text', q, 30, 0.5, 5
+      ) h
+      JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+      WHERE requested_scope IN ('all', 'code', 'graph')
+    ),
+    hybrid_docs AS (
+      SELECT
+        'doc' AS kind,
+        s.qualified_name AS title,
+        s.file_path,
+        h.stable_symbol_id,
+        CAST('section' AS VARCHAR) AS symbol_kind,
+        round(
+          COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
+            * CASE WHEN intent = 'plan' THEN 1.3 ELSE 1.0 END,
+          3
+        ) AS score,
+        CAST(NULL AS VARCHAR) AS signal,
+        CAST(NULL AS VARCHAR) AS neighbor_kind,
+        CAST(NULL AS VARCHAR) AS edge_bind_method,
+        'hybrid-doc' AS grounding
+      FROM lance_hybrid_search(
+        'lance_ns.main.section_bodies',
+        'vector', query_vec, 'body_text', q, 30, 0.5, 5
+      ) h
+      JOIN sections_search s USING (stable_symbol_id)
+      WHERE requested_scope IN ('all', 'docs')
+    ),
+    unioned AS (
+      SELECT * FROM bm25_rows WHERE query_vec IS NULL
+      UNION ALL
+      SELECT * FROM bm25_rows WHERE query_vec IS NOT NULL
+      UNION ALL
+      SELECT * FROM hybrid_code WHERE query_vec IS NOT NULL
+      UNION ALL
+      SELECT * FROM hybrid_docs WHERE query_vec IS NOT NULL
+    )
+    SELECT *,
+           row_number() OVER (
+             PARTITION BY COALESCE(stable_symbol_id, file_path || ':' || title)
+             ORDER BY score DESC NULLS LAST
+           ) AS dedupe_rank
+    FROM unioned
   )
-  WHERE score IS NOT NULL
-  QUALIFY row_number() OVER (PARTITION BY file_path ORDER BY rank DESC) <= 2
-  ORDER BY rank DESC NULLS LAST
+  WHERE dedupe_rank = 1
+  ORDER BY score DESC NULLS LAST
   LIMIT 40;
 
 -- Graph-augmented: BM25 top-k hits + selective 1-hop call-graph expansion.
 -- Gate: symbols with posture = 'load-bearing wall' AND callers > 30 are popular
 -- sinks — expanding them would flood results with noise. All other hits expand.
-CREATE OR REPLACE MACRO search_graph(q) AS TABLE
+CREATE OR REPLACE MACRO search_graph(q, intent) AS TABLE
   SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
          neighbor_kind, edge_bind_method, grounding
   FROM (
@@ -222,7 +323,13 @@ CREATE OR REPLACE MACRO search_graph(q) AS TABLE
           * CASE WHEN st.file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
           * CASE WHEN st.symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15
                  WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
-          * (1 + 0.15 * ln(1 + sc.pagerank * 1e4)) AS fused_rank,
+          * (1 + 0.15 * ln(1 + sc.pagerank * 1e4))
+          * CASE
+              WHEN intent = 'debug' THEN 1 + 0.12 * ln(1 + sc.churn_90d)
+              WHEN intent = 'change' THEN 1 + 0.10 * ln(1 + COALESCE(vi.callers, 0))
+              WHEN intent = 'review' AND sc.posture = 'load-bearing wall' THEN 1.35
+              ELSE 1.0
+            END AS fused_rank,
         sc.pagerank,
         sc.churn_90d,
         sc.posture,
