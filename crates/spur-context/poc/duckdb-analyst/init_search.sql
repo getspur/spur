@@ -224,89 +224,153 @@ CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS
   LIMIT 40;
 
 CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE
+  WITH bm25_rows AS (
+    SELECT * FROM search_context_candidates(q, requested_scope, intent)
+  ),
+  hybrid_code AS (
+    SELECT
+      'code' AS kind,
+      COALESCE(sc.entity_name, h.entity_name) AS title,
+      COALESCE(sc.file_path, h.file_path) AS file_path,
+      h.stable_symbol_id,
+      COALESCE(sc.symbol_kind, h.symbol_kind) AS symbol_kind,
+      round(
+        COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
+          * CASE WHEN COALESCE(sc.file_path, h.file_path) LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
+          * CASE WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('function','method','struct','enum','trait') THEN 1.15
+                 WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
+          * (1 + 0.15 * ln(1 + COALESCE(sc.pagerank, 0) * 1e4))
+          * CASE
+              WHEN intent = 'debug' THEN 1 + 0.12 * ln(1 + COALESCE(sc.churn_90d, 0))
+              WHEN intent = 'change' THEN 1 + 0.10 * ln(1 + COALESCE(vi.callers, 0))
+              WHEN intent = 'review' AND COALESCE(sc.posture, '') = 'load-bearing wall' THEN 1.35
+              ELSE 1.0
+            END,
+        3
+      ) AS score,
+      COALESCE(sc.posture, 'unknown') || ' · pr=' || round(COALESCE(sc.pagerank, 0) * 1e4, 1)
+        || ' · churn=' || COALESCE(sc.churn_90d, 0) AS signal,
+      'primary' AS neighbor_kind,
+      CAST(NULL AS VARCHAR) AS edge_bind_method,
+      'hybrid-code' AS grounding
+    FROM lance_hybrid_search(
+      '__SPUR_GRAPH_ARTIFACT_DIR__/code_symbols.lance',
+      'vector', query_vec, 'embed_text', q,
+      k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
+    ) h
+    JOIN v_symbol_scorecard sc USING (stable_symbol_id)
+    LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
+    WHERE requested_scope IN ('all', 'code', 'graph')
+  ),
+  hybrid_docs AS (
+    SELECT
+      'doc' AS kind,
+      s.qualified_name AS title,
+      s.file_path,
+      h.stable_symbol_id,
+      CAST('section' AS VARCHAR) AS symbol_kind,
+      round(
+        COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
+          * CASE WHEN intent = 'plan' THEN 1.3 ELSE 1.0 END,
+        3
+      ) AS score,
+      CAST(NULL AS VARCHAR) AS signal,
+      CAST(NULL AS VARCHAR) AS neighbor_kind,
+      CAST(NULL AS VARCHAR) AS edge_bind_method,
+      'hybrid-doc' AS grounding
+    FROM lance_hybrid_search(
+      '__SPUR_GRAPH_ARTIFACT_DIR__/sections.lancedb/section_bodies.lance',
+      'vector', query_vec, 'body_text', q,
+      k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
+    ) h
+    JOIN sections_search s USING (stable_symbol_id)
+    WHERE requested_scope IN ('all', 'docs')
+  ),
+  -- Pure BM25 callers keep search_context_candidates unchanged. When a query
+  -- vector is present, `score` below becomes an RRF-fused score across the BM25
+  -- and Lance candidate lists so their incompatible raw score scales never
+  -- compete directly for the same LIMIT slots.
+  rrf_sources AS (
+    SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
+           neighbor_kind, edge_bind_method, grounding,
+           COALESCE(stable_symbol_id, file_path || ':' || title) AS candidate_id,
+           0 AS list_priority,
+           row_number() OVER (
+             ORDER BY score DESC NULLS LAST, file_path, title, COALESCE(stable_symbol_id, '')
+           ) AS list_rank
+    FROM bm25_rows
+    WHERE query_vec IS NOT NULL
+    UNION ALL
+    SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
+           neighbor_kind, edge_bind_method, grounding,
+           COALESCE(stable_symbol_id, file_path || ':' || title) AS candidate_id,
+           1 AS list_priority,
+           row_number() OVER (
+             ORDER BY score DESC NULLS LAST, file_path, title, COALESCE(stable_symbol_id, '')
+           ) AS list_rank
+    FROM hybrid_code
+    WHERE query_vec IS NOT NULL
+    UNION ALL
+    SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
+           neighbor_kind, edge_bind_method, grounding,
+           COALESCE(stable_symbol_id, file_path || ':' || title) AS candidate_id,
+           2 AS list_priority,
+           row_number() OVER (
+             ORDER BY score DESC NULLS LAST, file_path, title, COALESCE(stable_symbol_id, '')
+           ) AS list_rank
+    FROM hybrid_docs
+    WHERE query_vec IS NOT NULL
+  ),
+  fused_scores AS (
+    SELECT candidate_id,
+           SUM(1.0 / (60.0 + list_rank)) AS fused_score,
+           CASE
+             WHEN MAX(CASE WHEN grounding = 'hybrid-code' THEN 1 ELSE 0 END) = 1 THEN 'hybrid-code'
+             WHEN MAX(CASE WHEN grounding = 'hybrid-doc' THEN 1 ELSE 0 END) = 1 THEN 'hybrid-doc'
+             ELSE MIN(grounding)
+           END AS grounding
+    FROM rrf_sources
+    GROUP BY candidate_id
+  ),
+  representatives AS (
+    SELECT *,
+           row_number() OVER (
+             PARTITION BY candidate_id
+             ORDER BY list_rank ASC, list_priority ASC, score DESC NULLS LAST, file_path, title
+           ) AS representative_rank
+    FROM rrf_sources
+  ),
+  fused_rows AS (
+    SELECT r.kind, r.title, r.file_path, r.stable_symbol_id, r.symbol_kind,
+           round(f.fused_score, 6) AS score, r.signal, r.neighbor_kind,
+           r.edge_bind_method, f.grounding, r.list_rank, r.list_priority,
+           r.candidate_id
+    FROM fused_scores f
+    JOIN representatives r USING (candidate_id)
+    WHERE representative_rank = 1
+  )
   SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
          neighbor_kind, edge_bind_method, grounding
   FROM (
-    WITH bm25_rows AS (
-      SELECT * FROM search_context_candidates(q, requested_scope, intent)
-    ),
-    hybrid_code AS (
-      SELECT
-        'code' AS kind,
-        COALESCE(sc.entity_name, h.entity_name) AS title,
-        COALESCE(sc.file_path, h.file_path) AS file_path,
-        h.stable_symbol_id,
-        COALESCE(sc.symbol_kind, h.symbol_kind) AS symbol_kind,
-        round(
-          COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
-            * CASE WHEN COALESCE(sc.file_path, h.file_path) LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END
-            * CASE WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('function','method','struct','enum','trait') THEN 1.15
-                   WHEN COALESCE(sc.symbol_kind, h.symbol_kind) IN ('constant','static','field') THEN 0.85 ELSE 1.0 END
-            * (1 + 0.15 * ln(1 + COALESCE(sc.pagerank, 0) * 1e4))
-            * CASE
-                WHEN intent = 'debug' THEN 1 + 0.12 * ln(1 + COALESCE(sc.churn_90d, 0))
-                WHEN intent = 'change' THEN 1 + 0.10 * ln(1 + COALESCE(vi.callers, 0))
-                WHEN intent = 'review' AND COALESCE(sc.posture, '') = 'load-bearing wall' THEN 1.35
-                ELSE 1.0
-              END,
-          3
-        ) AS score,
-        COALESCE(sc.posture, 'unknown') || ' · pr=' || round(COALESCE(sc.pagerank, 0) * 1e4, 1)
-          || ' · churn=' || COALESCE(sc.churn_90d, 0) AS signal,
-        'primary' AS neighbor_kind,
-        CAST(NULL AS VARCHAR) AS edge_bind_method,
-        'hybrid-code' AS grounding
-      FROM lance_hybrid_search(
-        '__SPUR_GRAPH_ARTIFACT_DIR__/code_symbols.lance',
-        'vector', query_vec, 'embed_text', q,
-        k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
-      ) h
-      JOIN v_symbol_scorecard sc USING (stable_symbol_id)
-      LEFT JOIN v_symbol_inbound vi USING (stable_symbol_id)
-      WHERE requested_scope IN ('all', 'code', 'graph')
-    ),
-    hybrid_docs AS (
-      SELECT
-        'doc' AS kind,
-        s.qualified_name AS title,
-        s.file_path,
-        h.stable_symbol_id,
-        CAST('section' AS VARCHAR) AS symbol_kind,
-        round(
-          COALESCE(h._hybrid_score, h._score, 1.0 - h._distance)
-            * CASE WHEN intent = 'plan' THEN 1.3 ELSE 1.0 END,
-          3
-        ) AS score,
-        CAST(NULL AS VARCHAR) AS signal,
-        CAST(NULL AS VARCHAR) AS neighbor_kind,
-        CAST(NULL AS VARCHAR) AS edge_bind_method,
-        'hybrid-doc' AS grounding
-      FROM lance_hybrid_search(
-        '__SPUR_GRAPH_ARTIFACT_DIR__/sections.lancedb/section_bodies.lance',
-        'vector', query_vec, 'body_text', q,
-        k := 30, prefilter := false, alpha := 0.5, oversample_factor := 5
-      ) h
-      JOIN sections_search s USING (stable_symbol_id)
-      WHERE requested_scope IN ('all', 'docs')
-    ),
-    unioned AS (
-      SELECT * FROM bm25_rows WHERE query_vec IS NULL
-      UNION ALL
-      SELECT * FROM bm25_rows WHERE query_vec IS NOT NULL
-      UNION ALL
-      SELECT * FROM hybrid_code WHERE query_vec IS NOT NULL
-      UNION ALL
-      SELECT * FROM hybrid_docs WHERE query_vec IS NOT NULL
-    )
-    SELECT *,
-           row_number() OVER (
-             PARTITION BY COALESCE(stable_symbol_id, file_path || ':' || title)
-             ORDER BY score DESC NULLS LAST
-           ) AS dedupe_rank
-    FROM unioned
+    SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
+           neighbor_kind, edge_bind_method, grounding,
+           CAST(NULL AS BIGINT) AS sort_rank,
+           CAST(NULL AS BIGINT) AS sort_priority,
+           COALESCE(stable_symbol_id, file_path || ':' || title) AS candidate_id
+    FROM bm25_rows
+    WHERE query_vec IS NULL
+    UNION ALL
+    SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
+           neighbor_kind, edge_bind_method, grounding,
+           list_rank AS sort_rank, list_priority AS sort_priority, candidate_id
+    FROM fused_rows
+    WHERE query_vec IS NOT NULL
   )
-  WHERE dedupe_rank = 1
-  ORDER BY score DESC NULLS LAST
+  ORDER BY
+    score DESC NULLS LAST,
+    CASE WHEN query_vec IS NOT NULL THEN sort_rank END ASC NULLS LAST,
+    CASE WHEN query_vec IS NOT NULL THEN sort_priority END ASC NULLS LAST,
+    CASE WHEN query_vec IS NOT NULL THEN candidate_id END ASC NULLS LAST
   LIMIT 40;
 
 -- Graph-augmented: BM25 top-k hits + selective 1-hop call-graph expansion.
