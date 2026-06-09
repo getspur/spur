@@ -38,7 +38,7 @@ const METHOD: &str = "code_semantic_search";
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
 #[cfg(feature = "datasource-introspect")]
-const EMBED_DIM: usize = 384;
+const EMBED_DIM: usize = 768;
 #[cfg(feature = "datasource-introspect")]
 const EMBED_CACHE_ENTRIES: usize = 1024;
 #[cfg(feature = "datasource-introspect")]
@@ -51,6 +51,10 @@ const HYBRID_PER_DOC_LIMIT: usize = 3;
 const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 #[cfg(feature = "datasource-introspect")]
 const SECTIONS_TABLE: &str = "section_bodies";
+#[cfg(feature = "datasource-introspect")]
+pub const CODE_SYMBOLS_DATASET_DIR: &str = "code_symbols.lance";
+#[cfg(feature = "datasource-introspect")]
+pub const CODE_SYMBOLS_TABLE: &str = "code_symbols";
 
 #[cfg(feature = "datasource-introspect")]
 static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
@@ -105,10 +109,10 @@ fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
     EMBED_MODEL
         .get_or_init(|| {
             tracing::info!(
-                "Loading embedding model BGESmallENV15 (~130 MB, cached after first run)"
+                "Loading embedding model BGEBaseENV15 (~420 MB, cached after first run)"
             );
             fastembed::TextEmbedding::try_new(
-                fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
+                fastembed::InitOptions::new(fastembed::EmbeddingModel::BGEBaseENV15)
                     .with_show_download_progress(true),
             )
             .ok()
@@ -164,6 +168,7 @@ async fn embed_query(query: &str) -> Option<[f32; EMBED_DIM]> {
 #[cfg(feature = "datasource-introspect")]
 #[derive(Debug, Clone)]
 struct DocSearchRow {
+    kind: String,
     stable_symbol_id: String,
     title: String,
     file: String,
@@ -175,11 +180,13 @@ struct DocSearchRow {
 impl DocSearchRow {
     fn new(
         stable_symbol_id: impl Into<String>,
+        kind: impl Into<String>,
         title: impl Into<String>,
         file: impl Into<String>,
         score: f64,
     ) -> Self {
         Self {
+            kind: kind.into(),
             stable_symbol_id: stable_symbol_id.into(),
             title: title.into(),
             file: file.into(),
@@ -190,7 +197,8 @@ impl DocSearchRow {
 
     fn into_value(self) -> Value {
         json!({
-            "kind": "doc",
+            "kind": self.kind,
+            "stable_symbol_id": self.stable_symbol_id,
             "title": self.title,
             "file": self.file,
             "score": self.score,
@@ -204,6 +212,8 @@ impl DocSearchRow {
 struct DocMetadata {
     title: String,
     file: String,
+    kind: Option<String>,
+    signal: Option<String>,
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -223,6 +233,8 @@ fn rrf_fuse(
             .or_insert_with(|| DocMetadata {
                 title: row.title.clone(),
                 file: row.file.clone(),
+                kind: Some(row.kind.clone()),
+                signal: row.signal.clone(),
             });
     }
 
@@ -249,10 +261,11 @@ fn rrf_fuse(
             let metadata = metadata.get(&stable_symbol_id)?;
             Some(DocSearchRow {
                 stable_symbol_id,
+                kind: metadata.kind.clone().unwrap_or_else(|| "doc".to_owned()),
                 title: metadata.title.clone(),
                 file: metadata.file.clone(),
                 score,
-                signal: None,
+                signal: metadata.signal.clone(),
             })
         })
         .collect::<Vec<_>>();
@@ -306,6 +319,7 @@ fn search_docs_bm25_rows(
         .query_map([], |row| {
             Ok(DocSearchRow::new(
                 row.get::<_, String>(0)?,
+                "doc",
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, f64>(3)?,
@@ -315,6 +329,109 @@ fn search_docs_bm25_rows(
 
     rows.collect::<Result<_, _>>()
         .map_err(|e| internal("failed to read BM25 docs rows", &e))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn search_code_bm25_rows(
+    conn: &duckdb::Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<DocSearchRow>, McpError> {
+    let q = query.replace('\'', "''");
+    let sql = format!(
+        "SELECT stable_symbol_id, symbol AS title, file_path AS file, \
+         round(bm25_raw, 3) AS score, posture AS signal \
+         FROM ( \
+           SELECT st.stable_symbol_id, st.entity_name AS symbol, st.file_path, \
+                  fts_main_symbol_text.match_bm25(st.stable_symbol_id, '{q}') AS bm25_raw, \
+                  st.symbol_kind, sc.posture \
+           FROM symbol_text st \
+           JOIN v_symbol_scorecard sc USING (stable_symbol_id) \
+           WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, '{q}') IS NOT NULL \
+         ) ranked \
+         ORDER BY bm25_raw \
+           * CASE WHEN file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END \
+           * CASE WHEN symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15 \
+                  WHEN symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END DESC NULLS LAST \
+         LIMIT {limit}"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| internal("failed to prepare code BM25 query", &e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let mut doc_row = DocSearchRow::new(
+                row.get::<_, String>(0)?,
+                "code",
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+            );
+            doc_row.signal = row.get::<_, Option<String>>(4)?;
+            Ok(doc_row)
+        })
+        .map_err(|e| internal("failed to run code BM25 query", &e))?;
+
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| internal("failed to read code BM25 rows", &e))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn search_all_bm25_rows(
+    conn: &duckdb::Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<DocSearchRow>, McpError> {
+    let q = query.replace('\'', "''");
+    let sql = format!(
+        "SELECT stable_symbol_id, kind, title, file, round(score, 3) AS score, signal \
+         FROM ( \
+           SELECT s.stable_symbol_id, 'doc' AS kind, \
+                  s.qualified_name AS title, \
+                  regexp_replace(s.file_path, '^(crates|docs|\\.claude|\\.spur|\\.codex|\\.kiro|\\.gemini)/', '') AS file, \
+                  fts_main_sections_search.match_bm25(s.stable_symbol_id, '{q}') AS score, \
+                  CAST(NULL AS VARCHAR) AS signal, \
+                  fts_main_sections_search.match_bm25(s.stable_symbol_id, '{q}') AS rank \
+           FROM sections_search s \
+           WHERE fts_main_sections_search.match_bm25(s.stable_symbol_id, '{q}') IS NOT NULL \
+           UNION ALL \
+           SELECT st.stable_symbol_id, 'code' AS kind, \
+                  st.entity_name AS title, \
+                  regexp_replace(st.file_path, '^crates/', '') AS file, \
+                  fts_main_symbol_text.match_bm25(st.stable_symbol_id, '{q}') AS score, \
+                  sc.posture AS signal, \
+                  fts_main_symbol_text.match_bm25(st.stable_symbol_id, '{q}') \
+                    * CASE WHEN st.file_path LIKE '%/tests/%' THEN 0.6 ELSE 1.0 END \
+                    * CASE WHEN st.symbol_kind IN ('function','method','struct','enum','trait') THEN 1.15 \
+                           WHEN st.symbol_kind IN ('constant','static','field') THEN 0.85 ELSE 1.0 END \
+                    * (1 + 0.15 * ln(1 + sc.pagerank * 1e4)) AS rank \
+           FROM symbol_text st \
+           JOIN v_symbol_scorecard sc USING (stable_symbol_id) \
+           WHERE fts_main_symbol_text.match_bm25(st.stable_symbol_id, '{q}') IS NOT NULL \
+         ) \
+         WHERE rank IS NOT NULL \
+         QUALIFY row_number() OVER (PARTITION BY file ORDER BY rank DESC) <= 2 \
+         ORDER BY rank DESC NULLS LAST \
+         LIMIT {limit}"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| internal("failed to prepare all BM25 query", &e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DocSearchRow {
+                stable_symbol_id: row.get::<_, String>(0)?,
+                kind: row.get::<_, String>(1)?,
+                title: row.get::<_, String>(2)?,
+                file: row.get::<_, String>(3)?,
+                score: row.get::<_, f64>(4)?,
+                signal: row.get::<_, Option<String>>(5)?,
+            })
+        })
+        .map_err(|e| internal("failed to run all BM25 query", &e))?;
+
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| internal("failed to read all BM25 rows", &e))
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -337,11 +454,64 @@ fn fetch_doc_metadata(
         .map(|id| format!("'{}'", id.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!(
-        "SELECT stable_symbol_id, qualified_name AS title, \
-         regexp_replace(file_path, '^(crates|docs|\\.claude|\\.spur|\\.codex|\\.kiro|\\.gemini)/', '') AS file \
-         FROM sections_search WHERE stable_symbol_id IN ({ids})"
-    );
+    let has_sections_search: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 \
+             FROM information_schema.tables \
+             WHERE table_schema='main' AND table_name='sections_search'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    let has_symbol_text: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 \
+             FROM information_schema.tables \
+             WHERE table_schema='main' AND table_name='symbol_text'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_sections_search && !has_symbol_text {
+        return Ok(HashMap::new());
+    }
+
+    let sql = if has_symbol_text && has_sections_search {
+        format!(
+            "SELECT stable_symbol_id, title, file, kind \
+             FROM ( \
+               SELECT st.stable_symbol_id, st.entity_name AS title, \
+                      regexp_replace(st.file_path, '^crates/', '') AS file, \
+                      'code' AS kind, 0 AS kind_rank \
+               FROM symbol_text st \
+               WHERE st.stable_symbol_id IN ({ids}) \
+               UNION ALL \
+               SELECT s.stable_symbol_id, s.qualified_name AS title, \
+                      regexp_replace(s.file_path, '^(crates|docs|\\.claude|\\.spur|\\.codex|\\.kiro|\\.gemini)/', '') AS file, \
+                      'doc' AS kind, 1 AS kind_rank \
+               FROM sections_search s \
+               WHERE s.stable_symbol_id IN ({ids}) \
+             ) \
+             QUALIFY row_number() OVER (PARTITION BY stable_symbol_id ORDER BY kind_rank) = 1"
+        )
+    } else if has_symbol_text {
+        format!(
+            "SELECT st.stable_symbol_id, st.entity_name AS title, \
+                    regexp_replace(st.file_path, '^crates/', '') AS file, \
+                    'code' AS kind \
+             FROM symbol_text st \
+             WHERE st.stable_symbol_id IN ({ids})"
+        )
+    } else {
+        format!(
+            "SELECT stable_symbol_id, qualified_name AS title, \
+                    regexp_replace(file_path, '^(crates|docs|\\.claude|\\.spur|\\.codex|\\.kiro|\\.gemini)/', '') AS file, \
+                    'doc' AS kind \
+             FROM sections_search \
+             WHERE stable_symbol_id IN ({ids})"
+        )
+    };
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| internal("failed to prepare doc metadata query", &e))?;
@@ -352,6 +522,8 @@ fn fetch_doc_metadata(
                 DocMetadata {
                     title: row.get::<_, String>(1)?,
                     file: row.get::<_, String>(2)?,
+                    kind: Some(row.get::<_, String>(3)?),
+                    signal: None,
                 },
             ))
         })
@@ -367,6 +539,23 @@ async fn lance_ann_search(query_vec: &[f32; EMBED_DIM], limit: usize) -> Vec<(St
         Ok(rows) => rows,
         Err(error) => {
             tracing::debug!(%error, "Lance ANN search unavailable; returning BM25-only hybrid rows");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+pub async fn lance_ann_search_code(
+    query_vec: &[f32; EMBED_DIM],
+    limit: usize,
+) -> Vec<(String, f64)> {
+    match lance_ann_search_code_inner(query_vec, limit).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "Lance code-symbol ANN search unavailable; returning empty rows"
+            );
             Vec::new()
         }
     }
@@ -419,6 +608,74 @@ async fn lance_ann_search_inner(
             .ok_or_else(|| {
                 McpError::internal_error(
                     format!("{METHOD} Lance vector query missing _distance column"),
+                    None,
+                )
+            })?;
+
+        for idx in 0..batch.num_rows() {
+            if ids.is_null(idx) {
+                continue;
+            }
+            let distance = if distances.is_valid(idx) {
+                distances.value(idx) as f64
+            } else {
+                0.0
+            };
+            rows.push((ids.value(idx).to_owned(), distance));
+        }
+    }
+    Ok(rows)
+}
+
+#[cfg(feature = "datasource-introspect")]
+pub async fn lance_ann_search_code_inner(
+    query_vec: &[f32; EMBED_DIM],
+    limit: usize,
+) -> Result<Vec<(String, f64)>, McpError> {
+    let dataset_path = resolve_lance_code_dataset_path()?;
+    if !dataset_path.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let conn = cached_lance_connection(&dataset_path).await?;
+    let table = conn
+        .open_table(CODE_SYMBOLS_TABLE)
+        .execute()
+        .await
+        .map_err(|e| internal("failed to open Lance code symbols table", &e))?;
+    let batches = table
+        .query()
+        .only_if("vector IS NOT NULL")
+        .select(Select::columns(&["stable_symbol_id", "_distance"]))
+        .nearest_to(query_vec.as_slice())
+        .map_err(|e| internal("failed to build Lance code-symbol vector query", &e))?
+        .limit(limit)
+        .execute()
+        .await
+        .map_err(|e| internal("failed to execute Lance code-symbol vector query", &e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| internal("failed to read Lance code-symbol vector rows", &e))?;
+
+    let mut rows = Vec::new();
+    for batch in batches {
+        let ids = batch
+            .column_by_name("stable_symbol_id")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    format!(
+                        "{METHOD} Lance code-symbol vector query missing stable_symbol_id column"
+                    ),
+                    None,
+                )
+            })?;
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|column| column.as_any().downcast_ref::<Float32Array>())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    format!("{METHOD} Lance code-symbol vector query missing _distance column"),
                     None,
                 )
             })?;
@@ -597,6 +854,72 @@ async fn search_rows(
         return Ok((path.display().to_string(), results, graph_hash, ann_count));
     }
 
+    if scope == "code" || scope == "all" {
+        let bm25_rows = match scope {
+            "code" => search_code_bm25_rows(&conn, query, HYBRID_CANDIDATES.max(limit))?,
+            _ => search_all_bm25_rows(&conn, query, HYBRID_CANDIDATES.max(limit))?,
+        };
+        let ann_rows = match embed_query(query).await {
+            Some(query_vec) => {
+                lance_ann_search_code(&query_vec, HYBRID_CANDIDATES.max(limit)).await
+            }
+            None => Vec::new(),
+        };
+        let mut metadata_ids = bm25_rows
+            .iter()
+            .map(|row| row.stable_symbol_id.clone())
+            .collect::<Vec<_>>();
+        metadata_ids.extend(
+            ann_rows
+                .iter()
+                .map(|(stable_symbol_id, _)| stable_symbol_id.clone()),
+        );
+        let metadata = fetch_doc_metadata(&conn, &metadata_ids)?;
+        let mut metadata = metadata;
+        for (stable_symbol_id, _) in &ann_rows {
+            metadata
+                .entry(stable_symbol_id.clone())
+                .and_modify(|doc_metadata| doc_metadata.kind = Some("code".to_owned()))
+                .or_insert_with(|| DocMetadata {
+                    title: stable_symbol_id.clone(),
+                    file: String::new(),
+                    kind: Some("code".to_owned()),
+                    signal: None,
+                });
+        }
+        // Code BM25 rows carry the authoritative posture in `signal` (and the
+        // resolved title/file); fetch_doc_metadata leaves signal=None, so overlay
+        // the BM25 row fields into the metadata map before fusion — otherwise
+        // posture is dropped from the final code-scope results.
+        for row in &bm25_rows {
+            metadata
+                .entry(row.stable_symbol_id.clone())
+                .and_modify(|doc_metadata| {
+                    if doc_metadata.signal.is_none() {
+                        doc_metadata.signal = row.signal.clone();
+                    }
+                    doc_metadata.kind = Some(row.kind.clone());
+                })
+                .or_insert_with(|| DocMetadata {
+                    title: row.title.clone(),
+                    file: row.file.clone(),
+                    kind: Some(row.kind.clone()),
+                    signal: row.signal.clone(),
+                });
+        }
+        let ann_count = ann_rows.len();
+        let results = rrf_fuse(&bm25_rows, &ann_rows, &metadata, limit)
+            .into_iter()
+            .map(DocSearchRow::into_value)
+            .collect::<Vec<_>>();
+
+        let graph_hash: Option<String> = conn
+            .query_row("SELECT graph_content_hash FROM _meta", [], |r| r.get(0))
+            .ok();
+
+        return Ok((path.display().to_string(), results, graph_hash, ann_count));
+    }
+
     // The macro arg flows into FTS match_bm25, which wants a constant — inline the
     // query as an escaped string literal rather than a bind parameter.
     let q = query.replace('\'', "''");
@@ -605,11 +928,6 @@ async fn search_rows(
             "SELECT 'doc' AS kind, section AS title, file_path AS file, \
              round(bm25, 3) AS score, CAST(NULL AS VARCHAR) AS signal \
              FROM search_docs('{q}') LIMIT {limit}"
-        ),
-        "code" => format!(
-            "SELECT 'code' AS kind, symbol AS title, file_path AS file, \
-             round(bm25, 3) AS score, posture AS signal \
-             FROM search_code('{q}') LIMIT {limit}"
         ),
         "graph" => format!(
             "SELECT kind, title, file, round(score, 3) AS score, signal, \
@@ -705,9 +1023,19 @@ fn resolve_db_path(explicit: Option<&str>) -> Result<std::path::PathBuf, McpErro
 
 #[cfg(feature = "datasource-introspect")]
 fn resolve_lance_dataset_path() -> Result<PathBuf, McpError> {
+    resolve_lance_dataset_path_in(SECTIONS_DATASET_DIR)
+}
+
+#[cfg(feature = "datasource-introspect")]
+pub fn resolve_lance_code_dataset_path() -> Result<PathBuf, McpError> {
+    resolve_lance_dataset_path_in(CODE_SYMBOLS_DATASET_DIR)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn resolve_lance_dataset_path_in(dataset_dir: &str) -> Result<PathBuf, McpError> {
     if let Some(raw) = std::env::var_os("SPUR_GRAPH_ARTIFACT_DIR") {
         if !raw.is_empty() {
-            return Ok(PathBuf::from(raw).join(SECTIONS_DATASET_DIR));
+            return Ok(PathBuf::from(raw).join(dataset_dir));
         }
     }
 
@@ -721,7 +1049,7 @@ fn resolve_lance_dataset_path() -> Result<PathBuf, McpError> {
         let pointer = dir.join(".spur").join("graph").join("CURRENT");
         if std::fs::symlink_metadata(&pointer).is_ok() {
             let artifact_dir = resolve_graph_current_pointer(&pointer)?;
-            return Ok(artifact_dir.join(SECTIONS_DATASET_DIR));
+            return Ok(artifact_dir.join(dataset_dir));
         }
         if !dir.pop() {
             break;
@@ -767,13 +1095,16 @@ fn internal(message: &str, error: &impl std::fmt::Display) -> McpError {
 
 #[cfg(all(test, feature = "datasource-introspect"))]
 mod tests {
-    use std::sync::Arc;
+    use std::{ffi::OsString, sync::Arc};
 
     use super::*;
     use crate::mcp::{
         bridge::{AgentBridge, TauriBridgeRequester},
         ServerDeps,
     };
+    use arrow_array::{FixedSizeListArray, LargeStringArray, RecordBatch};
+    use arrow_buffer::NullBuffer;
+    use arrow_schema::{DataType, Field, Schema};
 
     fn deps_without_app() -> ServerDeps {
         ServerDeps::from_bridge(Arc::new(TauriBridgeRequester::without_app(Arc::new(
@@ -787,9 +1118,74 @@ mod tests {
         embedding
     }
 
+    // Serializes every test that mutates a process-global env var (notably
+    // SPUR_GRAPH_ARTIFACT_DIR). Cargo runs tests in parallel threads within one
+    // binary, so two tests pointing the same env var at different dirs would
+    // clobber each other; holding this lock for the guard's lifetime makes those
+    // tests run one at a time.
+    static ENV_GUARD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            // Recover from a poisoned lock (a prior test panicked while holding
+            // it) — the env state is restored on drop regardless, so the data is
+            // not meaningfully corrupted.
+            let lock = ENV_GUARD_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self {
+                key,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
-    fn embed_dim_matches_bge_small_vectors() {
-        assert_eq!(EMBED_DIM, 384);
+    fn embed_dim_matches_graph_sections_dataset() {
+        assert_eq!(EMBED_DIM, indexer_embedding_dimensions(),);
+    }
+
+    fn indexer_embedding_dimensions() -> usize {
+        let sections_rs_path = format!(
+            "{}/../spur-graph/src/store/lance_sections.rs",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let sections_rs = std::fs::read_to_string(&sections_rs_path)
+            .expect("reading spur-graph sections index writer source");
+
+        let declaration = sections_rs
+            .lines()
+            .find(|line| line.contains("pub const EMBEDDING_VECTOR_DIMENSIONS"))
+            .unwrap_or_else(|| {
+                panic!("could not find EMBEDDING_VECTOR_DIMENSIONS in {sections_rs_path}")
+            });
+        let rhs = declaration.split('=').nth(1).unwrap_or_else(|| {
+            panic!("malformed EMBEDDING_VECTOR_DIMENSIONS declaration in {sections_rs_path}")
+        });
+        rhs.trim()
+            .trim_end_matches(';')
+            .parse::<usize>()
+            .unwrap_or_else(|error| {
+                panic!("failed to parse EMBEDDING_VECTOR_DIMENSIONS in {sections_rs_path}: {error}")
+            })
     }
 
     #[test]
@@ -842,11 +1238,11 @@ mod tests {
     #[test]
     fn rrf_fuse_merges_bm25_and_ann_with_per_document_cap() {
         let bm25 = vec![
-            DocSearchRow::new("bm25-only", "BM25 only", "docs/a.md", 3.0),
-            DocSearchRow::new("shared", "Shared", "docs/a.md", 2.0),
-            DocSearchRow::new("a-third", "A third", "docs/a.md", 1.0),
-            DocSearchRow::new("a-fourth", "A fourth", "docs/a.md", 0.5),
-            DocSearchRow::new("other", "Other", "docs/b.md", 0.25),
+            DocSearchRow::new("bm25-only", "doc", "BM25 only", "docs/a.md", 3.0),
+            DocSearchRow::new("shared", "doc", "Shared", "docs/a.md", 2.0),
+            DocSearchRow::new("a-third", "doc", "A third", "docs/a.md", 1.0),
+            DocSearchRow::new("a-fourth", "doc", "A fourth", "docs/a.md", 0.5),
+            DocSearchRow::new("other", "doc", "Other", "docs/b.md", 0.25),
         ];
         let metadata = bm25
             .iter()
@@ -856,6 +1252,8 @@ mod tests {
                     DocMetadata {
                         title: row.title.clone(),
                         file: row.file.clone(),
+                        kind: Some(row.kind.clone()),
+                        signal: row.signal.clone(),
                     },
                 )
             })
@@ -864,6 +1262,8 @@ mod tests {
                 DocMetadata {
                     title: "ANN only".to_owned(),
                     file: "docs/c.md".to_owned(),
+                    kind: Some("doc".to_owned()),
+                    signal: None,
                 },
             )])
             .collect::<HashMap<_, _>>();
@@ -912,6 +1312,7 @@ mod tests {
     fn rrf_fuse_returns_bm25_rows_when_ann_is_unavailable() {
         let bm25 = vec![DocSearchRow::new(
             "s1",
+            "doc",
             "design/overview",
             "docs/design.md",
             3.0,
@@ -924,6 +1325,8 @@ mod tests {
                     DocMetadata {
                         title: row.title.clone(),
                         file: row.file.clone(),
+                        kind: Some(row.kind.clone()),
+                        signal: row.signal.clone(),
                     },
                 )
             })
@@ -1123,6 +1526,103 @@ mod tests {
         assert!(
             unified_plan_rows <= 2,
             "one document must not exceed 2 unified search rows"
+        );
+        Ok(())
+    }
+
+    fn code_symbol_batch_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("stable_symbol_id", DataType::Utf8, false),
+            Field::new("file_path", DataType::Utf8, false),
+            Field::new("qualified_name", DataType::Utf8, false),
+            Field::new("entity_name", DataType::Utf8, false),
+            Field::new("symbol_kind", DataType::Utf8, false),
+            Field::new("embed_text", DataType::LargeUtf8, false),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, true)),
+                    EMBED_DIM as i32,
+                ),
+                true,
+            ),
+            Field::new("content_hash", DataType::Utf8, false),
+        ]))
+    }
+
+    fn code_symbol_batch(query_vec: &[f32; EMBED_DIM]) -> RecordBatch {
+        let mut second = *query_vec;
+        second[0] = -query_vec[0];
+        let vectors = {
+            let mut values = Vec::with_capacity(EMBED_DIM * 2);
+            values.extend_from_slice(query_vec);
+            values.extend_from_slice(&second);
+            values
+        };
+
+        let vector_array = FixedSizeListArray::try_new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            EMBED_DIM as i32,
+            Arc::new(Float32Array::from(vectors)),
+            Some(NullBuffer::from(vec![true, true])),
+        )
+        .expect("code-symbol vector column");
+
+        RecordBatch::try_new(
+            code_symbol_batch_schema(),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    "s.code.alpha".to_owned(),
+                    "s.code.beta".to_owned(),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "crates/spur-notebook/src/lib.rs".to_owned(),
+                    "crates/spur-notebook/src/main.rs".to_owned(),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "notebook::alpha".to_owned(),
+                    "notebook::beta".to_owned(),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "alpha".to_owned(),
+                    "beta".to_owned(),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "function".to_owned(),
+                    "function".to_owned(),
+                ])),
+                Arc::new(LargeStringArray::from(vec![
+                    "alpha alpha function".to_owned(),
+                    "beta beta function".to_owned(),
+                ])),
+                Arc::new(vector_array),
+                Arc::new(StringArray::from(vec![
+                    "h-alpha".to_owned(),
+                    "h-beta".to_owned(),
+                ])),
+            ],
+        )
+        .expect("code-symbol batch")
+    }
+
+    #[tokio::test]
+    async fn lance_ann_search_code_fixture_returns_seeded_rows() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let query_vec = embedding_with_marker(1.0);
+        let dataset_dir = tempdir.path().join(CODE_SYMBOLS_DATASET_DIR);
+        let db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
+            .execute()
+            .await?;
+        db.create_table(CODE_SYMBOLS_TABLE, code_symbol_batch(&query_vec))
+            .execute()
+            .await?;
+
+        let artifact_dir = tempdir.path().to_string_lossy().to_string();
+        let _artifact_dir = EnvVarGuard::set("SPUR_GRAPH_ARTIFACT_DIR", &artifact_dir);
+        let rows = lance_ann_search_code(&query_vec, 10).await;
+        assert!(
+            !rows.is_empty(),
+            "code-symbol ANN query should return seeded rows"
         );
         Ok(())
     }
@@ -1417,6 +1917,15 @@ mod tests {
         // search_rows reopens read-only and must LOAD icu so the TIMESTAMPTZ churn
         // boundary binds. Without that load this errors with the production
         // `-(TIMESTAMP WITH TIME ZONE, INTERVAL)` binder error.
+        //
+        // Pin SPUR_GRAPH_ARTIFACT_DIR to this test's own tempdir (which has no
+        // code_symbols.lance) so resolve_lance_code_dataset_path does NOT walk up
+        // to the real repo `.spur/graph/CURRENT`; that keeps this a pure BM25/icu
+        // binding test with ann_rows == 0 instead of leaking into the live artifact.
+        let _artifact_dir = EnvVarGuard::set(
+            "SPUR_GRAPH_ARTIFACT_DIR",
+            dir.path().to_string_lossy().as_ref(),
+        );
         let (_path, results, graph_hash, ann_rows) =
             search_rows("response metadata compression", "code", 10, db.to_str())
                 .await
@@ -1427,6 +1936,96 @@ mod tests {
         assert_eq!(results[0]["title"], "compress_response");
         // posture flowed through as the `signal` column (active: churn==2, <10).
         assert_eq!(results[0]["signal"], "active");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_rows_code_scope_ceiling_uses_ann() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("analyst.duckdb");
+        {
+            let conn = duckdb::Connection::open(&db)?;
+            conn.execute_batch("INSTALL fts; LOAD fts;")?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE symbol_text(
+                    stable_symbol_id VARCHAR, entity_name VARCHAR, symbol_kind VARCHAR,
+                    file_path VARCHAR, tokens VARCHAR);
+                CREATE TABLE v_symbol_scorecard(
+                    stable_symbol_id VARCHAR, pagerank DOUBLE,
+                    churn_90d BIGINT, posture VARCHAR, component_size BIGINT
+                );
+                CREATE TABLE sections_search(
+                    stable_symbol_id VARCHAR, qualified_name VARCHAR, file_path VARCHAR
+                );
+                CREATE TABLE _meta(graph_content_hash VARCHAR);
+                INSERT INTO _meta VALUES ('floor');
+                INSERT INTO symbol_text VALUES
+                  ('event_drain::flush', 'event_drain_flush', 'function',
+                   'crates/spur-core/src/stream.rs',
+                   'ring buffer checkpoint');
+                INSERT INTO v_symbol_scorecard VALUES
+                  ('event_drain::flush', 0.01, 7, 'leaf', 50);
+                INSERT INTO sections_search VALUES
+                  ('event_drain::flush', 'event_drain::flush', 'crates/spur-core/src/stream.rs');
+                "#,
+            )?;
+            conn.execute_batch(
+                "PRAGMA create_fts_index('symbol_text','stable_symbol_id','tokens', overwrite=1);",
+            )?;
+            conn.execute_batch("CHECKPOINT;")?;
+        }
+
+        let dataset_dir = dir.path().join(CODE_SYMBOLS_DATASET_DIR);
+        let lancedb_conn = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
+            .execute()
+            .await?;
+        let query_vec = [0.0f32; EMBED_DIM];
+        let vectors = query_vec.to_vec();
+        let vector_array = FixedSizeListArray::try_new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            EMBED_DIM as i32,
+            Arc::new(Float32Array::from(vectors)),
+            Some(NullBuffer::from(vec![true])),
+        )?;
+        let batch = RecordBatch::try_new(
+            code_symbol_batch_schema(),
+            vec![
+                Arc::new(StringArray::from(vec!["event_drain::flush".to_owned()])),
+                Arc::new(StringArray::from(vec![
+                    "crates/spur-core/src/stream.rs".to_owned()
+                ])),
+                Arc::new(StringArray::from(vec!["event_drain::flush".to_owned()])),
+                Arc::new(StringArray::from(vec!["event_drain".to_owned()])),
+                Arc::new(StringArray::from(vec!["function".to_owned()])),
+                Arc::new(LargeStringArray::from(vec![
+                    "ring buffer checkpoint".to_owned()
+                ])),
+                Arc::new(vector_array),
+                Arc::new(StringArray::from(vec!["h".to_owned()])),
+            ],
+        )?;
+        lancedb_conn
+            .create_table(CODE_SYMBOLS_TABLE, batch)
+            .execute()
+            .await?;
+
+        let query = "throttle events before shutdown";
+        if let Ok(mut cache) = embed_cache().lock() {
+            cache.insert(embed_cache_key(query), query_vec);
+        }
+
+        let artifact_dir = dir.path().to_string_lossy().to_string();
+        let _artifact_dir = EnvVarGuard::set("SPUR_GRAPH_ARTIFACT_DIR", &artifact_dir);
+        let (_, rows, _graph_hash, ann_rows) = search_rows(query, "code", 10, db.to_str())
+            .await
+            .expect("code scope should blend ANN for ceiling-only query");
+
+        assert_eq!(ann_rows, 1);
+        assert!(!rows.is_empty(), "expected ANN-backed result");
+        assert_eq!(rows[0]["kind"], "code");
+        assert_eq!(rows[0]["stable_symbol_id"], "event_drain::flush");
+
         Ok(())
     }
 }
