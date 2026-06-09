@@ -47,8 +47,8 @@ function blob(x,y,r,color){
   g.addColorStop(0,color); g.addColorStop(.58,color.replace(/[\d.]+\)$/,".18)")); g.addColorStop(1,"transparent");
   ctx.fillStyle=g; ctx.fillRect(0,0,canvas.width,canvas.height);
 }
-function frame(now){
-  const t=now/1000,w=canvas.width,h=canvas.height,cx=w/2,cy=h/2;
+function draw(nowMs){
+  const t=nowMs/1000,w=canvas.width,h=canvas.height,cx=w/2,cy=h/2;
   const bg=ctx.createLinearGradient(0,0,w,h);
   bg.addColorStop(0,"#08111f"); bg.addColorStop(.28,"#0f766e"); bg.addColorStop(.55,"#155e75");
   bg.addColorStop(.78,"#7c3aed"); bg.addColorStop(1,"#111827"); ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
@@ -72,9 +72,15 @@ function frame(now){
   const line=ctx.createLinearGradient(cx-barW/2,0,cx+barW/2,0);
   line.addColorStop(0,"transparent"); line.addColorStop(.35,"#a7f3d0"); line.addColorStop(.65,"#f0abfc"); line.addColorStop(1,"transparent");
   ctx.fillStyle=line; ctx.fillRect(cx-barW/2,h*.88,barW,2);
-  requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+const DURATION_SEC = (window.__FRAME__ && window.__FRAME__.duration_ms) ? window.__FRAME__.duration_ms / 1000 : 6;
+window.__hf = { duration: DURATION_SEC, seek: (time) => draw(time * 1000) };
+const start = performance.now();
+function preview(now){
+  window.__hf.seek(((now-start)/1000) % window.__hf.duration);
+  requestAnimationFrame(preview);
+}
+requestAnimationFrame(preview);
 </script>
 </body>
 </html>
