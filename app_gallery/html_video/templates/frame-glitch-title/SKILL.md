@@ -1,6 +1,6 @@
 ---
 name: frame-glitch-title
-description: Canvas chromatic glitch title card for short video openers, chapter breaks, and high-energy text reveals.
+description: Native DOM/GSAP glitch title card with chromatic layering and burst jitter.
 ---
 # Frame: Glitch Title
 
@@ -9,12 +9,12 @@ headline with chromatic aberration, scanlines, and short glitch bursts.
 
 ## Capture Contract
 
-The template renders all visible content to one `<canvas data-capture="true">`.
-Do not add DOM-rendered visual layers, CSS animations, external fonts, scripts,
-images, or CDN links. The script sizes the canvas with
-`canvas.width = window.innerWidth` and `canvas.height = window.innerHeight`,
-then starts a `requestAnimationFrame` loop on load so `canvas.captureStream()`
-records the same pixels shown in the iframe preview.
+The template is a full-viewport native HyperFrames composition:
+- Root element uses `data-composition-id="main"` with `data-start`, `data-duration`,
+  `data-width`, and `data-height`.
+- `./gsap.min.js` is vendored and loaded directly.
+- A paused GSAP timeline is registered on `window.__timelines["main"]`.
+- No `<canvas>`, no `window.__hf`, and no `requestAnimationFrame` render loops.
 
 ## Inputs
 
