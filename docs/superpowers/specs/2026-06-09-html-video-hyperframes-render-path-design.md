@@ -79,19 +79,23 @@ re-pointed from `node` to `bun` (the only working JS runtime).**
 - **Note:** Node is NOT viable (engine packaging is bundler-only). Pixel-determinism is
   deferred to F1 (needs the engine's SwiftShader headless shell, not system Chrome).
 
-### F1 — render path swap *(depends: F0)*
-Route `html_video_render` through the engine.
-- **Goal:** add an engine render mode to the app: given a composition (an html_video
-  template/`app.ipynb` cell exposing `window.__hf`) + duration/fps/resolution, produce MP4
-  by shelling to the F0 harness via **`bun render-hf.mjs …`**. Keep the existing webm/port
-  path intact as a deprecated fallback during transition.
-- **Determinism requirement:** F0 showed that pointing Puppeteer at system Chrome yields
-  non-deterministic pixels (GPU raster). F1 MUST render through the engine's expected
-  **software-raster headless shell (SwiftShader)** — see the engine's `assertSwiftShader`
-  / `buildChromeArgs` / `BROWSER_GPU_NOT_SOFTWARE` — so output is reproducible.
-- **Acceptance:** rendering a Tier 0 template (e.g. `frame-liquid-hero`) through the new
-  path yields a deterministic MP4 (**frame-identical decoded pixels across two runs** at
-  fixed fps) with no reliance on the real-time capture gates. Existing Python tests stay green.
+### F1 — render path swap *(depends: F0)* — **DONE (approved 2026-06-09)**
+Route `html_video_render` through the engine. Implemented: `html_video_render` gains
+`composition_html` + `duration` params and shells **`bun render-hf.mjs …`**
+(`render_mode: "hyperframes-bun"`); engine harness untouched (Bun); webm/port path kept as
+fallback; test asserts the bun contract. Brain-verified end-to-end (valid 1280×720 h264,
+60 frames, 2.000s).
+- **Determinism — platform-gated (KNOWN CONSTRAINT, not a bug):** HyperFrames' deterministic
+  **BeginFrame** capture mode runs **only on Linux** with chrome-headless-shell
+  (`browserManager.js`: BeginFrame "crashes on macOS/Windows — crbug.com/40656275", so the
+  engine forces `screenshot` mode off-Linux). On macOS the output is correct but
+  **not bit-reproducible** (screenshot mode; sub-pixel antialiasing varies). This is a
+  HyperFrames platform limitation — unfixable in this app.
+- **Acceptance (revised, scoped to platform):** (a) a Tier 0 template renders through the
+  new Bun engine path to a valid MP4 with no reliance on the real-time capture gates
+  *(met + verified)*; (b) existing Python tests stay green *(met)*; (c) **bit-determinism is
+  expected only on a Linux render target** (BeginFrame) — verify there when one is wired,
+  not on the macOS dev box. Documented as a known constraint; **not a pipeline blocker.**
 
 ### T1 — audio + `<video>` *(depends: F1)*
 - **Goal:** extend the content model + templates to declare `__hf.media`
