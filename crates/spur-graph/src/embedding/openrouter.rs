@@ -1,6 +1,32 @@
 use anyhow::{anyhow, bail, Context as _, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Maximum number of retry attempts for transient network failures.
+/// Total attempts = MAX_RETRIES + 1 (initial attempt + retries).
+const MAX_RETRIES: usize = 2;
+
+/// Base delay for exponential backoff between retries.
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
+
+/// Timeout for establishing a TCP connection to OpenRouter.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Request timeout covering the full request + response body read.
+/// Bulk batches of 256 inputs can be slow, so use a generous timeout.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Build a `reqwest::Client` with bounded connect and request timeouts.
+/// Falls back to `Client::new()` if the builder fails (should never happen
+/// with valid timeout values, but we keep construction infallible).
+fn build_client() -> Client {
+    Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenRouterEmbedder {
@@ -28,7 +54,7 @@ impl OpenRouterEmbedder {
 
     pub fn from_api_key(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(),
             api_key: api_key.into(),
             endpoint: Self::DEFAULT_ENDPOINT.to_owned(),
         }
@@ -47,24 +73,86 @@ impl OpenRouterEmbedder {
 
         let mut embeddings = Vec::with_capacity(texts.len());
         for chunk in truncated_refs.chunks(Self::BATCH_SIZE) {
+            let chunk_embeddings = self.embed_chunk_with_retry(chunk).await?;
+            embeddings.extend(chunk_embeddings);
+        }
+        Ok(embeddings)
+    }
+
+    /// Embed a single chunk with bounded retry-with-backoff for transient
+    /// network failures (connection drop, body read error, 429 / 5xx status).
+    /// Non-transient errors (4xx except 429, 200-with-error-body, JSON decode
+    /// errors, embedding count mismatch) are returned immediately without retry.
+    async fn embed_chunk_with_retry(&self, chunk: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                // Exponential backoff: 200ms, 400ms, …
+                let delay = RETRY_BASE_DELAY * (1u32 << (attempt - 1));
+                tracing::debug!(
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    "Retrying OpenRouter embeddings request after transient error"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
             let request = EmbeddingRequest {
                 model: Self::MODEL,
                 input: chunk,
                 encoding_format: "float",
             };
-            let response = self
+
+            // Transient: send failure (connection drop, timeout, etc.)
+            let response = match self
                 .client
                 .post(&self.endpoint)
                 .bearer_auth(&self.api_key)
                 .json(&request)
                 .send()
                 .await
-                .context("failed to send OpenRouter embeddings request")?;
+                .context("failed to send OpenRouter embeddings request")
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "Transient send failure for OpenRouter embeddings request"
+                    );
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+
             let status_code = response.status();
             tracing::debug!(
                 status = status_code.as_u16(),
                 "OpenRouter embeddings response received"
             );
+
+            // Retryable: 429 or 5xx status codes.
+            if status_code == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status_code.is_server_error()
+            {
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<failed to read error body>".to_owned());
+                let err = anyhow::anyhow!(
+                    "OpenRouter embeddings request failed with {status_code}: {body}"
+                );
+                tracing::warn!(
+                    attempt,
+                    status = status_code.as_u16(),
+                    "Retryable HTTP error for OpenRouter embeddings request"
+                );
+                last_error = Some(err);
+                continue;
+            }
+
+            // Non-retryable: 4xx (except 429 handled above) — fail fast.
             if !status_code.is_success() {
                 let body = response
                     .text()
@@ -74,10 +162,26 @@ impl OpenRouterEmbedder {
             }
 
             let headers = response.headers().clone();
-            let body = response
+
+            // Transient: body read failure (mid-stream connection drop).
+            let body = match response
                 .text()
                 .await
-                .context("failed to read OpenRouter embeddings response body")?;
+                .context("failed to read OpenRouter embeddings response body")
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "Transient body read failure for OpenRouter embeddings response"
+                    );
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+
+            // Non-retryable: 200 with an embedded API error object.
             if let Some(api_error) = openrouter_error_from_body(&body) {
                 bail!(
                     "OpenRouter API error (model={}, batch_size={}, status={}): {}. \
@@ -89,8 +193,10 @@ impl OpenRouterEmbedder {
                     response_body_preview(&body, 500)
                 );
             }
-            let response = match serde_json::from_str::<EmbeddingResponse>(&body) {
-                Ok(response) => response,
+
+            // Non-retryable: JSON decode error.
+            let embedding_response = match serde_json::from_str::<EmbeddingResponse>(&body) {
+                Ok(r) => r,
                 Err(error) => {
                     let content_type = headers
                         .get("content-type")
@@ -120,7 +226,9 @@ impl OpenRouterEmbedder {
                     );
                 }
             };
-            let mut chunk_embeddings = ordered_embeddings_from_response(response)?;
+
+            // Non-retryable: embedding count mismatch.
+            let mut chunk_embeddings = ordered_embeddings_from_response(embedding_response)?;
             if chunk_embeddings.len() != chunk.len() {
                 bail!(
                     "OpenRouter returned {} embeddings for {} inputs",
@@ -128,9 +236,14 @@ impl OpenRouterEmbedder {
                     chunk.len()
                 );
             }
-            embeddings.append(&mut chunk_embeddings);
+
+            let mut result = Vec::with_capacity(chunk_embeddings.len());
+            result.append(&mut chunk_embeddings);
+            return Ok(result);
         }
-        Ok(embeddings)
+
+        // All attempts exhausted — propagate the last transient error.
+        Err(last_error.unwrap_or_else(|| anyhow!("OpenRouter embeddings request failed")))
     }
 
     fn request_input_text(text: &str) -> String {
@@ -328,7 +441,7 @@ mod tests {
     async fn embed_batch_decode_error_includes_response_diagnostics() {
         let endpoint = malformed_openrouter_server("not-json").await;
         let embedder = OpenRouterEmbedder {
-            client: Client::new(),
+            client: build_client(),
             api_key: "test-key".to_owned(),
             endpoint,
         };
@@ -352,7 +465,7 @@ mod tests {
         let error_body = r#"{"error":{"message":"HTTP 400: input too long","code":400}}"#;
         let endpoint = malformed_openrouter_server(error_body).await;
         let embedder = OpenRouterEmbedder {
-            client: Client::new(),
+            client: build_client(),
             api_key: "test-key".to_owned(),
             endpoint,
         };
@@ -371,7 +484,7 @@ mod tests {
     async fn embed_batch_truncates_token_dense_input_before_request() {
         let (endpoint, request_rx) = capturing_openrouter_server().await;
         let embedder = OpenRouterEmbedder {
-            client: Client::new(),
+            client: build_client(),
             api_key: "test-key".to_owned(),
             endpoint,
         };
