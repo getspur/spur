@@ -389,6 +389,7 @@ fn main() {
             jute::commands::run_cell,
             jute::commands::interrupt_kernel,
             jute::commands::get_notebook,
+            jute::commands::notebook_open_mode,
             jute::commands::save_to_disk,
             jute::commands::spur_delegate_to_worker,
             jute::commands::venv::venv_list_python_versions,
