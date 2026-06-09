@@ -1412,6 +1412,16 @@ export class Notebook {
       const notebook = await invoke<NotebookRoot>("get_notebook", { path });
       this.loadNotebook(notebook);
       this.state.viewStateActions.setPath(path);
+      try {
+        const openMode = await invoke<string | null>("notebook_open_mode", {
+          path,
+        });
+        if (openMode === "app") {
+          this.state.viewStateActions.setViewMode("app");
+        }
+      } catch {
+        // If open-mode detection fails, keep the default view mode.
+      }
     } catch (e: any) {
       this.state.viewStateActions.setLoadError(e.toString());
     }
