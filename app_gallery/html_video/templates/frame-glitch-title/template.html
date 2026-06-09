@@ -49,8 +49,8 @@ function drawTextBlock(text,x,y,maxWidth,size,lineHeight){
   }
   if(line)ctx.fillText(line,x,y);
 }
-function frame(now){
-  const t=now/1000,w=canvas.width,h=canvas.height,cx=w/2,cy=h/2;
+function draw(nowMs){
+  const t=nowMs/1000,w=canvas.width,h=canvas.height,cx=w/2,cy=h/2;
   const bg=ctx.createLinearGradient(0,0,w,h);
   bg.addColorStop(0,"#050505"); bg.addColorStop(.55,"#111318"); bg.addColorStop(1,"#050505");
   ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
@@ -82,9 +82,15 @@ function frame(now){
   ctx.globalCompositeOperation="source-over";
   ctx.fillStyle="#cbd5e1";
   drawTextBlock(copy.footer,cx,cy+h*.22,Math.min(760,w*.82),Math.max(16,Math.min(28,w*.021)),Math.max(24,w*.031));
-  requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+const DURATION_SEC = (window.__FRAME__ && window.__FRAME__.duration_ms) ? window.__FRAME__.duration_ms / 1000 : 6;
+window.__hf = { duration: DURATION_SEC, seek: (time) => draw(time * 1000) };
+const start = performance.now();
+function preview(now){
+  window.__hf.seek(((now-start)/1000) % window.__hf.duration);
+  requestAnimationFrame(preview);
+}
+requestAnimationFrame(preview);
 </script>
 </body>
 </html>
