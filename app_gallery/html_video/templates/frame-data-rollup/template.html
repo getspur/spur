@@ -21,7 +21,6 @@ const data=[
   {label:"Partners",value:47,color:"#fde047"},
   {label:"Paid",value:38,color:"#fb7185"}
 ];
-const bars=data.map(()=>({width:0,velocity:0}));
 function resize(){
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
@@ -38,8 +37,19 @@ function text(size,weight,color,align){
   ctx.font=`${weight} ${size}px Arial, Helvetica, sans-serif`;
   ctx.fillStyle=color; ctx.textAlign=align; ctx.textBaseline="middle";
 }
-function frame(now){
-  const t=now/1000,w=canvas.width,h=canvas.height;
+function springWidth(target, timeSec){
+  const steps = Math.max(0, Math.floor(timeSec * 60));
+  let width = 0;
+  let velocity = 0;
+  for(let i = 0; i < steps; i++){
+    const force = (target - width) * 0.085;
+    velocity = (velocity + force) * 0.74;
+    width += velocity;
+  }
+  return Math.max(0, Math.min(1, width));
+}
+function draw(nowMs){
+  const t=nowMs/1000,w=canvas.width,h=canvas.height;
   const bg=ctx.createLinearGradient(0,0,w,h);
   bg.addColorStop(0,"#0a0f14"); bg.addColorStop(.58,"#13202b"); bg.addColorStop(1,"#090b10");
   ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
@@ -62,9 +72,7 @@ function frame(now){
   const chartTop=top+h*.19;
   data.forEach((item,i)=>{
     const target=item.value/max;
-    const force=(target-bars[i].width)*0.085;
-    bars[i].velocity=(bars[i].velocity+force)*0.74;
-    bars[i].width+=bars[i].velocity;
+    const widthProgress = springWidth(target, t);
     const y=chartTop+i*(rowH+rowGap);
     const visible=Math.min(1,Math.max(0,(t-.18-i*.08)/.5));
     ctx.globalAlpha=visible;
@@ -73,7 +81,7 @@ function frame(now){
     const x=left+labelW+gap;
     rounded(x,y,chartW,rowH,8); ctx.fillStyle="rgba(255,255,255,.07)"; ctx.fill();
     ctx.strokeStyle="rgba(255,255,255,.13)"; ctx.lineWidth=1; ctx.stroke();
-    const barW=Math.max(0,Math.min(chartW,chartW*bars[i].width));
+    const barW=Math.max(0,Math.min(chartW,chartW*widthProgress));
     const grad=ctx.createLinearGradient(x,y,x+chartW,y);
     grad.addColorStop(0,item.color); grad.addColorStop(.56,"#a7f3d0"); grad.addColorStop(1,"#fde047");
     rounded(x,y,barW,rowH,8); ctx.fillStyle=grad; ctx.fill();
@@ -87,9 +95,15 @@ function frame(now){
   });
   text(Math.max(16,Math.min(24,w*.018)),700,"#b6c3d1","left");
   ctx.fillText(title.note,left,Math.min(h-44,chartTop+data.length*(rowH+rowGap)+h*.035));
-  requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+const DURATION_SEC = (window.__FRAME__ && window.__FRAME__.duration_ms) ? window.__FRAME__.duration_ms / 1000 : 6;
+window.__hf = { duration: DURATION_SEC, seek: (time) => draw(time * 1000) };
+const start = performance.now();
+function preview(now){
+  window.__hf.seek(((now-start)/1000) % window.__hf.duration);
+  requestAnimationFrame(preview);
+}
+requestAnimationFrame(preview);
 </script>
 </body>
 </html>
