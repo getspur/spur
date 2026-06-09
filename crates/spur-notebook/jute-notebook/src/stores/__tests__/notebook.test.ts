@@ -1,15 +1,26 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { RunCellEvent } from "@/bindings";
+import type { NotebookRoot, RunCellEvent } from "@/bindings";
 
 import {
   type NotebookStoreState,
   type RunCellEventApplicationState,
   applyRunCellEvent,
+  Notebook,
 } from "../notebook";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  Channel: class<T> {
+    onmessage?: (message: T) => void;
+  },
+  invoke: invokeMock,
+}));
 
 describe("applyRunCellEvent", () => {
   afterEach(() => {
+    invokeMock.mockReset();
     vi.restoreAllMocks();
   });
 
@@ -259,5 +270,89 @@ describe("applyRunCellEvent", () => {
 
     expect(runState.compile).toBeUndefined();
     expect(state.serverState.cells[cellId].result?.compile).toBeUndefined();
+  });
+});
+
+describe("loadNotebookFromPath", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("switches to app view mode when open mode is app", async () => {
+    const path = "/x/app.ipynb";
+    const notebook: NotebookRoot = {
+      nbformat: 4,
+      nbformat_minor: 5,
+      metadata: {},
+      cells: [],
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_notebook") {
+        expect(args).toEqual({ path });
+        return notebook;
+      }
+      if (command === "notebook_open_mode") {
+        expect(args).toEqual({ path });
+        return "app";
+      }
+      if (command === "start_kernel") {
+        return "kernel-1";
+      }
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebookStore = new Notebook();
+    await notebookStore.loadNotebookFromPath(path);
+    expect(notebookStore.store.getState().viewState.viewMode).toBe("app");
+  });
+
+  test("keeps cells view mode when open mode is null", async () => {
+    const path = "/x/cells.ipynb";
+    const notebook: NotebookRoot = {
+      nbformat: 4,
+      nbformat_minor: 5,
+      metadata: {},
+      cells: [],
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_notebook") {
+        expect(args).toEqual({ path });
+        return notebook;
+      }
+      if (command === "notebook_open_mode") {
+        expect(args).toEqual({ path });
+        return null;
+      }
+      if (command === "start_kernel") {
+        return "kernel-1";
+      }
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebookStore = new Notebook();
+    await notebookStore.loadNotebookFromPath(path);
+    expect(notebookStore.store.getState().viewState.viewMode).toBe("cells");
   });
 });
