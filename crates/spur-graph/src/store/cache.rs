@@ -78,9 +78,19 @@ pub fn write_with_dedup_with_section_sidecar_options(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     ctx: &GitCtx,
-    section_sidecar_options: SectionSidecarOptions,
+    mut section_sidecar_options: SectionSidecarOptions,
     section_sidecar_progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<()> {
+    // Resolve the current pointer BEFORE writing — it still points to the
+    // previous artifact at this moment.  Use it as the carry-forward source.
+    // Best-effort: any failure → None, never an error.
+    if section_sidecar_options.previous_artifact_dir.is_none() {
+        let prev_dir = resolve_artifact_location(worktree_root, None)
+            .ok()
+            .map(|r| r.path);
+        section_sidecar_options.previous_artifact_dir = prev_dir;
+    }
+
     let canonical_dir = canonical_base_dir(&ctx.git_common_dir, &artifact.manifest_version);
     let canonical = canonical_path(
         &ctx.git_common_dir,
