@@ -82,7 +82,17 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 # Version pinned here; the `bundled` feature is opted into per-consumer
 # (spur-context, spur-notebook, rest-table-gateway) so the loadable-extension
 # build (rest-table-gateway-ext) can take duckdb WITHOUT bundling.
-duckdb = { version = "1.10502.0" }
+#
+# `vtab` is pinned at the baseline so EVERY workspace consumer resolves duckdb
+# to the same feature set. Without it, the spur-cli closure
+# (spur-analyst → bundled only) and the spur-notebook closure
+# (rest-table-gateway → bundled + vtab) requested divergent feature sets, and
+# because cargo fingerprints by exact feature set the ~4-min bundled libduckdb
+# compiled TWICE on a cold `cargo xtask install` (spur-cli build, then the
+# separate `tauri build` for Jute.app). Aligning vtab here makes it compile
+# once and reuse across both invocations. The loadable-extension ext pins
+# duckdb directly (not via this workspace dep), so it is unaffected.
+duckdb = { version = "1.10502.0", features = ["vtab"] }
 
 # Logging
 tracing = "0.1"
