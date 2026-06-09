@@ -988,7 +988,25 @@ fn is_test_file(file_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
+    use duckdb::Connection;
+
+    use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
+    use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
+
+    const INIT_SEARCH_SQL: &str =
+        include_str!("../../../../spur-context/poc/duckdb-analyst/init_search.sql");
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HybridConfidenceFixture {
+        _temp_dir: tempfile::TempDir,
+        db_path: PathBuf,
+        query_vec: Vec<f32>,
+    }
 
     #[test]
     fn hybrid_confidence_thresholds_match_bge_base_scores() {
@@ -1010,6 +1028,246 @@ mod tests {
             neighbor_kind: None,
             edge_bind_method: None,
             grounding: "test".into(),
+        }
+    }
+
+    fn context_candidate_macro_sql() -> String {
+        INIT_SEARCH_SQL
+            .split("CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE")
+            .nth(1)
+            .and_then(|rest| rest.split("-- Graph-augmented:").next())
+            .map(|body| {
+                let start = "CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE";
+                format!("{start}{body}")
+            })
+            .expect("context candidate macro should be present in init_search.sql")
+    }
+
+    fn context_candidate_macro_sql_with_artifact_dir(artifact_dir: &Path) -> String {
+        context_candidate_macro_sql().replace(
+            "__SPUR_GRAPH_ARTIFACT_DIR__",
+            &sql_escape_path(artifact_dir),
+        )
+    }
+
+    fn semantic_query_vec() -> Vec<f32> {
+        let mut query_vec = vec![0.0; EMBEDDING_VECTOR_DIMENSIONS];
+        query_vec[0] = 1.0;
+        query_vec
+    }
+
+    fn format_query_vec_sql(query_vec: &[f32]) -> String {
+        let values = query_vec
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("[{values}]::FLOAT[{EMBEDDING_VECTOR_DIMENSIONS}]")
+    }
+
+    fn seed_section_vectors(
+        conn: &Connection,
+        semantic_rows: &[(&str, &[f32])],
+        lexical_rows: &[(&str, &[f32])],
+    ) {
+        if semantic_rows.is_empty() && lexical_rows.is_empty() {
+            return;
+        }
+        let overrides = semantic_rows
+            .iter()
+            .chain(lexical_rows.iter())
+            .map(|(file_path, vector)| {
+                format!(
+                    "('{}', {})",
+                    file_path.replace('\'', "''"),
+                    format_query_vec_sql(vector)
+                )
+            })
+            .collect::<Vec<_>>();
+        let sql = format!(
+            r#"
+            CREATE OR REPLACE TABLE lance_ns.main.section_bodies AS
+            SELECT s.stable_symbol_id,
+                   s.file_path,
+                   s.qualified_name,
+                   s.heading_level,
+                   s.body_text,
+                   s.body_byte_start,
+                   s.body_byte_end,
+                   s.child_count,
+                   s.parent_stable_id,
+                   s.content_hash,
+                   COALESCE(o.vector, s.vector) AS vector
+            FROM lance_ns.main.section_bodies AS s
+            LEFT JOIN (
+                SELECT col0 AS stable_symbol_id, col1 AS vector
+                FROM (VALUES {})
+            ) AS o USING (stable_symbol_id);
+            "#,
+            overrides.join(",\n                  ")
+        );
+        conn.execute_batch(&sql)
+            .expect("seed fixture section vectors");
+    }
+
+    fn sql_escape_path(path: &Path) -> String {
+        path.display().to_string().replace('\'', "''")
+    }
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().expect("env lock")
+    }
+
+    fn parse_vector_json_to_f32(raw: &str) -> Vec<f32> {
+        serde_json::from_str::<Vec<f64>>(raw)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| value as f32)
+            .collect()
+    }
+
+    fn build_hybrid_confidence_fixture() -> HybridConfidenceFixture {
+        let _lock = env_lock();
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let root = temp_dir.path().join("repo");
+        fs::create_dir_all(root.join("src")).expect("create src dir");
+        fs::create_dir_all(root.join("docs")).expect("create docs dir");
+        fs::write(
+            root.join("src/hybrid.rs"),
+            r#"
+pub fn ranking_beacon_router() {
+    // Ranking beacon: this symbol intentionally repeats the target query phrase.
+    let ranking_beacon = "ranking beacon ranking beacon ranking beacon";
+    println!("{ranking_beacon}");
+}
+
+pub fn lexical_signal_anchor() {
+    println!("lexical fallback utility");
+}
+"#,
+        )
+        .expect("write strong hybrid code");
+        fs::write(
+            root.join("docs/strong_hybrid.md"),
+            "# Strong Hybrid\n\nranking beacon ranking beacon ranking beacon.\n",
+        )
+        .expect("write strong hybrid doc");
+        fs::write(
+            root.join("docs/lexical_hybrid.md"),
+            "# Lexical Rival\n\nranking beacon appears often ranking beacon.\n",
+        )
+        .expect("write lexical rival doc");
+        fs::write(
+            root.join("docs/weak_hybrid.md"),
+            "# Weak Only\n\nprivate lexical-only weakness signal.\n",
+        )
+        .expect("write weak-only doc");
+
+        let facts = build_facts(&root, None).expect("build fixture facts").0;
+        let artifact = artifact_from_facts(&facts, &root).expect("build fixture artifact");
+        let artifact_dir = temp_dir.path().join("artifact");
+        write_sections_dataset(&artifact, &root, &artifact_dir).expect("write Lance sidecar");
+
+        let db_path = temp_dir.path().join("analyst.duckdb");
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu; INSTALL lance; LOAD lance;")
+            .expect("load fixture extensions");
+        conn.execute_batch(&format!(
+            "ATTACH '{}' AS lance_ns (TYPE LANCE);",
+            sql_escape_path(&artifact_dir.join(SECTIONS_DATASET_DIR))
+        ))
+        .expect("attach sections dataset");
+        conn.execute_batch(&format!(
+            "ATTACH '{}' AS code_ns (TYPE LANCE);",
+            sql_escape_path(&artifact_dir)
+        ))
+        .expect("attach code dataset");
+        let mut symbol_row_stmt = conn
+            .prepare(
+                "
+            SELECT stable_symbol_id
+            FROM code_ns.main.code_symbols
+            WHERE file_path = 'src/hybrid.rs'
+            ORDER BY stable_symbol_id
+            LIMIT 1
+            ",
+            )
+            .expect("query code symbol id");
+        let strong_symbol_id: String = symbol_row_stmt
+            .query_row([], |row| row.get(0))
+            .expect("query strong symbol id");
+        let mut symbol_vec_stmt = conn
+            .prepare("SELECT to_json(vector) FROM code_ns.main.code_symbols WHERE stable_symbol_id = ? LIMIT 1")
+            .expect("query strong symbol vector");
+        let symbol_vector_json = symbol_vec_stmt
+            .query_row([&strong_symbol_id], |row| {
+                row.get::<usize, Option<String>>(0)
+            })
+            .expect("query code symbol vector");
+        let query_vec = symbol_vector_json
+            .and_then(|value| (!value.is_empty()).then_some(value))
+            .map(|value| parse_vector_json_to_f32(&value))
+            .filter(|query_vec| query_vec.len() == EMBEDDING_VECTOR_DIMENSIONS)
+            .unwrap_or_else(semantic_query_vec);
+        seed_section_vectors(
+            &conn,
+            &[("docs/strong_hybrid.md", query_vec.as_slice())],
+            &[],
+        );
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE _meta (graph_content_hash VARCHAR);
+            INSERT INTO _meta VALUES ('hybrid-fixture-hash');
+
+            CREATE TABLE sections_search AS
+            SELECT stable_symbol_id, qualified_name, file_path, heading_level, content_hash, body_text
+            FROM lance_ns.main.section_bodies;
+
+            CREATE TABLE symbol_text AS
+            SELECT stable_symbol_id,
+                   entity_name,
+                   qualified_name,
+                   file_path,
+                   symbol_kind,
+                   embed_text AS doc_text
+            FROM code_ns.main.code_symbols;
+
+            CREATE TABLE v_symbol_scorecard AS
+            SELECT stable_symbol_id,
+                   entity_name,
+                   file_path,
+                   symbol_kind,
+                   0.01 AS pagerank,
+                   3::BIGINT AS churn_90d,
+                   'stable' AS posture,
+                   1::BIGINT AS component_size,
+                   2::BIGINT AS callers
+            FROM symbol_text;
+
+            CREATE TABLE v_symbol_inbound AS
+            SELECT stable_symbol_id, 1::BIGINT AS callers
+            FROM symbol_text;
+            "#
+        )
+        .expect("create fixture schema");
+        conn.execute_batch(
+            r#"
+            PRAGMA create_fts_index('main.sections_search', 'stable_symbol_id', 'body_text', overwrite=1, stemmer='porter');
+            PRAGMA create_fts_index('main.symbol_text', 'stable_symbol_id', 'doc_text', overwrite=1);
+            "#,
+        )
+        .expect("create fixture fts indexes");
+        let macro_sql = context_candidate_macro_sql_with_artifact_dir(&artifact_dir);
+        conn.execute_batch(&macro_sql)
+            .expect("define search context macro");
+        drop(conn);
+
+        HybridConfidenceFixture {
+            _temp_dir: temp_dir,
+            db_path,
+            query_vec,
         }
     }
 
@@ -1712,5 +1970,125 @@ mod tests {
             pack["impact"]["callee_neighbors"].as_array().unwrap().len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_reports_confidence_from_real_hybrid_fusion() {
+        let fixture = build_hybrid_confidence_fixture();
+
+        let strong_request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "ranking beacon",
+            "scope": "all",
+            "limit": 3
+        }))
+        .expect("request");
+        let strong_result = query_context_candidates(
+            &fixture.db_path,
+            "ranking beacon",
+            KnowledgeSearchScope::All,
+            KnowledgeQueryOptions {
+                limit: 3,
+                intent: KnowledgeQueryIntent::Explain,
+                query_vec: Some(fixture.query_vec.clone()),
+            },
+        )
+        .expect("query strong hybrid candidates");
+        let strong_primary = strong_result
+            .candidates
+            .iter()
+            .filter(|candidate| !candidate.grounding.starts_with("bm25"))
+            .collect::<Vec<_>>();
+        assert!(
+            !strong_primary.is_empty(),
+            "expected strong-query hybrid candidates, got {:?}",
+            strong_result.candidates
+        );
+        let strong_pack = pack_query_result(&strong_request, strong_result).await;
+        println!(
+            "strong pack: {}",
+            serde_json::to_string_pretty(&strong_pack).unwrap_or_else(|_| strong_pack.to_string())
+        );
+        let strong_top = strong_pack["primary_evidence"]
+            .as_array()
+            .and_then(|values| values.first())
+            .expect("strong result should include primary evidence");
+        let strong_score = strong_top["score"].as_f64().expect("strong top score");
+        let strong_grounding = strong_top["grounding"].as_str().unwrap_or("<missing>");
+        let strong_confidence = strong_pack["confidence"]
+            .as_str()
+            .expect("strong confidence");
+
+        assert!(
+            strong_grounding.starts_with("hybrid-"),
+            "strong top grounding should be hybrid, got {strong_grounding}"
+        );
+        assert!(
+            strong_score >= 0.55,
+            "strong hybrid top score={strong_score:.6}, grounding={strong_grounding}"
+        );
+        assert!(
+            strong_pack["candidates"]["returned_primary"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1,
+            "expected at least one primary candidate, got {:?}",
+            strong_pack["candidates"]
+        );
+        assert!(
+            matches!(strong_confidence, "medium" | "high"),
+            "cross-signal hybrid should not be reported as low confidence, got {strong_confidence}"
+        );
+
+        let weak_request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "private lexical-only weakness signal",
+            "scope": "docs",
+            "limit": 3
+        }))
+        .expect("request");
+        let weak_result = query_context_candidates(
+            &fixture.db_path,
+            "private lexical-only weakness signal",
+            KnowledgeSearchScope::Docs,
+            KnowledgeQueryOptions {
+                limit: 1,
+                intent: KnowledgeQueryIntent::Explain,
+                query_vec: None,
+            },
+        )
+        .expect("query weak hybrid candidates");
+        let weak_primary = weak_result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.kind == "doc")
+            .collect::<Vec<_>>();
+        assert!(
+            !weak_primary.is_empty(),
+            "expected weak-query doc candidates, got {:?}",
+            weak_result.candidates
+        );
+        let weak_pack = pack_query_result(&weak_request, weak_result).await;
+        println!(
+            "weak pack: {}",
+            serde_json::to_string_pretty(&weak_pack).unwrap_or_else(|_| weak_pack.to_string())
+        );
+        let weak_top = weak_pack["supporting_docs"]
+            .as_array()
+            .and_then(|values| values.first())
+            .expect("weak result should include supporting docs");
+        assert_eq!(
+            weak_pack["candidates"]["returned_primary"]
+                .as_u64()
+                .unwrap_or(0),
+            0
+        );
+        let weak_score = weak_top["score"].as_f64().expect("weak top score");
+        let weak_grounding = weak_top["grounding"].as_str().unwrap_or("<missing>");
+
+        println!(
+            "measured top scores: strong={:.6}, weak={:.6}",
+            strong_score, weak_score
+        );
+        assert_eq!(weak_grounding, "bm25-doc");
+        assert_eq!(weak_pack["confidence"], "low");
     }
 }
