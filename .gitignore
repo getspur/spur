@@ -56,6 +56,13 @@ marketing/marketingskills/skills/*/*
 .beads/.write.lock
 .beads/issues.jsonl.*.tmp
 
+# node deps — never track or sync (rebuilt locally; build VM enumerates --others)
+node_modules/
+
+# local model + scratch caches
+.fastembed_cache/
+.tmp/
+
 # tool & IDE caches
 .antigravitycli/
 .wrangler/
