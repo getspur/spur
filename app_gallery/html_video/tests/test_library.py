@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import re
 
 
 library = pytest.importorskip("server.library")
@@ -46,3 +47,13 @@ def test_get_template_unknown_id_raises(real_templates_dir: Path) -> None:
 
 def test_tokenize_splits_and_lowercases() -> None:
     assert library.tokenize("Hello World") == ["hello", "world"]
+
+
+def test_media_mix_template_declares_audio_and_video(real_templates_dir: Path) -> None:
+    template = library.get_template("frame-media-mix")
+    html = template["html"].lower()
+
+    assert "<video" in html
+    assert "<audio" in html
+    assert re.search(r'<video\b[^>]*class="clip"[^>]*data-start="0"[^>]*data-duration="3"[^>]*data-track-index="0"[^>]*', html)
+    assert re.search(r'<audio\b[^>]*data-start="0"[^>]*data-duration="3"[^>]*data-track-index="2"[^>]*data-volume="1"[^>]*', html)
