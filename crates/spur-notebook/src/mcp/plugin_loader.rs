@@ -31,6 +31,18 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Upper bound on how long any single JSON-RPC round trip (initialize,
 /// tools/list, tools/call, ping) may take before we treat the plugin as wedged.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for the MCP initialize handshake.  This is intentionally longer
+/// than the steady-state request timeout to accommodate one-time plugin startup
+/// and dependency installation.
+const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(180);
+
+fn init_timeout() -> Duration {
+    std::env::var("SPUR_PLUGIN_INIT_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_INIT_TIMEOUT)
+}
 
 /// Failures that can occur while managing plugin child processes.
 #[derive(Debug, Error)]
@@ -390,7 +402,12 @@ struct PluginIo {
 impl PluginIo {
     /// Write a JSON-RPC request and block until the response with the matching
     /// id arrives, skipping interleaved notifications and unrelated responses.
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, PluginError> {
+    async fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, PluginError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -439,10 +456,15 @@ impl PluginIo {
             }
         };
 
-        match tokio::time::timeout(REQUEST_TIMEOUT, read).await {
+        match tokio::time::timeout(timeout, read).await {
             Ok(result) => result,
             Err(_) => Err(PluginError::Timeout(method.to_string())),
         }
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, PluginError> {
+        self.request_with_timeout(method, params, REQUEST_TIMEOUT)
+            .await
     }
 
     /// Write a JSON-RPC notification (no id, no response expected).
@@ -466,7 +488,7 @@ impl PluginIo {
     /// Perform the MCP `initialize` handshake followed by the
     /// `notifications/initialized` acknowledgement.
     async fn initialize(&mut self) -> Result<(), PluginError> {
-        self.request(
+        self.request_with_timeout(
             "initialize",
             json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -476,6 +498,7 @@ impl PluginIo {
                     "version": env!("CARGO_PKG_VERSION"),
                 },
             }),
+            init_timeout(),
         )
         .await?;
         self.notify("notifications/initialized", json!({})).await
@@ -770,5 +793,47 @@ mod tests {
             Err(PluginError::UnsupportedServerType(kind)) => assert_eq!(kind, "ruby"),
             other => panic!("expected UnsupportedServerType, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn request_with_timeout_times_out_on_silent_plugin() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("failed to spawn silent plugin");
+
+        let stdin = child.stdin.take().expect("missing stdin pipe");
+        let stdout = child.stdout.take().expect("missing stdout pipe");
+        let mut plugin_io = PluginIo {
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+        };
+
+        let result = plugin_io
+            .request_with_timeout("initialize", json!({}), Duration::from_millis(50))
+            .await;
+
+        drop(child);
+        match result {
+            Err(PluginError::Timeout(message)) => assert_eq!(message, "initialize"),
+            _ => panic!("expected timeout for initialize"),
+        }
+    }
+
+    #[test]
+    fn init_timeout_honors_env_override_and_default() {
+        std::env::remove_var("SPUR_PLUGIN_INIT_TIMEOUT_MS");
+        assert_eq!(init_timeout(), DEFAULT_INIT_TIMEOUT);
+
+        std::env::set_var("SPUR_PLUGIN_INIT_TIMEOUT_MS", "250");
+        assert_eq!(init_timeout(), Duration::from_millis(250));
+
+        std::env::remove_var("SPUR_PLUGIN_INIT_TIMEOUT_MS");
     }
 }
