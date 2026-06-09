@@ -13,13 +13,15 @@ Source lives in each crate’s `src/`. Integration tests are primarily in `crate
 
 ## Code Retrieval & Exploration
 
-**`code_search` is the primary discovery tool.** Use `code_*` for most exploration:
+**`knowledge_context_pack` is the first-class tool for discovery and exploration — reach for it first.** For any "where does X live / what's around this concept / get me oriented" question, issue one `knowledge_context_pack` call before hand-chaining `code_*`. It returns a bounded, one-shot evidence pack combining BM25 retrieval over code + docs, scorecard signals (pagerank, churn, posture), exact graph caller/callee context with popular-sink boundaries already applied, and staleness metadata — plus `recommended_next_tools` with pre-filled selectors that hand you straight to the precise `code_*` follow-up. One call replaces several rounds of manual search.
+- Strongest for orientation and doc/architecture grounding, and for impact triage when you roughly know the vocabulary.
+- **Known caveat (temporary):** code retrieval is BM25-only today, so recall is identifier-vocabulary-dependent — a concept whose words don't appear in symbol names may return few or no code hits (doc grounding stays strong). Read the BM25 scores and `confidence`; when code recall looks thin, broaden with `code_symbol_search` or `spur-analyst`. A dedicated workstream is adding semantic (vector/ANN) retrieval shortly, which lifts this ceiling — **prefer `knowledge_context_pack` as the default entry point regardless.**
+
+**`code_*` is the precise follow-up substrate** — use it for exact symbol work, ideally seeded from a `knowledge_context_pack` selector rather than re-resolved by name:
 - `code_symbol_search` / `code_resolve` to find specific symbols
 - `code_read_symbol` to read source code with context
 - `code_callers` / `code_callees` for impact analysis and call tracing
 - `code_subgraph` for neighborhood maps
-
-**Use `knowledge_context_pack` when entering unfamiliar code areas** and you need the big picture before diving into specific symbols. It returns bounded evidence packs combining BM25 search, scorecard signals (pagerank, churn, posture), and exact graph context. The response includes `recommended_next_tools` with pre-filled selectors for follow-up with `code_*` tools.
 
 **Use `spur-analyst` for complex queries and graph algorithms.** When you need aggregation, time-series analysis, multi-table JOINs, reachability paths, or graph algorithms (PageRank, SCC, shortest path), use the DuckDB-based analyst tools.
 

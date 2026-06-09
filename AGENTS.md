@@ -35,35 +35,25 @@ Source lives in each crate’s `src/`. Integration tests are primarily in `crate
 
 ## Code Retrieval & Exploration
 
-Treat the repository code graph as the first-class retrieval layer for code work. Choose tools based on question shape:
+Treat the repository code graph as the first-class retrieval layer for code work. Choose tools based on question shape, but **start with `knowledge_context_pack` for discovery and exploration.**
 
-### Primary: `code_*` — Precise Symbol Work
+### First-Class: `knowledge_context_pack` — Discovery & One-Shot Retrieval
 
-**`code_search` is the primary discovery tool.** Use `code_*` for most exploration:
-
-- **`code_symbol_search`** — Fuzzy/substring symbol discovery
-- **`code_resolve`** — Exact symbol lookup from stable IDs or qualified names
-- **`code_read_symbol`** — Read source with context lines, file OID tracking
-- **`code_callers`** / **`code_callees`** — Impact analysis with unresolved edge detection
-- **`code_subgraph`** — Neighborhood maps (use sparingly, cap radius at 2)
-
-**When to use:**
-- You know the symbol name or have a specific target
-- Need exact source code, caller/callee impact, or call tracing
-- Verifying symbol signatures, types, or implementations
-
-### Onboarding: `knowledge_context_pack` — Get Oriented First
-
-**Use `knowledge_context_pack` when entering unfamiliar code areas** and you need the big picture before diving into specific symbols. It returns bounded evidence packs combining:
-- **BM25 search** over symbol token text and documentation sections
-- **Scorecard signals** (pagerank, churn, posture) to surface high-value symbols
-- **Exact graph context** with caller/callee impact summaries
+**`knowledge_context_pack` is the default entry point for exploration — reach for it first.** For any "where does X live / what's around this concept / get me oriented" question, issue one pack call before hand-chaining `code_*`. It returns a bounded, one-shot evidence pack combining:
+- **BM25 retrieval** over symbol token text AND documentation/spec/plan section bodies
+- **Scorecard signals** (pagerank, churn, posture) to surface high-value, load-bearing symbols
+- **Exact graph context** — caller/callee impact summaries with popular-sink boundaries already applied
 - **Staleness metadata** to detect when the analyst index lags the working tree
+- **`recommended_next_tools`** — pre-filled `code_*` selectors that hand you straight to precise follow-up
+
+One call replaces several rounds of manual search.
 
 **When to use:**
-- You don't know what to look for — "What's around this concept?"
+- You don't know what to look for — "What's around this concept?" / "Where is X?"
 - Quick orientation before diving into specific symbols
-- Bounded evidence gathering without manual tool chaining
+- One-shot bounded evidence gathering without manual tool chaining
+
+**Known caveat (temporary):** code retrieval is BM25-only today, so recall is identifier-vocabulary-dependent — a concept whose words don't appear in symbol names may return few or no code hits (doc grounding stays strong). Read the BM25 scores and `confidence`; when code recall looks thin, broaden with `code_symbol_search` or `spur-analyst`. A dedicated workstream is adding semantic (vector/ANN) retrieval shortly, which lifts this ceiling — **prefer `knowledge_context_pack` as the first move regardless.**
 
 **Example:**
 ```rust
@@ -77,7 +67,20 @@ knowledge_context_pack({
 })
 ```
 
-The response includes `recommended_next_tools` with pre-filled selectors for follow-up with `code_*` tools.
+### Precise Follow-up: `code_*` — Symbol Work
+
+**`code_*` is the precise substrate for exact symbol work** — ideally seeded from a `knowledge_context_pack` selector rather than re-resolved by name:
+
+- **`code_symbol_search`** — Fuzzy/substring symbol discovery
+- **`code_resolve`** — Exact symbol lookup from stable IDs or qualified names
+- **`code_read_symbol`** — Read source with context lines, file OID tracking
+- **`code_callers`** / **`code_callees`** — Impact analysis with unresolved edge detection
+- **`code_subgraph`** — Neighborhood maps (use sparingly, cap radius at 2)
+
+**When to use:**
+- You know the symbol name or have a specific target (often from a pack selector)
+- Need exact source code, caller/callee impact, or call tracing
+- Verifying symbol signatures, types, or implementations
 
 ### Specialist: `spur-analyst` — Deep Analysis
 
