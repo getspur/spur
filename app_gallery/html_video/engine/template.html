@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HyperFrames HF Harness</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #020617;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function draw(timeSeconds) {
+      const t = Math.max(0, timeSeconds);
+      const width = canvas.width;
+      const height = canvas.height;
+      const x = ((t * 300) % (width + 120)) - 60;
+
+      ctx.fillStyle = "#0f172a";
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = "#0ea5e9";
+      ctx.fillRect(0, 0, width, 12);
+      ctx.fillStyle = "#f97316";
+      ctx.fillRect(x, height * 0.35, 120, 120);
+      ctx.fillStyle = "#06b6d4";
+      ctx.fillRect(width - x - 120, height * 0.55, 120, 120);
+    }
+
+    window.__hf = {
+      duration: 2,
+      seek: (time) => draw(time),
+    };
+
+    draw(0);
+  </script>
+</body>
+</html>
