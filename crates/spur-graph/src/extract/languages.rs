@@ -744,20 +744,23 @@ pub(crate) fn emit_edges(
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
                 let import_paths =
                     contained_capture_text(capture, source, captures, "reexport.path");
+                let relation = relation_kind_for_capture(config, "reexport", RelationKind::Imports);
                 for imported in contained_capture_text(capture, source, captures, "reexport.name") {
-                    builder.reexport_edges.push(PendingEdge {
+                    let edge = PendingEdge {
                         source: source_id,
                         target_name: imported,
                         import_path: import_path_for_edge(
                             &import_paths,
                             config.preserve_bare_import_path,
                         ),
-                        relation: RelationKind::Imports,
+                        relation,
                         edge_kind: None,
                         origin: crate::extract::tree_sitter::CallOrigin::Expression,
                         receiver_text: None,
                         scope_text: None,
-                    });
+                    };
+                    builder.pending_edges.push(edge.clone());
+                    builder.reexport_edges.push(edge);
                 }
             }
             "implements" => {
@@ -1747,6 +1750,11 @@ mod gate_contract {
             "import" => Some(relation_kind_for_capture(
                 config,
                 "import",
+                RelationKind::Imports,
+            )),
+            "reexport" => Some(relation_kind_for_capture(
+                config,
+                "reexport",
                 RelationKind::Imports,
             )),
             "call" | "jsx_call" | "macro_call" => Some(RelationKind::Calls),
