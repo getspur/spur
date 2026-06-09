@@ -8,6 +8,19 @@
 
 (import_statement
   (import_clause
+    (identifier) @import.name)
+  source: (string
+    (string_fragment) @import.path)) @import
+
+(import_statement
+  (import_clause
+    (namespace_import
+      (identifier) @import.name))
+  source: (string
+    (string_fragment) @import.path)) @import
+
+(import_statement
+  (import_clause
     (named_imports
       (import_specifier
         name: (identifier) @import.name)))
@@ -18,6 +31,12 @@
   (export_clause
     (export_specifier
       name: (identifier) @reexport.name))
+  source: (string
+    (string_fragment) @reexport.path)) @reexport
+
+(export_statement
+  (namespace_export
+    (identifier) @reexport.name)
   source: (string
     (string_fragment) @reexport.path)) @reexport
 
@@ -43,8 +62,35 @@
     (implements_clause
       [
         (type_identifier) @implements.name
+        (type
+          (type_identifier) @implements.name)
+        (type
+          (primary_type
+            (type_identifier) @implements.name))
+        (type
+          (generic_type
+            (type_identifier) @implements.name))
+        (type
+          (primary_type
+              (generic_type
+                (type_identifier) @implements.name)))
+        (type
+          (nested_type_identifier) @implements.name)
+        (type
+          (primary_type
+            (nested_type_identifier) @implements.name))
+        (type
+          (generic_type
+            (nested_type_identifier) @implements.name))
+        (nested_type_identifier) @implements.name
+        (generic_type
+          (nested_type_identifier) @implements.name)
         (generic_type
           (type_identifier) @implements.name)
+        (primary_type
+          (type_identifier) @implements.name)
+        (primary_type
+          (nested_type_identifier) @implements.name)
       ]))) @implements
 
 ; `class C extends B` emits an Extends edge to the base class.
@@ -53,6 +99,8 @@
     (extends_clause
       value: [
         (identifier) @extends.name
+        (type (type_identifier) @extends.name)
+        (primary_type (type_identifier) @extends.name)
         (member_expression
           property: (property_identifier) @extends.name)
       ]))) @extends
@@ -64,4 +112,7 @@
       (type_identifier) @extends.name
       (generic_type
         (type_identifier) @extends.name)
+      (nested_type_identifier) @extends.name
+      (generic_type
+        (nested_type_identifier) @extends.name)
     ])) @extends

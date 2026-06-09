@@ -413,7 +413,7 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls",
-      "bind_method": "singleton"
+      "bind_method": "import_path"
     },
     {
       "source_stable_symbol_id": "90d74fe4b59265ab",
