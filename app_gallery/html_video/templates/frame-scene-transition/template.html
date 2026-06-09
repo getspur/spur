@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1280, height=720, initial-scale=1">
+  <title>Scene Transition</title>
+  <script src="./gsap.min.js"></script>
+  <script src="./shader-transitions.global.js"></script>
+  <style>
+    :root,
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #030712;
+    }
+
+    body {
+      font-family: "Trebuchet MS", "Segoe UI", Arial, sans-serif;
+      color: #ecfeff;
+    }
+
+    #main {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #030712;
+      isolation: isolate;
+    }
+
+    .scene {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: grid;
+      align-items: center;
+      justify-items: center;
+      padding: 6vh 8vw;
+      box-sizing: border-box;
+    }
+
+    .scene-copy {
+      width: min(980px, 88vw);
+      display: grid;
+      gap: 1rem;
+      z-index: 2;
+    }
+
+    #scene-1 {
+      background:
+        radial-gradient(circle at 18% 18%, rgba(56, 189, 248, 0.46), transparent 46%),
+        radial-gradient(circle at 82% 78%, rgba(192, 132, 252, 0.46), transparent 44%),
+        linear-gradient(160deg, #020617, #0f172a 45%, #0b1222);
+      color: #e0f2fe;
+      justify-items: center;
+      text-align: center;
+    }
+
+    #scene-2 {
+      background:
+        radial-gradient(circle at 14% 16%, rgba(94, 234, 212, 0.28), transparent 50%),
+        radial-gradient(circle at 84% 86%, rgba(251, 146, 60, 0.24), transparent 54%),
+        linear-gradient(20deg, #0b1222, #0f172a 52%, #111827);
+      color: #f8fafc;
+      text-align: left;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.26em;
+      font-size: clamp(12px, 1.2vw, 16px);
+      margin: 0;
+      color: #67e8f9;
+    }
+
+    .headline {
+      margin: 0;
+      line-height: 1.03;
+      font-size: clamp(44px, 6.4vw, 92px);
+      letter-spacing: 0.01em;
+      font-weight: 700;
+      text-wrap: balance;
+    }
+
+    .subtext {
+      margin: 0;
+      max-width: 86%;
+      font-size: clamp(17px, 2vw, 30px);
+      line-height: 1.34;
+      color: #bfdbfe;
+    }
+
+    .metrics {
+      display: grid;
+      gap: 0.7rem;
+      font-size: clamp(24px, 2.4vw, 40px);
+      color: #e2e8f0;
+    }
+
+    .metric {
+      display: grid;
+      gap: 0.2rem;
+      padding: 0.65rem 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 14px;
+      background: linear-gradient(120deg, rgba(15, 23, 42, 0.56), rgba(2, 6, 23, 0.5));
+      backdrop-filter: blur(4px);
+    }
+
+    .metric b {
+      color: #67e8f9;
+      font-size: clamp(32px, 3vw, 54px);
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div
+    id="main"
+    data-composition-id="main"
+    data-start="0"
+    data-duration="3"
+    data-width="1280"
+    data-height="720"
+  >
+    <div id="scene-1" class="scene" data-composition-id="scene-1" data-start="0" data-duration="1.5">
+      <div class="scene-copy">
+        <p class="eyebrow">Chapter One</p>
+        <h1 class="headline">Multi-scene composition.</h1>
+        <p class="subtext">A native HyperFrames scene composition with a shader transition between two independently styled DOM scenes.</p>
+      </div>
+    </div>
+
+    <div id="scene-2" class="scene" data-composition-id="scene-2" data-start="1.5" data-duration="1.5">
+      <div class="scene-copy">
+        <p class="eyebrow">Closing Scene</p>
+        <h1 class="headline">One transition, two worlds.</h1>
+        <div class="metrics">
+          <p class="metric"><span>Frames composited</span><b>1.0x</b></p>
+          <p class="metric"><span>Transition shader</span><b>domain-warp</b></p>
+          <p class="metric"><span>Runtime</span><b>Bun-native</b></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const tl = window.HyperShader.init({ bgColor:"#000000", scenes:["scene-1","scene-2"], transitions:[{ time:1.5, shader:"domain-warp", duration:0.6 }] });
+    window.__timelines = window.__timelines || {};
+    window.__timelines["main"] = tl;
+  </script>
+</body>
+</html>
