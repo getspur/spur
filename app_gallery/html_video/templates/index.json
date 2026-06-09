@@ -21,6 +21,13 @@
     "tags": ["hero", "opener", "gradient", "headline"]
   },
   {
+    "id": "frame-scene-transition",
+    "title": "Scene Transition",
+    "intent": "Create a two-scene intro-to-closing composition with a single shader transition and DOM styling.",
+    "summary": "Native HyperFrames multi-scene composition using a single domain-warp transition between two visually distinct scenes.",
+    "tags": ["scene", "transition", "shader", "hyperframes"]
+  },
+  {
     "id": "frame-media-mix",
     "title": "Media Mix",
     "intent": "Create a native template that mixes local video and audio with animated overlay text.",
