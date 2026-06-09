@@ -145,6 +145,7 @@ pub fn query_context_candidates(
     let sql_scope = scope.as_sql_scope();
     let sql_intent = options.intent.as_sql_intent();
     let query_vec_sql = format_query_vec_sql(options.query_vec.as_deref());
+    let mut hybrid_failed = false;
     let candidates = match query_context_candidates_inner(
         &conn,
         &escaped_query,
@@ -155,6 +156,7 @@ pub fn query_context_candidates(
     ) {
         Ok(candidates) => candidates,
         Err(error) if query_vec_sql.is_some() => {
+            hybrid_failed = true;
             tracing::warn!(
                 error = %error,
                 query,
@@ -171,6 +173,20 @@ pub fn query_context_candidates(
         }
         Err(error) => return Err(error),
     };
+    if query_vec_sql.is_some()
+        && !hybrid_failed
+        && candidates
+            .iter()
+            .all(|candidate| !candidate.grounding.starts_with("hybrid-"))
+    {
+        tracing::warn!(
+            query,
+            scope = sql_scope,
+            intent = sql_intent,
+            limit,
+            "hybrid search produced no surviving hybrid-grounded context candidates"
+        );
+    }
 
     Ok(KnowledgeQueryResult {
         db_path: db_path.display().to_string(),
@@ -312,4 +328,17 @@ pub fn query_graph_candidates(
         graph_content_hash,
         candidates,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_query_vec_sql;
+    use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
+
+    #[test]
+    fn format_query_vec_sql_rejects_wrong_dimension() {
+        assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS - 1])).is_none());
+        assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS + 1])).is_none());
+        assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS])).is_some());
+    }
 }
