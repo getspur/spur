@@ -427,4 +427,249 @@ mod tests {
         );
         assert!(truncated.ends_with('…'));
     }
+
+    /// Spawn a server that accepts `fail_count` connections and immediately
+    /// closes them (simulating a mid-stream reset), then on the next accept
+    /// serves a valid embedding response.
+    async fn transient_failing_openrouter_server(fail_count: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let addr = listener.local_addr().expect("server addr");
+        tokio::spawn(async move {
+            for _ in 0..fail_count {
+                let (mut stream, _) = listener.accept().await.expect("accept failing request");
+                // Read the request then drop the stream without writing a response
+                // — this simulates a mid-stream connection reset.
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                drop(stream);
+            }
+            // Serve a valid response on the final accept.
+            let (mut stream, _) = listener.accept().await.expect("accept good request");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let body = r#"{"data":[{"index":0,"embedding":[0.5,0.6]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write good response");
+        });
+        format!("http://{addr}/embeddings")
+    }
+
+    /// Spawn a server that returns HTTP 503 `fail_count` times, then a valid
+    /// 200 response.  The `attempt_count` sender fires once per accepted
+    /// connection so callers can assert how many requests were made.
+    async fn flaky_status_openrouter_server(
+        fail_count: usize,
+    ) -> (String, tokio::sync::mpsc::Receiver<u32>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let addr = listener.local_addr().expect("server addr");
+        let (tx, rx) = tokio::sync::mpsc::channel::<u32>(16);
+        let mut attempt: u32 = 0;
+        tokio::spawn(async move {
+            for _ in 0..fail_count {
+                attempt += 1;
+                let (mut stream, _) = listener.accept().await.expect("accept 503 request");
+                let _ = tx.send(attempt).await;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = r#"{"error":"service unavailable"}"#;
+                let response = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write 503 response");
+            }
+            // Serve a valid response on the final accept.
+            attempt += 1;
+            let (mut stream, _) = listener.accept().await.expect("accept good request");
+            let _ = tx.send(attempt).await;
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let body = r#"{"data":[{"index":0,"embedding":[1.0,2.0]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write good response");
+        });
+        (format!("http://{addr}/embeddings"), rx)
+    }
+
+    /// A server that tracks how many requests it received, closes after
+    /// serving exactly `max_requests` requests (each with the provided body).
+    async fn counting_openrouter_server(
+        max_requests: usize,
+        body: &'static str,
+        status: u16,
+    ) -> (String, tokio::sync::mpsc::Receiver<u32>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let addr = listener.local_addr().expect("server addr");
+        let (tx, rx) = tokio::sync::mpsc::channel::<u32>(16);
+        tokio::spawn(async move {
+            for i in 0..max_requests {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let _ = tx.send(i as u32 + 1).await;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let status_text = if status == 200 { "OK" } else { "Error" };
+                let response = format!(
+                    "HTTP/1.1 {status} {status_text}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        (format!("http://{addr}/embeddings"), rx)
+    }
+
+    /// Retry recovers from a transient connection drop: server drops the first
+    /// connection, then serves a valid response on the second attempt.
+    #[tokio::test]
+    async fn embed_batch_retries_after_connection_drop() {
+        let endpoint = transient_failing_openrouter_server(1).await;
+        let embedder = OpenRouterEmbedder {
+            client: build_client(),
+            api_key: "test-key".to_owned(),
+            endpoint,
+        };
+
+        let result = embedder
+            .embed_batch(&["hello"])
+            .await
+            .expect("should succeed after retry");
+        assert_eq!(result, vec![vec![0.5f32, 0.6f32]]);
+    }
+
+    /// Retry recovers from a transient 503: server returns 503 once, then a
+    /// valid 200 response.
+    #[tokio::test]
+    async fn embed_batch_retries_after_503() {
+        let (endpoint, mut rx) = flaky_status_openrouter_server(1).await;
+        let embedder = OpenRouterEmbedder {
+            client: build_client(),
+            api_key: "test-key".to_owned(),
+            endpoint,
+        };
+
+        let result = embedder
+            .embed_batch(&["hello"])
+            .await
+            .expect("should succeed after retry on 503");
+        assert_eq!(result, vec![vec![1.0f32, 2.0f32]]);
+
+        // Confirm the server received exactly 2 requests (1 failing + 1 good).
+        let mut count = 0u32;
+        while let Ok(n) = rx.try_recv() {
+            count = n;
+        }
+        assert_eq!(count, 2, "expected exactly 2 requests (1 retry)");
+    }
+
+    /// Non-retryable: a 200 with an OpenRouter error body should fail fast
+    /// without retry — the server should only receive exactly one request.
+    #[tokio::test]
+    async fn embed_batch_does_not_retry_openrouter_api_error_in_200_body() {
+        let error_body = r#"{"error":{"message":"HTTP 400: input too long","code":400}}"#;
+        // Allow up to MAX_RETRIES+1 requests, but assert only 1 was made.
+        let (endpoint, mut rx) = counting_openrouter_server(MAX_RETRIES + 1, error_body, 200).await;
+        let embedder = OpenRouterEmbedder {
+            client: build_client(),
+            api_key: "test-key".to_owned(),
+            endpoint,
+        };
+
+        let error = embedder
+            .embed_batch(&["hello"])
+            .await
+            .expect_err("API error in 200 body should fail without retry");
+        let message = error.to_string();
+        assert!(message.contains("OpenRouter API error"));
+        assert!(message.contains("HTTP 400: input too long"));
+
+        // Only one request should have reached the server.
+        let mut count = 0u32;
+        while let Ok(n) = rx.try_recv() {
+            count = n;
+        }
+        assert_eq!(count, 1, "non-retryable error must not trigger retries");
+    }
+
+    /// Non-retryable: a 400 Bad Request should fail fast (not retried).
+    #[tokio::test]
+    async fn embed_batch_does_not_retry_400_error() {
+        let error_body = r#"{"error":"bad request"}"#;
+        let (endpoint, mut rx) = counting_openrouter_server(MAX_RETRIES + 1, error_body, 400).await;
+        let embedder = OpenRouterEmbedder {
+            client: build_client(),
+            api_key: "test-key".to_owned(),
+            endpoint,
+        };
+
+        let error = embedder
+            .embed_batch(&["hello"])
+            .await
+            .expect_err("400 should fail without retry");
+        let message = error.to_string();
+        assert!(message.contains("400"));
+
+        let mut count = 0u32;
+        while let Ok(n) = rx.try_recv() {
+            count = n;
+        }
+        assert_eq!(count, 1, "4xx non-429 must not trigger retries");
+    }
+
+    /// Exhaustion: if all MAX_RETRIES+1 attempts fail (connection drop), the
+    /// error should propagate with the original error context intact.
+    #[tokio::test]
+    async fn embed_batch_exhausts_retries_and_returns_error() {
+        // Server that drops MAX_RETRIES+1 connections, never serves a good response.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let total = MAX_RETRIES + 1;
+        tokio::spawn(async move {
+            for _ in 0..total {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                drop(stream);
+            }
+        });
+        let endpoint = format!("http://{addr}/embeddings");
+        let embedder = OpenRouterEmbedder {
+            client: build_client(),
+            api_key: "test-key".to_owned(),
+            endpoint,
+        };
+
+        let error = embedder
+            .embed_batch(&["hello"])
+            .await
+            .expect_err("all retries exhausted should return error");
+        // Error context should still reference the send/body-read failure.
+        let msg = error.to_string();
+        assert!(
+            msg.contains("failed to send OpenRouter embeddings request")
+                || msg.contains("failed to read OpenRouter embeddings response body"),
+            "unexpected error message: {msg}"
+        );
+    }
 }
