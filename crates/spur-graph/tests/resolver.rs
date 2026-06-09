@@ -354,6 +354,74 @@ impl Type {
     assert_eq!(edge.bind_method, None);
 }
 
+#[test]
+fn typescript_imported_function_call_binds_by_import_path() {
+    let artifact = artifact_from_sources(&[
+        (
+            "src/m.ts",
+            r#"
+export function helper() {}
+
+export default function default_helper() {}
+"#,
+        ),
+        (
+            "src/app.ts",
+            r#"
+import { helper } from "./m";
+
+export function caller() {
+    helper();
+}
+"#,
+        ),
+    ]);
+
+    let app = symbol_in_file(&artifact, "src/app.ts", "caller", "function");
+    let helper = symbol_in_file(&artifact, "src/m.ts", "helper", "function");
+
+    let helper_edge = call_edge(&artifact, app, "helper");
+    assert_eq!(
+        helper_edge.target_stable_symbol_id.as_deref(),
+        Some(helper.stable_symbol_id.as_str())
+    );
+    assert_eq!(helper_edge.bind_method.as_deref(), Some("import_path"));
+}
+
+#[test]
+fn typescript_react_frontend_imported_function_call_binds_by_import_path() {
+    let artifact = artifact_from_sources(&[
+        (
+            "src/m.tsx",
+            r#"
+export function helper() {}
+
+export default function default_helper() {}
+"#,
+        ),
+        (
+            "src/app.tsx",
+            r#"
+import { helper } from "./m";
+
+export function caller() {
+    return <div>{helper()}</div>;
+}
+"#,
+        ),
+    ]);
+
+    let app = symbol_in_file(&artifact, "src/app.tsx", "caller", "function");
+    let helper = symbol_in_file(&artifact, "src/m.tsx", "helper", "function");
+
+    let helper_edge = call_edge(&artifact, app, "helper");
+    assert_eq!(
+        helper_edge.target_stable_symbol_id.as_deref(),
+        Some(helper.stable_symbol_id.as_str())
+    );
+    assert_eq!(helper_edge.bind_method.as_deref(), Some("import_path"));
+}
+
 impl ResolverCase {
     fn new(explicit_override: bool, current: bool, pointer: bool) -> Self {
         Self {

@@ -105,6 +105,10 @@ Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
 reclassified to `implements`.
 
+TypeScript/Tsx `imports` includes both direct import declarations and re-export
+statements (`export { ... } from "..."`, `export * from "..."`), both mapped to
+`RelationKind::Imports` through the same resolver path.
+
 HOF references are realized in Rust, Python, and C++ via closed HOF-method
 allowlists in the respective `spur-edges.scm`; TypeScript/Tsx are TODO.
 

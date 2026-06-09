@@ -767,6 +767,9 @@ fn resolve_bare_pending_edge(
     phantom_blocked_calls: &mut usize,
 ) {
     if edge.relation == RelationKind::Calls {
+        if resolve_javascript_call_via_import_edge(builder, edge, indexes, ambiguous_unresolved) {
+            return;
+        }
         let candidates = callable_symbol_candidates(builder, edge, indexes);
         if let Some(target) =
             same_file_duplicate_function_candidate(edge, Some(&candidates), indexes)
@@ -1124,6 +1127,62 @@ fn resolve_singleton_bare_target(
             }
         }
     }
+}
+
+fn resolve_javascript_call_via_import_edge(
+    builder: &mut FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+    ambiguous_unresolved: &mut usize,
+) -> bool {
+    let Some(source_file) = file_path_for_node(builder, edge.source, indexes) else {
+        return false;
+    };
+    if import_language_family(&source_file) != Some(ImportLanguageFamily::Javascript) {
+        return false;
+    }
+
+    let Some(source_file_node) = builder
+        .facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::File && node.label == source_file)
+        .map(|node| node.node_id)
+    else {
+        return false;
+    };
+
+    let Some(imports) = indexes.pending_imports_by_source.get(&source_file_node) else {
+        return false;
+    };
+
+    let mut candidates = imports
+        .iter()
+        .filter(|import| import.target_name == edge.target_name)
+        .flat_map(|import| module_path_resolution_candidates(builder, import, indexes))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+
+    match candidates.as_slice() {
+        [target] if *target != edge.source => {
+            builder.add_pending_edge_with_bind_method(edge, Some(*target), Some("import_path"));
+            return true;
+        }
+        candidates if candidates.len() > 1 => {
+            *ambiguous_unresolved += 1;
+            tracing::debug!(
+                target_label = %edge.target_name,
+                candidates = candidates.len(),
+                "spur-graph: ambiguous javascript import-based call target; leaving unresolved"
+            );
+            builder.add_pending_edge(edge, None);
+            return true;
+        }
+        _ => {}
+    }
+
+    false
 }
 
 fn callable_symbol_candidates(

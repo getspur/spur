@@ -411,7 +411,7 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls",
-      "bind_method": "singleton"
+      "bind_method": "import_path"
     },
     {
       "source_stable_symbol_id": "7cf131a41e53f73f",
@@ -421,7 +421,7 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "calls",
-      "bind_method": "singleton"
+      "bind_method": "import_path"
     },
     {
       "source_stable_symbol_id": "88e47eeb43e558be",
