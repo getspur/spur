@@ -525,6 +525,37 @@ fn graph_build_triggers_analyst_rebuild_when_duckdb_present() {
     assert!(db.is_file(), "analyst DB should exist at {}", db.display());
 }
 
+#[test]
+fn graph_build_prints_code_symbol_sidecar_progress() {
+    let dir = fixture_tree();
+
+    let output = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args([
+            "graph",
+            "build",
+            "--workspace",
+            "--no-analyst",
+            "--no-section-embeddings",
+        ])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .env_remove("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        output.status.success(),
+        "expected success; stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("[spur] Code symbol sidecar ready:"),
+        "expected code symbol sidecar completion in stdout, got: {stdout}"
+    );
+}
+
 fn parquet_artifact_dirs(base: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut dirs = std::fs::read_dir(base)
         .unwrap_or_else(|err| panic!("read output base `{}`: {err}", base.display()))

@@ -3449,6 +3449,7 @@ fn submit_plan_def() -> ToolDefinition {
         let prev = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
             .expect("artifact");
         subscriber.clear();
+        tracing::callsite::rebuild_interest_cache();
         fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n").expect("rewrite a.rs");
 
         let (_next, mode, _stats) =
