@@ -1700,6 +1700,37 @@ pub async fn get_notebook(path: &str) -> Result<NotebookRoot, Error> {
     Ok(serde_json::from_str(&contents)?)
 }
 
+#[derive(Deserialize)]
+struct AppModeManifest {
+    open_mode: String,
+    entry_notebook: String,
+}
+
+/// Get the spur-app `open_mode` for a notebook when its sibling manifest marks
+/// the notebook as the entry notebook.
+#[tauri::command]
+pub async fn notebook_open_mode(path: String) -> Result<Option<String>, Error> {
+    let notebook_path = Path::new(&path);
+    let Some(dir) = notebook_path.parent() else {
+        return Ok(None);
+    };
+    let Ok(manifest_contents) = tokio::fs::read_to_string(dir.join("spur-app.json")).await else {
+        return Ok(None);
+    };
+    let manifest: AppModeManifest = match serde_json::from_str(&manifest_contents) {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(None),
+    };
+
+    if notebook_path.file_name().and_then(|name| name.to_str())
+        == Some(manifest.entry_notebook.as_str())
+    {
+        Ok(Some(manifest.open_mode))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Save the contents of a Jupyter notebook to disk.
 #[tauri::command]
 pub async fn save_to_disk(
@@ -2223,6 +2254,64 @@ mod tests {
     #[test]
     fn daemon_control_command_symbol_is_exported() {
         let _command = daemon_control;
+    }
+
+    #[tokio::test]
+    async fn notebook_open_mode_entry_returns_app() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("spur-app.json"),
+            r#"{"open_mode":"app","entry_notebook":"app.ipynb"}"#,
+        )
+        .expect("write manifest");
+        let entry = dir.path().join("app.ipynb");
+        std::fs::write(&entry, "{}").expect("write notebook");
+
+        assert_eq!(
+            notebook_open_mode(entry.to_string_lossy().into_owned())
+                .await
+                .expect("notebook_open_mode entry"),
+            Some("app".to_string())
+        );
+
+        let other = dir.path().join("other.ipynb");
+        std::fs::write(&other, "{}").expect("write other notebook");
+        assert_eq!(
+            notebook_open_mode(other.to_string_lossy().into_owned())
+                .await
+                .expect("notebook_open_mode other"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn notebook_open_mode_no_manifest_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry = dir.path().join("app.ipynb");
+        std::fs::write(&entry, "{}").expect("write notebook");
+
+        assert_eq!(
+            notebook_open_mode(entry.to_string_lossy().into_owned())
+                .await
+                .expect("notebook_open_mode no manifest"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn notebook_open_mode_invalid_manifest_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("spur-app.json"), r#"{invalid}"#)
+            .expect("write invalid manifest");
+        let entry = dir.path().join("app.ipynb");
+        std::fs::write(&entry, "{}").expect("write notebook");
+
+        assert_eq!(
+            notebook_open_mode(entry.to_string_lossy().into_owned())
+                .await
+                .expect("notebook_open_mode invalid manifest"),
+            None
+        );
     }
 
     #[tokio::test]
