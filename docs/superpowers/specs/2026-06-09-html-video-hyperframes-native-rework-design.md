@@ -102,3 +102,31 @@ appears tied to chrome-headless-shell). To be re-verified per template; not a bl
   is a re-author, not a port. Accepted (option C).
 - GSAP licence: GSAP 3 standard is free for most uses; vendoring the core `gsap.min.js` is
   fine. Note if any premium plugins are needed (avoid).
+
+## Completion status (2026-06-09)
+
+The native rework is COMPLETE. All phases brain-verified and merged to local main:
+
+- **P0** — native-format spike — proven.
+- **P1** — native render harness (producer createRenderJob/executeRenderJob, Bun) +
+  frame-liquid-hero re-authored GSAP/DOM. `331296449`.
+- **P2** — frame-glitch-title + frame-data-rollup migrated to native GSAP/DOM. `947a70f1`.
+- **P3** — frame-media-mix: DOM `<audio>`+`<video>`, mixed/composited by the producer
+  (verified: MP4 with h264 video + aac audio). `3b41da73`.
+- **P4** — frame-scene-transition: multi-scene + domain-warp shader transition via vendored
+  `@hyperframes/shader-transitions` (verified: producer detects + layered-composites the
+  transition). `724c02cd`.
+- **P5 (declarative authoring) — SUBSUMED / DROPPED.** Investigation showed GSAP timeline +
+  DOM clips (`window.__timelines`) IS HyperFrames' canonical native authoring model (per
+  `@hyperframes/core` quickstart, GSAP is REQUIRED). `@hyperframes/core` is the producer's
+  INTERNAL compiler (htmlCompiler/htmlBundler/timingCompiler), not a separate author-facing
+  declarative layer. Our P1–P4 templates already use the native authoring model, so there is
+  no distinct P5 deliverable that adds value. Adopting a non-GSAP adapter (Lottie/anime/WAAPI)
+  would only matter if html_video needed those specific libraries — it does not. Dropped to
+  avoid make-work.
+
+**Net:** html_video is fully re-architected onto HyperFrames. All templates are native
+GSAP/DOM compositions rendering through the Bun producer harness; audio, video compositing,
+and shader transitions all work — capabilities the prior canvas approach could not provide.
+Known constraints: shader-transition renders are slow (~130s for 3s, layered compositing);
+bit-determinism is Linux/BeginFrame-scoped (output correct everywhere).
