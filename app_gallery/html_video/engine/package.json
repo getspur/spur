@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@hyperframes/engine": "0.6.84",
+    "@hyperframes/producer": "0.6.84",
     "puppeteer": "24.0.0"
   }
 }
