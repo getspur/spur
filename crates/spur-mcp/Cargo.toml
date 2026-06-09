@@ -61,6 +61,7 @@ required-features = ["madsim-sim"]
 
 [dev-dependencies]
 agent-client-protocol = { workspace = true }
+duckdb = { workspace = true }
 proptest = { workspace = true }
 proptest-state-machine = "0.8"
 reqwest = { workspace = true }
