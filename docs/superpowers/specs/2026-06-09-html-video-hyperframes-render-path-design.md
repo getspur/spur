@@ -1,7 +1,8 @@
 # html_video → HyperFrames render path + Tiers 1–3
 
 - **Date:** 2026-06-09
-- **Status:** Approved (Deno-first foundation + tiered sequencing)
+- **Status:** Approved (Option A: Node-subprocess engine foundation + tiered sequencing)
+- **Revision:** runtime decision changed Deno-first → **Node subprocess (Option A)** per user direction.
 - **Owner:** brain
 - **Worker:** codex
 - **Builds on:** `2026-06-09-html-video-hyperframes-seekable-design.md` (Tier 0, merged `ef3a68d4`)
@@ -21,24 +22,27 @@ templates does nothing until an engine consumes them.
 HyperFrames engine.** The engine requires a JS/TS runtime + Puppeteer (Chromium) +
 ffmpeg.
 
-### Runtime decision: Deno-first, Node-subprocess fallback
+### Runtime decision: Node subprocess (Option A)
 
-SPUR already provisions a **Deno kernel** (`crates/spur-notebook/.../kernel_provision.rs`;
-`dag/engine.rs` supports the `deno` kernelspec). Reusing Deno avoids introducing a Node 22
-toolchain into the Python-only app. Deno 2 can import `npm:@hyperframes/engine@0.6.84` and
-provides node-compat for `node:` builtins / `child_process`.
+The HyperFrames engine's **native runtime is Node** (`package.json: engines.node >=22`,
+`puppeteer ^24`, `worker_threads`, `@hono/node-server`). Running it on its native runtime
+removes all node-compat risk (Puppeteer launch, worker pools, hono server all work
+unmodified). The cost is that this app — Python-only today (`spur-app.json:
+mcp_server.type = "python"`) — gains a **Node 22 + Chromium + ffmpeg** dependency.
 
-**Risk surface (why F0 is a spike, not an assumption):** the engine uses Puppeteer 24,
-`worker_threads`, and `@hono/node-server`. Puppeteer-under-Deno + worker pools are the
-real unknowns. The CDP BeginFrame capture itself is WebSocket-level and portable; the
-question is whether `npm:puppeteer` launches and connects under Deno node-compat.
+**Approach:** bundle the pinned `@hyperframes/engine@0.6.84` and invoke it from a small
+Node entry script; the Python render tool (`server/render.py` / `html_video_render`)
+**shells out to a Node subprocess** over an `__hf` composition. `html_video_render`
+becomes a thin invoker; the seek→BeginFrame→ffmpeg determinism replaces the real-time
+capture gates.
 
-- **Primary:** run the engine under `deno run -A` (reuse provisioned Deno).
-- **Fallback (only if F0 fails):** bundle Node 22 + the engine and spawn a Node subprocess
-  from the Python render tool.
+**Runtime provisioning** is part of the foundation: declare the Node toolchain + engine
+deps in the app (alongside the existing Python `requirements.txt`), resolve a Chromium for
+Puppeteer (prefer `PUPPETEER_EXECUTABLE_PATH` over a fresh download), and ensure `node`
+is discoverable from the Python process.
 
-Either way, `html_video_render` becomes a thin invoker of the engine over an `__hf`
-composition; the seek→BeginFrame→ffmpeg determinism replaces the real-time capture gates.
+(The previously-considered Deno-first path is dropped; Deno node-compat for Puppeteer was
+the gating unknown and Option A sidesteps it by using the engine's native runtime.)
 
 ## Goal
 
@@ -48,22 +52,25 @@ transitions, declarative authoring).
 
 ## Decomposition (DAG)
 
-### F0 — Deno engine spike *(no deps)*
-Prove `@hyperframes/engine@0.6.84` renders under Deno.
-- **Goal:** a `render-hf.ts` that, via `deno run -A`, loads a trivial seekable page
-  (`window.__hf={duration:2, seek(t){…canvas draw…}}`), drives the engine's BeginFrame
-  capture for `duration·fps` frames, and muxes to MP4 with ffmpeg.
-- **Acceptance:** a non-empty, playable MP4 of the right duration/fps, OR a precise
-  go/no-go report naming the exact Deno-compat blocker (Puppeteer launch, worker_threads,
-  hono server, etc.). Keep the spike script in `app_gallery/html_video/engine/` (new dir).
-- **Gate:** green → F1 uses Deno; red → F1 uses the Node-subprocess fallback.
+### F0 — Node engine render harness *(no deps)*
+Stand up `@hyperframes/engine@0.6.84` on its native Node runtime and prove the invocation
+contract F1 will build on.
+- **Goal:** a Node entry script `app_gallery/html_video/engine/render-hf.mjs` (new dir)
+  that loads a trivial seekable page (`window.__hf={duration:2, seek(t){…canvas draw…}}`),
+  drives the engine's BeginFrame capture for `duration·fps` frames, and muxes to MP4 with
+  ffmpeg. Add a pinned `package.json` (engine + puppeteer) and document the Node version +
+  how Chromium is resolved (`PUPPETEER_EXECUTABLE_PATH` preferred).
+- **Acceptance:** `node render-hf.mjs …` produces a non-empty, playable MP4 of the right
+  duration/fps. Document the exact CLI contract (args in, MP4 out) so F1 can shell to it.
+- **Note:** this is foundation, not a gamble — Node is the engine's native runtime; the
+  task is provisioning + establishing the subprocess contract, not de-risking compat.
 
 ### F1 — render path swap *(depends: F0)*
 Route `html_video_render` through the engine.
 - **Goal:** add an engine render mode to the app: given a composition (an html_video
   template/`app.ipynb` cell exposing `window.__hf`) + duration/fps/resolution, produce MP4
-  via the engine (Deno path from F0, or fallback). Keep the existing webm/port path intact
-  as a deprecated fallback during transition.
+  by shelling to the F0 Node render harness. Keep the existing webm/port path intact as a
+  deprecated fallback during transition.
 - **Acceptance:** rendering a Tier 0 template (e.g. `frame-liquid-hero`) through the new
   path yields a deterministic MP4 (same bytes across two runs at fixed fps) with no
   reliance on the real-time capture gates. Existing Python tests stay green.
@@ -89,8 +96,8 @@ Route `html_video_render` through the engine.
 
 ## Constraints (all tasks)
 
-- Reuse the provisioned Deno runtime where possible; do not add a Node toolchain unless
-  F0 forces the fallback.
+- Run the engine on Node (Option A). Pin the Node toolchain + `@hyperframes/*` versions;
+  resolve Chromium via `PUPPETEER_EXECUTABLE_PATH` where possible.
 - Keep determinism: render output must be reproducible at a fixed fps.
 - Each task reads its predecessor's merged branch before starting; downstream tasks adapt
   to the integration shape F0/F1 establish rather than assuming it.
@@ -100,7 +107,6 @@ Route `html_video_render` through the engine.
 
 ## Sequencing rationale
 
-F0 de-risks the entire arc before any rewrite. F1 is the load-bearing foundation that
-unblocks T1/T2/T3. T1→T2 are strictly ordered (transitions build on the media model).
-T3 is a parallel track off F1. If F0 returns red, brain re-scopes F1 to the Node fallback
-at the review gate before F1 dispatches.
+F0 establishes the Node engine harness + subprocess contract before any rewrite. F1 is the
+load-bearing foundation that unblocks T1/T2/T3. T1→T2 are strictly ordered (transitions
+build on the media model). T3 is a parallel track off F1.
