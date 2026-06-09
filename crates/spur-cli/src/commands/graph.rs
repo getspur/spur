@@ -11,7 +11,7 @@ use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
 use spur_graph::store::lance_sections::{
     write_sections_dataset_best_effort_with_sidecar_options_and_progress, SectionSidecarOptions,
-    SectionSidecarProgressCallback, SectionSidecarProgressEvent,
+    SectionSidecarProgressCallback, SectionSidecarProgressEvent, SidecarPhase,
 };
 use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
@@ -62,8 +62,6 @@ pub fn build_with_section_embedding_override(
 
     let temporal_shard_config = options.temporal_shard_config;
     let use_temporal = should_use_temporal(options.with_temporal);
-    let section_sidecar_options =
-        SectionSidecarOptions::from_env_with_skip_override(no_section_embeddings);
     let section_progress_bar = (!options.quiet).then(section_sidecar_progress_bar);
     let section_progress_reporter =
         |event| report_section_sidecar_progress(section_progress_bar.as_ref(), event);
@@ -89,26 +87,37 @@ pub fn build_with_section_embedding_override(
     );
 
     let mut mode = BuildMode::Full;
-    let previous_artifact = match resolve_artifact_location(&root, Some(&output)) {
+    // Resolve the previous artifact location; capture the path for both
+    // incremental-build reuse and vector carry-forward.
+    let (previous_artifact, previous_artifact_path) = match resolve_artifact_location(
+        &root,
+        Some(&output),
+    ) {
         Ok(resolved) => {
             tracing::debug!(
                 requested_path = %output.display(),
                 resolved_path = %resolved.path.display(),
                 "spur-graph: resolved previous artifact for graph build"
             );
-            match load_previous_artifact_for_graph_build(&resolved.path) {
+            let path = resolved.path.clone();
+            let prev = match load_previous_artifact_for_graph_build(&resolved.path) {
                 Ok(prev) => Some(prev),
                 Err(error) => {
                     tracing::info!(error = %error, "spur-graph: failed to load previous artifact; falling back to full");
                     None
                 }
-            }
+            };
+            (prev, Some(path))
         }
         Err(error) => {
             tracing::info!(error = %error, "spur-graph: no previous artifact resolved; falling back to full");
-            None
+            (None, None)
         }
     };
+
+    let section_sidecar_options =
+        SectionSidecarOptions::from_env_with_skip_override(no_section_embeddings)
+            .with_previous_artifact_dir(previous_artifact_path);
 
     let (mut artifact, file_counts, node_count, edge_count) = match previous_artifact {
         Some(prev) => match artifact_from_facts_incremental(&prev, &root) {
@@ -537,7 +546,7 @@ fn temporal_progress_bar(total: usize) -> ProgressBar {
 fn section_sidecar_progress_bar() -> ProgressBar {
     let progress = ProgressBar::new(0);
     progress.set_style(
-        ProgressStyle::with_template("{spinner} sections  [{bar:30}] {pos}/{len} rows {wide_msg}")
+        ProgressStyle::with_template("{spinner} sidecar   [{bar:30}] {pos}/{len} rows {wide_msg}")
             .expect("valid section sidecar progress template"),
     );
     progress.enable_steady_tick(Duration::from_millis(120));
@@ -559,7 +568,7 @@ fn report_section_sidecar_progress(
             if let Some(progress) = progress {
                 progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
                 progress.set_position(0);
-                progress.set_message("preparing Lance section rows");
+                progress.set_message("sections: preparing Lance rows");
             }
             println!(
                 "[spur] Section sidecar: rows: {}, markdown files: {}, embeddings: {}, embed batch: {}, write batch: {}",
@@ -568,6 +577,25 @@ fn report_section_sidecar_progress(
                 if embeddings_enabled { "enabled" } else { "disabled" },
                 fmt_thousands(embedding_batch_size),
                 fmt_thousands(write_batch_size)
+            );
+        }
+        SectionSidecarProgressEvent::CodeSymbolsStarted {
+            total_rows,
+            embeddings_enabled,
+        } => {
+            if let Some(progress) = progress {
+                progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                progress.set_position(0);
+                progress.set_message("code symbols: preparing Lance rows");
+            }
+            println!(
+                "[spur] Code symbol sidecar: rows: {}, embeddings: {}",
+                fmt_thousands(total_rows),
+                if embeddings_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
             );
         }
         SectionSidecarProgressEvent::BatchStarted {
@@ -661,25 +689,46 @@ fn report_section_sidecar_progress(
                 "[spur] Preparing embedding model {model_name} (~{approximate_size_mb} MB, cached after first run)"
             );
         }
-        SectionSidecarProgressEvent::Indexing { label } => {
+        SectionSidecarProgressEvent::Indexing { label, phase } => {
             if let Some(progress) = progress {
-                progress.set_message(format!("building {label} index"));
+                let phase_prefix = match phase {
+                    SidecarPhase::Sections => "sections",
+                    SidecarPhase::CodeSymbols => "code symbols",
+                };
+                progress.set_message(format!("{phase_prefix}: building {label} index"));
             }
         }
         SectionSidecarProgressEvent::Finished {
             total_rows,
             written_rows,
             skipped_existing_rows,
+            phase,
         } => {
-            if let Some(progress) = progress {
-                progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
-                progress.finish_and_clear();
+            match phase {
+                SidecarPhase::Sections => {
+                    if let Some(progress) = progress {
+                        progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                        // Do NOT finish the bar here — code symbols phase follows.
+                        progress.set_message("sections: done");
+                    }
+                    println!(
+                        "[spur] Section sidecar ready: wrote {} rows, skipped {} unchanged rows",
+                        fmt_thousands(written_rows),
+                        fmt_thousands(skipped_existing_rows)
+                    );
+                }
+                SidecarPhase::CodeSymbols => {
+                    if let Some(progress) = progress {
+                        progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                        progress.finish_and_clear();
+                    }
+                    println!(
+                        "[spur] Code symbol sidecar ready: wrote {} rows, skipped {} unchanged rows",
+                        fmt_thousands(written_rows),
+                        fmt_thousands(skipped_existing_rows)
+                    );
+                }
             }
-            println!(
-                "[spur] Section sidecar ready: wrote {} rows, skipped {} unchanged rows",
-                fmt_thousands(written_rows),
-                fmt_thousands(skipped_existing_rows)
-            );
         }
         SectionSidecarProgressEvent::Failed { error } => {
             if let Some(progress) = progress {
