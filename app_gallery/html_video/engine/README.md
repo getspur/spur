@@ -1,17 +1,18 @@
 # HyperFrames Bun harness for `html_video`
 
-This folder is the F0 harness used by the engine-backed render path.
+This folder now runs HyperFrames-native compositions through the Bun runtime.
 
 ## Runtime stack
 
 - Bun runtime: **>=1.1.0**
 - `@hyperframes/engine`: **0.6.84**
+- `@hyperframes/producer`: **0.6.84**
 - `puppeteer`: **24.0.0**
 
-## Why Bun (not Node)
+## Why Bun
 
-`@hyperframes/engine@0.6.84` is currently Bun-native and not reliably consumable via stock Node ESM
-in this repository context (broken exports/type path behavior), so the subprocess contract is Bun.
+`@hyperframes/producer@0.6.84` is Bun-native and requires Bun for reliable execution.
+The subprocess contract remains direct Bun execution.
 
 ## Install + provisioning
 
@@ -19,10 +20,10 @@ From `app_gallery/html_video/engine`:
 
 ```bash
 cd app_gallery/html_video/engine
-npm install
+bun install
 ```
 
-- Install Bun if not already available (single binary):
+- Install Bun if not already available:
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
@@ -31,14 +32,14 @@ curl -fsSL https://bun.sh/install | bash
 - If Chromium is already available locally:
 
 ```bash
-PUPPETEER_SKIP_DOWNLOAD=true npm install
+bun install
 ```
 
 - If no Chromium is present:
 
 ```bash
-npm install
-npx puppeteer browsers install chrome
+bun install
+bunx puppeteer browsers install chrome
 ```
 
 ## `render-hf.mjs` CLI contract
@@ -46,43 +47,44 @@ npx puppeteer browsers install chrome
 `render-hf.mjs` is intentionally positional so F1 can shell to it directly.
 
 ```bash
-bun render-hf.mjs <composition_html> <duration_seconds> <fps> <resolution> <output_mp4>
+bun render-hf.mjs <composition> <duration_seconds> <fps> <resolution> <output_mp4>
 ```
 
-- `<composition_html>`: HTML file path exposing `window.__hf = { duration, seek }`.
-  - If `<composition_html>` is a file, relative assets are served from that file’s parent directory.
-  - If `<composition_html>` is a directory, `index.html` must exist.
-- `<duration_seconds>`: render duration in seconds, positive numeric.
+- `<composition>`: a composition directory containing `index.html` or an html file under that root.
+  - If a directory, `index.html` must exist in the directory.
+  - If an html file path, its parent directory is staged as the composition root and staged to `index.html` when needed.
+- `<duration_seconds>`: render duration in seconds, positive numeric (validated in harness, retained for CLI contract).
 - `<fps>`: integer fps (`30`, `60`, …) or rational fps (`30000/1001`).
-- `<resolution>`: `<width>x<height>`, e.g. `1280x720`.
+- `<resolution>`: `<width>x<height>`, e.g. `1280x720` (validated in harness, composition attributes drive actual canvas size).
 - `<output_mp4>`: output path (`.mp4` auto-appended if omitted).
 
 Example:
 
 ```bash
-bun render-hf.mjs ../templates/frame-liquid-hero/template.html 2.0 30 1280x720 /tmp/liquid-hero.mp4
+bun render-hf.mjs ../templates/frame-liquid-hero 2 30 1280x720 /tmp/liquid-hero.mp4
 ```
 
 ## Chromium/Bun process contract
 
-The harness prefers system Chromium via:
-
-1. `PUPPETEER_EXECUTABLE_PATH` (exported env var), passed as `chromePath`.
-2. Puppeteer-managed browser fallback when no env path is provided.
+`PUPPETEER_EXECUTABLE_PATH` is optional and passed through as a producer chrome path.
+When set, it is sent to `createRenderJob` as `producerConfig.chromePath`.
 
 For environments where Chromium is unavailable, install one explicitly:
 
 ```bash
-npx puppeteer browsers install chrome
+bunx puppeteer browsers install chrome
 ```
 
 or set `PUPPETEER_EXECUTABLE_PATH` to an existing browser binary.
 
-## Deterministic output behavior
+## Determinism and composition metadata
 
-Frames are rendered with fixed frame times at exactly:
+`frame` timing is handled by the producer and the composition’s timeline.
 
-`frame_index / fps`.
+The composition must be HyperFrames-native:
 
-The script captures `floor(duration * fps)` frames from `t=0` in order and encodes one MP4 via
-`encodeFramesFromDir`. For fixed inputs this produces deterministic frame-accurate output.
+- Root `<div>` carries `data-composition-id`, `data-start`, `data-duration`,
+  `data-width`, and `data-height`.
+- Animation is driven by a paused GSAP timeline assigned as
+  `window.__timelines["main"]`.
+- The producer reads composition duration and dimensions from DOM attributes.
