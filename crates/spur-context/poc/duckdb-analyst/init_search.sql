@@ -287,9 +287,11 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
     WHERE requested_scope IN ('all', 'docs')
   ),
   -- Pure BM25 callers keep search_context_candidates unchanged. When a query
-  -- vector is present, `score` below becomes an RRF-fused score across the BM25
-  -- and Lance candidate lists so their incompatible raw score scales never
-  -- compete directly for the same LIMIT slots.
+  -- vector is present, `score` below is an RRF-fused score across the BM25
+  -- and Lance candidate lists, then normalized to a fixed [0,1] range using a
+  -- constant reference of 2.0/(60.0+1.0). This maps a top-ranked candidate
+  -- in BOTH lists to ~1.0, while a candidate ranked #1 in only one list
+  -- lands around 0.5.
   rrf_sources AS (
     SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, signal,
            neighbor_kind, edge_bind_method, grounding,
@@ -342,7 +344,8 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
   ),
   fused_rows AS (
     SELECT r.kind, r.title, r.file_path, r.stable_symbol_id, r.symbol_kind,
-           round(f.fused_score, 6) AS score, r.signal, r.neighbor_kind,
+           round(LEAST(f.fused_score / (2.0 / (60.0 + 1.0)), 1.0), 6) AS score,
+           r.signal, r.neighbor_kind,
            r.edge_bind_method, f.grounding, r.list_rank, r.list_priority,
            r.candidate_id
     FROM fused_scores f
