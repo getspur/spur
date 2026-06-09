@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["markdown"]
+default = ["markdown", "analytics"]
 markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "dep:mermaid-text", "dep:ratatui-image", "dep:resvg", "dep:pulldown-cmark"]
 analytics = ["dep:spur-context", "spur-context/duckdb", "dep:spur-cost", "dep:directories"]
 
