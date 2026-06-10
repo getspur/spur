@@ -1,7 +1,7 @@
 # Python SDK — spur_app
 
 Source: `sdk/python/src/spur_app/`
-Install: `pip install spur-app` (PyPI, planned U7) or `uv add --dev spur_app` from the repo.
+Published: PyPI `spur-app` (post-U7; not yet released). Until then, install from the repo with `uv add --dev sdk/python/` or `pip install -e sdk/python/`.
 
 Dependencies: `mcp` (for `app.run()`); stdlib-only for `ports`, `artifacts`, `env`, `testing`.
 
@@ -164,9 +164,11 @@ with FakePortStore() as store:
     assert frame.duration_sec == 5.0
 # SPUR_PORTS_ROOT is restored after the context
 
-# Load from golden fixtures
+# Load from golden fixtures — depth depends on the test file's location.
+# sdk/python/tests/test_*.py uses parents[3] (test → python → sdk → repo root).
+# An in-app test at my-app/tests/test_*.py inside the monorepo uses parents[2].
 from pathlib import Path
-FIXTURES = Path(__file__).parents[N] / "sdk" / "fixtures" / "port-store"
+FIXTURES = Path(__file__).resolve().parents[3] / "sdk" / "fixtures" / "port-store"
 
 with FakePortStore.from_fixtures(FIXTURES) as store:
     frame = store.port_store.read("spur-ad-capture")
