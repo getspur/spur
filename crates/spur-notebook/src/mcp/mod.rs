@@ -758,6 +758,39 @@ fn recents_bridge_error(error: anyhow::Error) -> BridgeError {
     }
 }
 
+/// Build the host-provisioned environment variables driven by `capabilities`.
+///
+/// Only keys for capabilities that are declared in the manifest are included.
+/// The returned map is merged into the plugin env **after** manifest env so
+/// host values take precedence on conflict (caller is responsible for logging
+/// the shadow warning).
+fn build_host_provisioned_env(
+    notebook_path: &Path,
+    capabilities: &crate::spur_app::SpurAppCapabilities,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+
+    if capabilities.ports.is_some() {
+        // SPUR_PORTS_ROOT is the directory that contains manifest.json and the
+        // versioned port files — i.e. `<notebook_port_root>/ports`.
+        let ports_root = crate::dag::notebook_port_root(notebook_path).join("ports");
+        env.insert(
+            "SPUR_PORTS_ROOT".to_string(),
+            ports_root.to_string_lossy().into_owned(),
+        );
+    }
+
+    if capabilities.artifacts_dir {
+        let artifacts_dir = crate::dag::notebook_port_root(notebook_path).join("artifacts");
+        env.insert(
+            "SPUR_ARTIFACTS_DIR".to_string(),
+            artifacts_dir.to_string_lossy().into_owned(),
+        );
+    }
+
+    env
+}
+
 #[cfg(feature = "datasource-introspect")]
 fn normalize_datasource_path(path: String) -> Result<PathBuf, BridgeError> {
     if path.trim().is_empty() {
@@ -3030,10 +3063,45 @@ impl NotebookDaemonControl {
             return Ok(None);
         }
 
-        Ok(manifest
-            .mcp_server
-            .as_ref()
-            .map(|server| PluginConfig::from_manifest(manifest.name.clone(), server, app_root)))
+        let Some(server) = manifest.mcp_server.as_ref() else {
+            return Ok(None);
+        };
+
+        let mut config = PluginConfig::from_manifest(manifest.name.clone(), server, app_root);
+
+        // Host-provisioned env: injected after manifest env so host values win
+        // on conflict. A warning is logged when the manifest already declared
+        // the same key so the app author learns about the shadowing.
+        let host_env = build_host_provisioned_env(path, &manifest.capabilities);
+
+        // Materialise side effects (directory creation) before adding env vars.
+        if manifest.capabilities.artifacts_dir {
+            let artifacts_dir = crate::dag::notebook_port_root(path).join("artifacts");
+            if let Err(error) = tokio::fs::create_dir_all(&artifacts_dir).await {
+                warn!(
+                    path = %artifacts_dir.display(),
+                    %error,
+                    "failed to create SPUR_ARTIFACTS_DIR"
+                );
+            }
+        }
+
+        for (key, value) in host_env {
+            if let Some(existing) = config.env.get(&key) {
+                if existing != &value {
+                    warn!(
+                        plugin = %config.name,
+                        %key,
+                        manifest_value = %existing,
+                        host_value = %value,
+                        "host-provisioned env key shadows manifest env"
+                    );
+                }
+            }
+            config.env.insert(key, value);
+        }
+
+        Ok(Some(config))
     }
 
     async fn shutdown_app_plugins(&self) {
@@ -6489,5 +6557,106 @@ if __name__ == "__main__":
 
         assert_eq!(path, temp_dir.path().join("Untitled.ipynb"));
         assert!(path.exists());
+    }
+
+    // ── T2: spawn provisioning env injection ─────────────────────────────────
+
+    #[test]
+    fn build_host_provisioned_env_injects_spur_ports_root_when_ports_declared() {
+        let notebook_path = std::path::Path::new("/tmp/fake/app.ipynb");
+        let caps = crate::spur_app::SpurAppCapabilities {
+            ports: Some(crate::spur_app::SpurAppCapabilityPorts {
+                read: vec!["spur-ad-capture".to_string()],
+                write: vec![],
+            }),
+            canvas_capture: false,
+            active_output_scripts: false,
+            artifacts_dir: false,
+        };
+
+        let env = build_host_provisioned_env(notebook_path, &caps);
+
+        let ports_root = env
+            .get("SPUR_PORTS_ROOT")
+            .expect("SPUR_PORTS_ROOT injected");
+        let expected_suffix = "ports";
+        assert!(
+            ports_root.ends_with(expected_suffix),
+            "SPUR_PORTS_ROOT must end with 'ports', got: {ports_root}"
+        );
+        assert!(
+            !env.contains_key("SPUR_ARTIFACTS_DIR"),
+            "SPUR_ARTIFACTS_DIR must not be injected when artifacts_dir is false"
+        );
+    }
+
+    #[test]
+    fn build_host_provisioned_env_injects_spur_artifacts_dir_when_declared() {
+        let notebook_path = std::path::Path::new("/tmp/fake/app.ipynb");
+        let caps = crate::spur_app::SpurAppCapabilities {
+            ports: None,
+            canvas_capture: false,
+            active_output_scripts: false,
+            artifacts_dir: true,
+        };
+
+        let env = build_host_provisioned_env(notebook_path, &caps);
+
+        let artifacts_dir = env
+            .get("SPUR_ARTIFACTS_DIR")
+            .expect("SPUR_ARTIFACTS_DIR injected");
+        assert!(
+            artifacts_dir.ends_with("artifacts"),
+            "SPUR_ARTIFACTS_DIR must end with 'artifacts', got: {artifacts_dir}"
+        );
+        assert!(
+            !env.contains_key("SPUR_PORTS_ROOT"),
+            "SPUR_PORTS_ROOT must not be injected when ports capability is absent"
+        );
+    }
+
+    #[test]
+    fn build_host_provisioned_env_injects_nothing_when_no_capabilities_declared() {
+        let notebook_path = std::path::Path::new("/tmp/fake/app.ipynb");
+        let caps = crate::spur_app::SpurAppCapabilities::default();
+
+        let env = build_host_provisioned_env(notebook_path, &caps);
+
+        assert!(
+            env.is_empty(),
+            "no env vars must be injected when no capabilities are declared"
+        );
+    }
+
+    #[test]
+    fn build_host_provisioned_env_injects_both_when_ports_and_artifacts_declared() {
+        let notebook_path = std::path::Path::new("/tmp/fake/app.ipynb");
+        let caps = crate::spur_app::SpurAppCapabilities {
+            ports: Some(crate::spur_app::SpurAppCapabilityPorts::default()),
+            canvas_capture: true,
+            active_output_scripts: true,
+            artifacts_dir: true,
+        };
+
+        let env = build_host_provisioned_env(notebook_path, &caps);
+
+        assert!(env.contains_key("SPUR_PORTS_ROOT"));
+        assert!(env.contains_key("SPUR_ARTIFACTS_DIR"));
+
+        // Both must be rooted under the same notebook port root.
+        let ports_root = env.get("SPUR_PORTS_ROOT").unwrap();
+        let artifacts_dir = env.get("SPUR_ARTIFACTS_DIR").unwrap();
+        let notebook_root = crate::dag::notebook_port_root(notebook_path);
+        assert_eq!(
+            ports_root,
+            &notebook_root.join("ports").to_string_lossy().into_owned()
+        );
+        assert_eq!(
+            artifacts_dir,
+            &notebook_root
+                .join("artifacts")
+                .to_string_lossy()
+                .into_owned()
+        );
     }
 }
