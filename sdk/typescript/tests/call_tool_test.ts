@@ -8,7 +8,6 @@
 import {
   assertEquals,
   assertRejects,
-  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { callToolWithSocket } from "../src/call_tool.ts";
 import { readFrame, writeFrame } from "../src/wire.ts";
@@ -287,7 +286,7 @@ Deno.test(
 );
 
 // ---------------------------------------------------------------------------
-// Error propagation
+// Error propagation — tools/call errors
 // ---------------------------------------------------------------------------
 
 Deno.test(
@@ -335,6 +334,40 @@ Deno.test(
   },
 );
 
+// ---------------------------------------------------------------------------
+// Error propagation — initialize errors
+// ---------------------------------------------------------------------------
+
+Deno.test(
+  "callTool throws when initialize response contains a JSON-RPC error",
+  { permissions: { net: true, read: true, write: true, env: true } },
+  async () => {
+    const socketPath = await tempSocketPath();
+
+    // Server that replies to initialize with an error and then hangs up
+    const { done } = await makeFakeServer(socketPath, async (conn) => {
+      const initReq = await readFrame(conn) as Record<string, unknown>;
+      await writeFrame(conn, {
+        jsonrpc: "2.0",
+        id: initReq.id,
+        error: { code: -32600, message: "protocol version not supported" },
+      });
+      // Close immediately — no further messages expected
+    });
+
+    await assertRejects(
+      () => callToolWithSocket(socketPath, "t", {}),
+      Error,
+      "protocol version not supported",
+    );
+    await done;
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Missing environment variable
+// ---------------------------------------------------------------------------
+
 Deno.test(
   "callTool throws when SPUR_NOTEBOOK_MCP_SOCKET is not set",
   { permissions: { env: true } },
@@ -356,11 +389,11 @@ Deno.test(
 );
 
 // ---------------------------------------------------------------------------
-// _connectFn seam (dependency injection)
+// _connectFn seam on callToolWithSocket (internal test injection)
 // ---------------------------------------------------------------------------
 
 Deno.test(
-  "callTool _connectFn seam receives the socket path",
+  "callToolWithSocket _connectFn seam receives the socket path",
   { permissions: { net: true, read: true, write: true, env: true } },
   async () => {
     const socketPath = await tempSocketPath();
