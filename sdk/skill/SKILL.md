@@ -132,23 +132,28 @@ If `SPUR_PORTS_ROOT` is not set (capabilities.ports not declared or host did
 not inject), `app.ports` raises `MissingCapabilityError` on first access.
 Same pattern for `app.artifacts` / `SPUR_ARTIFACTS_DIR`.
 
-**TypeScript frontend cell** — import from `@spur/app` (JSR):
+**TypeScript frontend cell** — each example below is a separate notebook cell.
+`display.*` must be the last expression (or `return`) — Deno-Jupyter renders only
+the cell return value.
+
+Call a server tool and render its output (one cell):
 
 ```ts
-import { callTool, display, capture, ports } from "@spur/app";
+import { callTool, display } from "@spur/app";
 
-// Call the Python MCP server tool
 const result = await callTool("process", {
   port_names: ["my-port"],
   output_path: "renders/out.mp4",
 });
-
-// Display HTML output — must be the returned/last expression to render
 return display.html(`<video controls src="..." />`);
+```
 
-// Emit a capture canvas (triggers host recorder loop)
-// Requires capabilities.canvas_capture + active_output_scripts
-// (In a cell that also calls callTool above, use last-expression form:)
+Emit a capture canvas — requires `canvas_capture` + `active_output_scripts`
+(one cell):
+
+```ts
+import { capture, display } from "@spur/app";
+
 const html = capture.canvas({
   port: "my-cell-id",   // must match the DAG source cell id
   fps: 30,
@@ -156,11 +161,16 @@ const html = capture.canvas({
   width: 1280,
   height: 720,
 });
-return display.html(html);  // last expression renders in Deno-Jupyter
+return display.html(html);
+```
 
-// Read a port directly from the frontend (uses SPUR_NOTEBOOK_PORT_ROOT)
+Read a port from the frontend (one cell):
+
+```ts
+import { ports } from "@spur/app";
+
 const data = await ports.read("my-port");
-// data.bytes, data.mime, data.version, data.durationSec
+// data.bytes, data.mime, data.version, data.kind, data.durationSec
 ```
 
 `callTool` connects to `SPUR_NOTEBOOK_MCP_SOCKET` (injected by the host),
