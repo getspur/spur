@@ -6,9 +6,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::BRIDGE_TIMEOUT;
-use crate::mcp::ServerDeps;
+use crate::mcp::{bridge::BridgeRequester, ServerDeps};
 
 pub const METHOD: &str = "notebook.edit_cell";
+const LAST_EDITED_BY: &str = "brain";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CellEdit {
@@ -18,9 +19,18 @@ pub struct CellEdit {
     pub replace_all: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct EditCellParams {
+    id: String,
+    edits: Vec<CellEdit>,
+    expected_version: Option<u64>,
+}
+
+#[derive(Debug)]
 pub struct AppliedEdits {
     pub source: String,
     pub replacements: usize,
+    /// Byte offset in the resulting source of the start of the last replacement.
     pub last_edit_offset: usize,
 }
 
@@ -37,12 +47,72 @@ pub enum EditError {
     },
 }
 
-/// Stub — real implementation comes in the feat commit.
-pub fn apply_edits(_source: &str, _edits: &[CellEdit]) -> Result<AppliedEdits, EditError> {
-    Err(EditError::NotFound {
-        index: 0,
-        id: "stub".to_string(),
+/// Apply a sequence of string-replacement edits sequentially to `source`.
+///
+/// Edits are applied in order against the evolving source. Each edit must match
+/// exactly once (non-overlapping, exact byte match) unless `replace_all` is true.
+///
+/// Returns `Err(EditError)` if any edit fails. On error the call is aborted
+/// before any write — edits are atomic as a set.
+pub fn apply_edits(source: &str, edits: &[CellEdit]) -> Result<AppliedEdits, EditError> {
+    let mut current = source.to_string();
+    let mut total_replacements: usize = 0;
+    let mut last_edit_offset: usize = 0;
+
+    for (index, edit) in edits.iter().enumerate() {
+        let count = current.matches(edit.old_string.as_str()).count();
+        if count == 0 {
+            return Err(EditError::NotFound {
+                index,
+                id: String::new(),
+            });
+        }
+        if count > 1 && !edit.replace_all {
+            return Err(EditError::Ambiguous {
+                index,
+                id: String::new(),
+                count,
+            });
+        }
+
+        last_edit_offset = current.find(edit.old_string.as_str()).unwrap_or(0);
+        if edit.replace_all {
+            current = current.replace(edit.old_string.as_str(), edit.new_string.as_str());
+            total_replacements += count;
+        } else {
+            current = current.replacen(edit.old_string.as_str(), edit.new_string.as_str(), 1);
+            total_replacements += 1;
+        }
+    }
+
+    Ok(AppliedEdits {
+        source: current,
+        replacements: total_replacements,
+        last_edit_offset,
     })
+}
+
+/// Extract up to ~10 lines of context centered on the given byte offset.
+fn snippet_around(source: &str, offset: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    if lines.is_empty() {
+        return source.to_string();
+    }
+    let mut cumulative: usize = 0;
+    let mut target_line: usize = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let next = cumulative + line.len() + 1; // +1 for newline
+        if offset < next {
+            target_line = i;
+            break;
+        }
+        cumulative = next;
+        target_line = i;
+    }
+    let half = 5usize;
+    let start = target_line.saturating_sub(half);
+    let end = (target_line + half + 1).min(lines.len());
+    lines[start..end].join("\n")
 }
 
 pub fn tool() -> Tool {
@@ -79,11 +149,176 @@ pub fn tool() -> Tool {
     )
 }
 
-pub async fn call(_deps: &ServerDeps, _arguments: Value) -> Result<CallToolResult, McpError> {
-    Err(McpError::internal_error(
-        "notebook.edit_cell not yet implemented",
-        None,
-    ))
+fn validate_params(params: &EditCellParams) -> Result<(), McpError> {
+    if params.id.is_empty() {
+        return Err(McpError::invalid_params(
+            "notebook.edit_cell id must not be empty",
+            None,
+        ));
+    }
+    if params.edits.is_empty() {
+        return Err(McpError::invalid_params(
+            "notebook.edit_cell edits must not be empty",
+            None,
+        ));
+    }
+    for (i, edit) in params.edits.iter().enumerate() {
+        if edit.old_string.is_empty() {
+            return Err(McpError::invalid_params(
+                format!("notebook.edit_cell edit {i}: old_string must not be empty"),
+                Some(json!({ "edit_index": i })),
+            ));
+        }
+        if edit.old_string == edit.new_string {
+            return Err(McpError::invalid_params(
+                format!("notebook.edit_cell edit {i}: old_string and new_string must differ"),
+                Some(json!({ "edit_index": i })),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_stale_version_error(err: &McpError) -> bool {
+    if let Some(data) = &err.data {
+        if let Some(code) = data.get("code") {
+            return code.as_str() == Some("stale_version");
+        }
+    }
+    false
+}
+
+/// Single read → apply → write attempt.
+async fn run_edit_attempt(
+    bridge: &dyn BridgeRequester,
+    id: &str,
+    edits: &[CellEdit],
+    pinned_version: Option<u64>,
+) -> Result<(u64, usize, bool, String), McpError> {
+    // 1. Read current source + version.
+    let read_value = bridge
+        .request("notebook.read_cell", json!({ "id": id }), BRIDGE_TIMEOUT)
+        .await
+        .map_err(|e| e.into_mcp_error())?;
+
+    let current_version: u64 = read_value["version"].as_u64().ok_or_else(|| {
+        McpError::internal_error(
+            "invalid notebook.read_cell bridge response: missing version",
+            None,
+        )
+    })?;
+    let current_source: String = read_value["source"]
+        .as_str()
+        .ok_or_else(|| {
+            McpError::internal_error(
+                "invalid notebook.read_cell bridge response: missing source",
+                None,
+            )
+        })?
+        .to_string();
+
+    // 2. Version-pin check (before applying edits).
+    if let Some(pinned) = pinned_version {
+        if current_version != pinned {
+            return Err(McpError::invalid_params(
+                format!(
+                    "notebook.edit_cell stale_version: expected_version {pinned} but cell \
+                     {id} is at version {current_version}"
+                ),
+                Some(json!({
+                    "code": "stale_version",
+                    "expected_version": pinned,
+                    "current_version": current_version
+                })),
+            ));
+        }
+    }
+
+    // 3. Apply edits in Rust.
+    let applied = apply_edits(&current_source, edits).map_err(|err| match err {
+        EditError::NotFound { index, .. } => McpError::invalid_params(
+            format!("notebook.edit_cell edit {index}: old_string not found in cell {id}"),
+            Some(json!({ "edit_index": index, "cell_id": id })),
+        ),
+        EditError::Ambiguous { index, count, .. } => McpError::invalid_params(
+            format!(
+                "notebook.edit_cell edit {index}: old_string matched {count} times in \
+                 cell {id}; include more surrounding context to make it unique, or set replace_all"
+            ),
+            Some(json!({ "edit_index": index, "cell_id": id, "match_count": count })),
+        ),
+    })?;
+
+    // 4. No-change short-circuit.
+    if applied.source == current_source {
+        return Ok((current_version, applied.replacements, false, String::new()));
+    }
+
+    // 5. Compute snippet centered on last edit.
+    let snippet = snippet_around(&applied.source, applied.last_edit_offset);
+
+    // 6. Write via bridge.
+    let write_result = bridge
+        .request(
+            "notebook.write_cell",
+            json!({
+                "id": id,
+                "source": applied.source,
+                "expected_version": current_version,
+                "last_edited_by": LAST_EDITED_BY
+            }),
+            BRIDGE_TIMEOUT,
+        )
+        .await
+        .map_err(|e| e.into_mcp_error())?;
+
+    let new_version: u64 = write_result["version"].as_u64().ok_or_else(|| {
+        McpError::internal_error(
+            "invalid notebook.write_cell bridge response: missing version",
+            None,
+        )
+    })?;
+
+    Ok((new_version, applied.replacements, true, snippet))
+}
+
+pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult, McpError> {
+    let bridge = deps.bridge.as_ref();
+
+    let params: EditCellParams = serde_json::from_value(arguments).map_err(|error| {
+        McpError::invalid_params(
+            "notebook.edit_cell requires { id, edits }",
+            Some(json!({ "error": error.to_string() })),
+        )
+    })?;
+
+    // Validate before any bridge call.
+    validate_params(&params)?;
+
+    let id = &params.id;
+    let edits = &params.edits;
+    let pinned_version = params.expected_version;
+
+    let (version, replacements, changed, snippet) =
+        match run_edit_attempt(bridge, id, edits, pinned_version).await {
+            Ok(result) => result,
+            Err(err) => {
+                // Stale-write retry only when the caller did NOT pin expected_version
+                // and the write failed with stale_version.
+                if pinned_version.is_none() && is_stale_version_error(&err) {
+                    run_edit_attempt(bridge, id, edits, None).await?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
+
+    Ok(CallToolResult::structured(json!({
+        "version": version,
+        "replacements": replacements,
+        "changed": changed,
+        "snippet": snippet
+    })))
 }
 
 #[cfg(test)]
@@ -214,6 +449,8 @@ mod tests {
                 "notebook.read_cell" => {
                     let source = self.read_source.clone();
                     let count = *self.write_call_count.lock().expect("lock");
+                    // After the first failed write, serve incremented version so the
+                    // retry's implicit version matches what we write with.
                     let version = if count >= 1 {
                         self.read_version + 1
                     } else {
@@ -516,7 +753,7 @@ mod tests {
         assert!(bridge.take_write_params().is_none(), "no write expected");
     }
 
-    // Test 7: Param validation — old_string == new_string (rejected before bridge)
+    // Test 7: Param validation — old_string == new_string rejected before bridge
     #[tokio::test]
     async fn param_validation_old_equals_new_rejected() {
         let bridge = CapturingBridge::new("hello world", 3, 4);
@@ -530,7 +767,7 @@ mod tests {
             }),
         )
         .await
-        .expect_err("old_string == new_string should be rejected by param validation");
+        .expect_err("old_string == new_string should be rejected");
 
         assert!(
             error.message.contains("old_string") || error.message.contains("new_string"),
