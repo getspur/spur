@@ -25,6 +25,22 @@ export async function readExactly(
 }
 
 /**
+ * Write all bytes of `data` to `writer`, looping until every byte is sent.
+ * `Deno.Conn.write` may return before all bytes are written (partial write);
+ * this function retries until the full buffer is flushed.
+ */
+async function writeAll(
+  writer: { write(p: Uint8Array): Promise<number> },
+  data: Uint8Array,
+): Promise<void> {
+  let offset = 0;
+  while (offset < data.length) {
+    const n = await writer.write(data.subarray(offset));
+    offset += n;
+  }
+}
+
+/**
  * Read one length-framed JSON frame from `conn`.
  * Frame layout: 4-byte big-endian uint32 length followed by that many UTF-8 bytes.
  */
@@ -41,6 +57,7 @@ export async function readFrame(conn: Deno.Conn): Promise<unknown> {
 /**
  * Write one length-framed JSON frame to `conn`.
  * Frame layout: 4-byte big-endian uint32 length followed by the JSON bytes.
+ * Loops internally to guard against partial writes.
  */
 export async function writeFrame(
   conn: Deno.Conn,
@@ -50,5 +67,5 @@ export async function writeFrame(
   const frame = new Uint8Array(4 + payload.length);
   new DataView(frame.buffer).setUint32(0, payload.length, false);
   frame.set(payload, 4);
-  await conn.write(frame);
+  await writeAll(conn, frame);
 }
