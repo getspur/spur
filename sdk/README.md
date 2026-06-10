@@ -12,9 +12,12 @@ See the design specs for full context (internal monorepo paths; not present in t
 | Path | Status | Description |
 |---|---|---|
 | `typescript/` | exists | `@spur/app` TypeScript/Deno SDK |
+| `python/` | exists | `spur_app` Python SDK |
+| `skill/` | exists | Bundled Claude skill for SDK consumers (`SKILL.md`) |
+| `docs/` | exists | Concept documentation (7 pages: dev-loop, manifest, port-store, python-sdk, typescript-sdk, versioning) |
+| `schema/` | exists | `spur-app.schema.json` — canonical JSON schema for the app manifest |
 | `fixtures/` | exists | Golden conformance fixtures (see below) |
-| `python/` | planned (U2) | `spur_app` Python SDK |
-| `skill/` | planned (U6) | Bundled Claude skill for SDK consumers |
+| `llms.txt` | exists | LLM-readable SDK summary for agents building Spur Apps |
 | `examples/` | planned | Example Spur Apps |
 
 ## Fixture lockstep rule
