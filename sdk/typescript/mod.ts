@@ -24,7 +24,7 @@
  */
 
 export { callTool, callToolWithSocket } from "./src/call_tool.ts";
-export type { CallToolOptions, ConnectFn } from "./src/call_tool.ts";
+export type { CallToolOptions } from "./src/call_tool.ts";
 
 export { capture } from "./src/capture.ts";
 export type { CaptureCanvasOptions } from "./src/capture.ts";
