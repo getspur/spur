@@ -549,7 +549,6 @@ fn section_sidecar_progress_bar() -> ProgressBar {
         ProgressStyle::with_template("{spinner} sidecar   [{bar:30}] {pos}/{len} rows {wide_msg}")
             .expect("valid section sidecar progress template"),
     );
-    progress.enable_steady_tick(Duration::from_millis(120));
     progress
 }
 
@@ -566,6 +565,7 @@ fn report_section_sidecar_progress(
             write_batch_size,
         } => {
             if let Some(progress) = progress {
+                progress.enable_steady_tick(Duration::from_millis(120));
                 progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
                 progress.set_position(0);
                 progress.set_message("sections: preparing Lance rows");
@@ -584,6 +584,8 @@ fn report_section_sidecar_progress(
             embeddings_enabled,
         } => {
             if let Some(progress) = progress {
+                progress.reset();
+                progress.enable_steady_tick(Duration::from_millis(120));
                 progress.set_length(u64::try_from(total_rows).unwrap_or(u64::MAX));
                 progress.set_position(0);
                 progress.set_message("code symbols: preparing Lance rows");
@@ -703,33 +705,29 @@ fn report_section_sidecar_progress(
             written_rows,
             skipped_existing_rows,
             phase,
-        } => {
-            match phase {
-                SidecarPhase::Sections => {
-                    if let Some(progress) = progress {
-                        progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
-                        // Do NOT finish the bar here — code symbols phase follows.
-                        progress.set_message("sections: done");
-                    }
-                    println!(
-                        "[spur] Section sidecar ready: wrote {} rows, skipped {} unchanged rows",
-                        fmt_thousands(written_rows),
-                        fmt_thousands(skipped_existing_rows)
-                    );
+        } => match phase {
+            SidecarPhase::Sections => {
+                if let Some(progress) = progress {
+                    progress.finish_and_clear();
                 }
-                SidecarPhase::CodeSymbols => {
-                    if let Some(progress) = progress {
-                        progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
-                        progress.finish_and_clear();
-                    }
-                    println!(
-                        "[spur] Code symbol sidecar ready: wrote {} rows, skipped {} unchanged rows",
-                        fmt_thousands(written_rows),
-                        fmt_thousands(skipped_existing_rows)
-                    );
-                }
+                println!(
+                    "[spur] Section sidecar ready: wrote {} rows, skipped {} unchanged rows",
+                    fmt_thousands(written_rows),
+                    fmt_thousands(skipped_existing_rows)
+                );
             }
-        }
+            SidecarPhase::CodeSymbols => {
+                if let Some(progress) = progress {
+                    progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
+                    progress.finish_and_clear();
+                }
+                println!(
+                    "[spur] Code symbol sidecar ready: wrote {} rows, skipped {} unchanged rows",
+                    fmt_thousands(written_rows),
+                    fmt_thousands(skipped_existing_rows)
+                );
+            }
+        },
         SectionSidecarProgressEvent::Failed { error } => {
             if let Some(progress) = progress {
                 progress.finish_and_clear();
