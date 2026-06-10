@@ -16,6 +16,8 @@ EXPECTED_ARCHIVE_FILES = {
 }
 
 
+# TODO(U4/U7): replace this hand-rolled packer with the canonical notebook_export_spur_app
+# packer once the Rust tooling front door (U4) is available from tests.
 def create_spurapp_archive(output_path: Path) -> None:
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_STORED) as archive:
         for path in sorted(APP_DIR.rglob("*")):

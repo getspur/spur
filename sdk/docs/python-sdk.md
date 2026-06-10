@@ -164,11 +164,13 @@ with FakePortStore() as store:
     assert frame.duration_sec == 5.0
 # SPUR_PORTS_ROOT is restored after the context
 
-# Load from golden fixtures — depth depends on the test file's location.
-# sdk/python/tests/test_*.py uses parents[3] (test → python → sdk → repo root).
-# An in-app test at my-app/tests/test_*.py inside the monorepo uses parents[2].
+# Load from golden fixtures.
+# N = directories between this test file and the repo root:
+#   my-app/tests/test_foo.py          → parents[2]
+#   app_gallery/html_video/tests/...  → parents[3]
+#   sdk/python/tests/test_*.py        → parents[3]  (working example)
 from pathlib import Path
-FIXTURES = Path(__file__).resolve().parents[3] / "sdk" / "fixtures" / "port-store"
+FIXTURES = Path(__file__).resolve().parents[N] / "sdk" / "fixtures" / "port-store"
 
 with FakePortStore.from_fixtures(FIXTURES) as store:
     frame = store.port_store.read("spur-ad-capture")
