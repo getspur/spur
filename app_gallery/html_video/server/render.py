@@ -98,20 +98,36 @@ def render_html_video(
             {"code": "missing_frames"},
         )
 
-    resolved_frame_duration = (
+    explicit_frame_duration: float | None = (
         float(frame_duration)
         if frame_duration is not None
         and math.isfinite(float(frame_duration))
         and float(frame_duration) > 0.0
-        else DEFAULT_FRAME_DURATION
+        else None
     )
 
-    frame_bytes = (
-        read_webm_port_frames(port_names)
-        if port_names
-        else decode_webm_frames(webm_frames)
-    )
-    total_duration = resolved_frame_duration * len(frame_bytes)
+    if port_names:
+        # read_webm_port_frames returns (bytes, duration_sec_or_None) tuples.
+        port_frame_pairs = read_webm_port_frames(port_names)
+        frame_bytes = [pair[0] for pair in port_frame_pairs]
+        # Per-frame duration: explicit arg wins; fall back to manifest value,
+        # then to DEFAULT_FRAME_DURATION as last resort.
+        per_frame_durations = [
+            explicit_frame_duration
+            if explicit_frame_duration is not None
+            else (pair[1] if pair[1] is not None else DEFAULT_FRAME_DURATION)
+            for pair in port_frame_pairs
+        ]
+    else:
+        frame_bytes = decode_webm_frames(webm_frames)
+        per_frame_durations = [
+            explicit_frame_duration if explicit_frame_duration is not None else DEFAULT_FRAME_DURATION
+            for _ in frame_bytes
+        ]
+
+    total_duration = sum(per_frame_durations)
+    # Resolved single frame duration used for single-frame encode path.
+    resolved_frame_duration = per_frame_durations[0] if per_frame_durations else DEFAULT_FRAME_DURATION
     ensure_ffmpeg_available()
 
     options = RenderOptions(
@@ -127,7 +143,7 @@ def render_html_video(
                 frame_webm_paths[0],
                 normalized_output_path,
                 options,
-                resolved_frame_duration,
+                per_frame_durations[0],
             )
         else:
             encode_frame_sequence(
@@ -135,7 +151,7 @@ def render_html_video(
                 normalized_output_path,
                 scratch_dir,
                 options,
-                resolved_frame_duration,
+                per_frame_durations,
             )
 
     return {
@@ -324,7 +340,20 @@ def decode_webm_frames(webm_frames: list[str]) -> list[bytes]:
     return decoded
 
 
-def read_webm_port_frames(port_names: list[str]) -> list[bytes]:
+def read_webm_port_frames(
+    port_names: list[str],
+) -> list[tuple[bytes, float | None]]:
+    """Read WebM bytes (and optional duration) for each named port from the
+    port store manifest.
+
+    Returns a list of ``(bytes, duration_sec_or_None)`` tuples — one per port
+    in the order they were requested.  ``duration_sec`` is ``None`` when the
+    manifest entry does not carry the field (old stores).
+
+    The physical path of each port file is taken from ``entry["path"]`` in the
+    manifest, NOT derived as ``root/<port>``.  For safety the path is resolved
+    as ``root / Path(entry["path"]).name`` so only the basename is used.
+    """
     root_raw = os.environ.get("SPUR_PORTS_ROOT")
     if not root_raw:
         raise RenderError(
@@ -349,7 +378,7 @@ def read_webm_port_frames(port_names: list[str]) -> list[bytes]:
             {"error": "manifest ports must be an object"},
         )
 
-    frames: list[bytes] = []
+    frames: list[tuple[bytes, float | None]] = []
     for port in port_names:
         entry = ports.get(port)
         if not isinstance(entry, dict):
@@ -365,13 +394,33 @@ def read_webm_port_frames(port_names: list[str]) -> list[bytes]:
                 {"port": port, "mime": mime},
             )
 
+        # Read from the path recorded in the manifest entry.  The file is
+        # written as ``<port>@v<N>.media`` — never as bare ``<port>``.
+        # For safety only the basename is used so a malicious manifest entry
+        # cannot escape the root directory.
+        entry_path_raw = entry.get("path", "")
+        port_file_path = root / Path(entry_path_raw).name if entry_path_raw else None
+        if not port_file_path or not port_file_path.name:
+            raise InvalidParams(
+                f"{METHOD} could not read media port",
+                {"port": port, "error": "manifest entry is missing a path"},
+            )
+
         try:
-            frames.append((root / port).read_bytes())
+            frame_bytes = port_file_path.read_bytes()
         except Exception as error:
             raise InvalidParams(
                 f"{METHOD} could not read media port",
                 {"port": port, "error": str(error)},
             ) from error
+
+        raw_duration = entry.get("duration_sec")
+        duration_sec: float | None = (
+            float(raw_duration)
+            if raw_duration is not None and math.isfinite(float(raw_duration)) and float(raw_duration) > 0.0
+            else None
+        )
+        frames.append((frame_bytes, duration_sec))
 
     return frames
 
@@ -405,12 +454,17 @@ def encode_frame_sequence(
     output_path: Path,
     scratch_dir: Path,
     options: RenderOptions,
-    duration_seconds: float,
+    per_frame_durations: list[float],
 ) -> None:
     segment_paths: list[Path] = []
     for index, frame_webm_path in enumerate(frame_webm_paths):
         segment_path = scratch_dir / f"spur-html-video-segment-{index}.mp4"
-        run_ffmpeg_frame_encode(frame_webm_path, segment_path, options, duration_seconds)
+        frame_duration = (
+            per_frame_durations[index]
+            if index < len(per_frame_durations)
+            else DEFAULT_FRAME_DURATION
+        )
+        run_ffmpeg_frame_encode(frame_webm_path, segment_path, options, frame_duration)
         segment_paths.append(segment_path)
 
     list_path = scratch_dir / "html-video-concat-list.txt"

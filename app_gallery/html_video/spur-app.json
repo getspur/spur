@@ -22,5 +22,15 @@
     "env": {}
   },
   "widgets": [],
-  "ports": null
+  "ports": null,
+  "capabilities": {
+    "ports": {
+      "read": ["spur-ad-capture"],
+      "write": []
+    },
+    "canvas_capture": true,
+    "active_output_scripts": true,
+    "artifacts_dir": true
+  },
+  "skill": "skill/SKILL.md"
 }

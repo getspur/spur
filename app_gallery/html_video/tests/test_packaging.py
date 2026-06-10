@@ -49,6 +49,13 @@ def test_manifest_is_valid_json() -> None:
         "requirements": "server/requirements.txt",
         "env": {},
     }
+    # T6c: capabilities and skill fields
+    caps = manifest["capabilities"]
+    assert caps["ports"]["read"] == ["spur-ad-capture"]
+    assert caps["canvas_capture"] is True
+    assert caps["active_output_scripts"] is True
+    assert caps["artifacts_dir"] is True
+    assert manifest["skill"] == "skill/SKILL.md"
 
 
 def test_archive_contains_expected_files(tmp_path: Path) -> None:
