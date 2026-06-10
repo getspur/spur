@@ -2,10 +2,7 @@
  * Tests for capture.canvas in src/capture.ts.
  */
 
-import {
-  assertEquals,
-  assertStringIncludes,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { capture } from "../src/capture.ts";
 
 Deno.test("capture.canvas emits data-capture=true", () => {

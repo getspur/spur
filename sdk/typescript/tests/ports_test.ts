@@ -6,13 +6,8 @@
  * testing (though env-var injection is also tested).
  */
 
-import {
-  assertEquals,
-  assertExists,
-  assertRejects,
-  assertStringIncludes,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { join } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { assertEquals, assertExists, assertRejects } from "@std/assert";
+import { join } from "@std/path";
 import { ports } from "../src/ports.ts";
 
 // ---------------------------------------------------------------------------

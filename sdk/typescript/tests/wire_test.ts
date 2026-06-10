@@ -2,10 +2,7 @@
  * Tests for the low-level framing primitives in src/wire.ts.
  */
 
-import {
-  assertEquals,
-  assertRejects,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertRejects } from "@std/assert";
 import { readExactly, readFrame, writeFrame } from "../src/wire.ts";
 
 // ---------------------------------------------------------------------------

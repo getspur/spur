@@ -25,7 +25,7 @@
  *     the ports directory.
  */
 
-import { basename, join } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { basename, join } from "@std/path";
 
 /** A single port entry from the manifest. */
 export interface PortEntry {
