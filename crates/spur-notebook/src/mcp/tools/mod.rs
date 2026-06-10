@@ -23,6 +23,7 @@ pub mod insert_cell;
 pub mod interrupt;
 pub mod kernel_info;
 pub mod list_datasources;
+pub mod notebook_app_doctor;
 pub mod notebook_dag_status;
 pub mod notebook_push_source;
 pub mod notebook_run_cascade;
@@ -96,6 +97,7 @@ pub fn tools() -> Vec<Tool> {
         daemon_files::move_to_trash_tool(),
         daemon_files::reveal_in_finder_tool(),
         daemon_files::discard_scratch_tool(),
+        notebook_app_doctor::tool(),
     ]
 }
 
