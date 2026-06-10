@@ -32,5 +32,8 @@
     "active_output_scripts": true,
     "artifacts_dir": true
   },
-  "skill": "skill/SKILL.md"
+  "skill": "skill/SKILL.md",
+  "sdk": {
+    "typescript": "sdk"
+  }
 }
