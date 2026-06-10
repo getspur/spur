@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from spur_app.errors import MissingCapabilityError, PortFileNotFoundError, PortNotFoundError
+from spur_app.errors import (
+    MissingCapabilityError,
+    PortFileNotFoundError,
+    PortManifestError,
+    PortNotFoundError,
+)
 from spur_app.ports import PortRead, PortStore
 from spur_app.testing import FakePortStore
 
@@ -56,7 +61,7 @@ def test_fixture_sales_entry_missing_file_raises_clear_error():
             store.read("sales")
     err = exc_info.value
     assert err.port == "sales"
-    assert "sales" in err.path
+    assert "sales" in str(err.path)
 
 
 # ---------------------------------------------------------------------------
@@ -197,3 +202,62 @@ def test_reparse_per_read_picks_up_new_version():
         r2 = fake.port_store.read("clip")
     assert r2.bytes == b"v2-data"
     assert r2.version == 2
+
+
+# ---------------------------------------------------------------------------
+# PortManifestError: missing manifest and corrupt JSON
+# ---------------------------------------------------------------------------
+
+
+def test_missing_manifest_raises_port_manifest_error(tmp_path):
+    """PortManifestError (a SpurAppError) raised when manifest.json absent."""
+    from spur_app.errors import SpurAppError
+
+    store = PortStore(root=tmp_path)
+    with pytest.raises(PortManifestError) as exc_info:
+        store.list()
+    err = exc_info.value
+    assert isinstance(err, SpurAppError)
+    assert "manifest.json" in str(err.manifest_path)
+    assert "not found" in str(err).lower()
+
+
+def test_corrupt_manifest_raises_port_manifest_error(tmp_path):
+    """PortManifestError raised when manifest.json contains invalid JSON."""
+    (tmp_path / "manifest.json").write_text("{not valid json")
+    store = PortStore(root=tmp_path)
+    with pytest.raises(PortManifestError) as exc_info:
+        store.list()
+    err = exc_info.value
+    assert "invalid JSON" in str(err)
+
+
+# ---------------------------------------------------------------------------
+# basename-join: crafted path "../escape" stays inside root
+# ---------------------------------------------------------------------------
+
+
+def test_basename_join_dotdot_escape_path_stays_inside_root(tmp_path):
+    """A manifest entry with path='../escape@v1.media' must not escape root."""
+    import json
+
+    # Write a file at tmp_path/escape@v1.media (basename of "../escape@v1.media")
+    data_file = tmp_path / "escape@v1.media"
+    data_file.write_bytes(b"escape-bytes")
+    manifest = {
+        "ports": {
+            "escape": {
+                "path": "../escape@v1.media",  # crafted traversal path
+                "version": 1,
+                "kind": "media",
+                "mime": "video/mp4",
+            }
+        }
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    store = PortStore(root=tmp_path)
+    # basename-join means Path("../escape@v1.media").name == "escape@v1.media"
+    # so the resolved file_path is tmp_path / "escape@v1.media" — inside root
+    result = store.read("escape")
+    assert result.bytes == b"escape-bytes"
+    assert result.path.parent == tmp_path

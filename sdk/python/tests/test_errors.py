@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from spur_app.errors import (
     ArtifactPathError,
     EnvVarRequiredError,
     MissingCapabilityError,
     PortFileNotFoundError,
+    PortManifestError,
     PortNotFoundError,
     SpurAppError,
 )
@@ -48,12 +51,24 @@ def test_port_not_found_error_empty_available():
 
 
 def test_port_file_not_found_error():
-    err = PortFileNotFoundError("sales", "/tmp/sales@v1.arrow")
+    p = Path("/tmp/sales@v1.arrow")
+    err = PortFileNotFoundError("sales", p)
     assert isinstance(err, SpurAppError)
     assert err.port == "sales"
-    assert err.path == "/tmp/sales@v1.arrow"
+    assert err.path == p
+    assert isinstance(err.path, Path)
     assert "sales" in str(err)
-    assert "/tmp/sales@v1.arrow" in str(err)
+    assert "sales@v1.arrow" in str(err)
+
+
+def test_port_manifest_error():
+    p = Path("/tmp/port-store/manifest.json")
+    err = PortManifestError(p, "file not found")
+    assert isinstance(err, SpurAppError)
+    assert err.manifest_path == p
+    assert err.reason == "file not found"
+    assert "manifest.json" in str(err)
+    assert "file not found" in str(err)
 
 
 def test_env_var_required_error():
