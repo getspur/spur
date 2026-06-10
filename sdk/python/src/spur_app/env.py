@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from .errors import EnvVarRequiredError
 
@@ -25,7 +24,7 @@ class EnvAccessor:
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self, name: str, default: Optional[str] = None) -> Optional[str]:
+    def get(self, name: str, default: str | None = None) -> str | None:
         """Return the value of env var *name*, or *default* if absent.
 
         Parameters
