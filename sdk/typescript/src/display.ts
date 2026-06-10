@@ -15,17 +15,34 @@
  * ```
  */
 
+// Declare as a module-level const so TypeScript can use `typeof DISPLAY_SYMBOL`
+// as a unique-symbol-like key in the JupyterDisplay type, giving callers precise
+// typing without needing a cast.
+const DISPLAY_SYMBOL: unique symbol = Symbol.for(
+  "Jupyter.display",
+) as unknown as typeof DISPLAY_SYMBOL;
+
 /**
  * A value that Deno-Jupyter can render as rich output.
- * The well-known symbol `Symbol.for("Jupyter.display")` is used as the key
- * so that Deno-Jupyter recognizes it as a display-protocol object.
+ *
+ * The key is typed as `typeof DISPLAY_SYMBOL` (the module-level const whose
+ * runtime value is `Symbol.for("Jupyter.display")`) so callers can access the
+ * method directly without a cast:
+ *
+ * ```ts
+ * import { display, DISPLAY_SYMBOL } from "@spur/app/src/display.ts";
+ * const bundle = obj[DISPLAY_SYMBOL]();
+ * ```
  */
-export type JupyterDisplay = Record<symbol, () => Record<string, unknown>>;
+export type JupyterDisplay = {
+  readonly [K in typeof DISPLAY_SYMBOL]: () => Record<string, unknown>;
+};
 
-const DISPLAY_SYMBOL = Symbol.for("Jupyter.display");
+/** The well-known symbol used as the Jupyter display key. */
+export { DISPLAY_SYMBOL };
 
 function makeDisplay(bundle: () => Record<string, unknown>): JupyterDisplay {
-  return { [DISPLAY_SYMBOL]: bundle };
+  return { [DISPLAY_SYMBOL]: bundle } as JupyterDisplay;
 }
 
 /**
