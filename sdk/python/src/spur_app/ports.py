@@ -36,9 +36,13 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
-from .errors import MissingCapabilityError, PortFileNotFoundError, PortNotFoundError
+from .errors import (
+    MissingCapabilityError,
+    PortFileNotFoundError,
+    PortManifestError,
+    PortNotFoundError,
+)
 
 ENV_VAR = "SPUR_PORTS_ROOT"
 
@@ -64,10 +68,10 @@ class PortRead:
     """
 
     bytes: bytes
-    mime: Optional[str]
+    mime: str | None
     version: int
     kind: str
-    duration_sec: Optional[float]
+    duration_sec: float | None
     path: Path
 
 
@@ -84,7 +88,7 @@ class PortStore:
         ``SPUR_PORTS_ROOT`` is used.
     """
 
-    def __init__(self, root: Optional[str | Path] = None) -> None:
+    def __init__(self, root: str | Path | None = None) -> None:
         if root is None:
             raw = os.environ.get(ENV_VAR)
             if not raw:
@@ -115,6 +119,8 @@ class PortStore:
 
         Raises
         ------
+        PortManifestError
+            When ``manifest.json`` is missing or contains invalid JSON.
         PortNotFoundError
             When *name* is absent from the manifest.
         PortFileNotFoundError
@@ -129,7 +135,7 @@ class PortStore:
         # basename-join: eliminates the @vN absolute-path bug
         file_path = self._root / Path(entry["path"]).name
         if not file_path.exists():
-            raise PortFileNotFoundError(name, str(file_path))
+            raise PortFileNotFoundError(name, file_path)
         data = file_path.read_bytes()
         return PortRead(
             bytes=data,
@@ -151,5 +157,10 @@ class PortStore:
 
     def _parse_manifest(self) -> dict:
         manifest_path = self._root / "manifest.json"
-        with manifest_path.open() as fh:
-            return json.load(fh)
+        try:
+            with manifest_path.open() as fh:
+                return json.load(fh)
+        except FileNotFoundError:
+            raise PortManifestError(manifest_path, "file not found")
+        except json.JSONDecodeError as exc:
+            raise PortManifestError(manifest_path, f"invalid JSON: {exc}") from exc

@@ -6,12 +6,26 @@ build-backend = "hatchling.build"
 name = "spur-app"
 version = "0.1.0"
 description = "Python server SDK for Spur app plugins"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 requires-python = ">=3.10"
-dependencies = ["mcp"]
+dependencies = ["mcp>=1.2"]
+authors = [{ name = "Spur Contributors" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
 
-[project.optional-dependencies]
-dev = ["pytest"]
+[project.urls]
+Repository = "https://github.com/spurtech/spur"
+
+[dependency-groups]
+dev = ["pytest>=8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spur_app"]

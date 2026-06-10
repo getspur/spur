@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from .errors import ArtifactPathError, MissingCapabilityError
 
@@ -29,7 +28,7 @@ class ArtifactStore:
         ``SPUR_ARTIFACTS_DIR`` is used.
     """
 
-    def __init__(self, root: Optional[str | Path] = None) -> None:
+    def __init__(self, root: str | Path | None = None) -> None:
         if root is None:
             raw = os.environ.get(ENV_VAR)
             if not raw:
