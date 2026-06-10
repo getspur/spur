@@ -18,22 +18,30 @@ SDK_DIR="sdk/fixtures/port-store"
 
 if [[ ! -d "$RUST_DIR" ]]; then
   echo "INV-SDK-F1 ERROR: Rust fixture directory not found: $RUST_DIR"
+  echo "This script must be run from the spur repo root."
   exit 1
 fi
 
 if [[ ! -d "$SDK_DIR" ]]; then
   echo "INV-SDK-F1 ERROR: SDK fixture directory not found: $SDK_DIR"
+  echo "This script must be run from the spur repo root."
   echo "Run: cp -R $RUST_DIR/. $SDK_DIR/"
   exit 1
 fi
 
-DIFF=$(diff -r "$RUST_DIR" "$SDK_DIR" 2>&1 || true)
+DIFF_OUTPUT=$(diff -r "$RUST_DIR" "$SDK_DIR" 2>&1) && DIFF_EXIT=0 || DIFF_EXIT=$?
 
-if [[ -n "$DIFF" ]]; then
+if [[ $DIFF_EXIT -eq 2 ]]; then
+  echo "INV-SDK-F1 ERROR: diff failed unexpectedly"
+  echo "$DIFF_OUTPUT"
+  exit 1
+fi
+
+if [[ $DIFF_EXIT -ne 0 ]]; then
   echo "INV-SDK-F1 FAIL: sdk/fixtures/port-store is out of sync with $RUST_DIR"
   echo ""
   echo "Diff:"
-  echo "$DIFF"
+  echo "$DIFF_OUTPUT"
   echo ""
   echo "Fix: cp -R $RUST_DIR/. $SDK_DIR/"
   echo "Then update SDK reader tests and commit both sides together."
