@@ -232,7 +232,12 @@ Use `spur_app.testing.FakePortStore` to test server tools without a live host:
 from spur_app.testing import FakePortStore
 from pathlib import Path
 
-FIXTURES = Path(__file__).parents[2] / "sdk" / "fixtures" / "port-store"
+# N = number of directories between this test file and the repo root:
+#   my-app/tests/test_foo.py          → parents[2]  (tests → my-app → repo root)
+#   app_gallery/html_video/tests/...  → parents[3]  (tests → html_video → app_gallery → repo root)
+#   sdk/python/tests/test_*.py        → parents[3]  (tests → python → sdk → repo root)
+# See sdk/python/tests/test_ports.py for a working example.
+FIXTURES = Path(__file__).resolve().parents[N] / "sdk" / "fixtures" / "port-store"
 
 def test_process():
     with FakePortStore.from_fixtures(FIXTURES) as store:
