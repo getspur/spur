@@ -14,6 +14,30 @@ render = pytest.importorskip("server.render")
 FAKE_WEBM_BYTES = b"fake webm bytes"
 
 
+def test_render_error_str_with_details_uses_json() -> None:
+    """RenderError.__str__ must not raise NameError when details are present.
+
+    This guards against accidentally removing `import json` from render.py:
+    the __str__ method calls json.dumps() on the details dict.
+    """
+    err = render.RenderError("something went wrong", {"code": "oops", "count": 3})
+
+    text = str(err)
+
+    assert "something went wrong" in text
+    assert '"code"' in text
+    assert "oops" in text
+    assert '"count"' in text
+    assert "3" in text
+
+
+def test_render_error_str_without_details_is_plain_message() -> None:
+    """RenderError.__str__ returns just the message when details are empty."""
+    err = render.RenderError("plain message")
+
+    assert str(err) == "plain message"
+
+
 def test_parse_resolution_valid() -> None:
     dimensions = render.parse_resolution("1920x1080")
 
