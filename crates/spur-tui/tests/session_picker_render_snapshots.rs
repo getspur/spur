@@ -242,6 +242,8 @@ fn populated_multi_brain_no_filter() {
         synopsis(),
     );
     // Two-line rows with brain column. Short id removed. Group header EARLIER shown.
+    // With H=24 + preview(12) + status(1) the list viewport holds ~1 session;
+    // cursor on a1xxxxxx (first) → only that row shown.
     // Preview is on by default; cursor on a1xxxxxx (no synopsis) → placeholder.
     let expected: &[&str] = &[
         "Sessions (claude) \u{b7} 2 sessions",
@@ -252,8 +254,8 @@ fn populated_multi_brain_no_filter() {
         "  EARLIER",
         "\u{25b8} Refactor auth                                                claude",
         "      \u{2514} resume to load message history",
-        "  Tier 1 fixes                                                 gpt-5",
-        "      \u{2514} resume to load message history",
+        "",
+        "",
         "",
         " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         "  (resume to load message history)",
@@ -290,9 +292,10 @@ fn populated_with_filter() {
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &ctx);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &ctx);
     // Filter active: no group headers. Two-line rows shown. Short id removed.
+    // Count shows ALL unfiltered sessions even when filter is active.
     // Preview is on by default; cursor=0 (new session) with filter active.
     let expected: &[&str] = &[
-        "Sessions (claude) \u{b7} 1 session",
+        "Sessions (claude) \u{b7} 2 sessions",
         "  Search  b_",
         "",
         "\u{25b8} + Start new session",
@@ -384,6 +387,8 @@ fn populated_with_confirm_switch() {
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
     assert!(picker.is_confirm_switch_visible());
     // Two-line rows. Group header EARLIER. Preview on; confirm-switch prompt displaces status bar.
+    // With H=24 + preview(12) + status(1) + footer(1) the viewport holds ~1 session;
+    // cursor on beta → scroll clamps so only beta is visible.
     let expected: &[&str] = &[
         "Sessions (t) \u{b7} 2 sessions",
         "  Search",
@@ -391,10 +396,10 @@ fn populated_with_confirm_switch() {
         "  + Start new session",
         "  ────",
         "  EARLIER",
-        "  alpha",
-        "      \u{2514} resume to load message history",
         "\u{25b8} beta",
         "      \u{2514} resume to load message history",
+        "",
+        "",
         " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         "  (resume to load message history)",
         "",
@@ -498,4 +503,80 @@ fn populated_with_archived_shown() {
         "j/k nav \u{b7} \u{21b5} new \u{b7} / search \u{b7} Esc                         \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
+}
+
+/// Regression test for scroll clamp correctness with preview pane open.
+///
+/// With H=24 and preview_height=12 the list pane has only ~11 rows; after
+/// subtracting chrome and header-reserve that fits ~1 session (2 lines each).
+/// Moving the cursor to the last of 8 sessions must scroll so BOTH of its
+/// lines appear in the rendered buffer.  The [+ Start new session] row must
+/// also remain permanently visible (it is always the first rendered row after
+/// the chrome header).
+///
+/// This test was written to FAIL under the pre-fix clamp (which used
+/// area.height - 4 and ignored preview/status rows, giving visible_sessions~=8
+/// so the clamp never fired) and PASS after the fix.
+#[test]
+fn selected_session_fully_visible_at_small_viewport() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(SessionMetadata::default());
+
+    // 8 sessions -- more than can fit with preview open on a 24-row terminal.
+    let sessions: Vec<SessionInfo> = (1u8..=8)
+        .map(|i| {
+            session(
+                &format!("session{:02}xxxxxxxx", i),
+                &format!("Session {i}"),
+                "/tmp",
+            )
+        })
+        .collect();
+    picker.set_sessions("t".into(), sessions, synopsis());
+    assert!(picker.is_preview_visible());
+
+    // Move cursor to the last session (cursor = 8).
+    let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+    for _ in 0..8 {
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &ctx);
+    }
+    assert_eq!(
+        picker.cursor(),
+        8,
+        "cursor should be on last session (index 8)"
+    );
+
+    // Render into a 80x24 terminal.
+    let backend = TestBackend::new(W, H);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, W, H);
+        picker.render(f, area, &ctx);
+    })
+    .unwrap();
+
+    let lines = buffer_to_lines(term.backend().buffer());
+
+    // The [+ Start new session] row must always be visible (fixed chrome).
+    assert!(
+        lines.iter().any(|l| l.contains("+ Start new session")),
+        "[+ Start new session] must be visible; lines:\n{lines:#?}"
+    );
+
+    // Both lines of the selected session ("Session 8") must appear.
+    let title_visible = lines
+        .iter()
+        .any(|l| l.contains('\u{25b8}') && l.contains("Session 8"));
+    assert!(
+        title_visible,
+        "selected session title line must be visible; lines:\n{lines:#?}"
+    );
+
+    let activity_visible = lines.iter().any(|l| l.contains('\u{2514}'));
+    assert!(
+        activity_visible,
+        "selected session activity line must be visible; lines:\n{lines:#?}"
+    );
 }
