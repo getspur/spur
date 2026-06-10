@@ -1,22 +1,19 @@
 from __future__ import annotations
 
+from spur_app import App
 
-def create_server():
-    from mcp.server.fastmcp import FastMCP
+from tools.get_template import html_video_get_template
+from tools.render import html_video_render
+from tools.search import html_video_search_templates
 
-    from tools.get_template import html_video_get_template
-    from tools.render import html_video_render
-    from tools.search import html_video_search_templates
-
-    mcp = FastMCP("html-video")
-    mcp.tool()(html_video_render)
-    mcp.tool()(html_video_search_templates)
-    mcp.tool()(html_video_get_template)
-    return mcp
+app = App("html-video")
+app.tool()(html_video_render)
+app.tool()(html_video_search_templates)
+app.tool()(html_video_get_template)
 
 
 def main() -> None:
-    create_server().run(transport="stdio")
+    app.run()
 
 
 if __name__ == "__main__":
