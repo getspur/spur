@@ -3,7 +3,7 @@
 This directory is the **source of truth** for the open-source Spur App SDK.
 On release tags it is mirrored to a public repository (Apache-2.0 license).
 
-See the design specs for full context:
+See the design specs for full context (internal monorepo paths; not present in the public mirror):
 - `docs/superpowers/specs/2026-06-10-app-platform-contract-design.ipynb` — App Platform Contract
 - `docs/superpowers/specs/2026-06-10-spur-app-sdk-design.ipynb` — Spur App SDK design
 
@@ -25,7 +25,8 @@ wire format that the Rust `PortStore` writer produces and that SDK language
 readers must parse.
 
 **The two directories must always be identical.**  CI enforces this via
-`scripts/check-sdk-fixture-lockstep.sh` (INV-SDK-F1 in `.github/workflows/lint-invariants.yml`).
+`scripts/check-sdk-fixture-lockstep.sh` (INV-SDK-F1 in `.github/workflows/lint-invariants.yml`)
+(internal monorepo paths; not present in the public mirror).
 
 If you change the Rust port-store wire format, regenerate the SDK copy and
 update any SDK reader tests before committing:
