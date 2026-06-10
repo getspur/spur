@@ -87,8 +87,11 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         )
     })?;
 
-    let port_root = resolve_port_root(deps, params.slot_id.as_deref(), &params.spec_name).await;
-    let mut kernel = start_local_kernel(&params.spec_name, port_root.as_deref(), None)
+    let notebook_path =
+        resolve_notebook_path(deps, params.slot_id.as_deref(), &params.spec_name).await;
+    let port_root = notebook_path.as_deref().map(notebook_port_root);
+    let working_dir = notebook_path.as_deref().and_then(|p| p.parent());
+    let mut kernel = start_local_kernel(&params.spec_name, port_root.as_deref(), working_dir)
         .await
         .map_err(|error| {
             McpError::internal_error(
@@ -140,24 +143,27 @@ async fn resolve_slot_id(deps: &ServerDeps, explicit_slot_id: Option<String>) ->
         .unwrap_or_else(|| format!("mcp:{}", Uuid::new_v4()))
 }
 
-async fn resolve_port_root(
+/// Resolve the notebook path from either an explicit slot id or the daemon's
+/// currently-open notebook.  Returns `None` when neither source provides a
+/// path (e.g. no notebook is open and no slot-id-encoded path exists).
+async fn resolve_notebook_path(
     deps: &ServerDeps,
     explicit_slot_id: Option<&str>,
     spec_name: &str,
 ) -> Option<PathBuf> {
     if let Some(slot_id) = explicit_slot_id {
-        return notebook_path_from_slot_id(slot_id, spec_name).map(notebook_port_root);
+        return notebook_path_from_slot_id(slot_id, spec_name).map(PathBuf::from);
     }
 
     let daemon = deps.daemon.as_ref()?;
-    daemon.current_path().await.map(notebook_port_root)
+    daemon.current_path().await
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use jute::state::State;
+    use jute::state::{slot_id_for_spec, State};
 
     use super::*;
     use crate::mcp::bridge::{AgentBridge, TauriBridgeRequester};
@@ -217,6 +223,58 @@ mod tests {
         assert_eq!(
             provisioning_target_for_spec("gonb"),
             KernelspecProvisioningTarget::Gonb
+        );
+    }
+
+    // ── resolve_notebook_path: slot-id branch ─────────────────────────────────
+
+    /// A slot id encoding a notebook path yields the notebook path, and its
+    /// parent is used as the working directory.
+    #[tokio::test]
+    async fn notebook_path_from_slot_id_yields_correct_working_dir() {
+        let notebook_path = "/home/user/projects/app/app.ipynb";
+        let slot_id = slot_id_for_spec(notebook_path, "python3");
+        let deps = deps_without_notebook();
+
+        let resolved = resolve_notebook_path(&deps, Some(&slot_id), "python3").await;
+
+        let resolved = resolved.expect("expected a notebook path from the slot id");
+        assert_eq!(
+            resolved,
+            PathBuf::from(notebook_path),
+            "resolved notebook path must match the path encoded in the slot id"
+        );
+        assert_eq!(
+            resolved.parent(),
+            Some(std::path::Path::new("/home/user/projects/app")),
+            "working_dir derived from resolved path must be the notebook's directory"
+        );
+    }
+
+    /// A bare mcp: slot id (not notebook-derived) yields None — no working dir.
+    #[tokio::test]
+    async fn mcp_slot_id_yields_no_notebook_path() {
+        let deps = deps_without_notebook();
+        let resolved = resolve_notebook_path(
+            &deps,
+            Some("mcp:550e8400-e29b-41d4-a716-446655440000"),
+            "python3",
+        )
+        .await;
+        assert!(
+            resolved.is_none(),
+            "mcp: slot id should not produce a notebook path"
+        );
+    }
+
+    /// No explicit slot id and no open notebook (daemon is None) yields None.
+    #[tokio::test]
+    async fn no_slot_id_no_daemon_yields_no_notebook_path() {
+        let deps = deps_without_notebook(); // daemon: None
+        let resolved = resolve_notebook_path(&deps, None, "python3").await;
+        assert!(
+            resolved.is_none(),
+            "no slot id + no daemon should yield no notebook path"
         );
     }
 }
