@@ -98,17 +98,19 @@ fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str, theme: &Theme) 
 fn render_help_overlay(frame: &mut Frame, list_area: Rect, theme: &Theme) {
     let muted = Style::default().fg(token(theme, "session_picker.row.muted.fg"));
 
-    // Content lines: two bindings per row, padded for alignment.
+    // Secondary bindings not disclosed in the primary footer tier.
+    // Keep in sync with the list-mode arm of handle_key — adding or removing
+    // a binding in either place requires updating the other.
     let rows: &[&str] = &[
         "R rename      \u{00b7}  p pin",
         "x archive     \u{00b7}  a show archived",
         "d archive (legacy)",
         "y yank id     \u{00b7}  P toggle preview",
-        "r refresh     \u{00b7}  n new session",
     ];
 
-    // Box size: 2 border rows + rows.len() content rows; width = widest row + 4 padding.
-    let content_w: u16 = rows.iter().map(|r| r.chars().count()).max().unwrap_or(20) as u16 + 4; // 2 border cols + 2 inner padding each side
+    // Box size: 2 border rows + rows.len() content rows.
+    // +4 = 2 border cols (left+right) + 1 explicit left pad + 1 right slack.
+    let content_w: u16 = rows.iter().map(|r| r.chars().count()).max().unwrap_or(20) as u16 + 4;
     let content_h: u16 = rows.len() as u16 + 2; // 2 border rows
 
     // Center the box within the list area (floor-centered).
@@ -546,6 +548,7 @@ impl SessionPickerView {
             filter: prev_filter,
         };
         self.scroll_offset.set(0);
+        self.help_visible = false;
     }
 
     fn highlighted_session_id(
@@ -647,6 +650,7 @@ impl SessionPickerView {
 
     pub fn set_error(&mut self, message: String) {
         self.state = PickerState::Error { message };
+        self.help_visible = false;
     }
 
     pub fn handle_paste(&mut self, text: &str) {
