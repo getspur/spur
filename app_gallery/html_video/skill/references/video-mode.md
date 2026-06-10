@@ -60,6 +60,13 @@ valid JSON inside a markdown cell and should be versioned as `"kind": "html-vide
 - `frames` drives the number and order of per-frame HTML cells.
 - Keep optional fields compact so frame cells can stay deterministic.
 
+## Template discovery
+
+Templates are discovered from `templates/index.json`, which lists the 5 available
+templates. Use `html_video_search_templates` to browse them and
+`html_video_get_template` to fetch a template's metadata and HTML. There are
+**5 templates** — not 21.
+
 ## Per-frame HTML cell protocol
 
 Each element in `frames` maps to one notebook code cell with:
@@ -69,16 +76,19 @@ Each element in `frames` maps to one notebook code cell with:
 - one and only one output item with MIME `text/html`
 - no external network or CDN assets
 - frame payload embedded as JSON in-page (`window.__FRAME__`) or compile-time constants
-- exactly one capture target: `<canvas data-capture="true">`
+- exactly one capture target: `<canvas data-capture="true" data-capture-duration-sec="...">`
+
+The `data-capture-duration-sec` attribute tells the recorder how long to record.
+It corresponds to the `duration_sec` stored in the port manifest entry and used by
+the render server as the frame's duration.
 
 Minimal frame structure used by template renderers:
 
 ```html
 <style>/* inlined frame CSS */</style>
-<canvas data-capture="true" width="1080" height="1920"></canvas>
+<canvas data-capture="true" data-capture-duration-sec="60" width="1080" height="1920"></canvas>
 <script>
   const frame = window.__FRAME__ || {}
-  const durationMs = frame.duration_ms || 3000
   const canvas = document.querySelector('canvas[data-capture="true"]')
   const ctx = canvas.getContext("2d")
 
@@ -94,41 +104,31 @@ Minimal frame structure used by template renderers:
 </script>
 ```
 
-The notebook runtime records the marked canvas in the browser and reports captures
-to the notebook bridge with this message shape:
-
-```json
-{
-  "type": "jute-video-capture",
-  "cellId": "frame-cell-id",
-  "webm": "base64-webm-payload",
-  "duration_sec": 3
-}
-```
+When active output scripts are enabled (granted via the one-time trust prompt), the
+browser records this canvas and delivers the WebM to the notebook bridge as a
+`jute-video-capture` postMessage. The `push_capture_port` command stores the WebM
+in the port store under the declared port name, along with the `duration_sec` value.
 
 ## Render recipe
 
-After frame cells render, collect browser captures through the notebook MCP bridge:
-
-```json
-{
-  "tool": "notebook_get_cell_capture",
-  "arguments": { "cell_id": "frame-cell-id" }
-}
-```
-
-The capture result includes `webm_base64` and `duration_sec`. Keep the captures in
-the same order as `frames`, then call:
+After frame cells render and the captures have been written to the port store,
+call `html_video_render` with `port_names` to read directly from the store:
 
 ```json
 {
   "tool": "html_video_render",
   "arguments": {
-    "webm_frames": ["base64-webm-payload"],
-    "output_path": "artifacts/output.mp4"
+    "port_names": ["spur-ad-capture"],
+    "output_path": "artifacts/output.mp4",
+    "fps": 30
   }
 }
 ```
+
+The server reads each port's bytes from `entry["path"]` in the manifest (never
+from a bare `root/<port-name>` path). When `frame_duration` is not passed, the
+server uses the `duration_sec` stored in the manifest entry (set by the recorder
+from `data-capture-duration-sec`), falling back to 3.0 seconds as a last resort.
 
 Embed the rendered MP4 from `output_path` in the final notebook output cell.
 

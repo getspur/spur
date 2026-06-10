@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -108,3 +109,119 @@ def test_render_html_video_composition_html_invokes_bun_harness(
     assert calls[0][4] == "24"
     assert calls[0][5] == "640x360"
     assert calls[0][6] == str(tmp_path / "out.mp4")
+
+
+# ── T6a: read_webm_port_frames fixture-based tests ────────────────────────────
+
+
+def _make_port_store(tmp_path: Path, duration_sec: float | None = None) -> tuple[Path, Path]:
+    """Create a minimal port store fixture in tmp_path.
+
+    Returns (ports_root, media_file_path).
+    """
+    ports_root = tmp_path / "ports"
+    ports_root.mkdir()
+    media_file = ports_root / "spur-ad-capture@v1.media"
+    media_file.write_bytes(b"fake webm bytes")
+    entry: dict = {
+        "path": str(media_file),
+        "version": 1,
+        "kind": "media",
+        "mime": "video/webm",
+        "size": len(b"fake webm bytes"),
+    }
+    if duration_sec is not None:
+        entry["duration_sec"] = duration_sec
+    manifest = {"ports": {"spur-ad-capture": entry}}
+    (ports_root / "manifest.json").write_text(json.dumps(manifest))
+    return ports_root, media_file
+
+
+def test_read_webm_port_frames_reads_entry_path_not_bare_port_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Port bytes must come from entry['path'] (basename-joined under root),
+    not from root/<port-name>."""
+    ports_root, media_file = _make_port_store(tmp_path)
+    monkeypatch.setenv("SPUR_PORTS_ROOT", str(ports_root))
+
+    frames = render.read_webm_port_frames(["spur-ad-capture"])
+
+    assert len(frames) == 1
+    frame_bytes, frame_duration = frames[0]
+    assert frame_bytes == b"fake webm bytes"
+    assert frame_duration is None  # no duration_sec in this fixture
+
+
+def test_read_webm_port_frames_surfaces_duration_sec_from_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When the manifest entry has duration_sec, it is returned alongside the bytes."""
+    ports_root, _ = _make_port_store(tmp_path, duration_sec=60.0)
+    monkeypatch.setenv("SPUR_PORTS_ROOT", str(ports_root))
+
+    frames = render.read_webm_port_frames(["spur-ad-capture"])
+
+    assert len(frames) == 1
+    _, frame_duration = frames[0]
+    assert frame_duration == 60.0
+
+
+def test_render_html_video_port_names_uses_manifest_duration_when_frame_duration_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When frame_duration is not passed and the manifest carries duration_sec=60,
+    the rendered total_duration must be 60 (not the 3.0 default)."""
+    ports_root, _ = _make_port_store(tmp_path, duration_sec=60.0)
+    monkeypatch.setenv("SPUR_PORTS_ROOT", str(ports_root))
+
+    calls: list[tuple] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(render.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(render.subprocess, "run", fake_run)
+
+    result = render.render_html_video(
+        port_names=["spur-ad-capture"],
+        output_path=str(tmp_path / "out"),
+        resolution="320x180",
+        fps=30,
+        # frame_duration intentionally omitted — should come from manifest
+    )
+
+    assert result["duration"] == 60.0
+    assert result["frame_count"] == 1
+
+
+def test_render_html_video_port_names_explicit_frame_duration_overrides_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When frame_duration is explicitly passed, it overrides the manifest duration_sec."""
+    ports_root, _ = _make_port_store(tmp_path, duration_sec=60.0)
+    monkeypatch.setenv("SPUR_PORTS_ROOT", str(ports_root))
+
+    calls: list[tuple] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(render.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(render.subprocess, "run", fake_run)
+
+    result = render.render_html_video(
+        port_names=["spur-ad-capture"],
+        output_path=str(tmp_path / "out"),
+        resolution="320x180",
+        fps=30,
+        frame_duration=5.0,  # explicit: should win over manifest's 60.0
+    )
+
+    assert result["duration"] == 5.0
