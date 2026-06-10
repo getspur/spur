@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -47,9 +47,9 @@ fn footer_hint(state: &PickerState, rename_active: bool, confirm_active: bool) -
             cursor: 0,
             search_focused: false,
             ..
-        } => "j/k nav \u{00b7} Enter new session \u{00b7} / search \u{00b7} P preview \u{00b7} Esc back",
+        } => "j/k nav \u{00b7} Enter new session \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back",
         PickerState::Populated { .. } => {
-            "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} p pin \u{00b7} x archive \u{00b7} d deprecated \u{00b7} y yank-id \u{00b7} P preview \u{00b7} Esc back"
+            "j/k nav \u{00b7} Enter resume \u{00b7} n new \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back"
         }
     }
 }
@@ -76,9 +76,9 @@ fn footer_hint_compact(
             cursor: 0,
             search_focused: false,
             ..
-        } => "j/k nav \u{00b7} \u{21b5} new \u{00b7} / search \u{00b7} Esc",
+        } => "j/k \u{00b7} \u{21b5} new \u{00b7} / \u{00b7} ? more \u{00b7} Esc",
         PickerState::Populated { .. } => {
-            "j/k nav \u{00b7} \u{21b5} resume \u{00b7} / search \u{00b7} y yank \u{00b7} Esc"
+            "j/k \u{00b7} \u{21b5} resume \u{00b7} / \u{00b7} ? more \u{00b7} Esc"
         }
     }
 }
@@ -91,6 +91,50 @@ fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str, theme: &Theme) 
         )),
         area,
     );
+}
+
+/// Secondary-bindings help overlay drawn over the list area.
+/// Uses a bordered block with a `keys` title and lists the secondary bindings.
+fn render_help_overlay(frame: &mut Frame, list_area: Rect, theme: &Theme) {
+    let muted = Style::default().fg(token(theme, "session_picker.row.muted.fg"));
+
+    // Content lines: two bindings per row, padded for alignment.
+    let rows: &[&str] = &[
+        "R rename      \u{00b7}  p pin",
+        "x archive     \u{00b7}  a show archived",
+        "d archive (legacy)",
+        "y yank id     \u{00b7}  P toggle preview",
+        "r refresh     \u{00b7}  n new session",
+    ];
+
+    // Box size: 2 border rows + rows.len() content rows; width = widest row + 4 padding.
+    let content_w: u16 = rows.iter().map(|r| r.chars().count()).max().unwrap_or(20) as u16 + 4; // 2 border cols + 2 inner padding each side
+    let content_h: u16 = rows.len() as u16 + 2; // 2 border rows
+
+    // Center the box within the list area (floor-centered).
+    let x = list_area.x + list_area.width.saturating_sub(content_w) / 2;
+    let y = list_area.y + list_area.height.saturating_sub(content_h) / 2;
+    let overlay_area = Rect {
+        x,
+        y,
+        width: content_w.min(list_area.width),
+        height: content_h.min(list_area.height),
+    };
+
+    let block = Block::default()
+        .title(" keys ")
+        .borders(Borders::ALL)
+        .border_style(muted);
+
+    // Build the paragraph content (without the border — ratatui handles it).
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|row| Line::from(vec![Span::raw(" "), Span::styled(*row, muted)]))
+        .collect();
+
+    // Clear the area first so the overlay renders cleanly over the list.
+    frame.render_widget(Clear, overlay_area);
+    frame.render_widget(Paragraph::new(lines).block(block), overlay_area);
 }
 
 /// Fixed display-column widths for the three metadata columns on session row line 1.
@@ -307,6 +351,8 @@ pub struct SessionPickerView {
     /// and render a top banner. This never auto-fires Enter.
     preselect: Option<String>,
     preselect_consumed: bool,
+    /// When true, the secondary-bindings help overlay is shown over the list.
+    help_visible: bool,
 }
 
 impl Default for SessionPickerView {
@@ -329,6 +375,7 @@ impl SessionPickerView {
             confirm_switch: None,
             preselect: None,
             preselect_consumed: false,
+            help_visible: false,
         }
     }
 
@@ -362,6 +409,10 @@ impl SessionPickerView {
 
     pub fn is_preview_visible(&self) -> bool {
         self.preview_visible
+    }
+
+    pub fn is_help_visible(&self) -> bool {
+        self.help_visible
     }
 
     /// Called by App whenever metadata changes OR picker is opened. Passes in
@@ -1356,16 +1407,24 @@ impl SessionPickerView {
                     license_badge,
                     flag_summary,
                     view_hint_override: ctx.transient_hint_override.or(Some(HintOverride {
-                        full: footer_hint(
-                            &self.state,
-                            self.rename_state.is_some(),
-                            self.confirm_switch.is_some(),
-                        ),
-                        compact: Some(footer_hint_compact(
-                            &self.state,
-                            self.rename_state.is_some(),
-                            self.confirm_switch.is_some(),
-                        )),
+                        full: if self.help_visible {
+                            "? or Esc close"
+                        } else {
+                            footer_hint(
+                                &self.state,
+                                self.rename_state.is_some(),
+                                self.confirm_switch.is_some(),
+                            )
+                        },
+                        compact: Some(if self.help_visible {
+                            "? or Esc close"
+                        } else {
+                            footer_hint_compact(
+                                &self.state,
+                                self.rename_state.is_some(),
+                                self.confirm_switch.is_some(),
+                            )
+                        }),
                         hide_on_overflow: true,
                     })),
                 },
@@ -1381,6 +1440,11 @@ impl SessionPickerView {
                 self.confirm_switch.is_some(),
             );
             render_footer_hint(frame, chunks[footer_idx], hint, ctx.theme);
+        }
+
+        // Draw the help overlay last so it renders on top of everything else.
+        if self.help_visible {
+            render_help_overlay(frame, chunks[0], ctx.theme);
         }
     }
 
@@ -1893,16 +1957,36 @@ impl View for SessionPickerView {
             }
         }
 
-        // Preview toggle intercepts before list-mode logic. Only valid when
-        // search isn't focused (so capital P typed in search box still filters).
-        let can_toggle_preview = matches!(
+        // Help overlay and preview toggle intercept before list-mode logic.
+        // Only valid when populated and search isn't focused.
+        let can_toggle_overlays = matches!(
             &self.state,
             PickerState::Populated {
                 search_focused: false,
                 ..
             }
         );
-        if can_toggle_preview {
+        if can_toggle_overlays {
+            // While help overlay is open: ? or Esc close it; all other keys
+            // are swallowed so the user cannot mutate state blindly under the
+            // overlay.
+            if self.help_visible {
+                match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc => {
+                        self.help_visible = false;
+                    }
+                    _ => {} // swallow
+                }
+                return None;
+            }
+            // ? toggles the help overlay (only when not search-focused).
+            if let KeyCode::Char('?') = key.code {
+                if key.modifiers.is_empty() {
+                    self.help_visible = true;
+                    return None;
+                }
+            }
+            // P toggles preview.
             if let KeyCode::Char('P') = key.code {
                 self.preview_visible = !self.preview_visible;
                 return None;
@@ -2103,9 +2187,6 @@ impl View for SessionPickerView {
                                 None
                             }
                             KeyCode::Char('y') => hl_session_id.clone().map(Action::CopySessionId),
-                            KeyCode::Char('?') if key.modifiers.is_empty() => {
-                                Some(Action::ShowHelp)
-                            }
                             _ => None,
                         }
                     }
@@ -2340,22 +2421,38 @@ mod current_session_shortcut_tests {
     }
 
     #[test]
-    fn question_mark_unfocused_emits_show_help() {
+    fn question_mark_unfocused_opens_picker_help_overlay() {
         let mut picker = SessionPickerView::new();
         picker.set_sessions(
             "test-brain".into(),
             vec![make_session("A")],
             test_ctx().synopsis,
         );
+        assert!(!picker.is_help_visible(), "help should start hidden");
 
         let action = picker.handle_key(
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
             &test_ctx(),
         );
         assert!(
-            matches!(action, Some(Action::ShowHelp)),
-            "expected ShowHelp, got {:?}",
+            action.is_none(),
+            "? must not emit an action (handled locally), got {:?}",
             action
+        );
+        assert!(
+            picker.is_help_visible(),
+            "help overlay must be visible after ?"
+        );
+
+        // Second ? closes it.
+        let action2 = picker.handle_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        assert!(action2.is_none(), "? close must not emit action");
+        assert!(
+            !picker.is_help_visible(),
+            "help overlay must be hidden after second ?"
         );
     }
 
