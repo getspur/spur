@@ -442,7 +442,7 @@ fn check_sdk(app_root: &Path, manifest_value: &Value, findings: &mut Vec<Finding
     const REQUIRED_TS_MODULES: &[&str] = &["call_tool.ts", "wire.ts"];
 
     let Some(ts_dir) = manifest_value["sdk"]["typescript"].as_str() else {
-        return; // no sdk block declared — nothing to check
+        return; // sdk.typescript not declared — nothing to check
     };
 
     let dir = app_root.join(ts_dir);
