@@ -1018,6 +1018,169 @@ mod tests {
         }
     }
 
+    /// Regression test: `attachments: None` on RawCell and MarkdownCell must
+    /// NOT serialize as `"attachments": null` — the nbformat v4 schema forbids
+    /// null there and `nbformat.read()` crashes with 'NoneType' object has no
+    /// attribute 'items'.  CodeCell.execution_count intentionally stays null.
+    #[test]
+    fn cell_attachments_none_omitted_not_null() {
+        // Build minimal CellMetadata inline (no spur, no jute_deck, no other).
+        let bare_meta = || CellMetadata {
+            spur: None,
+            jute_deck: None,
+            other: Map::new(),
+        };
+
+        // (a) MarkdownCell with attachments: None must NOT have the key in JSON.
+        let md_cell = Cell::Markdown(MarkdownCell {
+            id: Some("md-1".to_string()),
+            metadata: bare_meta(),
+            source: MultilineString::Single("hello".to_string()),
+            attachments: None,
+        });
+        let root_md = NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                jute_deck: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: vec![md_cell],
+        };
+        let v = serde_json::to_value(&root_md).unwrap();
+        let cell_json = v["cells"][0].as_object().unwrap();
+        assert!(
+            !cell_json.contains_key("attachments"),
+            "MarkdownCell must not contain attachments key when None, got: {cell_json:?}"
+        );
+
+        // (a) RawCell with attachments: None must NOT have the key in JSON.
+        let raw_cell = Cell::Raw(RawCell {
+            id: Some("raw-1".to_string()),
+            metadata: bare_meta(),
+            source: MultilineString::Single("raw".to_string()),
+            attachments: None,
+        });
+        let root_raw = NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                jute_deck: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: vec![raw_cell],
+        };
+        let v = serde_json::to_value(&root_raw).unwrap();
+        let cell_json = v["cells"][0].as_object().unwrap();
+        assert!(
+            !cell_json.contains_key("attachments"),
+            "RawCell must not contain attachments key when None, got: {cell_json:?}"
+        );
+
+        // (b) Legacy `"attachments": null` must still deserialize successfully.
+        let json_legacy_md = r#"{
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "id": "md-1",
+                    "metadata": {},
+                    "source": "hello",
+                    "attachments": null
+                }
+            ]
+        }"#;
+        let parsed_md: NotebookRoot = serde_json::from_str(json_legacy_md)
+            .expect("legacy null attachments on markdown cell must deserialize");
+        let Cell::Markdown(ref md) = parsed_md.cells[0] else {
+            panic!("expected markdown cell");
+        };
+        assert!(md.attachments.is_none());
+
+        let json_legacy_raw = r#"{
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "cells": [
+                {
+                    "cell_type": "raw",
+                    "id": "raw-1",
+                    "metadata": {},
+                    "source": "raw",
+                    "attachments": null
+                }
+            ]
+        }"#;
+        let parsed_raw: NotebookRoot = serde_json::from_str(json_legacy_raw)
+            .expect("legacy null attachments on raw cell must deserialize");
+        let Cell::Raw(ref raw) = parsed_raw.cells[0] else {
+            panic!("expected raw cell");
+        };
+        assert!(raw.attachments.is_none());
+
+        // (c) Self-heal: re-serializing legacy-parsed cells must omit the key.
+        let healed_md = serde_json::to_value(&parsed_md).unwrap();
+        let md_cell_json = healed_md["cells"][0].as_object().unwrap();
+        assert!(
+            !md_cell_json.contains_key("attachments"),
+            "self-heal: attachments must be absent on MarkdownCell after round-trip, got: {md_cell_json:?}"
+        );
+
+        let healed_raw = serde_json::to_value(&parsed_raw).unwrap();
+        let raw_cell_json = healed_raw["cells"][0].as_object().unwrap();
+        assert!(
+            !raw_cell_json.contains_key("attachments"),
+            "self-heal: attachments must be absent on RawCell after round-trip, got: {raw_cell_json:?}"
+        );
+
+        // (d) Guard: CodeCell.execution_count: None MUST still serialize as null
+        //     (integer-or-null is legal and conventional under nbformat).
+        let code_cell = Cell::Code(CodeCell {
+            id: Some("code-1".to_string()),
+            metadata: bare_meta(),
+            source: MultilineString::Single("x = 1".to_string()),
+            execution_count: None,
+            outputs: Vec::new(),
+        });
+        let root_code = NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                jute_deck: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: vec![code_cell],
+        };
+        let v = serde_json::to_value(&root_code).unwrap();
+        let code_cell_json = v["cells"][0].as_object().unwrap();
+        assert!(
+            code_cell_json.contains_key("execution_count"),
+            "CodeCell must still serialize execution_count (as null) when None, got: {code_cell_json:?}"
+        );
+        assert_eq!(
+            code_cell_json["execution_count"],
+            serde_json::Value::Null,
+            "CodeCell execution_count must be null when None"
+        );
+    }
+
     #[test]
     fn string_to_multiline() {
         let empty = MultilineString::Single("".into()).normalize();
