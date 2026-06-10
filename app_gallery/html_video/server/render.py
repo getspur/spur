@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import base64
-import json
 import math
-import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 METHOD = "html_video_render"
 DEFAULT_FPS = 30
@@ -341,84 +338,61 @@ def decode_webm_frames(webm_frames: list[str]) -> list[bytes]:
 def read_webm_port_frames(
     port_names: list[str],
 ) -> list[tuple[bytes, float | None]]:
-    """Read WebM bytes (and optional duration) for each named port from the
-    port store manifest.
+    """Read WebM bytes (and optional duration) for each named port.
 
-    Returns a list of ``(bytes, duration_sec_or_None)`` tuples — one per port
-    in the order they were requested.  ``duration_sec`` is ``None`` when the
-    manifest entry does not carry the field (old stores).
+    Delegates to ``spur_app.PortStore`` which handles manifest parsing,
+    basename-joining, and capability validation.  A fresh ``PortStore`` is
+    created on every call so that test fixtures that swap ``SPUR_PORTS_ROOT``
+    via monkeypatch are honoured without stale caching.
 
-    The physical path of each port file is taken from ``entry["path"]`` in the
-    manifest, NOT derived as ``root/<port>``.  For safety the path is resolved
-    as ``root / Path(entry["path"]).name`` so only the basename is used.
+    Returns a list of ``(bytes, duration_sec_or_None)`` tuples in the order
+    requested.  ``duration_sec`` is ``None`` when the manifest entry does not
+    carry the field.
     """
-    root_raw = os.environ.get("SPUR_PORTS_ROOT")
-    if not root_raw:
+    from spur_app.errors import (
+        MissingCapabilityError,
+        PortFileNotFoundError,
+        PortManifestError,
+        PortNotFoundError,
+    )
+    from spur_app.ports import PortStore
+
+    try:
+        store = PortStore()
+    except MissingCapabilityError as error:
         raise RenderError(
             f"{METHOD} port_names require SPUR_PORTS_ROOT",
             {"code": "ports_root_unavailable"},
-        )
-
-    root = Path(root_raw)
-    manifest_path = root / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except Exception as error:
-        raise RenderError(
-            f"{METHOD} failed to open notebook port store",
-            {"error": str(error)},
         ) from error
-
-    ports = manifest.get("ports", {}) if isinstance(manifest, dict) else {}
-    if not isinstance(ports, dict):
-        raise RenderError(
-            f"{METHOD} failed to open notebook port store",
-            {"error": "manifest ports must be an object"},
-        )
 
     frames: list[tuple[bytes, float | None]] = []
     for port in port_names:
-        entry = ports.get(port)
-        if not isinstance(entry, dict):
-            raise InvalidParams(
-                f"{METHOD} could not read media port",
-                {"port": port, "error": "port not found"},
-            )
-
-        mime = entry.get("mime")
-        if mime != "video/webm":
-            raise InvalidParams(
-                f"{METHOD} media port must be video/webm",
-                {"port": port, "mime": mime},
-            )
-
-        # Read from the path recorded in the manifest entry.  The file is
-        # written as ``<port>@v<N>.media`` — never as bare ``<port>``.
-        # For safety only the basename is used so a malicious manifest entry
-        # cannot escape the root directory.
-        entry_path_raw = entry.get("path", "")
-        port_file_path = root / Path(entry_path_raw).name if entry_path_raw else None
-        if not port_file_path or not port_file_path.name:
-            raise InvalidParams(
-                f"{METHOD} could not read media port",
-                {"port": port, "error": "manifest entry is missing a path"},
-            )
-
         try:
-            frame_bytes = port_file_path.read_bytes()
-        except Exception as error:
+            result = store.read(port)
+        except PortManifestError as error:
+            raise RenderError(
+                f"{METHOD} failed to open notebook port store",
+                {"error": str(error)},
+            ) from error
+        except (PortNotFoundError, PortFileNotFoundError) as error:
             raise InvalidParams(
                 f"{METHOD} could not read media port",
                 {"port": port, "error": str(error)},
             ) from error
 
-        raw_duration = entry.get("duration_sec")
+        if result.mime != "video/webm":
+            raise InvalidParams(
+                f"{METHOD} media port must be video/webm",
+                {"port": port, "mime": result.mime},
+            )
+
+        raw = result.duration_sec
         duration_sec: float | None = (
-            float(raw_duration)
-            if raw_duration is not None and math.isfinite(float(raw_duration)) and float(raw_duration) > 0.0
+            float(raw)
+            if raw is not None and math.isfinite(float(raw)) and float(raw) > 0.0
             else None
         )
-        frames.append((frame_bytes, duration_sec))
+        frames.append((result.bytes, duration_sec))
 
     return frames
 
