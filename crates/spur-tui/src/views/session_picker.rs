@@ -830,16 +830,33 @@ impl SessionPickerView {
         filter: &str,
     ) {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
-        // With two-line rows + optional headers we budget sessions, not lines.
-        // Reserve up to 4 lines for group headers when there is no active filter,
-        // so the selected session is always fully visible (both lines rendered).
-        // When a filter is active there are no headers, so the full area is used.
+
+        // ── Compute the real height available for session rows ────────────
+        // This must mirror the Layout construction below so the scroll clamp
+        // and the actual rendering agree on how many rows are available.
+        let needs_footer_row = self.rename_state.is_some() || self.confirm_switch.is_some();
+        let preview_height = if self.preview_visible {
+            (area.height / 2)
+                .max(PREVIEW_MIN_LINES)
+                .min(PREVIEW_MAX_LINES_TALL)
+        } else {
+            0
+        };
+        // chunks[0] (the list pane) gets whatever is left after preview + status
+        // (+ optional footer prompt row).
+        let status_rows: u16 = 1;
+        let footer_rows: u16 = if needs_footer_row { 1 } else { 0 };
+        let chrome_rows: u16 = preview_height + status_rows + footer_rows;
+        // Fixed list chrome above the session rows: title(1) + search(1) + blank(1)
+        // + [+New](1) + separator(1) = 5. Subtract that from the list pane height.
+        let list_pane_height = (area.height as usize).saturating_sub(chrome_rows as usize);
+        let list_session_area = list_pane_height.saturating_sub(5);
+        // Reserve up to 4 lines for group-bucket headers when filter is empty.
         let header_line_reserve: usize = if filter.is_empty() { 4 } else { 0 };
-        let list_lines = (area.height as usize)
-            .saturating_sub(4) // fixed chrome: title + search + blank + [+new] separator
-            .saturating_sub(header_line_reserve);
-        // Each session occupies 2 lines. Use saturating so tiny terminals don't panic.
-        let visible_sessions = (list_lines / 2).max(1);
+        let session_lines = list_session_area.saturating_sub(header_line_reserve);
+        // Each session occupies 2 lines. Ensure at least 1 so we never div-by-zero
+        // or refuse to scroll on tiny terminals.
+        let visible_sessions = (session_lines / 2).max(1);
 
         let indices = filtered_indices(
             sessions,
@@ -862,13 +879,33 @@ impl SessionPickerView {
         self.scroll_offset.set(scroll);
 
         // ── Count stats for the header line ───────────────────────────────
-        let total_count = indices.len();
-        let pinned_count = indices
+        // Use the FULL unfiltered session list + metadata so counts are stable
+        // and don't change while the user is typing a filter.
+        let total_count = {
+            // Count all sessions visible in the current show_archived mode
+            sessions
+                .iter()
+                .filter(|s| {
+                    let archived = self
+                        .metadata
+                        .sessions
+                        .get(s.session_id.0.as_ref())
+                        .map(|e| e.archived)
+                        .unwrap_or(false);
+                    if archived {
+                        self.show_archived
+                    } else {
+                        true
+                    }
+                })
+                .count()
+        };
+        let pinned_count = sessions
             .iter()
-            .filter(|&&i| {
+            .filter(|s| {
                 self.metadata
                     .sessions
-                    .get(sessions[i].session_id.0.as_ref())
+                    .get(s.session_id.0.as_ref())
                     .map(|e| e.pinned)
                     .unwrap_or(false)
             })
@@ -1122,13 +1159,24 @@ impl SessionPickerView {
 
             let mut activity_line_spans: Vec<Span> = Vec::with_capacity(4);
             activity_line_spans.push(Span::styled(activity_indent.to_string(), muted_style));
-            let activity_truncated = truncate_for_row(&activity_content, content_budget);
+
+            // " ● draft" badge is 7 display columns. Reserve space for it BEFORE
+            // truncating the activity text so the combined line never overflows
+            // row_width. When no draft, the full content_budget is available.
+            const DRAFT_BADGE: &str = " \u{25cf} draft"; // 7 cols
+            const DRAFT_BADGE_WIDTH: usize = 7;
+            let text_budget = if draft.is_empty() {
+                content_budget
+            } else {
+                content_budget.saturating_sub(DRAFT_BADGE_WIDTH)
+            };
+            let activity_truncated = truncate_for_row(&activity_content, text_budget);
             activity_line_spans.push(Span::styled(activity_truncated, muted_style));
 
-            // Draft badge at end of activity line
+            // Append draft badge only when a draft exists.
             if !draft.is_empty() {
                 activity_line_spans.push(Span::styled(
-                    " \u{25cf} draft",
+                    DRAFT_BADGE,
                     Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
                 ));
             }
@@ -1142,16 +1190,9 @@ impl SessionPickerView {
         // In normal/list mode, the StatusBar's `view_hint_override` already
         // carries the key hints alongside the stats, so a separate footer row
         // would duplicate. We collapse to one row in that case.
-        let needs_footer_row = self.rename_state.is_some() || self.confirm_switch.is_some();
-        // Adaptive preview height: use up to half the available area, capped at
-        // PREVIEW_MAX_LINES_TALL, with PREVIEW_MIN_LINES as the floor.
-        let preview_height = if self.preview_visible {
-            (area.height / 2)
-                .max(PREVIEW_MIN_LINES)
-                .min(PREVIEW_MAX_LINES_TALL)
-        } else {
-            0
-        };
+        // NOTE: needs_footer_row and preview_height are computed at the top of
+        // this function (before the scroll clamp) so they are the single source
+        // of truth used by both the clamp and the layout construction.
         let chunks = if self.preview_visible {
             if needs_footer_row {
                 Layout::vertical([
