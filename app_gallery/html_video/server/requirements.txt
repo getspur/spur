@@ -1,3 +1,4 @@
 mcp>=1.0.0
 Pillow>=10.0.0
+# TODO(U7): replace with spur-app>=0.1.0 once published to PyPI
 ../../sdk/python
