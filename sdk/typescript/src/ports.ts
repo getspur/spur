@@ -29,7 +29,12 @@ import { basename, join } from "https://deno.land/std@0.224.0/path/mod.ts";
 
 /** A single port entry from the manifest. */
 export interface PortEntry {
-  /** Absolute path to the versioned file (e.g. `name@v2.media`). */
+  /**
+   * Manifest-reported path to the versioned file (e.g. `name@v2.media`).
+   * Do not open this path directly — `ports.read` resolves it via
+   * basename-join under the ports root directory to guard against stale or
+   * path-traversal values.
+   */
   path: string;
   /** Monotonically increasing version counter. */
   version: number;
