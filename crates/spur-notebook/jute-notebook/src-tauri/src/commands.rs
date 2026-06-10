@@ -1725,13 +1725,16 @@ struct AppModeManifest {
 /// still deserialise unchanged).
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct AppModeCapabilities {
+    /// When `true`, the host shows a grant prompt for active output scripts.
     #[serde(default)]
     pub active_output_scripts: bool,
+    /// When `true`, the canvas capture recorder loop is enabled end-to-end.
     #[serde(default)]
     pub canvas_capture: bool,
+    /// When `true`, the host injects `SPUR_ARTIFACTS_DIR` at plugin spawn.
     #[serde(default)]
     pub artifacts_dir: bool,
-    // `ports` is kept as an opaque value — full parsing lives in spur-notebook.
+    /// Port capability kept as an opaque value — full parsing lives in spur-notebook.
     #[serde(default)]
     pub ports: Option<serde_json::Value>,
 }
@@ -1775,11 +1778,11 @@ pub async fn notebook_open_mode(path: String) -> Result<Option<NotebookOpenInfo>
         return Ok(None);
     }
 
-    let app_name = manifest.name.unwrap_or_else(|| "App".to_string());
+    let app_name = manifest.name.unwrap_or_else(|| "App".to_owned());
     let app_root = dir.to_string_lossy().into_owned();
     let skill = manifest
         .skill
-        .unwrap_or_else(|| "skill/SKILL.md".to_string());
+        .unwrap_or_else(|| "skill/SKILL.md".to_owned());
 
     Ok(Some(NotebookOpenInfo {
         open_mode: manifest.open_mode,

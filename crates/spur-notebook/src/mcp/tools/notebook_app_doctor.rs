@@ -131,6 +131,10 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
     // ── Check 1: manifest + schema + entry_notebook ────────────────────────────
 
     let manifest_path = app_root.join(SPUR_APP_MANIFEST);
+    #[expect(
+        clippy::manual_let_else,
+        reason = "else branch has a side-effect (push to findings) before returning"
+    )]
     let manifest_raw = match tokio::fs::read_to_string(&manifest_path).await {
         Ok(s) => s,
         Err(_) => {
@@ -141,7 +145,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
                 )
                 .with_location(manifest_path.display().to_string()),
             );
-            return ok_result(findings);
+            return Ok(ok_result(findings));
         }
     };
 
@@ -154,7 +158,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
                 Finding::fail("manifest", format!("spur-app.json is not valid JSON: {e}"))
                     .with_location(manifest_path.display().to_string()),
             );
-            return ok_result(findings);
+            return Ok(ok_result(findings));
         }
     };
 
@@ -168,7 +172,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
             )
             .with_location(manifest_path.display().to_string()),
         );
-        return ok_result(findings);
+        return Ok(ok_result(findings));
     }
 
     // Check entry_notebook exists
@@ -178,7 +182,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
             Finding::fail("manifest", "entry_notebook is missing or empty")
                 .with_location(manifest_path.display().to_string()),
         );
-        return ok_result(findings);
+        return Ok(ok_result(findings));
     }
     let entry_path = app_root.join(entry_notebook);
     if !entry_path.is_file() {
@@ -193,7 +197,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
             )
             .with_location(entry_path.display().to_string()),
         );
-        return ok_result(findings);
+        return Ok(ok_result(findings));
     }
 
     findings.push(Finding::pass(
@@ -277,7 +281,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
         }
     }
 
-    ok_result(findings)
+    Ok(ok_result(findings))
 }
 
 /// Resolve the app root from a path that may be either a directory or a
@@ -697,11 +701,11 @@ async fn command_available(cmd: &str) -> bool {
 }
 
 /// Build the final `CallToolResult` from accumulated findings.
-fn ok_result(findings: Vec<Finding>) -> Result<CallToolResult, McpError> {
+fn ok_result(findings: Vec<Finding>) -> CallToolResult {
     let ok = !findings.iter().any(|f| f.level == "fail");
     let findings_json: Vec<Value> = findings.iter().map(Finding::to_value).collect();
-    Ok(CallToolResult::structured(json!({
+    CallToolResult::structured(json!({
         "ok": ok,
         "findings": findings_json
-    })))
+    }))
 }

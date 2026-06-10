@@ -371,14 +371,14 @@ async fn build_python_command(config: &PluginConfig) -> Result<Command, PluginEr
 
         ensure_python_venv(config).await?;
         let program = program_for(&config.server_type, config)?;
-        return build_command(config, program);
+        return Ok(build_command(config, program));
     }
 
     let program = program_for(&config.server_type, config)?;
-    build_command(config, program)
+    Ok(build_command(config, program))
 }
 
-fn build_command(config: &PluginConfig, program: PathBuf) -> Result<Command, PluginError> {
+fn build_command(config: &PluginConfig, program: PathBuf) -> Command {
     let mut command = Command::new(program);
     command
         .arg(&config.entry)
@@ -388,7 +388,7 @@ fn build_command(config: &PluginConfig, program: PathBuf) -> Result<Command, Plu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    Ok(command)
+    command
 }
 
 /// Mutable stdio state for one plugin, guarded by a mutex so `&self` callers can
