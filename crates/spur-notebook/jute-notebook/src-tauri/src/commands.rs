@@ -1193,6 +1193,7 @@ fn apply_notebook_mcp_socket_env(kernel_spec: &mut environment::KernelSpec) {
 pub async fn start_local_kernel(
     spec_name: &str,
     port_root: Option<&std::path::Path>,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<LocalKernel, Error> {
     // Temporary hack to just start a kernel locally with ZeroMQ.
     let kernels = environment::list_kernels(None).await;
@@ -1221,7 +1222,7 @@ pub async fn start_local_kernel(
 
     apply_notebook_port_root_env(&mut kernel_spec, port_root);
     apply_notebook_mcp_socket_env(&mut kernel_spec);
-    let kernel = LocalKernel::start(&kernel_spec).await?;
+    let kernel = LocalKernel::start(&kernel_spec, working_dir).await?;
 
     let info = commands::kernel_info(kernel.conn()).await?;
     info!(banner = info.banner, "started new jute kernel");
@@ -1296,8 +1297,10 @@ pub async fn restart_kernel_in_slot(
     let mut prior = take_kernel_from_slot(state, slot_id)?;
     prior.kill().await?;
 
-    let port_root = notebook_path_from_slot_id(slot_id, spec_name).map(notebook_port_root);
-    let mut kernel = start_local_kernel(spec_name, port_root.as_deref()).await?;
+    let nb_path = notebook_path_from_slot_id(slot_id, spec_name).map(std::path::Path::new);
+    let port_root = nb_path.map(notebook_port_root);
+    let working_dir = nb_path.and_then(|p| p.parent());
+    let mut kernel = start_local_kernel(spec_name, port_root.as_deref(), working_dir).await?;
     if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
         let _ = kernel.kill().await;
         return Err(error);
@@ -1618,6 +1621,7 @@ pub async fn start_kernel(
     let slot_id = slot_id_for_window(&window);
     let notebook_path = load_current_notebook_path_normalized().await?;
     let port_root = notebook_path.as_deref().map(notebook_port_root);
+    let working_dir = notebook_path.as_deref().and_then(|p| p.parent());
     if let Some(mut kernel) = take_kernel_if_present(&state, &slot_id) {
         if let Err(error) = kernel.kill().await {
             restore_kernel_to_slot(&state, &slot_id, kernel);
@@ -1627,7 +1631,7 @@ pub async fn start_kernel(
     }
 
     crate::kernel_provision::ensure_python3_kernelspec(&app).await?;
-    let mut kernel = start_local_kernel(spec_name, port_root.as_deref()).await?;
+    let mut kernel = start_local_kernel(spec_name, port_root.as_deref(), working_dir).await?;
     if let Err(error) = inject_port_bootstrap(kernel.conn(), spec_name).await {
         let _ = kernel.kill().await;
         return Err(error);
@@ -1653,7 +1657,10 @@ pub async fn restart_kernel(
         Some(spec_name) => spec_name,
         None => spec_name_for_slot(&state, slot_id)?,
     };
-    let port_root = notebook_path_from_slot_id(slot_id, &next_spec_name).map(notebook_port_root);
+    let nb_path_restart =
+        notebook_path_from_slot_id(slot_id, &next_spec_name).map(std::path::Path::new);
+    let port_root = nb_path_restart.map(notebook_port_root);
+    let working_dir_restart = nb_path_restart.and_then(|p| p.parent());
 
     let mut kernel = take_kernel_from_slot(&state, slot_id)?;
     if let Err(error) = kernel.kill().await {
@@ -1662,7 +1669,8 @@ pub async fn restart_kernel(
     }
     clear_comm_owners_for_slot(&state, slot_id);
 
-    let mut kernel = start_local_kernel(&next_spec_name, port_root.as_deref()).await?;
+    let mut kernel =
+        start_local_kernel(&next_spec_name, port_root.as_deref(), working_dir_restart).await?;
     if let Err(error) = inject_port_bootstrap(kernel.conn(), &next_spec_name).await {
         let _ = kernel.kill().await;
         return Err(error);
@@ -2099,7 +2107,8 @@ async fn ensure_kernel_slot_live(
     }
 
     let port_root = notebook_port_root(notebook_path);
-    let mut kernel = start_local_kernel(spec_name, Some(&port_root)).await?;
+    let working_dir = std::path::Path::new(notebook_path).parent();
+    let mut kernel = start_local_kernel(spec_name, Some(&port_root), working_dir).await?;
     let status = match kernel_slot_status(state, slot_id, spec_name, code_type) {
         Ok(status) => status,
         Err(error) => {
@@ -2424,13 +2433,16 @@ mod tests {
         };
         apply_notebook_port_root_env(&mut kernel_spec, Some(&port_root));
 
-        let status =
-            crate::backend::local::kernel_command_for_test(&kernel_spec.argv, &kernel_spec.env)
-                .spawn()
-                .expect("spawn fake kernel env probe")
-                .wait()
-                .await
-                .expect("wait for fake kernel env probe");
+        let status = crate::backend::local::kernel_command_for_test(
+            &kernel_spec.argv,
+            &kernel_spec.env,
+            None,
+        )
+        .spawn()
+        .expect("spawn fake kernel env probe")
+        .wait()
+        .await
+        .expect("wait for fake kernel env probe");
         assert!(status.success());
         let output = tokio::fs::read_to_string(&output_path)
             .await
@@ -2444,6 +2456,72 @@ mod tests {
             Some(expected_root.as_str())
         );
         assert_eq!(output, format!("{expected_root}|spec|parent"));
+    }
+
+    #[tokio::test]
+    async fn kernel_command_runs_kernel_in_provided_working_dir() {
+        let tmpdir = tempfile::tempdir().expect("create tempdir");
+        let output_file = tempfile::NamedTempFile::new().expect("create temp output file");
+        let output_path = output_file.path().to_owned();
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "pwd > \"$1\"".to_string(),
+            "kernel-cwd-test".to_string(),
+            output_path.to_string_lossy().into_owned(),
+        ];
+        let status = crate::backend::local::kernel_command_for_test(
+            &argv,
+            &BTreeMap::new(),
+            Some(tmpdir.path()),
+        )
+        .spawn()
+        .expect("spawn cwd probe")
+        .wait()
+        .await
+        .expect("wait for cwd probe");
+        assert!(status.success());
+        let raw = tokio::fs::read_to_string(&output_path)
+            .await
+            .expect("read cwd output");
+        let printed = std::path::Path::new(raw.trim());
+        let expected = std::fs::canonicalize(tmpdir.path()).expect("canonicalize tmpdir");
+        let actual = std::fs::canonicalize(printed).expect("canonicalize printed path");
+        assert_eq!(
+            actual, expected,
+            "kernel cwd should be the provided working_dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_command_none_working_dir_inherits_parent_cwd() {
+        let output_file = tempfile::NamedTempFile::new().expect("create temp output file");
+        let output_path = output_file.path().to_owned();
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "pwd > \"$1\"".to_string(),
+            "kernel-cwd-none-test".to_string(),
+            output_path.to_string_lossy().into_owned(),
+        ];
+        let status = crate::backend::local::kernel_command_for_test(&argv, &BTreeMap::new(), None)
+            .spawn()
+            .expect("spawn cwd none probe")
+            .wait()
+            .await
+            .expect("wait for cwd none probe");
+        assert!(status.success());
+        let raw = tokio::fs::read_to_string(&output_path)
+            .await
+            .expect("read cwd none output");
+        let printed = std::path::Path::new(raw.trim());
+        let expected = std::fs::canonicalize(std::env::current_dir().expect("current_dir"))
+            .expect("canonicalize current_dir");
+        let actual = std::fs::canonicalize(printed).expect("canonicalize printed path");
+        assert_eq!(
+            actual, expected,
+            "kernel with None working_dir should inherit parent cwd"
+        );
     }
 
     #[test]
