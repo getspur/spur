@@ -4,9 +4,17 @@
 //! that consumers feed from their broadcast subscription. Read API is
 //! pure functions over the in-memory state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use spur_acp::SessionId;
+
+/// A single conversation exchange (user turn + optional agent reply)
+/// stored in the `recent_exchanges` ring buffer of [`SessionSynopsis`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SynopsisExchange {
+    pub user: String,
+    pub agent: Option<String>,
+}
 
 /// First and last user-authored message text for a session, plus the
 /// agent's reply that followed each, derived from observed events.
@@ -19,12 +27,27 @@ pub struct SessionSynopsis {
     pub last_user_msg: Option<String>,
     pub first_agent_reply: Option<String>,
     pub last_agent_reply: Option<String>,
+    /// Ring buffer of the last up-to-3 conversation exchanges, in
+    /// chronological order (oldest at front, newest at back). Populated
+    /// incrementally via `flush_pending` / `flush_pending_agent`, and
+    /// rebuilt from authoritative history on `SessionHistory` events.
+    pub recent_exchanges: VecDeque<SynopsisExchange>,
 }
 
 /// Max stored characters per user-message field.
 const USER_MSG_CAP: usize = 200;
 /// Max stored characters per agent-reply field.
 const AGENT_REPLY_CAP: usize = 100;
+/// Maximum number of exchanges kept in the recent-exchanges ring.
+const RECENT_EXCHANGES_CAP: usize = 3;
+/// Max stored characters per user turn in the recent-exchanges ring.
+/// Intentionally smaller than `USER_MSG_CAP` — the ring is optimised for
+/// preview rendering, not full-fidelity storage.
+const RECENT_USER_CAP: usize = 100;
+/// Max stored characters per agent turn in the recent-exchanges ring.
+/// Intentionally larger than `AGENT_REPLY_CAP` — agent previews benefit
+/// from slightly more context than the legacy first/last fields.
+const RECENT_AGENT_CAP: usize = 200;
 
 /// In-memory projection of session synopses, fed by `apply(&event)`.
 #[derive(Debug, Default)]
@@ -69,6 +92,7 @@ impl SessionSynopsisProjection {
                 last_user_msg: Some(cap_chars(p, USER_MSG_CAP)),
                 first_agent_reply: None,
                 last_agent_reply: None,
+                recent_exchanges: VecDeque::new(),
             }),
             (None, None) => None,
         }
@@ -151,28 +175,15 @@ impl SessionSynopsisProjection {
                 self.pending.remove(session);
                 self.pending_agent.remove(session);
 
-                // Locate the first non-slash user entry and the most recent
-                // user entry, then take the immediately-following assistant
-                // entry (if any) as the agent reply for each.
-                let mut first_user_idx: Option<usize> = None;
-                let mut last_user_idx: Option<usize> = None;
-                let mut last_user_text: Option<&str> = None;
-                for (i, e) in entries.iter().enumerate() {
-                    if e.role != "user" {
-                        continue;
-                    }
-                    let t = e.text.trim();
-                    if t.is_empty() {
-                        continue;
-                    }
-                    if first_user_idx.is_none() && !is_slash_command_like(t) {
-                        first_user_idx = Some(i);
-                    }
-                    last_user_idx = Some(i);
-                    last_user_text = Some(t);
-                }
+                // Collect all non-empty user entry indices in document order.
+                let user_indices: Vec<usize> = entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.role == "user" && !e.text.trim().is_empty())
+                    .map(|(i, _)| i)
+                    .collect();
 
-                if last_user_idx.is_none() {
+                if user_indices.is_empty() {
                     return;
                 }
 
@@ -185,6 +196,13 @@ impl SessionSynopsisProjection {
                         .filter(|t| !t.is_empty())
                 };
 
+                // Determine first non-slash user index and last user index.
+                let first_user_idx = user_indices
+                    .iter()
+                    .copied()
+                    .find(|&i| !is_slash_command_like(entries[i].text.trim()));
+                let last_user_idx = *user_indices.last().unwrap(); // always present
+
                 let s = self.by_session.entry(session.clone()).or_default();
                 if let Some(idx) = first_user_idx {
                     if s.first_user_msg.is_none() {
@@ -196,14 +214,22 @@ impl SessionSynopsisProjection {
                         }
                     }
                 }
-                if let Some(t) = last_user_text {
-                    s.last_user_msg = Some(cap_chars(t, USER_MSG_CAP));
+                s.last_user_msg = Some(cap_chars(entries[last_user_idx].text.trim(), USER_MSG_CAP));
+                if let Some(reply) = next_assistant_text(last_user_idx) {
+                    s.last_agent_reply = Some(cap_chars(reply, AGENT_REPLY_CAP));
                 }
-                if let Some(idx) = last_user_idx {
-                    if let Some(reply) = next_assistant_text(idx) {
-                        s.last_agent_reply = Some(cap_chars(reply, AGENT_REPLY_CAP));
-                    }
-                }
+
+                // Rebuild the recent-exchanges ring from the last up-to-3
+                // non-empty user entries (chronological order, oldest first).
+                // History is authoritative — always replace any prior ring.
+                let recent_start = user_indices.len().saturating_sub(RECENT_EXCHANGES_CAP);
+                s.recent_exchanges = user_indices[recent_start..]
+                    .iter()
+                    .map(|&i| SynopsisExchange {
+                        user: cap_chars(entries[i].text.trim(), RECENT_USER_CAP),
+                        agent: next_assistant_text(i).map(|r| cap_chars(r, RECENT_AGENT_CAP)),
+                    })
+                    .collect();
             }
             SpurEventBody::SessionSynopsisSeed {
                 session,
@@ -224,6 +250,7 @@ impl SessionSynopsisProjection {
                     last_user_msg: last.clone().map(|s| cap_chars(&s, USER_MSG_CAP)),
                     first_agent_reply: None,
                     last_agent_reply: None,
+                    recent_exchanges: VecDeque::new(),
                 };
 
                 if synopsis.first_user_msg.is_none() && synopsis.last_user_msg.is_none() {
@@ -251,6 +278,17 @@ impl SessionSynopsisProjection {
             s.first_user_msg = Some(capped.clone());
         }
         s.last_user_msg = Some(capped);
+
+        // Push a new exchange onto the ring. Slash-command messages are
+        // included (they update last_user_msg, so they go into the ring too).
+        let exchange = SynopsisExchange {
+            user: cap_chars(trimmed, RECENT_USER_CAP),
+            agent: None,
+        };
+        s.recent_exchanges.push_back(exchange);
+        if s.recent_exchanges.len() > RECENT_EXCHANGES_CAP {
+            s.recent_exchanges.pop_front();
+        }
     }
 
     fn flush_pending_agent(&mut self, session: &SessionId) {
@@ -274,6 +312,16 @@ impl SessionSynopsisProjection {
             s.first_agent_reply = Some(capped.clone());
         }
         s.last_agent_reply = Some(capped);
+
+        // Fill the agent slot of the newest (back) exchange, but only when it
+        // is still unfilled. Never overwrite an already-committed agent reply in
+        // the ring — the ring entry records the reply for that specific user turn.
+        let reply_capped = cap_chars(trimmed, RECENT_AGENT_CAP);
+        if let Some(newest) = s.recent_exchanges.back_mut() {
+            if newest.agent.is_none() {
+                newest.agent = Some(reply_capped);
+            }
+        }
     }
 }
 
@@ -902,5 +950,197 @@ mod tests {
         }));
         assert!(proj.get(&SessionId("S1".into())).is_none());
         assert!(proj.get(&SessionId("missing".into())).is_none());
+    }
+
+    // ── recent_exchanges ring buffer tests ────────────────────────────────────
+
+    fn turn_complete(session: &str) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::TurnComplete {
+            session: SessionId(session.into()),
+        })
+    }
+
+    /// Drive a complete turn: user msg → agent reply → TurnComplete.
+    fn do_turn(proj: &mut SessionSynopsisProjection, session: &str, user: &str, agent: &str) {
+        proj.apply(&user_chunk_event(session, user));
+        proj.apply(&agent_chunk_event(session, agent));
+        proj.apply(&turn_complete(session));
+    }
+
+    #[test]
+    fn ring_captures_exchanges_in_order_and_evicts_oldest_on_fourth() {
+        let mut proj = SessionSynopsisProjection::new();
+        do_turn(&mut proj, "S1", "msg1", "reply1");
+        do_turn(&mut proj, "S1", "msg2", "reply2");
+        do_turn(&mut proj, "S1", "msg3", "reply3");
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.recent_exchanges.len(), 3);
+        assert_eq!(s.recent_exchanges[0].user, "msg1");
+        assert_eq!(s.recent_exchanges[0].agent.as_deref(), Some("reply1"));
+        assert_eq!(s.recent_exchanges[1].user, "msg2");
+        assert_eq!(s.recent_exchanges[1].agent.as_deref(), Some("reply2"));
+        assert_eq!(s.recent_exchanges[2].user, "msg3");
+        assert_eq!(s.recent_exchanges[2].agent.as_deref(), Some("reply3"));
+
+        // Fourth turn evicts the oldest.
+        do_turn(&mut proj, "S1", "msg4", "reply4");
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.recent_exchanges.len(), 3);
+        assert_eq!(s.recent_exchanges[0].user, "msg2", "oldest evicted");
+        assert_eq!(s.recent_exchanges[1].user, "msg3");
+        assert_eq!(s.recent_exchanges[2].user, "msg4");
+    }
+
+    #[test]
+    fn ring_caps_user_at_100_and_agent_at_200() {
+        let mut proj = SessionSynopsisProjection::new();
+        // Use lengths that exceed both the ring caps AND the first/last caps
+        // so every truncation point is exercised.
+        let long_user = "u".repeat(300); // > USER_MSG_CAP(200) and > RECENT_USER_CAP(100)
+        let long_agent = "a".repeat(300); // > AGENT_REPLY_CAP(100) and > RECENT_AGENT_CAP(200)
+        proj.apply(&user_chunk_event("S1", &long_user));
+        proj.apply(&agent_chunk_event("S1", &long_agent));
+        proj.apply(&turn_complete("S1"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        let ex = &s.recent_exchanges[0];
+        assert_eq!(
+            ex.user.chars().count(),
+            100,
+            "user capped at RECENT_USER_CAP"
+        );
+        assert_eq!(
+            ex.agent.as_ref().map(|a| a.chars().count()),
+            Some(200),
+            "agent capped at RECENT_AGENT_CAP"
+        );
+        // Existing first/last fields should keep their own (larger) caps.
+        assert_eq!(
+            s.first_user_msg.as_ref().map(|s| s.chars().count()),
+            Some(200),
+            "first_user_msg capped at USER_MSG_CAP"
+        );
+        assert_eq!(
+            s.first_agent_reply.as_ref().map(|s| s.chars().count()),
+            Some(100),
+            "first_agent_reply capped at AGENT_REPLY_CAP"
+        );
+    }
+
+    #[test]
+    fn agent_reply_fills_only_newest_exchange_and_does_not_overwrite_already_filled() {
+        let mut proj = SessionSynopsisProjection::new();
+        // Turn 1 — fully committed with an agent reply.
+        do_turn(&mut proj, "S1", "first", "first_reply");
+        // Turn 2 user — no agent reply yet.
+        proj.apply(&user_chunk_event("S1", "second"));
+        proj.apply(&agent_chunk_event("S1", "second_reply"));
+        proj.apply(&turn_complete("S1"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        // The first exchange must not have its agent slot changed.
+        assert_eq!(
+            s.recent_exchanges[0].agent.as_deref(),
+            Some("first_reply"),
+            "already-filled slot must not be overwritten"
+        );
+        assert_eq!(s.recent_exchanges[1].agent.as_deref(), Some("second_reply"));
+    }
+
+    #[test]
+    fn turn_without_agent_reply_yields_exchange_with_agent_none() {
+        let mut proj = SessionSynopsisProjection::new();
+        // User sends a message; TurnComplete fires with no agent reply.
+        proj.apply(&user_chunk_event("S1", "standalone"));
+        proj.apply(&turn_complete("S1"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.recent_exchanges.len(), 1);
+        assert_eq!(s.recent_exchanges[0].user, "standalone");
+        assert!(
+            s.recent_exchanges[0].agent.is_none(),
+            "no agent reply → exchange.agent should be None"
+        );
+    }
+
+    #[test]
+    fn session_history_rebuilds_ring_from_last_3_pairs() {
+        let mut proj = SessionSynopsisProjection::new();
+        // Prime the ring with stale data from live events to verify replace.
+        do_turn(&mut proj, "S1", "stale", "stale_reply");
+
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![
+                history_entry("user", "h1"),
+                history_entry("assistant", "a1"),
+                history_entry("user", "h2"),
+                history_entry("assistant", "a2"),
+                history_entry("user", "h3"),
+                history_entry("assistant", "a3"),
+                history_entry("user", "h4"),
+                history_entry("assistant", "a4"),
+            ],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        // Ring should hold h2, h3, h4 (last 3), stale data gone.
+        assert_eq!(s.recent_exchanges.len(), 3);
+        assert_eq!(s.recent_exchanges[0].user, "h2");
+        assert_eq!(s.recent_exchanges[0].agent.as_deref(), Some("a2"));
+        assert_eq!(s.recent_exchanges[1].user, "h3");
+        assert_eq!(s.recent_exchanges[1].agent.as_deref(), Some("a3"));
+        assert_eq!(s.recent_exchanges[2].user, "h4");
+        assert_eq!(s.recent_exchanges[2].agent.as_deref(), Some("a4"));
+    }
+
+    #[test]
+    fn session_history_trailing_user_without_assistant_gets_agent_none() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![
+                history_entry("user", "h1"),
+                history_entry("assistant", "a1"),
+                history_entry("user", "h2"),
+                // No assistant after h2.
+            ],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.recent_exchanges.len(), 2);
+        assert_eq!(s.recent_exchanges[0].user, "h1");
+        assert_eq!(s.recent_exchanges[0].agent.as_deref(), Some("a1"));
+        assert_eq!(s.recent_exchanges[1].user, "h2");
+        assert!(
+            s.recent_exchanges[1].agent.is_none(),
+            "trailing user without assistant → agent None"
+        );
+    }
+
+    #[test]
+    fn seed_event_leaves_ring_empty() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&seed_event("S1", Some("hello"), Some("bye")));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert!(
+            s.recent_exchanges.is_empty(),
+            "seed events carry no exchange data"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_flush_pushes_nothing_to_ring() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "   \n  "));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+        // The whitespace-only buffer was discarded, so by_session has no entry,
+        // and no exchange should have been pushed.
+        assert!(
+            proj.get(&SessionId("S1".into())).is_none(),
+            "whitespace-only flush should not create synopsis or exchange"
+        );
     }
 }
