@@ -1,10 +1,6 @@
 """Tests for spur_app.artifacts."""
 from __future__ import annotations
 
-import os
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from spur_app.artifacts import ArtifactStore
