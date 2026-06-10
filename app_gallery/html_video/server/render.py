@@ -355,6 +355,7 @@ def read_webm_port_frames(
         PortFileNotFoundError,
         PortManifestError,
         PortNotFoundError,
+        SpurAppError,
     )
     from spur_app.ports import PortStore
 
@@ -379,6 +380,11 @@ def read_webm_port_frames(
             raise InvalidParams(
                 f"{METHOD} could not read media port",
                 {"port": port, "error": str(error)},
+            ) from error
+        except SpurAppError as error:
+            raise RenderError(
+                f"{METHOD} failed to read notebook port store",
+                {"error": str(error)},
             ) from error
 
         if result.mime != "video/webm":

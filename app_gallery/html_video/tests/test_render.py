@@ -140,6 +140,45 @@ def test_render_html_video_composition_html_invokes_bun_harness(
 # ── T6a / U8: read_webm_port_frames tests via FakePortStore ──────────────────
 
 
+def test_read_webm_port_frames_missing_ports_root_raises_render_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing SPUR_PORTS_ROOT must surface as RenderError with code 'ports_root_unavailable'."""
+    monkeypatch.delenv("SPUR_PORTS_ROOT", raising=False)
+
+    with pytest.raises(render.RenderError) as exc_info:
+        render.read_webm_port_frames(["spur-ad-capture"])
+
+    text = str(exc_info.value)
+    assert "ports_root_unavailable" in text
+
+
+def test_read_webm_port_frames_absent_port_raises_invalid_params() -> None:
+    """Port absent from the manifest must surface as InvalidParams naming the port."""
+    with FakePortStore():
+        # store is empty — "spur-ad-capture" is not registered
+        with pytest.raises(render.InvalidParams) as exc_info:
+            render.read_webm_port_frames(["spur-ad-capture"])
+
+    text = str(exc_info.value)
+    assert "spur-ad-capture" in text
+
+
+def test_read_webm_port_frames_wrong_mime_raises_invalid_params() -> None:
+    """Port present with non-webm mime must surface as InvalidParams with port + mime."""
+    with FakePortStore().add_media(
+        "spur-ad-capture",
+        FAKE_WEBM_BYTES,
+        mime="video/mp4",
+    ):
+        with pytest.raises(render.InvalidParams) as exc_info:
+            render.read_webm_port_frames(["spur-ad-capture"])
+
+    text = str(exc_info.value)
+    assert "spur-ad-capture" in text
+    assert "video/mp4" in text
+
+
 def test_read_webm_port_frames_reads_entry_path_not_bare_port_name() -> None:
     """Port bytes must come from entry['path'] (basename-joined under root),
     not from root/<port-name>."""
