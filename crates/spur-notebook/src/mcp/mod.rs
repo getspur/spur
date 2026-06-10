@@ -249,6 +249,7 @@ impl ServerHandler for NotebookMcpServer {
                 tools::code_semantic_search::call(&self.deps, arguments).await
             }
             "notebook.insert_cell" => tools::insert_cell::call(&self.deps, arguments).await,
+            "notebook.edit_cell" => tools::edit_cell::call(&self.deps, arguments).await,
             "notebook.write_cell" => tools::write_cell::call(&self.deps, arguments).await,
             "notebook.save" => tools::save::call(&self.deps, arguments).await,
             "notebook.delete_cell" => tools::delete_cell::call(&self.deps, arguments).await,

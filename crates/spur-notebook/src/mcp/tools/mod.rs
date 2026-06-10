@@ -15,6 +15,7 @@ pub mod daemon_files;
 pub mod daemon_lifecycle;
 pub mod daemon_recents;
 pub mod delete_cell;
+pub mod edit_cell;
 pub mod export_spur_app;
 pub mod get_notebook;
 pub mod import_spur_app;
@@ -72,6 +73,7 @@ pub fn tools() -> Vec<Tool> {
         open_design_get::tool(),
         code_semantic_search::tool(),
         insert_cell::tool(),
+        edit_cell::tool(),
         write_cell::tool(),
         set_cell_metadata::tool(),
         save::tool(),
@@ -288,6 +290,7 @@ mod tests {
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
         assert!(names.iter().any(|name| name == "notebook_run_cell"));
         assert!(names.iter().any(|name| name == "notebook_run_cascade"));
+        assert!(names.iter().any(|name| name == "notebook.edit_cell"));
     }
 
     #[test]
