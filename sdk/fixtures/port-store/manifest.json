@@ -1,0 +1,30 @@
+{
+  "ports": {
+    "sales": {
+      "path": "sales@v1.arrow",
+      "version": 1,
+      "kind": "arrow",
+      "schema": {
+        "fields": [
+          {
+            "name": "id",
+            "data_type": "Int64",
+            "nullable": false,
+            "dict_id": 0,
+            "dict_is_ordered": false,
+            "metadata": {}
+          }
+        ],
+        "metadata": {}
+      }
+    },
+    "spur-ad-capture": {
+      "path": "spur-ad-capture@v1.media",
+      "version": 1,
+      "kind": "media",
+      "mime": "video/webm",
+      "size": 10,
+      "duration_sec": 60.0
+    }
+  }
+}
