@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { dispose, on, set } from "@/stores/widgetRegistry";
+import { useSettings } from "@/stores/settings";
 
 import OutputView from "./OutputView";
 
@@ -259,5 +260,69 @@ describe("OutputView HTML video capture", () => {
         durationSec: 1,
       }),
     );
+  });
+});
+
+function htmlOutput(appRoot?: string) {
+  return (
+    <OutputView
+      appRoot={appRoot}
+      value={{
+        status: "success",
+        outputs: [
+          {
+            output_type: "display_data",
+            data: { "text/html": "<p>hello</p>" },
+            metadata: {},
+          },
+        ],
+      }}
+    />
+  );
+}
+
+describe("HtmlOutput sandbox respects per-app grant", () => {
+  afterEach(() => {
+    cleanup();
+    useSettings.getState().reset();
+    invokeMock.mockReset();
+  });
+
+  test("uses global toggle when no appRoot given", () => {
+    useSettings.getState().setOutputActiveContent(false);
+    render(htmlOutput(undefined));
+    const iframe = screen.getByTitle("Notebook HTML output") as HTMLIFrameElement;
+    expect(iframe.getAttribute("sandbox")).toBe("");
+  });
+
+  test("uses global toggle when no grant exists for appRoot", () => {
+    useSettings.getState().setOutputActiveContent(false);
+    render(htmlOutput("/my/app"));
+    const iframe = screen.getByTitle("Notebook HTML output") as HTMLIFrameElement;
+    expect(iframe.getAttribute("sandbox")).toBe("");
+  });
+
+  test("app grant=true enables scripts even when global toggle is off", () => {
+    useSettings.getState().setOutputActiveContent(false);
+    useSettings.getState().setAppGrant("/my/app", true);
+    render(htmlOutput("/my/app"));
+    const iframe = screen.getByTitle("Notebook HTML output") as HTMLIFrameElement;
+    expect(iframe.getAttribute("sandbox")).toContain("allow-scripts");
+  });
+
+  test("app grant=false disables scripts even when global toggle is on", () => {
+    useSettings.getState().setOutputActiveContent(true);
+    useSettings.getState().setAppGrant("/my/app", false);
+    render(htmlOutput("/my/app"));
+    const iframe = screen.getByTitle("Notebook HTML output") as HTMLIFrameElement;
+    expect(iframe.getAttribute("sandbox")).toBe("");
+  });
+
+  test("grant for different app root does not affect sandbox", () => {
+    useSettings.getState().setOutputActiveContent(false);
+    useSettings.getState().setAppGrant("/other/app", true);
+    render(htmlOutput("/my/app"));
+    const iframe = screen.getByTitle("Notebook HTML output") as HTMLIFrameElement;
+    expect(iframe.getAttribute("sandbox")).toBe("");
   });
 });

@@ -162,6 +162,21 @@ export type NotebookServerState = {
   cells: Record<string, NotebookCellState>;
 };
 
+/** App-open information returned by the `notebook_open_mode` Tauri command. */
+export type NotebookOpenInfo = {
+  open_mode: string;
+  app_name: string;
+  /** Absolute path to the app root directory. */
+  app_root: string;
+  capabilities: {
+    active_output_scripts: boolean;
+    canvas_capture: boolean;
+    artifacts_dir: boolean;
+    ports?: unknown;
+  };
+  skill: string;
+};
+
 export type NotebookViewState = {
   /** ID of the currently focused cell, when any. */
   selectedCellId: string | null;
@@ -186,6 +201,12 @@ export type NotebookViewState = {
 
   /** Active in-place notebook view. */
   viewMode: NotebookViewMode;
+
+  /**
+   * App-mode open information populated when the notebook is an app entry
+   * point. `undefined` for regular (non-app) notebooks.
+   */
+  appOpenInfo?: NotebookOpenInfo;
 };
 
 export type NotebookEditBuffer = {
@@ -370,6 +391,11 @@ function notebookViewStateActions(
     setViewMode: (viewMode: NotebookViewMode) =>
       set((state) => {
         state.viewState.viewMode = viewMode;
+      }),
+
+    setAppOpenInfo: (info: NotebookOpenInfo | undefined) =>
+      set((state) => {
+        state.viewState.appOpenInfo = info;
       }),
   };
 }
@@ -1413,11 +1439,15 @@ export class Notebook {
       this.loadNotebook(notebook);
       this.state.viewStateActions.setPath(path);
       try {
-        const openMode = await invoke<string | null>("notebook_open_mode", {
-          path,
-        });
-        if (openMode === "app") {
+        const openInfo = await invoke<NotebookOpenInfo | null>(
+          "notebook_open_mode",
+          { path },
+        );
+        if (openInfo?.open_mode === "app") {
           this.state.viewStateActions.setViewMode("app");
+          this.state.viewStateActions.setAppOpenInfo(openInfo);
+        } else {
+          this.state.viewStateActions.setAppOpenInfo(undefined);
         }
       } catch {
         // If open-mode detection fails, keep the default view mode.

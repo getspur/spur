@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { MultilineString, OutputDisplayData } from "@/bindings";
 import { CellResult } from "@/stores/notebook";
-import { useOutputActiveContentEnabled } from "@/stores/settings";
+import { useEffectiveActiveContentReactive } from "@/stores/settings";
 
 import AfmView, {
   type AfmPortBindingSnapshot,
@@ -26,6 +26,12 @@ type Props = {
   cellId?: string;
   chromeless?: boolean;
   afmPortBindings?: AfmPortBindingSnapshot;
+  /**
+   * App root directory path passed down from the notebook context.  When set,
+   * `HtmlOutput` consults the per-app grant before the global active-content
+   * toggle.  `undefined` in non-app-mode notebooks.
+   */
+  appRoot?: string;
 };
 
 type CompileProgressState = NonNullable<CellResult["compile"]>;
@@ -35,6 +41,7 @@ export default function OutputView({
   cellId,
   chromeless = false,
   afmPortBindings,
+  appRoot,
 }: Props) {
   const compile = value?.compile;
   const outputs = value?.outputs ?? [];
@@ -67,6 +74,7 @@ export default function OutputView({
               output={output}
               chromeless={chromeless}
               afmPortBindings={afmPortBindings}
+              appRoot={appRoot}
             />
           ) : output.output_type === "execute_result" ? (
             <OutputViewDisplayData
@@ -74,6 +82,7 @@ export default function OutputView({
               output={output}
               chromeless={chromeless}
               afmPortBindings={afmPortBindings}
+              appRoot={appRoot}
             />
           ) : output.output_type === "error" ? (
             // TODO: Display error tracebacks.
@@ -190,11 +199,13 @@ const OutputViewDisplayData = memo(
     cellId,
     chromeless,
     afmPortBindings,
+    appRoot,
   }: {
     output: OutputDisplayData;
     cellId?: string;
     chromeless?: boolean;
     afmPortBindings?: AfmPortBindingSnapshot;
+    appRoot?: string;
   }) => {
     const widgetView = anywidgetViewFromData(output.data[WIDGET_VIEW_MIME]);
     if (widgetView) {
@@ -221,7 +232,7 @@ const OutputViewDisplayData = memo(
 
     const html = displayStringData(output.data["text/html"]);
     if (html !== null) {
-      return <HtmlOutput html={html} cellId={cellId} />;
+      return <HtmlOutput html={html} cellId={cellId} appRoot={appRoot} />;
     }
 
     const markdown = displayStringData(output.data["text/markdown"]);
@@ -241,10 +252,22 @@ const OutputViewDisplayData = memo(
 
 // Active output scripts run in the sandboxed srcdoc iframe; same-origin is
 // needed for capture APIs.
-function HtmlOutput({ html, cellId }: { html: string; cellId?: string }) {
+function HtmlOutput({
+  html,
+  cellId,
+  appRoot,
+}: {
+  html: string;
+  cellId?: string;
+  appRoot?: string;
+}) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(IFRAME_MIN_HEIGHT);
-  const activeContent = useOutputActiveContentEnabled();
+
+  // Per-app grant takes precedence over the global active-content toggle.
+  // `appRoot` is `undefined` for non-app notebooks → falls back to global.
+  const activeContent = useEffectiveActiveContentReactive(appRoot);
+
   const srcDoc = useMemo(
     () => withHeightReporter(withVideoCapture(html)),
     [html],

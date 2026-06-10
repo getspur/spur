@@ -298,6 +298,11 @@ export function CellOutput({
     () => parseAfmPortBindingsKey(afmPortBindingsKey),
     [afmPortBindingsKey],
   );
+  // Pass app root so HtmlOutput can resolve per-app trust grants.
+  const appRoot = useStore(
+    notebook.store,
+    (state) => state.viewState.appOpenInfo?.app_root,
+  );
 
   if (!output) return null;
   return (
@@ -306,6 +311,7 @@ export function CellOutput({
       cellId={cellId}
       chromeless={chromeless}
       afmPortBindings={afmPortBindings}
+      appRoot={appRoot}
     />
   );
 }

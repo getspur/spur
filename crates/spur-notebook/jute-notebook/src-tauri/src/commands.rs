@@ -1704,12 +1704,51 @@ pub async fn get_notebook(path: &str) -> Result<NotebookRoot, Error> {
 struct AppModeManifest {
     open_mode: String,
     entry_notebook: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    capabilities: AppModeCapabilities,
+    #[serde(default)]
+    skill: Option<String>,
 }
 
-/// Get the spur-app `open_mode` for a notebook when its sibling manifest marks
-/// the notebook as the entry notebook.
+/// Capability subset needed for the frontend grant prompt (additive, all
+/// fields default to off so old manifests without a `capabilities` block
+/// still deserialise unchanged).
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct AppModeCapabilities {
+    #[serde(default)]
+    pub active_output_scripts: bool,
+    #[serde(default)]
+    pub canvas_capture: bool,
+    #[serde(default)]
+    pub artifacts_dir: bool,
+    // `ports` is kept as an opaque value — full parsing lives in spur-notebook.
+    #[serde(default)]
+    pub ports: Option<serde_json::Value>,
+}
+
+/// Richer open-mode information returned when a notebook is an app entry point.
+#[derive(Debug, Serialize)]
+pub struct NotebookOpenInfo {
+    /// The `open_mode` declared in the manifest (e.g. `"app"`).
+    pub open_mode: String,
+    /// Human-readable app name.
+    pub app_name: String,
+    /// Absolute path to the app root directory (parent of the entry notebook).
+    pub app_root: String,
+    /// Declared capability flags relevant to the trust grant prompt.
+    pub capabilities: AppModeCapabilities,
+    /// Skill file path relative to the app root (default `"skill/SKILL.md"`).
+    pub skill: String,
+}
+
+/// Get the spur-app open-mode information for a notebook when its sibling
+/// manifest marks the notebook as the entry notebook.  Returns `None` when the
+/// notebook has no manifest, the manifest does not match, or the manifest
+/// cannot be parsed (graceful degradation, keeps notebooks opening normally).
 #[tauri::command]
-pub async fn notebook_open_mode(path: String) -> Result<Option<String>, Error> {
+pub async fn notebook_open_mode(path: String) -> Result<Option<NotebookOpenInfo>, Error> {
     let notebook_path = Path::new(&path);
     let Some(dir) = notebook_path.parent() else {
         return Ok(None);
@@ -1723,12 +1762,24 @@ pub async fn notebook_open_mode(path: String) -> Result<Option<String>, Error> {
     };
 
     if notebook_path.file_name().and_then(|name| name.to_str())
-        == Some(manifest.entry_notebook.as_str())
+        != Some(manifest.entry_notebook.as_str())
     {
-        Ok(Some(manifest.open_mode))
-    } else {
-        Ok(None)
+        return Ok(None);
     }
+
+    let app_name = manifest.name.unwrap_or_else(|| "App".to_string());
+    let app_root = dir.to_string_lossy().into_owned();
+    let skill = manifest
+        .skill
+        .unwrap_or_else(|| "skill/SKILL.md".to_string());
+
+    Ok(Some(NotebookOpenInfo {
+        open_mode: manifest.open_mode,
+        app_name,
+        app_root,
+        capabilities: manifest.capabilities,
+        skill,
+    }))
 }
 
 /// Save the contents of a Jupyter notebook to disk.
@@ -2261,27 +2312,60 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("spur-app.json"),
-            r#"{"open_mode":"app","entry_notebook":"app.ipynb"}"#,
+            r#"{"open_mode":"app","entry_notebook":"app.ipynb","name":"My App"}"#,
         )
         .expect("write manifest");
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
-        assert_eq!(
-            notebook_open_mode(entry.to_string_lossy().into_owned())
-                .await
-                .expect("notebook_open_mode entry"),
-            Some("app".to_string())
-        );
+        let info = notebook_open_mode(entry.to_string_lossy().into_owned())
+            .await
+            .expect("notebook_open_mode entry")
+            .expect("entry notebook returns Some");
+        assert_eq!(info.open_mode, "app");
+        assert_eq!(info.app_name, "My App");
+        assert_eq!(info.app_root, dir.path().to_string_lossy().as_ref());
+        assert!(!info.capabilities.active_output_scripts);
 
         let other = dir.path().join("other.ipynb");
         std::fs::write(&other, "{}").expect("write other notebook");
-        assert_eq!(
+        assert!(
             notebook_open_mode(other.to_string_lossy().into_owned())
                 .await
-                .expect("notebook_open_mode other"),
-            None
+                .expect("notebook_open_mode other")
+                .is_none(),
+            "non-entry notebook must return None"
         );
+    }
+
+    #[tokio::test]
+    async fn notebook_open_mode_returns_capabilities_and_skill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("spur-app.json"),
+            r#"{
+                "open_mode": "app",
+                "entry_notebook": "app.ipynb",
+                "name": "Cap App",
+                "capabilities": {
+                    "active_output_scripts": true,
+                    "canvas_capture": true
+                },
+                "skill": "skill/MY_SKILL.md"
+            }"#,
+        )
+        .expect("write manifest with capabilities");
+        let entry = dir.path().join("app.ipynb");
+        std::fs::write(&entry, "{}").expect("write notebook");
+
+        let info = notebook_open_mode(entry.to_string_lossy().into_owned())
+            .await
+            .expect("notebook_open_mode capabilities")
+            .expect("entry notebook returns Some");
+        assert!(info.capabilities.active_output_scripts);
+        assert!(info.capabilities.canvas_capture);
+        assert!(!info.capabilities.artifacts_dir);
+        assert_eq!(info.skill, "skill/MY_SKILL.md");
     }
 
     #[tokio::test]
@@ -2290,12 +2374,10 @@ mod tests {
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
-        assert_eq!(
-            notebook_open_mode(entry.to_string_lossy().into_owned())
-                .await
-                .expect("notebook_open_mode no manifest"),
-            None
-        );
+        assert!(notebook_open_mode(entry.to_string_lossy().into_owned())
+            .await
+            .expect("notebook_open_mode no manifest")
+            .is_none());
     }
 
     #[tokio::test]
@@ -2306,12 +2388,10 @@ mod tests {
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
-        assert_eq!(
-            notebook_open_mode(entry.to_string_lossy().into_owned())
-                .await
-                .expect("notebook_open_mode invalid manifest"),
-            None
-        );
+        assert!(notebook_open_mode(entry.to_string_lossy().into_owned())
+            .await
+            .expect("notebook_open_mode invalid manifest")
+            .is_none());
     }
 
     #[tokio::test]
