@@ -21,7 +21,7 @@ shows the real path to use today vs the planned front door.
 
 The reference app `app_gallery/html_video/` is the template. Copy and adapt:
 
-```
+```text
 my-app/
   spur-app.json         # manifest (see docs/manifest.md)
   app.ipynb             # entry notebook
