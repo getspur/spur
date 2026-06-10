@@ -6,6 +6,8 @@
 
 use std::{collections::BTreeMap, path::Path, process::Stdio};
 
+use tracing::warn;
+
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
@@ -174,7 +176,7 @@ async fn get_available_port() -> Result<u16, Error> {
 fn kernel_command(
     argv: &[String],
     env: &BTreeMap<String, String>,
-    _working_dir: Option<&Path>,
+    working_dir: Option<&Path>,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&argv[0]);
     command
@@ -183,6 +185,19 @@ fn kernel_command(
         .kill_on_drop(true)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(dir) = working_dir {
+        if dir.is_dir() {
+            command.current_dir(dir);
+        } else {
+            // Skip silently if the directory has vanished; kernel start must
+            // not fail because a notebook directory was deleted after the path
+            // was resolved.
+            warn!(
+                ?dir,
+                "kernel working_dir does not exist; skipping current_dir"
+            );
+        }
+    }
     command
 }
 

@@ -36,7 +36,7 @@ async fn main() {
         kernel_spec.argv[0] = "python3.11".into();
     }
 
-    let mut kernel = LocalKernel::start(&kernel_spec).await.unwrap();
+    let mut kernel = LocalKernel::start(&kernel_spec, None).await.unwrap();
 
     println!("\nStarted kernel.");
 
