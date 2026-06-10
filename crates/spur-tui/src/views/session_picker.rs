@@ -1343,8 +1343,9 @@ pub(crate) fn build_preview_rows(
         let fixed_cost =
             intent_lines + blank_after_intent + blank_before_footer + draft_lines + footer_lines;
 
-        // Greedily include exchanges newest-first, then reverse to render
-        // oldest-first. Drop whole exchanges oldest-first until they fit.
+        // Build a contiguous newest-suffix: iterate newest→oldest, stop at
+        // the first exchange that doesn't fit so we never skip an exchange and
+        // keep a cheaper older one (which would produce a non-contiguous set).
         let available = (pane_height as usize).saturating_sub(fixed_cost);
         let mut selected: Vec<&spur_core::SynopsisExchange> = Vec::new();
         let mut used = 0usize;
@@ -1353,6 +1354,8 @@ pub(crate) fn build_preview_rows(
             if used + cost <= available {
                 selected.push(ex);
                 used += cost;
+            } else {
+                break;
             }
         }
         // selected is newest-first; reverse to render oldest-first
@@ -2949,6 +2952,70 @@ mod preview_rows_tests {
             you_rows.len(),
             1,
             "exactly one 'you' row when 1 exchange fits"
+        );
+    }
+
+    /// Regression: when the middle exchange is expensive and doesn't fit, the
+    /// buggy code (no `break`) would skip it and still add the cheap oldest
+    /// exchange, producing a non-contiguous set.  The fix (`break` on first
+    /// miss) must produce only the newest contiguous suffix.
+    #[test]
+    fn degradation_is_contiguous_newest_suffix_not_skip_middle() {
+        // oldest: cheap  — you only, no agent (cost = sep(1) + you(1) = 2)
+        // middle: expensive — you + long agent text that wraps to 3 lines (cost = sep(1)+you(1)+agent(3) = 5)
+        // newest: medium — you + short agent (cost = sep(1)+you(1)+agent(1) = 3)
+        //
+        // fixed_cost = intent(1)+blank(1)+blank(1)+footer(1) = 4
+        // available = pane_height(8) - 4 = 4
+        //
+        // newest (3) fits within 4 → selected.
+        // middle (5) does not fit (3+5=8 > 4) → break.  oldest is never visited.
+        //
+        // Buggy code (no break): after skipping middle it would continue and
+        // also pick oldest (3+2=5 ≤ 4? No — 5>4 so it would skip too). Let's
+        // use available=5 so oldest WOULD fit if the loop continued:
+        // available = pane_height(9) - 4 = 5
+        // newest(3) ≤ 5 → selected, used=3
+        // middle(5): 3+5=8 > 5 → skip (buggy) / break (correct)
+        // oldest(2): 3+2=5 ≤ 5 → would be selected by buggy code!
+        let mut s = synopsis_with_exchanges(vec![
+            ("intent", Some("ireply")),
+            ("t2", Some("r2")),
+            ("t3", Some("r3")),
+        ]);
+        s.recent_exchanges.clear();
+        // oldest: cheap (no agent)
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xcheapoldx".into(),
+            agent: None,
+        });
+        // middle: expensive (agent wraps to 3 lines with long text)
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xexpensivemidx".into(),
+            agent: Some("a".repeat(300)), // wraps to 3 lines at value_width≈70
+        });
+        // newest: medium (short agent)
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xnewestx".into(),
+            agent: Some("nagent".into()),
+        });
+
+        let theme = default_theme();
+        // pane_height=9 → available=5; newest(3)fits, middle(5)doesn't, oldest(2)would-if-no-break
+        let content = build_preview_rows(Some(&s), "", "b", "/c", "id1", 80, 9, &theme);
+        let flat = values_flat(&content);
+
+        assert!(
+            flat.iter().any(|v| v.contains("xnewestx")),
+            "newest must be rendered"
+        );
+        assert!(
+            !flat.iter().any(|v| v.contains("xexpensivemidx")),
+            "expensive middle must be dropped"
+        );
+        assert!(
+            !flat.iter().any(|v| v.contains("xcheapoldx")),
+            "cheap oldest must NOT be included (contiguous suffix rule)"
         );
     }
 }
