@@ -126,8 +126,6 @@ def render_html_video(
         ]
 
     total_duration = sum(per_frame_durations)
-    # Resolved single frame duration used for single-frame encode path.
-    resolved_frame_duration = per_frame_durations[0] if per_frame_durations else DEFAULT_FRAME_DURATION
     ensure_ffmpeg_available()
 
     options = RenderOptions(
