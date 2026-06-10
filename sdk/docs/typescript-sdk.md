@@ -75,7 +75,7 @@ const html = capture.canvas({
   width: 1280,
   height: 720,
 });
-display.html(html);
+return display.html(html);  // last expression renders in Deno-Jupyter
 ```
 
 `capture.canvas(opts: CaptureCanvasOptions) -> string`
