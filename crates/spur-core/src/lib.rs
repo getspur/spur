@@ -172,7 +172,7 @@ pub use orchestrator::{
 };
 pub use plan_projection::{PlanProjectionStore, TrackedPlan, TrackedTask};
 pub use review_sink::{ReviewSink, ReviewSinkError};
-pub use session_synopsis::{SessionSynopsis, SessionSynopsisProjection};
+pub use session_synopsis::{SessionSynopsis, SessionSynopsisProjection, SynopsisExchange};
 pub use spur_acp::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
