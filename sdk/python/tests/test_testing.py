@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from spur_app.errors import PortNotFoundError
-from spur_app.testing import FakePortStore, fake_port_store
+from spur_app.testing import FakePortStore
 
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "sdk" / "fixtures" / "port-store"
 
@@ -135,21 +135,31 @@ def test_env_dict_method():
 
 
 # ---------------------------------------------------------------------------
-# pytest fixture function
+# pytest fixture injection — exercises the @pytest.fixture path end-to-end
 # ---------------------------------------------------------------------------
 
 
-def test_fake_port_store_fixture_yields_active_store():
-    """Verify the fixture function works as an iterator."""
-    gen = fake_port_store()
-    store = next(gen)
+def test_fake_port_store_fixture_injects_active_store(fake_port_store):
+    """Verify fake_port_store is a real pytest fixture that injects a live store.
+
+    The fixture yields an empty (already-entered) FakePortStore; we write a
+    port file directly into the tmp root to confirm it is readable.
+    """
+    # SPUR_PORTS_ROOT must be patched for the duration of this test
+    assert os.environ.get("SPUR_PORTS_ROOT") == str(fake_port_store.root)
+    # Write a port file + manifest directly into the live tmp root
+    import json as _json
+    (fake_port_store.root / "clip@v1.media").write_bytes(b"fixture-bytes")
+    manifest = {"ports": {"clip": {"path": "clip@v1.media", "version": 1, "kind": "media", "mime": "video/mp4"}}}
+    (fake_port_store.root / "manifest.json").write_text(_json.dumps(manifest))
+    result = fake_port_store.port_store.read("clip")
+    assert result.bytes == b"fixture-bytes"
+    assert result.mime == "video/mp4"
+
+
+def test_fake_port_store_fixture_env_is_set(fake_port_store):
+    """A second injected-fixture test confirms the env is set on each test run."""
     assert os.environ.get("SPUR_PORTS_ROOT") is not None
-    try:
-        next(gen)
-    except StopIteration:
-        pass
-    # After exhausting the generator the env var should be cleaned up
-    # (we just verify no exception was raised)
 
 
 # ---------------------------------------------------------------------------
