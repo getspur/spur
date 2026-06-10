@@ -460,3 +460,107 @@ fn structured(result: CallToolResult) -> Value {
     assert_eq!(result.is_error, Some(false));
     result.structured_content.expect("structured content")
 }
+
+// ── check sdk: declared vendored sdk dir ──────────────────────────────────────
+
+#[tokio::test]
+async fn doctor_sdk_fails_when_declared_sdk_dir_is_missing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    // Manifest declares sdk.typescript = "sdk" but no sdk/ directory on disk.
+    fs::write(
+        root.join("spur-app.json"),
+        serde_json::to_string(&json!({
+            "schema": "spur.app/v1",
+            "name": "Test App",
+            "entry_notebook": "app.ipynb",
+            "open_mode": "app",
+            "runtime": { "jute_min": "0.1.0", "features": [] },
+            "sdk": { "typescript": "sdk" }
+        }))
+        .unwrap(),
+    )
+    .expect("write manifest");
+    fs::write(root.join("app.ipynb"), minimal_notebook()).expect("write notebook");
+    // Intentionally do NOT create sdk/ directory.
+
+    let result = notebook_app_doctor::call(&deps(), json!({ "path": root.to_string_lossy() }))
+        .await
+        .expect("doctor call succeeds");
+
+    let body = structured(result);
+    assert!(
+        has_fail(&body),
+        "expected ok=false when sdk dir is missing: {body}"
+    );
+    assert!(
+        has_check_level(&body, "sdk:typescript", "fail"),
+        "expected sdk:typescript fail: {body}"
+    );
+}
+
+#[tokio::test]
+async fn doctor_sdk_passes_when_declared_sdk_dir_has_required_modules() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::write(
+        root.join("spur-app.json"),
+        serde_json::to_string(&json!({
+            "schema": "spur.app/v1",
+            "name": "Test App",
+            "entry_notebook": "app.ipynb",
+            "open_mode": "app",
+            "runtime": { "jute_min": "0.1.0", "features": [] },
+            "sdk": { "typescript": "sdk" }
+        }))
+        .unwrap(),
+    )
+    .expect("write manifest");
+    fs::write(root.join("app.ipynb"), minimal_notebook()).expect("write notebook");
+    // Create sdk/ directory with required modules.
+    fs::create_dir(root.join("sdk")).expect("create sdk dir");
+    fs::write(
+        root.join("sdk/call_tool.ts"),
+        b"export function callTool() {}",
+    )
+    .expect("write call_tool.ts");
+    fs::write(root.join("sdk/wire.ts"), b"export {};").expect("write wire.ts");
+
+    let result = notebook_app_doctor::call(&deps(), json!({ "path": root.to_string_lossy() }))
+        .await
+        .expect("doctor call succeeds");
+
+    let body = structured(result);
+    // Must have a pass finding for sdk:typescript and no fail finding for it.
+    assert!(
+        has_check_level(&body, "sdk:typescript", "pass"),
+        "expected sdk:typescript pass: {body}"
+    );
+    let sdk_fail = findings(body.clone())
+        .into_iter()
+        .any(|f| f["check"].as_str().unwrap_or("").starts_with("sdk:") && f["level"] == "fail");
+    assert!(!sdk_fail, "expected no sdk fail findings: {body}");
+}
+
+#[tokio::test]
+async fn doctor_sdk_no_finding_when_sdk_block_absent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    // A manifest with no sdk block at all — should produce no sdk:* finding.
+    fs::write(root.join("spur-app.json"), minimal_manifest("app.ipynb")).expect("write manifest");
+    fs::write(root.join("app.ipynb"), minimal_notebook()).expect("write notebook");
+
+    let result = notebook_app_doctor::call(&deps(), json!({ "path": root.to_string_lossy() }))
+        .await
+        .expect("doctor call succeeds");
+
+    let body = structured(result);
+    let sdk_findings: Vec<_> = findings(body.clone())
+        .into_iter()
+        .filter(|f| f["check"].as_str().unwrap_or("").starts_with("sdk:"))
+        .collect();
+    assert!(
+        sdk_findings.is_empty(),
+        "expected no sdk:* findings when sdk block absent: {sdk_findings:?}"
+    );
+}
