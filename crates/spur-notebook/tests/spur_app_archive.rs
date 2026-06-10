@@ -6,9 +6,9 @@ use spur_notebook::spur_app::archive::{
     read_entry, read_manifest, write_entries, SpurAppArchiveError,
 };
 use spur_notebook::spur_app::{
-    export_spur_app, import_spur_app, is_safe_archive_path, SpurAppDependencies,
-    SpurAppExportOptions, SpurAppManifest, SpurAppMcpServer, SPUR_APP_EXTENSION, SPUR_APP_MANIFEST,
-    SPUR_APP_SCHEMA,
+    export_spur_app, import_spur_app, is_safe_archive_path, SpurAppCapabilities,
+    SpurAppCapabilityPorts, SpurAppDependencies, SpurAppExportOptions, SpurAppManifest,
+    SpurAppMcpServer, SPUR_APP_EXTENSION, SPUR_APP_MANIFEST, SPUR_APP_SCHEMA,
 };
 
 #[test]
@@ -285,6 +285,90 @@ fn spur_app_import_rejects_unsafe_archive_entries() {
 
     assert!(matches!(err, SpurAppArchiveError::UnsafePath(path) if path == "../escape.txt"));
     assert!(!temp.path().join("escape.txt").exists());
+}
+
+// ── T1: capabilities + skill manifest schema ──────────────────────────────────
+
+#[test]
+fn manifest_without_capabilities_deserializes_with_defaults() {
+    // Existing manifests (no `capabilities` or `skill` fields) must continue to
+    // parse unchanged — backward-compat invariant.
+    let json = serde_json::json!({
+        "schema": SPUR_APP_SCHEMA,
+        "name": "Legacy App",
+        "entry_notebook": "app.ipynb",
+        "open_mode": "app",
+        "runtime": { "jute_min": "0.1.0", "features": [] }
+    });
+
+    let manifest: SpurAppManifest =
+        serde_json::from_value(json).expect("legacy manifest deserializes");
+
+    assert_eq!(manifest.capabilities, SpurAppCapabilities::default());
+    assert_eq!(manifest.skill, None);
+    assert!(!manifest.capabilities.canvas_capture);
+    assert!(!manifest.capabilities.active_output_scripts);
+    assert!(!manifest.capabilities.artifacts_dir);
+    assert_eq!(manifest.capabilities.ports, None);
+}
+
+#[test]
+fn manifest_with_capabilities_round_trips() {
+    let mut manifest = SpurAppManifest::minimal("HTML Video", "app.ipynb");
+    manifest.capabilities = SpurAppCapabilities {
+        ports: Some(SpurAppCapabilityPorts {
+            read: vec!["spur-ad-capture".to_string()],
+            write: vec![],
+        }),
+        canvas_capture: true,
+        active_output_scripts: true,
+        artifacts_dir: true,
+    };
+    manifest.skill = Some("skill/SKILL.md".to_string());
+
+    let json = serde_json::to_value(&manifest).expect("serialize manifest");
+    assert_eq!(json["capabilities"]["canvas_capture"], true);
+    assert_eq!(json["capabilities"]["active_output_scripts"], true);
+    assert_eq!(json["capabilities"]["artifacts_dir"], true);
+    assert_eq!(json["capabilities"]["ports"]["read"][0], "spur-ad-capture");
+    assert_eq!(json["skill"], "skill/SKILL.md");
+
+    let decoded: SpurAppManifest =
+        serde_json::from_value(json).expect("deserialize manifest with capabilities");
+    assert_eq!(decoded, manifest);
+}
+
+#[test]
+fn manifest_capabilities_with_unknown_field_is_rejected() {
+    // `deny_unknown_fields` on SpurAppCapabilities must cause deserialization
+    // to fail so the host can return a structured error.
+    let json = serde_json::json!({
+        "schema": SPUR_APP_SCHEMA,
+        "name": "Future App",
+        "entry_notebook": "app.ipynb",
+        "open_mode": "app",
+        "runtime": { "jute_min": "0.1.0", "features": [] },
+        "capabilities": {
+            "canvas_capture": true,
+            "future_capability_unknown_to_this_host": true
+        }
+    });
+
+    let result: Result<SpurAppManifest, _> = serde_json::from_value(json);
+    assert!(
+        result.is_err(),
+        "manifest with unknown capability key must be rejected"
+    );
+}
+
+#[test]
+fn manifest_capabilities_all_off_round_trips_as_default() {
+    let manifest = SpurAppManifest::minimal("Minimal", "app.ipynb");
+    let json = serde_json::to_value(&manifest).expect("serialize manifest");
+    let decoded: SpurAppManifest =
+        serde_json::from_value(json).expect("deserialize manifest with no capabilities");
+    assert_eq!(decoded.capabilities, SpurAppCapabilities::default());
+    assert_eq!(decoded.skill, None);
 }
 
 fn raw_archive_with_entry(path: &str, contents: &[u8]) -> Vec<u8> {
