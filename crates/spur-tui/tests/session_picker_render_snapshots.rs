@@ -565,18 +565,78 @@ fn selected_session_fully_visible_at_small_viewport() {
         "[+ Start new session] must be visible; lines:\n{lines:#?}"
     );
 
-    // Both lines of the selected session ("Session 8") must appear.
-    let title_visible = lines
+    // Both lines of the selected session ("Session 8") must appear, and
+    // they must be ADJACENT: the activity line (└ …) must be at title_idx+1
+    // so we cannot accidentally pass because a different session's activity
+    // line happens to be on-screen.
+    let title_idx = lines
         .iter()
-        .any(|l| l.contains('\u{25b8}') && l.contains("Session 8"));
+        .position(|l| l.contains('\u{25b8}') && l.contains("Session 8"));
     assert!(
-        title_visible,
+        title_idx.is_some(),
         "selected session title line must be visible; lines:\n{lines:#?}"
     );
-
-    let activity_visible = lines.iter().any(|l| l.contains('\u{2514}'));
+    let title_idx = title_idx.unwrap();
+    let next_line = lines.get(title_idx + 1).map(|s| s.as_str()).unwrap_or("");
     assert!(
-        activity_visible,
-        "selected session activity line must be visible; lines:\n{lines:#?}"
+        next_line.contains('\u{2514}') && next_line.contains("resume to load message history"),
+        "line immediately after selected title must be the activity line; \
+         title_idx={title_idx}, next={next_line:?}; lines:\n{lines:#?}"
+    );
+}
+
+/// Draft badge test: the " ● draft" badge must appear in full (all 8 display
+/// columns) on the activity line, and the combined line must not exceed the
+/// buffer width (W=80).  This test was written to catch the off-by-one where
+/// DRAFT_BADGE_WIDTH=7 clipped the trailing 't'.
+#[test]
+fn draft_badge_full_text_fits_within_row_width() {
+    let mut picker = SessionPickerView::new();
+    let mut meta = SessionMetadata::default();
+    // Give session "drafty" a non-empty draft.
+    meta.sessions
+        .entry("draftyxxxxxxx".into())
+        .or_default()
+        .draft = "unsent message text".into();
+    picker.set_metadata(meta);
+    picker.set_sessions(
+        "t".into(),
+        vec![session("draftyxxxxxxx", "Draft session", "/tmp")],
+        synopsis(),
+    );
+
+    let backend = TestBackend::new(W, H);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, W, H);
+        let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+        picker.render(f, area, &ctx);
+    })
+    .unwrap();
+
+    let lines = buffer_to_lines(term.backend().buffer());
+
+    // Find the activity line for the drafted session (contains "● draft").
+    let badge_line = lines.iter().find(|l| l.contains("\u{25cf} draft")).cloned();
+    assert!(
+        badge_line.is_some(),
+        "activity line with '● draft' badge must be present; lines:\n{lines:#?}"
+    );
+    let badge_line = badge_line.unwrap();
+
+    // The full badge text " ● draft" (8 cols) must appear verbatim — no
+    // truncation of the trailing 't'.
+    assert!(
+        badge_line.contains(" \u{25cf} draft"),
+        "badge must contain the full ' ● draft' text (8 cols); got: {badge_line:?}"
+    );
+
+    // The rendered line must not exceed the buffer width.  buffer_to_lines
+    // already trims trailing spaces, so just check the byte length is <= W.
+    // (All chars here are ASCII/single-width so byte len == display width.)
+    assert!(
+        badge_line.len() <= W as usize,
+        "activity line with badge must fit within {W} cols; got len={} line={badge_line:?}",
+        badge_line.len()
     );
 }
