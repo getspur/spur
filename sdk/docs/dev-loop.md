@@ -105,7 +105,7 @@ Returns `{ "ok": bool, "findings": [...] }`:
   "ok": false,
   "findings": [
     { "check": "manifest", "level": "pass", "message": "...", "location": "spur-app.json" },
-    { "check": "skill_hard_gate", "level": "fail", "message": "Tool 'phantom_tool' not in live surface", "location": "skill/SKILL.md:42" }
+    { "check": "skill:tool:phantom_tool", "level": "fail", "message": "HARD-GATE tool \"phantom_tool\" is referenced in skill but absent from both the notebook MCP tool registry and the plugin's tools/list", "location": "skill/SKILL.md" }
   ]
 }
 ```
