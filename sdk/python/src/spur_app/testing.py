@@ -39,10 +39,13 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .ports import PortStore
+
+__all__ = ["FakePortStore", "fake_port_store"]
 
 
 class FakePortStore:
@@ -64,9 +67,9 @@ class FakePortStore:
 
     def __init__(self) -> None:
         self._entries: list[dict[str, Any]] = []
-        self._tmp_dir: Optional[Path] = None
-        self._old_env: Optional[str] = None
-        self._fixture_dir: Optional[Path] = None
+        self._tmp_dir: Path | None = None
+        self._old_env: str | None = None
+        self._fixture_dir: Path | None = None
 
     # ------------------------------------------------------------------
     # Builder methods — call before entering the context
@@ -78,7 +81,7 @@ class FakePortStore:
         data: bytes,
         *,
         mime: str = "application/octet-stream",
-        duration_sec: Optional[float] = None,
+        duration_sec: float | None = None,
         version: int = 1,
     ) -> "FakePortStore":
         """Add a media port entry.
@@ -119,7 +122,7 @@ class FakePortStore:
         name: str,
         ipc_bytes: bytes,
         *,
-        schema: Optional[dict] = None,
+        schema: dict | None = None,
         version: int = 1,
     ) -> "FakePortStore":
         """Add an arrow port entry.
@@ -264,7 +267,7 @@ try:
     import pytest as _pytest
 
     @_pytest.fixture
-    def fake_port_store() -> "FakePortStore":  # type: ignore[misc]
+    def fake_port_store() -> Generator[FakePortStore, None, None]:
         """Pytest fixture that yields an active :class:`FakePortStore`.
 
         Re-export this fixture in your ``conftest.py``::
