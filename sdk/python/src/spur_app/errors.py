@@ -5,6 +5,8 @@ hierarchy with a single ``except SpurAppError``.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 
 class SpurAppError(Exception):
     """Base class for all spur_app errors."""
@@ -56,15 +58,37 @@ class PortFileNotFoundError(SpurAppError):
     port:
         The name of the port whose file was expected.
     path:
-        The resolved filesystem path that was expected to exist.
+        The resolved filesystem :class:`~pathlib.Path` that was expected to
+        exist.
     """
 
-    def __init__(self, port: str, path: str) -> None:
+    def __init__(self, port: str, path: Path) -> None:
         self.port = port
         self.path = path
         super().__init__(
             f"Port {port!r} is declared in the manifest but its data file is "
             f"missing: {path}"
+        )
+
+
+class PortManifestError(SpurAppError):
+    """Raised when ``manifest.json`` is missing or cannot be parsed.
+
+    Parameters
+    ----------
+    manifest_path:
+        The path to ``manifest.json`` that was expected to exist or be valid
+        JSON.
+    reason:
+        A short description of what went wrong (e.g. "file not found" or
+        "invalid JSON").
+    """
+
+    def __init__(self, manifest_path: Path, reason: str) -> None:
+        self.manifest_path = manifest_path
+        self.reason = reason
+        super().__init__(
+            f"Could not read port-store manifest at {manifest_path}: {reason}"
         )
 
 
