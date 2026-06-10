@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sdk.spur.app/schema/spur-app.schema.json",
-  "$comment": "Hand-authored against the serde definitions in crates/spur-notebook/src/spur_app.rs (SpurAppManifest, SpurAppCapabilities, SpurAppCapabilityPorts, SpurAppDependencies, SpurAppMcpServer, SpurAppRuntime, SpurAppWidgetAsset, SpurAppPorts). Generation from Rust types is planned for a follow-up task (U7). When the generated schema ships, this file will be replaced and the $comment updated.",
+  "$id": "urn:spur:schema:spur-app:v1",
+  "$comment": "Stable public URL (post-U7, not yet live): https://sdk.spur.app/schema/spur-app.schema.json. Hand-authored against the serde definitions in crates/spur-notebook/src/spur_app.rs (SpurAppManifest, SpurAppCapabilities, SpurAppCapabilityPorts, SpurAppDependencies, SpurAppMcpServer, SpurAppRuntime, SpurAppWidgetAsset, SpurAppPorts). Generation from Rust types is planned for a follow-up task (U7). When the generated schema ships, this file will be replaced and the $comment updated.",
   "title": "spur-app.json",
   "description": "Manifest for a Spur notebook app bundle (.spurapp). Schema version spur.app/v1.",
   "type": "object",
