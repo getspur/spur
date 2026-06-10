@@ -14,6 +14,7 @@
 //!     tool surface (downgraded to warn when check 4 was skipped).
 //!  6. Port store reachable: warn if absent (app never ran), pass if ok.
 //!  7. `runtime.features` non-empty → warn deprecated.
+//!  8. Declared `sdk.typescript` dir exists and contains required modules.
 
 use std::{
     path::{Path, PathBuf},
@@ -250,6 +251,10 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
                 check_ports(&app_root, &entry_path, &ports.read, &mut findings).await;
             }
 
+            // ── Check 8: declared vendored SDK directories ───────────────────
+
+            check_sdk(&app_root, &manifest_value, &mut findings);
+
             // ── Check 6: port store reachable ────────────────────────────────
 
             check_port_store(&entry_path, &mut findings);
@@ -425,6 +430,47 @@ fn check_port_store(entry_path: &Path, findings: &mut Vec<Finding>) {
                 manifest_path.display()
             ),
         ));
+    }
+}
+
+/// Check 8: declared vendored SDK directories exist with required modules.
+fn check_sdk(app_root: &Path, manifest_value: &Value, findings: &mut Vec<Finding>) {
+    const REQUIRED_TS_MODULES: &[&str] = &["call_tool.ts", "wire.ts"];
+
+    let Some(ts_dir) = manifest_value["sdk"]["typescript"].as_str() else {
+        return; // no sdk block declared — nothing to check
+    };
+
+    let dir = app_root.join(ts_dir);
+    if !dir.is_dir() {
+        findings.push(
+            Finding::fail(
+                "sdk:typescript",
+                format!("declared sdk.typescript dir {ts_dir:?} not found in app root"),
+            )
+            .with_location(dir.display().to_string()),
+        );
+        return;
+    }
+
+    let missing: Vec<&str> = REQUIRED_TS_MODULES
+        .iter()
+        .copied()
+        .filter(|module| !dir.join(module).is_file())
+        .collect();
+    if missing.is_empty() {
+        findings.push(Finding::pass(
+            "sdk:typescript",
+            format!("vendored TypeScript SDK present at {ts_dir:?}"),
+        ));
+    } else {
+        findings.push(
+            Finding::fail(
+                "sdk:typescript",
+                format!("vendored TypeScript SDK at {ts_dir:?} is missing {missing:?}"),
+            )
+            .with_location(dir.display().to_string()),
+        );
     }
 }
 
