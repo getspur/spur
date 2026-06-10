@@ -1609,8 +1609,7 @@ mod tests {
     async fn lance_ann_search_code_fixture_returns_seeded_rows() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let query_vec = embedding_with_marker(1.0);
-        let dataset_dir = tempdir.path().join(CODE_SYMBOLS_DATASET_DIR);
-        let db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
+        let db = lancedb::connect(tempdir.path().to_string_lossy().as_ref())
             .execute()
             .await?;
         db.create_table(CODE_SYMBOLS_TABLE, code_symbol_batch(&query_vec))
@@ -1976,8 +1975,7 @@ mod tests {
             conn.execute_batch("CHECKPOINT;")?;
         }
 
-        let dataset_dir = dir.path().join(CODE_SYMBOLS_DATASET_DIR);
-        let lancedb_conn = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
+        let lancedb_conn = lancedb::connect(dir.path().to_string_lossy().as_ref())
             .execute()
             .await?;
         let query_vec = [0.0f32; EMBED_DIM];
