@@ -148,10 +148,11 @@ export function ScriptsDisabledBanner() {
     notebook.store,
     (state) => state.viewState.appOpenInfo,
   );
-  const { appGrants, revokeAppGrant } = useSettings((state) => ({
-    appGrants: state.appGrants,
-    revokeAppGrant: state.revokeAppGrant,
-  }));
+  // Two stable selectors: a selector returning a fresh object literal makes
+  // zustand v5's getSnapshot change identity every call, which loops React
+  // into error #185 (Maximum update depth exceeded).
+  const appGrants = useSettings((state) => state.appGrants);
+  const revokeAppGrant = useSettings((state) => state.revokeAppGrant);
 
   if (!appOpenInfo) return null;
 
