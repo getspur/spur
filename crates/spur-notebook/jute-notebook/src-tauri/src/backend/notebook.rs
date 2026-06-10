@@ -161,6 +161,7 @@ pub struct RawCell {
     pub source: MultilineString,
 
     /// Attachments (e.g., images) in the cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub attachments: Option<CellAttachments>,
 }
@@ -179,6 +180,7 @@ pub struct MarkdownCell {
     pub source: MultilineString,
 
     /// Attachments (e.g., images) in the cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub attachments: Option<CellAttachments>,
 }
