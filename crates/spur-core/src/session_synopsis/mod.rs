@@ -1,3 +1,3 @@
 pub mod projection;
 
-pub use projection::{SessionSynopsis, SessionSynopsisProjection};
+pub use projection::{SessionSynopsis, SessionSynopsisProjection, SynopsisExchange};
