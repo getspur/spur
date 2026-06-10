@@ -683,6 +683,64 @@ mod tests {
     }
 
     #[test]
+    fn code_explore_skill_establishes_three_layer_stack() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("code-explore", &fake).unwrap();
+        assert!(
+            body.contains("knowledge_context_pack"),
+            "layer 1: skill must establish knowledge_context_pack as the orientation entry point"
+        );
+        assert!(
+            body.contains("spur-analyst"),
+            "layer 3: skill must route aggregation/graph-algorithm questions to spur-analyst"
+        );
+        assert!(
+            body.contains("recommended_next_tools"),
+            "skill must teach the selector hand-off from the pack into code_* tools"
+        );
+        assert!(
+            body.contains("confidence"),
+            "skill must warn that the pack's confidence field is miscalibrated"
+        );
+        assert!(
+            body.contains("supporting_docs"),
+            "skill must teach judging code recall against the doc hits"
+        );
+    }
+
+    #[test]
+    fn code_explore_description_names_all_three_layers() {
+        let raw = all_bundled_raw().get("code-explore").unwrap();
+        let parsed = frontmatter::parse_source(raw);
+        let desc = parsed.description.as_deref().unwrap_or("");
+        for keyword in ["knowledge_context_pack", "code_*", "spur-analyst"] {
+            assert!(
+                desc.contains(keyword),
+                "description must carry `{keyword}` so agents discover the skill for that layer, got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn spur_analyst_skill_is_bundled_and_loadable() {
+        let fake = PathBuf::from("/nonexistent");
+        let body =
+            load_skill("spur-analyst", &fake).expect("spur-analyst skill must be bundled");
+        assert!(
+            body.contains("DuckPGQ"),
+            "skill must document the property-graph extension"
+        );
+        assert!(
+            body.contains("information_schema.columns"),
+            "skill must keep the schema-discovery hard gate"
+        );
+        assert!(
+            body.contains("code_*"),
+            "skill must keep the layer-2 routing table"
+        );
+    }
+
+    #[test]
     fn brainstorming_description_contains_trigger_phrases() {
         let raw = all_bundled_raw().get("brainstorming").unwrap();
         let parsed = frontmatter::parse_source(raw);
