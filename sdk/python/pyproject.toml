@@ -11,11 +11,10 @@ requires-python = ">=3.10"
 dependencies = ["mcp"]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spur_app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
