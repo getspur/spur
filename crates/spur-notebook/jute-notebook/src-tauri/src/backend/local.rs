@@ -4,7 +4,7 @@
 //! future it could replace the Jupyter installation by directly invoking
 //! kernels, or introduce new APIs for developer experience.
 
-use std::{collections::BTreeMap, process::Stdio};
+use std::{collections::BTreeMap, path::Path, process::Stdio};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -48,7 +48,7 @@ pub struct LocalKernel {
 
 impl LocalKernel {
     /// Start a new kernel based on a spec, and connect to it.
-    pub async fn start(spec: &KernelSpec) -> Result<Self, Error> {
+    pub async fn start(spec: &KernelSpec, working_dir: Option<&Path>) -> Result<Self, Error> {
         let (control_port, shell_port, iopub_port, stdin_port, heartbeat_port) = tokio::try_join!(
             get_available_port(),
             get_available_port(),
@@ -92,7 +92,7 @@ impl LocalKernel {
         // Capture the kernel's stderr (fd 2) rather than discarding it: some
         // kernels (notably evcxr) emit compile progress like
         // `Compiling <crate> v<ver>` directly on stderr instead of over IOPub.
-        let mut child = kernel_command(&argv, &spec.env)
+        let mut child = kernel_command(&argv, &spec.env, working_dir)
             .stderr(Stdio::piped())
             .spawn()
             .map_err(Error::Subprocess)?;
@@ -171,7 +171,11 @@ async fn get_available_port() -> Result<u16, Error> {
     Ok(addr.port())
 }
 
-fn kernel_command(argv: &[String], env: &BTreeMap<String, String>) -> tokio::process::Command {
+fn kernel_command(
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+    _working_dir: Option<&Path>,
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&argv[0]);
     command
         .args(&argv[1..])
@@ -186,8 +190,9 @@ fn kernel_command(argv: &[String], env: &BTreeMap<String, String>) -> tokio::pro
 pub(crate) fn kernel_command_for_test(
     argv: &[String],
     env: &BTreeMap<String, String>,
+    working_dir: Option<&Path>,
 ) -> tokio::process::Command {
-    kernel_command(argv, env)
+    kernel_command(argv, env, working_dir)
 }
 
 #[cfg(test)]
@@ -244,7 +249,7 @@ mod tests {
             output_path.to_string_lossy().into_owned(),
         ];
 
-        let status = kernel_command(&argv, &spec_env)
+        let status = kernel_command(&argv, &spec_env, None)
             .spawn()
             .expect("spawn env echo child")
             .wait()
