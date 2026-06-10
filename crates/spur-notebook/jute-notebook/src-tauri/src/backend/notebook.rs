@@ -32,22 +32,27 @@ pub struct NotebookRoot {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct NotebookMetadata {
     /// Kernel information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kernelspec: Option<KernelSpec>,
 
     /// Programming language information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub language_info: Option<LanguageInfo>,
 
     /// Original notebook format before conversion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub orig_nbformat: Option<u8>,
 
     /// Title of the notebook document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub title: Option<String>,
 
     /// Authors of the notebook document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub authors: Option<Vec<Author>>,
 
