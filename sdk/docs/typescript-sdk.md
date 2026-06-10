@@ -124,14 +124,16 @@ import type { JupyterDisplay } from "@spur/app";
 ```
 
 ```ts
-display.html("<b>Hello</b>")
-display.markdown("# Title")
-display.json({ key: "value" })
+// Must be the last expression in the cell (or use return) — Deno-Jupyter only
+// renders the cell's return value. A mid-cell statement is silently discarded.
+return display.html("<b>Hello</b>")
+return display.markdown("# Title")
+return display.json({ key: "value" })
 ```
 
 Each method returns a `JupyterDisplay` object with a `Symbol.for("Jupyter.display")`
-method that returns the MIME bundle. Return or use as the last expression of a
-Deno-Jupyter kernel cell to render rich output.
+method that returns the MIME bundle. **The object must be the last expression
+or explicitly returned** — Deno-Jupyter renders only the cell return value.
 
 | Method | MIME type |
 |--------|-----------|
@@ -162,11 +164,12 @@ const data: PortData = await ports.read("spur-ad-capture");
 // data.kind        "arrow" | "media"
 // data.durationSec number | undefined
 
-const manifest: PortManifest = await ports.readManifest();
-// manifest.ports   Record<string, PortEntry>
-
-const names: string[] = await ports.list();
+const m: PortManifest = await ports.manifest();
+// m.ports   Record<string, PortEntry>
 ```
+
+The `ports` object exports exactly two functions: `ports.read(name, root?)` and
+`ports.manifest(root?)`. There is no `ports.list()` or `ports.readManifest()`.
 
 `ports.read(name, root?)` reads `SPUR_NOTEBOOK_PORT_ROOT` (or accepts an explicit
 `root` override). The manifest path is `${root}/ports/manifest.json`. File path
